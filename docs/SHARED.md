@@ -82,6 +82,56 @@ Yes — and it's worth internalising *why*, because it prevents a common trap:
   "add later" table above is the plan for scale — we reach for it only when
   real usage demands it.
 
+## Legal / IP considerations
+
+Being **non-profit does not grant immunity** from copyright or trademark claims —
+infringement is about *use*, not profit, and donation-funded operation still
+counts as operating publicly. Not legal advice; this is a running note of what's
+worth a real lawyer's time. Four distinct issues:
+
+1. **Trademark — the name "TimeLine" (the one hard-to-reverse decision).**
+   - "Timeline" is a **descriptive/generic** term for a social feed, so it's
+     hard for *anyone* to own broadly — but also hard for *us* to protect, and a
+     confusingly-similar branded use in the *same product category* can still
+     draw a claim.
+   - **Directly relevant precedent:** *Timelines, Inc. v. Facebook* (2011–2013).
+     Timelines Inc. held registered marks for "Timelines"/"Timelines.com" for a
+     site to create and share chronologies (a social product), sued Facebook
+     over its "Timeline" feature, and **Facebook settled** (2013). Same category
+     as us. Whether that mark is still live needs a direct USPTO check.
+   - The space is crowded with active "Timeline" companies (e.g. `timeline.co`
+     financial-planning software, Timeline longevity supplements, `timelines.app`
+     time-tracking) — mostly *different* classes from social networking, but it
+     shows the word is heavily used.
+   - **Takeaway:** a bare-dictionary-word brand is weak and slightly risky in
+     this category. A **suggestive/coined brand** (think "Instagram") is far
+     safer to own and defend. Do a proper trademark search in software/
+     social-networking classes at your national IP office (UK IPO / IP Australia
+     — note British/AU spelling in this repo) **and** the US
+     (`tmsearch.uspto.gov`) before locking the brand. Weigh this against the
+     `timeline.me` domain choice (see phase-5 notes).
+
+2. **Copyright in user content — the real day-to-day risk.** Friends/family will
+   upload photos/text they may not own the rights to. Mitigate with a short
+   **Terms of Service** (users grant us a licence to store/display, confirm they
+   have the right to post) and a **content-report/takedown path** (US DMCA §512
+   safe harbour, UK/EU equivalents). Low probability for a private invite-only
+   app, but cheap to cover. **Do before inviting real users (Phase 5).**
+
+3. **Copyright in our own code — a choice, not a risk.** Auto-copyrighted to the
+   author; the only decision is which **licence** to release under. Handled
+   deliberately at **Phase 10** (MIT/Apache = permissive; AGPL keeps
+   network-deployed forks open).
+
+4. **Dependency licences — fine.** Stack is permissive (Django = BSD, React =
+   MIT, Postgres). Just keep attribution notices intact and don't pull in a
+   copyleft (GPL/AGPL) library unintentionally.
+
+**Not copyright but bigger:** holding real people's data makes us a **data
+controller** under GDPR/UK GDPR — need a basic **privacy policy** and a
+delete-my-data path before launch (Phase 5). Already aligned with the
+privacy-first principle.
+
 ## Repo conventions
 
 - `/backend` — Django + Django REST Framework app (managed with `uv`)

@@ -33,13 +33,19 @@ reboot.
 - [ ] Automated database backups with a tested restore
 - [ ] Basic monitoring: know if the site is down
 - [ ] Confirmed monthly cost estimate written down (feeds the funding phase)
+- [ ] **Terms of Service + privacy policy** published, and a
+      content-report/takedown path exists — before inviting real users (see the
+      Legal / IP section in `docs/SHARED.md`). Covers user-uploaded content we
+      don't own, and our GDPR/UK-GDPR duties as a data controller (privacy
+      policy + delete-my-data path)
 
 ## Steps
 
 1. Choose the Lightsail deployment shape (Container Service vs. instance +
    Compose) and document the reasoning + cost.
 2. Set up the production Postgres (managed vs. self-hosted) and backups.
-3. Register/point a domain; set up HTTPS/TLS.
+3. Register/point a domain (**`timeline.me`** — chosen candidate, see
+   decisions log); set up HTTPS/TLS.
 4. Move all secrets to environment/secret configuration.
 5. Write the deploy runbook (build image → push → release).
 6. Add uptime monitoring and a simple alert.
@@ -71,4 +77,23 @@ DB access, no secrets in the repo, and keeping dependencies patched. Do a
 
 ## Notes / decisions log
 
-(Record deviations/gotchas here.)
+- **Domain: `timeline.me` (chosen candidate, not yet purchased).** The bare
+  `timeline.com`/`.org` are long-taken premium names (registered 1996/2000) and
+  effectively unbuyable; `timeline.app` and `timeline.social` are also taken. A
+  raw-`timeline` name was preferred over `ourtimeline.*`. As of 2026-07-04 a
+  RDAP check showed these raw-`timeline` names still available: `.me`,
+  `.family`, `.gallery`, `.house`. Picked **`timeline.me`** — short, reads as
+  "my timeline," reputable ccTLD (Montenegro). `.family` was the runner-up
+  (literally on-message for a private family timeline).
+  - Cost: roughly **$15–20/yr** retail. `.me` is a ccTLD that sometimes has a
+    cheap first year and a higher renewal — **check the renewal price**, not
+    just year one, at purchase.
+  - Buy from a no-upsell registrar (Cloudflare at-cost, or Namecheap). Turn on
+    **auto-renew** and **free WHOIS privacy** (keeps our name/address out of the
+    public registry — matters for the privacy-first principle).
+  - Can be bought before this phase starts — it just sits idle (~$20/yr) until
+    we point it at the AWS Lightsail deploy. Re-verify availability at purchase
+    time; nothing is reserved until paid for.
+  - Note the `.me` cookie-domain angle: if we ever split into
+    `app.timeline.me` + `api.timeline.me`, revisit the CSRF cookie-domain note
+    above (shared parent `.timeline.me`). Same-origin behind one host avoids it.
