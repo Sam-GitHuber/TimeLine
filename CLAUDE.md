@@ -11,9 +11,12 @@ to create a post, follow/unfollow, list people, and view a profile's posts. The
 React app is off Phase 1's mock data and onto the real API via TanStack Query —
 feed with compose box + "Load more", a People page, and profile pages keyed on
 user id (`/u/:id`, no username). Author labels come from `User.display_name`
-(real name, else email local-part — no emails leaked between members). Backend +
-frontend test suites cover feed ordering and follow-scoping. Phase 4 (photos &
-profiles) is next.** Keep this line current: update it whenever a phase starts
+(real name, else email local-part — no emails leaked between members).
+Accounts are private-by-default: a follow is a request the requestee approves
+(`Follow.status` pending→accepted); feed and profile posts are both gated on an
+accepted follow. There's a Requests inbox (nav badge) to approve/reject.
+Backend + frontend test suites cover feed ordering, follow-scoping, and the
+request/approval flow. Phase 4 (photos & profiles) is next.** Keep this line current: update it whenever a phase starts
 or finishes, but keep the detail in the phase docs, not here.
 
 ## Before doing any work

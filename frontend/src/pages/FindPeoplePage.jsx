@@ -51,7 +51,7 @@ export default function FindPeoplePage() {
           >
             {person.display_name}
           </Link>
-          <FollowButton userId={person.id} isFollowing={person.is_following} />
+          <FollowButton userId={person.id} followStatus={person.follow_status} />
         </div>
       ))}
     </div>

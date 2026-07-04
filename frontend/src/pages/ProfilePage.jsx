@@ -49,6 +49,9 @@ export default function ProfilePage() {
 
   const user = userQuery.data;
   const posts = postsQuery.data?.pages.flatMap((page) => page.results) ?? [];
+  // Private-by-default: unless it's you or an accepted follow, the backend
+  // returns no posts, and we show a locked state explaining why.
+  const canSeePosts = isSelf || user.follow_status === "accepted";
 
   return (
     <div>
@@ -64,7 +67,7 @@ export default function ProfilePage() {
               {!isSelf && (
                 <FollowButton
                   userId={user.id}
-                  isFollowing={user.is_following}
+                  followStatus={user.follow_status}
                 />
               )}
             </div>
@@ -77,7 +80,18 @@ export default function ProfilePage() {
         Posts
       </h2>
 
-      {postsQuery.isLoading ? (
+      {!canSeePosts ? (
+        <div className="px-6 py-10 text-center text-slate-500">
+          <p className="font-medium text-slate-700">
+            {user.display_name}’s posts are private.
+          </p>
+          <p className="mt-1">
+            {user.follow_status === "pending"
+              ? "Your follow request is waiting for approval."
+              : "Follow them, and once they approve you’ll see their posts here."}
+          </p>
+        </div>
+      ) : postsQuery.isLoading ? (
         <p className="px-6 py-10 text-center text-slate-500">Loading posts…</p>
       ) : posts.length > 0 ? (
         <>

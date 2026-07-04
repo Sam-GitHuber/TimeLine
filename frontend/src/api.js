@@ -110,14 +110,25 @@ export const api = {
   createPost: (text) =>
     request("/api/posts/", { method: "POST", body: { text } }),
 
-  // People to follow — everyone else, each flagged is_following.
+  // People to follow — everyone else, each with your follow_status.
   listUsers: () => request("/api/users/"),
 
   getUser: (id) => request(`/api/users/${id}/`),
 
   getUserPosts: (id) => request(`/api/users/${id}/posts/`),
 
+  // Follows are private: this sends a *request* the other person must approve.
   follow: (id) => request(`/api/users/${id}/follow/`, { method: "POST" }),
 
+  // Cancels a pending request or unfollows an accepted follow (same endpoint).
   unfollow: (id) => request(`/api/users/${id}/follow/`, { method: "DELETE" }),
+
+  // Incoming follow requests (people asking to follow you) + approve/reject.
+  getFollowRequests: () => request("/api/follow-requests/"),
+
+  approveRequest: (id) =>
+    request(`/api/follow-requests/${id}/approve/`, { method: "POST" }),
+
+  rejectRequest: (id) =>
+    request(`/api/follow-requests/${id}/reject/`, { method: "POST" }),
 };

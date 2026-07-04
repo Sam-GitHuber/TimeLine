@@ -25,7 +25,8 @@ class PostAdmin(admin.ModelAdmin):
 
 @admin.register(Follow)
 class FollowAdmin(admin.ModelAdmin):
-    list_display = ("id", "follower", "followee", "created_at")
+    list_display = ("id", "follower", "followee", "status", "created_at")
     list_select_related = ("follower", "followee")
+    list_filter = ("status",)
     search_fields = ("follower__email", "followee__email")
     ordering = ("-created_at",)

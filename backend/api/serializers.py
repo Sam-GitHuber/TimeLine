@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import Post
+from .models import Follow, Post
 
 User = get_user_model()
 
@@ -48,16 +48,32 @@ class PostSerializer(serializers.ModelSerializer):
 
 
 class UserListSerializer(serializers.ModelSerializer):
-    """A person in the "find people to follow" list.
+    """A person in the "find people to follow" list, or a profile header.
 
-    ``is_following`` reflects whether the *requesting* user already follows this
-    person, so the UI can render Follow vs Unfollow. It's annotated onto the
-    queryset in the view (a single query, no N+1).
+    ``follow_status`` describes the *requesting* user's follow toward this
+    person, so the UI can render the right button: ``"none"`` (Follow),
+    ``"pending"`` (Requested — awaiting their approval), or ``"accepted"``
+    (Following). It's annotated onto the queryset in the view (one query, no
+    N+1).
     """
 
     display_name = serializers.CharField(read_only=True)
-    is_following = serializers.BooleanField(read_only=True)
+    follow_status = serializers.CharField(read_only=True)
 
     class Meta:
         model = User
-        fields = ("id", "display_name", "is_following")
+        fields = ("id", "display_name", "follow_status")
+
+
+class FollowRequestSerializer(serializers.ModelSerializer):
+    """An incoming follow request shown in the requestee's "Requests" inbox.
+
+    ``id`` is the Follow row's id — the handle used to approve/reject it.
+    ``requester`` is the person asking to follow you.
+    """
+
+    requester = AuthorSerializer(source="follower", read_only=True)
+
+    class Meta:
+        model = Follow
+        fields = ("id", "requester", "created_at")

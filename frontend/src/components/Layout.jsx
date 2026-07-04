@@ -1,4 +1,6 @@
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 
 // The app shell: a top nav plus whichever page is active (<Outlet />).
@@ -9,6 +11,15 @@ import { useAuth } from "../auth.jsx";
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+
+  // Count of pending follow requests, for the nav badge. Shares the
+  // ["followRequests"] cache key with the Requests page, so approving/rejecting
+  // there updates this badge automatically.
+  const { data: requestsData } = useQuery({
+    queryKey: ["followRequests"],
+    queryFn: api.getFollowRequests,
+  });
+  const pendingCount = requestsData?.results?.length ?? 0;
 
   // The Django admin lives on the API host, not the SPA — build the link from
   // the same base URL the API client uses so it's correct in every environment.
@@ -44,6 +55,14 @@ export default function Layout() {
             </NavLink>
             <NavLink to="/people" className={navLinkClass}>
               People
+            </NavLink>
+            <NavLink to="/requests" className={navLinkClass}>
+              Requests
+              {pendingCount > 0 && (
+                <span className="ml-1.5 inline-flex min-w-5 items-center justify-center rounded-full bg-sky-600 px-1.5 text-xs font-semibold text-white">
+                  {pendingCount}
+                </span>
+              )}
             </NavLink>
             {user && (
               <NavLink to={`/u/${user.pk}`} className={navLinkClass}>

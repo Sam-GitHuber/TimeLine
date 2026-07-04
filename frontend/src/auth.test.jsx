@@ -17,6 +17,7 @@ vi.mock("./api.js", () => ({
     getFeed: vi.fn().mockResolvedValue({ results: [], next: null }),
     getPage: vi.fn().mockResolvedValue({ results: [], next: null }),
     createPost: vi.fn(),
+    getFollowRequests: vi.fn().mockResolvedValue({ results: [], next: null }),
   },
 }));
 

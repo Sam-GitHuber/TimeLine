@@ -17,7 +17,11 @@ User = get_user_model()
 FEED_URL = "/api/feed/"
 POSTS_URL = "/api/posts/"
 USERS_URL = "/api/users/"
+REQUESTS_URL = "/api/follow-requests/"
 PASSWORD = "correct-horse-42-battery"
+
+ACCEPTED = Follow.Status.ACCEPTED
+PENDING = Follow.Status.PENDING
 
 
 def make_user(email, **kwargs):
@@ -157,7 +161,9 @@ class FeedScopingTests(APITestCase):
             author=self.stranger, text="stranger"
         )
 
-        Follow.objects.create(follower=self.me, followee=self.followed)
+        Follow.objects.create(
+            follower=self.me, followee=self.followed, status=ACCEPTED
+        )
         self.client.force_authenticate(self.me)
 
     def test_feed_includes_self_and_followed_but_not_strangers(self):
@@ -177,20 +183,32 @@ class FeedScopingTests(APITestCase):
         self.assertIn(self.my_post.id, ids)  # own posts stay
 
 
-class FollowTests(APITestCase):
+class FollowRequestTests(APITestCase):
+    """Follows are private: POST creates a pending request, and the follower
+    sees nothing until the followee approves."""
+
     def setUp(self):
         self.me = make_user("me@example.com")
         self.other = make_user("other@example.com")
+        self.other_post = Post.objects.create(author=self.other, text="hi")
         self.client.force_authenticate(self.me)
 
-    def test_follow_creates_the_relationship(self):
+    def test_follow_creates_a_pending_request_not_an_accepted_follow(self):
         resp = self.client.post(follow_url(self.other))
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(
-            Follow.objects.filter(follower=self.me, followee=self.other).exists()
-        )
 
-    def test_following_twice_is_a_noop(self):
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["follow_status"], PENDING)
+        follow = Follow.objects.get(follower=self.me, followee=self.other)
+        self.assertEqual(follow.status, PENDING)
+
+    def test_pending_request_does_not_yet_show_their_posts(self):
+        self.client.post(follow_url(self.other))
+
+        resp = self.client.get(FEED_URL)
+        ids = {p["id"] for p in resp.data["results"]}
+        self.assertNotIn(self.other_post.id, ids)
+
+    def test_requesting_twice_is_a_noop(self):
         self.client.post(follow_url(self.other))
         resp = self.client.post(follow_url(self.other))
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
@@ -203,8 +221,18 @@ class FollowTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Follow.objects.count(), 0)
 
-    def test_unfollow_removes_the_relationship(self):
-        Follow.objects.create(follower=self.me, followee=self.other)
+    def test_deleting_cancels_a_pending_request(self):
+        self.client.post(follow_url(self.other))
+        resp = self.client.delete(follow_url(self.other))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            Follow.objects.filter(follower=self.me, followee=self.other).exists()
+        )
+
+    def test_unfollow_removes_an_accepted_follow(self):
+        Follow.objects.create(
+            follower=self.me, followee=self.other, status=ACCEPTED
+        )
         resp = self.client.delete(follow_url(self.other))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertFalse(
@@ -216,14 +244,82 @@ class FollowTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
 
+class ApproveRejectTests(APITestCase):
+    """The requestee approves or rejects an incoming request."""
+
+    def setUp(self):
+        self.owner = make_user("owner@example.com")
+        self.requester = make_user("requester@example.com")
+        self.owner_post = Post.objects.create(author=self.owner, text="private")
+        # requester asks to follow owner.
+        self.req = Follow.objects.create(
+            follower=self.requester, followee=self.owner, status=PENDING
+        )
+
+    def _approve(self, pk):
+        return self.client.post(f"{REQUESTS_URL}{pk}/approve/")
+
+    def _reject(self, pk):
+        return self.client.post(f"{REQUESTS_URL}{pk}/reject/")
+
+    def test_incoming_requests_list_shows_only_your_pending_requests(self):
+        # A request addressed to someone else must not appear in owner's inbox.
+        third = make_user("third@example.com")
+        Follow.objects.create(
+            follower=third, followee=self.requester, status=PENDING
+        )
+        self.client.force_authenticate(self.owner)
+
+        resp = self.client.get(REQUESTS_URL)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], self.req.id)
+        self.assertEqual(rows[0]["requester"]["id"], self.requester.id)
+
+    def test_approve_grants_the_follow_and_reveals_posts(self):
+        self.client.force_authenticate(self.owner)
+        resp = self._approve(self.req.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, ACCEPTED)
+
+        # The requester can now see the owner's posts in their feed.
+        self.client.force_authenticate(self.requester)
+        feed = self.client.get(FEED_URL)
+        ids = {p["id"] for p in feed.data["results"]}
+        self.assertIn(self.owner_post.id, ids)
+
+    def test_reject_deletes_the_request(self):
+        self.client.force_authenticate(self.owner)
+        resp = self._reject(self.req.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(Follow.objects.filter(pk=self.req.id).exists())
+
+    def test_cannot_act_on_a_request_that_isnt_yours(self):
+        # The requester (not the followee) can't approve their own request.
+        self.client.force_authenticate(self.requester)
+        self.assertEqual(
+            self._approve(self.req.id).status_code, status.HTTP_404_NOT_FOUND
+        )
+        self.assertEqual(
+            self._reject(self.req.id).status_code, status.HTTP_404_NOT_FOUND
+        )
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, PENDING)  # untouched
+
+
 class UserListTests(APITestCase):
     def setUp(self):
         self.me = make_user("me@example.com")
         self.other = make_user("other@example.com")
         self.client.force_authenticate(self.me)
 
-    def test_list_excludes_self_and_flags_following(self):
-        Follow.objects.create(follower=self.me, followee=self.other)
+    def test_list_excludes_self_and_reports_follow_status(self):
+        Follow.objects.create(
+            follower=self.me, followee=self.other, status=ACCEPTED
+        )
 
         resp = self.client.get(USERS_URL)
 
@@ -232,9 +328,27 @@ class UserListTests(APITestCase):
         ids = {r["id"] for r in rows}
         self.assertNotIn(self.me.pk, ids)  # never list yourself
         other_row = next(r for r in rows if r["id"] == self.other.pk)
-        self.assertTrue(other_row["is_following"])
+        self.assertEqual(other_row["follow_status"], ACCEPTED)
         # No email is exposed to other members.
         self.assertNotIn("email", other_row)
+
+    def test_follow_status_reflects_none_pending_accepted(self):
+        pending_user = make_user("pending-target@example.com")
+        none_user = make_user("stranger@example.com")
+        accepted_user = make_user("friend@example.com")
+        Follow.objects.create(
+            follower=self.me, followee=pending_user, status=PENDING
+        )
+        Follow.objects.create(
+            follower=self.me, followee=accepted_user, status=ACCEPTED
+        )
+
+        resp = self.client.get(USERS_URL)
+        by_id = {r["id"]: r["follow_status"] for r in resp.data["results"]}
+
+        self.assertEqual(by_id[pending_user.id], PENDING)
+        self.assertEqual(by_id[accepted_user.id], ACCEPTED)
+        self.assertEqual(by_id[none_user.id], "none")
 
     def test_inactive_users_are_hidden(self):
         make_user("pending@example.com", is_active=False)
@@ -243,18 +357,38 @@ class UserListTests(APITestCase):
         self.assertEqual(visible, {self.other.pk})
 
 
-class UserPostsTests(APITestCase):
-    def test_user_posts_returns_only_that_users_posts_newest_first(self):
-        me = make_user("me@example.com")
-        other = make_user("other@example.com")
-        self.client.force_authenticate(me)
+class ProfileGatingTests(APITestCase):
+    """Profile posts are private-by-default: only you and accepted followers
+    can read them."""
 
-        p1 = Post.objects.create(author=other, text="one")
-        p2 = Post.objects.create(author=other, text="two")
-        Post.objects.create(author=me, text="mine, should not appear")
+    def setUp(self):
+        self.owner = make_user("owner@example.com")
+        self.p1 = Post.objects.create(author=self.owner, text="one")
+        self.p2 = Post.objects.create(author=self.owner, text="two")
 
-        resp = self.client.get(f"/api/users/{other.pk}/posts/")
+    def _get_posts(self, viewer):
+        self.client.force_authenticate(viewer)
+        return self.client.get(f"/api/users/{self.owner.pk}/posts/")
 
+    def test_owner_sees_their_own_posts_newest_first(self):
+        resp = self._get_posts(self.owner)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         ids = [p["id"] for p in resp.data["results"]]
-        self.assertEqual(ids, [p2.id, p1.id])
+        self.assertEqual(ids, [self.p2.id, self.p1.id])
+
+    def test_accepted_follower_sees_posts(self):
+        follower = make_user("follower@example.com")
+        Follow.objects.create(
+            follower=follower, followee=self.owner, status=ACCEPTED
+        )
+        resp = self._get_posts(follower)
+        self.assertEqual(len(resp.data["results"]), 2)
+
+    def test_non_follower_and_pending_follower_see_nothing(self):
+        stranger = make_user("stranger@example.com")
+        pending = make_user("pending@example.com")
+        Follow.objects.create(
+            follower=pending, followee=self.owner, status=PENDING
+        )
+        self.assertEqual(len(self._get_posts(stranger).data["results"]), 0)
+        self.assertEqual(len(self._get_posts(pending).data["results"]), 0)

@@ -34,6 +34,19 @@ Two real accounts can:
 - [x] Automated tests covering: feed ordering, and that you only see posts from
       people you follow
 
+### Follow requests & approval (private-by-default)
+
+- [x] A follow is a **request** (`Follow.status = pending`) that only takes
+      effect once the requestee **approves** it (`accepted`)
+- [x] Endpoints: list incoming requests, approve, reject; follow-request is the
+      `POST` on the follow endpoint, cancel/unfollow is the `DELETE`
+- [x] Feed and **profile posts** are both gated on an accepted follow (you only
+      see a user's posts if it's you or an accepted follower)
+- [x] Frontend: Follow button reflects none/pending/accepted; a Requests inbox
+      (with a nav badge) to approve/reject; profile shows a private/locked state
+- [x] Tests covering: request stays hidden until approved, approve reveals
+      posts, reject/cancel, profile gating, and can't act on others' requests
+
 ## Steps
 
 1. Add `Post` and `Follow` models + migrations; register them in the Django
@@ -81,6 +94,34 @@ Two real accounts can:
   `QueryClientProvider` in `main.jsx`; mutations invalidate `["feed"]` /
   `["users"]` / `["user", id]` so following someone or posting refreshes the
   affected views immediately.
-- **Verification.** 30 backend + 32 frontend tests pass; a live HTTP E2E
+- **Verification.** 39 backend + 35 frontend tests pass; a live HTTP E2E
   (real login cookies + CSRF) confirmed follow-scoping and newest-first
   ordering, and that self-follow is 400 and unfollow drops a user's posts.
+
+### Follow requests & approval (added after the initial Phase 3 build)
+
+- **Private-by-default, always.** The maintainer asked that a follow be a request
+  the other person approves, not an instant follow. Chosen model: **every** follow
+  requires approval — no per-account public/private toggle (keeps one behaviour;
+  matches the privacy-first mission). A toggle can be added later if wanted.
+- **`status` on `Follow`, not a separate table.** `Follow` gained a
+  `status` (`pending` | `accepted`, `TextChoices`) — one row per (follower,
+  followee), status transitions on approve. Simpler than a separate
+  `FollowRequest` table. Migration `0002` backfills existing rows to `accepted`
+  (they predate the feature and were real instant-follows).
+- **Profile posts are gated too, not just the feed.** If only the feed respected
+  approval, anyone could still read all your posts at `/u/:id`. `UserPostsView`
+  returns posts only to yourself or an accepted follower; the profile page shows
+  a "posts are private" locked state otherwise. Private-by-default is enforced on
+  both surfaces.
+- **`is_following` (bool) → `follow_status` (none/pending/accepted).** Annotated
+  via a `Subquery` on the requester's follow row; drives the three-state Follow
+  button (Follow / Requested / Following).
+- **Endpoints.** `POST /api/users/<id>/follow/` sends a pending request;
+  `DELETE` cancels a request or unfollows. `GET /api/follow-requests/` is your
+  inbox; `POST /api/follow-requests/<id>/approve|reject/` — guarded so only the
+  requestee can act (else 404, so requests to others aren't revealed).
+- **Frontend.** New Requests page + nav badge (pending count, shares the
+  `["followRequests"]` query cache). Live E2E confirmed: request stays hidden
+  until approved, approval reveals feed + profile posts, non-followers see a
+  private profile, cross-user approve is 404, unfollow revokes.

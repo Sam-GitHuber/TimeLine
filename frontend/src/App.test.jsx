@@ -20,6 +20,9 @@ vi.mock("./api.js", () => ({
     getUserPosts: vi.fn(),
     follow: vi.fn(),
     unfollow: vi.fn(),
+    getFollowRequests: vi.fn(),
+    approveRequest: vi.fn(),
+    rejectRequest: vi.fn(),
   },
 }));
 
@@ -46,8 +49,9 @@ beforeEach(() => {
   // Sensible empty defaults; individual tests override as needed.
   api.getFeed.mockResolvedValue(page([]));
   api.listUsers.mockResolvedValue(page([]));
-  api.getUser.mockResolvedValue({ id: 2, display_name: "Priya", is_following: false });
+  api.getUser.mockResolvedValue({ id: 2, display_name: "Priya", follow_status: "none" });
   api.getUserPosts.mockResolvedValue(page([]));
+  api.getFollowRequests.mockResolvedValue(page([]));
 });
 
 describe("Feed page", () => {
@@ -103,11 +107,11 @@ describe("Feed page", () => {
 });
 
 describe("Profile page", () => {
-  it("shows the user's details and their posts", async () => {
+  it("shows the user's posts once you have an accepted follow", async () => {
     api.getUser.mockResolvedValue({
       id: 2,
       display_name: "Priya",
-      is_following: false,
+      follow_status: "accepted",
     });
     api.getUserPosts.mockResolvedValue(
       page([post(1, 2, "Priya", "Booked flights", "2026-06-30T21:00:00Z")])
@@ -122,6 +126,19 @@ describe("Profile page", () => {
     expect(api.getUserPosts).toHaveBeenCalledWith(2);
   });
 
+  it("hides posts behind a private message when you don't follow them", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      follow_status: "none",
+    });
+
+    renderAt("/u/2");
+
+    await screen.findByRole("heading", { name: "Priya" });
+    expect(screen.getByText(/posts are private/i)).toBeInTheDocument();
+  });
+
   it("shows a not-found message when the user id doesn't exist", async () => {
     api.getUser.mockRejectedValue(new Error("Not found"));
     renderAt("/u/999");
@@ -129,7 +146,7 @@ describe("Profile page", () => {
   });
 
   it("does not show a follow button on your own profile", async () => {
-    api.getUser.mockResolvedValue({ id: 1, display_name: "you", is_following: false });
+    api.getUser.mockResolvedValue({ id: 1, display_name: "you", follow_status: "none" });
     // fakeUser.pk is 1, so /u/1 is your own profile.
     renderAt("/u/1");
     await screen.findByRole("heading", { name: "you" });
@@ -140,12 +157,12 @@ describe("Profile page", () => {
 });
 
 describe("People page", () => {
-  it("lists other members and follows one on click", async () => {
+  it("lists other members and sends a follow request on click", async () => {
     const user = userEvent.setup();
     api.listUsers.mockResolvedValue(
-      page([{ id: 2, display_name: "Priya", is_following: false }])
+      page([{ id: 2, display_name: "Priya", follow_status: "none" }])
     );
-    api.follow.mockResolvedValue({ is_following: true });
+    api.follow.mockResolvedValue({ follow_status: "pending" });
 
     renderAt("/people");
 
@@ -153,6 +170,41 @@ describe("People page", () => {
     await user.click(screen.getByRole("button", { name: "Follow" }));
 
     await waitFor(() => expect(api.follow).toHaveBeenCalledWith(2));
+  });
+
+  it("shows a pending request as 'Requested'", async () => {
+    api.listUsers.mockResolvedValue(
+      page([{ id: 3, display_name: "Tom", follow_status: "pending" }])
+    );
+
+    renderAt("/people");
+
+    expect(
+      await screen.findByRole("button", { name: "Requested" })
+    ).toBeInTheDocument();
+  });
+});
+
+describe("Requests page", () => {
+  it("lists incoming requests and approves one on click", async () => {
+    const user = userEvent.setup();
+    api.getFollowRequests.mockResolvedValue(
+      page([
+        {
+          id: 55,
+          requester: { id: 2, display_name: "Priya" },
+          created_at: "2026-07-04T08:00:00Z",
+        },
+      ])
+    );
+    api.approveRequest.mockResolvedValue({ detail: "Approved." });
+
+    renderAt("/requests");
+
+    await screen.findByText("Priya");
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(api.approveRequest).toHaveBeenCalledWith(55));
   });
 });
 
@@ -181,7 +233,7 @@ describe("Navigation", () => {
     api.getFeed.mockResolvedValue(
       page([post(1, 2, "Priya", "Sunrise over the harbour", "2026-07-04T08:00:00Z")])
     );
-    api.getUser.mockResolvedValue({ id: 2, display_name: "Priya", is_following: false });
+    api.getUser.mockResolvedValue({ id: 2, display_name: "Priya", follow_status: "accepted" });
     api.getUserPosts.mockResolvedValue(
       page([post(1, 2, "Priya", "Sunrise over the harbour", "2026-07-04T08:00:00Z")])
     );

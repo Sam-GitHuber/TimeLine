@@ -20,4 +20,20 @@ urlpatterns = [
         views.FollowView.as_view(),
         name="user-follow",
     ),
+    # Incoming follow requests (people asking to follow you) + approve/reject.
+    path(
+        "follow-requests/",
+        views.FollowRequestListView.as_view(),
+        name="follow-request-list",
+    ),
+    path(
+        "follow-requests/<int:pk>/approve/",
+        views.FollowRequestActionView.as_view(action="approve"),
+        name="follow-request-approve",
+    ),
+    path(
+        "follow-requests/<int:pk>/reject/",
+        views.FollowRequestActionView.as_view(action="reject"),
+        name="follow-request-reject",
+    ),
 ]

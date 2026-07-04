@@ -28,14 +28,21 @@ class Post(models.Model):
 
 
 class Follow(models.Model):
-    """A directed follow: ``follower`` follows ``followee``.
+    """A directed follow request: ``follower`` asks to follow ``followee``.
 
-    A user's feed is their own posts plus the posts of everyone they follow.
+    Accounts are private-by-default: a follow starts **pending** and only lets
+    the follower see the followee's posts once the followee **approves** it
+    (``status`` becomes ``accepted``). Rejecting or unfollowing deletes the row.
+
     Two guardrails live in the database (not just the API) so bad data can't
     sneak in another way:
     - you can't follow the same person twice (``UniqueConstraint``),
     - you can't follow yourself (``CheckConstraint``).
     """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
 
     follower = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -46,6 +53,12 @@ class Follow(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="followers",
+    )
+    status = models.CharField(
+        max_length=8,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -62,4 +75,4 @@ class Follow(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.follower} → {self.followee}"
+        return f"{self.follower} → {self.followee} ({self.status})"
