@@ -38,4 +38,17 @@ setup), and contribute to — plus a live funding page linked from the project.
 
 ## Notes / decisions log
 
-(Record deviations/gotchas here.)
+- **Licence choice ties to the ethos (see Legal / IP in `docs/SHARED.md`).**
+  Our code is auto-copyrighted to the author; the licence is a deliberate
+  choice. **AGPL-3.0** is worth strong consideration: it's copyleft *including
+  over-the-network use*, so anyone running a modified TimeLine as a service must
+  publish their changes — the best fit for keeping derivatives open and
+  ad/algorithm-free. Trade-off: AGPL deters some commercial adopters (fine for
+  this project). Permissive (MIT/Apache-2.0) is the alternative if wider reuse
+  matters more than keeping forks open.
+- **Funding model is explicitly non-profit.** Stated intent: donations
+  (Patreon etc.) cover hosting costs first; any material excess is donated to
+  charity. The funding page should state this breakdown honestly. Note:
+  "non-profit" here is an operating stance — formal non-profit/charity
+  *incorporation* is a separate legal step, not required to run this way, but
+  worth a lawyer's input if donation volume ever grows.
