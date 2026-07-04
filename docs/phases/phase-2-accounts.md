@@ -166,6 +166,7 @@ This is the first phase holding real credentials.
   — so we accept it for now. **Revisit if sign-ups ever open to the public**
   (e.g. around the Phase 10 openness/funding work): switch to generic
   "check your email"-style responses that don't distinguish existing accounts.
+  Tracked in GitHub issue #6.
 
 ## Notes / decisions log
 
