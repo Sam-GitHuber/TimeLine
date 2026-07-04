@@ -3,8 +3,12 @@ name = "backend"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "dj-rest-auth>=7.0",
     "django>=5.1,<5.2",
+    "django-allauth>=65.0",
     "django-cors-headers>=4.9.0",
     "djangorestframework>=3.17.1",
+    "djangorestframework-simplejwt>=5.3",
     "psycopg[binary]>=3.3.4",
+    "requests>=2.34.2",
 ]

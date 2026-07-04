@@ -1,18 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
 import App from "./App.jsx";
+import { renderWithAuth } from "./test-utils.jsx";
 
-// Render the whole app at a given URL. App relies on a router being present
-// (main.jsx uses BrowserRouter in the real app); MemoryRouter is the in-memory
-// equivalent used for tests.
+// Render the whole app at a given URL as a logged-in user. The feed/profile
+// pages are behind ProtectedRoute now, so these tests supply an authenticated
+// auth context (see renderWithAuth). Auth gating itself is covered separately
+// in auth.test.jsx.
 function renderAt(path = "/") {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <App />
-    </MemoryRouter>
-  );
+  return renderWithAuth(<App />, { route: path });
 }
 
 describe("Feed page", () => {
@@ -76,6 +73,27 @@ describe("Profile page", () => {
     renderAt("/u/nobody");
     expect(screen.getByText("User not found")).toBeInTheDocument();
     expect(screen.queryAllByRole("article")).toHaveLength(0);
+  });
+});
+
+describe("Admin link", () => {
+  it("shows an Admin link only for staff users", () => {
+    renderWithAuth(<App />, {
+      route: "/",
+      auth: { user: { pk: 9, email: "boss@example.com", is_staff: true } },
+    });
+    const adminLink = screen.getByRole("link", { name: "Admin" });
+    // Points at the backend admin, opens in a new tab.
+    expect(adminLink).toHaveAttribute("href", expect.stringContaining("/admin/"));
+    expect(adminLink).toHaveAttribute("target", "_blank");
+  });
+
+  it("hides the Admin link for non-staff users", () => {
+    renderWithAuth(<App />, {
+      route: "/",
+      auth: { user: { pk: 10, email: "member@example.com", is_staff: false } },
+    });
+    expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
   });
 });
 

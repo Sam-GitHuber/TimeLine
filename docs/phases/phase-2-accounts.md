@@ -1,6 +1,7 @@
 # Phase 2 — Accounts & Authentication
 
-**Status:** not started (plan confirmed 2026-07-04)
+**Status:** done 2026-07-04 (PR #5). Branch protection on `main` now requires the
+`backend` + `frontend` checks.
 
 ## Goal
 
@@ -43,32 +44,33 @@ A person can, in the running app:
 
 ## Definition of done
 
-- [ ] Custom `accounts.User(AbstractUser)` with email login, set as
+- [x] Custom `accounts.User(AbstractUser)` with email login, set as
       `AUTH_USER_MODEL`, migrated into Postgres (see DB-reset caveat in Notes)
-- [ ] Passwords are hashed by Django (never stored in plain text)
-- [ ] API endpoints for register / login / logout / "who am I" via `dj-rest-auth`
-- [ ] Auth token delivered in an **httpOnly** cookie (not readable by JS)
-- [ ] New sign-ups are inactive until approved in the Django admin; approving is
+- [x] Passwords are hashed by Django (never stored in plain text)
+- [x] API endpoints for register / login / logout / "who am I" via `dj-rest-auth`
+- [x] Auth token delivered in an **httpOnly** cookie (not readable by JS)
+- [x] New sign-ups are inactive until approved in the Django admin; approving is
       a documented one-toggle action
-- [ ] The user is visible/manageable in the Django admin (register the custom
+- [x] The user is visible/manageable in the Django admin (register the custom
       user with a suitable `UserAdmin`)
-- [ ] Frontend has login and sign-up forms wired to those endpoints, plus an
+- [x] Frontend has login and sign-up forms wired to those endpoints, plus an
       auth-state context and a logout control
-- [ ] Logged-in state persists across page refresh (re-checks "who am I" on load)
-- [ ] Protected pages redirect to login when not authenticated
-- [ ] **Automated tests exist and run in CI** (first real test suite — see
+- [x] Logged-in state persists across page refresh (re-checks "who am I" on load)
+- [x] Protected pages redirect to login when not authenticated
+- [x] **Automated tests exist and run in CI** (first real test suite — see
       "Testing & CI"):
-  - [ ] Backend auth tests: register (creates an *inactive* account), login
+  - [x] Backend auth tests: register (creates an *inactive* account), login
         (rejected while inactive, succeeds once active), logout, "who am I", and
         that a protected endpoint rejects unauthenticated requests
-  - [ ] Settings hardening test carried over from Phase 0: with `DEBUG` off and
+  - [x] Settings hardening test carried over from Phase 0: with `DEBUG` off and
         no `DJANGO_SECRET_KEY`, the app refuses to boot (`ImproperlyConfigured`);
         with `DEBUG` on it falls back to the dev key
-  - [ ] Frontend test(s) for the login/auth flow (Vitest)
-  - [ ] `.github/workflows/main.yml` runs backend + frontend tests on every
+  - [x] Frontend test(s) for the login/auth flow (Vitest)
+  - [x] `.github/workflows/main.yml` runs backend + frontend tests on every
         push/PR, replacing the Phase 0 placeholder job
-  - [ ] Branch protection on `main` updated to require the new CI job name(s)
-        instead of `placeholder` (follow the deadlock-free sequence below)
+  - [x] Branch protection on `main` updated to require the new CI job name(s)
+        instead of `placeholder` (followed the deadlock-free sequence below):
+        required checks are now `backend` + `frontend`
 
 ## Steps
 
@@ -155,6 +157,16 @@ This is the first phase holding real credentials.
   repo (already enforced by the Phase 0 settings guard).
 - Inactive-by-default sign-up means a leaked/guessed form can't create a usable
   account without maintainer approval.
+- **Accepted risk — account/email enumeration** (from the Phase 2 security
+  review, dismissed at 2/10): duplicate-email registration and pending-account
+  login return allauth's distinct default messages, so someone could probe
+  whether an email is a member. It's stock, unmodified allauth/dj-rest-auth
+  behaviour, leaks only membership existence (no credentials/session/data), and
+  is low-value for a deliberately private, approval-gated friends-and-family app
+  — so we accept it for now. **Revisit if sign-ups ever open to the public**
+  (e.g. around the Phase 10 openness/funding work): switch to generic
+  "check your email"-style responses that don't distinguish existing accounts.
+  Tracked in GitHub issue #6.
 
 ## Notes / decisions log
 
@@ -164,8 +176,56 @@ This is the first phase holding real credentials.
   `docker compose down -v` (drops the `postgres_data` volume), then bring it back
   up so migrations create the custom user table from scratch. Do this now, while
   it's free — after real family accounts exist it would be destructive.
-- **New dependencies (backend):** `dj-rest-auth`, `django-allauth`,
-  `djangorestframework-simplejwt` (managed with `uv`). All are standard,
-  well-trodden libraries; recorded here per the SHARED.md "raise new libraries"
-  rule since they extend the from-the-start auth choice rather than replace it.
-- (Record further deviations/gotchas here as we build.)
+- **New dependencies (backend):** `dj-rest-auth` (7.2), `django-allauth` (65.18),
+  `djangorestframework-simplejwt` (5.5), plus `requests` (pulled in transitively
+  by allauth's socialaccount provider code that dj-rest-auth's registration
+  imports). All are standard, well-trodden libraries; recorded here per the
+  SHARED.md "raise new libraries" rule since they extend the from-the-start auth
+  choice rather than replace it. `pyjwt` also arrives as a simplejwt dep.
+- **allauth 65 settings API:** allauth ≥65 replaced the old per-flag settings
+  with `ACCOUNT_LOGIN_METHODS = {"email"}` and
+  `ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]`. With no
+  username field on the user, `ACCOUNT_USER_MODEL_USERNAME_FIELD = None` is what
+  stops allauth trying to set one.
+- **Custom serializers were required, not optional:** dj-rest-auth's default
+  `RegisterSerializer`/`UserDetailsSerializer` reference a `username` field our
+  model doesn't have, so `accounts.serializers` provides slimmed versions
+  (username dropped). `CustomRegisterSerializer.save()` is also where
+  `is_active=False` is set.
+- **Inactive gating is mostly free:** Django/allauth won't authenticate an
+  inactive user, so login is refused while pending without extra code. simplejwt
+  also refuses to resolve a token for an inactive user, so even the register
+  flow (which we made issue *no* token anyway) couldn't accidentally let someone
+  in. `InactiveRegisterView` deliberately skips `complete_signup` (which would
+  try to log the new user in and reverse an allauth URL we don't route).
+- **CSRF with the cookie-JWT flow:** enabled `JWT_AUTH_COOKIE_USE_CSRF`, so once
+  the auth cookie is present, unsafe requests must carry the `X-CSRFToken`
+  header matching the `csrftoken` cookie. Added `/api/auth/csrf/` for the SPA to
+  prime that cookie on load, `CSRF_TRUSTED_ORIGINS` for the cross-port dev
+  origin, and `CORS_ALLOW_CREDENTIALS = True`. Gotcha for tests: Django's test
+  client sets `_dont_enforce_csrf_checks`, which suppresses even dj-rest-auth's
+  manual CSRF check — use `APIClient(enforce_csrf_checks=True)` to test the
+  blocked-without-token path.
+- **Login response still contains the access token in its JSON body** (dj-rest-
+  auth behaviour). The httpOnly cookie is what we rely on; the frontend never
+  reads or stores that body token. An XSS attacker can't retrieve a past login
+  response, so the "JS can't read the token" property effectively holds. If we
+  want to be stricter later we can override the login response to strip it.
+- **Access token lifetime set to 1 day** (`SIMPLE_JWT`) because the frontend
+  doesn't do silent refresh yet; a 5-minute default would log people out
+  constantly. Revisit (add refresh-on-401) when it matters.
+- **Approving a sign-up (the one-toggle action):** in Django admin → Users, tick
+  **Active** on the pending account (or select rows → "Approve selected
+  sign-ups"). A dev superuser was created locally for admin access
+  (`admin@timeline.local`); each environment makes its own via
+  `python manage.py createsuperuser`.
+- **Branch protection (done):** the CI job was renamed from `placeholder` to
+  `backend` + `frontend`, and once both were green on the Phase 2 PR the required
+  contexts were swapped (`PATCH .../required_status_checks` with
+  `contexts[]=backend`, `contexts[]=frontend`). `main` now requires those two.
+- **Staff-only Admin link (added on top of the DoD):** the who-am-I payload
+  exposes `is_staff` (read-only), and the app nav shows an **Admin** link (to the
+  backend `/admin/`, built from `VITE_API_URL`, opens in a new tab) only for
+  staff users. This is cosmetic — Django enforces staff access on `/admin/`
+  server-side. **Phase 5 follow-up:** harden the admin *surface* itself
+  (HTTPS-only, and consider a non-default admin URL / IP allowlist / 2FA).

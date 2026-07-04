@@ -18,7 +18,19 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from accounts.views import InactiveRegisterView, csrf
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("api.urls")),
+    # Auth API (dj-rest-auth): login/, logout/, user/, password/*, token/*.
+    path("api/auth/", include("dj_rest_auth.urls")),
+    # Registration is our inactive-by-default view, not dj-rest-auth's default.
+    path(
+        "api/auth/registration/",
+        InactiveRegisterView.as_view(),
+        name="rest_register",
+    ),
+    # Lets the SPA obtain a CSRF cookie on load.
+    path("api/auth/csrf/", csrf, name="csrf"),
 ]

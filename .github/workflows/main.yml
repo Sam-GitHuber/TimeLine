@@ -1,26 +1,85 @@
-# CI placeholder.
+# CI — runs the automated test suites on every push and pull request.
 #
-# The original template CI ran pytest against a `src/` package that no longer
-# exists (removed in Phase 0). Real test suites get added *per phase* as we
-# build features — backend tests with Django's test runner / pytest-django, and
-# frontend tests with Vitest. This workflow just keeps CI green in the meantime
-# and gives us a file to grow.
+# Two independent jobs, matching the two apps in the repo:
+#   backend  — Django tests against a real Postgres (same engine as prod, so we
+#              don't get surprised by SQLite-only behaviour).
+#   frontend — Vitest (React Testing Library).
 #
-# TODO (future phases): replace the placeholder step with real jobs, e.g.
-#   - backend:  uv sync && uv run python manage.py test
-#   - frontend: npm ci && npm test
+# These job names ("backend", "frontend") are the required status checks for
+# branch protection on main — see docs/phases/phase-2-accounts.md.
 name: CI
 
 on: [push, pull_request]
 
 jobs:
-  placeholder:
+  backend:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: timeline
+          POSTGRES_USER: timeline
+          POSTGRES_PASSWORD: timeline
+        ports:
+          - 5432:5432
+        # Wait until Postgres is accepting connections before the job runs.
+        options: >-
+          --health-cmd "pg_isready -U timeline -d timeline"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Point Django at the service container (exposed on localhost in CI).
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: timeline
+      POSTGRES_USER: timeline
+      POSTGRES_PASSWORD: timeline
+      # DEBUG on so the throwaway dev secret key is used (the settings-hardening
+      # test sets its own isolated env, so this doesn't affect it).
+      DJANGO_DEBUG: "true"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: No test suites yet
-        run: |
-          echo "No automated tests yet — real suites are added per phase."
-          echo "See .github/workflows/main.yml for the plan."
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run migrations (sanity check)
+        run: uv run python manage.py migrate --noinput
+
+      - name: Run tests
+        run: uv run python manage.py test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
