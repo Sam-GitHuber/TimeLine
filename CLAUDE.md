@@ -4,11 +4,12 @@ Instructions for Claude Code when working in this repo.
 
 ## Current status
 
-**Phase 0 (Docker skeleton) — done. `docker compose up` runs Django+DRF,
-React/Vite, and Postgres talking to each other; legacy template scaffolding
-removed. Phase 1 (wireframe) is next.** Keep this line current: update it
-whenever a phase starts or finishes, but keep the detail in the phase docs,
-not here.
+**Phase 1 (wireframe) — done. The React/Vite frontend is a clickable timeline
+wireframe on mock data: reverse-chronological feed, working compose box, and
+per-user profile pages, with react-router navigation and a Vitest suite
+(`npm test`). Phase 2 (accounts & auth) is next.** Keep this line current:
+update it whenever a phase starts or finishes, but keep the detail in the phase
+docs, not here.
 
 ## Before doing any work
 

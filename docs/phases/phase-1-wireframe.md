@@ -1,6 +1,6 @@
 # Phase 1 — Wireframe Web App
 
-**Status:** not started
+**Status:** done
 
 ## Goal
 
@@ -26,13 +26,13 @@ flow over visual polish.
 
 ## Definition of done
 
-- [ ] Feed page renders a list of mock posts in reverse-chronological order
-- [ ] Each post shows author, timestamp, and text
-- [ ] Compose box exists and visibly adds a post to the on-screen list
-- [ ] A profile page exists showing a fake user + their posts
-- [ ] Navigation between feed and profile works
-- [ ] Runs locally with one documented command (via Docker or `npm run dev`)
-- [ ] Mock data lives in one obvious file so it's easy to see the "shape" of a
+- [x] Feed page renders a list of mock posts in reverse-chronological order
+- [x] Each post shows author, timestamp, and text
+- [x] Compose box exists and visibly adds a post to the on-screen list
+- [x] A profile page exists showing a fake user + their posts
+- [x] Navigation between feed and profile works
+- [x] Runs locally with one documented command (via Docker or `npm run dev`)
+- [x] Mock data lives in one obvious file so it's easy to see the "shape" of a
       post/user (this becomes the contract the backend fulfils later)
 
 ## Steps
@@ -48,4 +48,30 @@ flow over visual polish.
 
 ## Notes / decisions log
 
-(Record deviations/gotchas here.)
+- **Router:** added `react-router-dom` (v6). The stack table in `SHARED.md`
+  didn't name a router; chose the boring standard for React SPAs so we get real
+  URLs (`/`, `/u/:username`), working back button, and shareable links — and
+  it's the same router later phases will lean on. Recorded in `SHARED.md`.
+- **Shared post state lives in `Layout`**, handed to pages via react-router's
+  `<Outlet context>` (rather than React Context or prop-drilling). This is why a
+  post added from the compose box shows up both in the feed *and* on the
+  author's profile — both pages read the same state.
+- **Mock data shape (`src/mockData.js`) is the future backend contract:**
+  `user { id, username, displayName, bio, joinedAt }` and
+  `post { id, authorId, createdAt, text }`. Posts reference the author by
+  `authorId` (foreign-key style) rather than embedding the author, mirroring how
+  it'll be stored. `currentUserId` stands in for the logged-in user until auth
+  (Phase 2).
+- **Reverse-chronological is enforced in two places:** the feed sorts a copy by
+  `createdAt` descending, and new posts are prepended. A regression test asserts
+  timestamps are non-increasing down the list, so ranking can't sneak in.
+- **Tests:** added Vitest + React Testing Library (frontend test tooling per the
+  "tests every phase" rule). `npm test` runs 11 tests covering feed ordering,
+  compose-adds-a-post, empty-post guard, profile filtering, unknown-user
+  handling, and feed→profile navigation. CI is still the placeholder for now —
+  the frontend suite is ready to wire into `.github/workflows/main.yml` when we
+  turn CI real.
+- **Styling:** minimal Tailwind, deliberately plain (a light Twitter-ish single
+  column). Avatars are coloured initials — real photos are Phase 4.
+- **Gotcha:** left the Phase 0 `App.jsx` backend smoke-test screen behind; it's
+  now the router (`Routes`). `main.jsx` wraps the app in `BrowserRouter`.
