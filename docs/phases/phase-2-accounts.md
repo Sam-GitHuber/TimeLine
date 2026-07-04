@@ -157,6 +157,15 @@ This is the first phase holding real credentials.
   repo (already enforced by the Phase 0 settings guard).
 - Inactive-by-default sign-up means a leaked/guessed form can't create a usable
   account without maintainer approval.
+- **Accepted risk — account/email enumeration** (from the Phase 2 security
+  review, dismissed at 2/10): duplicate-email registration and pending-account
+  login return allauth's distinct default messages, so someone could probe
+  whether an email is a member. It's stock, unmodified allauth/dj-rest-auth
+  behaviour, leaks only membership existence (no credentials/session/data), and
+  is low-value for a deliberately private, approval-gated friends-and-family app
+  — so we accept it for now. **Revisit if sign-ups ever open to the public**
+  (e.g. around the Phase 10 openness/funding work): switch to generic
+  "check your email"-style responses that don't distinguish existing accounts.
 
 ## Notes / decisions log
 
