@@ -97,4 +97,27 @@ export const api = {
       method: "POST",
       body: { email, password1: password, password2: password },
     }),
+
+  // --- Timeline (Phase 3) --------------------------------------------------
+
+  // The home feed: your posts + those you follow, newest-first, paginated.
+  getFeed: () => request("/api/feed/"),
+
+  // Follow a paginated response's `next` URL. DRF returns an absolute URL, so
+  // strip the origin back to a path our request() helper can use.
+  getPage: (nextUrl) => request(nextUrl.replace(BASE_URL, "")),
+
+  createPost: (text) =>
+    request("/api/posts/", { method: "POST", body: { text } }),
+
+  // People to follow — everyone else, each flagged is_following.
+  listUsers: () => request("/api/users/"),
+
+  getUser: (id) => request(`/api/users/${id}/`),
+
+  getUserPosts: (id) => request(`/api/users/${id}/posts/`),
+
+  follow: (id) => request(`/api/users/${id}/follow/`, { method: "POST" }),
+
+  unfollow: (id) => request(`/api/users/${id}/follow/`, { method: "DELETE" }),
 };

@@ -1,22 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatRelativeTime, sortByNewest } from "./utils.js";
-
-describe("sortByNewest", () => {
-  const older = { id: 1, createdAt: "2026-01-01T00:00:00Z" };
-  const newer = { id: 2, createdAt: "2026-06-01T00:00:00Z" };
-  const newest = { id: 3, createdAt: "2026-07-01T00:00:00Z" };
-
-  it("orders posts newest-first regardless of input order", () => {
-    const result = sortByNewest([older, newest, newer]);
-    expect(result.map((p) => p.id)).toEqual([3, 2, 1]);
-  });
-
-  it("does not mutate the input array", () => {
-    const input = [older, newest, newer];
-    sortByNewest(input);
-    expect(input.map((p) => p.id)).toEqual([1, 3, 2]);
-  });
-});
+import { formatRelativeTime } from "./utils.js";
 
 describe("formatRelativeTime", () => {
   const now = new Date("2026-07-04T12:00:00Z");

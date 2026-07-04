@@ -2,9 +2,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // Mock the API module so these tests exercise the real AuthProvider + routing
-// without any network. Each test decides what the backend "returns".
+// without any network. Each test decides what the backend "returns". The feed
+// endpoints are stubbed to empty so the (logged-in) feed page renders quietly.
 vi.mock("./api.js", () => ({
   api: {
     ensureCsrf: vi.fn().mockResolvedValue({}),
@@ -12,6 +14,9 @@ vi.mock("./api.js", () => ({
     login: vi.fn(),
     logout: vi.fn(),
     register: vi.fn(),
+    getFeed: vi.fn().mockResolvedValue({ results: [], next: null }),
+    getPage: vi.fn().mockResolvedValue({ results: [], next: null }),
+    createPost: vi.fn(),
   },
 }));
 
@@ -19,20 +24,27 @@ import { api } from "./api.js";
 import { AuthProvider } from "./auth.jsx";
 import App from "./App.jsx";
 
-// The real provider, exactly as main.jsx wires it, at a given URL.
+// The real provider, exactly as main.jsx wires it, at a given URL — including
+// the QueryClientProvider the app depends on for data fetching.
 function renderApp(route = "/") {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
-    <MemoryRouter initialEntries={[route]}>
-      <AuthProvider>
-        <App />
-      </AuthProvider>
-    </MemoryRouter>
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[route]}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>
+    </QueryClientProvider>
   );
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   api.ensureCsrf.mockResolvedValue({});
+  api.getFeed.mockResolvedValue({ results: [], next: null });
 });
 
 describe("Auth gating", () => {

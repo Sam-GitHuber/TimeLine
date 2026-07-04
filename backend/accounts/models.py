@@ -32,3 +32,16 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.email
+
+    @property
+    def display_name(self):
+        """The human label shown for this user across the app.
+
+        Real first + last name once set (the maintainer fills these in when
+        approving a sign-up, and the Phase 4 profile UI lets users edit them).
+        Until then we fall back to the email's local-part (the bit before the
+        ``@``) rather than the full address, so members don't see each other's
+        email addresses in the feed or the people list (privacy-first).
+        """
+        full_name = f"{self.first_name} {self.last_name}".strip()
+        return full_name or self.email.split("@", 1)[0]

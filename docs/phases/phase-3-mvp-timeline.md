@@ -1,6 +1,6 @@
 # Phase 3 — MVP Timeline
 
-**Status:** not started
+**Status:** done
 
 ## Goal
 
@@ -22,16 +22,16 @@ Two real accounts can:
 
 ## Definition of done
 
-- [ ] `Post` model (author, text, created_at) via Django migration
-- [ ] `Follow` relationship (follower → followee) via Django migration
-- [ ] Endpoint to create a post (must be logged in)
-- [ ] Endpoint to follow / unfollow a user
-- [ ] Feed endpoint returns posts from followed users (+ self), ordered by
+- [x] `Post` model (author, text, created_at) via Django migration
+- [x] `Follow` relationship (follower → followee) via Django migration
+- [x] Endpoint to create a post (must be logged in)
+- [x] Endpoint to follow / unfollow a user
+- [x] Feed endpoint returns posts from followed users (+ self), ordered by
       `created_at` descending, with pagination
-- [ ] Frontend feed page renders the real feed from the backend
-- [ ] Frontend compose box creates real posts
-- [ ] A way to find/follow another user (even a basic list or search)
-- [ ] Automated tests covering: feed ordering, and that you only see posts from
+- [x] Frontend feed page renders the real feed from the backend
+- [x] Frontend compose box creates real posts
+- [x] A way to find/follow another user (even a basic list or search)
+- [x] Automated tests covering: feed ordering, and that you only see posts from
       people you follow
 
 ## Steps
@@ -48,4 +48,39 @@ Two real accounts can:
 
 ## Notes / decisions log
 
-(Record deviations/gotchas here.)
+- **Where the models live.** `Post` and `Follow` went into the existing `api`
+  app rather than a new app — it already had `models.py`/`views.py`/`urls.py`/
+  `admin.py`/`tests.py` wired in, so this kept the change small. If posts grow
+  their own concerns (comments, likes-that-aren't-ranking, etc.) a dedicated
+  app can be split out later.
+- **No username → profile URLs use the numeric user id.** There is no username
+  in this project (email login). Phase 1's `/u/:username` routes became
+  `/u/:id`, and post/author payloads carry `{ id, display_name }`.
+- **`display_name` and the privacy fallback.** Registration only collects
+  email + password, so `first_name`/`last_name` are blank until the Phase 4
+  profile UI. `User.display_name` (a property, the single source of truth used
+  by every serializer) is `"First Last"` when set, else the **email local-part**
+  (before the `@`) — never the full address, so members don't see each other's
+  emails in the feed or people list. The maintainer sets real names in the
+  Django admin when approving a sign-up.
+- **Author is never trusted from the client.** `POST /api/posts/` ignores any
+  `author` in the body and sets it from `request.user`; a test asserts you
+  can't post as someone else.
+- **Guardrails in the database, not just the API.** `Follow` has a
+  `UniqueConstraint` (no double-follow) and a `CheckConstraint` (no self-follow)
+  so bad data can't arrive by another path. The follow endpoint is idempotent
+  (`get_or_create` / delete-if-present).
+- **Feed ordering is enforced server-side.** `Post.Meta.ordering` +
+  `created_at` (indexed) mean the API always returns newest-first; the frontend
+  renders in the order received. The old client-side `sortByNewest` helper was
+  removed as dead code.
+- **Pagination.** DRF `PageNumberPagination`, `PAGE_SIZE = 20`. Feed and profile
+  pages use TanStack Query `useInfiniteQuery` with a "Load more" button that
+  follows the response's `next` URL (via `api.getPage`).
+- **TanStack Query added** (per `docs/SHARED.md`, the point earmarked for it):
+  `QueryClientProvider` in `main.jsx`; mutations invalidate `["feed"]` /
+  `["users"]` / `["user", id]` so following someone or posting refreshes the
+  affected views immediately.
+- **Verification.** 30 backend + 32 frontend tests pass; a live HTTP E2E
+  (real login cookies + CSRF) confirmed follow-scoping and newest-first
+  ordering, and that self-follow is 400 and unfollow drops a user's posts.

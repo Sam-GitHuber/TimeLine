@@ -201,6 +201,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    # Feed and post lists are paginated so a long history doesn't ship in one
+    # response. Clients follow the `next` URL to load more. 20 is a comfortable
+    # page for a text feed; revisit if it feels short in real use.
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
 }
 
 # --- Authentication (dj-rest-auth + allauth + simplejwt) ---------------------

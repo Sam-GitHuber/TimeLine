@@ -3,16 +3,18 @@ import Layout from "./components/Layout.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import FeedPage from "./pages/FeedPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
+import FindPeoplePage from "./pages/FindPeoplePage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
 
 // Route table:
 //   /login, /signup   → public auth pages
 //   /                 → the feed (home timeline)     ┐ require a logged-in user
-//   /u/:username      → a person's profile           ┘ (ProtectedRoute gate)
+//   /people           → find people to follow        │ (ProtectedRoute gate)
+//   /u/:id            → a person's profile (by user id) ┘
 // The protected pages render inside Layout, which provides the nav bar (with
-// the logout control) and the shared posts state. Real URLs (not just tab
-// state) mean the back button and shareable links work.
+// the logout control). Each page fetches its own data from the API. Real URLs
+// (not just tab state) mean the back button and shareable links work.
 export default function App() {
   return (
     <Routes>
@@ -22,7 +24,8 @@ export default function App() {
       <Route element={<ProtectedRoute />}>
         <Route path="/" element={<Layout />}>
           <Route index element={<FeedPage />} />
-          <Route path="u/:username" element={<ProfilePage />} />
+          <Route path="people" element={<FindPeoplePage />} />
+          <Route path="u/:id" element={<ProfilePage />} />
         </Route>
       </Route>
     </Routes>
