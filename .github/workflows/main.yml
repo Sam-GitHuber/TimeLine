@@ -1,31 +1,26 @@
-name: Run Pytest with coverage
+# CI placeholder.
+#
+# The original template CI ran pytest against a `src/` package that no longer
+# exists (removed in Phase 0). Real test suites get added *per phase* as we
+# build features — backend tests with Django's test runner / pytest-django, and
+# frontend tests with Vitest. This workflow just keeps CI green in the meantime
+# and gives us a file to grow.
+#
+# TODO (future phases): replace the placeholder step with real jobs, e.g.
+#   - backend:  uv sync && uv run python manage.py test
+#   - frontend: npm ci && npm test
+name: CI
 
 on: [push, pull_request]
 
 jobs:
-  test:
+  placeholder:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10' # Change to the Python version you need
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r ./requirements/test_requirements.txt
-
-    - name: Run pytest with coverage
-      run: |
-        pytest tests/ --cov=src --cov-report=xml --cov-fail-under=80
-      
-    # - name: Upload coverage report
-    #   uses: actions/upload-artifact@v3
-    #   with:
-    #     name: coverage-report
-    #     path: coverage.xml
+      - name: No test suites yet
+        run: |
+          echo "No automated tests yet — real suites are added per phase."
+          echo "See .github/workflows/main.yml for the plan."
