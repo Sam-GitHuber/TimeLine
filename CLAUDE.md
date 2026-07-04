@@ -9,10 +9,10 @@ custom email-login `accounts.User`, with register/login/logout/who-am-I through
 `dj-rest-auth` (JWT in an httpOnly cookie). Sign-ups are inactive until approved
 in the Django admin. The React app has login/sign-up forms, an auth context, a
 logout control, and protected routes. First real test suites (backend Django +
-frontend Vitest) run in CI. Remaining: the owner-only branch-protection swap
-from `placeholder` to the `backend`/`frontend` checks (see the phase doc).
-Phase 3 (MVP timeline) is next.** Keep this line current: update it whenever a
-phase starts or finishes, but keep the detail in the phase docs, not here.
+frontend Vitest) run in CI, and `main` now requires the `backend`/`frontend`
+checks. Phase 3 (MVP timeline) is next.** Keep this line current: update it
+whenever a phase starts or finishes, but keep the detail in the phase docs, not
+here.
 
 ## Before doing any work
 

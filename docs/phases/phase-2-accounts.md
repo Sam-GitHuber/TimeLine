@@ -1,7 +1,7 @@
 # Phase 2 — Accounts & Authentication
 
-**Status:** implemented 2026-07-04 (on branch `phase-2-accounts-auth`; the final
-branch-protection swap is an owner step — see below).
+**Status:** done 2026-07-04 (PR #5). Branch protection on `main` now requires the
+`backend` + `frontend` checks.
 
 ## Goal
 
@@ -68,9 +68,9 @@ A person can, in the running app:
   - [x] Frontend test(s) for the login/auth flow (Vitest)
   - [x] `.github/workflows/main.yml` runs backend + frontend tests on every
         push/PR, replacing the Phase 0 placeholder job
-  - [ ] Branch protection on `main` updated to require the new CI job name(s)
-        instead of `placeholder` (follow the deadlock-free sequence below) —
-        **owner step, pending; see Notes**
+  - [x] Branch protection on `main` updated to require the new CI job name(s)
+        instead of `placeholder` (followed the deadlock-free sequence below):
+        required checks are now `backend` + `frontend`
 
 ## Steps
 
@@ -209,7 +209,7 @@ This is the first phase holding real credentials.
   sign-ups"). A dev superuser was created locally for admin access
   (`admin@timeline.local`); each environment makes its own via
   `python manage.py createsuperuser`.
-- **Branch protection (owner step, still pending):** the CI job was renamed from
-  `placeholder` to `backend` + `frontend`. Both run on this PR. Once they're
-  green, the owner swaps the required contexts (the deadlock-free sequence above)
-  — until then the PR shows the old required `placeholder` check as missing.
+- **Branch protection (done):** the CI job was renamed from `placeholder` to
+  `backend` + `frontend`, and once both were green on the Phase 2 PR the required
+  contexts were swapped (`PATCH .../required_status_checks` with
+  `contexts[]=backend`, `contexts[]=frontend`). `main` now requires those two.
