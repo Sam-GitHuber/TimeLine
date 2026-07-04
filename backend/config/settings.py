@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -25,15 +27,26 @@ def env_bool(name, default=False):
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-# In dev we fall back to a throwaway key; production MUST set DJANGO_SECRET_KEY.
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    "django-insecure-dev-only-key-change-me-in-production",
-)
-
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = env_bool("DJANGO_DEBUG", default=True)
+# Secure by default: DEBUG is off unless explicitly enabled. The dev
+# docker-compose sets DJANGO_DEBUG=true, so local development is unaffected.
+DEBUG = env_bool("DJANGO_DEBUG", default=False)
+
+# SECURITY WARNING: keep the secret key used in production secret!
+# In development we fall back to a throwaway key. With DEBUG off (i.e. anything
+# that looks like production) the key MUST come from the environment — we refuse
+# to boot with a repo-visible key, since a public SECRET_KEY lets anyone forge
+# session cookies and signed tokens (password resets, etc.).
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "django-insecure-dev-only-key-change-me-in-production"
+    else:
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY environment variable must be set when DEBUG is "
+            "off. Generate one with: "
+            "python -c \"import secrets; print(secrets.token_urlsafe(50))\""
+        )
 
 # Comma-separated list, e.g. "localhost,127.0.0.1,timeline.example.com"
 ALLOWED_HOSTS = [
