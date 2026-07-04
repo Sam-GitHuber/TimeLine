@@ -1,0 +1,3 @@
+[run]
+omit =
+    src/your_module.py

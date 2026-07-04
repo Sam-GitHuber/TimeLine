@@ -1,0 +1,7 @@
+name: template
+dependencies:
+  - python>=3
+  - pandas
+  - numpy
+  - pytest
+  - pytest-cov
