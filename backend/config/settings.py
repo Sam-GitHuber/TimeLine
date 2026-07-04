@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -65,12 +66,32 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # django.contrib.sites is required by allauth.
+    "django.contrib.sites",
     # Third-party
     "rest_framework",
+    # authtoken backs dj-rest-auth's TokenModel imports (we use JWT, but the
+    # library still references it — cheap to include, avoids import surprises).
+    "rest_framework.authtoken",
     "corsheaders",
+    # Auth stack: dj-rest-auth exposes the API endpoints; allauth powers
+    # registration + email-based login. See docs/phases/phase-2-accounts.md.
+    "allauth",
+    "allauth.account",
+    "allauth.socialaccount",
+    "dj_rest_auth",
+    "dj_rest_auth.registration",
     # Local apps
+    "accounts",
     "api",
 ]
+
+# django.contrib.sites — single site; required by allauth.
+SITE_ID = 1
+
+# Our custom user model (email login, no username). MUST be set before the
+# first migration that creates the user table (see phase-2 notes / DB reset).
+AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -82,6 +103,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Required by allauth (>=0.55): populates request for the account flows.
+    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -164,14 +187,66 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
 # Django REST Framework
-# Phase 0 only needs a working JSON endpoint; auth/permission policy is set in
-# later phases (accounts land in Phase 2).
+# Phase 2: default every endpoint to "must be logged in", authenticated via the
+# JWT that lives in an httpOnly cookie. Endpoints that must stay open (login,
+# register, the CSRF primer, the Phase 0 smoke test) opt out with AllowAny.
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
         "rest_framework.renderers.BrowsableAPIRenderer",
     ],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "dj_rest_auth.jwt_auth.JWTCookieAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
 }
+
+# --- Authentication (dj-rest-auth + allauth + simplejwt) ---------------------
+# JWT delivered in an httpOnly cookie so page JavaScript can't read it: an XSS
+# bug then can't exfiltrate a login. See docs/phases/phase-2-accounts.md.
+REST_AUTH = {
+    "USE_JWT": True,
+    "JWT_AUTH_COOKIE": "timeline-auth",
+    "JWT_AUTH_REFRESH_COOKIE": "timeline-refresh",
+    # httpOnly: not readable by JavaScript (XSS mitigation).
+    "JWT_AUTH_HTTPONLY": True,
+    # Lax lets the cookie ride same-site navigations but not cross-site POSTs —
+    # a first line of CSRF defence. Secure is added in production (Phase 5).
+    "JWT_AUTH_SAMESITE": "Lax",
+    "JWT_AUTH_SECURE": env_bool("DJANGO_COOKIE_SECURE", default=not DEBUG),
+    # With the token in a cookie, require a CSRF token on unsafe (mutating)
+    # requests — belt-and-braces alongside SameSite.
+    "JWT_AUTH_COOKIE_USE_CSRF": True,
+    # We authenticate with JWT only; don't also open a Django session on login.
+    "SESSION_LOGIN": False,
+    "REGISTER_SERIALIZER": "accounts.serializers.CustomRegisterSerializer",
+    "USER_DETAILS_SERIALIZER": "accounts.serializers.UserDetailsSerializer",
+}
+
+SIMPLE_JWT = {
+    # Longer-lived access token: the frontend doesn't do silent refresh yet, so
+    # a short access lifetime would log family members out constantly. Revisit
+    # (add refresh-on-401) if/when that matters.
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+}
+
+# allauth: email is the login identifier; there is no username field.
+ACCOUNT_LOGIN_METHODS = {"email"}
+ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
+ACCOUNT_USER_MODEL_USERNAME_FIELD = None
+ACCOUNT_UNIQUE_EMAIL = True
+# Gating is admin approval (is_active), not email verification — so no email
+# sending is wired up in this phase.
+ACCOUNT_EMAIL_VERIFICATION = "none"
+
+# allauth needs an authentication backend alongside Django's default.
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "allauth.account.auth_backends.AuthenticationBackend",
+]
 
 # CORS — which browser origins may call this API.
 # The React dev server (Vite) runs on :5173. Comma-separated list via env.
@@ -183,3 +258,11 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if o.strip()
 ]
+# The SPA sends the auth + CSRF cookies with its fetches (credentials:include),
+# so the browser needs an explicit credentials-allowed CORS response. Never
+# combine this with a wildcard origin.
+CORS_ALLOW_CREDENTIALS = True
+
+# Cross-origin (Vite :5173 → Django :8000) unsafe requests must have their
+# Origin trusted for Django's CSRF check. Same allowlist as CORS.
+CSRF_TRUSTED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
