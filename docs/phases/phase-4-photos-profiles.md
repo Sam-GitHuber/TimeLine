@@ -54,8 +54,26 @@ with file uploads and storage, which has real cost and privacy implications.
   connecting with friends and family, so forcing a made-up username adds
   friction for no benefit. `first_name`/`last_name` already exist on the Phase 2
   `User`, so this phase only adds bio + avatar and the edit UI over them.
-- **Open: the public profile-URL identifier.** With no username, `/u/:username`
-  can't stand. Names aren't unique, so the boring, robust default is the numeric
-  id (e.g. `/u/42`); an optional unique slug could be added later if we want
-  prettier URLs. Decide this when wiring real profile pages (late Phase 3 /
-  Phase 4). It will **not** be a username.
+- **Profile URL = a name-based slug, not a username (confirmed 2026-07-04).**
+  The public profile lives at `/u/<slug>`, where the slug is auto-generated from
+  the person's name (`sam-jefford`, then `sam-jefford-2` on collision). Users can
+  **optionally customise** it (`/u/sam`). Crucially this is a *URL handle only* —
+  it's never displayed as the name (that's always first + last) and never used
+  to log in (always email). Implementation notes / things that will bite:
+  - It's a **unique, indexed `slug` field on `User`**, not a login credential.
+  - **Names aren't known at sign-up** (we only collect email + password), so
+    there's no name to slugify at creation. Generate the slug when the user
+    first sets their name (this phase's profile step), with an email-local-part
+    or id-based fallback until then. → see the related open point below.
+  - If the slug is editable, **changing it breaks old links** (link rot). For a
+    small family app that's acceptable; just don't promise permanence.
+  - **Reserve/validate custom slugs**: reject ones that collide with real routes
+    (`login`, `signup`, `admin`, `settings`, …), enforce a charset
+    (lowercase/digits/hyphen), and keep it tasteful (trusted user base, so
+    light-touch).
+- **Related open point — do we collect the name at sign-up?** Today's Phase 2
+  sign-up asks only for email + password, so a freshly-approved user has *no*
+  display name and no natural slug until they fill in a profile. Options: (a) add
+  first/last name to the sign-up form, or (b) force a "complete your profile"
+  step on first login. Decide at the start of this phase; it's the cleanest point
+  to add it. (Leaning (a) — a real name is the whole identity here.)
