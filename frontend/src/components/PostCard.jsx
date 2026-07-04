@@ -13,7 +13,11 @@ export default function PostCard({ post }) {
   return (
     <article className="border-b border-slate-200 px-4 py-4 sm:px-6">
       <div className="flex gap-3">
-        <Link to={`/u/${author.username}`}>
+        {/* The avatar is a convenience click target to the same profile as the
+            name link below. It's hidden from assistive tech and the tab order
+            (aria-hidden + tabIndex=-1) so screen-reader/keyboard users get one
+            named link per post, not an empty duplicate. */}
+        <Link to={`/u/${author.username}`} tabIndex={-1} aria-hidden="true">
           <Avatar user={author} size="md" />
         </Link>
 

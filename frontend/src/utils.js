@@ -1,9 +1,19 @@
-// Small formatting helpers for timestamps.
+// Small helpers for posts and timestamps.
 //
 // Posts store an ISO 8601 string in `createdAt`. These helpers turn that into
 // something readable. Kept dependency-free (no date library) — the wireframe
 // doesn't need one, and it's a good habit not to reach for a package until a
 // problem actually demands it.
+
+// Return a new array of posts ordered newest-first. This is the project's core,
+// non-negotiable ordering (reverse-chronological, no ranking, ever), so it
+// lives in exactly one place — the feed and profile pages both call it, and
+// there's nowhere for the two to drift apart. Sorts a copy; never mutates.
+export function sortByNewest(posts) {
+  return [...posts].sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+  );
+}
 
 // "just now", "5m", "3h", "2d" — the short relative style you see next to a
 // post. Falls back to an absolute date for anything older than a week.

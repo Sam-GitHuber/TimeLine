@@ -2,7 +2,7 @@ import { Link, useOutletContext, useParams } from "react-router-dom";
 import Avatar from "../components/Avatar.jsx";
 import PostCard from "../components/PostCard.jsx";
 import { getUserByUsername } from "../mockData.js";
-import { formatAbsoluteTime } from "../utils.js";
+import { formatAbsoluteTime, sortByNewest } from "../utils.js";
 
 // A single person's page: their details plus their own posts, newest-first.
 export default function ProfilePage() {
@@ -28,9 +28,9 @@ export default function ProfilePage() {
     );
   }
 
-  const userPosts = posts
-    .filter((post) => post.authorId === user.id)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const userPosts = sortByNewest(
+    posts.filter((post) => post.authorId === user.id)
+  );
 
   return (
     <div>
