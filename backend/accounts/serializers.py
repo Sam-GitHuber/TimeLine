@@ -27,8 +27,14 @@ class CustomRegisterSerializer(RegisterSerializer):
 
 class UserDetailsSerializer(BaseUserDetailsSerializer):
     """"Who am I" payload. Mirrors dj-rest-auth's default but without the
-    ``username`` field, which our custom User model doesn't have."""
+    ``username`` field, which our custom User model doesn't have.
+
+    ``is_staff`` is exposed (read-only) so the frontend can show maintainer-only
+    UI like the admin link. It's not a security control — the Django admin
+    enforces staff access server-side; this just decides whether to render the
+    link.
+    """
 
     class Meta(BaseUserDetailsSerializer.Meta):
-        fields = ("pk", "email", "first_name", "last_name")
-        read_only_fields = ("pk", "email")
+        fields = ("pk", "email", "first_name", "last_name", "is_staff")
+        read_only_fields = ("pk", "email", "is_staff")

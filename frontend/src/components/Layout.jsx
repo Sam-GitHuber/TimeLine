@@ -23,6 +23,10 @@ export default function Layout() {
   const navigate = useNavigate();
   const currentUser = getUserById(currentUserId);
 
+  // The Django admin lives on the API host, not the SPA — build the link from
+  // the same base URL the API client uses so it's correct in every environment.
+  const adminUrl = `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/admin/`;
+
   async function handleLogout() {
     try {
       await logout();
@@ -70,6 +74,19 @@ export default function Layout() {
               <span className="hidden text-sm text-slate-500 sm:inline">
                 {user.email}
               </span>
+            )}
+            {/* Maintainer-only: the admin lives on the backend, so this is a
+                plain external link (new tab). Visibility is cosmetic — Django
+                enforces staff access server-side. */}
+            {user?.is_staff && (
+              <a
+                href={adminUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-full px-4 py-1.5 font-medium text-slate-600 transition hover:bg-slate-100"
+              >
+                Admin
+              </a>
             )}
             <button
               type="button"

@@ -101,6 +101,9 @@ class LoginLogoutTests(APITestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["email"], "me@example.com")
+        # is_staff is exposed (drives the frontend admin link) and defaults False.
+        self.assertIn("is_staff", resp.data)
+        self.assertFalse(resp.data["is_staff"])
 
     def test_who_am_i_rejects_anonymous_requests(self):
         resp = self.client.get(USER_URL)

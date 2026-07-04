@@ -76,6 +76,27 @@ describe("Profile page", () => {
   });
 });
 
+describe("Admin link", () => {
+  it("shows an Admin link only for staff users", () => {
+    renderWithAuth(<App />, {
+      route: "/",
+      auth: { user: { pk: 9, email: "boss@example.com", is_staff: true } },
+    });
+    const adminLink = screen.getByRole("link", { name: "Admin" });
+    // Points at the backend admin, opens in a new tab.
+    expect(adminLink).toHaveAttribute("href", expect.stringContaining("/admin/"));
+    expect(adminLink).toHaveAttribute("target", "_blank");
+  });
+
+  it("hides the Admin link for non-staff users", () => {
+    renderWithAuth(<App />, {
+      route: "/",
+      auth: { user: { pk: 10, email: "member@example.com", is_staff: false } },
+    });
+    expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
+  });
+});
+
 describe("Navigation", () => {
   it("navigates from the feed to a profile via a post author link", async () => {
     const user = userEvent.setup();
