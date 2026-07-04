@@ -31,6 +31,18 @@ A person can, in the running app:
 - [ ] At this small/private stage, sign-up can be gated (e.g. invite-only or
       manually approved via the admin) so it isn't open to the public — decide
       and document which
+- [ ] **Automated tests exist and run in CI** (first real test suite — see
+      "Testing & CI" below):
+  - [ ] Backend auth tests: register, login, logout, "who am I", and that a
+        protected endpoint rejects unauthenticated requests
+  - [ ] Settings hardening test carried over from Phase 0: with `DEBUG` off and
+        no `DJANGO_SECRET_KEY`, the app refuses to boot (`ImproperlyConfigured`);
+        with `DEBUG` on it falls back to the dev key
+  - [ ] Frontend test(s) for the login/auth flow (Vitest)
+  - [ ] `.github/workflows/main.yml` runs these on every push/PR, replacing the
+        Phase 0 placeholder job
+  - [ ] Branch protection on `main` updated to require the new CI job name(s)
+        instead of `placeholder`
 
 ## Steps
 
@@ -44,6 +56,32 @@ A person can, in the running app:
 6. Add route protection on the frontend and matching auth checks on the backend.
 7. Decide how sign-up is restricted while private (invite/approval) and document
    it here.
+8. **Stand up the real test suite and wire it into CI** (see below).
+
+## Testing & CI
+
+Phase 2 is where automated testing starts for real — Phase 0 deliberately left
+CI as a passing placeholder because there was nothing to test yet. From here on,
+every phase ships tests alongside its features.
+
+- **Backend:** Django's built-in test runner (or `pytest-django`). Cover the
+  auth surface: register / login / logout / current-user, and that protected
+  endpoints reject unauthenticated requests. Fold in the **Phase 0 settings
+  hardening** as a regression test — assert that `DEBUG=False` with no
+  `DJANGO_SECRET_KEY` raises `ImproperlyConfigured`, and that `DEBUG=True`
+  falls back to the dev key (guards `backend/config/settings.py`).
+- **Frontend:** Vitest for the login/sign-up flow and auth-state behaviour.
+- **CI:** replace the placeholder job in `.github/workflows/main.yml` with real
+  jobs, e.g.
+  - backend: `uv sync` then `python manage.py test` (spin up a Postgres service
+    container, or use SQLite for the test DB — decide and document)
+  - frontend: `npm ci` then `npm test`
+- **Branch protection gotcha:** the required status check on `main` is currently
+  named `placeholder` (the job id). When the CI jobs are renamed here, the
+  required-check list must be updated or PRs will hang waiting on a check that
+  no longer runs. Update it with:
+  `gh api --method PUT repos/Sam-GitHuber/TimeLine/branches/main/protection`
+  (set `required_status_checks.contexts` to the new job name(s)).
 
 ## Security notes
 
