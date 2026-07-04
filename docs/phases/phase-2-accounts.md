@@ -213,3 +213,9 @@ This is the first phase holding real credentials.
   `backend` + `frontend`, and once both were green on the Phase 2 PR the required
   contexts were swapped (`PATCH .../required_status_checks` with
   `contexts[]=backend`, `contexts[]=frontend`). `main` now requires those two.
+- **Staff-only Admin link (added on top of the DoD):** the who-am-I payload
+  exposes `is_staff` (read-only), and the app nav shows an **Admin** link (to the
+  backend `/admin/`, built from `VITE_API_URL`, opens in a new tab) only for
+  staff users. This is cosmetic — Django enforces staff access on `/admin/`
+  server-side. **Phase 5 follow-up:** harden the admin *surface* itself
+  (HTTPS-only, and consider a non-default admin URL / IP allowlist / 2FA).

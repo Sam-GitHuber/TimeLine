@@ -26,26 +26,42 @@ That builds and starts all three containers. Then open:
 
 | URL | What it is |
 |---|---|
-| http://localhost:5173 | The React app (shows a live "Backend connected" message) |
-| http://localhost:8000/api/hello | The backend JSON endpoint |
-| http://localhost:8000/admin/ | Django admin |
+| http://localhost:5173 | The React app — you'll be sent to a login screen (see Accounts below) |
+| http://localhost:8000/api/hello | The backend JSON smoke-test endpoint |
+| http://localhost:8000/admin/ | Django admin (also the sign-up approval console) |
 
 Stop everything with <kbd>Ctrl-C</kbd>, or `docker compose down` (add `-v` to
 also wipe the database volume).
 
-### Django admin login
+### Accounts & login
 
-Phase 0 creates a **local-dev** superuser: username `admin`, password `admin`.
-These are for local use only — real credentials are set up in Phase 5
-(productionisation). If you rebuilt from scratch and need to (re)create it:
+Accounts are real (Phase 2) and log in **by email** — there is no username.
+The app is fully behind auth: visiting it while logged out redirects to
+`/login`.
+
+To get in, create a superuser (which is active immediately and can reach the
+admin). Interactively:
+
+```bash
+docker compose exec -it backend python manage.py createsuperuser
+```
+
+...or non-interactively (email login, so no username is asked for):
 
 ```bash
 docker compose exec \
-  -e DJANGO_SUPERUSER_USERNAME=admin \
   -e DJANGO_SUPERUSER_EMAIL=admin@example.com \
-  -e DJANGO_SUPERUSER_PASSWORD=admin \
+  -e DJANGO_SUPERUSER_PASSWORD=change-me \
   backend python manage.py createsuperuser --noinput
 ```
+
+These are **local-dev** credentials only; real ones are set up in Phase 5
+(productionisation).
+
+**Sign-ups are approval-gated.** Anyone can submit the sign-up form, but the
+account is created **inactive** and cannot log in until you approve it in the
+Django admin → **Users** (tick **Active**, or use the "Approve selected
+sign-ups" action). Staff accounts also see an **Admin** link in the app nav.
 
 ### Configuration
 
@@ -59,6 +75,7 @@ copy [`.env.example`](.env.example) to `.env` and edit it — Docker Compose rea
 ```
 backend/           Django + DRF API (uv-managed)
   config/          Django project settings + URLs
+  accounts/        Custom email-login User + auth (register/login/logout)
   api/             App with the /api/hello endpoint
 frontend/          React + Vite + Tailwind app
 docker-compose.yml Wires frontend + backend + db together

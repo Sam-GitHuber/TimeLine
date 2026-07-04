@@ -35,7 +35,7 @@ once the product is solid — see the Roadmap below.
 |---|---|---|
 | Backend | Django + Django REST Framework (Python) | Batteries-included: bundles auth, ORM, migrations, and a free admin panel. Instagram/Pinterest run on Django — proven at global scale. DRF exposes the data as a JSON API for the React app + future mobile apps |
 | DB access + migrations | Django ORM + built-in migrations | Integrated into Django — no separate tools needed |
-| Auth | Django's built-in auth (+ token auth for the API) | Don't hand-roll login/password/session logic. Token-based auth (e.g. `dj-rest-auth`/`djoser`) so web and mobile can share it |
+| Auth | Django's built-in auth + `dj-rest-auth`/`allauth`/`simplejwt` | Don't hand-roll login/password/session logic. Implemented in Phase 2: **email login** (custom `accounts.User`, no username), JWT delivered in an **httpOnly cookie**, sign-ups **admin-approved** (`is_active`). Token-based so web + future mobile share it |
 | Admin / moderation | Django admin | Free ready-made UI to manage users/posts, approve sign-ups, moderate — big win for a solo-run community |
 | Database | PostgreSQL | Runs as its own Docker container |
 | Frontend | React + Vite | Vite chosen over Next.js — don't need server rendering yet |
