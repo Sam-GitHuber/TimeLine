@@ -11,4 +11,10 @@ export default defineConfig({
     host: true,
     port: 5173,
   },
+  test: {
+    // Run tests in a simulated browser (jsdom) so React components can render.
+    globals: true,
+    environment: "jsdom",
+    setupFiles: "./test/setup.js",
+  },
 });

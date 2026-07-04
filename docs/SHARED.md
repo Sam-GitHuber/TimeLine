@@ -39,8 +39,10 @@ once the product is solid — see the Roadmap below.
 | Admin / moderation | Django admin | Free ready-made UI to manage users/posts, approve sign-ups, moderate — big win for a solo-run community |
 | Database | PostgreSQL | Runs as its own Docker container |
 | Frontend | React + Vite | Vite chosen over Next.js — don't need server rendering yet |
+| Routing (frontend) | react-router-dom (v6) | The standard React SPA router. Real URLs + back-button/shareable links. Added in Phase 1 |
 | Styling | Tailwind CSS | Fast to build with; pairs with the `frontend-design` plugin |
-| Data fetching (frontend) | TanStack Query | Handles loading/refreshing feed data cleanly |
+| Data fetching (frontend) | TanStack Query | Handles loading/refreshing feed data cleanly. Add when the frontend first talks to the real API (Phase 3) |
+| Frontend tests | Vitest + React Testing Library | The standard test runner for Vite/React. `npm test`. Added in Phase 1 |
 | Python packaging | uv | Fast, modern Python package/venv manager |
 | Photo storage | S3-compatible object storage (via `django-storages`) | Phase 4+. Local folder for dev |
 | Local dev / packaging | Docker Compose | Three services: `frontend`, `backend`, `postgres` |
