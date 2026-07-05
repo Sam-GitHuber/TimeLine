@@ -64,9 +64,10 @@ here.
   completed, and add anything non-obvious to that file's "Notes / decisions
   log" section.
 - When a phase is finished, mark its status as done in that file.
-- Every phase already has a doc in `docs/phases/`. Phases 0–4 and 7
-  (productionisation) are detailed; the rest — 5 (messaging), 6 (groups), and
-  8–10 — are marked "sketch only". Flesh those out into a full plan (definition
+- Every phase already has a doc in `docs/phases/`. Phases 0–4 and 7 are
+  detailed (productionisation is split into **7 — self-hosted home-server beta**
+  and **7b — migrate to AWS**, both detailed); the rest — 5 (messaging), 6
+  (groups), and 8–10 — are marked "sketch only". Flesh those out into a full plan (definition
   of done, steps) *before* starting work on them, following the pattern of the
   detailed phase files, and confirm the plan with the user. (Messaging and
   groups were deliberately moved ahead of productionisation — see the "Why this

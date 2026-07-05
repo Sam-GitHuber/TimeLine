@@ -17,8 +17,10 @@ with file uploads and storage, which has real cost and privacy implications.
 ## Definition of done
 
 - [ ] Posts can include image attachments
-- [ ] Images are stored somewhere sensible (decide: local volume for now vs.
-      object storage; note the plan for production in Phase 7)
+- [ ] Images are stored via **`django-storages`** so the backend can be swapped
+      by config: a **local disk volume** now (and through the home-server beta,
+      Phase 7), switching to an **S3 bucket** at the AWS migration (Phase 7b)
+      without a code change
 - [ ] Uploads are validated (file type, size limits) and served safely
 - [ ] Profile page shows the person's name (first + last), avatar, bio, and
       their posts
@@ -27,9 +29,11 @@ with file uploads and storage, which has real cost and privacy implications.
 
 ## Steps
 
-1. Decide image storage approach and document it (Django's default file storage
-   to a local Docker volume is fine for dev; production likely S3-compatible
-   object storage via `django-storages` — coordinate with Phase 7).
+1. Set up image storage through **`django-storages`** pointed at a local Docker
+   volume for now. Using the `django-storages` abstraction from the start is
+   deliberate: media stays on local disk through the home-server beta (Phase 7)
+   and becomes an S3 bucket at the AWS migration (Phase 7b) as a **config change,
+   not a rewrite**. Keep storage **private** (not publicly listable).
 2. Add image upload endpoint(s) with validation (type/size).
 3. Extend the `Post` model / add an attachments table for images.
 4. Add profile fields to the `User` model (**bio, avatar**) via migration. There
@@ -43,8 +47,9 @@ with file uploads and storage, which has real cost and privacy implications.
 
 - Photos of real friends/family are sensitive — keep storage private by default,
   not publicly listable.
-- Storage and bandwidth are the first real ongoing costs; note expected impact
-  so it feeds into the Phase 7 hosting decision and the eventual funding ask.
+- Storage and bandwidth are the first real ongoing costs (near-zero on the home
+  server, but real once photos live in an S3 bucket on AWS); note expected impact
+  so it feeds into the Phase 7b cost estimate and the eventual funding ask.
 
 ## Notes / decisions log
 
