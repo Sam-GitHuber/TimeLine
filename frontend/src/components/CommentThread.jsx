@@ -56,12 +56,15 @@ export default function CommentThread({ postId }) {
   );
 }
 
-// One comment plus its (visible) replies, indented under it. Each node with
-// replies can be collapsed — the accordion behaviour from issue #12.
+// One comment plus its replies, indented under it. Replies start *collapsed*, so
+// a busy post opens as a clean list of top-level comments and you drill into
+// just the sub-thread you want — much easier to follow a long thread (and less
+// overwhelming) than a wall of nested replies. Opening the reply box, or having
+// posted a reply, reveals the sub-thread so you always see your own reply.
 function CommentNode({ comment, postId }) {
-  const [showReply, setShowReply] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const replies = comment.replies ?? [];
+  const [showReply, setShowReply] = useState(false);
+  const [collapsed, setCollapsed] = useState(replies.length > 0);
 
   return (
     <li className="flex gap-2.5">
@@ -86,14 +89,19 @@ function CommentNode({ comment, postId }) {
           </time>
         </div>
 
-        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">
+        <p className="whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
           {comment.text}
         </p>
 
-        <div className="mt-1 flex gap-3 text-xs font-medium text-ink-faint">
+        <div className="mt-1.5 flex items-center gap-4 text-sm font-medium text-ink-faint">
           <button
             type="button"
-            onClick={() => setShowReply((v) => !v)}
+            onClick={() => {
+              setShowReply((v) => !v);
+              // Engaging with a sub-thread should show it (for context, and so
+              // the reply you're about to add is visible).
+              setCollapsed(false);
+            }}
             className="transition hover:text-accent-deep"
           >
             Reply
@@ -102,8 +110,12 @@ function CommentNode({ comment, postId }) {
             <button
               type="button"
               onClick={() => setCollapsed((v) => !v)}
-              className="transition hover:text-accent-deep"
+              aria-expanded={!collapsed}
+              className="inline-flex items-center gap-1.5 font-semibold text-accent-deep transition hover:underline"
             >
+              <span aria-hidden="true" className="text-[0.7em]">
+                {collapsed ? "▸" : "▾"}
+              </span>
               {collapsed
                 ? `Show ${replies.length} ${replies.length === 1 ? "reply" : "replies"}`
                 : "Hide replies"}

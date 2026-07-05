@@ -382,6 +382,36 @@ describe("Comments", () => {
     expect(api.getComments).toHaveBeenCalledWith(1);
   });
 
+  it("collapses replies by default and reveals them on demand", async () => {
+    const user = userEvent.setup();
+    api.getFeed.mockResolvedValue(page([feedPost]));
+    // A top-level comment with one reply under it.
+    api.getComments.mockResolvedValue([
+      comment(10, "Priya", "Lovely shot", [
+        {
+          id: 11,
+          author: { id: 3, display_name: "Tom" },
+          parent: 10,
+          text: "Where was this taken?",
+          created_at: "2026-07-04T10:00:00Z",
+          replies: [],
+        },
+      ]),
+    ]);
+
+    renderAt("/");
+    await screen.findByText("Sunrise over the harbour");
+    await user.click(screen.getByRole("button", { name: "Comments" }));
+
+    // The top-level comment shows, but its reply stays tucked behind a toggle —
+    // so a long thread reads as a clean list, not a wall of nested replies.
+    expect(await screen.findByText("Lovely shot")).toBeInTheDocument();
+    expect(screen.queryByText("Where was this taken?")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /show 1 reply/i }));
+    expect(await screen.findByText("Where was this taken?")).toBeInTheDocument();
+  });
+
   it("posts a new top-level comment", async () => {
     const user = userEvent.setup();
     api.getFeed.mockResolvedValue(page([feedPost]));
