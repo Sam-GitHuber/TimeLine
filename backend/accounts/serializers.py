@@ -36,5 +36,12 @@ class UserDetailsSerializer(BaseUserDetailsSerializer):
     """
 
     class Meta(BaseUserDetailsSerializer.Meta):
-        fields = ("pk", "email", "first_name", "last_name", "is_staff")
-        read_only_fields = ("pk", "email", "is_staff")
+        fields = (
+            "pk",
+            "email",
+            "first_name",
+            "last_name",
+            "display_name",
+            "is_staff",
+        )
+        read_only_fields = ("pk", "email", "display_name", "is_staff")

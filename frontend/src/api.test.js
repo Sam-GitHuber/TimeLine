@@ -84,6 +84,57 @@ describe("api CSRF + fetch wiring", () => {
     });
   });
 
+  it("createPost POSTs the text with a CSRF header", async () => {
+    document.cookie = "csrftoken=tok-p";
+    const fetchMock = stubFetch({ body: JSON.stringify({ id: 1 }) });
+
+    await api.createPost("hello world");
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/posts/");
+    expect(opts.method).toBe("POST");
+    expect(opts.headers["X-CSRFToken"]).toBe("tok-p");
+    expect(JSON.parse(opts.body)).toEqual({ text: "hello world" });
+  });
+
+  it("follow POSTs and unfollow DELETEs the same user URL", async () => {
+    document.cookie = "csrftoken=tok-f";
+    const fetchMock = stubFetch({ body: "{}" });
+
+    await api.follow(7);
+    await api.unfollow(7);
+
+    const [followUrl, followOpts] = fetchMock.mock.calls[0];
+    const [unfollowUrl, unfollowOpts] = fetchMock.mock.calls[1];
+    expect(followUrl).toContain("/api/users/7/follow/");
+    expect(followOpts.method).toBe("POST");
+    expect(unfollowUrl).toContain("/api/users/7/follow/");
+    expect(unfollowOpts.method).toBe("DELETE");
+  });
+
+  it("getPage strips the origin from a DRF `next` URL", async () => {
+    const fetchMock = stubFetch({ body: JSON.stringify({ results: [] }) });
+
+    await api.getPage("http://localhost:8000/api/feed/?page=2");
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    // Called with the same absolute URL (BASE_URL + path), method GET.
+    expect(url).toBe("http://localhost:8000/api/feed/?page=2");
+    expect(opts.method ?? "GET").toBe("GET");
+  });
+
+  it("getPage rebases a `next` URL whose origin differs from BASE_URL", async () => {
+    const fetchMock = stubFetch({ body: JSON.stringify({ results: [] }) });
+
+    // Behind a proxy / on a separate API domain, DRF builds `next` from a host
+    // that isn't BASE_URL. getPage must keep only path+query and rebase onto
+    // BASE_URL, not fetch the foreign origin (or a malformed concatenation).
+    await api.getPage("https://api.example.com/api/feed/?page=3");
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://localhost:8000/api/feed/?page=3");
+  });
+
   it("throws with the backend's error message on a non-OK response", async () => {
     stubFetch({
       ok: false,

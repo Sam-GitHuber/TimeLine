@@ -1,13 +1,14 @@
 import { Link } from "react-router-dom";
 import Avatar from "./Avatar.jsx";
-import { getUserById } from "../mockData.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
-// A single post in a feed: author, timestamp, and text.
+// A single post in a feed: author, timestamp, and text. The author now comes
+// embedded in the post from the API ({ id, display_name }), and posts are
+// identified by numeric user id in profile links (there is no username).
 export default function PostCard({ post }) {
-  const author = getUserById(post.authorId);
+  const author = post.author;
 
-  // Defensive: if a post ever references a missing author, don't crash the feed.
+  // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
 
   return (
@@ -17,26 +18,25 @@ export default function PostCard({ post }) {
             name link below. It's hidden from assistive tech and the tab order
             (aria-hidden + tabIndex=-1) so screen-reader/keyboard users get one
             named link per post, not an empty duplicate. */}
-        <Link to={`/u/${author.username}`} tabIndex={-1} aria-hidden="true">
+        <Link to={`/u/${author.id}`} tabIndex={-1} aria-hidden="true">
           <Avatar user={author} size="md" />
         </Link>
 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
             <Link
-              to={`/u/${author.username}`}
+              to={`/u/${author.id}`}
               className="font-semibold text-slate-900 hover:underline"
             >
-              {author.displayName}
+              {author.display_name}
             </Link>
-            <span className="text-sm text-slate-500">@{author.username}</span>
             <span className="text-sm text-slate-400">·</span>
             <time
               className="text-sm text-slate-500"
-              dateTime={post.createdAt}
-              title={formatAbsoluteTime(post.createdAt)}
+              dateTime={post.created_at}
+              title={formatAbsoluteTime(post.created_at)}
             >
-              {formatRelativeTime(post.createdAt)}
+              {formatRelativeTime(post.created_at)}
             </time>
           </div>
 

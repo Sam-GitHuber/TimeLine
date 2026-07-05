@@ -142,6 +142,28 @@ privacy-first principle.
   `requirements/`) is legacy from the repo's starter template and gets removed
   as the real backend/frontend are built — it's not part of the intended stack.
 
+### Running the dev stack (read this before `docker compose up`)
+
+- **Always build:** `docker compose up --build` (add `-d` to background). A plain
+  `up` reuses a stale image, so newly-added dependencies or Dockerfile changes
+  silently don't take effect.
+- **When you add or bump a dependency, `--build` alone is not enough** — also
+  renew the anonymous `node_modules` volume:
+
+  ```
+  docker compose up -d --build --renew-anon-volumes frontend
+  ```
+
+  Why: the compose file mounts an anonymous volume over `/app/node_modules` (so
+  the container keeps its Linux-built modules, not the host's macOS ones). That
+  volume survives `up --build` and **shadows** the freshly-built image's
+  `node_modules`, so the container keeps the old install and Vite errors with
+  `Failed to resolve import "<new-dep>"`. Renewing the volume repopulates it from
+  the new image. Ordinary source edits hot-reload fine — this only bites on
+  dependency changes, and CI is unaffected (it runs `npm ci` fresh). Hit in
+  Phase 3 after adding `@tanstack/react-query`. (Same idea applies to the backend
+  image when Python deps change.)
+
 ## Roadmap (phases)
 
 Detailed plans live in `docs/phases/`, one file each. **Every phase ends in

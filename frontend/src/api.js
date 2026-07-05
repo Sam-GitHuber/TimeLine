@@ -97,4 +97,43 @@ export const api = {
       method: "POST",
       body: { email, password1: password, password2: password },
     }),
+
+  // --- Timeline (Phase 3) --------------------------------------------------
+
+  // The home feed: your posts + those you follow, newest-first, paginated.
+  getFeed: () => request("/api/feed/"),
+
+  // Follow a paginated response's `next` URL. DRF returns an absolute URL built
+  // from the request host, which needn't match BASE_URL (behind a proxy, or a
+  // separate API domain in prod). Take just the path + query so request()
+  // prepends our own BASE_URL regardless of the origin DRF used.
+  getPage: (nextUrl) => {
+    const url = new URL(nextUrl, BASE_URL);
+    return request(url.pathname + url.search);
+  },
+
+  createPost: (text) =>
+    request("/api/posts/", { method: "POST", body: { text } }),
+
+  // People to follow — everyone else, each with your follow_status.
+  listUsers: () => request("/api/users/"),
+
+  getUser: (id) => request(`/api/users/${id}/`),
+
+  getUserPosts: (id) => request(`/api/users/${id}/posts/`),
+
+  // Follows are private: this sends a *request* the other person must approve.
+  follow: (id) => request(`/api/users/${id}/follow/`, { method: "POST" }),
+
+  // Cancels a pending request or unfollows an accepted follow (same endpoint).
+  unfollow: (id) => request(`/api/users/${id}/follow/`, { method: "DELETE" }),
+
+  // Incoming follow requests (people asking to follow you) + approve/reject.
+  getFollowRequests: () => request("/api/follow-requests/"),
+
+  approveRequest: (id) =>
+    request(`/api/follow-requests/${id}/approve/`, { method: "POST" }),
+
+  rejectRequest: (id) =>
+    request(`/api/follow-requests/${id}/reject/`, { method: "POST" }),
 };
