@@ -9,8 +9,8 @@ app. Because the web frontend is React, the leading candidate is **React Native
 (via Expo)**, which reuses the most knowledge and lets one codebase target both
 iOS and Android (Android is Phase 9).
 
-This phase depends on the backend being stable and deployed (Phase 7) — the app
-is just another client of the same API.
+This phase depends on the backend being stable and deployed on AWS (Phase 7b) —
+the app is just another client of the same API.
 
 ## Runnable product at the end of this phase
 

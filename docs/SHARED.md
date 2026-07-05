@@ -44,10 +44,10 @@ once the product is solid — see the Roadmap below.
 | Data fetching (frontend) | TanStack Query | Handles loading/refreshing feed data cleanly. Add when the frontend first talks to the real API (Phase 3) |
 | Frontend tests | Vitest + React Testing Library | The standard test runner for Vite/React. `npm test`. Added in Phase 1 |
 | Python packaging | uv | Fast, modern Python package/venv manager |
-| Photo storage | S3-compatible object storage (via `django-storages`) | Phase 4+. Local folder for dev |
+| Photo storage | S3-compatible object storage (via `django-storages`) | Built via `django-storages` from Phase 4, but backed by a **local disk volume** through the home-server beta (Phase 7); switches to an S3 bucket at the AWS migration (Phase 7b) as a config change, not a rewrite |
 | Local dev / packaging | Docker Compose | Three services: `frontend`, `backend`, `postgres` |
 | CI | GitHub Actions | Runs tests automatically on push (`.github/workflows/`) |
-| Hosting (future) | AWS Lightsail | Cheap on-ramp to AWS. Phase 7 |
+| Hosting (future) | Home server first, then AWS Lightsail | Phase 7 self-hosts the finished app on a wiped spare PC for a cheap, reversible friends/family beta; Phase 7b migrates all data to AWS Lightsail once it's proven |
 
 ### Add later — only when actually needed (do NOT build these now)
 
@@ -180,7 +180,8 @@ detail when we're about to start them.
 | 4 | Photos & profiles | Attach photos to posts; browse a person's profile page | `phase-4-photos-profiles.md` |
 | 5 | Direct messaging | One-to-one private messages between users | `phase-5-messaging.md` |
 | 6 | Groups | Shared group timelines you can post into and follow | `phase-6-groups.md` |
-| 7 | Productionisation | The app live on a private URL (AWS Lightsail) with HTTPS + backups; friends/family can log in | `phase-7-productionisation.md` |
+| 7 | Self-hosted private beta | The finished app live on a wiped spare **home PC**, on a real HTTPS URL; close friends/family log in and bug-test it | `phase-7-productionisation.md` |
+| 7b | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | `phase-7b-aws-migration.md` |
 | 8 | iPhone app | An installable iOS app hitting the same backend | `phase-8-iphone-app.md` |
 | 9 | Android app | An installable Android app hitting the same backend | `phase-9-android-app.md` |
 | 10 | Open source & funding | Public repo with license + contribution guide, and a funding channel (e.g. Patreon) | `phase-10-open-source-funding.md` |
@@ -198,10 +199,18 @@ detail when we're about to start them.
   live rows to migrate, so we productionise once, with the feature set settled,
   rather than re-deploying and migrating after each feature. (Trade-off: real
   friends/family start using it later, so early usage doesn't shape the
-  messaging/groups design — a deliberate choice.)
+  messaging/groups design — a deliberate choice; the maintainer wants a genuinely
+  solid site before inviting anyone.)
+- **Productionise in two steps: home server (7) then AWS (7b).** Rather than
+  paying for cloud hosting on day one, we self-host the finished app on a wiped
+  spare PC for a friends/family beta — cheap and fully reversible, so if it flops
+  we've spent nothing but a domain. Once it's proven, Phase 7b migrates all the
+  real data to AWS Lightsail. The known cost is a one-time home→cloud data
+  migration, deliberately accepted and de-risked by designing storage so photos
+  move to a bucket once and never move again.
 - **Apps (8–9) after the web app is solid.** The phone apps talk to the same
   backend, so there's no point building them until that backend is stable and
-  deployed.
+  deployed (Phase 7b).
 - **Open source & funding (10) last of the planned set,** but the repo stays
   public throughout — phase 10 is about doing it *properly* (license,
   contribution guide) and asking for money only once there's a real product

@@ -1,99 +1,118 @@
-# Phase 7 — Productionisation & Private Deploy
+# Phase 7 — Self-Hosted Private Beta (home server)
 
 **Status:** not started
 
+> **When we start this phase, walk the user through it step by step.** They are
+> new to servers/hosting and want simple, one-thing-at-a-time guidance. That
+> hand-holding happens live — it is deliberately **not** written out here, to
+> keep this doc short. This file records *what* and *why*, not the keystrokes.
+
 ## Goal
 
-Get TimeLine off localhost and onto a real, private URL that invited
-friends/family can actually use, hosted cheaply on **AWS Lightsail** (see
-`docs/SHARED.md`). This is the phase that turns a local project into a running
-service — with the security, reliability, and cost basics that entails.
+Get the finished app off localhost and onto a **wiped spare PC in the user's
+house**, so a few close friends/family can log in over the internet (HTTPS) and
+bug-test it.
+
+This is **not** the app's final home — it's the cheap, fully reversible way to
+prove the app is worth keeping before paying for cloud. If the beta goes well,
+**Phase 7b** migrates all data to AWS; if it flops, nothing was spent but a
+domain.
+
+## Precondition
+
+The full feature set (Phases 4–6) is done and the site **feels solid** — we
+invite real people only once there's a genuinely good product to show them.
 
 ## Runnable product at the end of this phase
 
-Friends/family can visit a real URL (over HTTPS), log in, and use everything
-built in Phases 2–4 — on a server that isn't your laptop, and that survives a
-reboot.
+Invited friends/family visit a real HTTPS URL, log in, and use everything from
+Phases 2–6 — running on the home server, surviving reboots.
 
 ## Definition of done
 
-- [ ] App deployed to AWS Lightsail (Container Service or a Lightsail
-      instance running Docker Compose — decide and document)
-- [ ] Reachable at a real domain over **HTTPS** (valid TLS certificate)
-- [ ] Postgres runs in a persistent, backed-up way (managed DB or a
-      volume-backed container with a backup routine) — data must survive
-      restarts and be recoverable
-- [ ] Secrets (DB password, app secret key) come from environment/secret config,
-      never committed to the repo
-- [ ] Auth/CSRF cookies hardened for production: `DJANGO_COOKIE_SECURE=true`
-      (JWT cookie) **and** `CSRF_COOKIE_SECURE`/`SESSION_COOKIE_SECURE` on, plus
-      the frontend↔backend **origin topology** settled so the `csrftoken` cookie
-      is readable by the SPA (see the CSRF cookie-domain note below)
-- [ ] A documented, repeatable deploy process (how to ship a new version)
-- [ ] Automated database backups with a tested restore
-- [ ] Basic monitoring: know if the site is down
-- [ ] Confirmed monthly cost estimate written down (feeds the funding phase)
-- [ ] **Terms of Service + privacy policy** published, and a
-      content-report/takedown path exists — before inviting real users (see the
-      Legal / IP section in `docs/SHARED.md`). Covers user-uploaded content we
-      don't own, and our GDPR/UK-GDPR duties as a data controller (privacy
-      policy + delete-my-data path)
+- [ ] Old PC wiped, running **Ubuntu Server LTS**
+- [ ] Server hardened: non-root user, SSH-key login (passwords off), `ufw`
+      firewall (only 22/80/443), automatic security updates
+- [ ] **Docker + Compose**; a **production** compose file runs the whole stack
+      and **survives a reboot** (restart policies + Docker as a system service)
+- [ ] Reachable **from outside the home network** at the domain over **HTTPS**
+      (Let's Encrypt) — verified on mobile data, not wifi
+- [ ] A **reverse proxy (Caddy recommended)** serves SPA + API **same-origin**
+      (auto-HTTPS *and* satisfies the CSRF-cookie requirement — see below)
+- [ ] Postgres data + uploaded **media on persistent volumes**
+- [ ] **Automated nightly backups copied OFF the PC** (DB dump *and* media) with a
+      **restore that's been tested**
+- [ ] Secrets in an env file, **not** in the repo
+- [ ] Prod cookie hardening: `DJANGO_COOKIE_SECURE=true` +
+      `CSRF_COOKIE_SECURE` / `SESSION_COOKIE_SECURE`, origin settled so the SPA
+      can read `csrftoken`
+- [ ] A **documented, repeatable deploy** (ship a new version to the box)
+- [ ] Basic **uptime monitoring** + alert
+- [ ] **Terms of Service + privacy policy** published; content-takedown +
+      delete-my-data path exists (see Legal / IP in `docs/SHARED.md`)
+- [ ] `/security-review` run and findings addressed
+- [ ] Rough **monthly running cost** written down
 
-## Steps
+## Steps (high level — details walked through live)
 
-1. Choose the Lightsail deployment shape (Container Service vs. instance +
-   Compose) and document the reasoning + cost.
-2. Set up the production Postgres (managed vs. self-hosted) and backups.
-3. Register/point a domain (**`timeline.me`** — chosen candidate, see
-   decisions log); set up HTTPS/TLS.
-4. Move all secrets to environment/secret configuration.
-5. Write the deploy runbook (build image → push → release).
-6. Add uptime monitoring and a simple alert.
-7. Do a full dry run: deploy, invite one real tester, fix what breaks.
+1. Wipe the PC; install Ubuntu Server LTS.
+2. Harden the box **before** it's internet-facing (user, SSH keys, firewall,
+   auto-updates).
+3. Install Docker/Compose; get the code + a production env file onto the box.
+4. Add a production compose file with a **Caddy** reverse proxy (auto-HTTPS,
+   same-origin).
+5. Point the domain via **dynamic DNS**; forward router ports 80/443 to the PC.
+6. Bring the stack up; prove it works **from outside** (mobile data).
+7. Set up off-box backups and **test a restore**.
+8. Add uptime monitoring.
+9. Publish ToS/privacy; run `/security-review`.
+10. Invite 2–3 close testers; bug-bash; iterate. Then → Phase 7b.
 
 ## Security notes
 
-This is the big security step — the app is now internet-facing with real data.
-Cover at least: HTTPS everywhere, hardened auth cookies/tokens, least-privilege
-DB access, no secrets in the repo, and keeping dependencies patched. Do a
-`/security-review` before inviting real users.
+Internet-facing with real data now. Cover HTTPS everywhere, hardened cookies,
+least-privilege DB access, no secrets in the repo, patched OS/deps.
 
-- **CSRF cookie must be readable by the SPA (carried over from the Phase 2
-  code review).** Our cookie-JWT flow has the frontend read the non-httpOnly
-  `csrftoken` cookie and echo it in `X-CSRFToken` on mutating requests. In dev
-  this works because everything is `localhost` (cookies are shared across
-  ports). In production it only works if the SPA can actually read that cookie:
-  - **Same-origin** (serve the API and the built SPA behind one domain via a
-    reverse proxy) — simplest, nothing extra needed; **preferred**. Or
-  - **Split subdomains** (e.g. `app.` + `api.example.com`) — then set
-    `CSRF_COOKIE_DOMAIN` (and the JWT cookie domain) to the shared parent
-    `.example.com`, and keep `CSRF_TRUSTED_ORIGINS`/`CORS_ALLOWED_ORIGINS`
-    exact. Miss this and every authenticated mutation (logout, posting) fails
-    CSRF with a 403.
-- **Optionally stop returning the access token in the login response body.**
-  dj-rest-auth includes it in the JSON even though we rely solely on the
-  httpOnly cookie; overriding the login response to strip it removes the last
-  place page JS can see a token. Low priority (see phase-2 notes).
+- **Port-forwarding exposes the home IP (accepted trade-off).** User chose
+  port-forwarding + DDNS over a Cloudflare Tunnel. Consequences to manage:
+  - Turn on WHOIS privacy; the domain resolves to the home's public IP.
+  - Forward **only 80/443** — never SSH (22) or Postgres. Admin over SSH on the
+    LAN (or a VPN like Tailscale), not a forwarded port.
+  - **If the ISP uses CGNAT**, inbound port-forwarding won't work — check early.
+    Fallback that needs no port-forward and hides the home IP: a **Cloudflare
+    Tunnel**.
+- **CSRF cookie must be readable by the SPA (from the Phase 2 review).** The
+  frontend reads the non-httpOnly `csrftoken` cookie and echoes it in
+  `X-CSRFToken`. In prod that needs either **same-origin** serving (Caddy in
+  front of SPA + API — why the reverse proxy is in the DoD), or **split
+  subdomains** with `CSRF_COOKIE_DOMAIN`/JWT cookie domain on the shared parent
+  and exact `CSRF_TRUSTED_ORIGINS`/`CORS_ALLOWED_ORIGINS`. Miss it and every
+  authenticated mutation 403s.
+- **Optional:** stop returning the access token in the login response body
+  (dj-rest-auth includes it though we rely only on the httpOnly cookie). Low
+  priority — see phase-2 notes.
 
 ## Notes / decisions log
 
-- **Domain: `timeline.me` (chosen candidate, not yet purchased).** The bare
-  `timeline.com`/`.org` are long-taken premium names (registered 1996/2000) and
-  effectively unbuyable; `timeline.app` and `timeline.social` are also taken. A
-  raw-`timeline` name was preferred over `ourtimeline.*`. As of 2026-07-04 a
-  RDAP check showed these raw-`timeline` names still available: `.me`,
-  `.family`, `.gallery`, `.house`. Picked **`timeline.me`** — short, reads as
-  "my timeline," reputable ccTLD (Montenegro). `.family` was the runner-up
-  (literally on-message for a private family timeline).
-  - Cost: roughly **$15–20/yr** retail. `.me` is a ccTLD that sometimes has a
-    cheap first year and a higher renewal — **check the renewal price**, not
-    just year one, at purchase.
-  - Buy from a no-upsell registrar (Cloudflare at-cost, or Namecheap). Turn on
-    **auto-renew** and **free WHOIS privacy** (keeps our name/address out of the
-    public registry — matters for the privacy-first principle).
-  - Can be bought before this phase starts — it just sits idle (~$20/yr) until
-    we point it at the AWS Lightsail deploy. Re-verify availability at purchase
-    time; nothing is reserved until paid for.
-  - Note the `.me` cookie-domain angle: if we ever split into
-    `app.timeline.me` + `api.timeline.me`, revisit the CSRF cookie-domain note
-    above (shared parent `.timeline.me`). Same-origin behind one host avoids it.
+- **Two-step productionisation (user, 2026-07-05).** Self-host the finished app
+  at home first for a cheap, reversible friends/family beta; migrate to AWS
+  (Phase 7b) only once proven. Known cost: a one-time home→cloud data migration,
+  deliberately accepted and de-risked (see Phase 7b).
+- **Exposure = port-forwarding + dynamic DNS (user, 2026-07-05).** Chosen over a
+  Cloudflare Tunnel; home-IP-exposure + CGNAT caveats above, Cloudflare Tunnel is
+  the documented fallback.
+- **Photos on the PC's local disk this phase (user, 2026-07-05).** No paid cloud
+  storage until proven; media on a persistent volume with off-box backups, moves
+  to S3 in Phase 7b. **The media folder must be in the off-box backup** — one
+  aging PC is a single point of failure holding real family photos.
+- **Off-box backups are non-negotiable.** Nightly DB dump + media archive to a
+  second device/cloud drive, restore tested once. Also what makes 7b low-risk.
+- **Domain: `timeline.me` (chosen candidate, not yet purchased).** Bare
+  `timeline.com`/`.org`/`.app`/`.social` are taken/unbuyable; as of 2026-07-04
+  raw-`timeline` `.me`/`.family`/`.gallery`/`.house` were available. `.me` reads
+  as "my timeline," reputable ccTLD; `.family` runner-up. ~**$15–20/yr** — check
+  the **renewal** price. Buy from a no-upsell registrar (Cloudflare at-cost /
+  Namecheap), auto-renew + free WHOIS privacy on. Buy any time; re-verify at
+  purchase.
+- **Reverse proxy: Caddy (recommended)** for tiny-config auto-HTTPS + same-origin
+  serving; nginx + certbot is the manual alternative.
