@@ -218,7 +218,7 @@ REST_AUTH = {
     # httpOnly: not readable by JavaScript (XSS mitigation).
     "JWT_AUTH_HTTPONLY": True,
     # Lax lets the cookie ride same-site navigations but not cross-site POSTs —
-    # a first line of CSRF defence. Secure is added in production (Phase 5).
+    # a first line of CSRF defence. Secure is added in production (Phase 7).
     "JWT_AUTH_SAMESITE": "Lax",
     "JWT_AUTH_SECURE": env_bool("DJANGO_COOKIE_SECURE", default=not DEBUG),
     # With the token in a cookie, require a CSRF token on unsafe (mutating)

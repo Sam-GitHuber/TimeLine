@@ -55,7 +55,7 @@ docker compose exec \
   backend python manage.py createsuperuser --noinput
 ```
 
-These are **local-dev** credentials only; real ones are set up in Phase 5
+These are **local-dev** credentials only; real ones are set up in Phase 7
 (productionisation).
 
 **Sign-ups are approval-gated.** Anyone can submit the sign-up form, but the

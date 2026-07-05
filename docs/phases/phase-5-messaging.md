@@ -1,12 +1,12 @@
-# Phase 6 — Direct Messaging
+# Phase 5 — Direct Messaging
 
 **Status:** not started — sketch only, refine before starting
 
 ## Goal
 
-Add private one-to-one messaging between users, layered onto the live app from
-Phase 5. Still no algorithm anywhere — messages are simply chronological
-conversations.
+Add private one-to-one messaging between users, layered onto the timeline app
+built in Phases 2–4. Still no algorithm anywhere — messages are simply
+chronological conversations.
 
 ## Runnable product at the end of this phase
 

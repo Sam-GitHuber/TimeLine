@@ -18,7 +18,7 @@ with file uploads and storage, which has real cost and privacy implications.
 
 - [ ] Posts can include image attachments
 - [ ] Images are stored somewhere sensible (decide: local volume for now vs.
-      object storage; note the plan for production in Phase 5)
+      object storage; note the plan for production in Phase 7)
 - [ ] Uploads are validated (file type, size limits) and served safely
 - [ ] Profile page shows the person's name (first + last), avatar, bio, and
       their posts
@@ -29,7 +29,7 @@ with file uploads and storage, which has real cost and privacy implications.
 
 1. Decide image storage approach and document it (Django's default file storage
    to a local Docker volume is fine for dev; production likely S3-compatible
-   object storage via `django-storages` — coordinate with Phase 5).
+   object storage via `django-storages` — coordinate with Phase 7).
 2. Add image upload endpoint(s) with validation (type/size).
 3. Extend the `Post` model / add an attachments table for images.
 4. Add profile fields to the `User` model (**bio, avatar**) via migration. There
@@ -44,7 +44,7 @@ with file uploads and storage, which has real cost and privacy implications.
 - Photos of real friends/family are sensitive — keep storage private by default,
   not publicly listable.
 - Storage and bandwidth are the first real ongoing costs; note expected impact
-  so it feeds into the Phase 5 hosting decision and the eventual funding ask.
+  so it feeds into the Phase 7 hosting decision and the eventual funding ask.
 
 ## Notes / decisions log
 

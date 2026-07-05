@@ -47,7 +47,7 @@ once the product is solid — see the Roadmap below.
 | Photo storage | S3-compatible object storage (via `django-storages`) | Phase 4+. Local folder for dev |
 | Local dev / packaging | Docker Compose | Three services: `frontend`, `backend`, `postgres` |
 | CI | GitHub Actions | Runs tests automatically on push (`.github/workflows/`) |
-| Hosting (future) | AWS Lightsail | Cheap on-ramp to AWS. Phase 5 |
+| Hosting (future) | AWS Lightsail | Cheap on-ramp to AWS. Phase 7 |
 
 ### Add later — only when actually needed (do NOT build these now)
 
@@ -58,7 +58,7 @@ well-known path when the time comes:
 |---|---|
 | Redis (caching / faster feeds) | The feed gets slow under real traffic |
 | Background job queue (Celery/RQ) | Need image processing, notifications, emails |
-| Django Channels (WebSockets) | Real-time messaging (Phase 6) |
+| Django Channels (WebSockets) | Real-time messaging (Phase 5) |
 | CDN for images | Users are geographically far from the server |
 | Load balancer + multiple backend copies | One server isn't enough (a good problem) |
 
@@ -109,14 +109,14 @@ worth a real lawyer's time. Four distinct issues:
      social-networking classes at your national IP office (UK IPO / IP Australia
      — note British/AU spelling in this repo) **and** the US
      (`tmsearch.uspto.gov`) before locking the brand. Weigh this against the
-     `timeline.me` domain choice (see phase-5 notes).
+     `timeline.me` domain choice (see phase-7 notes).
 
 2. **Copyright in user content — the real day-to-day risk.** Friends/family will
    upload photos/text they may not own the rights to. Mitigate with a short
    **Terms of Service** (users grant us a licence to store/display, confirm they
    have the right to post) and a **content-report/takedown path** (US DMCA §512
    safe harbour, UK/EU equivalents). Low probability for a private invite-only
-   app, but cheap to cover. **Do before inviting real users (Phase 5).**
+   app, but cheap to cover. **Do before inviting real users (Phase 7).**
 
 3. **Copyright in our own code — a choice, not a risk.** Auto-copyrighted to the
    author; the only decision is which **licence** to release under. Handled
@@ -129,7 +129,7 @@ worth a real lawyer's time. Four distinct issues:
 
 **Not copyright but bigger:** holding real people's data makes us a **data
 controller** under GDPR/UK GDPR — need a basic **privacy policy** and a
-delete-my-data path before launch (Phase 5). Already aligned with the
+delete-my-data path before launch (Phase 7). Already aligned with the
 privacy-first principle.
 
 ## Repo conventions
@@ -178,9 +178,9 @@ detail when we're about to start them.
 | 2 | Accounts & auth | Sign up, log in, log out — real user accounts in the database | `phase-2-accounts.md` |
 | 3 | MVP timeline | Post text, follow people, see a real reverse-chronological feed of who you follow | `phase-3-mvp-timeline.md` |
 | 4 | Photos & profiles | Attach photos to posts; browse a person's profile page | `phase-4-photos-profiles.md` |
-| 5 | Productionisation | The app live on a private URL (AWS Lightsail) with HTTPS + backups; friends/family can log in | `phase-5-productionisation.md` |
-| 6 | Direct messaging | One-to-one private messages between users | `phase-6-messaging.md` |
-| 7 | Groups | Shared group timelines you can post into and follow | `phase-7-groups.md` |
+| 5 | Direct messaging | One-to-one private messages between users | `phase-5-messaging.md` |
+| 6 | Groups | Shared group timelines you can post into and follow | `phase-6-groups.md` |
+| 7 | Productionisation | The app live on a private URL (AWS Lightsail) with HTTPS + backups; friends/family can log in | `phase-7-productionisation.md` |
 | 8 | iPhone app | An installable iOS app hitting the same backend | `phase-8-iphone-app.md` |
 | 9 | Android app | An installable Android app hitting the same backend | `phase-9-android-app.md` |
 | 10 | Open source & funding | Public repo with license + contribution guide, and a funding channel (e.g. Patreon) | `phase-10-open-source-funding.md` |
@@ -192,9 +192,13 @@ detail when we're about to start them.
   motivating progress before the harder plumbing.
 - **Auth (2) before posting (3).** Everything else assumes "who is logged in,"
   so accounts come first.
-- **Productionise (5) before messaging/groups.** Once real friends/family are
-  using it, later features ship to a live app you can dogfood — you get real
-  feedback instead of guessing.
+- **Messaging (5) and groups (6) before productionising (7).** We cement the
+  full data model — DMs and groups, not just the timeline — *before* the app
+  holds any real data. Schema changes are cheap now and painful once there are
+  live rows to migrate, so we productionise once, with the feature set settled,
+  rather than re-deploying and migrating after each feature. (Trade-off: real
+  friends/family start using it later, so early usage doesn't shape the
+  messaging/groups design — a deliberate choice.)
 - **Apps (8–9) after the web app is solid.** The phone apps talk to the same
   backend, so there's no point building them until that backend is stable and
   deployed.
