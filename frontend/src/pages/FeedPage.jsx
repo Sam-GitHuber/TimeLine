@@ -1,5 +1,5 @@
 import ComposeBox from "../components/ComposeBox.jsx";
-import PostCard from "../components/PostCard.jsx";
+import Timeline from "../components/Timeline.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
@@ -15,28 +15,24 @@ export default function FeedPage() {
 
   return (
     <div>
-      <ComposeBox />
+      <Timeline posts={posts} header={<ComposeBox />} />
 
       {isLoading && (
-        <p className="px-6 py-10 text-center text-slate-500">Loading feed…</p>
+        <p className="px-6 py-10 text-center text-ink-faint">Loading feed…</p>
       )}
 
       {isError && (
-        <p className="px-6 py-10 text-center text-rose-600">
+        <p className="px-6 py-10 text-center text-red-600">
           {error?.message || "Couldn't load the feed."}
         </p>
       )}
 
       {!isLoading && !isError && posts.length === 0 && (
-        <p className="px-6 py-10 text-center text-slate-500">
+        <p className="px-6 py-10 text-center text-ink-faint">
           Your feed is empty. Write something above, or find people to connect
           with.
         </p>
       )}
-
-      {posts.map((post) => (
-        <PostCard key={post.id} post={post} />
-      ))}
 
       <LoadMoreButton query={feed} />
     </div>

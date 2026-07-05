@@ -30,9 +30,18 @@ boundary — you only see comments/replies from people you're connected with, an
 a not-connected author's comment takes its whole subtree with it. Frontend:
 Connect/Requested/Connected(+Approve) button, "Connection requests" inbox,
 collapsible comment thread on each post. See
-`docs/phases/phase-3a-connections-comments.md`. Phase 4 (photos & profiles) is
-next.** Keep this line current: update it whenever a phase starts
-or finishes, but keep the detail in the phase docs, not here.
+`docs/phases/phase-3a-connections-comments.md`.
+
+A site-wide **design system** now underpins the frontend (done before Phase 4 so
+later phases don't trigger a redesign): a warm-modern "living line" look —
+token-first via Tailwind v4 `@theme`, self-hosted fonts (Bricolage Grotesque /
+Hanken Grotesk / IBM Plex Mono), a single emerald-teal accent, and a literal
+timeline spine down the feed (`components/Timeline.jsx`). Build new UI from these
+tokens — see `docs/design-system.md`.
+
+Phase 4 (photos & profiles) is next.** Keep this line current: update it
+whenever a phase starts or finishes, but keep the detail in the phase docs, not
+here.
 
 ## Before doing any work
 

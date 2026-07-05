@@ -38,66 +38,89 @@ export default function Layout() {
   }
 
   const navLinkClass = ({ isActive }) =>
-    `rounded-full px-4 py-1.5 font-medium transition ${
+    `rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
       isActive
-        ? "bg-slate-900 text-white"
-        : "text-slate-600 hover:bg-slate-100"
+        ? "bg-ink/[0.06] text-ink"
+        : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
     }`;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/80 backdrop-blur">
-        <nav className="mx-auto flex max-w-2xl items-center justify-between px-4 py-3">
-          <Link to="/" className="text-xl font-bold tracking-tight">
-            TimeLine
-          </Link>
-          <div className="flex items-center gap-2">
-            <NavLink to="/" end className={navLinkClass}>
-              Feed
-            </NavLink>
-            <NavLink to="/people" className={navLinkClass}>
-              People
-            </NavLink>
-            <NavLink to="/requests" className={navLinkClass}>
-              Requests
-              {pendingCount > 0 && (
-                <span className="ml-1.5 inline-flex min-w-5 items-center justify-center rounded-full bg-sky-600 px-1.5 text-xs font-semibold text-white">
-                  {pendingCount}
-                </span>
-              )}
-            </NavLink>
-            {user && (
-              <NavLink to={`/u/${user.pk}`} className={navLinkClass}>
-                Profile
-              </NavLink>
-            )}
-            {/* Maintainer-only: the admin lives on the backend, so this is a
-                plain external link (new tab). Visibility is cosmetic — Django
-                enforces staff access server-side. */}
-            {user?.is_staff && (
-              <a
-                href={adminUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="rounded-full px-4 py-1.5 font-medium text-slate-600 transition hover:bg-slate-100"
-              >
-                Admin
-              </a>
-            )}
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="rounded-full px-4 py-1.5 font-medium text-slate-600 transition hover:bg-slate-100"
+    <div className="min-h-screen">
+      <div className="mx-auto max-w-[640px] border-x border-line bg-surface">
+        <header className="sticky top-0 z-10 border-b border-line bg-surface/80 backdrop-blur">
+          <nav className="flex items-center justify-between gap-3 px-5 py-3.5">
+            <Link
+              to="/"
+              className="flex items-center gap-2 font-display text-xl font-bold -tracking-[0.02em] text-ink"
             >
-              Log out
-            </button>
-          </div>
-        </nav>
-      </header>
+              <svg
+                width="15"
+                height="19"
+                viewBox="0 0 16 20"
+                fill="none"
+                aria-hidden="true"
+              >
+                <line
+                  x1="8"
+                  y1="2"
+                  x2="8"
+                  y2="18"
+                  stroke="var(--color-spine)"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+                <circle cx="8" cy="6" r="4" fill="var(--color-accent)" />
+              </svg>
+              TimeLine
+            </Link>
+            <div className="flex items-center gap-0.5">
+              <NavLink to="/" end className={navLinkClass}>
+                Feed
+              </NavLink>
+              <NavLink to="/people" className={navLinkClass}>
+                People
+              </NavLink>
+              <NavLink to="/requests" className={navLinkClass}>
+                Requests
+                {pendingCount > 0 && (
+                  <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
+                    {pendingCount}
+                  </span>
+                )}
+              </NavLink>
+              {user && (
+                <NavLink to={`/u/${user.pk}`} className={navLinkClass}>
+                  Profile
+                </NavLink>
+              )}
+              {/* Maintainer-only: the admin lives on the backend, so this is a
+                  plain external link (new tab). Visibility is cosmetic — Django
+                  enforces staff access server-side. */}
+              {user?.is_staff && (
+                <a
+                  href={adminUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded-xl px-3 py-1.5 text-sm font-medium text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep"
+                >
+                  Admin
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="rounded-xl px-3 py-1.5 text-sm font-medium text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep"
+              >
+                Log out
+              </button>
+            </div>
+          </nav>
+        </header>
 
-      <main className="mx-auto max-w-2xl border-x border-slate-200 bg-white">
-        <Outlet />
-      </main>
+        <main>
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 }

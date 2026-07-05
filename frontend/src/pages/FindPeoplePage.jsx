@@ -16,22 +16,22 @@ export default function FindPeoplePage() {
 
   return (
     <div>
-      <h1 className="border-b border-slate-200 px-4 py-4 text-lg font-bold text-slate-900 sm:px-6">
+      <h1 className="border-b border-line px-5 py-4 font-display text-lg font-bold -tracking-[0.02em] text-ink">
         People
       </h1>
 
       {isLoading && (
-        <p className="px-6 py-10 text-center text-slate-500">Loading people…</p>
+        <p className="px-6 py-10 text-center text-ink-faint">Loading people…</p>
       )}
 
       {isError && (
-        <p className="px-6 py-10 text-center text-rose-600">
+        <p className="px-6 py-10 text-center text-red-600">
           {error?.message || "Couldn't load people."}
         </p>
       )}
 
       {!isLoading && !isError && users.length === 0 && (
-        <p className="px-6 py-10 text-center text-slate-500">
+        <p className="px-6 py-10 text-center text-ink-faint">
           No one else here yet.
         </p>
       )}
@@ -39,14 +39,14 @@ export default function FindPeoplePage() {
       {users.map((person) => (
         <div
           key={person.id}
-          className="flex items-center gap-3 border-b border-slate-200 px-4 py-3 sm:px-6"
+          className="flex items-center gap-3 border-b border-line px-5 py-3.5"
         >
           <Link to={`/u/${person.id}`} tabIndex={-1} aria-hidden="true">
             <Avatar user={person} size="md" />
           </Link>
           <Link
             to={`/u/${person.id}`}
-            className="min-w-0 flex-1 truncate font-semibold text-slate-900 hover:underline"
+            className="min-w-0 flex-1 truncate font-semibold text-ink hover:text-accent-deep"
           >
             {person.display_name}
           </Link>

@@ -36,13 +36,9 @@ export default function ConnectButton({ userId, connectionStatus }) {
       connected: "Connected",
     }[connectionStatus] ?? "Connect";
 
-  const base =
-    "rounded-full px-4 py-1.5 text-sm font-semibold transition disabled:opacity-50";
   // The two "act to connect" states get the filled accent; the two "already
   // in motion" states (requested/connected) get the quieter outline.
-  const styling = isConnectAction
-    ? "bg-sky-600 text-white hover:bg-sky-700"
-    : "border border-slate-300 text-slate-700 hover:bg-slate-100";
+  const styling = isConnectAction ? "btn-primary" : "btn-ghost";
 
   const title = {
     requested: "Waiting for approval — click to withdraw",
@@ -55,7 +51,7 @@ export default function ConnectButton({ userId, connectionStatus }) {
       type="button"
       onClick={() => mutation.mutate()}
       disabled={mutation.isPending}
-      className={`${base} ${styling}`}
+      className={`btn btn-sm ${styling}`}
       title={title}
     >
       {label}
