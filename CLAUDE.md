@@ -40,10 +40,13 @@ or finishes, but keep the detail in the phase docs, not here.
   completed, and add anything non-obvious to that file's "Notes / decisions
   log" section.
 - When a phase is finished, mark its status as done in that file.
-- Every phase already has a doc in `docs/phases/`. Phases 0–5 are detailed;
-  phases 6–10 are marked "sketch only" — flesh those out into a full plan
-  (definition of done, steps) *before* starting work on them, following the
-  pattern of the detailed phase files, and confirm the plan with the user.
+- Every phase already has a doc in `docs/phases/`. Phases 0–4 and 7
+  (productionisation) are detailed; the rest — 5 (messaging), 6 (groups), and
+  8–10 — are marked "sketch only". Flesh those out into a full plan (definition
+  of done, steps) *before* starting work on them, following the pattern of the
+  detailed phase files, and confirm the plan with the user. (Messaging and
+  groups were deliberately moved ahead of productionisation — see the "Why this
+  order" note in `docs/SHARED.md`.)
 - Keep this file small and stable — it loads into every session's context.
   It should stay a short pointer to the docs, not a copy of them. Put stack
   details in `docs/SHARED.md` and phase details in `docs/phases/`; only the

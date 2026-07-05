@@ -1,4 +1,4 @@
-# Phase 7 — Groups
+# Phase 6 — Groups
 
 **Status:** not started — sketch only, refine before starting
 

@@ -146,7 +146,7 @@ tiny follow-up PR.
 
 This is the first phase holding real credentials.
 - **httpOnly cookie** keeps the token out of reach of page JavaScript (XSS
-  mitigation). Pair with `SameSite` and, in production (Phase 5), `Secure` +
+  mitigation). Pair with `SameSite` and, in production (Phase 7), `Secure` +
   HTTPS-only.
 - **CSRF:** cookie-based auth needs CSRF protection; `dj-rest-auth`'s cookie JWT
   flow handles the CSRF token — wire the frontend to send it on mutating calls.
@@ -227,5 +227,5 @@ This is the first phase holding real credentials.
   exposes `is_staff` (read-only), and the app nav shows an **Admin** link (to the
   backend `/admin/`, built from `VITE_API_URL`, opens in a new tab) only for
   staff users. This is cosmetic — Django enforces staff access on `/admin/`
-  server-side. **Phase 5 follow-up:** harden the admin *surface* itself
+  server-side. **Phase 7 follow-up:** harden the admin *surface* itself
   (HTTPS-only, and consider a non-default admin URL / IP allowlist / 2FA).

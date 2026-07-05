@@ -26,7 +26,7 @@ setup), and contribute to — plus a live funding page linked from the project.
 - [ ] Documented privacy practices (what data is stored, how, user rights) —
       the ethical stance made concrete for users and contributors
 - [ ] Funding channel set up (e.g. Patreon) and linked, with an honest
-      breakdown of what money goes toward (hosting first — see Phase 5 costs)
+      breakdown of what money goes toward (hosting first — see Phase 7 costs)
 - [ ] A short public roadmap so contributors know where it's heading
 
 ## Open questions to resolve before starting
