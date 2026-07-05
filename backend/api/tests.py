@@ -578,6 +578,22 @@ class CommentTests(APITestCase):
         all_ids = _flatten_ids(tree)
         self.assertNotIn(stranger_c.id, all_ids)
 
+    def test_deactivated_author_comment_and_its_subtree_are_hidden(self):
+        # Banning a member must pull their comments too, not just their posts —
+        # and, like any hidden comment, take the whole branch under it.
+        top = Comment.objects.create(
+            post=self.post, author=self.friend, text="friend top"
+        )
+        my_reply = Comment.objects.create(
+            post=self.post, author=self.me, parent=top, text="my reply"
+        )
+        self.friend.is_active = False
+        self.friend.save(update_fields=["is_active"])
+
+        ids = _flatten_ids(self._tree())
+        self.assertNotIn(top.id, ids)  # the banned author's comment is gone
+        self.assertNotIn(my_reply.id, ids)  # and my reply beneath it goes too
+
     def test_replies_are_nested_under_their_parent(self):
         top = Comment.objects.create(
             post=self.post, author=self.friend, text="top"

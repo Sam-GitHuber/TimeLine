@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError, transaction
 from django.db.models import Case, Exists, OuterRef, Q, Value, When
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -43,7 +44,7 @@ def connected_user_ids(user):
     }
 
 
-def visible_posts(user, author=None):
+def visible_posts(user, author=None, connected_ids=None):
     """The posts ``user`` is allowed to see, newest-first.
 
     Private-by-default, in one place so the feed and a profile can't drift: a
@@ -51,10 +52,13 @@ def visible_posts(user, author=None):
     author, and only if that author is still active (a deactivated/banned member
     disappears from feeds too, not just from the people list). Pass ``author``
     to narrow to a single person's posts (the profile page) — the same rule then
-    yields their posts if allowed, or nothing if not.
+    yields their posts if allowed, or nothing if not. Pass ``connected_ids`` when
+    the caller already computed the connected set, to avoid recomputing it.
     """
+    if connected_ids is None:
+        connected_ids = connected_user_ids(user)
     qs = Post.objects.filter(
-        Q(author=user) | Q(author__in=connected_user_ids(user)),
+        Q(author=user) | Q(author__in=connected_ids),
         author__is_active=True,
     ).select_related("author")
     if author is not None:
@@ -90,23 +94,26 @@ def connection_status_annotation(user):
     )
 
 
-def build_visible_comment_tree(comments, user):
-    """Turn a flat list of a post's comments into the nested tree ``user`` may
-    see, pruning whole subtrees rooted at a not-connected author.
+def build_visible_comment_tree(comments, visible_author_ids):
+    """Turn a flat list of a post's comments into the nested tree a viewer may
+    see, pruning whole subtrees rooted at an author they can't see.
 
-    Visibility rule (issue #12): you see a comment only if its author is you or
-    someone you're connected with. Crucially, if a comment is hidden, everything
-    **below** it is hidden too — even a reply from someone you *are* connected
-    with — so you never see half a conversation with invisible participants, and
-    strangers can't be surfaced to you second-hand through a thread.
+    ``visible_author_ids`` is the set of authors the viewer may see: themselves
+    plus their (active) connections. Visibility rule (issue #12): a comment shows
+    only if its author is in that set. Crucially, if a comment is hidden,
+    everything **below** it is hidden too — even a reply from someone the viewer
+    *is* connected with — so they never see half a conversation with invisible
+    participants, and strangers can't be surfaced second-hand through a thread.
+
+    Note the caller is expected to have already dropped comments by deactivated
+    authors from ``comments`` (see ``PostCommentsView``); those then take their
+    subtrees with them here too, since an orphaned reply is never reached from a
+    root.
 
     Each surviving comment gets a ``_visible_children`` list of its visible
     replies (read by the serializer). ``comments`` is assumed to arrive in the
     model's ``created_at, id`` order, which we preserve within each sibling set.
     """
-    visible_authors = connected_user_ids(user)
-    visible_authors.add(user.id)
-
     children = defaultdict(list)
     for comment in comments:
         children[comment.parent_id].append(comment)
@@ -114,7 +121,7 @@ def build_visible_comment_tree(comments, user):
     def build(parent_id):
         nodes = []
         for comment in children.get(parent_id, []):
-            if comment.author_id not in visible_authors:
+            if comment.author_id not in visible_author_ids:
                 # Prune this node AND its whole subtree: don't recurse into it.
                 continue
             comment._visible_children = build(comment.id)
@@ -241,13 +248,28 @@ class ConnectView(APIView):
             )
         existing = self._existing(request.user, target)
         if existing is None:
-            Connection.objects.create(
-                requester=request.user, requestee=target
-            )
-            return Response(
-                {"detail": "Request sent.", "connection_status": "requested"},
-                status=status.HTTP_201_CREATED,
-            )
+            try:
+                # Own savepoint so a lost race rolls back just this insert, not
+                # the whole request transaction (which ATOMIC_REQUESTS may wrap).
+                with transaction.atomic():
+                    Connection.objects.create(
+                        requester=request.user, requestee=target
+                    )
+            except IntegrityError:
+                # A reciprocal request landed between our read and our write;
+                # the one-row-per-pair constraint rejected this insert. Re-read
+                # and fall through to resolve it (their pending row → accept).
+                existing = self._existing(request.user, target)
+                if existing is None:
+                    raise
+            else:
+                return Response(
+                    {
+                        "detail": "Request sent.",
+                        "connection_status": "requested",
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
         if existing.status == ACCEPTED:
             return Response(
                 {
@@ -338,14 +360,27 @@ class PostCommentsView(APIView):
     from the session, never the body.
     """
 
-    def _post(self, request, pk):
+    def _post(self, request, pk, connected_ids=None):
         # Reuse the shared visibility gate: 404 if you can't see this post.
-        return get_object_or_404(visible_posts(request.user), pk=pk)
+        return get_object_or_404(
+            visible_posts(request.user, connected_ids=connected_ids), pk=pk
+        )
 
     def get(self, request, pk):
-        post = self._post(request, pk)
-        comments = list(post.comments.select_related("author").all())
-        tree = build_visible_comment_tree(comments, request.user)
+        # Compute the connected set once and reuse it for both the post gate and
+        # the comment prune, instead of querying it twice.
+        connected_ids = connected_user_ids(request.user)
+        post = self._post(request, pk, connected_ids=connected_ids)
+        # Drop comments by deactivated (banned) authors before building the
+        # tree, so a banned member's comments vanish just like their posts do —
+        # and their replies go with them (an orphaned reply is never reached).
+        comments = list(
+            post.comments.select_related("author").filter(
+                author__is_active=True
+            )
+        )
+        visible_author_ids = connected_ids | {request.user.id}
+        tree = build_visible_comment_tree(comments, visible_author_ids)
         data = CommentSerializer(
             tree, many=True, context={"request": request}
         ).data
