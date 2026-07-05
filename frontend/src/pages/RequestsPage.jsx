@@ -33,22 +33,22 @@ export default function RequestsPage() {
 
   return (
     <div>
-      <h1 className="border-b border-slate-200 px-4 py-4 text-lg font-bold text-slate-900 sm:px-6">
+      <h1 className="border-b border-line px-5 py-4 font-display text-lg font-bold -tracking-[0.02em] text-ink">
         Connection requests
       </h1>
 
       {isLoading && (
-        <p className="px-6 py-10 text-center text-slate-500">Loading…</p>
+        <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>
       )}
 
       {isError && (
-        <p className="px-6 py-10 text-center text-rose-600">
+        <p className="px-6 py-10 text-center text-red-600">
           {error?.message || "Couldn't load requests."}
         </p>
       )}
 
       {!isLoading && !isError && requests.length === 0 && (
-        <p className="px-6 py-10 text-center text-slate-500">
+        <p className="px-6 py-10 text-center text-ink-faint">
           No pending requests.
         </p>
       )}
@@ -56,14 +56,14 @@ export default function RequestsPage() {
       {requests.map((req) => (
         <div
           key={req.id}
-          className="flex items-center gap-3 border-b border-slate-200 px-4 py-3 sm:px-6"
+          className="flex items-center gap-3 border-b border-line px-5 py-3.5"
         >
           <Link to={`/u/${req.requester.id}`} tabIndex={-1} aria-hidden="true">
             <Avatar user={req.requester} size="md" />
           </Link>
           <Link
             to={`/u/${req.requester.id}`}
-            className="min-w-0 flex-1 truncate font-semibold text-slate-900 hover:underline"
+            className="min-w-0 flex-1 truncate font-semibold text-ink hover:text-accent-deep"
           >
             {req.requester.display_name}
           </Link>
@@ -71,7 +71,7 @@ export default function RequestsPage() {
             type="button"
             onClick={() => decide.mutate({ act: api.approveRequest, id: req.id })}
             disabled={decide.isPending}
-            className="rounded-full bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:opacity-50"
+            className="btn btn-primary btn-sm"
           >
             Approve
           </button>
@@ -79,7 +79,7 @@ export default function RequestsPage() {
             type="button"
             onClick={() => decide.mutate({ act: api.rejectRequest, id: req.id })}
             disabled={decide.isPending}
-            className="rounded-full border border-slate-300 px-4 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
+            className="btn btn-ghost btn-sm"
           >
             Reject
           </button>

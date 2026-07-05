@@ -37,3 +37,48 @@ export function formatAbsoluteTime(isoString) {
     minute: "2-digit",
   });
 }
+
+// The clock time shown on the timeline rail, split so the meridiem can sit on
+// its own line under the time (e.g. { time: "2:10", meridiem: "pm" }). This is
+// the "voice of time" — the one place the exact *when* is the point.
+export function formatClockTime(isoString) {
+  const d = new Date(isoString);
+  const meridiem = d.getHours() < 12 ? "am" : "pm";
+  const hour = d.getHours() % 12 || 12;
+  const minute = String(d.getMinutes()).padStart(2, "0");
+  return { time: `${hour}:${minute}`, meridiem };
+}
+
+// A stable per-calendar-day key (local time) used to group consecutive posts
+// under a single day divider.
+export function dayKey(isoString) {
+  const d = new Date(isoString);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+// The heading for a day divider: a friendly primary label plus, where it adds
+// information, a mono secondary date. "Today"/"Yesterday" for the obvious ones,
+// the weekday within the past week, else the full date stands on its own.
+export function dayHeading(isoString, now = new Date()) {
+  const d = new Date(isoString);
+  const key = dayKey(isoString);
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const full = d.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+
+  if (key === dayKey(now)) return { label: "Today", sub: full };
+  if (key === dayKey(yesterday)) return { label: "Yesterday", sub: full };
+
+  const withinWeek = now - d < 7 * 24 * 60 * 60 * 1000;
+  if (withinWeek) {
+    return { label: d.toLocaleDateString(undefined, { weekday: "long" }), sub: full };
+  }
+  return { label: full, sub: null };
+}

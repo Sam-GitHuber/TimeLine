@@ -2,7 +2,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
 import ConnectButton from "../components/ConnectButton.jsx";
-import PostCard from "../components/PostCard.jsx";
+import Timeline from "../components/Timeline.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
@@ -31,11 +31,11 @@ export default function ProfilePage() {
   if (userQuery.isError && userQuery.error?.status === 404) {
     return (
       <div className="px-6 py-16 text-center">
-        <p className="text-lg font-medium text-slate-800">User not found</p>
-        <p className="mt-1 text-slate-500">No one here goes by that id.</p>
+        <p className="text-lg font-medium text-ink">User not found</p>
+        <p className="mt-1 text-ink-faint">No one here goes by that id.</p>
         <Link
           to="/"
-          className="mt-4 inline-block font-medium text-sky-600 hover:underline"
+          className="mt-4 inline-block font-medium text-accent-deep hover:underline"
         >
           ← Back to the feed
         </Link>
@@ -46,13 +46,13 @@ export default function ProfilePage() {
   if (userQuery.isError) {
     return (
       <div className="px-6 py-16 text-center">
-        <p className="text-lg font-medium text-rose-600">
+        <p className="text-lg font-medium text-red-600">
           {userQuery.error?.message || "Couldn't load this profile."}
         </p>
         <button
           type="button"
           onClick={() => userQuery.refetch()}
-          className="mt-4 inline-block rounded-full border border-slate-300 px-5 py-1.5 font-medium text-slate-700 transition hover:bg-slate-100"
+          className="btn btn-ghost btn-sm mt-4"
         >
           Try again
         </button>
@@ -61,7 +61,7 @@ export default function ProfilePage() {
   }
 
   if (userQuery.isLoading) {
-    return <p className="px-6 py-10 text-center text-slate-500">Loading…</p>;
+    return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
   }
 
   const user = userQuery.data;
@@ -72,12 +72,12 @@ export default function ProfilePage() {
 
   return (
     <div>
-      <section className="border-b border-slate-200 px-4 py-6 sm:px-6">
+      <section className="border-b border-line px-5 py-7">
         <div className="flex items-start gap-4">
           <Avatar user={user} size="lg" />
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-4">
-              <h1 className="text-2xl font-bold text-slate-900">
+              <h1 className="font-display text-2xl font-bold -tracking-[0.02em] text-ink">
                 {user.display_name}
               </h1>
               {/* Can't connect with yourself; the button only shows for
@@ -94,13 +94,9 @@ export default function ProfilePage() {
         </div>
       </section>
 
-      <h2 className="px-4 py-3 text-sm font-semibold uppercase tracking-wide text-slate-400 sm:px-6">
-        Posts
-      </h2>
-
       {!canSeePosts ? (
-        <div className="px-6 py-10 text-center text-slate-500">
-          <p className="font-medium text-slate-700">
+        <div className="px-6 py-14 text-center text-ink-faint">
+          <p className="font-medium text-ink">
             {user.display_name}’s posts are private.
           </p>
           <p className="mt-1">
@@ -112,16 +108,14 @@ export default function ProfilePage() {
           </p>
         </div>
       ) : postsQuery.isLoading ? (
-        <p className="px-6 py-10 text-center text-slate-500">Loading posts…</p>
+        <p className="px-6 py-10 text-center text-ink-faint">Loading posts…</p>
       ) : posts.length > 0 ? (
         <>
-          {posts.map((post) => (
-            <PostCard key={post.id} post={post} />
-          ))}
+          <Timeline posts={posts} />
           <LoadMoreButton query={postsQuery} />
         </>
       ) : (
-        <p className="px-6 py-10 text-center text-slate-500">
+        <p className="px-6 py-14 text-center text-ink-faint">
           {user.display_name} hasn’t posted yet.
         </p>
       )}

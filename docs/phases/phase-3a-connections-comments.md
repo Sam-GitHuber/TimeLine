@@ -131,6 +131,14 @@ Two real accounts can:
   connected. The Connect button shows "Approve" for `incoming` and calls the
   same `POST /connect/`, which accepts their pending request — so you can accept
   from someone's profile, not only the Requests inbox.
+- **Replies collapse by default (post-design-system refinement).** After the
+  site-wide design system landed (see `docs/design-system.md`), the comment tree
+  was tuned for readability: replies now start **collapsed**, so a busy post
+  opens as a clean list of top-level comments, each with a clear "Show N replies"
+  control (accent-coloured + chevron, visually distinct from "Reply"). Opening a
+  reply box — or having just posted a reply — auto-reveals that sub-thread so
+  your own reply is always visible. Frontend-only; aimed at making long threads
+  followable for less technical users. Guarded by a test.
 - **Verification.** `makemigrations --check` clean; migration `0004` applied to
   the real dev DB without data loss. 39 backend + 43 frontend tests pass
   (added: bidirectional visibility, disconnect clears both feeds, reverse-request

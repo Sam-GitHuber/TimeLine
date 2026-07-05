@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import Avatar from "./Avatar.jsx";
 import CommentThread from "./CommentThread.jsx";
-import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
+import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
-// A single post in a feed: author, timestamp, text, and a collapsible comment
-// thread. The author comes embedded in the post from the API
-// ({ id, display_name }), and posts are identified by numeric user id in
-// profile links (there is no username).
+// A single post as an entry on the timeline: a node on the line, its clock time
+// on the rail, then the author, text, and a collapsible comment thread. The
+// author comes embedded in the post from the API ({ id, display_name }), and
+// posts are identified by numeric user id in profile links (there is no
+// username).
 export default function PostCard({ post }) {
   const author = post.author;
   // Comments load lazily: we only fetch a post's thread once you open it, so
@@ -17,50 +17,52 @@ export default function PostCard({ post }) {
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
 
+  const { time, meridiem } = formatClockTime(post.created_at);
+
   return (
-    <article className="border-b border-slate-200 px-4 py-4 sm:px-6">
-      <div className="flex gap-3">
-        {/* The avatar is a convenience click target to the same profile as the
-            name link below. It's hidden from assistive tech and the tab order
-            (aria-hidden + tabIndex=-1) so screen-reader/keyboard users get one
-            named link per post, not an empty duplicate. */}
-        <Link to={`/u/${author.id}`} tabIndex={-1} aria-hidden="true">
-          <Avatar user={author} size="md" />
-        </Link>
+    <article className="tl-entry">
+      <div className="tl-rail">
+        <span className="tl-node" aria-hidden="true" />
+        <time
+          className="font-mono text-xs tabular-nums text-ink-faint"
+          dateTime={post.created_at}
+          title={formatAbsoluteTime(post.created_at)}
+          // The visible text splits over two lines ("2:10" / "pm"); give
+          // assistive tech the full, unambiguous timestamp instead of "2:10pm".
+          aria-label={formatAbsoluteTime(post.created_at)}
+        >
+          {time}
+          <br />
+          {meridiem}
+        </time>
+      </div>
 
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2">
-            <Link
-              to={`/u/${author.id}`}
-              className="font-semibold text-slate-900 hover:underline"
-            >
-              {author.display_name}
-            </Link>
-            <span className="text-sm text-slate-400">·</span>
-            <time
-              className="text-sm text-slate-500"
-              dateTime={post.created_at}
-              title={formatAbsoluteTime(post.created_at)}
-            >
-              {formatRelativeTime(post.created_at)}
-            </time>
-          </div>
+      <div className="tl-body">
+        <div className="mb-1.5">
+          <Link
+            to={`/u/${author.id}`}
+            className="font-semibold text-ink transition hover:text-accent-deep"
+          >
+            {author.display_name}
+          </Link>
+        </div>
 
-          <p className="mt-1 whitespace-pre-wrap break-words text-slate-800">
-            {post.text}
-          </p>
+        <p className="whitespace-pre-wrap break-words text-[1.02rem] leading-relaxed text-ink">
+          {post.text}
+        </p>
 
+        <div className="mt-3 -ml-2">
           <button
             type="button"
             onClick={() => setShowComments((v) => !v)}
             aria-expanded={showComments}
-            className="mt-2 text-sm font-medium text-slate-500 transition hover:text-slate-800"
+            className="rounded-lg px-2 py-1 text-sm font-medium text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
           >
             {showComments ? "Hide comments" : "Comments"}
           </button>
-
-          {showComments && <CommentThread postId={post.id} />}
         </div>
+
+        {showComments && <CommentThread postId={post.id} />}
       </div>
     </article>
   );

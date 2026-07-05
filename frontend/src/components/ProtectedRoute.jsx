@@ -11,7 +11,7 @@ export default function ProtectedRoute() {
 
   if (loading) {
     return (
-      <div className="grid min-h-screen place-items-center bg-slate-50 text-slate-400">
+      <div className="grid min-h-screen place-items-center text-ink-faint">
         Loading…
       </div>
     );

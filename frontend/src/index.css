@@ -1,1 +1,322 @@
 @import "tailwindcss";
+
+/* ============================================================================
+   TimeLine design system
+   ----------------------------------------------------------------------------
+   A warm, modern, unhurried look — a calm place for the people you already know
+   in real life. The signature is the "living line": the feed hangs off one
+   continuous vertical spine, day-markers punctuate it, and the timestamp is
+   promoted to a marker ON the line (the product's one promise, made visible).
+
+   Everything below is token-first so posts, profiles, messaging and groups all
+   read as the same place. Design tokens live in @theme (so Tailwind generates
+   `bg-surface`, `text-ink`, `font-display`… utilities from them); the timeline
+   spine mechanics and shared button live in @layer components.
+   ========================================================================== */
+
+/* ---- Self-hosted fonts (privacy-first: no Google CDN request per visitor) -- */
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("./fonts/BricolageGrotesque-variable.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("./fonts/HankenGrotesk-variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("./fonts/IBMPlexMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("./fonts/IBMPlexMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
+@theme {
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-body: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Neutrals carry a faint warm bias toward the surface — never a flat grey. */
+  --color-surface: #fbfaf7; /* warm near-white app ground */
+  --color-raised: #ffffff; /* cards, compose, inputs */
+  --color-ink: #1c1a16; /* near-black, faint warmth */
+  --color-ink-soft: #57534b; /* secondary text */
+  --color-ink-faint: #928d83; /* meta, timestamps */
+  --color-line: #ece9e2; /* soft hairline */
+  --color-line-strong: #e0dcd3; /* input borders */
+  --color-spine: #ded9cf; /* the line itself */
+
+  /* One accent only: a modern emerald-teal for connection and growth. */
+  --color-accent: #1c8a6a;
+  --color-accent-deep: #146650; /* hover / press */
+  --color-accent-tint: #e6f2ed; /* washes: chips, hovers */
+
+  /* Avatar earth palette — lives in the same world as the surface. */
+  --color-av-clay: #c06a44;
+  --color-av-ochre: #c39433;
+  --color-av-sage: #7a8a5c;
+  --color-av-teal: #3e9585;
+  --color-av-plum: #8c6076;
+  --color-av-moss: #5f7a50;
+}
+
+:root {
+  --tl-gutter: 76px; /* width of the timeline's time rail */
+  --tl-node: 12px;
+}
+@media (max-width: 560px) {
+  :root {
+    --tl-gutter: 58px;
+  }
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #f4f7f4 0%, transparent 60%),
+      var(--color-surface);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+  }
+  /* Form controls don't inherit the page font by default — make them read in
+     Hanken like everything else (utilities still set size/weight per element). */
+  input,
+  textarea,
+  select,
+  button {
+    font-family: inherit;
+  }
+}
+
+@layer components {
+  /* ---- Shared button ---- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    font-size: 0.9rem;
+    padding: 9px 18px;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    transition:
+      background 0.15s ease, color 0.15s ease, border-color 0.15s ease,
+      box-shadow 0.15s ease, transform 0.05s ease;
+  }
+  .btn:active {
+    transform: translateY(1px);
+  }
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+  .btn-primary {
+    background: var(--color-accent);
+    color: #fff;
+    box-shadow: 0 1px 2px rgba(20, 102, 80, 0.25);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--color-accent-deep);
+  }
+  .btn-ghost {
+    background: var(--color-raised);
+    color: var(--color-ink-soft);
+    border-color: var(--color-line-strong);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    border-color: var(--color-ink-faint);
+    color: var(--color-ink);
+  }
+  .btn-sm {
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    border-radius: 10px;
+  }
+  .btn-block {
+    width: 100%;
+  }
+
+  /* ---- The living line ---- */
+  .tl-feed {
+    position: relative;
+  }
+  /* one continuous line down the feed, faded at the very top & bottom */
+  .tl-feed::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--tl-gutter);
+    width: 2px;
+    border-radius: 2px;
+    background: linear-gradient(
+      var(--color-surface) 0,
+      var(--color-spine) 44px,
+      var(--color-spine) calc(100% - 40px),
+      var(--color-surface) 100%
+    );
+    transform-origin: top;
+    animation: tl-draw 1s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  @keyframes tl-draw {
+    from {
+      transform: scaleY(0);
+    }
+    to {
+      transform: scaleY(1);
+    }
+  }
+
+  /* a post (or compose) hanging off the line */
+  .tl-entry,
+  .tl-compose {
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--tl-gutter) 1fr;
+    padding: 20px 22px 20px 0;
+  }
+  .tl-entry {
+    animation: tl-rise 0.55s ease both;
+  }
+  .tl-entry + .tl-entry {
+    border-top: 1px solid var(--color-line);
+  }
+  @keyframes tl-rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .tl-rail {
+    position: relative;
+    padding-right: 18px;
+    text-align: right;
+  }
+  .tl-rail > time,
+  .tl-rail > .tl-now {
+    display: block;
+    line-height: 1.35;
+    padding-top: 2px;
+  }
+  .tl-node {
+    position: absolute;
+    top: 5px;
+    right: calc(-1 * var(--tl-node) / 2 - 1px);
+    width: var(--tl-node);
+    height: var(--tl-node);
+    border-radius: 50%;
+    background: var(--color-raised);
+    border: 2px solid var(--color-spine);
+    z-index: 2;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .tl-entry:hover .tl-node {
+    border-color: var(--color-accent);
+    transform: scale(1.12);
+  }
+  .tl-body {
+    padding-left: 20px;
+    min-width: 0;
+  }
+
+  /* day divider — a clean marked point on the line */
+  .tl-day {
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--tl-gutter) 1fr;
+    align-items: center;
+    padding: 16px 22px 16px 0;
+  }
+  .tl-day + .tl-entry {
+    border-top: 0;
+  }
+  .tl-day-dot {
+    position: absolute;
+    top: 50%;
+    left: var(--tl-gutter);
+    transform: translate(-50%, -50%);
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-ink);
+    z-index: 2;
+  }
+  .tl-day-label {
+    grid-column: 2;
+    padding-left: 20px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .tl-day-label b {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 1rem;
+    letter-spacing: -0.02em;
+    color: var(--color-ink);
+  }
+  .tl-day-label span {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* compose — the live "now" end of the line */
+  .tl-compose {
+    border-bottom: 1px solid var(--color-line);
+  }
+  .tl-compose .tl-node {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 4px var(--color-accent-tint);
+  }
+  .tl-compose .tl-node::after {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: 50%;
+    border: 2px solid var(--color-accent);
+    animation: tl-ping 2.6s ease-out infinite;
+  }
+  @keyframes tl-ping {
+    0% {
+      transform: scale(1);
+      opacity: 0.7;
+    }
+    70%,
+    100% {
+      transform: scale(2.5);
+      opacity: 0;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tl-feed::before,
+  .tl-entry,
+  .tl-compose .tl-node::after {
+    animation: none !important;
+  }
+}

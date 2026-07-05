@@ -5,13 +5,15 @@
 // computes — real name, or email local-part until a name is set). That keeps
 // the same person's colour and initial stable across the app.
 
+// A warm earth palette that lives in the same world as the surface — replacing
+// the old bright primaries. Each maps to a --color-av-* token in index.css.
 const COLORS = [
-  "bg-rose-500",
-  "bg-amber-500",
-  "bg-emerald-500",
-  "bg-sky-500",
-  "bg-violet-500",
-  "bg-fuchsia-500",
+  "bg-av-clay",
+  "bg-av-ochre",
+  "bg-av-sage",
+  "bg-av-teal",
+  "bg-av-plum",
+  "bg-av-moss",
 ];
 
 function colorFor(seed) {

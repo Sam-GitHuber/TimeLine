@@ -7,12 +7,12 @@ export default function LoadMoreButton({ query }) {
   if (!query.hasNextPage) return null;
 
   return (
-    <div className="flex justify-center py-4">
+    <div className="flex justify-center py-5">
       <button
         type="button"
         onClick={() => query.fetchNextPage()}
         disabled={query.isFetchingNextPage}
-        className="rounded-full border border-slate-300 px-5 py-1.5 font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
+        className="btn btn-ghost btn-sm"
       >
         {query.isFetchingNextPage ? "Loading…" : "Load more"}
       </button>

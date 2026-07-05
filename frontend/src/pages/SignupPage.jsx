@@ -40,12 +40,12 @@ export default function SignupPage() {
   if (pendingMessage) {
     return (
       <AuthShell title="Almost there">
-        <p role="status" className="text-sm text-slate-700">
+        <p role="status" className="text-sm text-ink-soft">
           {pendingMessage}
         </p>
         <Link
           to="/login"
-          className="mt-6 block text-center text-sm font-medium text-sky-700 hover:underline"
+          className="mt-6 block text-center text-sm font-medium text-accent-deep hover:underline"
         >
           Back to log in
         </Link>
@@ -88,15 +88,15 @@ export default function SignupPage() {
         <button
           type="submit"
           disabled={submitting || !email || !password || !confirm}
-          className="w-full rounded-full bg-sky-600 px-5 py-2 font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40"
+          className="btn btn-primary btn-block"
         >
           {submitting ? "Creating…" : "Sign up"}
         </button>
       </form>
 
-      <p className="mt-6 text-center text-sm text-slate-500">
+      <p className="mt-6 text-center text-sm text-ink-faint">
         Already have an account?{" "}
-        <Link to="/login" className="font-medium text-sky-700 hover:underline">
+        <Link to="/login" className="font-medium text-accent-deep hover:underline">
           Log in
         </Link>
       </p>

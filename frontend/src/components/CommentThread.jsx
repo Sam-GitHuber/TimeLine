@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
@@ -18,11 +19,11 @@ export default function CommentThread({ postId }) {
   });
 
   return (
-    <div className="mt-3 border-t border-slate-100 pt-3">
-      {isLoading && <p className="text-sm text-slate-500">Loading comments…</p>}
+    <div className="mt-4 rounded-2xl border border-line bg-raised p-4">
+      {isLoading && <p className="text-sm text-ink-faint">Loading comments…</p>}
 
       {isError && (
-        <p className="text-sm text-rose-600">
+        <p className="text-sm text-red-600">
           {error?.message || "Couldn't load comments."}
         </p>
       )}
@@ -30,11 +31,11 @@ export default function CommentThread({ postId }) {
       {!isLoading && !isError && (
         <>
           {comments.length === 0 ? (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-ink-faint">
               No comments yet. Start the conversation.
             </p>
           ) : (
-            <ul className="space-y-3">
+            <ul className="space-y-4">
               {comments.map((comment) => (
                 <CommentNode
                   key={comment.id}
@@ -46,7 +47,7 @@ export default function CommentThread({ postId }) {
           )}
 
           {/* Top-level composer (a comment on the post itself). */}
-          <div className="mt-3">
+          <div className="mt-4">
             <CommentComposer postId={postId} placeholder="Write a comment…" />
           </div>
         </>
@@ -55,77 +56,105 @@ export default function CommentThread({ postId }) {
   );
 }
 
-// One comment plus its (visible) replies, indented under it. Each node with
-// replies can be collapsed — the accordion behaviour from issue #12.
+// One comment plus its replies, indented under it. Replies start *collapsed*, so
+// a busy post opens as a clean list of top-level comments and you drill into
+// just the sub-thread you want — much easier to follow a long thread (and less
+// overwhelming) than a wall of nested replies. Opening the reply box, or having
+// posted a reply, reveals the sub-thread so you always see your own reply.
 function CommentNode({ comment, postId }) {
-  const [showReply, setShowReply] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const replies = comment.replies ?? [];
+  const [showReply, setShowReply] = useState(false);
+  const [collapsed, setCollapsed] = useState(replies.length > 0);
 
   return (
-    <li>
-      <div className="flex items-baseline gap-x-2">
-        <Link
-          to={`/u/${comment.author.id}`}
-          className="text-sm font-semibold text-slate-900 hover:underline"
-        >
-          {comment.author.display_name}
-        </Link>
-        <span className="text-xs text-slate-400">·</span>
-        <time
-          className="text-xs text-slate-500"
-          dateTime={comment.created_at}
-          title={formatAbsoluteTime(comment.created_at)}
-        >
-          {formatRelativeTime(comment.created_at)}
-        </time>
-      </div>
+    <li className="flex gap-2.5">
+      <Link to={`/u/${comment.author.id}`} tabIndex={-1} aria-hidden="true">
+        <Avatar user={comment.author} size="sm" />
+      </Link>
 
-      <p className="whitespace-pre-wrap break-words text-sm text-slate-800">
-        {comment.text}
-      </p>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-x-2">
+          <Link
+            to={`/u/${comment.author.id}`}
+            className="text-sm font-semibold text-ink hover:text-accent-deep"
+          >
+            {comment.author.display_name}
+          </Link>
+          <time
+            className="font-mono text-xs text-ink-faint"
+            dateTime={comment.created_at}
+            title={formatAbsoluteTime(comment.created_at)}
+          >
+            {formatRelativeTime(comment.created_at)}
+          </time>
+        </div>
 
-      <div className="mt-1 flex gap-3 text-xs font-medium text-slate-500">
-        <button
-          type="button"
-          onClick={() => setShowReply((v) => !v)}
-          className="hover:text-slate-800"
-        >
-          Reply
-        </button>
-        {replies.length > 0 && (
+        <p className="whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
+          {comment.text}
+        </p>
+
+        <div className="mt-1.5 flex items-center gap-4 text-sm font-medium text-ink-faint">
           <button
             type="button"
-            onClick={() => setCollapsed((v) => !v)}
-            className="hover:text-slate-800"
+            onClick={() => {
+              setShowReply((v) => !v);
+              // Engaging with a sub-thread should show it (for context, and so
+              // the reply you're about to add is visible).
+              setCollapsed(false);
+            }}
+            className="transition hover:text-accent-deep"
           >
-            {collapsed
-              ? `Show ${replies.length} ${replies.length === 1 ? "reply" : "replies"}`
-              : "Hide replies"}
+            Reply
           </button>
+          {replies.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setCollapsed((v) => !v)}
+              aria-expanded={!collapsed}
+              className="inline-flex items-center gap-1.5 font-semibold text-accent-deep transition hover:underline"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                className={`h-4 w-4 transition-transform ${
+                  collapsed ? "" : "rotate-90"
+                }`}
+              >
+                <path d="m9 18 6-6-6-6" />
+              </svg>
+              {collapsed
+                ? `Show ${replies.length} ${replies.length === 1 ? "reply" : "replies"}`
+                : "Hide replies"}
+            </button>
+          )}
+        </div>
+
+        {showReply && (
+          <div className="mt-2">
+            <CommentComposer
+              postId={postId}
+              parentId={comment.id}
+              autoFocus
+              placeholder={`Reply to ${comment.author.display_name}…`}
+              onDone={() => setShowReply(false)}
+            />
+          </div>
+        )}
+
+        {/* Replies nest under a left rule, so depth reads at a glance. */}
+        {replies.length > 0 && !collapsed && (
+          <ul className="mt-3 space-y-4 border-l-2 border-line pl-3">
+            {replies.map((reply) => (
+              <CommentNode key={reply.id} comment={reply} postId={postId} />
+            ))}
+          </ul>
         )}
       </div>
-
-      {showReply && (
-        <div className="mt-2">
-          <CommentComposer
-            postId={postId}
-            parentId={comment.id}
-            autoFocus
-            placeholder={`Reply to ${comment.author.display_name}…`}
-            onDone={() => setShowReply(false)}
-          />
-        </div>
-      )}
-
-      {/* Replies nest under a left rule, so depth reads at a glance. */}
-      {replies.length > 0 && !collapsed && (
-        <ul className="mt-3 space-y-3 border-l-2 border-slate-100 pl-3">
-          {replies.map((reply) => (
-            <CommentNode key={reply.id} comment={reply} postId={postId} />
-          ))}
-        </ul>
-      )}
     </li>
   );
 }
@@ -168,19 +197,19 @@ function CommentComposer({
         rows={2}
         autoFocus={autoFocus}
         placeholder={placeholder}
-        className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:border-slate-300 focus:outline-none"
+        className="w-full resize-none rounded-xl border border-line-strong bg-surface px-3 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
       />
       {mutation.isError && (
-        <p className="text-xs text-rose-600">
+        <p className="text-xs text-red-600">
           {mutation.error?.message || "Couldn't post. Try again."}
         </p>
       )}
-      <div className="mt-1 flex justify-end gap-2">
+      <div className="mt-1.5 flex justify-end gap-2">
         {onDone && (
           <button
             type="button"
             onClick={onDone}
-            className="rounded-full px-3 py-1 text-xs font-semibold text-slate-500 transition hover:bg-slate-100"
+            className="rounded-lg px-3 py-1 text-xs font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
           >
             Cancel
           </button>
@@ -188,7 +217,7 @@ function CommentComposer({
         <button
           type="submit"
           disabled={!text.trim() || mutation.isPending}
-          className="rounded-full bg-sky-600 px-4 py-1 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40"
+          className="btn btn-primary btn-sm text-xs"
         >
           {mutation.isPending ? "Posting…" : parentId ? "Reply" : "Comment"}
         </button>
