@@ -1,18 +1,59 @@
 # CI — runs the automated test suites on every push and pull request.
 #
-# Two independent jobs, matching the two apps in the repo:
+# Two independent test jobs, matching the two apps in the repo:
 #   backend  — Django tests against a real Postgres (same engine as prod, so we
 #              don't get surprised by SQLite-only behaviour).
 #   frontend — Vitest (React Testing Library).
 #
 # These job names ("backend", "frontend") are the required status checks for
 # branch protection on main — see docs/phases/phase-2-accounts.md.
+#
+# Path filtering: a docs-only change (e.g. editing docs/**) shouldn't have to
+# wait for the full test suites. A `changes` job detects which app folders were
+# touched, and the `backend`/`frontend` jobs run only when their folder (or this
+# workflow file) changed.
+#
+# WHY it's done this way and NOT with a top-level `on: paths:` filter: the two
+# jobs are *required* status checks. If we filtered at the `on:` level, a
+# docs-only change wouldn't trigger the workflow at all, so those required checks
+# would never report and the PR would sit blocked ("Expected — waiting for status
+# to be reported") forever. Instead the workflow always runs, and we skip the
+# jobs with a job-level `if:`. A job skipped that way reports as "Skipped", which
+# GitHub counts as a *passing* required check — so a docs PR goes green instantly
+# while any code change still runs its suite. Editing this workflow runs BOTH.
 name: CI
 
 on: [push, pull_request]
 
 jobs:
+  # Detect which parts of the repo changed, so the expensive test jobs below can
+  # be skipped when irrelevant. Not a required check itself — it just always runs.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/main.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/main.yml'
+
   backend:
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -62,6 +103,8 @@ jobs:
         run: uv run python manage.py test
 
   frontend:
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
