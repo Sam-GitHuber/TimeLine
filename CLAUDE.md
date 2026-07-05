@@ -16,7 +16,22 @@ Accounts are private-by-default: a follow is a request the requestee approves
 (`Follow.status` pending→accepted); feed and profile posts are both gated on an
 accepted follow. There's a Requests inbox (nav badge) to approve/reject.
 Backend + frontend test suites cover feed ordering, follow-scoping, and the
-request/approval flow. Phase 4 (photos & profiles) is next.** Keep this line current: update it whenever a phase starts
+request/approval flow.
+
+Phase 3a (connections & comments) — done. The one-directional follow is now a
+symmetric *connection* (`Connection` model; approving a request connects both
+accounts so each sees the other — no one-way follow), backed by
+`connected_user_ids` (accepted rows either direction) feeding feed + profile.
+Endpoints: `POST/DELETE /api/users/<id>/connect/`, `GET
+/api/connection-requests/` + approve/reject; requesting someone who already
+asked you auto-accepts. Posts have a threaded `Comment` tree
+(`GET/POST /api/posts/<id>/comments/`) served pre-pruned to the connection
+boundary — you only see comments/replies from people you're connected with, and
+a not-connected author's comment takes its whole subtree with it. Frontend:
+Connect/Requested/Connected(+Approve) button, "Connection requests" inbox,
+collapsible comment thread on each post. See
+`docs/phases/phase-3a-connections-comments.md`. Phase 4 (photos & profiles) is
+next.** Keep this line current: update it whenever a phase starts
 or finishes, but keep the detail in the phase docs, not here.
 
 ## Before doing any work

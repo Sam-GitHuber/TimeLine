@@ -5,23 +5,27 @@ import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 
-// Your inbox of incoming follow requests: people who've asked to follow you and
-// are waiting on your approval. Approve grants the follow (they start seeing
-// your posts); Reject discards the request.
+// Your inbox of incoming connection requests: people who've asked to connect
+// with you and are waiting on your approval. Approve makes the connection mutual
+// (you both start seeing each other's posts); Reject discards the request.
 export default function RequestsPage() {
   const queryClient = useQueryClient();
 
   // Paginated so every request is reachable, not just the first page. Uses a
-  // child of the ["followRequests"] key the nav badge holds, so invalidating
-  // ["followRequests"] (below, and from FollowButton) refreshes both.
-  const query = useInfiniteList(["followRequests", "list"], api.getFollowRequests);
+  // child of the ["connectionRequests"] key the nav badge holds, so
+  // invalidating ["connectionRequests"] (below, and from ConnectButton)
+  // refreshes both.
+  const query = useInfiniteList(
+    ["connectionRequests", "list"],
+    api.getConnectionRequests
+  );
   const { items: requests, isLoading, isError, error } = query;
 
   const decide = useMutation({
     // `act` is api.approveRequest or api.rejectRequest.
     mutationFn: ({ act, id }) => act(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["followRequests"] });
+      queryClient.invalidateQueries({ queryKey: ["connectionRequests"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
       queryClient.invalidateQueries({ queryKey: ["feed"] });
     },
@@ -30,7 +34,7 @@ export default function RequestsPage() {
   return (
     <div>
       <h1 className="border-b border-slate-200 px-4 py-4 text-lg font-bold text-slate-900 sm:px-6">
-        Follow requests
+        Connection requests
       </h1>
 
       {isLoading && (

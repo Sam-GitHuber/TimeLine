@@ -2,6 +2,12 @@
 
 **Status:** done
 
+> **Followed by [Phase 3a — Connections & comments](phase-3a-connections-comments.md):**
+> the one-directional *follow* built here is being reworked into a symmetric
+> *connection*, and posts are gaining a connection-scoped threaded comment tree
+> (issues #11 and #12). Where this doc says "follow", read the current model in
+> the 3a doc.
+
 ## Goal
 
 The core of the whole product: real users can **post text**, **follow** other

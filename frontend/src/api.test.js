@@ -97,19 +97,35 @@ describe("api CSRF + fetch wiring", () => {
     expect(JSON.parse(opts.body)).toEqual({ text: "hello world" });
   });
 
-  it("follow POSTs and unfollow DELETEs the same user URL", async () => {
+  it("connect POSTs and disconnect DELETEs the same user URL", async () => {
     document.cookie = "csrftoken=tok-f";
     const fetchMock = stubFetch({ body: "{}" });
 
-    await api.follow(7);
-    await api.unfollow(7);
+    await api.connect(7);
+    await api.disconnect(7);
 
-    const [followUrl, followOpts] = fetchMock.mock.calls[0];
-    const [unfollowUrl, unfollowOpts] = fetchMock.mock.calls[1];
-    expect(followUrl).toContain("/api/users/7/follow/");
-    expect(followOpts.method).toBe("POST");
-    expect(unfollowUrl).toContain("/api/users/7/follow/");
-    expect(unfollowOpts.method).toBe("DELETE");
+    const [connectUrl, connectOpts] = fetchMock.mock.calls[0];
+    const [disconnectUrl, disconnectOpts] = fetchMock.mock.calls[1];
+    expect(connectUrl).toContain("/api/users/7/connect/");
+    expect(connectOpts.method).toBe("POST");
+    expect(disconnectUrl).toContain("/api/users/7/connect/");
+    expect(disconnectOpts.method).toBe("DELETE");
+  });
+
+  it("addComment POSTs text (and parent for a reply) to the post's comments", async () => {
+    document.cookie = "csrftoken=tok-c";
+    const fetchMock = stubFetch({ body: "{}" });
+
+    await api.addComment(5, { text: "top-level" });
+    await api.addComment(5, { text: "a reply", parent: 42 });
+
+    const [topUrl, topOpts] = fetchMock.mock.calls[0];
+    expect(topUrl).toContain("/api/posts/5/comments/");
+    expect(topOpts.method).toBe("POST");
+    expect(JSON.parse(topOpts.body)).toEqual({ text: "top-level" });
+
+    const [, replyOpts] = fetchMock.mock.calls[1];
+    expect(JSON.parse(replyOpts.body)).toEqual({ text: "a reply", parent: 42 });
   });
 
   it("getPage strips the origin from a DRF `next` URL", async () => {

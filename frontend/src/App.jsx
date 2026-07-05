@@ -11,8 +11,8 @@ import SignupPage from "./pages/SignupPage.jsx";
 // Route table:
 //   /login, /signup   → public auth pages
 //   /                 → the feed (home timeline)     ┐ require a logged-in user
-//   /people           → find people to follow        │ (ProtectedRoute gate)
-//   /requests         → incoming follow requests      │
+//   /people           → find people to connect with  │ (ProtectedRoute gate)
+//   /requests         → incoming connection requests  │
 //   /u/:id            → a person's profile (by user id) ┘
 // The protected pages render inside Layout, which provides the nav bar (with
 // the logout control). Each page fetches its own data from the API. Real URLs

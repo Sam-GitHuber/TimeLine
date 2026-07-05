@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.db.models.functions import Greatest, Least
 
 
 class Post(models.Model):
@@ -30,32 +31,41 @@ class Post(models.Model):
         return f"{self.author} · {preview}"
 
 
-class Follow(models.Model):
-    """A directed follow request: ``follower`` asks to follow ``followee``.
+class Connection(models.Model):
+    """A connection between two accounts — mutual once accepted.
 
-    Accounts are private-by-default: a follow starts **pending** and only lets
-    the follower see the followee's posts once the followee **approves** it
-    (``status`` becomes ``accepted``). Rejecting or unfollowing deletes the row.
+    ``requester`` asks to connect with ``requestee``. Accounts are
+    private-by-default: the connection starts **pending** and grants no access
+    on its own. Once the requestee **approves** it (``status`` becomes
+    ``accepted``) the connection is **symmetric** — each account sees the
+    other's posts. There is no one-way "follow": approving is the whole
+    relationship. Rejecting or disconnecting deletes the row.
+
+    While pending, direction still matters (who asked whom, for the requests
+    inbox). Once accepted, the row is treated as an undirected edge and every
+    "who am I connected with" query checks *both* endpoints — so a single row is
+    the one source of truth and there's no reciprocal row to drift out of sync.
 
     Two guardrails live in the database (not just the API) so bad data can't
     sneak in another way:
-    - you can't follow the same person twice (``UniqueConstraint``),
-    - you can't follow yourself (``CheckConstraint``).
+    - at most one row per unordered pair — no duplicate in *either* direction
+      (``UniqueConstraint`` on the min/max of the two ids),
+    - you can't connect with yourself (``CheckConstraint``).
     """
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         ACCEPTED = "accepted", "Accepted"
 
-    follower = models.ForeignKey(
+    requester = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name="following",
+        related_name="connections_requested",
     )
-    followee = models.ForeignKey(
+    requestee = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name="followers",
+        related_name="connections_received",
     )
     status = models.CharField(
         max_length=8,
@@ -67,15 +77,69 @@ class Follow(models.Model):
 
     class Meta:
         constraints = [
+            # One row per unordered pair: because a connection is symmetric,
+            # A↔B and B↔A are the *same* relationship, so we forbid a second
+            # row in the reverse direction too — not just an exact duplicate.
+            # The unique index is on the smaller/larger of the two user ids, so
+            # the pair is order-independent at the database level.
             models.UniqueConstraint(
-                fields=["follower", "followee"],
-                name="unique_follow",
+                Least("requester_id", "requestee_id"),
+                Greatest("requester_id", "requestee_id"),
+                name="unique_connection_pair",
             ),
             models.CheckConstraint(
-                condition=~models.Q(follower=models.F("followee")),
-                name="no_self_follow",
+                condition=~models.Q(requester=models.F("requestee")),
+                name="no_self_connection",
             ),
         ]
 
     def __str__(self):
-        return f"{self.follower} → {self.followee} ({self.status})"
+        arrow = "↔" if self.status == self.Status.ACCEPTED else "→"
+        return f"{self.requester} {arrow} {self.requestee} ({self.status})"
+
+
+class Comment(models.Model):
+    """A comment on a post, or a reply to another comment — a node in a tree.
+
+    ``parent`` is null for a top-level comment on the post, or points at the
+    comment being replied to. The tree can nest to any depth; the reply chain is
+    walked in Python when building the (visibility-pruned) tree the API returns.
+
+    Deleting a comment cascades to its replies (``on_delete=CASCADE`` on
+    ``parent``): removing a node removes the branch under it, which matches how
+    the tree reads — a reply with no visible parent makes no sense.
+
+    Visibility is **not** stored here — it's computed per-viewer against their
+    connections when the tree is served (a comment, and everything under it, is
+    hidden from anyone not connected with its author). See the comments view.
+    """
+
+    post = models.ForeignKey(
+        Post,
+        on_delete=models.CASCADE,
+        related_name="comments",
+    )
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="comments",
+    )
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="replies",
+    )
+    text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        # Oldest-first: a comment thread reads top-to-bottom in the order it was
+        # written (unlike the feed). The ``id`` tiebreaker keeps siblings that
+        # share a timestamp in a stable, deterministic order.
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        preview = self.text[:40] + ("…" if len(self.text) > 40 else "")
+        return f"{self.author} · {preview}"

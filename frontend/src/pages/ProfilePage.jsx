@@ -1,7 +1,7 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
-import FollowButton from "../components/FollowButton.jsx";
+import ConnectButton from "../components/ConnectButton.jsx";
 import PostCard from "../components/PostCard.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
@@ -66,9 +66,9 @@ export default function ProfilePage() {
 
   const user = userQuery.data;
   const posts = postsQuery.items;
-  // Private-by-default: unless it's you or an accepted follow, the backend
-  // returns no posts, and we show a locked state explaining why.
-  const canSeePosts = isSelf || user.follow_status === "accepted";
+  // Private-by-default: unless it's you or a connection, the backend returns no
+  // posts, and we show a locked state explaining why.
+  const canSeePosts = isSelf || user.connection_status === "connected";
 
   return (
     <div>
@@ -80,11 +80,12 @@ export default function ProfilePage() {
               <h1 className="text-2xl font-bold text-slate-900">
                 {user.display_name}
               </h1>
-              {/* Can't follow yourself; the button only shows for other people. */}
+              {/* Can't connect with yourself; the button only shows for
+                  other people. */}
               {!isSelf && (
-                <FollowButton
+                <ConnectButton
                   userId={user.id}
-                  followStatus={user.follow_status}
+                  connectionStatus={user.connection_status}
                 />
               )}
             </div>
@@ -103,9 +104,11 @@ export default function ProfilePage() {
             {user.display_name}’s posts are private.
           </p>
           <p className="mt-1">
-            {user.follow_status === "pending"
-              ? "Your follow request is waiting for approval."
-              : "Follow them, and once they approve you’ll see their posts here."}
+            {user.connection_status === "requested"
+              ? "Your connection request is waiting for approval."
+              : user.connection_status === "incoming"
+                ? `${user.display_name} asked to connect — approve to see each other’s posts.`
+                : "Connect, and once they approve you’ll see each other’s posts here."}
           </p>
         </div>
       ) : postsQuery.isLoading ? (

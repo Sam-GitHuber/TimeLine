@@ -2,7 +2,8 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "./api.js";
 
 // Shared paging for our DRF PageNumberPagination endpoints (feed, profile
-// posts, people, follow requests — all paginated at PAGE_SIZE on the backend).
+// posts, people, connection requests — all paginated at PAGE_SIZE on the
+// backend).
 //
 // Give it a queryKey and a function that fetches the *first* page; it follows
 // each response's `next` URL for the rest and hands back the flattened `items`
