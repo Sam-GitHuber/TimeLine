@@ -27,6 +27,9 @@ export default function PostCard({ post }) {
           className="font-mono text-xs tabular-nums text-ink-faint"
           dateTime={post.created_at}
           title={formatAbsoluteTime(post.created_at)}
+          // The visible text splits over two lines ("2:10" / "pm"); give
+          // assistive tech the full, unambiguous timestamp instead of "2:10pm".
+          aria-label={formatAbsoluteTime(post.created_at)}
         >
           {time}
           <br />
