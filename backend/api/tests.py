@@ -143,6 +143,32 @@ class FeedOrderingTests(APITestCase):
         ids = [p["id"] for p in resp.data["results"]]
         self.assertEqual(ids, [third.id, second.id, first.id])
 
+    def test_pagination_is_stable_when_posts_share_a_timestamp(self):
+        # Posts made in the same clock tick tie on created_at; without a unique
+        # tiebreaker in the ordering, paging can duplicate or skip a post at the
+        # page boundary. Force a shared created_at and page all the way through.
+        from django.utils import timezone
+
+        user = make_user("me@example.com")
+        self.client.force_authenticate(user)
+
+        total = 25  # > PAGE_SIZE (20), so at least two pages.
+        for i in range(total):
+            Post.objects.create(author=user, text=f"post {i}")
+        # auto_now_add ignores an assigned value, so pin the timestamp after.
+        Post.objects.all().update(created_at=timezone.now())
+
+        seen = []
+        url = FEED_URL
+        while url:
+            resp = self.client.get(url)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            seen.extend(p["id"] for p in resp.data["results"])
+            url = resp.data["next"]
+
+        self.assertEqual(len(seen), total)  # no post skipped
+        self.assertEqual(len(set(seen)), total)  # and none duplicated
+
 
 class FeedScopingTests(APITestCase):
     """The core promise: you see your own posts + those of people you follow,
@@ -176,6 +202,17 @@ class FeedScopingTests(APITestCase):
 
     def test_unfollowing_removes_their_posts_from_the_feed(self):
         self.client.delete(follow_url(self.followed))
+
+        resp = self.client.get(FEED_URL)
+        ids = {p["id"] for p in resp.data["results"]}
+        self.assertNotIn(self.followed_post.id, ids)
+        self.assertIn(self.my_post.id, ids)  # own posts stay
+
+    def test_deactivated_author_drops_out_of_the_feed(self):
+        # Deactivating a member (the maintainer's ban lever) must pull their
+        # posts from existing followers' feeds too — not just hide their profile.
+        self.followed.is_active = False
+        self.followed.save(update_fields=["is_active"])
 
         resp = self.client.get(FEED_URL)
         ids = {p["id"] for p in resp.data["results"]}

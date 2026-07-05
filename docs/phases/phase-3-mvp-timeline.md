@@ -87,9 +87,10 @@ Two real accounts can:
   `created_at` (indexed) mean the API always returns newest-first; the frontend
   renders in the order received. The old client-side `sortByNewest` helper was
   removed as dead code.
-- **Pagination.** DRF `PageNumberPagination`, `PAGE_SIZE = 20`. Feed and profile
-  pages use TanStack Query `useInfiniteQuery` with a "Load more" button that
-  follows the response's `next` URL (via `api.getPage`).
+- **Pagination.** DRF `PageNumberPagination`, `PAGE_SIZE = 20`. Every list view
+  pages through a shared `useInfiniteList` hook + `<LoadMoreButton>` that follows
+  the response's `next` URL (via `api.getPage`) — see the code-review-fixes note
+  below for why this is shared rather than per-page.
 - **TanStack Query added** (per `docs/SHARED.md`, the point earmarked for it):
   `QueryClientProvider` in `main.jsx`; mutations invalidate `["feed"]` /
   `["users"]` / `["user", id]` so following someone or posting refreshes the
@@ -125,3 +126,41 @@ Two real accounts can:
   `["followRequests"]` query cache). Live E2E confirmed: request stays hidden
   until approved, approval reveals feed + profile posts, non-followers see a
   private profile, cross-user approve is 404, unfollow revokes.
+
+### Code-review fixes (after the request/approval build)
+
+A high-effort review of the Phase 3 branch surfaced a cluster of issues, all now
+fixed with tests:
+
+- **The global pagination we added silently truncated the un-paginated lists.**
+  Turning on `PageNumberPagination` app-wide meant `/api/users/` and
+  `/api/follow-requests/` also paginate, but the People page, the Requests inbox,
+  and the nav badge each read only the first page (`data.results`). Past 20
+  members/requests, people became unfollowable and requests un-approvable, and
+  the badge capped at 20. Fixed by making all list consumers page: a shared
+  `useInfiniteList(queryKey, firstPageFn)` hook + `<LoadMoreButton>` (in
+  `hooks.js` / `components/`), now used by the feed, profile, People, and
+  Requests. The badge uses the paginator's `count`, not `results.length`. The
+  Requests list uses the `["followRequests", "list"]` child key so invalidating
+  `["followRequests"]` still refreshes both it and the badge.
+- **The feed leaked deactivated members' posts.** `is_active` was gated on the
+  profile/people endpoints but not the feed, so a deactivated (banned) member's
+  posts kept showing in existing followers' feeds. The "who can I see" rule now
+  lives in one `visible_posts(user, author=None)` helper used by both `FeedView`
+  and `UserPostsView` (so they can't drift), and it filters `author__is_active`.
+- **Feed pagination could duplicate/skip posts.** `Post.Meta.ordering` was
+  `["-created_at"]` with no unique tiebreaker; posts sharing a timestamp have no
+  stable order across page queries on Postgres. Now `["-created_at", "-id"]`
+  (migration `0003`).
+- **`getPage` broke behind a proxy / on a separate API domain.** It stripped
+  `BASE_URL` from DRF's absolute `next` URL by string replace, which no-ops when
+  the origins differ. Now it parses the URL and keeps only path+query, rebasing
+  onto `BASE_URL`.
+- **Profile "User not found" hid transient errors.** Any `getUser` failure
+  rendered the 404 state; a 5xx/network blip told the user a real account didn't
+  exist. Now only `status === 404` shows not-found; other errors show a
+  retryable state.
+- **Verification.** 41 backend + 39 frontend tests pass (added: deactivated-author
+  feed exclusion, same-timestamp pagination stability, cross-origin `getPage`,
+  People/Requests "Load more", compose-shows-post, 404-vs-transient, and a
+  restored strict reverse-chronological DOM assertion).

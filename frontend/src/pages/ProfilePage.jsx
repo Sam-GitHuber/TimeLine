@@ -1,8 +1,10 @@
 import { Link, useParams } from "react-router-dom";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
 import FollowButton from "../components/FollowButton.jsx";
 import PostCard from "../components/PostCard.jsx";
+import LoadMoreButton from "../components/LoadMoreButton.jsx";
+import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 
@@ -19,16 +21,14 @@ export default function ProfilePage() {
     queryFn: () => api.getUser(userId),
   });
 
-  const postsQuery = useInfiniteQuery({
-    queryKey: ["userPosts", userId],
-    queryFn: ({ pageParam }) =>
-      pageParam ? api.getPage(pageParam) : api.getUserPosts(userId),
-    initialPageParam: undefined,
-    getNextPageParam: (lastPage) => lastPage.next ?? undefined,
-  });
+  const postsQuery = useInfiniteList(["userPosts", userId], () =>
+    api.getUserPosts(userId)
+  );
 
-  // A user id that doesn't exist (or an inactive account) → 404 from the API.
-  if (userQuery.isError) {
+  // Only a real 404 means "no such user". A transient 5xx/network error must
+  // not masquerade as that — show a retryable error instead of telling someone
+  // a user who exists doesn't.
+  if (userQuery.isError && userQuery.error?.status === 404) {
     return (
       <div className="px-6 py-16 text-center">
         <p className="text-lg font-medium text-slate-800">User not found</p>
@@ -43,12 +43,29 @@ export default function ProfilePage() {
     );
   }
 
+  if (userQuery.isError) {
+    return (
+      <div className="px-6 py-16 text-center">
+        <p className="text-lg font-medium text-rose-600">
+          {userQuery.error?.message || "Couldn't load this profile."}
+        </p>
+        <button
+          type="button"
+          onClick={() => userQuery.refetch()}
+          className="mt-4 inline-block rounded-full border border-slate-300 px-5 py-1.5 font-medium text-slate-700 transition hover:bg-slate-100"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+
   if (userQuery.isLoading) {
     return <p className="px-6 py-10 text-center text-slate-500">Loading…</p>;
   }
 
   const user = userQuery.data;
-  const posts = postsQuery.data?.pages.flatMap((page) => page.results) ?? [];
+  const posts = postsQuery.items;
   // Private-by-default: unless it's you or an accepted follow, the backend
   // returns no posts, and we show a locked state explaining why.
   const canSeePosts = isSelf || user.follow_status === "accepted";
@@ -98,18 +115,7 @@ export default function ProfilePage() {
           {posts.map((post) => (
             <PostCard key={post.id} post={post} />
           ))}
-          {postsQuery.hasNextPage && (
-            <div className="flex justify-center py-4">
-              <button
-                type="button"
-                onClick={() => postsQuery.fetchNextPage()}
-                disabled={postsQuery.isFetchingNextPage}
-                className="rounded-full border border-slate-300 px-5 py-1.5 font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
-              >
-                {postsQuery.isFetchingNextPage ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
+          <LoadMoreButton query={postsQuery} />
         </>
       ) : (
         <p className="px-6 py-10 text-center text-slate-500">

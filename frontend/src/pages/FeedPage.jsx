@@ -1,6 +1,7 @@
-import { useInfiniteQuery } from "@tanstack/react-query";
 import ComposeBox from "../components/ComposeBox.jsx";
 import PostCard from "../components/PostCard.jsx";
+import LoadMoreButton from "../components/LoadMoreButton.jsx";
+import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 
 // The home timeline: your posts + everyone you follow, strictly newest-first.
@@ -8,23 +9,8 @@ import { api } from "../api.js";
 // the project. The backend already orders and scopes the feed; the frontend
 // just renders the pages, following the `next` URL to load older posts.
 export default function FeedPage() {
-  const {
-    data,
-    isLoading,
-    isError,
-    error,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: ["feed"],
-    queryFn: ({ pageParam }) =>
-      pageParam ? api.getPage(pageParam) : api.getFeed(),
-    initialPageParam: undefined,
-    getNextPageParam: (lastPage) => lastPage.next ?? undefined,
-  });
-
-  const posts = data?.pages.flatMap((page) => page.results) ?? [];
+  const feed = useInfiniteList(["feed"], api.getFeed);
+  const { items: posts, isLoading, isError, error } = feed;
 
   return (
     <div>
@@ -50,18 +36,7 @@ export default function FeedPage() {
         <PostCard key={post.id} post={post} />
       ))}
 
-      {hasNextPage && (
-        <div className="flex justify-center py-4">
-          <button
-            type="button"
-            onClick={() => fetchNextPage()}
-            disabled={isFetchingNextPage}
-            className="rounded-full border border-slate-300 px-5 py-1.5 font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
-          >
-            {isFetchingNextPage ? "Loading…" : "Load more"}
-          </button>
-        </div>
-      )}
+      <LoadMoreButton query={feed} />
     </div>
   );
 }

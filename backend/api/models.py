@@ -19,8 +19,11 @@ class Post(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
-        # Default to newest-first everywhere this model is queried.
-        ordering = ["-created_at"]
+        # Default to newest-first everywhere this model is queried. The ``-id``
+        # tiebreaker keeps pagination stable: posts sharing a ``created_at``
+        # (same clock tick) get a deterministic total order, so paging through
+        # the feed can't duplicate or skip a post at a page boundary.
+        ordering = ["-created_at", "-id"]
 
     def __str__(self):
         preview = self.text[:40] + ("…" if len(self.text) > 40 else "")

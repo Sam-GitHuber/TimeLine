@@ -30,6 +30,25 @@ def accepted_followee_ids(user):
     )
 
 
+def visible_posts(user, author=None):
+    """The posts ``user`` is allowed to see, newest-first.
+
+    Private-by-default, in one place so the feed and a profile can't drift: a
+    post is visible only if ``user`` wrote it or has an *accepted* follow on its
+    author, and only if that author is still active (a deactivated/banned member
+    disappears from feeds too, not just from the people list). Pass ``author``
+    to narrow to a single person's posts (the profile page) — the same rule then
+    yields their posts if allowed, or nothing if not.
+    """
+    qs = Post.objects.filter(
+        Q(author=user) | Q(author__in=accepted_followee_ids(user)),
+        author__is_active=True,
+    ).select_related("author")
+    if author is not None:
+        qs = qs.filter(author=author)
+    return qs
+
+
 def follow_status_annotation(user):
     """Annotate a User queryset with ``follow_status`` — the requesting user's
     follow toward each row: "accepted", "pending", or "none"."""
@@ -66,10 +85,7 @@ class FeedView(generics.ListAPIView):
     serializer_class = PostSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        return Post.objects.filter(
-            Q(author=user) | Q(author__in=accepted_followee_ids(user))
-        ).select_related("author")
+        return visible_posts(self.request.user)
 
 
 class PostCreateView(generics.CreateAPIView):
@@ -93,15 +109,11 @@ class UserPostsView(generics.ListAPIView):
     serializer_class = PostSerializer
 
     def get_queryset(self):
-        # 404 for an unknown/inactive user rather than a silently empty list.
+        # 404 for an unknown/inactive user rather than a silently empty list;
+        # visible_posts then applies the shared private-by-default gate (returns
+        # their posts if we're allowed to see them, otherwise nothing).
         author = get_object_or_404(User, pk=self.kwargs["pk"], is_active=True)
-        me = self.request.user
-        allowed = author == me or Follow.objects.filter(
-            follower=me, followee=author, status=ACCEPTED
-        ).exists()
-        if not allowed:
-            return Post.objects.none()
-        return Post.objects.filter(author=author).select_related("author")
+        return visible_posts(self.request.user, author=author)
 
 
 class UserListView(generics.ListAPIView):

@@ -103,9 +103,14 @@ export const api = {
   // The home feed: your posts + those you follow, newest-first, paginated.
   getFeed: () => request("/api/feed/"),
 
-  // Follow a paginated response's `next` URL. DRF returns an absolute URL, so
-  // strip the origin back to a path our request() helper can use.
-  getPage: (nextUrl) => request(nextUrl.replace(BASE_URL, "")),
+  // Follow a paginated response's `next` URL. DRF returns an absolute URL built
+  // from the request host, which needn't match BASE_URL (behind a proxy, or a
+  // separate API domain in prod). Take just the path + query so request()
+  // prepends our own BASE_URL regardless of the origin DRF used.
+  getPage: (nextUrl) => {
+    const url = new URL(nextUrl, BASE_URL);
+    return request(url.pathname + url.search);
+  },
 
   createPost: (text) =>
     request("/api/posts/", { method: "POST", body: { text } }),

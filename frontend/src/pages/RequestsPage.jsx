@@ -1,6 +1,8 @@
 import { Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
+import LoadMoreButton from "../components/LoadMoreButton.jsx";
+import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 
 // Your inbox of incoming follow requests: people who've asked to follow you and
@@ -9,10 +11,11 @@ import { api } from "../api.js";
 export default function RequestsPage() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["followRequests"],
-    queryFn: api.getFollowRequests,
-  });
+  // Paginated so every request is reachable, not just the first page. Uses a
+  // child of the ["followRequests"] key the nav badge holds, so invalidating
+  // ["followRequests"] (below, and from FollowButton) refreshes both.
+  const query = useInfiniteList(["followRequests", "list"], api.getFollowRequests);
+  const { items: requests, isLoading, isError, error } = query;
 
   const decide = useMutation({
     // `act` is api.approveRequest or api.rejectRequest.
@@ -23,8 +26,6 @@ export default function RequestsPage() {
       queryClient.invalidateQueries({ queryKey: ["feed"] });
     },
   });
-
-  const requests = data?.results ?? [];
 
   return (
     <div>
@@ -80,6 +81,8 @@ export default function RequestsPage() {
           </button>
         </div>
       ))}
+
+      <LoadMoreButton query={query} />
     </div>
   );
 }

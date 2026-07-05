@@ -19,7 +19,9 @@ export default function Layout() {
     queryKey: ["followRequests"],
     queryFn: api.getFollowRequests,
   });
-  const pendingCount = requestsData?.results?.length ?? 0;
+  // `count` is the paginator's true total; `results.length` would cap at one
+  // page (PAGE_SIZE) and under-report once there are more than a page of them.
+  const pendingCount = requestsData?.count ?? 0;
 
   // The Django admin lives on the API host, not the SPA — build the link from
   // the same base URL the API client uses so it's correct in every environment.
