@@ -1,15 +1,15 @@
 import { Link } from "react-router-dom";
 import Avatar from "../components/Avatar.jsx";
-import FollowButton from "../components/FollowButton.jsx";
+import ConnectButton from "../components/ConnectButton.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 
-// A minimal "find people to follow" list: every other member, each with a
-// Follow/Unfollow toggle. Search and richer discovery can come later; for a
-// small family app a plain list is enough (see phase-3 Definition of done).
-// The list is paginated, so we follow the `next` URL to reach members past the
-// first page — otherwise the 21st+ member could never be found or followed.
+// A minimal "find people to connect with" list: every other member, each with a
+// Connect toggle. Search and richer discovery can come later; for a small
+// family app a plain list is enough (see phase-3 Definition of done). The list
+// is paginated, so we follow the `next` URL to reach members past the first
+// page — otherwise the 21st+ member could never be found or connected with.
 export default function FindPeoplePage() {
   const query = useInfiniteList(["users"], api.listUsers);
   const { items: users, isLoading, isError, error } = query;
@@ -50,7 +50,10 @@ export default function FindPeoplePage() {
           >
             {person.display_name}
           </Link>
-          <FollowButton userId={person.id} followStatus={person.follow_status} />
+          <ConnectButton
+            userId={person.id}
+            connectionStatus={person.connection_status}
+          />
         </div>
       ))}
 

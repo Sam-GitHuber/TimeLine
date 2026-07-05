@@ -7,20 +7,22 @@ import { api } from "./api.js";
 
 // The pages now fetch from the real API, so we mock the api module and assert
 // the app renders what the backend returns and calls the right endpoints on
-// actions. Feed ordering + follow-scoping themselves are enforced (and tested)
-// on the backend; here we check the frontend renders the given order and wires
-// compose/follow to the API.
+// actions. Feed ordering + connection-scoping themselves are enforced (and
+// tested) on the backend; here we check the frontend renders the given order
+// and wires compose/connect/comment to the API.
 vi.mock("./api.js", () => ({
   api: {
     getFeed: vi.fn(),
     getPage: vi.fn(),
     createPost: vi.fn(),
+    getComments: vi.fn(),
+    addComment: vi.fn(),
     listUsers: vi.fn(),
     getUser: vi.fn(),
     getUserPosts: vi.fn(),
-    follow: vi.fn(),
-    unfollow: vi.fn(),
-    getFollowRequests: vi.fn(),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    getConnectionRequests: vi.fn(),
     approveRequest: vi.fn(),
     rejectRequest: vi.fn(),
   },
@@ -49,9 +51,14 @@ beforeEach(() => {
   // Sensible empty defaults; individual tests override as needed.
   api.getFeed.mockResolvedValue(page([]));
   api.listUsers.mockResolvedValue(page([]));
-  api.getUser.mockResolvedValue({ id: 2, display_name: "Priya", follow_status: "none" });
+  api.getUser.mockResolvedValue({
+    id: 2,
+    display_name: "Priya",
+    connection_status: "none",
+  });
   api.getUserPosts.mockResolvedValue(page([]));
-  api.getFollowRequests.mockResolvedValue(page([]));
+  api.getComments.mockResolvedValue([]);
+  api.getConnectionRequests.mockResolvedValue(page([]));
 });
 
 describe("Feed page", () => {
@@ -127,11 +134,11 @@ describe("Feed page", () => {
 });
 
 describe("Profile page", () => {
-  it("shows only the subject's posts (accepted follow), not posts from elsewhere", async () => {
+  it("shows only the subject's posts (connected), not posts from elsewhere", async () => {
     api.getUser.mockResolvedValue({
       id: 2,
       display_name: "Priya",
-      follow_status: "accepted",
+      connection_status: "connected",
     });
     api.getUserPosts.mockResolvedValue(
       page([post(1, 2, "Priya", "Booked flights", "2026-06-30T21:00:00Z")])
@@ -152,11 +159,11 @@ describe("Profile page", () => {
     expect(api.getUserPosts).toHaveBeenCalledWith(2);
   });
 
-  it("hides posts behind a private message when you don't follow them", async () => {
+  it("hides posts behind a private message when you aren't connected", async () => {
     api.getUser.mockResolvedValue({
       id: 2,
       display_name: "Priya",
-      follow_status: "none",
+      connection_status: "none",
     });
 
     renderAt("/u/2");
@@ -185,36 +192,40 @@ describe("Profile page", () => {
     expect(screen.queryByText("User not found")).not.toBeInTheDocument();
   });
 
-  it("does not show a follow button on your own profile", async () => {
-    api.getUser.mockResolvedValue({ id: 1, display_name: "you", follow_status: "none" });
+  it("does not show a connect button on your own profile", async () => {
+    api.getUser.mockResolvedValue({
+      id: 1,
+      display_name: "you",
+      connection_status: "none",
+    });
     // fakeUser.pk is 1, so /u/1 is your own profile.
     renderAt("/u/1");
     await screen.findByRole("heading", { name: "you" });
     expect(
-      screen.queryByRole("button", { name: /follow/i })
+      screen.queryByRole("button", { name: /connect/i })
     ).not.toBeInTheDocument();
   });
 });
 
 describe("People page", () => {
-  it("lists other members and sends a follow request on click", async () => {
+  it("lists other members and sends a connection request on click", async () => {
     const user = userEvent.setup();
     api.listUsers.mockResolvedValue(
-      page([{ id: 2, display_name: "Priya", follow_status: "none" }])
+      page([{ id: 2, display_name: "Priya", connection_status: "none" }])
     );
-    api.follow.mockResolvedValue({ follow_status: "pending" });
+    api.connect.mockResolvedValue({ connection_status: "requested" });
 
     renderAt("/people");
 
     await screen.findByText("Priya");
-    await user.click(screen.getByRole("button", { name: "Follow" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
-    await waitFor(() => expect(api.follow).toHaveBeenCalledWith(2));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledWith(2));
   });
 
   it("shows a pending request as 'Requested'", async () => {
     api.listUsers.mockResolvedValue(
-      page([{ id: 3, display_name: "Tom", follow_status: "pending" }])
+      page([{ id: 3, display_name: "Tom", connection_status: "requested" }])
     );
 
     renderAt("/people");
@@ -224,16 +235,28 @@ describe("People page", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows an incoming request as 'Approve'", async () => {
+    api.listUsers.mockResolvedValue(
+      page([{ id: 4, display_name: "Ada", connection_status: "incoming" }])
+    );
+
+    renderAt("/people");
+
+    expect(
+      await screen.findByRole("button", { name: "Approve" })
+    ).toBeInTheDocument();
+  });
+
   it("reaches members past the first page via 'Load more'", async () => {
     const user = userEvent.setup();
     api.listUsers.mockResolvedValue(
       page(
-        [{ id: 2, display_name: "Priya", follow_status: "none" }],
+        [{ id: 2, display_name: "Priya", connection_status: "none" }],
         "http://localhost:8000/api/users/?page=2"
       )
     );
     api.getPage.mockResolvedValue(
-      page([{ id: 3, display_name: "Tom", follow_status: "none" }])
+      page([{ id: 3, display_name: "Tom", connection_status: "none" }])
     );
 
     renderAt("/people");
@@ -249,7 +272,7 @@ describe("People page", () => {
 describe("Requests page", () => {
   it("lists incoming requests and approves one on click", async () => {
     const user = userEvent.setup();
-    api.getFollowRequests.mockResolvedValue(
+    api.getConnectionRequests.mockResolvedValue(
       page([
         {
           id: 55,
@@ -270,7 +293,7 @@ describe("Requests page", () => {
 
   it("reaches requests past the first page via 'Load more'", async () => {
     const user = userEvent.setup();
-    api.getFollowRequests.mockResolvedValue(
+    api.getConnectionRequests.mockResolvedValue(
       page(
         [
           {
@@ -279,7 +302,7 @@ describe("Requests page", () => {
             created_at: "2026-07-04T08:00:00Z",
           },
         ],
-        "http://localhost:8000/api/follow-requests/?page=2"
+        "http://localhost:8000/api/connection-requests/?page=2"
       )
     );
     api.getPage.mockResolvedValue(
@@ -321,13 +344,80 @@ describe("Admin link", () => {
   });
 });
 
+describe("Comments", () => {
+  const feedPost = post(
+    1,
+    2,
+    "Priya",
+    "Sunrise over the harbour",
+    "2026-07-04T08:00:00Z"
+  );
+
+  function comment(id, name, text, replies = []) {
+    return {
+      id,
+      author: { id: 2, display_name: name },
+      parent: null,
+      text,
+      created_at: "2026-07-04T09:00:00Z",
+      replies,
+    };
+  }
+
+  it("lazily loads and shows the comment tree when expanded", async () => {
+    const user = userEvent.setup();
+    api.getFeed.mockResolvedValue(page([feedPost]));
+    api.getComments.mockResolvedValue([comment(10, "Priya", "Lovely shot")]);
+
+    renderAt("/");
+    await screen.findByText("Sunrise over the harbour");
+
+    // Not fetched until you open the thread — the feed shouldn't fire a request
+    // per post on load.
+    expect(api.getComments).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Comments" }));
+
+    expect(await screen.findByText("Lovely shot")).toBeInTheDocument();
+    expect(api.getComments).toHaveBeenCalledWith(1);
+  });
+
+  it("posts a new top-level comment", async () => {
+    const user = userEvent.setup();
+    api.getFeed.mockResolvedValue(page([feedPost]));
+    api.getComments.mockResolvedValue([]);
+    api.addComment.mockResolvedValue({ id: 11 });
+
+    renderAt("/");
+    await screen.findByText("Sunrise over the harbour");
+    await user.click(screen.getByRole("button", { name: "Comments" }));
+
+    await user.type(
+      await screen.findByPlaceholderText("Write a comment…"),
+      "Where is this?"
+    );
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+
+    await waitFor(() =>
+      expect(api.addComment).toHaveBeenCalledWith(1, {
+        text: "Where is this?",
+        parent: null,
+      })
+    );
+  });
+});
+
 describe("Navigation", () => {
   it("navigates from the feed to a profile via a post author link", async () => {
     const user = userEvent.setup();
     api.getFeed.mockResolvedValue(
       page([post(1, 2, "Priya", "Sunrise over the harbour", "2026-07-04T08:00:00Z")])
     );
-    api.getUser.mockResolvedValue({ id: 2, display_name: "Priya", follow_status: "accepted" });
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
     api.getUserPosts.mockResolvedValue(
       page([post(1, 2, "Priya", "Sunrise over the harbour", "2026-07-04T08:00:00Z")])
     );

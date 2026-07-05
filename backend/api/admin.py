@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Follow, Post
+from .models import Comment, Connection, Post
 
 
 @admin.register(Post)
@@ -23,10 +23,25 @@ class PostAdmin(admin.ModelAdmin):
         return obj.text[:60] + ("…" if len(obj.text) > 60 else "")
 
 
-@admin.register(Follow)
-class FollowAdmin(admin.ModelAdmin):
-    list_display = ("id", "follower", "followee", "status", "created_at")
-    list_select_related = ("follower", "followee")
+@admin.register(Connection)
+class ConnectionAdmin(admin.ModelAdmin):
+    list_display = ("id", "requester", "requestee", "status", "created_at")
+    list_select_related = ("requester", "requestee")
     list_filter = ("status",)
-    search_fields = ("follower__email", "followee__email")
+    search_fields = ("requester__email", "requestee__email")
     ordering = ("-created_at",)
+
+
+@admin.register(Comment)
+class CommentAdmin(admin.ModelAdmin):
+    """Lets the maintainer read/moderate/delete comments from the admin."""
+
+    list_display = ("id", "author", "post", "parent", "short_text", "created_at")
+    list_select_related = ("author", "post", "parent")
+    search_fields = ("text", "author__email")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+
+    @admin.display(description="text")
+    def short_text(self, obj):
+        return obj.text[:60] + ("…" if len(obj.text) > 60 else "")

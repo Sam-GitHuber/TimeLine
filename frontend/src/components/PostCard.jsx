@@ -1,12 +1,18 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import Avatar from "./Avatar.jsx";
+import CommentThread from "./CommentThread.jsx";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
-// A single post in a feed: author, timestamp, and text. The author now comes
-// embedded in the post from the API ({ id, display_name }), and posts are
-// identified by numeric user id in profile links (there is no username).
+// A single post in a feed: author, timestamp, text, and a collapsible comment
+// thread. The author comes embedded in the post from the API
+// ({ id, display_name }), and posts are identified by numeric user id in
+// profile links (there is no username).
 export default function PostCard({ post }) {
   const author = post.author;
+  // Comments load lazily: we only fetch a post's thread once you open it, so
+  // scrolling the feed doesn't fire a request per post.
+  const [showComments, setShowComments] = useState(false);
 
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
@@ -43,6 +49,17 @@ export default function PostCard({ post }) {
           <p className="mt-1 whitespace-pre-wrap break-words text-slate-800">
             {post.text}
           </p>
+
+          <button
+            type="button"
+            onClick={() => setShowComments((v) => !v)}
+            aria-expanded={showComments}
+            className="mt-2 text-sm font-medium text-slate-500 transition hover:text-slate-800"
+          >
+            {showComments ? "Hide comments" : "Comments"}
+          </button>
+
+          {showComments && <CommentThread postId={post.id} />}
         </div>
       </div>
     </article>

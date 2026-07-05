@@ -7,6 +7,11 @@ urlpatterns = [
     # Timeline
     path("feed/", views.FeedView.as_view(), name="feed"),
     path("posts/", views.PostCreateView.as_view(), name="post-create"),
+    path(
+        "posts/<int:pk>/comments/",
+        views.PostCommentsView.as_view(),
+        name="post-comments",
+    ),
     # People
     path("users/", views.UserListView.as_view(), name="user-list"),
     path("users/<int:pk>/", views.UserDetailView.as_view(), name="user-detail"),
@@ -16,24 +21,24 @@ urlpatterns = [
         name="user-posts",
     ),
     path(
-        "users/<int:pk>/follow/",
-        views.FollowView.as_view(),
-        name="user-follow",
+        "users/<int:pk>/connect/",
+        views.ConnectView.as_view(),
+        name="user-connect",
     ),
-    # Incoming follow requests (people asking to follow you) + approve/reject.
+    # Incoming connection requests (people asking to connect) + approve/reject.
     path(
-        "follow-requests/",
-        views.FollowRequestListView.as_view(),
-        name="follow-request-list",
-    ),
-    path(
-        "follow-requests/<int:pk>/approve/",
-        views.FollowRequestActionView.as_view(action="approve"),
-        name="follow-request-approve",
+        "connection-requests/",
+        views.ConnectionRequestListView.as_view(),
+        name="connection-request-list",
     ),
     path(
-        "follow-requests/<int:pk>/reject/",
-        views.FollowRequestActionView.as_view(action="reject"),
-        name="follow-request-reject",
+        "connection-requests/<int:pk>/approve/",
+        views.ConnectionRequestActionView.as_view(action="approve"),
+        name="connection-request-approve",
+    ),
+    path(
+        "connection-requests/<int:pk>/reject/",
+        views.ConnectionRequestActionView.as_view(action="reject"),
+        name="connection-request-reject",
     ),
 ]

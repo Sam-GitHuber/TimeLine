@@ -100,7 +100,8 @@ export const api = {
 
   // --- Timeline (Phase 3) --------------------------------------------------
 
-  // The home feed: your posts + those you follow, newest-first, paginated.
+  // The home feed: your posts + everyone you're connected with, newest-first,
+  // paginated.
   getFeed: () => request("/api/feed/"),
 
   // Follow a paginated response's `next` URL. DRF returns an absolute URL built
@@ -115,25 +116,36 @@ export const api = {
   createPost: (text) =>
     request("/api/posts/", { method: "POST", body: { text } }),
 
-  // People to follow — everyone else, each with your follow_status.
+  // The visible comment tree for a post (already pruned server-side to people
+  // you're connected with), and adding a comment/reply.
+  getComments: (postId) => request(`/api/posts/${postId}/comments/`),
+
+  addComment: (postId, { text, parent = null }) =>
+    request(`/api/posts/${postId}/comments/`, {
+      method: "POST",
+      body: parent ? { text, parent } : { text },
+    }),
+
+  // People to connect with — everyone else, each with your connection_status.
   listUsers: () => request("/api/users/"),
 
   getUser: (id) => request(`/api/users/${id}/`),
 
   getUserPosts: (id) => request(`/api/users/${id}/posts/`),
 
-  // Follows are private: this sends a *request* the other person must approve.
-  follow: (id) => request(`/api/users/${id}/follow/`, { method: "POST" }),
+  // Connections are private + mutual: this sends a *request* the other person
+  // must approve (or, if they already requested you, it accepts theirs).
+  connect: (id) => request(`/api/users/${id}/connect/`, { method: "POST" }),
 
-  // Cancels a pending request or unfollows an accepted follow (same endpoint).
-  unfollow: (id) => request(`/api/users/${id}/follow/`, { method: "DELETE" }),
+  // Cancels a pending request or ends an accepted connection (same endpoint).
+  disconnect: (id) => request(`/api/users/${id}/connect/`, { method: "DELETE" }),
 
-  // Incoming follow requests (people asking to follow you) + approve/reject.
-  getFollowRequests: () => request("/api/follow-requests/"),
+  // Incoming connection requests (people asking to connect) + approve/reject.
+  getConnectionRequests: () => request("/api/connection-requests/"),
 
   approveRequest: (id) =>
-    request(`/api/follow-requests/${id}/approve/`, { method: "POST" }),
+    request(`/api/connection-requests/${id}/approve/`, { method: "POST" }),
 
   rejectRequest: (id) =>
-    request(`/api/follow-requests/${id}/reject/`, { method: "POST" }),
+    request(`/api/connection-requests/${id}/reject/`, { method: "POST" }),
 };

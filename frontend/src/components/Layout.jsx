@@ -12,12 +12,12 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  // Count of pending follow requests, for the nav badge. Shares the
-  // ["followRequests"] cache key with the Requests page, so approving/rejecting
-  // there updates this badge automatically.
+  // Count of pending connection requests, for the nav badge. Shares the
+  // ["connectionRequests"] cache key with the Requests page, so
+  // approving/rejecting there updates this badge automatically.
   const { data: requestsData } = useQuery({
-    queryKey: ["followRequests"],
-    queryFn: api.getFollowRequests,
+    queryKey: ["connectionRequests"],
+    queryFn: api.getConnectionRequests,
   });
   // `count` is the paginator's true total; `results.length` would cap at one
   // page (PAGE_SIZE) and under-report once there are more than a page of them.
