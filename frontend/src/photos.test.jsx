@@ -49,38 +49,95 @@ describe("Avatar", () => {
   });
 });
 
+function galleryPost(imageCount = 2) {
+  return {
+    id: 5,
+    author: { id: 2, display_name: "Priya" },
+    text: "Beach day",
+    created_at: "2026-07-04T08:00:00Z",
+    images: Array.from({ length: imageCount }, (_, i) => ({
+      id: i + 1,
+      image: `http://x/full${i + 1}.jpg`,
+      thumbnail: `http://x/thumb${i + 1}.jpg`,
+      width: 800,
+      height: 600,
+    })),
+  };
+}
+
 describe("PostCard photo gallery", () => {
-  it("renders a post's images (thumbnail shown, linking to the full image)", () => {
-    const post = {
-      id: 5,
-      author: { id: 2, display_name: "Priya" },
-      text: "Beach day",
-      created_at: "2026-07-04T08:00:00Z",
-      images: [
-        {
-          id: 1,
-          image: "http://x/full1.jpg",
-          thumbnail: "http://x/thumb1.jpg",
-          width: 800,
-          height: 600,
-        },
-        {
-          id: 2,
-          image: "http://x/full2.jpg",
-          thumbnail: "http://x/thumb2.jpg",
-          width: 800,
-          height: 600,
-        },
-      ],
-    };
-    renderWithAuth(<PostCard post={post} />);
+  it("renders a post's images as clickable thumbnails", () => {
+    renderWithAuth(<PostCard post={galleryPost(2)} />);
 
     const imgs = document.querySelectorAll("img");
     expect(imgs).toHaveLength(2);
     expect(imgs[0]).toHaveAttribute("src", "http://x/thumb1.jpg");
-    // The thumbnail links to the full-size original.
-    const links = document.querySelectorAll('a[href="http://x/full1.jpg"]');
-    expect(links).toHaveLength(1);
+    // Each thumbnail is a button that opens the viewer.
+    expect(
+      screen.getByRole("button", { name: "View photo 1 of 2" })
+    ).toBeInTheDocument();
+  });
+});
+
+describe("Lightbox", () => {
+  it("opens on the clicked photo and flips through with the arrows", async () => {
+    const user = userEvent.setup();
+    renderWithAuth(<PostCard post={galleryPost(3)} />);
+
+    await user.click(screen.getByRole("button", { name: "View photo 2 of 3" }));
+
+    // Opens showing the full-size version of the clicked photo (#2).
+    const dialog = screen.getByRole("dialog", { name: "Photo viewer" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByAltText("Photo 2 of 3")).toHaveAttribute(
+      "src",
+      "http://x/full2.jpg"
+    );
+
+    // Next → photo 3, then wraps to photo 1.
+    await user.click(screen.getByRole("button", { name: "Next photo" }));
+    expect(screen.getByAltText("Photo 3 of 3")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Next photo" }));
+    expect(screen.getByAltText("Photo 1 of 3")).toBeInTheDocument();
+
+    // Previous wraps back to photo 3.
+    await user.click(screen.getByRole("button", { name: "Previous photo" }));
+    expect(screen.getByAltText("Photo 3 of 3")).toBeInTheDocument();
+  });
+
+  it("navigates with the arrow keys and closes on Escape", async () => {
+    const user = userEvent.setup();
+    renderWithAuth(<PostCard post={galleryPost(2)} />);
+
+    await user.click(screen.getByRole("button", { name: "View photo 1 of 2" }));
+    expect(screen.getByAltText("Photo 1 of 2")).toBeInTheDocument();
+
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByAltText("Photo 2 of 2")).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("closes on a click of the backdrop", async () => {
+    const user = userEvent.setup();
+    renderWithAuth(<PostCard post={galleryPost(2)} />);
+
+    await user.click(screen.getByRole("button", { name: "View photo 1 of 2" }));
+    const dialog = screen.getByRole("dialog", { name: "Photo viewer" });
+    await user.click(dialog);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows no arrows for a single-photo post", async () => {
+    const user = userEvent.setup();
+    renderWithAuth(<PostCard post={galleryPost(1)} />);
+
+    await user.click(screen.getByRole("button", { name: "View photo 1 of 1" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Next photo" })
+    ).not.toBeInTheDocument();
   });
 });
 

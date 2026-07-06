@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import CommentThread from "./CommentThread.jsx";
+import Lightbox from "./Lightbox.jsx";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
 // A single post as an entry on the timeline: a node on the line, its clock time
@@ -13,6 +14,8 @@ export default function PostCard({ post }) {
   // Comments load lazily: we only fetch a post's thread once you open it, so
   // scrolling the feed doesn't fire a request per post.
   const [showComments, setShowComments] = useState(false);
+  // Which photo the lightbox is showing; null = closed.
+  const [lightboxIndex, setLightboxIndex] = useState(null);
 
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
@@ -59,13 +62,13 @@ export default function PostCard({ post }) {
               post.images.length === 1 ? "grid-cols-1" : "grid-cols-2"
             }`}
           >
-            {post.images.map((image) => (
-              <a
+            {post.images.map((image, i) => (
+              <button
                 key={image.id}
-                href={image.image}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block overflow-hidden rounded-xl border border-line"
+                type="button"
+                onClick={() => setLightboxIndex(i)}
+                aria-label={`View photo ${i + 1} of ${post.images.length}`}
+                className="block cursor-zoom-in overflow-hidden rounded-xl border border-line"
               >
                 <img
                   src={image.thumbnail}
@@ -77,13 +80,22 @@ export default function PostCard({ post }) {
                   // share a uniform square grid so the layout stays tidy.
                   className={
                     post.images.length === 1
-                      ? "max-h-[28rem] w-full object-cover"
-                      : "aspect-square w-full object-cover"
+                      ? "max-h-[28rem] w-full object-cover transition hover:opacity-95"
+                      : "aspect-square w-full object-cover transition hover:opacity-95"
                   }
                 />
-              </a>
+              </button>
             ))}
           </div>
+        )}
+
+        {lightboxIndex !== null && (
+          <Lightbox
+            images={post.images}
+            index={lightboxIndex}
+            onClose={() => setLightboxIndex(null)}
+            onIndexChange={setLightboxIndex}
+          />
         )}
 
         <div className="mt-3 -ml-2">
