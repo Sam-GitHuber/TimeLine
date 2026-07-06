@@ -8,11 +8,18 @@ from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import ValidationError
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Comment, Connection, Post
+from .imaging import (
+    MAX_IMAGES_PER_POST,
+    POST_IMAGE_MAX_EDGE,
+    POST_THUMB_EDGE,
+    process_image,
+)
+from .models import Comment, Connection, Post, PostImage
 from .serializers import (
     CommentCreateSerializer,
     CommentSerializer,
@@ -57,10 +64,16 @@ def visible_posts(user, author=None, connected_ids=None):
     """
     if connected_ids is None:
         connected_ids = connected_user_ids(user)
-    qs = Post.objects.filter(
-        Q(author=user) | Q(author__in=connected_ids),
-        author__is_active=True,
-    ).select_related("author")
+    qs = (
+        Post.objects.filter(
+            Q(author=user) | Q(author__in=connected_ids),
+            author__is_active=True,
+        )
+        .select_related("author")
+        # A post can carry several photos; prefetch so rendering the feed
+        # doesn't fire one query per post for its images.
+        .prefetch_related("images")
+    )
     if author is not None:
         qs = qs.filter(author=author)
     return qs
@@ -162,13 +175,63 @@ class FeedView(generics.ListAPIView):
 
 
 class PostCreateView(generics.CreateAPIView):
-    """Create a post as the logged-in user."""
+    """Create a post as the logged-in user, optionally with photos.
+
+    Accepts JSON (text only) or multipart (text + repeated ``images`` files).
+    Every uploaded file is validated + downscaled + metadata-stripped by
+    ``api.imaging.process_image`` *before* anything is written, so a bad file
+    400s without creating a half-post, and no EXIF/GPS reaches storage. A post
+    must have text or at least one photo.
+    """
 
     serializer_class = PostSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
-    def perform_create(self, serializer):
-        # Author comes from the session, never the request body.
-        serializer.save(author=self.request.user)
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        files = request.FILES.getlist("images")
+        text = serializer.validated_data.get("text", "")
+        if not text and not files:
+            raise ValidationError(
+                {"detail": "A post needs some text or at least one photo."}
+            )
+        if len(files) > MAX_IMAGES_PER_POST:
+            raise ValidationError(
+                {"images": f"A post can have at most {MAX_IMAGES_PER_POST} photos."}
+            )
+
+        # Process every file up front: if any is invalid we bail here (400)
+        # before creating the post, so there's never an orphaned text row.
+        processed = [
+            process_image(
+                f, max_edge=POST_IMAGE_MAX_EDGE, thumb_edge=POST_THUMB_EDGE
+            )
+            for f in files
+        ]
+
+        with transaction.atomic():
+            # Author comes from the session, never the request body.
+            post = serializer.save(author=request.user)
+            for item in processed:
+                image = PostImage(
+                    post=post, width=item["width"], height=item["height"]
+                )
+                image.image.save(
+                    f"image{item['ext']}", item["image"], save=False
+                )
+                image.thumbnail.save(
+                    f"thumb{item['ext']}", item["thumbnail"], save=False
+                )
+                image.save()
+
+        # Re-serialize so the response carries the created images (with URLs).
+        out = self.get_serializer(post)
+        headers = self.get_success_headers(out.data)
+        return Response(
+            out.data, status=status.HTTP_201_CREATED, headers=headers
+        )
 
 
 class UserPostsView(generics.ListAPIView):

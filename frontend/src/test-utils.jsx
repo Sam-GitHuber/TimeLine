@@ -10,6 +10,8 @@ export const fakeUser = {
   first_name: "",
   last_name: "",
   display_name: "you",
+  bio: "",
+  avatar_thumb: null,
   is_staff: false,
 };
 
@@ -25,6 +27,7 @@ export function renderWithAuth(ui, { route = "/", auth = {} } = {}) {
     login: async () => {},
     logout: async () => {},
     register: async () => {},
+    refreshUser: async () => fakeUser,
     ...auth,
   };
   const queryClient = new QueryClient({

@@ -15,6 +15,8 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
@@ -34,3 +36,9 @@ urlpatterns = [
     # Lets the SPA obtain a CSRF cookie on load.
     path("api/auth/csrf/", csrf, name="csrf"),
 ]
+
+# Serve user-uploaded media in development only. In production a real web
+# server / object storage handles this (Phase 7); Django's static() helper is a
+# no-op unless DEBUG is on, so this is safe to leave here.
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

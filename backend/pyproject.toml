@@ -7,8 +7,17 @@ dependencies = [
     "django>=5.1,<5.2",
     "django-allauth>=65.0",
     "django-cors-headers>=4.9.0",
+    # django-storages: the storage abstraction behind media files. Local disk
+    # now (through the Phase 7 home-server beta); flipping to an S3 bucket at the
+    # AWS migration (Phase 7b) is a config change, not a code change. The S3
+    # backend's own dependency (boto3) is only pulled in then.
+    "django-storages>=1.14",
     "djangorestframework>=3.17.1",
     "djangorestframework-simplejwt>=5.3",
+    # Pillow: image validation + thumbnail/downscale for post photos & avatars
+    # (Phase 4). We decode every upload with it rather than trusting the
+    # extension, and re-encode to strip EXIF (incl. GPS) — see api/imaging.py.
+    "pillow>=11.0",
     "psycopg[binary]>=3.3.4",
     "requests>=2.34.2",
 ]

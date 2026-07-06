@@ -180,6 +180,41 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 
+# User-uploaded files (post photos, avatars — Phase 4).
+# In development these live in a local folder (bind-mounted / gitignored) and are
+# served by Django (see config/urls.py, DEBUG-only). Production will move them to
+# private object storage with auth-gated/signed URLs — see Phase 7. Filenames get
+# a UUID (see api/imaging.py) so a raw media URL can't be guessed by walking ids.
+MEDIA_URL = "media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
+# Where media files actually live, chosen by config so the backend can be
+# swapped without touching model/view code (django-storages). Local disk now —
+# and through the Phase 7 home-server beta — flipping to an S3 bucket at the AWS
+# migration (Phase 7b) by setting DJANGO_MEDIA_STORAGE=s3 and the bucket env
+# vars below (which pulls in django-storages' S3 backend + boto3 at that point).
+if os.environ.get("DJANGO_MEDIA_STORAGE") == "s3":
+    _default_storage = {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": os.environ.get("AWS_STORAGE_BUCKET_NAME", ""),
+            "region_name": os.environ.get("AWS_S3_REGION_NAME", ""),
+            # Private by default: objects aren't world-readable; the app serves
+            # them via signed URLs. Keeps real friends'/family's photos private.
+            "default_acl": "private",
+            "querystring_auth": True,
+        },
+    }
+else:
+    _default_storage = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
+
+STORAGES = {
+    "default": _default_storage,
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 

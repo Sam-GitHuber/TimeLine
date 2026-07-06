@@ -1,4 +1,10 @@
+import shutil
+import tempfile
+from io import BytesIO
+
 from django.contrib.auth import get_user_model
+from django.test import override_settings
+from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
@@ -36,7 +42,13 @@ class RegistrationTests(APITestCase):
     def _register(self, email):
         return self.client.post(
             REGISTER_URL,
-            {"email": email, "password1": PASSWORD, "password2": PASSWORD},
+            {
+                "email": email,
+                "password1": PASSWORD,
+                "password2": PASSWORD,
+                "first_name": "Reg",
+                "last_name": "Ister",
+            },
             format="json",
         )
 
@@ -56,12 +68,37 @@ class RegistrationTests(APITestCase):
         self.assertNotEqual(user.password, PASSWORD)
         self.assertTrue(user.check_password(PASSWORD))
 
+    def test_register_persists_the_real_name(self):
+        # Names are collected at sign-up (Phase 4) so a member has a display
+        # name from day one, not an email local-part.
+        self._register("named@example.com")
+        user = User.objects.get(email="named@example.com")
+        self.assertEqual(user.first_name, "Reg")
+        self.assertEqual(user.last_name, "Ister")
+        self.assertEqual(user.display_name, "Reg Ister")
+
+    def test_register_requires_a_name(self):
+        resp = self.client.post(
+            REGISTER_URL,
+            {"email": "noname@example.com", "password1": PASSWORD,
+             "password2": PASSWORD},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(User.objects.filter(email="noname@example.com").exists())
+
 
 class LoginLogoutTests(APITestCase):
     def _register(self, email):
         return self.client.post(
             REGISTER_URL,
-            {"email": email, "password1": PASSWORD, "password2": PASSWORD},
+            {
+                "email": email,
+                "password1": PASSWORD,
+                "password2": PASSWORD,
+                "first_name": "Log",
+                "last_name": "Inman",
+            },
             format="json",
         )
 
@@ -130,3 +167,79 @@ class LoginLogoutTests(APITestCase):
         resp = client.post(LOGOUT_URL, HTTP_X_CSRFTOKEN=csrf)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.cookies[AUTH_COOKIE].value, "")
+
+
+# --- Phase 4: profile editing (name, bio, avatar) ---------------------------
+
+_AVATAR_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-avatars-")
+
+
+def make_avatar_upload(name="me.jpg"):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    buffer = BytesIO()
+    Image.new("RGB", (300, 200), (40, 120, 90)).save(buffer, "JPEG")
+    buffer.seek(0)
+    return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
+
+
+@override_settings(MEDIA_ROOT=_AVATAR_MEDIA_ROOT)
+class ProfileEditTests(APITestCase):
+    """Editing your own profile via dj-rest-auth's user endpoint (PATCH)."""
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_AVATAR_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="editor@example.com", password=PASSWORD, is_active=True
+        )
+        self.client.force_authenticate(self.user)
+
+    def test_can_edit_name_and_bio(self):
+        resp = self.client.patch(
+            USER_URL,
+            {"first_name": "Ada", "last_name": "Lovelace", "bio": "Hello"},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.display_name, "Ada Lovelace")
+        self.assertEqual(self.user.bio, "Hello")
+
+    def test_can_upload_and_then_clear_an_avatar(self):
+        # Upload…
+        resp = self.client.patch(
+            USER_URL, {"avatar": make_avatar_upload()}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(resp.data["avatar_thumb"])
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.avatar)
+        self.assertTrue(self.user.avatar_thumb)
+
+        # …then clear it.
+        resp = self.client.patch(
+            USER_URL, {"remove_avatar": "true"}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["avatar_thumb"])
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.avatar)
+
+    def test_an_svg_avatar_is_rejected(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        svg = SimpleUploadedFile(
+            "vector.svg",
+            b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            content_type="image/svg+xml",
+        )
+        resp = self.client.patch(
+            USER_URL, {"avatar": svg}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.avatar)

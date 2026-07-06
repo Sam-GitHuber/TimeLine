@@ -1,6 +1,8 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
+from api.imaging import avatar_thumb_upload_to, avatar_upload_to
+
 from .managers import UserManager
 
 
@@ -27,6 +29,18 @@ class User(AbstractUser):
     # Fields prompted for by `createsuperuser` in addition to USERNAME_FIELD +
     # password. Email is already the identifier, so nothing extra is required.
     REQUIRED_FIELDS = []
+
+    # Profile fields (Phase 4). A short free-text bio, and an avatar with a small
+    # square thumbnail generated at upload (the size the feed/lists render). Both
+    # avatar fields are set together via api.imaging.process_image — never by the
+    # client directly — so a stored avatar is always validated + metadata-stripped.
+    bio = models.TextField(blank=True, default="")
+    avatar = models.ImageField(
+        upload_to=avatar_upload_to, null=True, blank=True
+    )
+    avatar_thumb = models.ImageField(
+        upload_to=avatar_thumb_upload_to, null=True, blank=True
+    )
 
     objects = UserManager()
 

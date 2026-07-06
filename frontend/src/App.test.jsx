@@ -115,7 +115,7 @@ describe("Feed page", () => {
     await user.click(screen.getByRole("button", { name: "Post" }));
 
     await waitFor(() =>
-      expect(api.createPost).toHaveBeenCalledWith("Hello from the test")
+      expect(api.createPost).toHaveBeenCalledWith("Hello from the test", [])
     );
     expect(
       await screen.findByText("Hello from the test")

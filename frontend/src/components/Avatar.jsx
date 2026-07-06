@@ -1,9 +1,10 @@
-// A placeholder avatar: a coloured circle with the user's initial.
-// Real profile photos arrive in Phase 4; for now this stands in.
+// A user's avatar. If they've uploaded one, show the (square) thumbnail the
+// backend generated; otherwise fall back to a coloured circle with their
+// initial.
 //
-// Everything is derived from the user's `display_name` (the label the backend
-// computes — real name, or email local-part until a name is set). That keeps
-// the same person's colour and initial stable across the app.
+// The fallback is derived from the user's `display_name` (the label the backend
+// computes — real name, or email local-part until a name is set), so the same
+// person's colour and initial stay stable across the app.
 
 // A warm earth palette that lives in the same world as the surface — replacing
 // the old bright primaries. Each maps to a --color-av-* token in index.css.
@@ -30,6 +31,18 @@ export default function Avatar({ user, size = "md" }) {
   };
   const name = user?.display_name || "?";
   const initial = name.charAt(0).toUpperCase();
+
+  if (user?.avatar_thumb) {
+    return (
+      <img
+        src={user.avatar_thumb}
+        alt=""
+        aria-hidden="true"
+        loading="lazy"
+        className={`inline-block shrink-0 rounded-full object-cover ${sizes[size]}`}
+      />
+    );
+  }
 
   return (
     <span

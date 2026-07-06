@@ -80,16 +80,24 @@ export default function ProfilePage() {
               <h1 className="font-display text-2xl font-bold -tracking-[0.02em] text-ink">
                 {user.display_name}
               </h1>
-              {/* Can't connect with yourself; the button only shows for
-                  other people. */}
-              {!isSelf && (
+              {/* Your own page gets an Edit link; everyone else's gets a
+                  Connect button (you can't connect with yourself). */}
+              {isSelf ? (
+                <Link to="/settings" className="btn btn-ghost btn-sm shrink-0">
+                  Edit profile
+                </Link>
+              ) : (
                 <ConnectButton
                   userId={user.id}
                   connectionStatus={user.connection_status}
                 />
               )}
             </div>
-            {/* Bio and other profile fields arrive in Phase 4. */}
+            {user.bio && (
+              <p className="mt-2 whitespace-pre-wrap break-words text-ink-soft">
+                {user.bio}
+              </p>
+            )}
           </div>
         </div>
       </section>

@@ -1,16 +1,21 @@
 import importlib.util
 import os
+import shutil
+import tempfile
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured
-from django.test import SimpleTestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import SimpleTestCase, override_settings
+from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Comment, Connection, Post
+from .models import Comment, Connection, Post, PostImage
 
 User = get_user_model()
 
@@ -615,3 +620,160 @@ def _flatten_ids(tree):
         ids.add(node["id"])
         ids |= _flatten_ids(node.get("replies", []))
     return ids
+
+
+# --- Phase 4: photos on posts -----------------------------------------------
+
+# One temp media root for the whole photo suite; wiped in tearDownClass so
+# uploaded test files never touch the real media folder or linger on disk.
+_PHOTO_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-media-")
+
+
+def make_image_upload(name="photo.jpg", fmt="JPEG", size=(120, 90),
+                      color=(200, 60, 60), exif=None):
+    """An in-memory uploaded image file for multipart post/avatar tests."""
+    buffer = BytesIO()
+    image = Image.new("RGB", size, color)
+    save_kwargs = {}
+    if exif is not None:
+        save_kwargs["exif"] = exif
+    image.save(buffer, fmt, **save_kwargs)
+    buffer.seek(0)
+    content_type = f"image/{ 'jpeg' if fmt == 'JPEG' else fmt.lower() }"
+    return SimpleUploadedFile(name, buffer.read(), content_type=content_type)
+
+
+def make_mpo_upload(name="phone.jpeg"):
+    """A Multi-Picture Object (.jpeg) like a phone/camera produces — two frames,
+    which Pillow reports as format "MPO" rather than "JPEG"."""
+    buffer = BytesIO()
+    primary = Image.new("RGB", (400, 300), (120, 90, 60))
+    secondary = Image.new("RGB", (400, 300), (60, 90, 120))
+    primary.save(buffer, "MPO", save_all=True, append_images=[secondary])
+    buffer.seek(0)
+    return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
+
+
+@override_settings(MEDIA_ROOT=_PHOTO_MEDIA_ROOT)
+class PhotoPostTests(APITestCase):
+    """Posts can carry photos, uploaded as multipart and processed server-side."""
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_PHOTO_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = make_user("shutterbug@example.com")
+        self.client.force_authenticate(self.user)
+
+    def test_create_post_with_several_photos(self):
+        resp = self.client.post(
+            POSTS_URL,
+            {
+                "text": "Beach day",
+                "images": [make_image_upload("a.jpg"), make_image_upload("b.jpg")],
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        post = Post.objects.get()
+        self.assertEqual(post.images.count(), 2)
+        # The response carries the images with absolute URLs + dimensions.
+        self.assertEqual(len(resp.data["images"]), 2)
+        first = resp.data["images"][0]
+        self.assertTrue(first["image"].startswith("http"))
+        self.assertTrue(first["thumbnail"].startswith("http"))
+        self.assertEqual(first["width"], 120)
+        self.assertEqual(first["height"], 90)
+        # Both original and thumbnail files were actually written.
+        image = post.images.first()
+        self.assertTrue(image.image.storage.exists(image.image.name))
+        self.assertTrue(image.thumbnail.storage.exists(image.thumbnail.name))
+
+    def test_a_phone_mpo_jpeg_is_accepted(self):
+        # Phones/cameras save "JPEGs" as Multi-Picture Objects (format "MPO").
+        # These are normal photos and must not be rejected as an unsupported type.
+        resp = self.client.post(
+            POSTS_URL,
+            {"text": "my dog", "images": [make_mpo_upload()]},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Post.objects.get().images.count(), 1)
+
+    def test_photo_only_post_needs_no_text(self):
+        resp = self.client.post(
+            POSTS_URL,
+            {"images": [make_image_upload()]},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Post.objects.get().text, "")
+
+    def test_post_with_no_text_and_no_photo_is_rejected(self):
+        resp = self.client.post(POSTS_URL, {}, format="multipart")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Post.objects.count(), 0)
+
+    def test_a_non_image_file_is_rejected(self):
+        bad = SimpleUploadedFile(
+            "notreally.jpg", b"this is not an image", content_type="image/jpeg"
+        )
+        resp = self.client.post(
+            POSTS_URL, {"text": "hi", "images": [bad]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # Nothing is created when a file is bad — no orphaned text post.
+        self.assertEqual(Post.objects.count(), 0)
+
+    def test_an_svg_is_rejected(self):
+        # SVGs can carry script → stored XSS, so they're not in the allow-list.
+        svg = SimpleUploadedFile(
+            "vector.svg",
+            b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            content_type="image/svg+xml",
+        )
+        resp = self.client.post(
+            POSTS_URL, {"text": "hi", "images": [svg]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Post.objects.count(), 0)
+
+    def test_too_many_photos_is_rejected(self):
+        images = [make_image_upload(f"{i}.jpg") for i in range(11)]
+        resp = self.client.post(
+            POSTS_URL, {"text": "lots", "images": images}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Post.objects.count(), 0)
+
+    def test_exif_metadata_is_stripped_from_stored_images(self):
+        # GPS coordinates live in EXIF; a phone photo can leak a home address.
+        # We embed an EXIF tag, upload, and assert the stored file has none.
+        exif = Image.Exif()
+        exif[0x0110] = "SecretCameraModel"  # the Model tag
+        upload = make_image_upload("located.jpg", exif=exif)
+        # Sanity: the upload really does carry EXIF before processing.
+        self.assertTrue(len(Image.open(upload).getexif()) > 0)
+        upload.seek(0)
+
+        resp = self.client.post(
+            POSTS_URL, {"images": [upload]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        stored = Post.objects.get().images.first()
+        with Image.open(stored.image.path) as saved:
+            self.assertEqual(len(saved.getexif()), 0)
+
+    def test_images_appear_in_the_feed(self):
+        self.client.post(
+            POSTS_URL,
+            {"text": "with pic", "images": [make_image_upload()]},
+            format="multipart",
+        )
+        feed = self.client.get(FEED_URL)
+        self.assertEqual(feed.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(feed.data["results"][0]["images"]), 1)

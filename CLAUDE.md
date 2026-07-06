@@ -39,9 +39,23 @@ Hanken Grotesk / IBM Plex Mono), a single emerald-teal accent, and a literal
 timeline spine down the feed (`components/Timeline.jsx`). Build new UI from these
 tokens — see `docs/design-system.md`.
 
-Phase 4 (photos & profiles) is next.** Keep this line current: update it
-whenever a phase starts or finishes, but keep the detail in the phase docs, not
-here.
+Phase 4 (photos & profiles) — done. Posts carry **photos** (`PostImage` table,
+many per post) uploaded as multipart to `POST /api/posts/`; the feed/profile
+embed each as `{image, thumbnail, width, height}`. Users have **avatar + bio**
+and edit their own name/avatar/bio at `/settings` (rides dj-rest-auth's
+`PATCH /api/auth/user/`). **Real name is now collected at sign-up** (required
+first/last), so every account has a display name from day one. All image
+handling funnels through `api/imaging.py`: validate-by-decoding (SVG rejected),
+strip EXIF/GPS, size/count caps, downscale + thumbnail. Media goes through
+**`django-storages`** — local disk now, an S3 bucket at Phase 7b by config
+(`STORAGES` seam on `DJANGO_MEDIA_STORAGE`); dev serves `/media/` openly, real
+private/signed media is a Phase 7b task. Profile URLs stay numeric (`/u/:id`) —
+name-based slugs deferred. See `docs/phases/phase-4-photos-profiles.md`.
+
+Phase 5 (direct messaging) is next — sketch-only, so flesh out its phase doc
+into a full plan and confirm with the user before building.** Keep this line
+current: update it whenever a phase starts or finishes, but keep the detail in
+the phase docs, not here.
 
 ## Before doing any work
 
