@@ -56,11 +56,20 @@ export function AuthProvider({ children }) {
 
   // register does NOT log you in — new accounts are pending admin approval.
   const register = useCallback(
-    (email, password) => api.register(email, password),
+    (email, password, firstName, lastName) =>
+      api.register(email, password, firstName, lastName),
     []
   );
 
-  const value = { user, loading, login, logout, register };
+  // Re-fetch "who am I" and update the context — used after a profile edit so a
+  // new name/avatar propagates to the nav, compose box, etc. immediately.
+  const refreshUser = useCallback(async () => {
+    const me = await api.getCurrentUser();
+    setUser(me);
+    return me;
+  }, []);
+
+  const value = { user, loading, login, logout, register, refreshUser };
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

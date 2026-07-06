@@ -9,6 +9,8 @@ import { AuthShell, Field } from "./LoginPage.jsx";
 export default function SignupPage() {
   const { register } = useAuth();
 
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -25,7 +27,7 @@ export default function SignupPage() {
     }
     setSubmitting(true);
     try {
-      const result = await register(email, password);
+      const result = await register(email, password, firstName, lastName);
       setPendingMessage(
         result?.detail ||
           "Account created and pending approval. You'll be able to log in once the site owner approves your account."
@@ -56,13 +58,27 @@ export default function SignupPage() {
   return (
     <AuthShell title="Create your account">
       <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="flex gap-3">
+          <Field
+            label="First name"
+            value={firstName}
+            onChange={setFirstName}
+            autoComplete="given-name"
+            autoFocus
+          />
+          <Field
+            label="Last name"
+            value={lastName}
+            onChange={setLastName}
+            autoComplete="family-name"
+          />
+        </div>
         <Field
           label="Email"
           type="email"
           value={email}
           onChange={setEmail}
           autoComplete="email"
-          autoFocus
         />
         <Field
           label="Password"
@@ -87,7 +103,14 @@ export default function SignupPage() {
 
         <button
           type="submit"
-          disabled={submitting || !email || !password || !confirm}
+          disabled={
+            submitting ||
+            !firstName ||
+            !lastName ||
+            !email ||
+            !password ||
+            !confirm
+          }
           className="btn btn-primary btn-block"
         >
           {submitting ? "Creating…" : "Sign up"}

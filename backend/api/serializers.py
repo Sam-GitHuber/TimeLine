@@ -1,7 +1,8 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import Comment, Connection, Post
+from .imaging import absolute_media_url
+from .models import Comment, Connection, Post, PostImage
 
 User = get_user_model()
 
@@ -13,15 +14,39 @@ POST_MAX_LENGTH = 5000
 class AuthorSerializer(serializers.ModelSerializer):
     """The tiny slice of a user we embed in a post or expose in a list.
 
-    Deliberately minimal: an id (for profile links) and a display name. No
-    email — see ``User.display_name`` for why we don't leak addresses.
+    Deliberately minimal: an id (for profile links), a display name, and the
+    small avatar thumbnail the UI renders. No email — see ``User.display_name``
+    for why we don't leak addresses.
     """
 
     display_name = serializers.CharField(read_only=True)
+    avatar_thumb = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ("id", "display_name")
+        fields = ("id", "display_name", "avatar_thumb")
+
+    def get_avatar_thumb(self, obj):
+        return absolute_media_url(obj.avatar_thumb, self.context.get("request"))
+
+
+class PostImageSerializer(serializers.ModelSerializer):
+    """One photo on a post: the (bounded) original plus its thumbnail, as
+    absolute URLs, with the original's dimensions so the client can reserve
+    layout space and avoid reflow while images load."""
+
+    image = serializers.SerializerMethodField()
+    thumbnail = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PostImage
+        fields = ("id", "image", "thumbnail", "width", "height")
+
+    def get_image(self, obj):
+        return absolute_media_url(obj.image, self.context.get("request"))
+
+    def get_thumbnail(self, obj):
+        return absolute_media_url(obj.thumbnail, self.context.get("request"))
 
 
 class PostSerializer(serializers.ModelSerializer):
@@ -29,22 +54,27 @@ class PostSerializer(serializers.ModelSerializer):
 
     ``author`` is read-only and set from the logged-in user in the view — it is
     never taken from the request body, so a client can't post as someone else.
+    ``images`` are read-only here; the files are uploaded as multipart and
+    processed in ``PostCreateView`` (validated + metadata-stripped via
+    ``api.imaging``). ``text`` is optional — a photo-only post is allowed — but
+    the view still rejects a post with neither text nor a photo.
     """
 
     author = AuthorSerializer(read_only=True)
-    text = serializers.CharField(max_length=POST_MAX_LENGTH)
+    text = serializers.CharField(
+        max_length=POST_MAX_LENGTH, required=False, allow_blank=True, default=""
+    )
+    images = PostImageSerializer(many=True, read_only=True)
 
     class Meta:
         model = Post
-        fields = ("id", "author", "text", "created_at")
-        read_only_fields = ("id", "author", "created_at")
+        fields = ("id", "author", "text", "images", "created_at")
+        read_only_fields = ("id", "author", "images", "created_at")
 
     def validate_text(self, value):
-        # A post must actually say something — reject blank/whitespace-only.
-        stripped = value.strip()
-        if not stripped:
-            raise serializers.ValidationError("A post can't be empty.")
-        return stripped
+        # A photo-only post is fine, so blank text is allowed here; the view
+        # enforces "must have text or at least one photo". Normalise whitespace.
+        return value.strip()
 
 
 class UserListSerializer(serializers.ModelSerializer):
@@ -59,10 +89,21 @@ class UserListSerializer(serializers.ModelSerializer):
 
     display_name = serializers.CharField(read_only=True)
     connection_status = serializers.CharField(read_only=True)
+    avatar_thumb = serializers.SerializerMethodField()
+    bio = serializers.CharField(read_only=True)
 
     class Meta:
         model = User
-        fields = ("id", "display_name", "connection_status")
+        fields = (
+            "id",
+            "display_name",
+            "connection_status",
+            "avatar_thumb",
+            "bio",
+        )
+
+    def get_avatar_thumb(self, obj):
+        return absolute_media_url(obj.avatar_thumb, self.context.get("request"))
 
 
 class ConnectionRequestSerializer(serializers.ModelSerializer):

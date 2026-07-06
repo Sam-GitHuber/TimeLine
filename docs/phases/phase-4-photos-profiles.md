@@ -1,6 +1,6 @@
 # Phase 4 — Photos & Profiles
 
-**Status:** not started
+**Status:** done
 
 ## Goal
 
@@ -16,16 +16,17 @@ with file uploads and storage, which has real cost and privacy implications.
 
 ## Definition of done
 
-- [ ] Posts can include image attachments
-- [ ] Images are stored via **`django-storages`** so the backend can be swapped
+- [x] Posts can include image attachments (`PostImage` table — many per post)
+- [x] Images are stored via **`django-storages`** so the backend can be swapped
       by config: a **local disk volume** now (and through the home-server beta,
       Phase 7), switching to an **S3 bucket** at the AWS migration (Phase 7b)
-      without a code change
-- [ ] Uploads are validated (file type, size limits) and served safely
-- [ ] Profile page shows the person's name (first + last), avatar, bio, and
+      without a code change (`STORAGES` seam keyed on `DJANGO_MEDIA_STORAGE`)
+- [x] Uploads are validated (file type, size limits) and served safely
+      (decode-with-Pillow, SVG rejected, size/count caps, EXIF stripped)
+- [x] Profile page shows the person's name (first + last), avatar, bio, and
       their posts
-- [ ] Users can edit their own name, avatar, and bio
-- [ ] Reasonable image handling (e.g. resizing/thumbnails) so the app stays fast
+- [x] Users can edit their own name, avatar, and bio (`/settings`)
+- [x] Reasonable image handling (resizing + thumbnails) so the app stays fast
 
 ## Steps
 
@@ -59,7 +60,14 @@ with file uploads and storage, which has real cost and privacy implications.
   connecting with friends and family, so forcing a made-up username adds
   friction for no benefit. `first_name`/`last_name` already exist on the Phase 2
   `User`, so this phase only adds bio + avatar and the edit UI over them.
-- **Profile URL = a name-based slug, not a username (confirmed 2026-07-04).**
+- **Name-based profile slugs deferred (decided 2026-07-06).** Profile URLs stay
+  numeric (`/u/<id>`) for this phase. Slugs are real extra surface (unique field,
+  auto-generation, collision handling, reserved-word validation, edit UI,
+  migration) that isn't needed to ship photos + profiles, so they move to a small
+  standalone follow-up rather than bloating this phase. The original slug design
+  is kept below for when we pick it up.
+- **Profile URL = a name-based slug, not a username (confirmed 2026-07-04) —
+  DEFERRED, see above.**
   The public profile lives at `/u/<slug>`, where the slug is auto-generated from
   the person's name (`sam-jefford`, then `sam-jefford-2` on collision). Users can
   **optionally customise** it (`/u/sam`). Crucially this is a *URL handle only* —
@@ -82,3 +90,43 @@ with file uploads and storage, which has real cost and privacy implications.
   first/last name to the sign-up form, or (b) force a "complete your profile"
   step on first login. Decide at the start of this phase; it's the cleanest point
   to add it. (Leaning (a) — a real name is the whole identity here.)
+  **Resolved 2026-07-06: option (a).** First + last name are now required on the
+  sign-up form (`CustomRegisterSerializer` + `SignupPage`), so every approved
+  account has a real display name from day one — no email-local-part fallback in
+  practice.
+
+## Implementation decisions (2026-07-06)
+
+- **Photos: multiple per post.** A `PostImage` table (FK to `Post`) rather than a
+  single field, matching "one or more photos". Uploaded as multipart to
+  `POST /api/posts/` (`images` repeated); the feed/profile serializers embed each
+  image as `{id, image, thumbnail, width, height}` with absolute URLs.
+- **All image handling funnels through `api/imaging.py`** (`process_image`) — the
+  single place the safety rules live, used for both post photos and avatars:
+  - **Validate by decoding, not by extension/Content-Type.** A file is accepted
+    only if Pillow opens it *and* its format is in a raster allow-list (JPEG/PNG/
+    WebP/GIF). **SVG is rejected** (script vector → stored XSS).
+  - **EXIF (incl. GPS) is stripped** by re-encoding from raw pixels, after
+    applying the orientation tag so photos aren't stored sideways. Phone photos
+    leak home location otherwise — a real privacy win, covered by a test.
+  - **Bounded:** ≤10 MB/file, ≤10 photos/post; originals downscaled (long edge
+    2048), thumbnails generated (512 post / 128 square avatar). Synchronous —
+    fine at family scale; move to Celery if volume grows (see SHARED.md).
+- **Unguessable filenames.** `upload_to` uses a UUID, so a raw media URL can't be
+  found by walking ids. In dev, Django serves `/media/` openly (DEBUG-only) — an
+  acceptable convenience, **not** real access control. Real private media
+  (S3 `private` ACL + signed URLs) lands at Phase 7b; the `STORAGES` config seam
+  and the `default_acl: private` / `querystring_auth` options are already staged.
+- **Profile editing rides dj-rest-auth's existing `PATCH /api/auth/user/`** (no
+  new endpoint): `UserDetailsSerializer` now writes first/last name + bio and
+  accepts an `avatar` upload (processed like a post photo), with `remove_avatar`
+  to clear it. The frontend `/settings` page PATCHes multipart, then refetches
+  "who am I" so the new name/avatar propagate everywhere immediately.
+- **Avatars** surface as a small square `avatar_thumb` on post/comment authors,
+  the people list, and the profile header; `Avatar.jsx` renders the photo when
+  present and falls back to the coloured initial otherwise.
+- **Tests:** backend covers multi-photo upload, photo-only posts, bad-file/SVG/
+  over-count rejection, EXIF-strip, feed rendering, avatar upload+clear, and
+  name-at-sign-up (temp `MEDIA_ROOT`, Pillow-generated images). Frontend covers
+  the Avatar branch, the PostCard gallery, ComposeBox photo add/remove/submit,
+  and the profile-edit form.

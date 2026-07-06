@@ -47,9 +47,44 @@ export default function PostCard({ post }) {
           </Link>
         </div>
 
-        <p className="whitespace-pre-wrap break-words text-[1.02rem] leading-relaxed text-ink">
-          {post.text}
-        </p>
+        {post.text && (
+          <p className="whitespace-pre-wrap break-words text-[1.02rem] leading-relaxed text-ink">
+            {post.text}
+          </p>
+        )}
+
+        {post.images?.length > 0 && (
+          <div
+            className={`mt-2.5 grid gap-1.5 ${
+              post.images.length === 1 ? "grid-cols-1" : "grid-cols-2"
+            }`}
+          >
+            {post.images.map((image) => (
+              <a
+                key={image.id}
+                href={image.image}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block overflow-hidden rounded-xl border border-line"
+              >
+                <img
+                  src={image.thumbnail}
+                  width={image.width}
+                  height={image.height}
+                  loading="lazy"
+                  alt=""
+                  // One photo keeps its natural shape (capped height); several
+                  // share a uniform square grid so the layout stays tidy.
+                  className={
+                    post.images.length === 1
+                      ? "max-h-[28rem] w-full object-cover"
+                      : "aspect-square w-full object-cover"
+                  }
+                />
+              </a>
+            ))}
+          </div>
+        )}
 
         <div className="mt-3 -ml-2">
           <button

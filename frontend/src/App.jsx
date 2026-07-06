@@ -3,6 +3,7 @@ import Layout from "./components/Layout.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import FeedPage from "./pages/FeedPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
+import ProfileEditPage from "./pages/ProfileEditPage.jsx";
 import FindPeoplePage from "./pages/FindPeoplePage.jsx";
 import RequestsPage from "./pages/RequestsPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
@@ -13,6 +14,7 @@ import SignupPage from "./pages/SignupPage.jsx";
 //   /                 → the feed (home timeline)     ┐ require a logged-in user
 //   /people           → find people to connect with  │ (ProtectedRoute gate)
 //   /requests         → incoming connection requests  │
+//   /settings         → edit your own profile          │
 //   /u/:id            → a person's profile (by user id) ┘
 // The protected pages render inside Layout, which provides the nav bar (with
 // the logout control). Each page fetches its own data from the API. Real URLs
@@ -28,6 +30,7 @@ export default function App() {
           <Route index element={<FeedPage />} />
           <Route path="people" element={<FindPeoplePage />} />
           <Route path="requests" element={<RequestsPage />} />
+          <Route path="settings" element={<ProfileEditPage />} />
           <Route path="u/:id" element={<ProfilePage />} />
         </Route>
       </Route>

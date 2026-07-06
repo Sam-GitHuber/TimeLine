@@ -2,6 +2,8 @@ from django.conf import settings
 from django.db import models
 from django.db.models.functions import Greatest, Least
 
+from .imaging import post_image_upload_to, post_thumb_upload_to
+
 
 class Post(models.Model):
     """A single text post by a user — the core unit of TimeLine.
@@ -29,6 +31,38 @@ class Post(models.Model):
     def __str__(self):
         preview = self.text[:40] + ("…" if len(self.text) > 40 else "")
         return f"{self.author} · {preview}"
+
+
+class PostImage(models.Model):
+    """One photo attached to a ``Post`` — a post can have several (Phase 4).
+
+    Its own table (rather than a single field on ``Post``) is what lets a post
+    carry multiple photos. Both ``image`` (the bounded original) and
+    ``thumbnail`` (what the feed renders) are produced by
+    ``api.imaging.process_image`` in the view — validated + metadata-stripped —
+    so nothing here trusts a raw upload. ``width``/``height`` are the stored
+    original's dimensions, handed to the client so it can reserve layout space
+    and avoid reflow. Deleting a post cascades to its images.
+    """
+
+    post = models.ForeignKey(
+        Post,
+        on_delete=models.CASCADE,
+        related_name="images",
+    )
+    image = models.ImageField(upload_to=post_image_upload_to)
+    thumbnail = models.ImageField(upload_to=post_thumb_upload_to)
+    width = models.PositiveIntegerField()
+    height = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Show a post's photos in the order they were uploaded. ``id`` breaks
+        # ties for images created in the same tick, keeping galleries stable.
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"image #{self.pk} of {self.post}"
 
 
 class Connection(models.Model):

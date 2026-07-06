@@ -152,7 +152,9 @@ describe("Sign-up flow", () => {
 
     renderApp("/signup");
 
-    await user.type(await screen.findByLabelText("Email"), "new@example.com");
+    await user.type(await screen.findByLabelText("First name"), "New");
+    await user.type(screen.getByLabelText("Last name"), "Member");
+    await user.type(screen.getByLabelText("Email"), "new@example.com");
     await user.type(screen.getByLabelText("Password"), "correcthorsebattery");
     await user.type(
       screen.getByLabelText("Confirm password"),
@@ -163,7 +165,9 @@ describe("Sign-up flow", () => {
     expect(await screen.findByText(/pending approval/i)).toBeInTheDocument();
     expect(api.register).toHaveBeenCalledWith(
       "new@example.com",
-      "correcthorsebattery"
+      "correcthorsebattery",
+      "New",
+      "Member"
     );
     // A pending account is not logged in — no feed.
     expect(
@@ -177,7 +181,9 @@ describe("Sign-up flow", () => {
 
     renderApp("/signup");
 
-    await user.type(await screen.findByLabelText("Email"), "new@example.com");
+    await user.type(await screen.findByLabelText("First name"), "New");
+    await user.type(screen.getByLabelText("Last name"), "Member");
+    await user.type(screen.getByLabelText("Email"), "new@example.com");
     await user.type(screen.getByLabelText("Password"), "one-password");
     await user.type(screen.getByLabelText("Confirm password"), "different");
     await user.click(screen.getByRole("button", { name: "Sign up" }));

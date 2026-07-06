@@ -1,31 +1,62 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 
+// Kept in step with the backend cap (api.imaging.MAX_IMAGES_PER_POST) so we
+// stop the user before a doomed request rather than after a 400.
+const MAX_IMAGES = 10;
+
 // The "what's happening" box at the top of the feed. On submit it creates a
-// real post via the API, then invalidates the feed so the new post appears.
+// real post — text, photos, or both — via the API, then invalidates the feed so
+// the new post appears.
 export default function ComposeBox() {
   const { user } = useAuth();
   const [text, setText] = useState("");
+  const [images, setImages] = useState([]);
+  const fileInputRef = useRef(null);
   const queryClient = useQueryClient();
 
+  // Object URLs for local previews. Created from the chosen files and revoked
+  // when they change / on unmount so we don't leak blob URLs.
+  const [previews, setPreviews] = useState([]);
+  useEffect(() => {
+    const urls = images.map((file) => URL.createObjectURL(file));
+    setPreviews(urls);
+    return () => urls.forEach((url) => URL.revokeObjectURL(url));
+  }, [images]);
+
   const mutation = useMutation({
-    mutationFn: (value) => api.createPost(value),
+    mutationFn: ({ text: value, images: files }) =>
+      api.createPost(value, files),
     onSuccess: () => {
       setText("");
+      setImages([]);
       queryClient.invalidateQueries({ queryKey: ["feed"] });
       // If you're looking at your own profile, refresh that too.
       queryClient.invalidateQueries({ queryKey: ["userPosts", user?.pk] });
     },
   });
 
+  function handleFilesChosen(event) {
+    const chosen = Array.from(event.target.files || []);
+    // Append, but never exceed the cap. Reset the input so picking the same
+    // file again still fires a change event.
+    setImages((current) => [...current, ...chosen].slice(0, MAX_IMAGES));
+    event.target.value = "";
+  }
+
+  function removeImage(index) {
+    setImages((current) => current.filter((_, i) => i !== index));
+  }
+
+  const canPost = (text.trim() || images.length > 0) && !mutation.isPending;
+
   function handleSubmit(event) {
     event.preventDefault();
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    mutation.mutate(trimmed);
+    if (!canPost) return;
+    mutation.mutate({ text: text.trim(), images });
   }
 
   return (
@@ -48,15 +79,58 @@ export default function ComposeBox() {
             placeholder="What's happening?"
             className="w-full resize-none rounded-2xl border border-line-strong bg-raised px-4 py-3 text-base text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
           />
+
+          {previews.length > 0 && (
+            <ul className="mt-2 flex flex-wrap gap-2">
+              {previews.map((url, index) => (
+                <li key={url} className="relative">
+                  <img
+                    src={url}
+                    alt={`Selected photo ${index + 1}`}
+                    className="h-20 w-20 rounded-xl object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeImage(index)}
+                    aria-label={`Remove photo ${index + 1}`}
+                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-ink text-xs font-bold text-white shadow"
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
           {mutation.isError && (
             <p className="mt-1 text-sm text-red-600">
               {mutation.error?.message || "Couldn't post. Try again."}
             </p>
           )}
-          <div className="mt-2 flex justify-end">
+
+          <div className="mt-2 flex items-center justify-between">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleFilesChosen}
+              className="hidden"
+              data-testid="compose-file-input"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={images.length >= MAX_IMAGES}
+              className="btn btn-ghost btn-sm"
+            >
+              {images.length > 0
+                ? `Photos (${images.length}/${MAX_IMAGES})`
+                : "Add photos"}
+            </button>
             <button
               type="submit"
-              disabled={!text.trim() || mutation.isPending}
+              disabled={!canPost}
               className="btn btn-primary btn-sm"
             >
               {mutation.isPending ? "Posting…" : "Post"}
