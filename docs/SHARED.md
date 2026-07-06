@@ -180,6 +180,7 @@ detail when we're about to start them.
 | 4 | Photos & profiles | Attach photos to posts; browse a person's profile page | `phase-4-photos-profiles.md` |
 | 5 | Direct messaging | One-to-one private messages between users | `phase-5-messaging.md` |
 | 6 | Groups | Shared group timelines you can post into and follow | `phase-6-groups.md` |
+| 6a | Group messaging | Group conversations (extends Phase 5 DMs); leave a conversation | `phase-6a-group-messaging.md` |
 | 7 | Self-hosted private beta | The finished app live on a wiped spare **home PC**, on a real HTTPS URL; close friends/family log in and bug-test it | `phase-7-productionisation.md` |
 | 7b | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | `phase-7b-aws-migration.md` |
 | 8 | iPhone app | An installable iOS app hitting the same backend | `phase-8-iphone-app.md` |
