@@ -352,6 +352,14 @@ of that story. "Leave a conversation" ships in 6a alongside "leave a group" here
   `GroupsRoute` (mirroring `MessagesRoute`). The group-invites nav badge moved
   onto the toggle unchanged. `GroupsDrawerProvider` takes an `initialOpen` prop
   used only by tests. See `components/GroupsDrawer.jsx`.
+- **The two companion drawers coordinate on narrow viewports.** Each is 400px,
+  docked to opposite edges, so below **800px** (2 × 400px) there's no room for
+  both — and below 640px each is full-width. So opening one closes the other
+  when `(max-width: 799px)` matches; a laptop keeps both side-by-side. The rule
+  lives in `Layout`'s two toggle handlers (the one place that holds both drawer
+  contexts, keeping the providers decoupled) via a new `useMediaQuery` hook in
+  `hooks.js`. jsdom lacks `matchMedia`, so `test/setup.js` stubs it ("no match" =
+  wide); the coordination test overrides it per-case.
 - **Last-admin guardrail** blocks leaving, being removed, or being demoted when
   you're the only admin (400) — a group can never be orphaned. Verified by an
   end-to-end HTTP smoke test alongside the create→invite→accept→post→feed flow.

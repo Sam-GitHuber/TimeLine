@@ -2,6 +2,7 @@ import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, CONVERSATION_LIST_POLL_MS } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { useMediaQuery } from "../hooks.js";
 import { useMessaging } from "../messaging.jsx";
 import { useGroupsDrawer } from "../groups-drawer.jsx";
 import MessagesDrawer from "./MessagesDrawer.jsx";
@@ -17,6 +18,24 @@ export default function Layout() {
   const navigate = useNavigate();
   const messaging = useMessaging();
   const groupsDrawer = useGroupsDrawer();
+
+  // The two companion drawers are 400px each, docked to opposite edges. Below
+  // 800px there isn't room for both at once (2 × 400px), so they'd overlap in
+  // the middle — and below 640px each is full-width, hiding the other entirely.
+  // So on a narrow viewport, opening one closes the other; on a wide one (a
+  // laptop) both can sit side-by-side. We only close the *other* drawer when a
+  // toggle is about to *open* its own, never when it's closing.
+  const tooNarrowForBoth = useMediaQuery("(max-width: 799px)");
+
+  function toggleGroups() {
+    if (tooNarrowForBoth && !groupsDrawer.isOpen) messaging.close();
+    groupsDrawer.toggle();
+  }
+
+  function toggleMessages() {
+    if (tooNarrowForBoth && !messaging.isOpen) groupsDrawer.close();
+    messaging.toggle();
+  }
 
   // Count of pending connection requests, for the nav badge. Shares the
   // ["connectionRequests"] cache key with the Requests page, so
@@ -110,7 +129,7 @@ export default function Layout() {
                   a group navigates the feed column to that group's timeline. */}
               <button
                 type="button"
-                onClick={groupsDrawer.toggle}
+                onClick={toggleGroups}
                 aria-pressed={groupsDrawer.isOpen}
                 className={`rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
                   groupsDrawer.isOpen
@@ -129,7 +148,7 @@ export default function Layout() {
                   the drawer so you keep your place in the feed. */}
               <button
                 type="button"
-                onClick={messaging.toggle}
+                onClick={toggleMessages}
                 aria-pressed={messaging.isOpen}
                 className={`rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
                   messaging.isOpen

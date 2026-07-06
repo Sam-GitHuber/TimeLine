@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App.jsx";
@@ -33,6 +33,7 @@ vi.mock("./api.js", () => ({
     deleteMessage: vi.fn(),
     markConversationRead: vi.fn(),
     getUnreadMessageCount: vi.fn(),
+    getGroups: vi.fn(),
     getGroupInvites: vi.fn(),
     blockUser: vi.fn(),
     unblockUser: vi.fn(),
@@ -74,6 +75,7 @@ beforeEach(() => {
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
   api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
+  api.getGroups.mockResolvedValue(page([]));
   api.getConversations.mockResolvedValue(page([]));
 });
 
@@ -480,5 +482,71 @@ describe("Navigation", () => {
     expect(
       await screen.findByRole("heading", { name: "Priya" })
     ).toBeInTheDocument();
+  });
+});
+
+// The Groups (left) and Messages (right) companion drawers are 400px each. Below
+// 800px there isn't room for both, so opening one closes the other; on a wide
+// viewport both stay open. `useMediaQuery` reads `window.matchMedia`, stubbed to
+// "no match" (wide) in test/setup.js — the narrow test overrides it per-test.
+describe("Companion drawer coordination", () => {
+  let originalMatchMedia;
+
+  beforeEach(() => {
+    originalMatchMedia = window.matchMedia;
+  });
+  afterEach(() => {
+    window.matchMedia = originalMatchMedia;
+  });
+
+  function setViewportTooNarrowForBoth(narrow) {
+    window.matchMedia = (query) => ({
+      matches: narrow,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    });
+  }
+
+  it("closes the groups drawer when opening messages on a narrow viewport", async () => {
+    setViewportTooNarrowForBoth(true);
+    const user = userEvent.setup();
+    renderAt("/");
+
+    await user.click(screen.getByRole("button", { name: /Groups/ }));
+    expect(
+      await screen.findByRole("dialog", { name: "Groups" })
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Messages/ }));
+    expect(
+      await screen.findByRole("dialog", { name: "Messages" })
+    ).toBeInTheDocument();
+    // The groups drawer must have been dismissed — no room for both.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Groups" })).toBeNull()
+    );
+  });
+
+  it("keeps both drawers open on a wide viewport", async () => {
+    setViewportTooNarrowForBoth(false);
+    const user = userEvent.setup();
+    renderAt("/");
+
+    await user.click(screen.getByRole("button", { name: /Groups/ }));
+    expect(
+      await screen.findByRole("dialog", { name: "Groups" })
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Messages/ }));
+    expect(
+      await screen.findByRole("dialog", { name: "Messages" })
+    ).toBeInTheDocument();
+    // Both fit side by side, so the groups drawer stays open.
+    expect(screen.getByRole("dialog", { name: "Groups" })).toBeInTheDocument();
   });
 });
