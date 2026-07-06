@@ -593,8 +593,12 @@ def user_conversations(user):
             "blocker_id", "blocked_id"
         )
     )
-    # Flatten the (blocker, blocked) pairs into "everyone I'm blocked-with".
-    hidden = {a if a != user.id else b for pair in blocked_ids for a, b in [pair]}
+    # Flatten the (blocker, blocked) pairs into "everyone I'm blocked-with" —
+    # the endpoint that isn't me in each pair.
+    hidden = {
+        blocker if blocker != user.id else blocked
+        for blocker, blocked in blocked_ids
+    }
     return (
         Conversation.objects.filter(Q(user_a=user) | Q(user_b=user))
         .filter(

@@ -15,6 +15,7 @@ import {
 } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useMessaging } from "../messaging.jsx";
+import { useInfiniteList } from "../hooks.js";
 import { formatRelativeTime } from "../utils.js";
 
 // The messages drawer: a non-modal panel docked to the right edge, so a
@@ -490,12 +491,19 @@ function NewMessageView() {
   const [term, setTerm] = useState("");
 
   // Recipients are your connections (messaging is connection-gated). The people
-  // list carries connection_status, so we filter to the accepted ones.
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ["users"],
-    queryFn: api.listUsers,
-  });
-  const connections = (data?.results ?? []).filter(
+  // list carries connection_status, so we filter to the accepted ones. Reuse the
+  // shared paging hook (not a one-off useQuery) so this shares the ["users"]
+  // cache shape with the People page — using useQuery here would collide with
+  // that page's useInfiniteQuery under the same key — and so a connection past
+  // the first page can still be found. Pull every page (family scale) so every
+  // connection is reachable from the picker.
+  const usersQuery = useInfiniteList(["users"], api.listUsers);
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = usersQuery;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  const { items, isLoading, isError } = usersQuery;
+  const connections = items.filter(
     (u) => u.connection_status === "connected"
   );
   const needle = term.trim().toLowerCase();
