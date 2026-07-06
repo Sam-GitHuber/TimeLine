@@ -338,6 +338,20 @@ of that story. "Leave a conversation" ships in 6a alongside "leave a group" here
 - **Non-members get 404 everywhere** (detail, timeline, members, comments) so a
   private group's existence isn't leaked — same discipline as a non-connection's
   profile.
+- **Groups list moved from a page to a left companion drawer (post-Phase-6 UX
+  change, 2026-07-06, at the user's request).** It's the mirror image of the
+  Phase 5 messages drawer (docked right): a non-modal panel docked to the *left*
+  edge, driven by `GroupsDrawerProvider`/`useGroupsDrawer` (`groups-drawer.jsx`,
+  open/closed only — no sub-views) with a nav "Groups" toggle, portalled to
+  `<body>` so it docks to the viewport edge over the centred column. It's a
+  *switcher*, not a reading surface: picking a group closes the drawer and
+  navigates the main column to the existing full-width `/g/:id` timeline — so the
+  group feed isn't squeezed into 400px beside the home feed (the deciding factor
+  vs. rendering the timeline inside the drawer like messages). `GroupsPage` was
+  deleted; the old `/groups` URL now opens the drawer and redirects to `/` via
+  `GroupsRoute` (mirroring `MessagesRoute`). The group-invites nav badge moved
+  onto the toggle unchanged. `GroupsDrawerProvider` takes an `initialOpen` prop
+  used only by tests. See `components/GroupsDrawer.jsx`.
 - **Last-admin guardrail** blocks leaving, being removed, or being demoted when
   you're the only admin (400) — a group can never be orphaned. Verified by an
   end-to-end HTTP smoke test alongside the create→invite→accept→post→feed flow.

@@ -3,7 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api, CONVERSATION_LIST_POLL_MS } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useMessaging } from "../messaging.jsx";
+import { useGroupsDrawer } from "../groups-drawer.jsx";
 import MessagesDrawer from "./MessagesDrawer.jsx";
+import GroupsDrawer from "./GroupsDrawer.jsx";
 
 // The app shell: a top nav plus whichever page is active (<Outlet />).
 //
@@ -14,6 +16,7 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const messaging = useMessaging();
+  const groupsDrawer = useGroupsDrawer();
 
   // Count of pending connection requests, for the nav badge. Shares the
   // ["connectionRequests"] cache key with the Requests page, so
@@ -102,14 +105,26 @@ export default function Layout() {
               <NavLink to="/people" className={navLinkClass}>
                 People
               </NavLink>
-              <NavLink to="/groups" className={navLinkClass}>
+              {/* Groups is a companion panel too — the mirror of Messages,
+                  docked to the left edge. The button toggles the drawer; picking
+                  a group navigates the feed column to that group's timeline. */}
+              <button
+                type="button"
+                onClick={groupsDrawer.toggle}
+                aria-pressed={groupsDrawer.isOpen}
+                className={`rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
+                  groupsDrawer.isOpen
+                    ? "bg-ink/[0.06] text-ink"
+                    : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
+                }`}
+              >
                 Groups
                 {groupInviteCount > 0 && (
                   <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
                     {groupInviteCount}
                   </span>
                 )}
-              </NavLink>
+              </button>
               {/* Messages is a companion panel, not a page — the button toggles
                   the drawer so you keep your place in the feed. */}
               <button
@@ -171,8 +186,10 @@ export default function Layout() {
         </main>
       </div>
 
-      {/* The messages drawer portals to <body>, so it sits above the column and
-          docks to the viewport edge regardless of the centered layout. */}
+      {/* Both companion drawers portal to <body>, so they sit above the column
+          and dock to the viewport edges regardless of the centered layout —
+          groups on the left, messages on the right. */}
+      <GroupsDrawer />
       <MessagesDrawer />
     </div>
   );

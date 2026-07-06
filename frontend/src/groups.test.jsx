@@ -5,7 +5,8 @@ import { Routes, Route } from "react-router-dom";
 import PostCard from "./components/PostCard.jsx";
 import ComposeBox from "./components/ComposeBox.jsx";
 import FeedPage from "./pages/FeedPage.jsx";
-import GroupsPage from "./pages/GroupsPage.jsx";
+import GroupsDrawer from "./components/GroupsDrawer.jsx";
+import { GroupsDrawerProvider } from "./groups-drawer.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
@@ -109,7 +110,7 @@ describe("Feed include-groups toggle", () => {
   });
 });
 
-describe("GroupsPage", () => {
+describe("GroupsDrawer", () => {
   it("lists your groups and surfaces pending invitations", async () => {
     api.getGroups.mockResolvedValue({
       results: [
@@ -125,7 +126,11 @@ describe("GroupsPage", () => {
     });
     api.getGroupInvites.mockResolvedValue({ count: 2, results: [] });
 
-    renderWithAuth(<GroupsPage />);
+    renderWithAuth(
+      <GroupsDrawerProvider initialOpen>
+        <GroupsDrawer />
+      </GroupsDrawerProvider>
+    );
 
     expect(await screen.findByText("Family")).toBeInTheDocument();
     expect(screen.getByText("4 members")).toBeInTheDocument();

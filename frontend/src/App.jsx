@@ -9,12 +9,12 @@ import {
 import Layout from "./components/Layout.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import { MessagingProvider, useMessaging } from "./messaging.jsx";
+import { GroupsDrawerProvider, useGroupsDrawer } from "./groups-drawer.jsx";
 import FeedPage from "./pages/FeedPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import ProfileEditPage from "./pages/ProfileEditPage.jsx";
 import FindPeoplePage from "./pages/FindPeoplePage.jsx";
 import RequestsPage from "./pages/RequestsPage.jsx";
-import GroupsPage from "./pages/GroupsPage.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
 import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
@@ -51,6 +51,19 @@ function MessagesRoute({ thread = false }) {
   return null;
 }
 
+// Groups moved from a page to a left companion drawer (like messaging). The old
+// `/groups` URL (bookmarks, history) still works: open the drawer over the feed,
+// then replace the URL with `/`. `/g/:id`, `/groups/new` etc. stay real pages.
+function GroupsRoute() {
+  const { open } = useGroupsDrawer();
+  const navigate = useNavigate();
+  useEffect(() => {
+    open();
+    navigate("/", { replace: true });
+  }, [open, navigate]);
+  return null;
+}
+
 export default function App() {
   return (
     <Routes>
@@ -62,7 +75,9 @@ export default function App() {
           path="/"
           element={
             <MessagingProvider>
-              <Layout />
+              <GroupsDrawerProvider>
+                <Layout />
+              </GroupsDrawerProvider>
             </MessagingProvider>
           }
         >
@@ -71,8 +86,9 @@ export default function App() {
           <Route path="requests" element={<RequestsPage />} />
           <Route path="settings" element={<ProfileEditPage />} />
           <Route path="u/:id" element={<ProfilePage />} />
-          {/* Groups (Phase 6) */}
-          <Route path="groups" element={<GroupsPage />} />
+          {/* Groups (Phase 6) — the list is a left companion drawer, not a
+              page; legacy `/groups` opens it. The rest stay real pages. */}
+          <Route path="groups" element={<GroupsRoute />} />
           <Route path="groups/new" element={<GroupFormPage />} />
           <Route path="group-invites" element={<GroupInvitesPage />} />
           <Route path="g/:id" element={<GroupPage />} />
