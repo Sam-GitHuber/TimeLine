@@ -31,8 +31,12 @@ from rest_framework import serializers
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
 # Raster formats we accept. SVG is intentionally absent (script vector → XSS);
-# so is anything Pillow can't identify.
-ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+# so is anything Pillow can't identify. MPO is included because phones/cameras
+# routinely save "JPEGs" as Multi-Picture Objects (a primary image plus an
+# embedded second frame) — Pillow reports their format as "MPO", not "JPEG". It's
+# JPEG-based and safe: _strip_and_encode flattens it to a plain JPEG (primary
+# frame only). Without it, a normal phone photo gets wrongly rejected.
+ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF", "MPO"}
 
 # Cap photos per post — bounds the work one request can trigger and the size of
 # a feed payload.

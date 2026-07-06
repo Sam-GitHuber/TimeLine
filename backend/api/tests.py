@@ -643,6 +643,17 @@ def make_image_upload(name="photo.jpg", fmt="JPEG", size=(120, 90),
     return SimpleUploadedFile(name, buffer.read(), content_type=content_type)
 
 
+def make_mpo_upload(name="phone.jpeg"):
+    """A Multi-Picture Object (.jpeg) like a phone/camera produces — two frames,
+    which Pillow reports as format "MPO" rather than "JPEG"."""
+    buffer = BytesIO()
+    primary = Image.new("RGB", (400, 300), (120, 90, 60))
+    secondary = Image.new("RGB", (400, 300), (60, 90, 120))
+    primary.save(buffer, "MPO", save_all=True, append_images=[secondary])
+    buffer.seek(0)
+    return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
+
+
 @override_settings(MEDIA_ROOT=_PHOTO_MEDIA_ROOT)
 class PhotoPostTests(APITestCase):
     """Posts can carry photos, uploaded as multipart and processed server-side."""
@@ -680,6 +691,17 @@ class PhotoPostTests(APITestCase):
         image = post.images.first()
         self.assertTrue(image.image.storage.exists(image.image.name))
         self.assertTrue(image.thumbnail.storage.exists(image.thumbnail.name))
+
+    def test_a_phone_mpo_jpeg_is_accepted(self):
+        # Phones/cameras save "JPEGs" as Multi-Picture Objects (format "MPO").
+        # These are normal photos and must not be rejected as an unsupported type.
+        resp = self.client.post(
+            POSTS_URL,
+            {"text": "my dog", "images": [make_mpo_upload()]},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Post.objects.get().images.count(), 1)
 
     def test_photo_only_post_needs_no_text(self):
         resp = self.client.post(
