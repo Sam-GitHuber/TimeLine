@@ -156,6 +156,21 @@ A nav badge shows unread messages, and you can block someone.
 
 ## Notes / decisions log
 
+- **Frontend UX: a docked drawer, not pages (revised after first build).** The
+  original plan's `/messages` list page + `/messages/:id` thread page were
+  replaced with a single **non-modal companion drawer** (`MessagesDrawer.jsx`,
+  driven by `MessagingProvider` state rather than the router). Rationale, from
+  user feedback: messaging should sit *beside* your timeline, so opening it
+  doesn't unmount the feed (you keep your scroll position), and starting a new
+  message lives right in the panel (compose control in the header → a searchable
+  connection picker). The drawer walks list → thread → new-message. The nav
+  "Messages" item toggles it. The backend API + data model are unchanged — this
+  was purely a frontend re-shape. The old `/messages[/:id]` URLs still work
+  (bookmarks / shared conversation links): `MessagesRoute` opens the drawer over
+  the feed, and a catch-all route sends any unknown path to the feed instead of
+  a blank screen (a blank `/messages` after the route was removed was the one
+  regression the reshape introduced, now covered).
+
 - **Message deletion is a *soft* delete, not a row drop.** Deleting blanks
   ``text`` and sets ``deleted_at`` rather than removing the row. Two reasons:
   the thread keeps a "message deleted" placeholder in its original spot (no

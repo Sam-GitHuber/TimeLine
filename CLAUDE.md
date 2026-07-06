@@ -63,10 +63,13 @@ direction hides the thread, stops messaging, severs + bars connecting). A shared
 `can_message(me, other)` gate (active + connected + not blocked) drives both
 create and send. Near-real-time is **polling** (TanStack Query `refetchInterval`;
 cadence in `frontend/src/api.js`) — the swap to Channels later is non-breaking.
-Frontend: a `/messages` list, a `/messages/:id` thread (compose + soft-delete),
-a nav "Messages" badge, and Message/Block controls on connected profiles.
-Backend + frontend tests cover send/scope/read/block. See
-`docs/phases/phase-5-messaging.md`.
+Frontend: messaging is a **non-modal companion drawer** (`MessagesDrawer.jsx`,
+driven by `MessagingProvider` — not a route), docked to the edge so the feed
+stays scrollable behind it; it walks list → thread → new-message (compose +
+connection picker in-panel), with a nav "Messages" toggle + unread badge and
+Message/Block controls on connected profiles. Legacy `/messages[/:id]` URLs open
+the drawer; a catch-all route avoids blank screens. Backend + frontend tests
+cover send/scope/read/block. See `docs/phases/phase-5-messaging.md`.
 
 Phase 6 (groups) is next — sketch-only, so flesh out its phase doc into a full
 plan and confirm with the user before building. (Phase 6a, group messaging, is
