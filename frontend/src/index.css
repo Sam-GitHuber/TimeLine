@@ -311,12 +311,37 @@
       opacity: 0;
     }
   }
+
+  /* ---- Messages drawer ----
+     The private companion to the public timeline: a non-modal panel docked to
+     the right edge, so conversations sit *beside* your feed (which stays
+     interactive — no scrim). It settles in from the edge rather than whooshing,
+     to keep the app's unhurried feel. */
+  .msg-drawer {
+    animation: msg-drawer-in 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  @keyframes msg-drawer-in {
+    from {
+      transform: translateX(24px);
+      opacity: 0;
+    }
+    to {
+      transform: none;
+      opacity: 1;
+    }
+  }
+  /* A sent/received bubble arriving — a whisper of motion, matched to tl-rise. */
+  .msg-bubble {
+    animation: tl-rise 0.4s ease both;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .tl-feed::before,
   .tl-entry,
-  .tl-compose .tl-node::after {
+  .tl-compose .tl-node::after,
+  .msg-drawer,
+  .msg-bubble {
     animation: none !important;
   }
 }

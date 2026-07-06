@@ -5,13 +5,13 @@ import App from "./App.jsx";
 import { renderWithAuth, fakeUser } from "./test-utils.jsx";
 import { api } from "./api.js";
 
-// Phase 5 messaging. Like App.test.jsx, the pages fetch from the real API, so we
+// Phase 5 messaging is a companion drawer (not a route): the nav "Messages"
+// button opens it over the feed, and it walks list → thread → new message. We
 // mock the api module and assert the frontend renders what the backend returns
-// and wires the message/block actions to the right endpoints. The scoping/
-// unread/block rules themselves are enforced (and tested) on the backend.
+// and wires the message/block actions to the right endpoints. Scoping/unread/
+// block rules themselves are enforced (and tested) on the backend.
 vi.mock("./api.js", () => ({
   api: {
-    // Feed/profile/nav dependencies the shell touches on any route.
     ensureCsrf: vi.fn().mockResolvedValue({}),
     getFeed: vi.fn(),
     getPage: vi.fn(),
@@ -23,7 +23,6 @@ vi.mock("./api.js", () => ({
     connect: vi.fn(),
     disconnect: vi.fn(),
     getConnectionRequests: vi.fn(),
-    // Messaging.
     getConversations: vi.fn(),
     openConversation: vi.fn(),
     getConversation: vi.fn(),
@@ -43,8 +42,40 @@ function page(results, next = null) {
   return { results, count: results.length, next };
 }
 
-function renderAt(path) {
+function renderAt(path = "/") {
   return renderWithAuth(<App />, { route: path });
+}
+
+function convoRow(overrides = {}) {
+  return {
+    id: 7,
+    other: { id: 2, display_name: "Priya", avatar_thumb: null },
+    last_message: {
+      text: "see you then",
+      is_deleted: false,
+      sender_id: 2,
+      created_at: new Date().toISOString(),
+    },
+    unread_count: 3,
+    updated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function convoDetail(overrides = {}) {
+  return {
+    id: 7,
+    other: { id: 2, display_name: "Priya", avatar_thumb: null },
+    last_message: null,
+    unread_count: 0,
+    can_message: true,
+    updated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+async function openDrawer(user) {
+  await user.click(await screen.findByRole("button", { name: /Messages/ }));
 }
 
 beforeEach(() => {
@@ -53,64 +84,120 @@ beforeEach(() => {
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
   api.getConversations.mockResolvedValue(page([]));
-  api.markConversationRead.mockResolvedValue({ detail: "Marked read." });
+  api.listUsers.mockResolvedValue(page([]));
   api.getMessages.mockResolvedValue(page([]));
+  api.getConversation.mockResolvedValue(convoDetail());
+  api.markConversationRead.mockResolvedValue({ detail: "Marked read." });
 });
 
-describe("Messages list", () => {
-  it("shows conversations with a preview and an unread badge", async () => {
-    api.getConversations.mockResolvedValue(
-      page([
-        {
-          id: 7,
-          other: { id: 2, display_name: "Priya", avatar_thumb: null },
-          last_message: {
-            text: "see you then",
-            is_deleted: false,
-            sender_id: 2,
-            created_at: new Date().toISOString(),
-          },
-          unread_count: 3,
-          updated_at: new Date().toISOString(),
-        },
-      ])
-    );
+describe("Messages drawer — list", () => {
+  it("opens from the nav and lists conversations with a preview + unread badge", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
 
-    renderAt("/messages");
+    renderAt("/");
+    await openDrawer(user);
 
-    expect(await screen.findByText("Priya")).toBeInTheDocument();
-    expect(screen.getByText("see you then")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
+    const drawer = await screen.findByRole("dialog", { name: "Messages" });
+    expect(within(drawer).getByText("Priya")).toBeInTheDocument();
+    expect(within(drawer).getByText("see you then")).toBeInTheDocument();
+    expect(within(drawer).getByText("3")).toBeInTheDocument();
   });
 
-  it("shows an empty state when there are no conversations", async () => {
+  it("shows an empty state with a New message action", async () => {
+    const user = userEvent.setup();
+    renderAt("/");
+    await openDrawer(user);
+
+    expect(await screen.findByText(/No conversations yet/i)).toBeInTheDocument();
+    // A compose control is offered (header icon + the empty-state CTA).
+    expect(
+      screen.getAllByRole("button", { name: "New message" }).length
+    ).toBeGreaterThan(0);
+  });
+
+  it("leaves the feed mounted underneath (companion, not a route)", async () => {
+    const user = userEvent.setup();
+    api.getFeed.mockResolvedValue(page([]));
+    renderAt("/");
+    await openDrawer(user);
+
+    // The compose box (feed) is still present while the drawer is open.
+    expect(
+      screen.getByPlaceholderText("What's happening?")
+    ).toBeInTheDocument();
+  });
+});
+
+describe("Legacy messaging URLs", () => {
+  it("opens the drawer when landing on /messages", async () => {
+    api.getConversations.mockResolvedValue(page([convoRow()]));
     renderAt("/messages");
-    expect(await screen.findByText(/No messages yet/i)).toBeInTheDocument();
+    // The drawer opens over the feed without a blank screen.
+    expect(
+      await screen.findByRole("dialog", { name: "Messages" })
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Priya")).toBeInTheDocument();
+  });
+
+  it("opens a specific thread when landing on /messages/:id", async () => {
+    renderAt("/messages/7");
+    expect(
+      await screen.findByRole("dialog", { name: "Messages" })
+    ).toBeInTheDocument();
+    await waitFor(() => expect(api.getConversation).toHaveBeenCalledWith(7));
+  });
+
+  it("sends an unknown path to the feed, never a blank screen", async () => {
+    renderAt("/does-not-exist");
+    expect(
+      await screen.findByPlaceholderText("What's happening?")
+    ).toBeInTheDocument();
   });
 });
 
 describe("Nav unread badge", () => {
   it("renders the total unread count in the nav", async () => {
     api.getUnreadMessageCount.mockResolvedValue({ count: 5 });
-    renderAt("/messages");
-    // The nav "Messages" link carries the badge.
+    renderAt("/");
     const nav = await screen.findByRole("navigation");
     expect(await within(nav).findByText("5")).toBeInTheDocument();
   });
 });
 
-describe("Conversation thread", () => {
-  const convo = {
-    id: 7,
-    other: { id: 2, display_name: "Priya", avatar_thumb: null },
-    last_message: null,
-    unread_count: 0,
-    can_message: true,
-    updated_at: new Date().toISOString(),
-  };
+describe("Messages drawer — new message", () => {
+  it("picks a connection and opens the thread", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+    api.listUsers.mockResolvedValue(
+      page([
+        { id: 2, display_name: "Priya", connection_status: "connected" },
+        { id: 3, display_name: "Stranger", connection_status: "none" },
+      ])
+    );
+    api.openConversation.mockResolvedValue({ id: 7 });
 
-  it("renders messages and marks the thread read", async () => {
-    api.getConversation.mockResolvedValue(convo);
+    renderAt("/");
+    await openDrawer(user);
+    // The header compose icon (first "New message" control) opens the picker.
+    const composeButtons = await screen.findAllByRole("button", {
+      name: "New message",
+    });
+    await user.click(composeButtons[0]);
+
+    // Only connections are offered.
+    expect(await screen.findByText("Priya")).toBeInTheDocument();
+    expect(screen.queryByText("Stranger")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Priya/ }));
+    await waitFor(() => expect(api.openConversation).toHaveBeenCalledWith(2));
+  });
+});
+
+describe("Messages drawer — thread", () => {
+  it("opens a conversation, renders messages, and marks it read", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
     api.getMessages.mockResolvedValue(
       page([
         {
@@ -130,7 +217,9 @@ describe("Conversation thread", () => {
       ])
     );
 
-    renderAt("/messages/7");
+    renderAt("/");
+    await openDrawer(user);
+    await user.click(await screen.findByRole("button", { name: /Priya/ }));
 
     expect(await screen.findByText("hey there")).toBeInTheDocument();
     expect(screen.getByText("hello!")).toBeInTheDocument();
@@ -139,8 +228,9 @@ describe("Conversation thread", () => {
     );
   });
 
-  it("sends a message via the composer", async () => {
-    api.getConversation.mockResolvedValue(convo);
+  it("sends a message from the composer", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
     api.getMessages.mockResolvedValue(page([]));
     api.sendMessage.mockResolvedValue({
       id: 9,
@@ -150,33 +240,35 @@ describe("Conversation thread", () => {
       created_at: new Date().toISOString(),
     });
 
-    renderAt("/messages/7");
+    renderAt("/");
+    await openDrawer(user);
+    await user.click(await screen.findByRole("button", { name: /Priya/ }));
 
     const box = await screen.findByPlaceholderText(/write a message/i);
-    await userEvent.type(box, "yo");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await user.type(box, "yo");
+    await user.click(screen.getByRole("button", { name: "Send" }));
 
-    await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "yo")
-    );
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledWith(7, "yo"));
   });
 
   it("hides the composer when you can no longer message", async () => {
-    api.getConversation.mockResolvedValue({ ...convo, can_message: false });
-    api.getMessages.mockResolvedValue(page([]));
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.getConversation.mockResolvedValue(convoDetail({ can_message: false }));
 
-    renderAt("/messages/7");
+    renderAt("/");
+    await openDrawer(user);
+    await user.click(await screen.findByRole("button", { name: /Priya/ }));
 
-    expect(
-      await screen.findByText(/no longer connected/i)
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/no longer connected/i)).toBeInTheDocument();
     expect(
       screen.queryByPlaceholderText(/write a message/i)
     ).not.toBeInTheDocument();
   });
 
   it("renders a placeholder for a deleted message", async () => {
-    api.getConversation.mockResolvedValue(convo);
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
     api.getMessages.mockResolvedValue(
       page([
         {
@@ -189,13 +281,17 @@ describe("Conversation thread", () => {
       ])
     );
 
-    renderAt("/messages/7");
+    renderAt("/");
+    await openDrawer(user);
+    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+
     expect(await screen.findByText("Message deleted")).toBeInTheDocument();
   });
 });
 
 describe("Profile messaging + block controls", () => {
-  it("offers Message on a connected profile and opens the thread", async () => {
+  it("offers Message on a connected profile and opens the thread drawer", async () => {
+    const user = userEvent.setup();
     api.getUser.mockResolvedValue({
       id: 2,
       display_name: "Priya",
@@ -205,26 +301,19 @@ describe("Profile messaging + block controls", () => {
     });
     api.getUserPosts.mockResolvedValue(page([]));
     api.openConversation.mockResolvedValue({ id: 7 });
-    api.getConversation.mockResolvedValue({
-      id: 7,
-      other: { id: 2, display_name: "Priya", avatar_thumb: null },
-      last_message: null,
-      unread_count: 0,
-      can_message: true,
-      updated_at: new Date().toISOString(),
-    });
 
     renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Message" }));
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Message" })
-    );
-    await waitFor(() =>
-      expect(api.openConversation).toHaveBeenCalledWith(2)
-    );
+    await waitFor(() => expect(api.openConversation).toHaveBeenCalledWith(2));
+    // The thread drawer opens in place (profile stays underneath).
+    expect(
+      await screen.findByRole("dialog", { name: "Messages" })
+    ).toBeInTheDocument();
   });
 
   it("blocks a user after confirmation", async () => {
+    const user = userEvent.setup();
     vi.spyOn(window, "confirm").mockReturnValue(true);
     api.getUser.mockResolvedValue({
       id: 2,
@@ -237,8 +326,8 @@ describe("Profile messaging + block controls", () => {
     api.blockUser.mockResolvedValue({ detail: "Blocked.", is_blocked: true });
 
     renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Block" }));
 
-    await userEvent.click(await screen.findByRole("button", { name: "Block" }));
     await waitFor(() => expect(api.blockUser).toHaveBeenCalledWith(2));
     window.confirm.mockRestore();
   });

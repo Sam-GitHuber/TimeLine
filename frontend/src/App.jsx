@@ -1,13 +1,19 @@
-import { Routes, Route } from "react-router-dom";
+import { useEffect } from "react";
+import {
+  Navigate,
+  Routes,
+  Route,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
+import { MessagingProvider, useMessaging } from "./messaging.jsx";
 import FeedPage from "./pages/FeedPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import ProfileEditPage from "./pages/ProfileEditPage.jsx";
 import FindPeoplePage from "./pages/FindPeoplePage.jsx";
 import RequestsPage from "./pages/RequestsPage.jsx";
-import MessagesPage from "./pages/MessagesPage.jsx";
-import ConversationPage from "./pages/ConversationPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
 
@@ -15,14 +21,32 @@ import SignupPage from "./pages/SignupPage.jsx";
 //   /login, /signup   → public auth pages
 //   /                 → the feed (home timeline)     ┐ require a logged-in user
 //   /people           → find people to connect with  │ (ProtectedRoute gate)
-//   /messages         → your conversations             │
-//   /messages/:id     → a single conversation thread    │
-//   /requests         → incoming connection requests    │
-//   /settings         → edit your own profile           │
+//   /requests         → incoming connection requests  │
+//   /settings         → edit your own profile          │
 //   /u/:id            → a person's profile (by user id) ┘
 // The protected pages render inside Layout, which provides the nav bar (with
 // the logout control). Each page fetches its own data from the API. Real URLs
 // (not just tab state) mean the back button and shareable links work.
+//
+// Messaging isn't a route: it's a companion drawer (Layout renders it) driven by
+// MessagingProvider state, so opening it never unmounts the feed underneath —
+// you keep your scroll position. See components/MessagesDrawer.jsx.
+//
+// But the old `/messages` and `/messages/:id` URLs (bookmarks, browser history,
+// shared conversation links) must still work: MessagesRoute honours them by
+// opening the drawer over the feed, then replacing the URL with `/`.
+function MessagesRoute({ thread = false }) {
+  const { openList, openThread } = useMessaging();
+  const navigate = useNavigate();
+  const { id } = useParams();
+  useEffect(() => {
+    if (thread && id) openThread(Number(id));
+    else openList();
+    navigate("/", { replace: true });
+  }, [thread, id, openList, openThread, navigate]);
+  return null;
+}
+
 export default function App() {
   return (
     <Routes>
@@ -30,14 +54,24 @@ export default function App() {
       <Route path="/signup" element={<SignupPage />} />
 
       <Route element={<ProtectedRoute />}>
-        <Route path="/" element={<Layout />}>
+        <Route
+          path="/"
+          element={
+            <MessagingProvider>
+              <Layout />
+            </MessagingProvider>
+          }
+        >
           <Route index element={<FeedPage />} />
           <Route path="people" element={<FindPeoplePage />} />
-          <Route path="messages" element={<MessagesPage />} />
-          <Route path="messages/:id" element={<ConversationPage />} />
           <Route path="requests" element={<RequestsPage />} />
           <Route path="settings" element={<ProfileEditPage />} />
           <Route path="u/:id" element={<ProfilePage />} />
+          {/* Legacy/deep-link messaging URLs → open the drawer over the feed. */}
+          <Route path="messages" element={<MessagesRoute />} />
+          <Route path="messages/:id" element={<MessagesRoute thread />} />
+          {/* Anything else lands on the feed rather than a blank screen. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>
     </Routes>
