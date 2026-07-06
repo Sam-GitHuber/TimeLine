@@ -68,7 +68,7 @@ export default function PostCard({ post }) {
                 type="button"
                 onClick={() => setLightboxIndex(i)}
                 aria-label={`View photo ${i + 1} of ${post.images.length}`}
-                className="block cursor-zoom-in overflow-hidden rounded-xl border border-line"
+                className="block cursor-pointer overflow-hidden rounded-xl border border-line"
               >
                 <img
                   src={image.thumbnail}
