@@ -23,6 +23,8 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    Group,
+    GroupMembership,
     Message,
     Post,
     PostImage,
@@ -1073,3 +1075,463 @@ class MessagingAuthRequiredTests(APITestCase):
             self.client.get(CONVERSATIONS_URL).status_code,
             status.HTTP_401_UNAUTHORIZED,
         )
+
+
+# --- Groups (Phase 6) --------------------------------------------------------
+
+GROUPS_URL = "/api/groups/"
+GROUP_INVITES_URL = "/api/group-invites/"
+
+ADMIN_ROLE = GroupMembership.Role.ADMIN
+MEMBER_ROLE = GroupMembership.Role.MEMBER
+ACTIVE_STATUS = GroupMembership.Status.ACTIVE
+INVITED_STATUS = GroupMembership.Status.INVITED
+
+
+def group_url(g):
+    return f"/api/groups/{g.pk}/"
+
+
+def group_posts_url(g):
+    return f"/api/groups/{g.pk}/posts/"
+
+
+def group_members_url(g):
+    return f"/api/groups/{g.pk}/members/"
+
+
+def group_member_url(g, u):
+    return f"/api/groups/{g.pk}/members/{u.pk}/"
+
+
+def group_role_url(g, u):
+    return f"/api/groups/{g.pk}/members/{u.pk}/role/"
+
+
+def invite_accept_url(m):
+    return f"/api/group-invites/{m.pk}/accept/"
+
+
+def invite_reject_url(m):
+    return f"/api/group-invites/{m.pk}/reject/"
+
+
+def make_group(creator, name="Family", **kwargs):
+    """A group with its creator as the first active admin (as the API does)."""
+    group = Group.objects.create(creator=creator, name=name, **kwargs)
+    GroupMembership.objects.create(
+        group=group, user=creator, role=ADMIN_ROLE, status=ACTIVE_STATUS
+    )
+    return group
+
+
+def add_member(group, user, role=MEMBER_ROLE, status=ACTIVE_STATUS, invited_by=None):
+    return GroupMembership.objects.create(
+        group=group, user=user, role=role, status=status, invited_by=invited_by
+    )
+
+
+class GroupCreateListTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.client.force_authenticate(self.me)
+
+    def test_create_makes_creator_an_active_admin(self):
+        resp = self.client.post(GROUPS_URL, {"name": "  Book Club "})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["name"], "Book Club")  # trimmed
+        self.assertEqual(resp.data["your_role"], ADMIN_ROLE)
+        self.assertEqual(resp.data["member_count"], 1)
+        membership = GroupMembership.objects.get(
+            group_id=resp.data["id"], user=self.me
+        )
+        self.assertEqual(membership.role, ADMIN_ROLE)
+        self.assertEqual(membership.status, ACTIVE_STATUS)
+
+    def test_create_requires_a_name(self):
+        resp = self.client.post(GROUPS_URL, {"name": "   "})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_shows_only_groups_i_am_an_active_member_of(self):
+        mine = make_group(self.me, name="Mine")
+        other_owner = make_user("owner@example.com")
+        theirs = make_group(other_owner, name="Theirs")
+        # A group I'm only *invited* to shouldn't count as membership.
+        invited_to = make_group(other_owner, name="Invited")
+        add_member(invited_to, self.me, status=INVITED_STATUS)
+
+        resp = self.client.get(GROUPS_URL)
+        ids = {g["id"] for g in resp.data["results"]}
+        self.assertEqual(ids, {mine.id})
+        self.assertNotIn(theirs.id, ids)
+        self.assertNotIn(invited_to.id, ids)
+
+    def test_member_count_counts_active_members_only(self):
+        group = make_group(self.me)
+        friend = make_user("friend@example.com")
+        add_member(group, friend, status=ACTIVE_STATUS)
+        add_member(group, make_user("pending@example.com"), status=INVITED_STATUS)
+        resp = self.client.get(GROUPS_URL)
+        row = next(g for g in resp.data["results"] if g["id"] == group.id)
+        self.assertEqual(row["member_count"], 2)
+
+
+class GroupDetailPermissionTests(APITestCase):
+    def setUp(self):
+        self.admin = make_user("admin@example.com")
+        self.member = make_user("member@example.com")
+        self.stranger = make_user("stranger@example.com")
+        self.group = make_group(self.admin, name="Secret")
+        add_member(self.group, self.member)
+
+    def test_non_member_gets_404_on_detail(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.get(group_url(self.group))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_member_sees_detail_with_their_role(self):
+        self.client.force_authenticate(self.member)
+        resp = self.client.get(group_url(self.group))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["your_role"], MEMBER_ROLE)
+        self.assertEqual(resp.data["member_count"], 2)
+
+    def test_only_admin_can_edit(self):
+        self.client.force_authenticate(self.member)
+        resp = self.client.patch(group_url(self.group), {"name": "Renamed"})
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.admin)
+        resp = self.client.patch(group_url(self.group), {"name": "Renamed"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.group.refresh_from_db()
+        self.assertEqual(self.group.name, "Renamed")
+
+    def test_only_admin_can_delete(self):
+        self.client.force_authenticate(self.member)
+        self.assertEqual(
+            self.client.delete(group_url(self.group)).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(
+            self.client.delete(group_url(self.group)).status_code,
+            status.HTTP_204_NO_CONTENT,
+        )
+        self.assertFalse(Group.objects.filter(pk=self.group.pk).exists())
+
+    def test_deleting_a_group_removes_its_posts(self):
+        post = Post.objects.create(
+            author=self.admin, text="in group", group=self.group
+        )
+        self.client.force_authenticate(self.admin)
+        self.client.delete(group_url(self.group))
+        self.assertFalse(Post.objects.filter(pk=post.pk).exists())
+
+
+class GroupTimelineTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        self.stranger = make_user("stranger@example.com")
+        make_connection(self.me, self.friend, ACCEPTED)
+        self.group = make_group(self.me, name="Trip")
+        add_member(self.group, self.friend)
+        self.client.force_authenticate(self.me)
+
+    def test_member_can_post_into_group(self):
+        resp = self.client.post(
+            POSTS_URL, {"text": "hello group", "group": self.group.id}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["group"]["id"], self.group.id)
+        self.assertEqual(resp.data["group"]["name"], self.group.name)
+        self.assertTrue(
+            Post.objects.filter(group=self.group, text="hello group").exists()
+        )
+
+    def test_non_member_cannot_post_into_group(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.post(
+            POSTS_URL, {"text": "sneaking in", "group": self.group.id}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Post.objects.filter(text="sneaking in").exists())
+
+    def test_group_timeline_lists_group_posts_for_members(self):
+        Post.objects.create(author=self.me, text="mine", group=self.group)
+        Post.objects.create(author=self.friend, text="theirs", group=self.group)
+        resp = self.client.get(group_posts_url(self.group))
+        texts = {p["text"] for p in resp.data["results"]}
+        self.assertEqual(texts, {"mine", "theirs"})
+
+    def test_group_timeline_404_for_non_member(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.get(group_posts_url(self.group))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_group_posts_stay_out_of_the_home_feed(self):
+        # The load-bearing decision: a group post must NOT appear in a member's
+        # home feed, even though the poster is a connection.
+        group_post = Post.objects.create(
+            author=self.friend, text="group only", group=self.group
+        )
+        personal_post = Post.objects.create(author=self.friend, text="personal")
+        resp = self.client.get(FEED_URL)
+        ids = {p["id"] for p in resp.data["results"]}
+        self.assertIn(personal_post.id, ids)
+        self.assertNotIn(group_post.id, ids)
+
+    def test_group_posts_stay_off_the_profile(self):
+        group_post = Post.objects.create(
+            author=self.friend, text="group only", group=self.group
+        )
+        personal_post = Post.objects.create(author=self.friend, text="personal")
+        resp = self.client.get(f"/api/users/{self.friend.pk}/posts/")
+        ids = {p["id"] for p in resp.data["results"]}
+        self.assertIn(personal_post.id, ids)
+        self.assertNotIn(group_post.id, ids)
+
+    def test_include_groups_merges_group_posts_chronologically(self):
+        # Opt-in: ?include_groups=1 merges posts from groups I'm in into the
+        # feed, still time-ordered — but only for groups I actually belong to.
+        my_group_post = Post.objects.create(
+            author=self.friend, text="in my group", group=self.group
+        )
+        # A group I'm NOT a member of must never leak in, even via the toggle.
+        outsider = make_user("outsider@example.com")
+        other_group = make_group(outsider, name="Not mine")
+        hidden_post = Post.objects.create(
+            author=outsider, text="secret", group=other_group
+        )
+        personal = Post.objects.create(author=self.me, text="personal")
+
+        # Default feed: no group posts.
+        resp = self.client.get(FEED_URL)
+        ids = {p["id"] for p in resp.data["results"]}
+        self.assertEqual(ids, {personal.id})
+
+        # Opted in: my group's post appears, the outsider group's never does.
+        resp = self.client.get(FEED_URL + "?include_groups=1")
+        ids = {p["id"] for p in resp.data["results"]}
+        self.assertIn(my_group_post.id, ids)
+        self.assertIn(personal.id, ids)
+        self.assertNotIn(hidden_post.id, ids)
+
+
+class GroupInviteTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        self.stranger = make_user("stranger@example.com")
+        make_connection(self.me, self.friend, ACCEPTED)
+        self.group = make_group(self.me, name="Crew")
+        self.client.force_authenticate(self.me)
+
+    def test_invite_a_connection_creates_pending_membership(self):
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": self.friend.id}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        m = GroupMembership.objects.get(group=self.group, user=self.friend)
+        self.assertEqual(m.status, INVITED_STATUS)
+        self.assertEqual(m.invited_by, self.me)
+
+    def test_cannot_invite_a_non_connection(self):
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": self.stranger.id}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(
+            GroupMembership.objects.filter(
+                group=self.group, user=self.stranger
+            ).exists()
+        )
+
+    def test_cannot_invite_a_blocked_connection(self):
+        self.client.post(block_url(self.friend))  # blocking severs the connection
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": self.friend.id}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_any_member_can_invite_their_own_connection(self):
+        # friend (a plain member) invites their own connection — allowed.
+        friend2 = make_user("friend2@example.com")
+        make_connection(self.friend, friend2, ACCEPTED)
+        add_member(self.group, self.friend)
+        self.client.force_authenticate(self.friend)
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": friend2.id}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_duplicate_invite_rejected(self):
+        add_member(self.group, self.friend, status=INVITED_STATUS)
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": self.friend.id}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invite_inbox_lists_pending_and_accept_joins(self):
+        invite = add_member(
+            self.group, self.friend, status=INVITED_STATUS, invited_by=self.me
+        )
+        self.client.force_authenticate(self.friend)
+        resp = self.client.get(GROUP_INVITES_URL)
+        ids = {i["id"] for i in resp.data["results"]}
+        self.assertIn(invite.id, ids)
+
+        resp = self.client.post(invite_accept_url(invite))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        invite.refresh_from_db()
+        self.assertEqual(invite.status, ACTIVE_STATUS)
+
+    def test_reject_invite_deletes_it(self):
+        invite = add_member(self.group, self.friend, status=INVITED_STATUS)
+        self.client.force_authenticate(self.friend)
+        resp = self.client.post(invite_reject_url(invite))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(GroupMembership.objects.filter(pk=invite.pk).exists())
+
+    def test_cannot_act_on_someone_elses_invite(self):
+        invite = add_member(self.group, self.friend, status=INVITED_STATUS)
+        # stranger tries to accept the friend's invite
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.post(invite_accept_url(invite))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class GroupMembershipManagementTests(APITestCase):
+    def setUp(self):
+        self.admin = make_user("admin@example.com")
+        self.member = make_user("member@example.com")
+        self.group = make_group(self.admin, name="Team")
+        add_member(self.group, self.member)
+
+    def test_member_can_leave(self):
+        self.client.force_authenticate(self.member)
+        resp = self.client.delete(group_member_url(self.group, self.member))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(
+            GroupMembership.objects.filter(
+                group=self.group, user=self.member
+            ).exists()
+        )
+
+    def test_admin_can_remove_a_member(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.delete(group_member_url(self.group, self.member))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_member_cannot_remove_someone_else(self):
+        other = make_user("other@example.com")
+        add_member(self.group, other)
+        self.client.force_authenticate(self.member)
+        resp = self.client.delete(group_member_url(self.group, other))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_last_admin_cannot_leave(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.delete(group_member_url(self.group, self.admin))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(
+            GroupMembership.objects.filter(
+                group=self.group, user=self.admin
+            ).exists()
+        )
+
+    def test_admin_can_leave_after_promoting_another(self):
+        self.client.force_authenticate(self.admin)
+        self.client.post(
+            group_role_url(self.group, self.member), {"role": ADMIN_ROLE}
+        )
+        resp = self.client.delete(group_member_url(self.group, self.admin))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_admin_can_promote_and_demote(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            group_role_url(self.group, self.member), {"role": ADMIN_ROLE}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(is_admin(self.group, self.member))
+        # Demote back down (still one other admin remains).
+        resp = self.client.post(
+            group_role_url(self.group, self.member), {"role": MEMBER_ROLE}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(is_admin(self.group, self.member))
+
+    def test_cannot_demote_the_last_admin(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            group_role_url(self.group, self.admin), {"role": MEMBER_ROLE}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_member_cannot_change_roles(self):
+        self.client.force_authenticate(self.member)
+        resp = self.client.post(
+            group_role_url(self.group, self.admin), {"role": MEMBER_ROLE}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class GroupCommentVisibilityTests(APITestCase):
+    """Inside a group every member sees every comment — no connection pruning."""
+
+    def setUp(self):
+        # a and b are group members but NOT connected to each other.
+        self.a = make_user("a@example.com")
+        self.b = make_user("b@example.com")
+        self.stranger = make_user("stranger@example.com")
+        self.group = make_group(self.a, name="Shared")
+        add_member(self.group, self.b)
+        self.post = Post.objects.create(
+            author=self.a, text="group post", group=self.group
+        )
+
+    def test_member_sees_comment_from_a_non_connection_member(self):
+        Comment.objects.create(author=self.b, post=self.post, text="hi from b")
+        self.client.force_authenticate(self.a)
+        resp = self.client.get(comments_url(self.post))
+        texts = {c["text"] for c in resp.data}
+        # a is not connected to b, but they share the group, so a sees it.
+        self.assertIn("hi from b", texts)
+
+    def test_member_can_comment_on_group_post(self):
+        self.client.force_authenticate(self.b)
+        resp = self.client.post(comments_url(self.post), {"text": "nice"})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_non_member_cannot_read_or_comment(self):
+        self.client.force_authenticate(self.stranger)
+        self.assertEqual(
+            self.client.get(comments_url(self.post)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.post(
+                comments_url(self.post), {"text": "hi"}
+            ).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+
+class GroupAuthRequiredTests(APITestCase):
+    def test_groups_require_login(self):
+        self.assertEqual(
+            self.client.get(GROUPS_URL).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+        self.assertEqual(
+            self.client.get(GROUP_INVITES_URL).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+
+def is_admin(group, user):
+    return GroupMembership.objects.filter(
+        group=group, user=user, role=ADMIN_ROLE, status=ACTIVE_STATUS
+    ).exists()

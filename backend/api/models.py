@@ -2,7 +2,12 @@ from django.conf import settings
 from django.db import models
 from django.db.models.functions import Greatest, Least
 
-from .imaging import post_image_upload_to, post_thumb_upload_to
+from .imaging import (
+    group_avatar_thumb_upload_to,
+    group_avatar_upload_to,
+    post_image_upload_to,
+    post_thumb_upload_to,
+)
 
 
 class Post(models.Model):
@@ -17,6 +22,22 @@ class Post(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="posts",
+    )
+    # A post is either a personal-timeline post (``group`` is NULL — the
+    # original Phase 3 behaviour, and what the home feed shows) or a post made
+    # into a group's shared timeline (Phase 6). Keeping it as one nullable FK
+    # rather than a separate ``GroupPost`` model means group posts reuse *all*
+    # the post machinery: photos, the comment tree, the serializer, and the
+    # imaging pipeline. Deleting a group takes its posts with it. Indexed
+    # because both the home feed (``group IS NULL``) and a group timeline
+    # (``group = X``) filter on it.
+    group = models.ForeignKey(
+        "Group",
+        on_delete=models.CASCADE,
+        related_name="posts",
+        null=True,
+        blank=True,
+        db_index=True,
     )
     text = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -357,3 +378,116 @@ class Block(models.Model):
 
     def __str__(self):
         return f"{self.blocker} ⊘ {self.blocked}"
+
+
+class Group(models.Model):
+    """A private, invite-only shared space with its own timeline (Phase 6).
+
+    A family group, a friend circle, a shared-interest group. Members post into
+    the group's timeline (``Post.group`` points here) and read it
+    reverse-chronological, exactly like the home feed but scoped to the group —
+    no ranking, ever. Group posts deliberately stay *inside* the group and do
+    **not** appear in members' home feeds (see the phase doc): the home feed
+    means "my connections", a group means "this group", and the two have
+    different visibility rules, so they stay separate surfaces.
+
+    Groups are always private/invite-only in this phase — there's no public or
+    discoverable group. The ``avatar``/``avatar_thumb`` reuse the same validated,
+    EXIF-stripped, downscaled imaging pipeline as user avatars and post photos
+    (``api.imaging`` — never a raw upload). URLs are numeric (``/g/:id``), no
+    slug, consistent with profiles.
+    """
+
+    name = models.CharField(max_length=100)
+    description = models.TextField(blank=True)
+    avatar = models.ImageField(
+        upload_to=group_avatar_upload_to, null=True, blank=True
+    )
+    avatar_thumb = models.ImageField(
+        upload_to=group_avatar_thumb_upload_to, null=True, blank=True
+    )
+    creator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        # Keep the group (and its timeline) if the creator's account is deleted —
+        # a group outlives any one member. The creator is a record of who made
+        # it; the ≥1-admin rule (enforced in the views) keeps the group
+        # governable regardless.
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="groups_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return self.name
+
+
+class GroupMembership(models.Model):
+    """One person's membership of a ``Group`` — their role and join state.
+
+    A single row per (group, user): an invitation and an active membership are
+    the *same* row moving ``status`` from ``invited`` → ``active``, so a person
+    can't end up with two rows for one group. "Members of a group" means the
+    ``active`` rows; an ``invited`` row grants no access until the invitee
+    accepts (consent-first, mirroring ``Connection``).
+
+    Two roles only (see the phase doc): ``member`` (read/post/comment/leave) and
+    ``admin`` (also invite-removal, edit, delete, promote). The creator starts as
+    an ``admin``; the views enforce that at least one admin always remains.
+    ``invited_by`` records who sent the invite (for the "X invited you" line in
+    the invites inbox) and survives that person leaving.
+    """
+
+    class Role(models.TextChoices):
+        MEMBER = "member", "Member"
+        ADMIN = "admin", "Admin"
+
+    class Status(models.TextChoices):
+        INVITED = "invited", "Invited"
+        ACTIVE = "active", "Active"
+
+    group = models.ForeignKey(
+        Group,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="group_memberships",
+    )
+    role = models.CharField(
+        max_length=6,
+        choices=Role.choices,
+        default=Role.MEMBER,
+    )
+    status = models.CharField(
+        max_length=7,
+        choices=Status.choices,
+        default=Status.INVITED,
+        db_index=True,
+    )
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="group_invites_sent",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            # One membership row per person per group — an invite and an active
+            # membership are the same row, so never two for one (group, user).
+            models.UniqueConstraint(
+                fields=["group", "user"],
+                name="unique_group_membership",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} · {self.group} ({self.role}, {self.status})"

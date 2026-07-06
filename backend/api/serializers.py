@@ -6,6 +6,8 @@ from .models import (
     Comment,
     Connection,
     Conversation,
+    Group,
+    GroupMembership,
     Message,
     Post,
     PostImage,
@@ -72,11 +74,22 @@ class PostSerializer(serializers.ModelSerializer):
         max_length=POST_MAX_LENGTH, required=False, allow_blank=True, default=""
     )
     images = PostImageSerializer(many=True, read_only=True)
+    # Which group this post belongs to — ``null`` for a personal-timeline post,
+    # or ``{id, name}`` for a group post. The name lets the feed label a group
+    # post ("in <group>") when the "include groups" view merges them in.
+    # Read-only here — the view sets the group from the validated request and
+    # checks membership, never trusting the body to place a post in a group.
+    group = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
-        fields = ("id", "author", "text", "images", "created_at")
-        read_only_fields = ("id", "author", "images", "created_at")
+        fields = ("id", "author", "text", "images", "group", "created_at")
+        read_only_fields = ("id", "author", "images", "group", "created_at")
+
+    def get_group(self, obj):
+        if obj.group_id is None:
+            return None
+        return {"id": obj.group_id, "name": obj.group.name}
 
     def validate_text(self, value):
         # A photo-only post is fine, so blank text is allowed here; the view
@@ -265,4 +278,113 @@ class ConversationSerializer(serializers.ModelSerializer):
             "is_deleted": message.is_deleted,
             "sender_id": message.sender_id,
             "created_at": message.created_at,
+        }
+
+
+# --- Groups (Phase 6) --------------------------------------------------------
+
+GROUP_NAME_MAX_LENGTH = 100
+GROUP_DESCRIPTION_MAX_LENGTH = 2000
+
+
+class GroupSerializer(serializers.ModelSerializer):
+    """Read + create + edit a group.
+
+    Read fields give the group page + list what they need: ``avatar_url`` (full)
+    and ``avatar_thumb`` (small, for the list), plus two **per-viewer** fields the
+    view attaches — ``member_count`` (active members) and ``your_role``
+    (``member``/``admin``, driving whether admin controls show). ``name`` and
+    ``description`` are writable (create + PATCH); the avatar is uploaded
+    separately as multipart and processed in the view (validated + downscaled +
+    EXIF-stripped via ``api.imaging``), same as user avatars — never a raw file.
+    """
+
+    name = serializers.CharField(max_length=GROUP_NAME_MAX_LENGTH)
+    description = serializers.CharField(
+        max_length=GROUP_DESCRIPTION_MAX_LENGTH,
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+    avatar_url = serializers.SerializerMethodField()
+    avatar_thumb = serializers.SerializerMethodField()
+    member_count = serializers.SerializerMethodField()
+    your_role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Group
+        fields = (
+            "id",
+            "name",
+            "description",
+            "avatar_url",
+            "avatar_thumb",
+            "member_count",
+            "your_role",
+            "created_at",
+        )
+        read_only_fields = ("id", "created_at")
+
+    def validate_name(self, value):
+        stripped = value.strip()
+        if not stripped:
+            raise serializers.ValidationError("A group needs a name.")
+        return stripped
+
+    def validate_description(self, value):
+        return value.strip()
+
+    def get_avatar_url(self, obj):
+        return absolute_media_url(obj.avatar, self.context.get("request"))
+
+    def get_avatar_thumb(self, obj):
+        return absolute_media_url(obj.avatar_thumb, self.context.get("request"))
+
+    def get_member_count(self, obj):
+        # Attached by the view (annotated, no N+1); falls back to a count for
+        # safety if a caller forgot to annotate.
+        count = getattr(obj, "member_count", None)
+        if count is None:
+            count = obj.memberships.filter(
+                status=GroupMembership.Status.ACTIVE
+            ).count()
+        return count
+
+    def get_your_role(self, obj):
+        return getattr(obj, "_your_role", None)
+
+
+class GroupMemberSerializer(serializers.ModelSerializer):
+    """One active member of a group: the person plus their role, so the members
+    panel can badge admins and show admin-only controls."""
+
+    user = AuthorSerializer(read_only=True)
+
+    class Meta:
+        model = GroupMembership
+        fields = ("user", "role")
+
+
+class GroupInviteSerializer(serializers.ModelSerializer):
+    """A pending invite in your group-invites inbox.
+
+    ``id`` is the membership row's id — the handle used to accept/reject.
+    ``group`` is a minimal card of the group you've been invited to, and
+    ``invited_by`` is who invited you (for the "X invited you to Y" line).
+    """
+
+    group = serializers.SerializerMethodField()
+    invited_by = AuthorSerializer(read_only=True)
+
+    class Meta:
+        model = GroupMembership
+        fields = ("id", "group", "invited_by", "created_at")
+
+    def get_group(self, obj):
+        return {
+            "id": obj.group_id,
+            "name": obj.group.name,
+            "avatar_thumb": absolute_media_url(
+                obj.group.avatar_thumb, self.context.get("request")
+            ),
         }

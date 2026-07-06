@@ -14,6 +14,10 @@ import ProfilePage from "./pages/ProfilePage.jsx";
 import ProfileEditPage from "./pages/ProfileEditPage.jsx";
 import FindPeoplePage from "./pages/FindPeoplePage.jsx";
 import RequestsPage from "./pages/RequestsPage.jsx";
+import GroupsPage from "./pages/GroupsPage.jsx";
+import GroupPage from "./pages/GroupPage.jsx";
+import GroupFormPage from "./pages/GroupFormPage.jsx";
+import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
 
@@ -67,6 +71,12 @@ export default function App() {
           <Route path="requests" element={<RequestsPage />} />
           <Route path="settings" element={<ProfileEditPage />} />
           <Route path="u/:id" element={<ProfilePage />} />
+          {/* Groups (Phase 6) */}
+          <Route path="groups" element={<GroupsPage />} />
+          <Route path="groups/new" element={<GroupFormPage />} />
+          <Route path="group-invites" element={<GroupInvitesPage />} />
+          <Route path="g/:id" element={<GroupPage />} />
+          <Route path="g/:id/edit" element={<GroupFormPage />} />
           {/* Legacy/deep-link messaging URLs → open the drawer over the feed. */}
           <Route path="messages" element={<MessagesRoute />} />
           <Route path="messages/:id" element={<MessagesRoute thread />} />

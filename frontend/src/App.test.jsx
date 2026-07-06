@@ -33,6 +33,7 @@ vi.mock("./api.js", () => ({
     deleteMessage: vi.fn(),
     markConversationRead: vi.fn(),
     getUnreadMessageCount: vi.fn(),
+    getGroupInvites: vi.fn(),
     blockUser: vi.fn(),
     unblockUser: vi.fn(),
   },
@@ -72,6 +73,7 @@ beforeEach(() => {
   api.getComments.mockResolvedValue([]);
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
+  api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
   api.getConversations.mockResolvedValue(page([]));
 });
 
@@ -129,7 +131,11 @@ describe("Feed page", () => {
     await user.click(screen.getByRole("button", { name: "Post" }));
 
     await waitFor(() =>
-      expect(api.createPost).toHaveBeenCalledWith("Hello from the test", [])
+      expect(api.createPost).toHaveBeenCalledWith(
+        "Hello from the test",
+        [],
+        null
+      )
     );
     expect(
       await screen.findByText("Hello from the test")

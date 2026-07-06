@@ -78,6 +78,14 @@ def avatar_thumb_upload_to(instance, filename):
     return _uuid_name("avatars/thumbs", filename)
 
 
+def group_avatar_upload_to(instance, filename):
+    return _uuid_name("groups", filename)
+
+
+def group_avatar_thumb_upload_to(instance, filename):
+    return _uuid_name("groups/thumbs", filename)
+
+
 # --- processing --------------------------------------------------------------
 
 

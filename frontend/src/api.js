@@ -143,8 +143,11 @@ export const api = {
   // --- Timeline (Phase 3) --------------------------------------------------
 
   // The home feed: your posts + everyone you're connected with, newest-first,
-  // paginated.
-  getFeed: () => request("/api/feed/"),
+  // paginated. Pass `includeGroups` to also merge in posts from groups you're a
+  // member of, still strictly chronological (opt-in — off by default so the feed
+  // stays "my connections" unless you ask for more).
+  getFeed: ({ includeGroups = false } = {}) =>
+    request(`/api/feed/${includeGroups ? "?include_groups=1" : ""}`),
 
   // Follow a paginated response's `next` URL. DRF returns an absolute URL built
   // from the request host, which needn't match BASE_URL (behind a proxy, or a
@@ -155,15 +158,18 @@ export const api = {
     return request(url.pathname + url.search);
   },
 
-  // Create a post. With no photos it's a plain JSON body; with photos it becomes
-  // a multipart upload carrying the text plus each image file under `images`.
-  createPost: (text, images = []) => {
-    if (!images || images.length === 0) {
+  // Create a post. With no photos (and no group) it's a plain JSON body; with
+  // photos it becomes a multipart upload carrying the text plus each image file
+  // under `images`. Pass a `group` id to post into that group's timeline instead
+  // of your personal one (the backend checks you're a member).
+  createPost: (text, images = [], group = null) => {
+    if ((!images || images.length === 0) && !group) {
       return request("/api/posts/", { method: "POST", body: { text } });
     }
     const form = new FormData();
     if (text) form.append("text", text);
     for (const file of images) form.append("images", file);
+    if (group) form.append("group", group);
     return request("/api/posts/", { method: "POST", body: form });
   },
 
@@ -250,4 +256,69 @@ export const api = {
 
   unblockUser: (userId) =>
     request(`/api/users/${userId}/block/`, { method: "DELETE" }),
+
+  // --- Groups (Phase 6) ----------------------------------------------------
+
+  // The groups you're an active member of, ordered by name; each with a
+  // member_count and your_role.
+  getGroups: () => request("/api/groups/"),
+
+  // Create a group. Multipart so it can carry an optional avatar file (name +
+  // description ride along as fields). You become its first member, an admin.
+  createGroup: ({ name, description = "", avatar } = {}) => {
+    const form = new FormData();
+    form.append("name", name);
+    form.append("description", description);
+    if (avatar) form.append("avatar", avatar);
+    return request("/api/groups/", { method: "POST", body: form });
+  },
+
+  getGroup: (id) => request(`/api/groups/${id}/`),
+
+  // Edit a group (admins only). Multipart, like the profile edit — pass
+  // `removeAvatar: true` to clear an existing avatar.
+  updateGroup: (id, { name, description, avatar, removeAvatar } = {}) => {
+    const form = new FormData();
+    if (name !== undefined) form.append("name", name);
+    if (description !== undefined) form.append("description", description);
+    if (avatar) form.append("avatar", avatar);
+    if (removeAvatar) form.append("remove_avatar", "true");
+    return request(`/api/groups/${id}/`, { method: "PATCH", body: form });
+  },
+
+  deleteGroup: (id) => request(`/api/groups/${id}/`, { method: "DELETE" }),
+
+  // A group's timeline: its posts, newest-first, paginated. Members only.
+  getGroupPosts: (id) => request(`/api/groups/${id}/posts/`),
+
+  // A group's active members (each with their role).
+  getGroupMembers: (id) => request(`/api/groups/${id}/members/`),
+
+  // Invite one of your connections to a group (any member can invite; the
+  // invitee accepts from their invites inbox).
+  inviteToGroup: (id, userId) =>
+    request(`/api/groups/${id}/members/`, {
+      method: "POST",
+      body: { user_id: userId },
+    }),
+
+  // Remove a member (admins), or — with your own id — leave the group.
+  removeGroupMember: (id, userId) =>
+    request(`/api/groups/${id}/members/${userId}/`, { method: "DELETE" }),
+
+  // Promote/demote a member between "admin" and "member" (admins only).
+  setGroupMemberRole: (id, userId, role) =>
+    request(`/api/groups/${id}/members/${userId}/role/`, {
+      method: "POST",
+      body: { role },
+    }),
+
+  // Your pending group invitations + accept/reject.
+  getGroupInvites: () => request("/api/group-invites/"),
+
+  acceptGroupInvite: (id) =>
+    request(`/api/group-invites/${id}/accept/`, { method: "POST" }),
+
+  rejectGroupInvite: (id) =>
+    request(`/api/group-invites/${id}/reject/`, { method: "POST" }),
 };

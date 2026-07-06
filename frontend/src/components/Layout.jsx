@@ -26,6 +26,15 @@ export default function Layout() {
   // page (PAGE_SIZE) and under-report once there are more than a page of them.
   const pendingCount = requestsData?.count ?? 0;
 
+  // Pending group invitations, for a badge on the Groups link. Shares the
+  // ["groupInvites"] key with the invitations page so accepting/declining there
+  // updates the badge.
+  const { data: groupInvitesData } = useQuery({
+    queryKey: ["groupInvites"],
+    queryFn: api.getGroupInvites,
+  });
+  const groupInviteCount = groupInvitesData?.count ?? 0;
+
   // Total unread messages, for the nav badge. Polled (no WebSockets yet — see
   // the Phase 5 doc) so it stays roughly current without the user reloading.
   // Shares the ["unreadMessages"] key so opening a thread can refresh it.
@@ -92,6 +101,14 @@ export default function Layout() {
               </NavLink>
               <NavLink to="/people" className={navLinkClass}>
                 People
+              </NavLink>
+              <NavLink to="/groups" className={navLinkClass}>
+                Groups
+                {groupInviteCount > 0 && (
+                  <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
+                    {groupInviteCount}
+                  </span>
+                )}
               </NavLink>
               {/* Messages is a companion panel, not a page — the button toggles
                   the drawer so you keep your place in the feed. */}

@@ -158,7 +158,7 @@ describe("ComposeBox with photos", () => {
 
     await user.click(postButton);
     await waitFor(() =>
-      expect(api.createPost).toHaveBeenCalledWith("", [file])
+      expect(api.createPost).toHaveBeenCalledWith("", [file], null)
     );
   });
 
