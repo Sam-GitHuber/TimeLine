@@ -20,7 +20,10 @@ vi.mock("./api.js", () => ({
     getConnectionRequests: vi
       .fn()
       .mockResolvedValue({ results: [], next: null }),
+    getUnreadMessageCount: vi.fn().mockResolvedValue({ count: 0 }),
   },
+  CONVERSATION_LIST_POLL_MS: 12000,
+  MESSAGE_POLL_MS: 4000,
 }));
 
 import { api } from "./api.js";

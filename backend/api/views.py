@@ -2,12 +2,26 @@ from collections import defaultdict
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-from django.db.models import Case, Exists, OuterRef, Q, Value, When
+from django.db.models import (
+    Case,
+    Count,
+    Exists,
+    F,
+    OuterRef,
+    Q,
+    Subquery,
+    Value,
+    When,
+)
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import (
+    NotFound,
+    PermissionDenied,
+    ValidationError,
+)
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -19,11 +33,23 @@ from .imaging import (
     POST_THUMB_EDGE,
     process_image,
 )
-from .models import Comment, Connection, Post, PostImage
+from .models import (
+    Block,
+    Comment,
+    Connection,
+    Conversation,
+    ConversationRead,
+    Message,
+    Post,
+    PostImage,
+)
 from .serializers import (
     CommentCreateSerializer,
     CommentSerializer,
     ConnectionRequestSerializer,
+    ConversationSerializer,
+    MessageCreateSerializer,
+    MessageSerializer,
     PostSerializer,
     UserListSerializer,
 )
@@ -49,6 +75,80 @@ def connected_user_ids(user):
         requestee if requester == user.id else requester
         for requester, requestee in pairs
     }
+
+
+def is_blocked_between(user, other):
+    """True if either of ``user``/``other`` has blocked the other (Phase 5).
+
+    A block in *either* direction cuts the pair off, so this checks both. It's
+    the single gate the messaging + connection paths consult, so "blocked means
+    blocked" can't be interpreted differently in two places.
+    """
+    return Block.objects.filter(
+        Q(blocker=user, blocked=other) | Q(blocker=other, blocked=user)
+    ).exists()
+
+
+def can_message(user, other):
+    """Whether ``user`` may send a message to ``other`` (Phase 5).
+
+    Messaging is connection-gated (no cold DMs from strangers — see the phase
+    doc): both accounts active, mutually connected, and neither has blocked the
+    other. This is the one place the rule lives; the create-conversation and
+    send-message views both defer to it.
+    """
+    if not other.is_active or not user.is_active:
+        return False
+    if is_blocked_between(user, other):
+        return False
+    return other.id in connected_user_ids(user)
+
+
+def decorate_conversations(conversations, user):
+    """Attach the per-viewer fields the conversation list serializer needs, in a
+    fixed number of queries (no N+1 across the page).
+
+    For each conversation, sets ``.other`` (the other participant), attaches the
+    latest message as ``._last_message`` (or ``None``), and ``.unread_count``
+    (messages you didn't send, newer than your read marker, not deleted).
+    ``conversations`` must already have ``user_a``/``user_b`` selected.
+    """
+    conversations = list(conversations)
+    for convo in conversations:
+        convo.other = convo.other_participant(user)
+    ids = [c.id for c in conversations]
+    if not ids:
+        return conversations
+
+    # Latest message per conversation, in one query (Postgres DISTINCT ON).
+    latest = (
+        Message.objects.filter(conversation_id__in=ids)
+        .order_by("conversation_id", "-created_at", "-id")
+        .distinct("conversation_id")
+        .select_related("sender")
+    )
+    last_by_convo = {m.conversation_id: m for m in latest}
+
+    # Unread-per-conversation in one query: count each viewer-unseen message
+    # (not yours, not deleted, newer than your read marker — or all of them if
+    # you've never opened the thread), grouped by conversation.
+    read_at = ConversationRead.objects.filter(
+        conversation_id=OuterRef("conversation_id"), user=user
+    ).values("last_read_at")[:1]
+    unread_rows = (
+        Message.objects.filter(conversation_id__in=ids, deleted_at__isnull=True)
+        .exclude(sender=user)
+        .annotate(read_at=Subquery(read_at))
+        .filter(Q(read_at__isnull=True) | Q(created_at__gt=F("read_at")))
+        .values("conversation_id")
+        .annotate(n=Count("id"))
+    )
+    unread_by_convo = {r["conversation_id"]: r["n"] for r in unread_rows}
+
+    for convo in conversations:
+        convo._last_message = last_by_convo.get(convo.id)
+        convo.unread_count = unread_by_convo.get(convo.id, 0)
+    return conversations
 
 
 def visible_posts(user, author=None, connected_ids=None):
@@ -275,7 +375,15 @@ class UserDetailView(generics.RetrieveAPIView):
     def get_queryset(self):
         user = self.request.user
         return User.objects.filter(is_active=True).annotate(
-            connection_status=connection_status_annotation(user)
+            connection_status=connection_status_annotation(user),
+            # Whether *you* have blocked this person, so the profile can offer
+            # Unblock and hide the Message button. (A block severs any
+            # connection, so "connected" already implies "not blocked".)
+            is_blocked=Exists(
+                Block.objects.filter(
+                    blocker=user, blocked=OuterRef("pk")
+                )
+            ),
         )
 
 
@@ -308,6 +416,13 @@ class ConnectView(APIView):
             return Response(
                 {"detail": "You can't connect with yourself."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        # A block in either direction bars (re)connecting — the explicit cut is
+        # meant to stick until the blocker lifts it (Phase 5).
+        if is_blocked_between(request.user, target):
+            return Response(
+                {"detail": "You can't connect with this person."},
+                status=status.HTTP_403_FORBIDDEN,
             )
         existing = self._existing(request.user, target)
         if existing is None:
@@ -460,3 +575,293 @@ class PostCommentsView(APIView):
             )
         serializer.save(author=request.user, post=post)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+# --- Direct messaging (Phase 5) ------------------------------------------------
+
+
+def user_conversations(user):
+    """The conversations ``user`` participates in that should be shown to them,
+    newest-activity first.
+
+    Hides a conversation whose other participant is deactivated or blocked
+    (either direction) — a block cuts the pair off from each other, so the thread
+    disappears from both lists, consistent with the feed hiding a banned member.
+    """
+    blocked_ids = set(
+        Block.objects.filter(Q(blocker=user) | Q(blocked=user)).values_list(
+            "blocker_id", "blocked_id"
+        )
+    )
+    # Flatten the (blocker, blocked) pairs into "everyone I'm blocked-with".
+    hidden = {a if a != user.id else b for pair in blocked_ids for a, b in [pair]}
+    return (
+        Conversation.objects.filter(Q(user_a=user) | Q(user_b=user))
+        .filter(
+            # The *other* participant must be active.
+            Q(user_a=user, user_b__is_active=True)
+            | Q(user_b=user, user_a__is_active=True)
+        )
+        .exclude(user_a_id__in=hidden)
+        .exclude(user_b_id__in=hidden)
+        .select_related("user_a", "user_b")
+        .order_by("-updated_at", "-id")
+    )
+
+
+class ConversationListCreateView(generics.ListCreateAPIView):
+    """List your conversations (GET) or open one with a connected person (POST).
+
+    GET returns your threads most-recent-activity first, each with the other
+    person, a last-message preview, and your unread count — time-ordered, never
+    ranked. POST is **get-or-create**: body ``{ user_id }`` returns the existing
+    1:1 thread with that person or makes a new one, but only if you *can* message
+    them (mutually connected, both active, neither blocked) — otherwise 403, or
+    404 for an unknown/inactive user.
+    """
+
+    serializer_class = ConversationSerializer
+
+    def get_queryset(self):
+        return user_conversations(self.request.user)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        source = page if page is not None else list(queryset)
+        decorate_conversations(source, request.user)
+        serializer = self.get_serializer(source, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        user_id = request.data.get("user_id")
+        if user_id is None:
+            raise ValidationError({"user_id": "This field is required."})
+        other = get_object_or_404(User, pk=user_id, is_active=True)
+        if other == request.user:
+            raise ValidationError(
+                {"user_id": "You can't message yourself."}
+            )
+        if not can_message(request.user, other):
+            raise PermissionDenied(
+                "You can only message people you're connected with."
+            )
+
+        a, b = sorted((request.user, other), key=lambda u: u.id)
+        try:
+            with transaction.atomic():
+                convo, _created = Conversation.objects.get_or_create(
+                    user_a=a, user_b=b
+                )
+        except IntegrityError:
+            # A concurrent open created the row between our check and insert;
+            # the one-per-pair constraint rejected ours — just fetch theirs.
+            convo = Conversation.objects.get(
+                Q(user_a=a, user_b=b) | Q(user_a=b, user_b=a)
+            )
+
+        decorate_conversations([convo], request.user)
+        serializer = self.get_serializer(convo)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class ConversationDetailView(generics.RetrieveAPIView):
+    """A single conversation (``GET /conversations/<pk>/``) — the other person,
+    last-message preview, and your unread count.
+
+    Drives the thread page's header (who you're talking to) so it's correct even
+    on a cold page load/refresh, not only when arriving from the list.
+    Participant-scoped, and hidden (404) if the pair is blocked either way."""
+
+    serializer_class = ConversationSerializer
+
+    def get_object(self):
+        user = self.request.user
+        convo = get_object_or_404(
+            Conversation.objects.select_related("user_a", "user_b").filter(
+                Q(user_a=user) | Q(user_b=user)
+            ),
+            pk=self.kwargs["pk"],
+        )
+        other = convo.other_participant(user)
+        if is_blocked_between(user, other):
+            raise NotFound()
+        decorate_conversations([convo], user)
+        # Whether new messages are still allowed (drives the composer). History
+        # stays readable after a disconnect even when this is False.
+        convo._can_message = can_message(user, other)
+        return convo
+
+
+class ConversationMessagesView(generics.ListAPIView):
+    """The messages in a conversation (GET) and sending one (POST) at
+    ``/conversations/<pk>/messages/``.
+
+    You must be a participant, else 404 (we don't reveal a thread you're not in).
+    A blocked pair can't see the thread at all (404). GET returns messages
+    oldest-first, paginated. POST re-checks ``can_message`` — disconnecting or a
+    block stops *future* messages even though the history stays visible — takes
+    the sender from the session, bumps the conversation's activity time, and
+    marks it read for you (you've clearly caught up).
+    """
+
+    serializer_class = MessageSerializer
+
+    def _conversation(self):
+        # Participant-scoped: only the two people in the thread can reach it, and
+        # a block hides it from both. 404 otherwise (don't leak its existence).
+        user = self.request.user
+        convo = get_object_or_404(
+            Conversation.objects.select_related("user_a", "user_b").filter(
+                Q(user_a=user) | Q(user_b=user)
+            ),
+            pk=self.kwargs["pk"],
+        )
+        other = convo.other_participant(user)
+        if is_blocked_between(user, other):
+            raise NotFound()
+        return convo, other
+
+    def get_queryset(self):
+        convo, _other = self._conversation()
+        return convo.messages.select_related("sender")
+
+    def post(self, request, pk):
+        convo, other = self._conversation()
+        if not can_message(request.user, other):
+            raise PermissionDenied(
+                "You can no longer message this person."
+            )
+        serializer = MessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        now = timezone.now()
+        with transaction.atomic():
+            message = Message.objects.create(
+                conversation=convo,
+                sender=request.user,
+                text=serializer.validated_data["text"],
+            )
+            # Bump activity so the thread rises to the top of both lists.
+            Conversation.objects.filter(pk=convo.pk).update(updated_at=now)
+            # Sending implies you've read everything up to now.
+            ConversationRead.objects.update_or_create(
+                conversation=convo,
+                user=request.user,
+                defaults={"last_read_at": now},
+            )
+        out = MessageSerializer(message, context={"request": request})
+        return Response(out.data, status=status.HTTP_201_CREATED)
+
+
+class ConversationReadView(APIView):
+    """Mark a conversation read up to now (``POST /conversations/<pk>/read/``),
+    which clears your unread count for it. Participant-only (404 otherwise)."""
+
+    def post(self, request, pk):
+        user = request.user
+        convo = get_object_or_404(
+            Conversation.objects.filter(Q(user_a=user) | Q(user_b=user)),
+            pk=pk,
+        )
+        ConversationRead.objects.update_or_create(
+            conversation=convo,
+            user=user,
+            defaults={"last_read_at": timezone.now()},
+        )
+        return Response({"detail": "Marked read."}, status=status.HTTP_200_OK)
+
+
+class MessageDeleteView(APIView):
+    """Delete your own message
+    (``DELETE /conversations/<pk>/messages/<message_id>/``).
+
+    Soft delete (v1 scope): only the sender can delete, and only their own
+    message. The row stays — blanked, with ``deleted_at`` set — so the thread
+    still renders a "message deleted" placeholder in the right spot rather than
+    silently reshuffling. 404 if it isn't your message or isn't in this thread.
+    """
+
+    def delete(self, request, pk, message_id):
+        message = get_object_or_404(
+            Message,
+            pk=message_id,
+            conversation_id=pk,
+            sender=request.user,
+        )
+        if not message.is_deleted:
+            message.text = ""
+            message.deleted_at = timezone.now()
+            message.save(update_fields=["text", "deleted_at"])
+        return Response(
+            {"detail": "Message deleted."}, status=status.HTTP_200_OK
+        )
+
+
+class UnreadMessageCountView(APIView):
+    """Your total unread-message count across all conversations, for the nav
+    badge (``GET /messages/unread-count/``). One query, mirrors the per-thread
+    unread rule (not yours, not deleted, newer than your read marker), and
+    ignores blocked/inactive threads via ``user_conversations``."""
+
+    def get(self, request):
+        user = request.user
+        convo_ids = list(user_conversations(user).values_list("id", flat=True))
+        if not convo_ids:
+            return Response({"count": 0})
+        read_at = ConversationRead.objects.filter(
+            conversation_id=OuterRef("conversation_id"), user=user
+        ).values("last_read_at")[:1]
+        count = (
+            Message.objects.filter(
+                conversation_id__in=convo_ids, deleted_at__isnull=True
+            )
+            .exclude(sender=user)
+            .annotate(read_at=Subquery(read_at))
+            .filter(Q(read_at__isnull=True) | Q(created_at__gt=F("read_at")))
+            .count()
+        )
+        return Response({"count": count})
+
+
+class BlockView(APIView):
+    """Block (POST) or unblock (DELETE) the user at ``/users/<pk>/block/``.
+
+    Blocking is the strong, explicit cut: it hides your conversation from both
+    of you, stops further messages, and bars (re)connecting — and it also removes
+    any existing connection between you, so blocking someone disconnects them.
+    Idempotent both ways. You can't block yourself (400) or an unknown/inactive
+    user (404). DELETE lifts only *your* block; if they've also blocked you, that
+    stays.
+    """
+
+    def post(self, request, pk):
+        target = get_object_or_404(User, pk=pk, is_active=True)
+        if target == request.user:
+            return Response(
+                {"detail": "You can't block yourself."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with transaction.atomic():
+            Block.objects.get_or_create(
+                blocker=request.user, blocked=target
+            )
+            # Blocking severs any connection — you shouldn't stay "connected"
+            # to someone you've blocked.
+            Connection.objects.filter(
+                Q(requester=request.user, requestee=target)
+                | Q(requester=target, requestee=request.user)
+            ).delete()
+        return Response(
+            {"detail": "Blocked.", "is_blocked": True},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        target = get_object_or_404(User, pk=pk)
+        Block.objects.filter(blocker=request.user, blocked=target).delete()
+        return Response(
+            {"detail": "Unblocked.", "is_blocked": False},
+            status=status.HTTP_200_OK,
+        )

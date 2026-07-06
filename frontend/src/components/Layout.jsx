@@ -1,6 +1,6 @@
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../api.js";
+import { api, CONVERSATION_LIST_POLL_MS } from "../api.js";
 import { useAuth } from "../auth.jsx";
 
 // The app shell: a top nav plus whichever page is active (<Outlet />).
@@ -22,6 +22,16 @@ export default function Layout() {
   // `count` is the paginator's true total; `results.length` would cap at one
   // page (PAGE_SIZE) and under-report once there are more than a page of them.
   const pendingCount = requestsData?.count ?? 0;
+
+  // Total unread messages, for the nav badge. Polled (no WebSockets yet — see
+  // the Phase 5 doc) so it stays roughly current without the user reloading.
+  // Shares the ["unreadMessages"] key so opening a thread can refresh it.
+  const { data: unreadData } = useQuery({
+    queryKey: ["unreadMessages"],
+    queryFn: api.getUnreadMessageCount,
+    refetchInterval: CONVERSATION_LIST_POLL_MS,
+  });
+  const unreadMessages = unreadData?.count ?? 0;
 
   // The Django admin lives on the API host, not the SPA — build the link from
   // the same base URL the API client uses so it's correct in every environment.
@@ -79,6 +89,14 @@ export default function Layout() {
               </NavLink>
               <NavLink to="/people" className={navLinkClass}>
                 People
+              </NavLink>
+              <NavLink to="/messages" className={navLinkClass}>
+                Messages
+                {unreadMessages > 0 && (
+                  <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
+                    {unreadMessages}
+                  </span>
+                )}
               </NavLink>
               <NavLink to="/requests" className={navLinkClass}>
                 Requests

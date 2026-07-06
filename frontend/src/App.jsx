@@ -6,6 +6,8 @@ import ProfilePage from "./pages/ProfilePage.jsx";
 import ProfileEditPage from "./pages/ProfileEditPage.jsx";
 import FindPeoplePage from "./pages/FindPeoplePage.jsx";
 import RequestsPage from "./pages/RequestsPage.jsx";
+import MessagesPage from "./pages/MessagesPage.jsx";
+import ConversationPage from "./pages/ConversationPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
 
@@ -13,8 +15,10 @@ import SignupPage from "./pages/SignupPage.jsx";
 //   /login, /signup   → public auth pages
 //   /                 → the feed (home timeline)     ┐ require a logged-in user
 //   /people           → find people to connect with  │ (ProtectedRoute gate)
-//   /requests         → incoming connection requests  │
-//   /settings         → edit your own profile          │
+//   /messages         → your conversations             │
+//   /messages/:id     → a single conversation thread    │
+//   /requests         → incoming connection requests    │
+//   /settings         → edit your own profile           │
 //   /u/:id            → a person's profile (by user id) ┘
 // The protected pages render inside Layout, which provides the nav bar (with
 // the logout control). Each page fetches its own data from the API. Real URLs
@@ -29,6 +33,8 @@ export default function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<FeedPage />} />
           <Route path="people" element={<FindPeoplePage />} />
+          <Route path="messages" element={<MessagesPage />} />
+          <Route path="messages/:id" element={<ConversationPage />} />
           <Route path="requests" element={<RequestsPage />} />
           <Route path="settings" element={<ProfileEditPage />} />
           <Route path="u/:id" element={<ProfilePage />} />

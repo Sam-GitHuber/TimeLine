@@ -10,12 +10,23 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import Q
 from django.test import SimpleTestCase, override_settings
+from django.utils import timezone
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Comment, Connection, Post, PostImage
+from .models import (
+    Block,
+    Comment,
+    Connection,
+    Conversation,
+    ConversationRead,
+    Message,
+    Post,
+    PostImage,
+)
 
 User = get_user_model()
 
@@ -23,6 +34,8 @@ FEED_URL = "/api/feed/"
 POSTS_URL = "/api/posts/"
 USERS_URL = "/api/users/"
 REQUESTS_URL = "/api/connection-requests/"
+CONVERSATIONS_URL = "/api/conversations/"
+UNREAD_COUNT_URL = "/api/messages/unread-count/"
 PASSWORD = "correct-horse-42-battery"
 
 ACCEPTED = Connection.Status.ACCEPTED
@@ -48,6 +61,18 @@ def make_connection(requester, requestee, status=ACCEPTED):
 
 def comments_url(post):
     return f"/api/posts/{post.pk}/comments/"
+
+
+def block_url(user):
+    return f"/api/users/{user.pk}/block/"
+
+
+def messages_url(convo):
+    return f"/api/conversations/{convo.pk}/messages/"
+
+
+def read_url(convo):
+    return f"/api/conversations/{convo.pk}/read/"
 
 
 # Path to the real settings module, loaded in isolation below so we can
@@ -777,3 +802,274 @@ class PhotoPostTests(APITestCase):
         feed = self.client.get(FEED_URL)
         self.assertEqual(feed.status_code, status.HTTP_200_OK)
         self.assertEqual(len(feed.data["results"][0]["images"]), 1)
+
+
+# --- Phase 5: direct messaging -------------------------------------------------
+
+
+class MessagingBase(APITestCase):
+    """Two mutually-connected users, ``me`` and ``friend``, plus an unrelated
+    ``stranger`` (not connected). ``me`` is authenticated by default."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        self.stranger = make_user("stranger@example.com")
+        make_connection(self.me, self.friend, status=ACCEPTED)
+        self.client.force_authenticate(self.me)
+
+    def open_with(self, other):
+        return self.client.post(
+            CONVERSATIONS_URL, {"user_id": other.pk}, format="json"
+        )
+
+
+class ConversationStartTests(MessagingBase):
+    def test_open_conversation_with_a_connection(self):
+        resp = self.open_with(self.friend)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["other"]["id"], self.friend.pk)
+        self.assertEqual(Conversation.objects.count(), 1)
+
+    def test_open_is_idempotent_get_or_create(self):
+        first = self.open_with(self.friend)
+        second = self.open_with(self.friend)
+        self.assertEqual(first.data["id"], second.data["id"])
+        self.assertEqual(Conversation.objects.count(), 1)
+
+    def test_reopening_from_the_other_side_finds_the_same_thread(self):
+        first = self.open_with(self.friend)
+        self.client.force_authenticate(self.friend)
+        second = self.client.post(
+            CONVERSATIONS_URL, {"user_id": self.me.pk}, format="json"
+        )
+        self.assertEqual(first.data["id"], second.data["id"])
+        self.assertEqual(Conversation.objects.count(), 1)
+
+    def test_cannot_open_with_a_non_connection(self):
+        resp = self.open_with(self.stranger)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Conversation.objects.count(), 0)
+
+    def test_cannot_open_with_yourself(self):
+        resp = self.open_with(self.me)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_open_with_unknown_user(self):
+        resp = self.client.post(
+            CONVERSATIONS_URL, {"user_id": 999999}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class MessageSendTests(MessagingBase):
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(
+            user_a=self.me, user_b=self.friend
+        )
+
+    def test_send_and_read_thread_oldest_first(self):
+        self.client.post(messages_url(self.convo), {"text": "first"})
+        self.client.post(messages_url(self.convo), {"text": "second"})
+        resp = self.client.get(messages_url(self.convo))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        texts = [m["text"] for m in resp.data["results"]]
+        self.assertEqual(texts, ["first", "second"])
+        self.assertEqual(resp.data["results"][0]["sender"]["id"], self.me.pk)
+
+    def test_sender_is_the_session_user_not_the_body(self):
+        # An attempt to spoof the sender via the body is ignored.
+        self.client.post(
+            messages_url(self.convo),
+            {"text": "hi", "sender": self.friend.pk},
+        )
+        self.assertEqual(Message.objects.get().sender, self.me)
+
+    def test_sending_bumps_conversation_activity(self):
+        before = Conversation.objects.get(pk=self.convo.pk).updated_at
+        self.client.post(messages_url(self.convo), {"text": "ping"})
+        after = Conversation.objects.get(pk=self.convo.pk).updated_at
+        self.assertGreater(after, before)
+
+    def test_empty_message_rejected(self):
+        resp = self.client.post(messages_url(self.convo), {"text": "   "})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_non_participant_cannot_read_or_send(self):
+        self.client.force_authenticate(self.stranger)
+        self.assertEqual(
+            self.client.get(messages_url(self.convo)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.post(
+                messages_url(self.convo), {"text": "intrude"}
+            ).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_history_visible_after_disconnect_but_no_new_messages(self):
+        self.client.post(messages_url(self.convo), {"text": "hello"})
+        # Disconnect: history stays readable, but sending is now barred.
+        self.client.delete(connect_url(self.friend))
+        self.assertEqual(
+            self.client.get(messages_url(self.convo)).status_code,
+            status.HTTP_200_OK,
+        )
+        resp = self.client.post(messages_url(self.convo), {"text": "again"})
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class MessageDeleteTests(MessagingBase):
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(
+            user_a=self.me, user_b=self.friend
+        )
+        self.mine = Message.objects.create(
+            conversation=self.convo, sender=self.me, text="mine"
+        )
+
+    def _delete(self, message):
+        return self.client.delete(
+            f"/api/conversations/{self.convo.pk}/messages/{message.pk}/"
+        )
+
+    def test_sender_can_soft_delete_own_message(self):
+        resp = self._delete(self.mine)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.mine.refresh_from_db()
+        self.assertTrue(self.mine.is_deleted)
+        self.assertEqual(self.mine.text, "")
+        # The tombstone still shows in the thread, flagged deleted.
+        thread = self.client.get(messages_url(self.convo))
+        row = thread.data["results"][0]
+        self.assertTrue(row["is_deleted"])
+        self.assertEqual(row["text"], "")
+
+    def test_cannot_delete_someone_elses_message(self):
+        theirs = Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="theirs"
+        )
+        resp = self._delete(theirs)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        theirs.refresh_from_db()
+        self.assertFalse(theirs.is_deleted)
+
+
+class UnreadAndListTests(MessagingBase):
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(
+            user_a=self.me, user_b=self.friend
+        )
+
+    def _friend_sends(self, text):
+        self.client.force_authenticate(self.friend)
+        self.client.post(messages_url(self.convo), {"text": text})
+        self.client.force_authenticate(self.me)
+
+    def test_unread_count_and_mark_read(self):
+        self._friend_sends("hey")
+        self._friend_sends("you there?")
+        listing = self.client.get(CONVERSATIONS_URL)
+        self.assertEqual(listing.data["results"][0]["unread_count"], 2)
+        self.assertEqual(self.client.get(UNREAD_COUNT_URL).data["count"], 2)
+        # Marking read clears it.
+        self.assertEqual(
+            self.client.post(read_url(self.convo)).status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(self.client.get(UNREAD_COUNT_URL).data["count"], 0)
+        self.assertTrue(
+            ConversationRead.objects.filter(
+                conversation=self.convo, user=self.me
+            ).exists()
+        )
+
+    def test_your_own_messages_are_not_unread(self):
+        self.client.post(messages_url(self.convo), {"text": "mine"})
+        self.assertEqual(self.client.get(UNREAD_COUNT_URL).data["count"], 0)
+
+    def test_deleted_messages_do_not_count_as_unread(self):
+        self._friend_sends("boo")
+        msg = Message.objects.get()
+        msg.text = ""
+        msg.deleted_at = timezone.now()
+        msg.save(update_fields=["text", "deleted_at"])
+        self.assertEqual(self.client.get(UNREAD_COUNT_URL).data["count"], 0)
+
+    def test_list_shows_preview_and_orders_by_activity(self):
+        other_friend = make_user("other@example.com")
+        make_connection(self.me, other_friend, status=ACCEPTED)
+        convo2 = Conversation.objects.create(
+            user_a=self.me, user_b=other_friend
+        )
+        # Send in convo (older) then convo2 (newer) — convo2 should lead.
+        self.client.post(messages_url(self.convo), {"text": "older"})
+        self.client.post(messages_url(convo2), {"text": "newer"})
+        results = self.client.get(CONVERSATIONS_URL).data["results"]
+        self.assertEqual(results[0]["id"], convo2.pk)
+        self.assertEqual(results[0]["last_message"]["text"], "newer")
+
+
+class BlockTests(MessagingBase):
+    def test_block_prevents_messaging_both_ways(self):
+        convo = Conversation.objects.create(user_a=self.me, user_b=self.friend)
+        self.client.post(block_url(self.friend))
+        # I can't send…
+        self.assertEqual(
+            self.client.post(messages_url(convo), {"text": "x"}).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        # …and the blocked user can't either (thread hidden from them too).
+        self.client.force_authenticate(self.friend)
+        self.assertEqual(
+            self.client.post(messages_url(convo), {"text": "y"}).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_block_hides_conversation_from_the_list(self):
+        Conversation.objects.create(user_a=self.me, user_b=self.friend)
+        self.client.post(block_url(self.friend))
+        self.assertEqual(self.client.get(CONVERSATIONS_URL).data["count"], 0)
+
+    def test_block_severs_connection_and_bars_reconnecting(self):
+        self.client.post(block_url(self.friend))
+        self.assertFalse(
+            Connection.objects.filter(
+                Q(requester=self.me, requestee=self.friend)
+                | Q(requester=self.friend, requestee=self.me)
+            ).exists()
+        )
+        # Trying to reconnect while blocked is forbidden.
+        resp = self.client.post(connect_url(self.friend))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_open_conversation_with_a_blocked_user(self):
+        self.client.post(block_url(self.friend))
+        resp = self.open_with(self.friend)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unblock_lifts_only_your_own_block(self):
+        # friend blocks me; my unblock must not clear their block.
+        self.client.force_authenticate(self.friend)
+        self.client.post(block_url(self.me))
+        self.client.force_authenticate(self.me)
+        self.client.delete(block_url(self.friend))
+        self.assertTrue(
+            Block.objects.filter(blocker=self.friend, blocked=self.me).exists()
+        )
+
+    def test_cannot_block_yourself(self):
+        resp = self.client.post(block_url(self.me))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class MessagingAuthRequiredTests(APITestCase):
+    def test_conversations_require_login(self):
+        self.assertEqual(
+            self.client.get(CONVERSATIONS_URL).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
