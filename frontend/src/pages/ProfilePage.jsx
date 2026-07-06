@@ -2,6 +2,8 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
 import ConnectButton from "../components/ConnectButton.jsx";
+import MessageButton from "../components/MessageButton.jsx";
+import BlockButton from "../components/BlockButton.jsx";
 import Timeline from "../components/Timeline.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
@@ -80,22 +82,53 @@ export default function ProfilePage() {
               <h1 className="font-display text-2xl font-bold -tracking-[0.02em] text-ink">
                 {user.display_name}
               </h1>
-              {/* Your own page gets an Edit link; everyone else's gets a
-                  Connect button (you can't connect with yourself). */}
+              {/* Your own page gets an Edit link. Everyone else's gets the
+                  connection/messaging actions — unless you've blocked them, in
+                  which case the only action is to unblock. */}
               {isSelf ? (
                 <Link to="/settings" className="btn btn-ghost btn-sm shrink-0">
                   Edit profile
                 </Link>
-              ) : (
-                <ConnectButton
+              ) : user.is_blocked ? (
+                <BlockButton
                   userId={user.id}
-                  connectionStatus={user.connection_status}
+                  displayName={user.display_name}
+                  isBlocked
                 />
+              ) : (
+                <div className="flex shrink-0 items-center gap-2">
+                  {/* Message only makes sense once connected — and the backend
+                      enforces the same rule. */}
+                  {user.connection_status === "connected" && (
+                    <MessageButton userId={user.id} />
+                  )}
+                  <ConnectButton
+                    userId={user.id}
+                    connectionStatus={user.connection_status}
+                  />
+                </div>
               )}
             </div>
             {user.bio && (
               <p className="mt-2 whitespace-pre-wrap break-words text-ink-soft">
                 {user.bio}
+              </p>
+            )}
+            {/* Block is a quieter, secondary action — not for your own page,
+                and shown as "Unblock" handling is up in the actions row. */}
+            {!isSelf && !user.is_blocked && (
+              <p className="mt-3">
+                <BlockButton
+                  userId={user.id}
+                  displayName={user.display_name}
+                  isBlocked={false}
+                />
+              </p>
+            )}
+            {user.is_blocked && (
+              <p className="mt-2 text-sm text-ink-faint">
+                You’ve blocked {user.display_name}. They can’t message you or see
+                your posts, and you can’t see theirs.
               </p>
             )}
           </div>

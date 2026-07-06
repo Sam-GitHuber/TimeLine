@@ -1,7 +1,10 @@
 # Phase 5 — Direct Messaging
 
-**Status:** not started — planned (this doc is the full plan; confirm before
-building)
+**Status:** done — implemented on branch `phase-5-messaging`. Backend
+(`Conversation`/`Message`/`ConversationRead`/`Block` + endpoints) and frontend
+(`/messages` list, `/messages/:id` thread, nav badge, profile Message/Block
+controls) are in, with backend + frontend tests passing. See the notes log below
+for the choices made while building.
 
 ## Goal
 
@@ -18,19 +21,21 @@ A nav badge shows unread messages, and you can block someone.
 
 ## Definition of done
 
-- [ ] `Conversation` + `Message` tables (and a read-marker) via migrations
-- [ ] Start (or reopen) a 1:1 conversation with **a person you're connected
+- [x] `Conversation` + `Message` tables (and a read-marker) via migrations
+      (`0006`, plus a `Block` table)
+- [x] Start (or reopen) a 1:1 conversation with **a person you're connected
       with** — not strangers (private-by-default, consistent with connections)
-- [ ] Send a message; view a conversation thread oldest-first, paginated
-- [ ] Delete your own message (confirmed in scope for v1)
-- [ ] A list of your conversations, most-recent-activity first, each showing the
+- [x] Send a message; view a conversation thread oldest-first, paginated
+- [x] Delete your own message (confirmed in scope for v1) — soft delete, keeps a
+      "message deleted" tombstone in place
+- [x] A list of your conversations, most-recent-activity first, each showing the
       other person, a last-message preview, and an unread count
-- [ ] Unread indicator (per-conversation count + a total badge in the nav)
-- [ ] Near-real-time delivery via **polling** (TanStack Query `refetchInterval`)
+- [x] Unread indicator (per-conversation count + a total badge in the nav)
+- [x] Near-real-time delivery via **polling** (TanStack Query `refetchInterval`)
       — WebSockets deferred (see decisions log)
-- [ ] **Block a user**: prevents messaging (and re-connecting) both ways
-- [ ] A "Message" affordance on a connected person's profile
-- [ ] Backend + frontend tests (send/scope/read/block), following the
+- [x] **Block a user**: prevents messaging (and re-connecting) both ways
+- [x] A "Message" affordance on a connected person's profile
+- [x] Backend + frontend tests (send/scope/read/block), following the
       established pattern
 
 ## API sketch (REST, reuses the Phase 3/3a auth + connection model)
@@ -151,4 +156,62 @@ A nav badge shows unread messages, and you can block someone.
 
 ## Notes / decisions log
 
-(Record deviations/gotchas here once building starts.)
+- **Frontend UX: a docked drawer, not pages (revised after first build).** The
+  original plan's `/messages` list page + `/messages/:id` thread page were
+  replaced with a single **non-modal companion drawer** (`MessagesDrawer.jsx`,
+  driven by `MessagingProvider` state rather than the router). Rationale, from
+  user feedback: messaging should sit *beside* your timeline, so opening it
+  doesn't unmount the feed (you keep your scroll position), and starting a new
+  message lives right in the panel (compose control in the header → a searchable
+  connection picker). The drawer walks list → thread → new-message. The nav
+  "Messages" item toggles it. The backend API + data model are unchanged — this
+  was purely a frontend re-shape. The old `/messages[/:id]` URLs still work
+  (bookmarks / shared conversation links): `MessagesRoute` opens the drawer over
+  the feed, and a catch-all route sends any unknown path to the feed instead of
+  a blank screen (a blank `/messages` after the route was removed was the one
+  regression the reshape introduced, now covered).
+
+- **Message deletion is a *soft* delete, not a row drop.** Deleting blanks
+  ``text`` and sets ``deleted_at`` rather than removing the row. Two reasons:
+  the thread keeps a "message deleted" placeholder in its original spot (no
+  silent reshuffle), and the stable ``created_at, id`` ordering / pagination
+  isn't disturbed by a hole. Deleted messages don't count toward unread.
+- **Two extra endpoints beyond the API sketch**, both to keep the client simple
+  and correct:
+  - ``GET /api/conversations/<id>/`` (conversation detail) — the messages
+    endpoint doesn't carry the *other participant*, so the thread page needs
+    this for its header to be right on a cold load/refresh. It also returns a
+    server-computed ``can_message`` boolean (connected + not blocked) that drives
+    whether the composer is shown — matching the real send gate exactly, so the
+    UI and the 403 can't disagree.
+  - ``GET /api/messages/unread-count/`` — a single-number endpoint for the nav
+    badge, so the badge doesn't have to load and sum the (paginated)
+    conversation list.
+- **Unread + last-message are computed without N+1.** The conversation-list
+  decorator (`decorate_conversations` in `api/views.py`) does one
+  Postgres ``DISTINCT ON (conversation_id)`` query for each thread's latest
+  message and one grouped-``Count`` query (with a per-viewer ``last_read_at``
+  ``Subquery``) for unread — a fixed number of queries per page regardless of
+  page size. Note ``DISTINCT ON`` is Postgres-specific (fine — Postgres is the
+  chosen DB, and the tests run on it).
+- **Blocking severs the connection.** ``POST /users/<id>/block/`` deletes any
+  ``Connection`` row between the pair as well as creating the ``Block`` — you
+  shouldn't stay "connected" to someone you've blocked. Unblock only lifts *your*
+  own block (a mutual block is two independent rows). A block in either direction
+  hides the conversation from **both** lists and 404s the thread, and bars
+  (re)connecting (wired into the existing `ConnectView`).
+- **`can_message(me, other)`** is the single gate (active + connected + not
+  blocked) that both create-conversation and send-message consult, and it reuses
+  `connected_user_ids`. History stays readable after a disconnect (GET works);
+  only *sending* is gated, so `POST` re-checks it and 403s.
+- **Polling cadence lives in one place** — `MESSAGE_POLL_MS` (open thread) and
+  `CONVERSATION_LIST_POLL_MS` (list + nav badge) in `frontend/src/api.js`. The
+  thread page eagerly pulls all message pages (threads are short at family
+  scale) so the newest messages are always on screen; going real-time later
+  swaps the interval for a socket subscription with no schema/API change, as
+  planned.
+- **`is_blocked` on the profile payload** (annotated only on the user-detail
+  view, defaults False elsewhere) tells the profile page whether *you've* blocked
+  this person, so it can show Unblock + a note and hide the Message/Connect
+  actions. A block severs the connection, so "connected" already implies "not
+  blocked" — the two never both show.

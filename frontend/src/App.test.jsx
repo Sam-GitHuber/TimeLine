@@ -25,7 +25,19 @@ vi.mock("./api.js", () => ({
     getConnectionRequests: vi.fn(),
     approveRequest: vi.fn(),
     rejectRequest: vi.fn(),
+    getConversations: vi.fn(),
+    openConversation: vi.fn(),
+    getConversation: vi.fn(),
+    getMessages: vi.fn(),
+    sendMessage: vi.fn(),
+    deleteMessage: vi.fn(),
+    markConversationRead: vi.fn(),
+    getUnreadMessageCount: vi.fn(),
+    blockUser: vi.fn(),
+    unblockUser: vi.fn(),
   },
+  CONVERSATION_LIST_POLL_MS: 12000,
+  MESSAGE_POLL_MS: 4000,
 }));
 
 // A DRF-style paginated payload.
@@ -59,6 +71,8 @@ beforeEach(() => {
   api.getUserPosts.mockResolvedValue(page([]));
   api.getComments.mockResolvedValue([]);
   api.getConnectionRequests.mockResolvedValue(page([]));
+  api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
+  api.getConversations.mockResolvedValue(page([]));
 });
 
 describe("Feed page", () => {

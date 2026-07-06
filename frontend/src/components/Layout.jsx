@@ -1,7 +1,9 @@
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../api.js";
+import { api, CONVERSATION_LIST_POLL_MS } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { useMessaging } from "../messaging.jsx";
+import MessagesDrawer from "./MessagesDrawer.jsx";
 
 // The app shell: a top nav plus whichever page is active (<Outlet />).
 //
@@ -11,6 +13,7 @@ import { useAuth } from "../auth.jsx";
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const messaging = useMessaging();
 
   // Count of pending connection requests, for the nav badge. Shares the
   // ["connectionRequests"] cache key with the Requests page, so
@@ -22,6 +25,16 @@ export default function Layout() {
   // `count` is the paginator's true total; `results.length` would cap at one
   // page (PAGE_SIZE) and under-report once there are more than a page of them.
   const pendingCount = requestsData?.count ?? 0;
+
+  // Total unread messages, for the nav badge. Polled (no WebSockets yet — see
+  // the Phase 5 doc) so it stays roughly current without the user reloading.
+  // Shares the ["unreadMessages"] key so opening a thread can refresh it.
+  const { data: unreadData } = useQuery({
+    queryKey: ["unreadMessages"],
+    queryFn: api.getUnreadMessageCount,
+    refetchInterval: CONVERSATION_LIST_POLL_MS,
+  });
+  const unreadMessages = unreadData?.count ?? 0;
 
   // The Django admin lives on the API host, not the SPA — build the link from
   // the same base URL the API client uses so it's correct in every environment.
@@ -80,6 +93,25 @@ export default function Layout() {
               <NavLink to="/people" className={navLinkClass}>
                 People
               </NavLink>
+              {/* Messages is a companion panel, not a page — the button toggles
+                  the drawer so you keep your place in the feed. */}
+              <button
+                type="button"
+                onClick={messaging.toggle}
+                aria-pressed={messaging.isOpen}
+                className={`rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
+                  messaging.isOpen
+                    ? "bg-ink/[0.06] text-ink"
+                    : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
+                }`}
+              >
+                Messages
+                {unreadMessages > 0 && (
+                  <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
+                    {unreadMessages}
+                  </span>
+                )}
+              </button>
               <NavLink to="/requests" className={navLinkClass}>
                 Requests
                 {pendingCount > 0 && (
@@ -121,6 +153,10 @@ export default function Layout() {
           <Outlet />
         </main>
       </div>
+
+      {/* The messages drawer portals to <body>, so it sits above the column and
+          docks to the viewport edge regardless of the centered layout. */}
+      <MessagesDrawer />
     </div>
   );
 }

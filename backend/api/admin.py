@@ -1,6 +1,15 @@
 from django.contrib import admin
 
-from .models import Comment, Connection, Post, PostImage
+from .models import (
+    Block,
+    Comment,
+    Connection,
+    Conversation,
+    ConversationRead,
+    Message,
+    Post,
+    PostImage,
+)
 
 
 class PostImageInline(admin.TabularInline):
@@ -62,3 +71,46 @@ class CommentAdmin(admin.ModelAdmin):
     @admin.display(description="text")
     def short_text(self, obj):
         return obj.text[:60] + ("…" if len(obj.text) > 60 else "")
+
+
+class MessageInline(admin.TabularInline):
+    """Show a conversation's messages inline so the maintainer can read/moderate
+    a thread (and soft-delete an individual message) from the admin."""
+
+    model = Message
+    extra = 0
+    fields = ("sender", "short_text", "deleted_at", "created_at")
+    readonly_fields = ("sender", "short_text", "created_at")
+    ordering = ("created_at", "id")
+
+    @admin.display(description="text")
+    def short_text(self, obj):
+        if obj.is_deleted:
+            return "(deleted)"
+        return obj.text[:60] + ("…" if len(obj.text) > 60 else "")
+
+
+@admin.register(Conversation)
+class ConversationAdmin(admin.ModelAdmin):
+    """Lets the maintainer read/moderate a 1:1 message thread from the admin.
+
+    Messages are stored in plaintext (not E2E encrypted — see the phase doc's
+    privacy notes), so they're readable here: a deliberate, disclosed property of
+    the current design, not an oversight."""
+
+    list_display = ("id", "user_a", "user_b", "updated_at", "created_at")
+    list_select_related = ("user_a", "user_b")
+    search_fields = ("user_a__email", "user_b__email")
+    ordering = ("-updated_at",)
+    inlines = (MessageInline,)
+
+
+@admin.register(Block)
+class BlockAdmin(admin.ModelAdmin):
+    list_display = ("id", "blocker", "blocked", "created_at")
+    list_select_related = ("blocker", "blocked")
+    search_fields = ("blocker__email", "blocked__email")
+    ordering = ("-created_at",)
+
+
+admin.site.register(ConversationRead)

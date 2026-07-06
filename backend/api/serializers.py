@@ -2,7 +2,14 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .imaging import absolute_media_url
-from .models import Comment, Connection, Post, PostImage
+from .models import (
+    Comment,
+    Connection,
+    Conversation,
+    Message,
+    Post,
+    PostImage,
+)
 
 User = get_user_model()
 
@@ -91,6 +98,10 @@ class UserListSerializer(serializers.ModelSerializer):
     connection_status = serializers.CharField(read_only=True)
     avatar_thumb = serializers.SerializerMethodField()
     bio = serializers.CharField(read_only=True)
+    # Whether the requesting user has blocked this person. Annotated only on the
+    # profile-detail queryset; defaults to False elsewhere (e.g. the people
+    # list, which doesn't surface block state).
+    is_blocked = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -100,7 +111,11 @@ class UserListSerializer(serializers.ModelSerializer):
             "connection_status",
             "avatar_thumb",
             "bio",
+            "is_blocked",
         )
+
+    def get_is_blocked(self, obj):
+        return bool(getattr(obj, "is_blocked", False))
 
     def get_avatar_thumb(self, obj):
         return absolute_media_url(obj.avatar_thumb, self.context.get("request"))
@@ -165,3 +180,89 @@ class CommentCreateSerializer(serializers.ModelSerializer):
         if not stripped:
             raise serializers.ValidationError("A comment can't be empty.")
         return stripped
+
+
+# Direct messages share the post/comment length cap — plenty for a chat message
+# while still bounding what a single row can write to the database.
+MESSAGE_MAX_LENGTH = POST_MAX_LENGTH
+
+
+class MessageSerializer(serializers.ModelSerializer):
+    """A single message in a conversation thread.
+
+    ``sender`` is the embedded author slice (id + display name + avatar), so the
+    thread can align/label each bubble. A soft-deleted message reports
+    ``is_deleted: true`` with blank ``text`` — the client renders a "message
+    deleted" placeholder in its place, keeping the thread's order intact.
+    """
+
+    sender = AuthorSerializer(read_only=True)
+    is_deleted = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Message
+        fields = ("id", "sender", "text", "is_deleted", "created_at")
+
+
+class MessageCreateSerializer(serializers.ModelSerializer):
+    """Create a message. ``sender`` and ``conversation`` are set in the view
+    (from the session and the URL), never the body."""
+
+    text = serializers.CharField(max_length=MESSAGE_MAX_LENGTH)
+
+    class Meta:
+        model = Message
+        fields = ("id", "text", "created_at")
+        read_only_fields = ("id", "created_at")
+
+    def validate_text(self, value):
+        stripped = value.strip()
+        if not stripped:
+            raise serializers.ValidationError("A message can't be empty.")
+        return stripped
+
+
+class ConversationSerializer(serializers.ModelSerializer):
+    """A row in your conversation list.
+
+    ``other`` is the person you're talking to (the participant who isn't you),
+    resolved per-viewer in the view and stashed on the instance. ``last_message``
+    is a short preview of the most recent message (or ``null`` for an empty
+    thread), and ``unread_count`` is how many messages you haven't read. The list
+    is ordered by ``updated_at`` desc in the view — most-recent-activity first.
+    """
+
+    other = AuthorSerializer(read_only=True)
+    last_message = serializers.SerializerMethodField()
+    unread_count = serializers.IntegerField(read_only=True)
+    # Whether you can still *send* in this thread (connected, not blocked). Set
+    # only on the conversation-detail view (the thread page's composer keys off
+    # it); ``null`` in the list, which doesn't need it.
+    can_message = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Conversation
+        fields = (
+            "id",
+            "other",
+            "last_message",
+            "unread_count",
+            "can_message",
+            "updated_at",
+        )
+
+    def get_can_message(self, obj):
+        return getattr(obj, "_can_message", None)
+
+    def get_last_message(self, obj):
+        # The view attaches the latest message (or None) as ``_last_message`` to
+        # avoid an N+1 across the list.
+        message = getattr(obj, "_last_message", None)
+        if message is None:
+            return None
+        return {
+            "text": "" if message.is_deleted else message.text,
+            "is_deleted": message.is_deleted,
+            "sender_id": message.sender_id,
+            "created_at": message.created_at,
+        }

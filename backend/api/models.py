@@ -177,3 +177,183 @@ class Comment(models.Model):
     def __str__(self):
         preview = self.text[:40] + ("…" if len(self.text) > 40 else "")
         return f"{self.author} · {preview}"
+
+
+class Conversation(models.Model):
+    """A private 1:1 message thread between two accounts (Phase 5).
+
+    Same symmetric-pair shape as ``Connection``: the two participants are
+    ``user_a``/``user_b`` and a single row represents the unordered pair, so
+    there's exactly one conversation per pair whichever way it's opened. The two
+    database guardrails mirror ``Connection`` — at most one row per unordered
+    pair, and no conversation with yourself.
+
+    ``updated_at`` is bumped whenever a message is sent (see the message-create
+    view), so the conversation list can sort by most-recent-activity cheaply —
+    time-ordered, never "relevance" (the project's non-negotiable rule applies to
+    messaging too). It's indexed for that ordering.
+
+    Group threads are a later extension (Phase 6a): the read-marker lives in its
+    own ``ConversationRead`` table rather than as two timestamps here, so adding
+    more participants doesn't require reshaping this model.
+    """
+
+    user_a = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="conversations_as_a",
+    )
+    user_b = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="conversations_as_b",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        constraints = [
+            # One row per unordered pair — A↔B and B↔A are the same thread.
+            # Order-independent at the database level (index on min/max id).
+            models.UniqueConstraint(
+                Least("user_a_id", "user_b_id"),
+                Greatest("user_a_id", "user_b_id"),
+                name="unique_conversation_pair",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(user_a=models.F("user_b")),
+                name="no_self_conversation",
+            ),
+        ]
+
+    def other_participant(self, user):
+        """The participant who isn't ``user`` — the person they're talking to."""
+        return self.user_b if self.user_a_id == user.id else self.user_a
+
+    def __str__(self):
+        return f"{self.user_a} ↔ {self.user_b}"
+
+
+class Message(models.Model):
+    """One message in a ``Conversation`` (Phase 5).
+
+    ``sender`` is always one of the conversation's two participants (enforced in
+    the view — it's taken from the session, never the request body). Deleting a
+    conversation cascades to its messages. ``created_at`` is indexed because the
+    thread and the unread count both query on it.
+
+    Soft delete: a sender can delete their own message (v1 scope). Rather than
+    dropping the row — which would break the "oldest-first, stable" ordering and
+    lose the tombstone — we blank ``text`` and set ``deleted_at``, so the thread
+    still renders a "message deleted" placeholder in the right place.
+    """
+
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="sent_messages",
+    )
+    text = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        # Oldest-first, like a comment thread — a conversation reads top to
+        # bottom in send order. ``id`` breaks ties within a clock tick so paging
+        # is stable.
+        ordering = ["created_at", "id"]
+
+    @property
+    def is_deleted(self):
+        return self.deleted_at is not None
+
+    def __str__(self):
+        if self.is_deleted:
+            return f"{self.sender} · (deleted)"
+        preview = self.text[:40] + ("…" if len(self.text) > 40 else "")
+        return f"{self.sender} · {preview}"
+
+
+class ConversationRead(models.Model):
+    """How far a participant has read in a conversation (Phase 5).
+
+    One row per (conversation, user): ``last_read_at`` is the moment they last
+    marked it read. Your unread count for a conversation is the number of
+    messages with ``created_at > last_read_at`` that you didn't send (a missing
+    row means you've never opened it, so everything is unread).
+
+    Kept as its own table rather than two timestamps on ``Conversation`` so the
+    same shape carries over to group threads (Phase 6a) — N participants, N read
+    rows — without a migration.
+    """
+
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="reads",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="conversation_reads",
+    )
+    last_read_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["conversation", "user"],
+                name="unique_conversation_read",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} read {self.conversation} @ {self.last_read_at}"
+
+
+class Block(models.Model):
+    """One account blocking another (Phase 5) — directional, but enforced both
+    ways.
+
+    ``blocker`` blocks ``blocked``. A block in *either* direction is enough to
+    cut the pair off from each other: it prevents messaging and (re)connecting,
+    whichever of them set it. Storing it directionally (rather than as an
+    unordered pair like ``Connection``) records *who* did the blocking — needed
+    so unblock only lets the blocker lift their own block, and so a mutual block
+    is two independent rows.
+
+    ``unique_together`` stops a duplicate block in the same direction; a check
+    constraint stops blocking yourself.
+    """
+
+    blocker = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="blocks_made",
+    )
+    blocked = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="blocks_received",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["blocker", "blocked"],
+                name="unique_block_pair",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(blocker=models.F("blocked")),
+                name="no_self_block",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.blocker} ⊘ {self.blocked}"

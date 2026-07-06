@@ -13,6 +13,14 @@
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+// Near-real-time messaging is done by polling for now, not WebSockets (see
+// docs/phases/phase-5-messaging.md — the swap to Channels later is deliberately
+// non-breaking). These are the one place the cadences live, so "go real-time"
+// is a localised change: an open thread refreshes briskly; the list + nav badge
+// tick more slowly.
+export const MESSAGE_POLL_MS = 4000;
+export const CONVERSATION_LIST_POLL_MS = 12000;
+
 function getCookie(name) {
   const match = document.cookie.match(
     new RegExp("(?:^|; )" + name + "=([^;]*)")
@@ -191,4 +199,55 @@ export const api = {
 
   rejectRequest: (id) =>
     request(`/api/connection-requests/${id}/reject/`, { method: "POST" }),
+
+  // --- Direct messaging (Phase 5) ------------------------------------------
+
+  // Your conversations, most-recent-activity first, each with the other person,
+  // a last-message preview, and your unread count. Paginated.
+  getConversations: () => request("/api/conversations/"),
+
+  // Get-or-create the 1:1 conversation with a connected person. Idempotent —
+  // returns the existing thread if there is one. Used by the "Message" button.
+  openConversation: (userId) =>
+    request("/api/conversations/", {
+      method: "POST",
+      body: { user_id: userId },
+    }),
+
+  // A single conversation (the other person, preview, unread) — for the thread
+  // header, correct even on a cold page load.
+  getConversation: (conversationId) =>
+    request(`/api/conversations/${conversationId}/`),
+
+  // Messages in a conversation, oldest-first, paginated.
+  getMessages: (conversationId) =>
+    request(`/api/conversations/${conversationId}/messages/`),
+
+  // Send a message. Sender is the session user (never the body).
+  sendMessage: (conversationId, text) =>
+    request(`/api/conversations/${conversationId}/messages/`, {
+      method: "POST",
+      body: { text },
+    }),
+
+  // Soft-delete your own message (it becomes a "message deleted" placeholder).
+  deleteMessage: (conversationId, messageId) =>
+    request(`/api/conversations/${conversationId}/messages/${messageId}/`, {
+      method: "DELETE",
+    }),
+
+  // Mark a conversation read up to now, clearing its unread count.
+  markConversationRead: (conversationId) =>
+    request(`/api/conversations/${conversationId}/read/`, { method: "POST" }),
+
+  // Total unread messages across all conversations, for the nav badge.
+  getUnreadMessageCount: () => request("/api/messages/unread-count/"),
+
+  // Block / unblock a user — the strong, explicit cut (stops messaging and
+  // (re)connecting, and hides your conversation from both of you).
+  blockUser: (userId) =>
+    request(`/api/users/${userId}/block/`, { method: "POST" }),
+
+  unblockUser: (userId) =>
+    request(`/api/users/${userId}/block/`, { method: "DELETE" }),
 };

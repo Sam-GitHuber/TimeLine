@@ -52,10 +52,30 @@ strip EXIF/GPS, size/count caps, downscale + thumbnail. Media goes through
 private/signed media is a Phase 7b task. Profile URLs stay numeric (`/u/:id`) —
 name-based slugs deferred. See `docs/phases/phase-4-photos-profiles.md`.
 
-Phase 5 (direct messaging) is next — sketch-only, so flesh out its phase doc
-into a full plan and confirm with the user before building.** Keep this line
-current: update it whenever a phase starts or finishes, but keep the detail in
-the phase docs, not here.
+Phase 5 (direct messaging) — done. Private 1:1 messaging between **connected**
+users: `Conversation`/`Message`/`ConversationRead`/`Block` models (in the `api`
+app) back get-or-create conversations (`POST /api/conversations/`, connection-
+gated), a thread served oldest-first + paginated
+(`GET/POST /api/conversations/<id>/messages/`), soft-delete your own message,
+per-conversation + total-nav unread counts (`ConversationRead` marker +
+`/api/messages/unread-count/`, cleared via `.../read/`), and **blocking** (either
+direction hides the thread, stops messaging, severs + bars connecting). A shared
+`can_message(me, other)` gate (active + connected + not blocked) drives both
+create and send. Near-real-time is **polling** (TanStack Query `refetchInterval`;
+cadence in `frontend/src/api.js`) — the swap to Channels later is non-breaking.
+Frontend: messaging is a **non-modal companion drawer** (`MessagesDrawer.jsx`,
+driven by `MessagingProvider` — not a route), docked to the edge so the feed
+stays scrollable behind it; it walks list → thread → new-message (compose +
+connection picker in-panel), with a nav "Messages" toggle + unread badge and
+Message/Block controls on connected profiles. Legacy `/messages[/:id]` URLs open
+the drawer; a catch-all route avoids blank screens. Backend + frontend tests
+cover send/scope/read/block. See `docs/phases/phase-5-messaging.md`.
+
+Phase 6 (groups) is next — sketch-only, so flesh out its phase doc into a full
+plan and confirm with the user before building. (Phase 6a, group messaging, is
+already fleshed out and follows Phase 6.)** Keep this line current: update it
+whenever a phase starts or finishes, but keep the detail in the phase docs, not
+here.
 
 ## Before doing any work
 
