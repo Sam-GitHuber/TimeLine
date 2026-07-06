@@ -2,6 +2,11 @@
 
 **Status:** not started — sketch only, refine before starting
 
+> **Followed by Phase 6a — Group Messaging** (`phase-6a-group-messaging.md`):
+> group *chat* is deliberately a sub-phase after groups, extending Phase 5's 1:1
+> direct messaging. Keep that in mind when designing the group membership model
+> here — 6a will build on it.
+
 ## Goal
 
 Let users create and join **groups** with their own shared, reverse-chronological
