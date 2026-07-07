@@ -26,6 +26,8 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    Participant,
+    ParticipantInterval,
     Post,
 )
 
@@ -1588,6 +1590,24 @@ class GroupAuthRequiredTests(APITestCase):
             self.client.get(GROUP_INVITES_URL).status_code,
             status.HTTP_401_UNAUTHORIZED,
         )
+
+
+class GroupChatModelTests(APITestCase):
+    def test_conversation_defaults_to_direct_kind(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        convo = Conversation.objects.create(user_a=a, user_b=b)
+        self.assertEqual(convo.kind, "direct")
+        self.assertIsNone(convo.group)
+
+    def test_participant_and_interval_round_trip(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        convo = Conversation.objects.create(kind="group", created_by=a)
+        p = Participant.objects.create(conversation=convo, user=a, status="active")
+        ParticipantInterval.objects.create(participant=p, started_at=timezone.now())
+        self.assertEqual(convo.participants.count(), 1)
+        self.assertEqual(p.intervals.count(), 1)
+        self.assertIsNone(p.intervals.first().ended_at)
 
 
 def is_admin(group, user):

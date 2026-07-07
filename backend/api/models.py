@@ -219,15 +219,37 @@ class Conversation(models.Model):
     more participants doesn't require reshaping this model.
     """
 
+    class Kind(models.TextChoices):
+        DIRECT = "direct", "Direct"
+        GROUP = "group", "Group"
+
+    kind = models.CharField(
+        max_length=6, choices=Kind.choices, default=Kind.DIRECT, db_index=True
+    )
+    # A group chat scoped to a Phase 6 Group. NULL = standalone (1:1 or ad-hoc
+    # multi-person). CASCADE: deleting a group deletes its chats (agreed 2026-07-07).
+    group = models.ForeignKey(
+        "Group", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="chats",
+    )
+    title = models.CharField(max_length=100, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="conversations_created",
+    )
     user_a = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="conversations_as_a",
+        null=True,
+        blank=True,
     )
     user_b = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="conversations_as_b",
+        null=True,
+        blank=True,
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -378,6 +400,70 @@ class Block(models.Model):
 
     def __str__(self):
         return f"{self.blocker} ⊘ {self.blocked}"
+
+
+class Participant(models.Model):
+    """One person's membership of a conversation (Phase 6a).
+
+    Generalises Phase 5's user_a/user_b pair into a set. ``status`` is the
+    current state: ``active`` (in the chat, counts toward the clique) or
+    ``pending`` (invited but not yet connected to every active member).
+    ``left_at`` tombstones a self-leave/decline. History visibility is *not* a
+    single join point — see ``ParticipantInterval``.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        PENDING = "pending", "Pending"
+
+    conversation = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name="participants"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="chat_participations",
+    )
+    status = models.CharField(
+        max_length=7, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="chat_invites_sent",
+    )
+    left_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["conversation", "user"], name="unique_conversation_participant"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} · {self.conversation_id} ({self.status})"
+
+
+class ParticipantInterval(models.Model):
+    """A span during which a participant was ``active`` (Phase 6a).
+
+    A message is visible to a participant iff its ``created_at`` falls inside one
+    of their intervals. Becoming active opens an interval; dropping to pending /
+    leaving closes it (``ended_at``); returning opens a new one — so a
+    blocked-then-returned member keeps pre-gap history and never sees the gap.
+    """
+
+    participant = models.ForeignKey(
+        Participant, on_delete=models.CASCADE, related_name="intervals"
+    )
+    started_at = models.DateTimeField()
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["started_at", "id"]
+
+    def __str__(self):
+        return f"{self.participant_id}: {self.started_at} → {self.ended_at or '…'}"
 
 
 class Group(models.Model):
