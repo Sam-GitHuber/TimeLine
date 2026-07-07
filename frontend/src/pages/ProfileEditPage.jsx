@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
@@ -23,16 +23,14 @@ export default function ProfileEditPage() {
   const [removeAvatar, setRemoveAvatar] = useState(false);
 
   // Local preview for a freshly chosen avatar; revoked on change/unmount.
-  const [preview, setPreview] = useState(null);
+  const preview = useMemo(
+    () => (avatarFile ? URL.createObjectURL(avatarFile) : null),
+    [avatarFile]
+  );
   useEffect(() => {
-    if (!avatarFile) {
-      setPreview(null);
-      return;
-    }
-    const url = URL.createObjectURL(avatarFile);
-    setPreview(url);
-    return () => URL.revokeObjectURL(url);
-  }, [avatarFile]);
+    if (!preview) return;
+    return () => URL.revokeObjectURL(preview);
+  }, [preview]);
 
   const mutation = useMutation({
     mutationFn: () =>

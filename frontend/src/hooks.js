@@ -1,26 +1,27 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "./api.js";
 
 // Reactively track a CSS media query (e.g. "(max-width: 799px)"). Returns a
 // boolean that updates as the viewport crosses the breakpoint, so components can
-// branch on layout width without hard-coding pixel maths. SSR-safe: falls back
-// to false when there's no `window` (there isn't in some test setups).
+// branch on layout width without hard-coding pixel maths. Built on
+// useSyncExternalStore — the React-blessed way to read from an external source
+// like matchMedia — so there's no setState-in-effect. SSR-safe: the server
+// snapshot falls back to false when there's no `window` (there isn't in some
+// test setups).
 export function useMediaQuery(query) {
-  const [matches, setMatches] = useState(
-    () => typeof window !== "undefined" && window.matchMedia(query).matches
+  const subscribe = useCallback(
+    (onChange) => {
+      if (typeof window === "undefined") return () => {};
+      const mql = window.matchMedia(query);
+      mql.addEventListener("change", onChange);
+      return () => mql.removeEventListener("change", onChange);
+    },
+    [query]
   );
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const mql = window.matchMedia(query);
-    const onChange = (event) => setMatches(event.matches);
-    setMatches(mql.matches);
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, [query]);
-
-  return matches;
+  const getSnapshot = () =>
+    typeof window !== "undefined" && window.matchMedia(query).matches;
+  return useSyncExternalStore(subscribe, getSnapshot, () => false);
 }
 
 // Shared paging for our DRF PageNumberPagination endpoints (feed, profile
