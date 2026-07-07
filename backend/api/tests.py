@@ -1704,3 +1704,38 @@ class MembershipHelperTests(APITestCase):
         self.assertIn(m1.id, visible_ids)
         self.assertNotIn(m_gap.id, visible_ids)
         self.assertIn(m2.id, visible_ids)
+
+
+class CreateGroupChatTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD, first_name="A", last_name="A")
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD, first_name="B", last_name="B")
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD, first_name="C", last_name="C")
+        for u in (self.b, self.c):
+            Connection.objects.create(requester=self.a, requestee=u, status="accepted")
+        self.client.force_authenticate(self.a)
+
+    def test_create_group_chat_creator_active_invitees_promoted_per_clique(self):
+        # b and c are NOT connected to each other.
+        res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id, self.c.id], "title": "Trip"}, format="json")
+        self.assertEqual(res.status_code, 201)
+        convo = Conversation.objects.get(id=res.data["id"])
+        self.assertEqual(convo.kind, "group")
+        self.assertEqual(convo.title, "Trip")
+        actives = set(convo.participants.filter(status="active").values_list("user_id", flat=True))
+        # a (creator) + exactly one of b/c can be active; the other stays pending.
+        self.assertIn(self.a.id, actives)
+        self.assertEqual(len(actives), 2)
+        self.assertEqual(convo.participants.filter(status="pending").count(), 1)
+
+    def test_cannot_add_a_non_connection(self):
+        stranger = User.objects.create_user(email="s@x.com", password=PASSWORD)
+        res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [stranger.id]}, format="json")
+        self.assertEqual(res.status_code, 403)
+
+    def test_group_scoped_requires_group_membership(self):
+        group = Group.objects.create(name="Fam", creator=self.a)
+        GroupMembership.objects.create(group=group, user=self.a, role="admin", status="active")
+        # b is a connection but not a group member.
+        res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id], "group_id": group.id}, format="json")
+        self.assertEqual(res.status_code, 400)

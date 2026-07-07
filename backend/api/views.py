@@ -891,6 +891,11 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
+        if "participant_ids" in request.data:
+            return self._create_group(request)
+        return self._create_direct(request)
+
+    def _create_direct(self, request):
         user_id = request.data.get("user_id")
         if user_id is None:
             raise ValidationError({"user_id": "This field is required."})
@@ -920,6 +925,55 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         decorate_conversations([convo], request.user)
         serializer = self.get_serializer(convo)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def _create_group(self, request):
+        """Open a group chat: creator active, invitees pending then promoted
+        per the clique rule (``promote_participants``).
+
+        Connection-gated exactly like a 1:1 (``can_add_to_group`` — same gate
+        as ``can_message``): every invitee must be one of the creator's
+        connections, or this 403s. A ``group_id`` additionally scopes the chat
+        to a Phase 6 ``Group`` — the caller must be a member (404, not leaking
+        the group's existence, if not) and so must every invitee (400 — a
+        validation error on the invite list, not a permission error, since the
+        caller *can* message them, just not into this group).
+        """
+        ids = request.data.get("participant_ids") or []
+        if not isinstance(ids, list) or not ids:
+            raise ValidationError({"participant_ids": "Pick at least one connection."})
+        title = (request.data.get("title") or "").strip()[:100]
+        group_id = request.data.get("group_id")
+        group = None
+        if group_id is not None:
+            group = get_object_or_404(Group, pk=group_id)
+            if not is_group_member(request.user, group.id):
+                raise NotFound()
+
+        invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
+        for invitee in invitees:
+            if not can_add_to_group(request.user, invitee):
+                raise PermissionDenied("You can only add people you're connected with.")
+            if group is not None and not is_group_member(invitee, group.id):
+                raise ValidationError({"participant_ids": f"{invitee.pk} isn't in this group."})
+
+        now = timezone.now()
+        with transaction.atomic():
+            convo = Conversation.objects.create(
+                kind=Conversation.Kind.GROUP, group=group, title=title,
+                created_by=request.user, updated_at=now,
+            )
+            creator = Participant.objects.create(
+                conversation=convo, user=request.user, status=ACTIVE_P,
+            )
+            activate(creator, now)
+            for invitee in invitees:
+                Participant.objects.create(
+                    conversation=convo, user=invitee, status=PENDING_P,
+                    invited_by=request.user,
+                )
+            promote_participants(convo, now)
+        decorate_conversations([convo], request.user)
+        return Response(self.get_serializer(convo).data, status=status.HTTP_201_CREATED)
 
 
 class ConversationDetailView(generics.RetrieveAPIView):
