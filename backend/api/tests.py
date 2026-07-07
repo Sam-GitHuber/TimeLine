@@ -1838,3 +1838,47 @@ class AddParticipantsTests(APITestCase):
         self.client.force_authenticate(self.d)
         res = self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [self.b.id]}, format="json")
         self.assertEqual(res.status_code, 403)
+
+    def test_re_add_after_leave_resets_left_at(self):
+        # b leaves, then a (still active) re-adds them — must not silently
+        # no-op via get_or_create finding the tombstoned row.
+        self.client.force_authenticate(self.b)
+        self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.client.force_authenticate(self.a)
+        res = self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [self.b.id]}, format="json")
+        self.assertEqual(res.status_code, 200)
+        p = Participant.objects.get(conversation_id=self.cid, user=self.b)
+        self.assertIsNone(p.left_at)
+        self.assertIn(p.status, ("active", "pending"))
+
+
+class LeaveChatTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        Connection.objects.create(requester=self.a, requestee=self.b, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id]}, format="json").data["id"]
+
+    def test_leave_closes_interval_and_drops_you(self):
+        res = self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.assertEqual(res.status_code, 200)
+        p = Participant.objects.get(conversation_id=self.cid, user=self.a)
+        self.assertIsNotNone(p.left_at)
+        self.assertFalse(p.intervals.filter(ended_at__isnull=True).exists())
+
+    def test_pending_invitee_can_decline(self):
+        # c pending (never connected to b).
+        c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+        Connection.objects.create(requester=self.a, requestee=c, status="accepted")
+        self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [c.id]}, format="json")
+        self.client.force_authenticate(c)
+        res = self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNotNone(Participant.objects.get(conversation_id=self.cid, user=c).left_at)
+
+    def test_non_participant_gets_404(self):
+        stranger = User.objects.create_user(email="stranger@x.com", password=PASSWORD)
+        self.client.force_authenticate(stranger)
+        res = self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.assertEqual(res.status_code, 404)

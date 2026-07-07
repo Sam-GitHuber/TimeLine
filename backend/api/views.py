@@ -1126,12 +1126,44 @@ class ConversationParticipantsView(APIView):
         now = timezone.now()
         with transaction.atomic():
             for invitee in invitees:
-                Participant.objects.get_or_create(
+                participant, created = Participant.objects.get_or_create(
                     conversation=convo, user=invitee,
                     defaults={"status": PENDING_P, "invited_by": request.user},
                 )
+                if not created and participant.left_at is not None:
+                    # They previously left/declined — re-adding must actually
+                    # bring them back, not silently no-op on the tombstoned
+                    # row get_or_create just found.
+                    participant.left_at = None
+                    participant.status = PENDING_P
+                    participant.save(update_fields=["left_at", "status"])
             promote_participants(convo, now)
         return Response({"detail": "Added."}, status=status.HTTP_200_OK)
+
+
+class ConversationLeaveView(APIView):
+    """Leave (or decline) a chat (``POST /conversations/<pk>/leave/``).
+
+    Works from either ``active`` or ``pending`` status — an active member
+    leaving, or a pending invitee declining. Closes the participant's open
+    access interval (see ``deactivate``), tombstones the row with
+    ``left_at``, then re-runs ``promote_participants`` so anyone still
+    pending gets re-checked against the (now smaller) active clique. 404 if
+    the caller has no non-left participant row for this conversation —
+    a chat you're not in shouldn't even reveal it exists.
+    """
+
+    def post(self, request, pk):
+        p = get_object_or_404(
+            Participant, conversation_id=pk, user=request.user, left_at__isnull=True
+        )
+        now = timezone.now()
+        with transaction.atomic():
+            deactivate(p, now)
+            p.left_at = now
+            p.save(update_fields=["left_at"])
+            promote_participants(p.conversation, now)
+        return Response({"detail": "Left the chat."}, status=status.HTTP_200_OK)
 
 
 def _viewer_conversation_or_404(pk, user):

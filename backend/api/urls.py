@@ -63,6 +63,11 @@ urlpatterns = [
         name="conversation-participants",
     ),
     path(
+        "conversations/<int:pk>/leave/",
+        views.ConversationLeaveView.as_view(),
+        name="conversation-leave",
+    ),
+    path(
         "conversations/<int:pk>/messages/",
         views.ConversationMessagesView.as_view(),
         name="conversation-messages",
