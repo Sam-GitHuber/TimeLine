@@ -1814,3 +1814,27 @@ class GroupChatViewTests(APITestCase):
 
         unread_after = self.client.get(UNREAD_COUNT_URL)
         self.assertEqual(unread_after.data["count"], 0)
+
+
+class AddParticipantsTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        self.d = User.objects.create_user(email="d@x.com", password=PASSWORD)
+        Connection.objects.create(requester=self.a, requestee=self.b, status="accepted")
+        Connection.objects.create(requester=self.a, requestee=self.d, status="accepted")
+        Connection.objects.create(requester=self.b, requestee=self.d, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id]}, format="json").data["id"]
+
+    def test_active_member_adds_a_mutual_connection(self):
+        res = self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [self.d.id]}, format="json")
+        self.assertEqual(res.status_code, 200)
+        convo = Conversation.objects.get(id=self.cid)
+        # d connected to a and b → promotes straight to active.
+        self.assertIn(self.d.id, set(convo.participants.filter(status="active").values_list("user_id", flat=True)))
+
+    def test_non_member_cannot_add(self):
+        self.client.force_authenticate(self.d)
+        res = self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [self.b.id]}, format="json")
+        self.assertEqual(res.status_code, 403)

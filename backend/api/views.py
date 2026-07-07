@@ -1096,6 +1096,44 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         return Response(self.get_serializer(convo).data, status=status.HTTP_201_CREATED)
 
 
+class ConversationParticipantsView(APIView):
+    """Add more people to an existing chat
+    (``POST /conversations/<pk>/participants/`` body ``{user_ids: [...]}``).
+
+    Any *active* member (not pending, not left) can invite more of their own
+    connections — same gate as opening the chat (``can_add_to_group``), plus
+    group membership for a group-scoped chat, consistent with
+    ``_create_group``. New rows land pending, then ``promote_participants``
+    runs the clique rule immediately, so an invitee connected to everyone
+    already active goes straight in. ``get_or_create`` keeps re-adding an
+    existing participant a no-op rather than a duplicate row.
+    """
+
+    def post(self, request, pk):
+        convo = get_object_or_404(Conversation, pk=pk)
+        me = convo.participants.filter(
+            user=request.user, status=ACTIVE_P, left_at__isnull=True
+        ).first()
+        if me is None:
+            raise PermissionDenied("Only an active member can add people.")
+        ids = request.data.get("user_ids") or []
+        invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
+        for invitee in invitees:
+            if not can_add_to_group(request.user, invitee):
+                raise PermissionDenied("You can only add people you're connected with.")
+            if convo.group_id and not is_group_member(invitee, convo.group_id):
+                raise ValidationError({"user_ids": f"{invitee.pk} isn't in this group."})
+        now = timezone.now()
+        with transaction.atomic():
+            for invitee in invitees:
+                Participant.objects.get_or_create(
+                    conversation=convo, user=invitee,
+                    defaults={"status": PENDING_P, "invited_by": request.user},
+                )
+            promote_participants(convo, now)
+        return Response({"detail": "Added."}, status=status.HTTP_200_OK)
+
+
 def _viewer_conversation_or_404(pk, user):
     """Fetch a conversation ``user`` is a member of (any status), or 404.
 

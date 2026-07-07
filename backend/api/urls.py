@@ -58,6 +58,11 @@ urlpatterns = [
         name="conversation-detail",
     ),
     path(
+        "conversations/<int:pk>/participants/",
+        views.ConversationParticipantsView.as_view(),
+        name="conversation-participants",
+    ),
+    path(
         "conversations/<int:pk>/messages/",
         views.ConversationMessagesView.as_view(),
         name="conversation-messages",
