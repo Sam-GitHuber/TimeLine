@@ -141,27 +141,6 @@ def participant_user_ids(convo):
     )
 
 
-def open_interval(participant):
-    """Open a fresh access interval for ``participant`` starting now-ish.
-
-    Kept separate from ``activate`` so callers that already know they need a
-    new interval (e.g. a migration backfill) don't have to touch status too.
-    """
-    return ParticipantInterval.objects.create(
-        participant=participant, started_at=timezone.now()
-    )
-
-
-def close_intervals(participant, when):
-    """Close any of ``participant``'s open-ended intervals as of ``when``.
-
-    A participant should have at most one open interval at a time, but this
-    closes all of them defensively so a data hiccup can't leave a stale one
-    silently extending visibility forever.
-    """
-    participant.intervals.filter(ended_at__isnull=True).update(ended_at=when)
-
-
 def activate(participant, when):
     """Make a participant active and open a fresh access interval (idempotent).
 
