@@ -27,7 +27,6 @@ from .models import (
     GroupMembership,
     Message,
     Post,
-    PostImage,
 )
 
 User = get_user_model()

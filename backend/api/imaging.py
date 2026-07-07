@@ -22,8 +22,8 @@ from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
-from PIL import Image, ImageOps, UnidentifiedImageError
 from django.core.files.base import ContentFile
+from PIL import Image, ImageOps, UnidentifiedImageError
 from rest_framework import serializers
 
 # Hard cap on a single uploaded file. Generous for a phone photo, but stops a
@@ -123,7 +123,9 @@ def _load_verified(upload):
         img = Image.open(upload)
         img.load()
     except (UnidentifiedImageError, OSError, ValueError):
-        raise serializers.ValidationError("That file isn't a valid image.")
+        raise serializers.ValidationError(
+            "That file isn't a valid image."
+        ) from None
 
     if img.format not in ALLOWED_FORMATS:
         raise serializers.ValidationError(

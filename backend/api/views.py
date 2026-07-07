@@ -38,7 +38,6 @@ from .imaging import (
 )
 from .models import (
     Block,
-    Comment,
     Connection,
     Conversation,
     ConversationRead,
@@ -1288,7 +1287,7 @@ class GroupMembersView(APIView):
             # rejected ours.
             raise ValidationError(
                 {"user_id": "They've already been invited."}
-            )
+            ) from None
         return Response(
             {"detail": "Invitation sent."}, status=status.HTTP_201_CREATED
         )
