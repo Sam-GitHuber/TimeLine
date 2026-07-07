@@ -71,9 +71,22 @@ Message/Block controls on connected profiles. Legacy `/messages[/:id]` URLs open
 the drawer; a catch-all route avoids blank screens. Backend + frontend tests
 cover send/scope/read/block. See `docs/phases/phase-5-messaging.md`.
 
-Phase 6 (groups) is next — sketch-only, so flesh out its phase doc into a full
-plan and confirm with the user before building. (Phase 6a, group messaging, is
-already fleshed out and follows Phase 6.)** Keep this line current: update it
+Phase 6 (groups) — done. Private/invite-only shared timelines: a nullable
+`Post.group` FK reuses all post machinery (photos, comments, serializer, imaging);
+`Group`/`GroupMembership` models back create/edit/delete, invite→accept membership
+(any member invites their own connections; group-invites inbox + nav badge),
+member-gated group timelines, admin-only remove/delete + promote/demote with a
+last-admin guardrail, and membership-scoped (not connection-pruned) group
+comments. Group posts stay *out* of the home feed by default, with an **opt-in
+"include groups" toggle** that merges them in chronologically (labelled "in
+&lt;group&gt;"). Small membership helpers (`group_role`/`is_group_member`/
+`is_group_admin`/`can_add_to_group`) mirror Phase 5's gates. Backend + frontend
+tests pass. See `docs/phases/phase-6-groups.md`.
+
+Phase 6a (group messaging) is next — already fleshed out (extends Phase 5 DMs to
+group conversations, built on this phase's `GroupMembership`; adds "leave a
+conversation"). Confirm its plan with the user before building.** Keep this
+line current: update it
 whenever a phase starts or finishes, but keep the detail in the phase docs, not
 here.
 

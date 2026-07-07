@@ -78,6 +78,14 @@ def avatar_thumb_upload_to(instance, filename):
     return _uuid_name("avatars/thumbs", filename)
 
 
+def group_avatar_upload_to(instance, filename):
+    return _uuid_name("groups", filename)
+
+
+def group_avatar_thumb_upload_to(instance, filename):
+    return _uuid_name("groups/thumbs", filename)
+
+
 # --- processing --------------------------------------------------------------
 
 
@@ -181,3 +189,46 @@ def process_image(upload, *, max_edge, thumb_edge, thumb_square=False):
         "width": original.width,
         "height": original.height,
     }
+
+
+# --- avatars -----------------------------------------------------------------
+# One place for the avatar lifecycle, shared by user profiles (accounts) and
+# groups (api). Both models expose ``avatar`` + ``avatar_thumb`` ImageFields, so
+# these operate on any such ``instance`` — the sizing, the square thumbnail, and
+# the "drop the old files so replaced avatars don't pile up on disk" rule can't
+# drift between the two. None of these call ``instance.save()``; the caller
+# persists (with the right ``update_fields``) so it composes with other updates.
+
+
+def process_avatar(upload):
+    """Validate + downscale + strip metadata from an avatar upload, using the
+    shared avatar sizes and a centre-cropped square thumbnail. Returns the same
+    dict as ``process_image``."""
+    return process_image(
+        upload,
+        max_edge=AVATAR_MAX_EDGE,
+        thumb_edge=AVATAR_THUMB_EDGE,
+        thumb_square=True,
+    )
+
+
+def save_avatar(instance, processed):
+    """Write a ``process_avatar`` result onto ``instance``'s avatar fields,
+    dropping any old files first. Does not save the instance."""
+    instance.avatar.delete(save=False)
+    instance.avatar_thumb.delete(save=False)
+    instance.avatar.save(
+        f"avatar{processed['ext']}", processed["image"], save=False
+    )
+    instance.avatar_thumb.save(
+        f"thumb{processed['ext']}", processed["thumbnail"], save=False
+    )
+
+
+def clear_avatar(instance):
+    """Remove ``instance``'s avatar + thumbnail (files and fields). Does not save
+    the instance."""
+    instance.avatar.delete(save=False)
+    instance.avatar_thumb.delete(save=False)
+    instance.avatar = None
+    instance.avatar_thumb = None

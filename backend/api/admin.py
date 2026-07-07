@@ -6,6 +6,8 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    Group,
+    GroupMembership,
     Message,
     Post,
     PostImage,
@@ -114,3 +116,38 @@ class BlockAdmin(admin.ModelAdmin):
 
 
 admin.site.register(ConversationRead)
+
+
+class GroupMembershipInline(admin.TabularInline):
+    """Show a group's members inline so the maintainer can see/moderate
+    membership (roles, invited vs active) from the group admin page."""
+
+    model = GroupMembership
+    extra = 0
+    fields = ("user", "role", "status", "invited_by", "created_at")
+    readonly_fields = ("created_at",)
+    autocomplete_fields = ("user", "invited_by")
+
+
+@admin.register(Group)
+class GroupAdmin(admin.ModelAdmin):
+    """Lets the maintainer read/moderate/delete groups from the admin."""
+
+    list_display = ("id", "name", "creator", "member_count", "created_at")
+    list_select_related = ("creator",)
+    search_fields = ("name", "creator__email")
+    ordering = ("name",)
+    inlines = (GroupMembershipInline,)
+
+    @admin.display(description="members")
+    def member_count(self, obj):
+        return obj.active_member_count()
+
+
+@admin.register(GroupMembership)
+class GroupMembershipAdmin(admin.ModelAdmin):
+    list_display = ("id", "group", "user", "role", "status", "created_at")
+    list_select_related = ("group", "user")
+    list_filter = ("role", "status")
+    search_fields = ("group__name", "user__email")
+    ordering = ("-created_at",)

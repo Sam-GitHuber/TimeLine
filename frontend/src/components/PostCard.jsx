@@ -41,13 +41,27 @@ export default function PostCard({ post }) {
       </div>
 
       <div className="tl-body">
-        <div className="mb-1.5">
+        <div className="mb-1.5 flex flex-wrap items-baseline gap-x-1.5">
           <Link
             to={`/u/${author.id}`}
             className="font-semibold text-ink transition hover:text-accent-deep"
           >
             {author.display_name}
           </Link>
+          {/* When a group post surfaces in the merged feed, label which group it
+              came from so the stream doesn't feel context-less. Omitted on a
+              group's own timeline is fine — the label just links back to it. */}
+          {post.group && (
+            <span className="text-sm text-ink-faint">
+              in{" "}
+              <Link
+                to={`/g/${post.group.id}`}
+                className="font-medium text-accent-deep hover:underline"
+              >
+                {post.group.name}
+              </Link>
+            </span>
+          )}
         </div>
 
         {post.text && (

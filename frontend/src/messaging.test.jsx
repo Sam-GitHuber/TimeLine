@@ -31,6 +31,7 @@ vi.mock("./api.js", () => ({
     deleteMessage: vi.fn(),
     markConversationRead: vi.fn(),
     getUnreadMessageCount: vi.fn(),
+    getGroupInvites: vi.fn(),
     blockUser: vi.fn(),
     unblockUser: vi.fn(),
   },
@@ -83,6 +84,7 @@ beforeEach(() => {
   api.getFeed.mockResolvedValue(page([]));
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
+  api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
   api.getConversations.mockResolvedValue(page([]));
   api.listUsers.mockResolvedValue(page([]));
   api.getMessages.mockResolvedValue(page([]));

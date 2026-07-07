@@ -31,7 +31,10 @@ from .imaging import (
     MAX_IMAGES_PER_POST,
     POST_IMAGE_MAX_EDGE,
     POST_THUMB_EDGE,
+    clear_avatar,
+    process_avatar,
     process_image,
+    save_avatar,
 )
 from .models import (
     Block,
@@ -39,6 +42,8 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    Group,
+    GroupMembership,
     Message,
     Post,
     PostImage,
@@ -48,6 +53,9 @@ from .serializers import (
     CommentSerializer,
     ConnectionRequestSerializer,
     ConversationSerializer,
+    GroupInviteSerializer,
+    GroupMemberSerializer,
+    GroupSerializer,
     MessageCreateSerializer,
     MessageSerializer,
     PostSerializer,
@@ -58,6 +66,12 @@ User = get_user_model()
 
 ACCEPTED = Connection.Status.ACCEPTED
 PENDING = Connection.Status.PENDING
+
+# Group membership states/roles (Phase 6).
+ACTIVE = GroupMembership.Status.ACTIVE
+INVITED = GroupMembership.Status.INVITED
+ADMIN = GroupMembership.Role.ADMIN
+MEMBER = GroupMembership.Role.MEMBER
 
 
 def connected_user_ids(user):
@@ -102,6 +116,44 @@ def can_message(user, other):
     if is_blocked_between(user, other):
         return False
     return other.id in connected_user_ids(user)
+
+
+def group_role(user, group_id):
+    """The user's role in a group if they're an **active** member, else None.
+
+    The single source of truth for "am I in this group, and as what" — every
+    group view keys off it so member/admin gates can't drift. Returns
+    ``"admin"``/``"member"`` or ``None`` (not a member, or only invited).
+    """
+    return (
+        GroupMembership.objects.filter(
+            group_id=group_id, user=user, status=ACTIVE
+        )
+        .values_list("role", flat=True)
+        .first()
+    )
+
+
+def is_group_member(user, group_id):
+    return group_role(user, group_id) is not None
+
+
+def is_group_admin(user, group_id):
+    return group_role(user, group_id) == ADMIN
+
+
+def can_add_to_group(inviter, invitee):
+    """Whether ``inviter`` may invite ``invitee`` into a group.
+
+    Invitations are connection-gated exactly like messaging: the invitee must be
+    one of the inviter's connections, both accounts active, neither blocking the
+    other. This keeps the app's "no cold contact from strangers" rule at the
+    point of entry — you can only pull in people *you* already have a
+    relationship with — and is *literally* the messaging gate (both accounts
+    active, mutually connected, neither blocking) so the two entry points to the
+    same person can't drift apart.
+    """
+    return can_message(inviter, invitee)
 
 
 def decorate_conversations(conversations, user):
@@ -151,16 +203,27 @@ def decorate_conversations(conversations, user):
     return conversations
 
 
-def visible_posts(user, author=None, connected_ids=None):
-    """The posts ``user`` is allowed to see, newest-first.
+def visible_posts(user, author=None, connected_ids=None, group=None):
+    """The posts ``user`` is allowed to see on a timeline, newest-first.
 
-    Private-by-default, in one place so the feed and a profile can't drift: a
-    post is visible only if ``user`` wrote it or is **connected** with its
-    author, and only if that author is still active (a deactivated/banned member
-    disappears from feeds too, not just from the people list). Pass ``author``
-    to narrow to a single person's posts (the profile page) — the same rule then
-    yields their posts if allowed, or nothing if not. Pass ``connected_ids`` when
-    the caller already computed the connected set, to avoid recomputing it.
+    Private-by-default, in one place so the feed, a profile, and a group timeline
+    can't drift: a post is visible only if ``user`` wrote it or is **connected**
+    with its author, and only if that author is still active (a deactivated/banned
+    member disappears from feeds too, not just from the people list). Pass
+    ``author`` to narrow to a single person's posts (the profile page). Pass
+    ``connected_ids`` when the caller already computed the connected set, to avoid
+    recomputing it.
+
+    ``group`` picks the timeline, and the connection gate above applies to both:
+
+    - ``None`` (default) — **personal** posts (``group IS NULL``): the home feed
+      and profiles. Group posts deliberately never surface here (the home feed
+      means "my connections", not "every group I'm in").
+    - a group (id or instance) — that group's timeline. Membership is gated by
+      the *caller* (see ``GroupPostsView``); this still prunes to the viewer's
+      connections, so inside a group you only ever see posts by members you're
+      connected with — never a co-member you don't know (a block, which severs
+      the connection, hides them here for free too).
     """
     if connected_ids is None:
         connected_ids = connected_user_ids(user)
@@ -169,14 +232,47 @@ def visible_posts(user, author=None, connected_ids=None):
             Q(author=user) | Q(author__in=connected_ids),
             author__is_active=True,
         )
-        .select_related("author")
-        # A post can carry several photos; prefetch so rendering the feed
-        # doesn't fire one query per post for its images.
+        # select_related("group") so the serializer's group label doesn't fire a
+        # query per group post; a post can carry several photos, so prefetch
+        # those too rather than one query per post.
+        .select_related("author", "group")
         .prefetch_related("images")
     )
+    qs = qs.filter(group__isnull=True) if group is None else qs.filter(group=group)
     if author is not None:
         qs = qs.filter(author=author)
     return qs
+
+
+def feed_posts(user, include_groups=False):
+    """The home feed's posts, newest-first.
+
+    By default this is exactly ``visible_posts`` — your personal posts plus your
+    connections' (no group posts). With ``include_groups`` the viewer has opted
+    in to *also* see posts from groups they're an active member of, merged into
+    the same strictly-chronological stream (no ranking — the merge is by time
+    only, so the no-algorithm rule holds). Two gates apply to those group posts,
+    exactly as on the group timeline itself: you must be an active member of the
+    group, **and** be connected with the post's (active) author — so opting in
+    never surfaces a co-member you aren't connected with, and a block (which
+    severs the connection) keeps their posts out of your feed here too.
+    """
+    connected_ids = connected_user_ids(user)
+    if not include_groups:
+        return visible_posts(user, connected_ids=connected_ids)
+
+    group_ids = GroupMembership.objects.filter(
+        user=user, status=ACTIVE
+    ).values_list("group_id", flat=True)
+    return (
+        Post.objects.filter(
+            Q(author=user) | Q(author__in=connected_ids),
+            author__is_active=True,
+        )
+        .filter(Q(group__isnull=True) | Q(group_id__in=group_ids))
+        .select_related("author", "group")
+        .prefetch_related("images")
+    )
 
 
 def connection_status_annotation(user):
@@ -266,12 +362,18 @@ class FeedView(generics.ListAPIView):
 
     Strictly newest-first (Post's default ordering) — no ranking, ever. This is
     the whole point of TimeLine (see docs/SHARED.md). Paginated.
+
+    ``?include_groups=1`` opts in to merging posts from groups you're a member of
+    into the same chronological stream (still time-ordered — see ``feed_posts``).
     """
 
     serializer_class = PostSerializer
 
     def get_queryset(self):
-        return visible_posts(self.request.user)
+        include_groups = parse_bool(
+            self.request.query_params.get("include_groups")
+        )
+        return feed_posts(self.request.user, include_groups=include_groups)
 
 
 class PostCreateView(generics.CreateAPIView):
@@ -282,6 +384,11 @@ class PostCreateView(generics.CreateAPIView):
     ``api.imaging.process_image`` *before* anything is written, so a bad file
     400s without creating a half-post, and no EXIF/GPS reaches storage. A post
     must have text or at least one photo.
+
+    An optional ``group`` id posts into that group's timeline instead of the
+    personal one — but only if the author is an active member of it (403
+    otherwise, 404 if the group is unknown). No ``group`` is the original
+    personal-post behaviour, unchanged.
     """
 
     serializer_class = PostSerializer
@@ -290,6 +397,18 @@ class PostCreateView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+
+        # Optional group target: you can only post into a group you belong to.
+        group = None
+        group_id = request.data.get("group")
+        if group_id:
+            # 404 (not 403) for both an unknown group and one you're not a member
+            # of, so posting can't be used to probe which private groups exist —
+            # the same non-member-gets-404 discipline as every other group
+            # endpoint (see the phase doc's privacy note).
+            group = get_object_or_404(Group, pk=group_id)
+            if not is_group_member(request.user, group.id):
+                raise NotFound()
 
         files = request.FILES.getlist("images")
         text = serializer.validated_data.get("text", "")
@@ -312,8 +431,9 @@ class PostCreateView(generics.CreateAPIView):
         ]
 
         with transaction.atomic():
-            # Author comes from the session, never the request body.
-            post = serializer.save(author=request.user)
+            # Author comes from the session, never the request body; group is the
+            # membership-checked target above (or None for a personal post).
+            post = serializer.save(author=request.user, group=group)
             for item in processed:
                 image = PostImage(
                     post=post, width=item["width"], height=item["height"]
@@ -530,25 +650,50 @@ class PostCommentsView(APIView):
     """The comment tree for a post (GET) and adding a comment/reply (POST) at
     ``/posts/<pk>/comments/``.
 
-    You must be able to *see* the post (be its author or connected with them) —
-    otherwise 404, same as the profile gate. GET returns the tree already pruned
-    to what you may see (a not-connected author's comment and its whole subtree
-    are omitted server-side, so hidden content never reaches the client). POST
-    adds a comment, or a reply when ``parent`` is given; the author is taken
+    One rule for both personal and group posts: you can reach a post's comments
+    only if you can **see** the post, and the tree is then pruned to your
+    connections — a not-connected author's comment and its whole subtree are
+    omitted server-side, so hidden content never reaches the client. Concretely:
+
+    - **Personal post** (no group): visible if you're its author or connected
+      with them — else 404.
+    - **Group post**: you must be an active **member** of the group *and* (as on
+      the group timeline) connected with the post's author — else 404. Inside a
+      group you only see comments from members you're connected with, matching
+      the connection-gated timeline; a co-member you don't know (or have blocked)
+      stays hidden.
+
+    POST adds a comment, or a reply when ``parent`` is given; the author is taken
     from the session, never the body.
     """
 
-    def _post(self, request, pk, connected_ids=None):
-        # Reuse the shared visibility gate: 404 if you can't see this post.
-        return get_object_or_404(
-            visible_posts(request.user, connected_ids=connected_ids), pk=pk
+    def _get_post_or_404(self, request, pk):
+        """Return ``(post, connected_ids)`` the requester may see + comment on,
+        or 404.
+
+        The single visibility gate for both regimes: fetch via ``visible_posts``
+        (author-or-connected, author active) scoped to the post's timeline, after
+        a membership check for group posts. ``connected_ids`` is returned so GET
+        can prune the tree without a second query.
+        """
+        post = get_object_or_404(Post.objects.select_related("author"), pk=pk)
+        connected_ids = connected_user_ids(request.user)
+        # Group posts gate on active membership first (404 for a non-member, so
+        # the group's existence isn't leaked); visibility below then also prunes
+        # to authors you're connected with.
+        if post.group_id and not is_group_member(request.user, post.group_id):
+            raise NotFound()
+        visible = visible_posts(
+            request.user,
+            connected_ids=connected_ids,
+            group=post.group_id or None,
         )
+        if not visible.filter(pk=pk).exists():
+            raise NotFound()
+        return post, connected_ids
 
     def get(self, request, pk):
-        # Compute the connected set once and reuse it for both the post gate and
-        # the comment prune, instead of querying it twice.
-        connected_ids = connected_user_ids(request.user)
-        post = self._post(request, pk, connected_ids=connected_ids)
+        post, connected_ids = self._get_post_or_404(request, pk)
         # Drop comments by deactivated (banned) authors before building the
         # tree, so a banned member's comments vanish just like their posts do —
         # and their replies go with them (an orphaned reply is never reached).
@@ -557,6 +702,8 @@ class PostCommentsView(APIView):
                 author__is_active=True
             )
         )
+        # Prune to the viewer's connections (plus themselves) — the same rule for
+        # personal and group posts.
         visible_author_ids = connected_ids | {request.user.id}
         tree = build_visible_comment_tree(comments, visible_author_ids)
         data = CommentSerializer(
@@ -565,7 +712,7 @@ class PostCommentsView(APIView):
         return Response(data)
 
     def post(self, request, pk):
-        post = self._post(request, pk)
+        post, _connected_ids = self._get_post_or_404(request, pk)
         serializer = CommentCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         parent = serializer.validated_data.get("parent")
@@ -869,3 +1016,392 @@ class BlockView(APIView):
             {"detail": "Unblocked.", "is_blocked": False},
             status=status.HTTP_200_OK,
         )
+
+
+# --- Groups (Phase 6) ----------------------------------------------------------
+
+
+def _active_admin_count(group_id):
+    return GroupMembership.objects.filter(
+        group_id=group_id, status=ACTIVE, role=ADMIN
+    ).count()
+
+
+def _member_group_or_404(user, pk):
+    """Fetch a group the user is an **active** member of, or 404.
+
+    404 (not 403) for a non-member so a private group's existence isn't leaked —
+    the same discipline as a non-connection's profile. Stashes the caller's role
+    on the instance as ``_your_role`` for the admin-gate checks and the response.
+    """
+    group = get_object_or_404(Group, pk=pk)
+    role = group_role(user, group.id)
+    if role is None:
+        raise NotFound()
+    group._your_role = role
+    return group
+
+
+def _attach_roles(groups, user):
+    """Attach each group's ``_your_role`` for ``user`` in one query (no N+1)."""
+    groups = list(groups)
+    ids = [g.id for g in groups]
+    roles = dict(
+        GroupMembership.objects.filter(
+            group_id__in=ids, user=user, status=ACTIVE
+        ).values_list("group_id", "role")
+    )
+    for g in groups:
+        g._your_role = roles.get(g.id)
+    return groups
+
+
+def parse_bool(value):
+    """Coerce a request flag (query param or form field) to a bool.
+
+    Accepts the common truthy spellings a browser or user might send; anything
+    else (including ``None``) is False. One helper so every boolean flag in the
+    API reads the same tokens instead of each endpoint inventing its own set.
+    """
+    return str(value).strip().lower() in ("1", "true", "on", "yes")
+
+
+class GroupListCreateView(generics.ListCreateAPIView):
+    """List the groups you're an active member of (GET) or create one (POST).
+
+    GET is ordered by name (not "relevance" — the no-algorithm rule applies here
+    too), each row carrying ``member_count`` and ``your_role``. POST creates the
+    group and makes you its first member as an **admin**, atomically; accepts an
+    optional multipart ``avatar`` (validated + downscaled + EXIF-stripped).
+    """
+
+    serializer_class = GroupSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_queryset(self):
+        user = self.request.user
+        # Filter via Exists (a subquery, no join) so the member_count Count has
+        # the memberships table to itself and can't double-count.
+        mine = GroupMembership.objects.filter(
+            group=OuterRef("pk"), user=user, status=ACTIVE
+        )
+        return (
+            Group.objects.filter(Exists(mine))
+            .annotate(
+                member_count=Count(
+                    "memberships", filter=Q(memberships__status=ACTIVE)
+                )
+            )
+            .order_by("name", "id")
+        )
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        source = page if page is not None else list(queryset)
+        _attach_roles(source, request.user)
+        serializer = self.get_serializer(source, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        avatar_file = request.FILES.get("avatar")
+        processed = process_avatar(avatar_file) if avatar_file else None
+
+        with transaction.atomic():
+            group = Group.objects.create(
+                name=serializer.validated_data["name"],
+                description=serializer.validated_data.get("description", ""),
+                creator=request.user,
+            )
+            if processed is not None:
+                save_avatar(group, processed)
+                group.save(update_fields=["avatar", "avatar_thumb"])
+            # The creator is the group's first member, and its admin.
+            GroupMembership.objects.create(
+                group=group, user=request.user, role=ADMIN, status=ACTIVE
+            )
+
+        group.member_count = 1
+        group._your_role = ADMIN
+        out = self.get_serializer(group)
+        return Response(out.data, status=status.HTTP_201_CREATED)
+
+
+class GroupDetailView(APIView):
+    """A single group: read (GET, members), edit (PATCH, admins), delete
+    (DELETE, admins) at ``/groups/<pk>/``.
+
+    Non-members get 404 everywhere (don't leak a private group's existence); a
+    member who isn't an admin gets 403 on PATCH/DELETE.
+    """
+
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def _serialize(self, group, request):
+        group.member_count = group.active_member_count()
+        return GroupSerializer(group, context={"request": request}).data
+
+    def get(self, request, pk):
+        group = _member_group_or_404(request.user, pk)
+        return Response(self._serialize(group, request))
+
+    def patch(self, request, pk):
+        group = _member_group_or_404(request.user, pk)
+        if group._your_role != ADMIN:
+            raise PermissionDenied("Only an admin can edit this group.")
+        serializer = GroupSerializer(
+            group,
+            data=request.data,
+            partial=True,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        update_fields = []
+        if "name" in data:
+            group.name = data["name"]
+            update_fields.append("name")
+        if "description" in data:
+            group.description = data["description"]
+            update_fields.append("description")
+
+        avatar_file = request.FILES.get("avatar")
+        if avatar_file is not None:
+            save_avatar(group, process_avatar(avatar_file))
+            update_fields += ["avatar", "avatar_thumb"]
+        elif parse_bool(request.data.get("remove_avatar")):
+            clear_avatar(group)
+            update_fields += ["avatar", "avatar_thumb"]
+
+        if update_fields:
+            group.save(update_fields=list(dict.fromkeys(update_fields)))
+        return Response(self._serialize(group, request))
+
+    def delete(self, request, pk):
+        group = _member_group_or_404(request.user, pk)
+        if group._your_role != ADMIN:
+            raise PermissionDenied("Only an admin can delete this group.")
+        # Cascades to memberships and the group's posts (and their photos +
+        # comments) via the FKs.
+        group.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class GroupPostsView(generics.ListAPIView):
+    """A group's timeline (``GET /groups/<pk>/posts/``): its posts, newest-first,
+    paginated. Members only — a non-member (or unknown group) gets 404, so a
+    private group's contents and existence stay hidden.
+
+    Within the group the same connection gate as everywhere else applies (via
+    ``visible_posts``): you see posts by members you're connected with, not by
+    co-members you don't know — and never by a deactivated author."""
+
+    serializer_class = PostSerializer
+
+    def get_queryset(self):
+        pk = self.kwargs["pk"]
+        if not is_group_member(self.request.user, pk):
+            raise NotFound()
+        return visible_posts(self.request.user, group=pk)
+
+
+class GroupMembersView(APIView):
+    """List a group's members (GET) or invite someone (POST) at
+    ``/groups/<pk>/members/``.
+
+    Members only (404 otherwise). **Any active member** may invite — but only
+    one of their own connections (``can_add_to_group``), so no stranger is pulled
+    into a shared space. The invite lands as a pending row the invitee accepts
+    from their invites inbox (consent-first).
+    """
+
+    def get(self, request, pk):
+        if not is_group_member(request.user, pk):
+            raise NotFound()
+        members = (
+            GroupMembership.objects.filter(
+                group_id=pk, status=ACTIVE, user__is_active=True
+            )
+            .select_related("user")
+            # Admins first, then by name — a stable, non-ranked order.
+            .order_by(
+                "role",
+                "user__first_name",
+                "user__last_name",
+                "user__email",
+            )
+        )
+        return Response(
+            GroupMemberSerializer(
+                members, many=True, context={"request": request}
+            ).data
+        )
+
+    def post(self, request, pk):
+        group = get_object_or_404(Group, pk=pk)
+        if not is_group_member(request.user, group.id):
+            raise NotFound()
+
+        user_id = request.data.get("user_id")
+        if not user_id:
+            raise ValidationError({"user_id": "This field is required."})
+        invitee = get_object_or_404(User, pk=user_id, is_active=True)
+        if invitee == request.user:
+            raise ValidationError({"user_id": "You're already in this group."})
+
+        # Report an existing membership/invite *before* the connection gate:
+        # co-members needn't be connected, so an already-in member who isn't your
+        # connection should hear "already a member", not a misleading "you're not
+        # connected".
+        existing = GroupMembership.objects.filter(
+            group=group, user=invitee
+        ).first()
+        if existing is not None:
+            detail = (
+                "They're already a member."
+                if existing.status == ACTIVE
+                else "They've already been invited."
+            )
+            raise ValidationError({"user_id": detail})
+
+        if not can_add_to_group(request.user, invitee):
+            raise PermissionDenied(
+                "You can only invite people you're connected with."
+            )
+        try:
+            with transaction.atomic():
+                GroupMembership.objects.create(
+                    group=group,
+                    user=invitee,
+                    role=MEMBER,
+                    status=INVITED,
+                    invited_by=request.user,
+                )
+        except IntegrityError:
+            # A concurrent invite won the race; the one-row-per-pair constraint
+            # rejected ours.
+            raise ValidationError(
+                {"user_id": "They've already been invited."}
+            )
+        return Response(
+            {"detail": "Invitation sent."}, status=status.HTTP_201_CREATED
+        )
+
+
+class GroupMemberDetailView(APIView):
+    """Remove a member, or leave the group yourself
+    (``DELETE /groups/<pk>/members/<user_id>/``).
+
+    You can always remove **yourself** (leave); removing **someone else** is
+    admin-only. The last-admin guardrail applies either way: an admin can't leave
+    or be removed while they're the only admin — promote someone first — so a
+    group is never orphaned.
+    """
+
+    def delete(self, request, pk, user_id):
+        group = get_object_or_404(Group, pk=pk)
+        my_role = group_role(request.user, group.id)
+        if my_role is None:
+            raise NotFound()
+
+        is_self = user_id == request.user.id
+        if not is_self and my_role != ADMIN:
+            raise PermissionDenied("Only an admin can remove members.")
+
+        target = get_object_or_404(
+            GroupMembership, group=group, user_id=user_id, status=ACTIVE
+        )
+        if target.role == ADMIN and _active_admin_count(group.id) <= 1:
+            raise ValidationError(
+                {
+                    "detail": (
+                        "Promote another member to admin first — a group must "
+                        "keep at least one admin."
+                    )
+                }
+            )
+        target.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class GroupMemberRoleView(APIView):
+    """Promote/demote a member between admin and member
+    (``POST /groups/<pk>/members/<user_id>/role/``), admin-only.
+
+    Body ``{ role: "admin" | "member" }``. The last-admin guardrail blocks
+    demoting the only admin.
+    """
+
+    def post(self, request, pk, user_id):
+        group = get_object_or_404(Group, pk=pk)
+        my_role = group_role(request.user, group.id)
+        if my_role is None:
+            raise NotFound()
+        if my_role != ADMIN:
+            raise PermissionDenied("Only an admin can change roles.")
+
+        role = request.data.get("role")
+        if role not in (ADMIN, MEMBER):
+            raise ValidationError({"role": 'Must be "admin" or "member".'})
+
+        target = get_object_or_404(
+            GroupMembership, group=group, user_id=user_id, status=ACTIVE
+        )
+        if (
+            target.role == ADMIN
+            and role == MEMBER
+            and _active_admin_count(group.id) <= 1
+        ):
+            raise ValidationError(
+                {"detail": "A group must keep at least one admin."}
+            )
+        if target.role != role:
+            target.role = role
+            target.save(update_fields=["role"])
+        return Response({"detail": "Role updated."}, status=status.HTTP_200_OK)
+
+
+class GroupInviteListView(generics.ListAPIView):
+    """Your pending group invitations (``GET /group-invites/``) — the ones
+    awaiting *your* acceptance, newest-first. Mirrors the connection-requests
+    inbox."""
+
+    serializer_class = GroupInviteSerializer
+
+    def get_queryset(self):
+        return (
+            GroupMembership.objects.filter(
+                user=self.request.user, status=INVITED
+            )
+            .select_related("group", "invited_by")
+            .order_by("-created_at")
+        )
+
+
+class GroupInviteActionView(APIView):
+    """Accept (join the group) or reject (delete the invite) a group invitation.
+    Wired to two URLs via ``.as_view(action=...)``:
+    ``/group-invites/<pk>/accept/`` and ``.../reject/``.
+
+    Only the invitee may act on it: the row must be theirs and still pending,
+    else 404 (we don't reveal invites addressed to others).
+    """
+
+    action = None
+
+    def post(self, request, pk):
+        invite = get_object_or_404(
+            GroupMembership, pk=pk, user=request.user, status=INVITED
+        )
+        if self.action == "accept":
+            invite.status = ACTIVE
+            invite.save(update_fields=["status"])
+            return Response({"detail": "Joined."}, status=status.HTTP_200_OK)
+        invite.delete()
+        return Response({"detail": "Declined."}, status=status.HTTP_200_OK)

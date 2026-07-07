@@ -8,10 +8,11 @@ import { useAuth } from "../auth.jsx";
 // stop the user before a doomed request rather than after a 400.
 const MAX_IMAGES = 10;
 
-// The "what's happening" box at the top of the feed. On submit it creates a
-// real post — text, photos, or both — via the API, then invalidates the feed so
-// the new post appears.
-export default function ComposeBox() {
+// The "what's happening" box at the top of a timeline. On submit it creates a
+// real post — text, photos, or both — via the API, then invalidates the right
+// list so the new post appears. Pass a `group` id to post into that group's
+// timeline (and refresh it) instead of your personal feed.
+export default function ComposeBox({ group = null }) {
   const { user } = useAuth();
   const [text, setText] = useState("");
   const [images, setImages] = useState([]);
@@ -29,13 +30,19 @@ export default function ComposeBox() {
 
   const mutation = useMutation({
     mutationFn: ({ text: value, images: files }) =>
-      api.createPost(value, files),
+      api.createPost(value, files, group),
     onSuccess: () => {
       setText("");
       setImages([]);
+      // The home feed always refreshes — a group post can surface there via the
+      // "include groups" toggle. Then refresh the specific list it landed in:
+      // the group's timeline, or (for a personal post) your own profile.
       queryClient.invalidateQueries({ queryKey: ["feed"] });
-      // If you're looking at your own profile, refresh that too.
-      queryClient.invalidateQueries({ queryKey: ["userPosts", user?.pk] });
+      if (group) {
+        queryClient.invalidateQueries({ queryKey: ["groupPosts", group] });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["userPosts", user?.pk] });
+      }
     },
   });
 
@@ -76,7 +83,7 @@ export default function ComposeBox() {
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={2}
-            placeholder="What's happening?"
+            placeholder={group ? "Share with the group…" : "What's happening?"}
             className="w-full resize-none rounded-2xl border border-line-strong bg-raised px-4 py-3 text-base text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
           />
 

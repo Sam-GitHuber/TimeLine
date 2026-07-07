@@ -8,6 +8,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
+import { SpineMark, StrokeIcon, IconButton } from "./drawer-chrome.jsx";
 import {
   api,
   MESSAGE_POLL_MS,
@@ -15,7 +16,7 @@ import {
 } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useMessaging } from "../messaging.jsx";
-import { useInfiniteList } from "../hooks.js";
+import { useConnections } from "../hooks.js";
 import { formatRelativeTime } from "../utils.js";
 
 // The messages drawer: a non-modal panel docked to the right edge, so a
@@ -55,65 +56,6 @@ export default function MessagesDrawer() {
       {view === "new" && <NewMessageView />}
     </aside>,
     document.body
-  );
-}
-
-/* ---- Shared chrome ---------------------------------------------------------- */
-
-// The little brand glyph (a node on the spine) — ties the private channel back
-// to the public timeline's living line.
-function SpineMark() {
-  return (
-    <svg
-      width="12"
-      height="16"
-      viewBox="0 0 16 20"
-      fill="none"
-      aria-hidden="true"
-      className="shrink-0"
-    >
-      <line
-        x1="8"
-        y1="2"
-        x2="8"
-        y2="18"
-        stroke="var(--color-spine)"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <circle cx="8" cy="6" r="4" fill="var(--color-accent)" />
-    </svg>
-  );
-}
-
-function StrokeIcon({ path, size = 20 }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d={path} />
-    </svg>
-  );
-}
-
-function IconButton({ onClick, label, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep"
-    >
-      {children}
-    </button>
   );
 }
 
@@ -490,28 +432,11 @@ function NewMessageView() {
   const { openList, openThread } = useMessaging();
   const [term, setTerm] = useState("");
 
-  // Recipients are your connections (messaging is connection-gated). The people
-  // list carries connection_status, so we filter to the accepted ones. Reuse the
-  // shared paging hook (not a one-off useQuery) so this shares the ["users"]
-  // cache shape with the People page — using useQuery here would collide with
-  // that page's useInfiniteQuery under the same key — and so a connection past
-  // the first page can still be found. Pull every page (family scale) so every
-  // connection is reachable from the picker.
-  const usersQuery = useInfiniteList(["users"], api.listUsers);
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = usersQuery;
-  useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
-  const { items, isLoading, isError } = usersQuery;
-  const connections = items.filter(
-    (u) => u.connection_status === "connected"
-  );
-  const needle = term.trim().toLowerCase();
-  const filtered = needle
-    ? connections.filter((u) =>
-        u.display_name.toLowerCase().includes(needle)
-      )
-    : connections;
+  // Recipients are your connections (messaging is connection-gated). The shared
+  // hook pulls every page of the ["users"] list and filters to accepted
+  // connections narrowed by the search term — same source the group-invite
+  // picker uses, so paging/filter behaviour can't drift between them.
+  const { connections, filtered, isLoading, isError } = useConnections(term);
 
   const open = useMutation({
     mutationFn: (userId) => api.openConversation(userId),
