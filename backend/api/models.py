@@ -424,6 +424,15 @@ class Group(models.Model):
     def __str__(self):
         return self.name
 
+    def active_member_count(self):
+        """The number of active members (excludes pending invites). The one
+        definition of "how many members" — the API list annotates this in bulk
+        (no N+1), but the serializer, admin, and detail view all fall back to
+        this so the count can't mean different things in different places."""
+        return self.memberships.filter(
+            status=GroupMembership.Status.ACTIVE
+        ).count()
+
 
 class GroupMembership(models.Model):
     """One person's membership of a ``Group`` — their role and join state.

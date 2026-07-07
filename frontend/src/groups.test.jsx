@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Routes, Route } from "react-router-dom";
 import PostCard from "./components/PostCard.jsx";
@@ -9,6 +9,7 @@ import GroupsDrawer from "./components/GroupsDrawer.jsx";
 import { GroupsDrawerProvider } from "./groups-drawer.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
+import GroupInvitePicker from "./components/GroupInvitePicker.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
 import { api } from "./api.js";
 
@@ -193,6 +194,45 @@ describe("GroupPage admin controls", () => {
     expect(
       await screen.findByText("Group not available")
     ).toBeInTheDocument();
+  });
+});
+
+describe("GroupInvitePicker", () => {
+  it("finds a connection listed beyond the first page of users", async () => {
+    // The people list is paginated; a connection can sort onto page 2. The
+    // picker must pull every page so they're still invitable (regression: it
+    // previously filtered only page 1 and reported "No connections match").
+    api.listUsers.mockResolvedValue({
+      results: [
+        {
+          id: 2,
+          display_name: "Page One Pal",
+          connection_status: "connected",
+          avatar_thumb: null,
+        },
+      ],
+      next: "/api/users/?page=2",
+    });
+    api.getPage.mockResolvedValue({
+      results: [
+        {
+          id: 3,
+          display_name: "Page Two Pal",
+          connection_status: "connected",
+          avatar_thumb: null,
+        },
+      ],
+      next: null,
+    });
+    api.inviteToGroup.mockResolvedValue({});
+
+    renderWithAuth(<GroupInvitePicker groupId={7} onClose={() => {}} />);
+
+    // The page-2 connection becomes reachable once all pages load.
+    expect(await screen.findByText("Page Two Pal")).toBeInTheDocument();
+    const row = screen.getByText("Page Two Pal").closest("li");
+    await userEvent.click(within(row).getByRole("button", { name: "Invite" }));
+    expect(api.inviteToGroup).toHaveBeenCalledWith(7, 3);
   });
 });
 

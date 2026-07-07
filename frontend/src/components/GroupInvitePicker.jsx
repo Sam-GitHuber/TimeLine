@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
-import { useInfiniteList } from "../hooks.js";
+import { useConnections } from "../hooks.js";
 import { api } from "../api.js";
 
 // Pick one of your connections to invite to a group. You can only invite people
@@ -13,17 +13,13 @@ export default function GroupInvitePicker({ groupId, onClose }) {
   // Track per-user outcome so the row can show "Invited" / an error inline.
   const [sent, setSent] = useState({});
 
-  // Reuse the shared ["users"] cache shape (same as the People page and the
-  // message picker); the list carries connection_status, so filter to accepted.
-  const usersQuery = useInfiniteList(["users"], api.listUsers);
-  const connections = usersQuery.items.filter(
-    (u) => u.connection_status === "connected"
-  );
-  const filtered = needle
-    ? connections.filter((u) =>
-        u.display_name.toLowerCase().includes(needle.toLowerCase())
-      )
-    : connections;
+  // The shared hook lists your connections (paged across every page) and
+  // narrows by the search term — the same source the new-message picker uses.
+  const {
+    connections,
+    filtered,
+    isLoading: usersLoading,
+  } = useConnections(needle);
 
   const invite = useMutation({
     mutationFn: (userId) => api.inviteToGroup(groupId, userId),
@@ -56,18 +52,18 @@ export default function GroupInvitePicker({ groupId, onClose }) {
         className="mb-3 w-full rounded-xl border border-line-strong bg-surface px-3 py-2 text-sm text-ink transition focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
       />
 
-      {usersQuery.isLoading && (
+      {usersLoading && (
         <p className="py-2 text-sm text-ink-faint">Loading…</p>
       )}
 
-      {!usersQuery.isLoading && connections.length === 0 && (
+      {!usersLoading && connections.length === 0 && (
         <p className="py-2 text-sm text-ink-faint">
           You can only invite people you're connected with. Connect with someone
           first.
         </p>
       )}
 
-      {!usersQuery.isLoading && connections.length > 0 && filtered.length === 0 && (
+      {!usersLoading && connections.length > 0 && filtered.length === 0 && (
         <p className="py-2 text-sm text-ink-faint">No connections match.</p>
       )}
 

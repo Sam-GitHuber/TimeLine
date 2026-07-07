@@ -341,13 +341,11 @@ class GroupSerializer(serializers.ModelSerializer):
         return absolute_media_url(obj.avatar_thumb, self.context.get("request"))
 
     def get_member_count(self, obj):
-        # Attached by the view (annotated, no N+1); falls back to a count for
-        # safety if a caller forgot to annotate.
+        # Attached by the view (annotated in bulk, no N+1); falls back to the
+        # model's shared count for safety if a caller forgot to annotate.
         count = getattr(obj, "member_count", None)
         if count is None:
-            count = obj.memberships.filter(
-                status=GroupMembership.Status.ACTIVE
-            ).count()
+            count = obj.active_member_count()
         return count
 
     def get_your_role(self, obj):

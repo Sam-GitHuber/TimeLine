@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import LoadMoreButton from "./LoadMoreButton.jsx";
+import { SpineMark, StrokeIcon, IconButton } from "./drawer-chrome.jsx";
 import { api } from "../api.js";
 import { useGroupsDrawer } from "../groups-drawer.jsx";
 import { useInfiniteList } from "../hooks.js";
@@ -45,63 +46,6 @@ export default function GroupsDrawer() {
       <GroupsListView />
     </aside>,
     document.body
-  );
-}
-
-// The brand glyph (a node on the spine) — same mark the messages drawer uses,
-// tying both companion panels back to the timeline's living line.
-function SpineMark() {
-  return (
-    <svg
-      width="12"
-      height="16"
-      viewBox="0 0 16 20"
-      fill="none"
-      aria-hidden="true"
-      className="shrink-0"
-    >
-      <line
-        x1="8"
-        y1="2"
-        x2="8"
-        y2="18"
-        stroke="var(--color-spine)"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <circle cx="8" cy="6" r="4" fill="var(--color-accent)" />
-    </svg>
-  );
-}
-
-function StrokeIcon({ path, size = 20 }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d={path} />
-    </svg>
-  );
-}
-
-function IconButton({ onClick, label, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep"
-    >
-      {children}
-    </button>
   );
 }
 

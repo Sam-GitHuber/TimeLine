@@ -5,10 +5,10 @@ from dj_rest_auth.serializers import (
 from rest_framework import serializers
 
 from api.imaging import (
-    AVATAR_MAX_EDGE,
-    AVATAR_THUMB_EDGE,
     absolute_media_url,
-    process_image,
+    clear_avatar,
+    process_avatar,
+    save_avatar,
 )
 
 # A comfortable cap for a short "about me" — enough for a sentence or two,
@@ -116,27 +116,10 @@ class UserDetailsSerializer(BaseUserDetailsSerializer):
         instance = super().update(instance, validated_data)
 
         if avatar_file is not None:
-            processed = process_image(
-                avatar_file,
-                max_edge=AVATAR_MAX_EDGE,
-                thumb_edge=AVATAR_THUMB_EDGE,
-                thumb_square=True,
-            )
-            # Drop the old files so replaced avatars don't pile up on disk.
-            instance.avatar.delete(save=False)
-            instance.avatar_thumb.delete(save=False)
-            instance.avatar.save(
-                f"avatar{processed['ext']}", processed["image"], save=False
-            )
-            instance.avatar_thumb.save(
-                f"thumb{processed['ext']}", processed["thumbnail"], save=False
-            )
+            save_avatar(instance, process_avatar(avatar_file))
             instance.save(update_fields=["avatar", "avatar_thumb"])
         elif remove_avatar:
-            instance.avatar.delete(save=False)
-            instance.avatar_thumb.delete(save=False)
-            instance.avatar = None
-            instance.avatar_thumb = None
+            clear_avatar(instance)
             instance.save(update_fields=["avatar", "avatar_thumb"])
 
         return instance

@@ -141,9 +141,7 @@ class GroupAdmin(admin.ModelAdmin):
 
     @admin.display(description="members")
     def member_count(self, obj):
-        return obj.memberships.filter(
-            status=GroupMembership.Status.ACTIVE
-        ).count()
+        return obj.active_member_count()
 
 
 @admin.register(GroupMembership)

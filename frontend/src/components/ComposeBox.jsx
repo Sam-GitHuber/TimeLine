@@ -34,14 +34,13 @@ export default function ComposeBox({ group = null }) {
     onSuccess: () => {
       setText("");
       setImages([]);
+      // The home feed always refreshes — a group post can surface there via the
+      // "include groups" toggle. Then refresh the specific list it landed in:
+      // the group's timeline, or (for a personal post) your own profile.
+      queryClient.invalidateQueries({ queryKey: ["feed"] });
       if (group) {
-        // A group post: refresh that group's timeline (and the feed, in case
-        // the viewer has "include groups" turned on there).
         queryClient.invalidateQueries({ queryKey: ["groupPosts", group] });
-        queryClient.invalidateQueries({ queryKey: ["feed"] });
       } else {
-        queryClient.invalidateQueries({ queryKey: ["feed"] });
-        // If you're looking at your own profile, refresh that too.
         queryClient.invalidateQueries({ queryKey: ["userPosts", user?.pk] });
       }
     },

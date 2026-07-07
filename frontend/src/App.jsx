@@ -8,8 +8,13 @@ import {
 } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
+import { useMediaQuery } from "./hooks.js";
 import { MessagingProvider, useMessaging } from "./messaging.jsx";
 import { GroupsDrawerProvider, useGroupsDrawer } from "./groups-drawer.jsx";
+
+// Below this width the two 400px companion drawers can't sit side-by-side, so
+// opening one closes the other. Kept in sync with Layout.jsx's coordination.
+const DRAWERS_DONT_FIT = "(max-width: 799px)";
 import FeedPage from "./pages/FeedPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import ProfileEditPage from "./pages/ProfileEditPage.jsx";
@@ -41,13 +46,18 @@ import SignupPage from "./pages/SignupPage.jsx";
 // opening the drawer over the feed, then replacing the URL with `/`.
 function MessagesRoute({ thread = false }) {
   const { openList, openThread } = useMessaging();
+  const groupsDrawer = useGroupsDrawer();
+  const tooNarrowForBoth = useMediaQuery(DRAWERS_DONT_FIT);
   const navigate = useNavigate();
   const { id } = useParams();
   useEffect(() => {
+    // Same coordination as Layout's nav button: on a narrow viewport, opening
+    // this drawer closes the other so they don't overlap.
+    if (tooNarrowForBoth) groupsDrawer.close();
     if (thread && id) openThread(Number(id));
     else openList();
     navigate("/", { replace: true });
-  }, [thread, id, openList, openThread, navigate]);
+  }, [thread, id, openList, openThread, groupsDrawer, tooNarrowForBoth, navigate]);
   return null;
 }
 
@@ -56,11 +66,16 @@ function MessagesRoute({ thread = false }) {
 // then replace the URL with `/`. `/g/:id`, `/groups/new` etc. stay real pages.
 function GroupsRoute() {
   const { open } = useGroupsDrawer();
+  const messaging = useMessaging();
+  const tooNarrowForBoth = useMediaQuery(DRAWERS_DONT_FIT);
   const navigate = useNavigate();
   useEffect(() => {
+    // Same coordination as Layout's nav button: on a narrow viewport, opening
+    // this drawer closes the messages drawer so they don't overlap.
+    if (tooNarrowForBoth) messaging.close();
     open();
     navigate("/", { replace: true });
-  }, [open, navigate]);
+  }, [open, messaging, tooNarrowForBoth, navigate]);
   return null;
 }
 

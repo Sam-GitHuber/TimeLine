@@ -1251,11 +1251,13 @@ class GroupTimelineTests(APITestCase):
         )
 
     def test_non_member_cannot_post_into_group(self):
+        # 404 (not 403) so posting can't probe which private groups exist — a
+        # non-member gets the same answer whether or not the group is real.
         self.client.force_authenticate(self.stranger)
         resp = self.client.post(
             POSTS_URL, {"text": "sneaking in", "group": self.group.id}
         )
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertFalse(Post.objects.filter(text="sneaking in").exists())
 
     def test_group_timeline_lists_group_posts_for_members(self):
@@ -1264,6 +1266,33 @@ class GroupTimelineTests(APITestCase):
         resp = self.client.get(group_posts_url(self.group))
         texts = {p["text"] for p in resp.data["results"]}
         self.assertEqual(texts, {"mine", "theirs"})
+
+    def test_group_timeline_hides_a_non_connected_members_posts(self):
+        # A co-member I'm not connected with: their group posts are gated out,
+        # same as everywhere else — a group is not a way around the connection
+        # rule (Phase 6 decision).
+        acquaintance = make_user("acq@example.com")
+        add_member(self.group, acquaintance)
+        Post.objects.create(author=self.me, text="mine", group=self.group)
+        Post.objects.create(
+            author=acquaintance, text="from an acquaintance", group=self.group
+        )
+        resp = self.client.get(group_posts_url(self.group))
+        texts = {p["text"] for p in resp.data["results"]}
+        self.assertEqual(texts, {"mine"})
+
+    def test_include_groups_hides_a_non_connected_members_posts(self):
+        # The same gate holds when the group posts are merged into the home feed.
+        acquaintance = make_user("acq@example.com")
+        add_member(self.group, acquaintance)
+        mine = Post.objects.create(author=self.me, text="mine", group=self.group)
+        theirs = Post.objects.create(
+            author=acquaintance, text="theirs", group=self.group
+        )
+        resp = self.client.get(FEED_URL + "?include_groups=1")
+        ids = {p["id"] for p in resp.data["results"]}
+        self.assertIn(mine.id, ids)
+        self.assertNotIn(theirs.id, ids)
 
     def test_group_timeline_404_for_non_member(self):
         self.client.force_authenticate(self.stranger)
@@ -1419,6 +1448,17 @@ class GroupMembershipManagementTests(APITestCase):
             ).exists()
         )
 
+    def test_members_list_excludes_deactivated_users(self):
+        # A member who is later deactivated/banned drops out of the roster, the
+        # same as they vanish from feeds and comments.
+        self.member.is_active = False
+        self.member.save(update_fields=["is_active"])
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get(group_members_url(self.group))
+        ids = {m["user"]["id"] for m in resp.data}
+        self.assertIn(self.admin.id, ids)
+        self.assertNotIn(self.member.id, ids)
+
     def test_admin_can_remove_a_member(self):
         self.client.force_authenticate(self.admin)
         resp = self.client.delete(group_member_url(self.group, self.member))
@@ -1479,31 +1519,51 @@ class GroupMembershipManagementTests(APITestCase):
 
 
 class GroupCommentVisibilityTests(APITestCase):
-    """Inside a group every member sees every comment — no connection pruning."""
+    """Inside a group, comments prune to the viewer's connections — you see
+    comments (and can comment) only on posts by members you're connected with,
+    matching the connection-gated timeline (Phase 6 decision)."""
 
     def setUp(self):
-        # a and b are group members but NOT connected to each other.
+        # a owns the group. b is a connected member; c is a member but NOT
+        # connected to a. The post is a's.
         self.a = make_user("a@example.com")
         self.b = make_user("b@example.com")
+        self.c = make_user("c@example.com")
         self.stranger = make_user("stranger@example.com")
+        make_connection(self.a, self.b, ACCEPTED)
         self.group = make_group(self.a, name="Shared")
         add_member(self.group, self.b)
+        add_member(self.group, self.c)
         self.post = Post.objects.create(
             author=self.a, text="group post", group=self.group
         )
 
-    def test_member_sees_comment_from_a_non_connection_member(self):
+    def test_sees_comment_from_a_connected_member(self):
         Comment.objects.create(author=self.b, post=self.post, text="hi from b")
         self.client.force_authenticate(self.a)
         resp = self.client.get(comments_url(self.post))
         texts = {c["text"] for c in resp.data}
-        # a is not connected to b, but they share the group, so a sees it.
         self.assertIn("hi from b", texts)
 
-    def test_member_can_comment_on_group_post(self):
+    def test_hides_comment_from_a_non_connected_member(self):
+        # b comments on a's post; c (a member, but not connected to a) can't see
+        # a's post at all, so c is served nothing here.
+        Comment.objects.create(author=self.b, post=self.post, text="hi from b")
+        self.client.force_authenticate(self.c)
+        resp = self.client.get(comments_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_connected_member_can_comment_on_a_visible_post(self):
         self.client.force_authenticate(self.b)
         resp = self.client.post(comments_url(self.post), {"text": "nice"})
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_member_cannot_comment_on_a_post_they_cannot_see(self):
+        # c is a member but not connected to the author, so a's post isn't
+        # visible to them — they can't comment on it (404, same as reading).
+        self.client.force_authenticate(self.c)
+        resp = self.client.post(comments_url(self.post), {"text": "hi"})
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_non_member_cannot_read_or_comment(self):
         self.client.force_authenticate(self.stranger)

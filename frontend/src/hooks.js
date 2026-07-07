@@ -44,3 +44,32 @@ export function useInfiniteList(queryKey, fetchFirstPage) {
   const items = query.data?.pages.flatMap((page) => page.results) ?? [];
   return { ...query, items };
 }
+
+// The viewer's accepted connections, for the "pick someone you already know"
+// pickers (new message, group invite). Pulls *every* page of the shared
+// ["users"] list — a connection can sort past the first page — then filters to
+// accepted connections, optionally narrowed by a name search. One place so the
+// two pickers can't drift on paging or the connection filter. Returns the full
+// `connections` set (for empty-state copy) and the `filtered` subset to render.
+export function useConnections(search = "") {
+  const usersQuery = useInfiniteList(["users"], api.listUsers);
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = usersQuery;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  const connections = usersQuery.items.filter(
+    (u) => u.connection_status === "connected"
+  );
+  const needle = search.trim().toLowerCase();
+  const filtered = needle
+    ? connections.filter((u) => u.display_name.toLowerCase().includes(needle))
+    : connections;
+
+  return {
+    connections,
+    filtered,
+    isLoading: usersQuery.isLoading,
+    isError: usersQuery.isError,
+  };
+}

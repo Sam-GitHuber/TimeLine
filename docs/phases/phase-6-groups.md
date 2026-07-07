@@ -73,6 +73,37 @@ comment-visibility point also still holds — a group post's comments stay
 membership-scoped wherever the post is shown. Each merged post is labelled "in
 &lt;group&gt;" in the UI so the stream stays legible.
 
+**Revision (2026-07-07) — in-group content is now connection-gated, reversing
+the "membership-based audience" rule below.** At the user's request: inside a
+group you now see posts and comments only from members you're **connected**
+with, not from every member. Rationale — two people commonly share a group
+without being connected (members invite their own connections, so the graph is
+connection-dense but not complete), and the user judged that seeing a
+not-connected co-member's posts violates the app's "no content from people you
+haven't chosen a relationship with" principle. Consequences, all now live in the
+code + tests:
+
+- The group timeline, the `include_groups` home-feed merge, **and** group-post
+  comments all run through the *same* `visible_posts()` connection gate as the
+  personal feed (with a `group` parameter selecting the timeline) — so the
+  membership rule and the connection rule no longer diverge, and there's a single
+  choke point instead of a group-specific branch. This is the opposite of the
+  "can't share one query" argument in decision 3 below (that argument assumed a
+  membership-based audience; it no longer applies).
+- Membership still gates *access* to a group (non-members 404; only members
+  post), and it gates *which groups'* posts the feed merges. Connection then
+  gates *whose* posts/comments you see inside. Both gates apply.
+- The block edge case flagged under "Privacy / safety notes" is now resolved for
+  free: a block severs the connection, so a blocked co-member's posts and
+  comments drop out of your group view automatically.
+- Trade-off (accepted): each member sees a **partial** group timeline — a group
+  is effectively "my connections' posts under a shared label", not one identical
+  shared feed. A member you aren't connected with is still visible in the members
+  roster, but their posts/comments aren't shown to you.
+
+The bullets and decisions below that describe a *membership-scoped* (every
+member sees everything) audience are superseded by this note.
+
 ### 2. Roles: just **admin** and **member**
 
 Keep it to two roles.
@@ -101,8 +132,9 @@ without promoting someone first — otherwise a group is orphaned). No read-only
       a nav badge, like the connection-requests inbox
 - [x] Post text + photos into a group (members only); group timeline
       reverse-chronological + paginated (members only — non-member gets 404)
-- [x] Comments on group posts, visible to **all group members** (not
-      connection-pruned) — a member-scoped variant of the existing comment tree
+- [x] Comments on group posts — connection-pruned like personal posts (see the
+      2026-07-07 revision note): a member sees comments only from co-members they
+      are connected with, via the same `visible_posts()`/tree gate
 - [x] Remove a member (admin); **leave a group** (any member); last-admin
       guardrail; promote/demote between admin/member (admin)
 - [x] Home feed **excludes** group posts by default (personal feed meaning
@@ -249,20 +281,20 @@ Group-invites inbox (mirrors `connection-requests/`):
 - **You can only invite your own connections.** Adding is gated on
   `can_add_to_group` (invitee is the inviter's connection, not blocked). This
   keeps the "no cold contact from strangers" rule at the point of entry: you pull
-  in people *you* already have a relationship with. (Note the deliberate
-  consequence: once in a group, members who aren't connected to *each other* can
-  see each other's group posts — that's the nature of a shared space, and it's why
-  in-group visibility is membership-scoped, not connection-scoped.)
+  in people *you* already have a relationship with. (Superseded refinement — see
+  the 2026-07-07 revision note: in-group post/comment visibility is now
+  **connection-gated**, so a member you aren't connected with does *not* see your
+  group posts, and vice versa.)
 - **Blocking.** You can't invite, or be invited by, someone you've blocked or who
-  has blocked you (either direction). **Open edge case to decide when we build:** what happens to an
-  existing co-membership if two members later block each other — hide their posts
-  from each other inside the group, force one out, or leave it (documented) as a
-  known limitation? Recommend: leave it as a documented limitation for v1 (block
-  still cuts off DMs and connecting); revisit if it actually bites.
-- **Comment visibility inside a group is membership-scoped, not
-  connection-scoped** — every member sees every comment. This is correct for a
-  shared space, but it *is* a different rule from personal posts, so it's called
-  out here and enforced in one place (`PostCommentsView`'s group branch).
+  has blocked you (either direction). The former "open edge case" — two co-members
+  later blocking each other — is now **resolved** by the 2026-07-07 connection
+  gate: a block severs the connection, so their group posts and comments drop out
+  of each other's view automatically (no special-casing needed).
+- **Comment visibility inside a group is connection-gated** (2026-07-07 revision,
+  reversing the earlier membership-scoped design): a member sees only comments
+  from co-members they're connected with, enforced in one place (`visible_posts()`
+  + the shared comment-tree prune in `PostCommentsView`), identical to personal
+  posts.
 - **Not end-to-end encrypted** (same as all app data — see the Phase 5 note).
   Group posts/comments are readable by the maintainer via the Django admin.
 - **Account deletion** (a Phase 7 concern) must cascade to memberships and group
