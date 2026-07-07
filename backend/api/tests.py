@@ -1614,3 +1614,25 @@ def is_admin(group, user):
     return GroupMembership.objects.filter(
         group=group, user=user, role=ADMIN_ROLE, status=ACTIVE_STATUS
     ).exists()
+
+
+class BackfillParticipantsMigrationTests(APITestCase):
+    def test_existing_conversation_gets_two_active_participants(self):
+        # A conversation created "before" the backfill (rows already exist).
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        convo = Conversation.objects.create(user_a=a, user_b=b)
+        Participant.objects.filter(conversation=convo).delete()  # simulate pre-migration
+
+        # Re-run the data migration's forward function directly.
+        from api.migrations._backfill import _backfill
+
+        _backfill(Conversation, Participant, ParticipantInterval)
+
+        parts = Participant.objects.filter(conversation=convo)
+        self.assertEqual(parts.count(), 2)
+        self.assertTrue(all(p.status == "active" for p in parts))
+        for p in parts:
+            iv = p.intervals.get()
+            self.assertEqual(iv.started_at, convo.created_at)
+            self.assertIsNone(iv.ended_at)
