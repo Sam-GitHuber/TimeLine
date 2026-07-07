@@ -17,6 +17,15 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from api.views import (
+    activate,
+    active_participant_ids,
+    deactivate,
+    must_connect_with,
+    promote_participants,
+    visible_messages_for,
+)
+
 from .models import (
     Block,
     Comment,
@@ -1636,3 +1645,62 @@ class BackfillParticipantsMigrationTests(APITestCase):
             iv = p.intervals.get()
             self.assertEqual(iv.started_at, convo.created_at)
             self.assertIsNone(iv.ended_at)
+
+
+class MembershipHelperTests(APITestCase):
+    def _connect(self, u1, u2):
+        Connection.objects.create(requester=u1, requestee=u2, status="accepted")
+
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+
+    def test_promote_requires_connection_to_all_actives(self):
+        # a connected to b and c; b and c NOT connected to each other.
+        self._connect(self.a, self.b)
+        self._connect(self.a, self.c)
+        convo = Conversation.objects.create(kind="group", created_by=self.a)
+        pa = Participant.objects.create(conversation=convo, user=self.a, status="active")
+        ParticipantInterval.objects.create(participant=pa, started_at=timezone.now())
+        Participant.objects.create(conversation=convo, user=self.b, status="pending")
+        Participant.objects.create(conversation=convo, user=self.c, status="pending")
+
+        promote_participants(convo, timezone.now())
+
+        # First pending connected to all actives {a} → promotes (now active {a,b}).
+        # Second pending must connect to {a,b}; not connected to b → stays pending.
+        actives = active_participant_ids(convo)
+        self.assertEqual(len(actives), 2)
+        self.assertIn(self.a.id, actives)
+
+    def test_must_connect_with_lists_unconnected_actives(self):
+        self._connect(self.a, self.b)
+        convo = Conversation.objects.create(kind="group", created_by=self.a)
+        for u, st in [(self.a, "active"), (self.b, "active"), (self.c, "pending")]:
+            p = Participant.objects.create(conversation=convo, user=u, status=st)
+            if st == "active":
+                ParticipantInterval.objects.create(participant=p, started_at=timezone.now())
+        # c is connected to nobody active → must connect with a and b.
+        ids = {u.id for u in must_connect_with(convo, self.c)}
+        self.assertEqual(ids, {self.a.id, self.b.id})
+
+    def test_visible_messages_clipped_to_intervals(self):
+        self._connect(self.a, self.b)
+        convo = Conversation.objects.create(kind="group", created_by=self.a)
+        pa = Participant.objects.create(conversation=convo, user=self.a, status="active")
+        pb = Participant.objects.create(conversation=convo, user=self.b, status="active")
+        ParticipantInterval.objects.create(participant=pa, started_at=timezone.now())
+        t0 = timezone.now()
+        ParticipantInterval.objects.create(participant=pb, started_at=t0)
+        m1 = Message.objects.create(conversation=convo, sender=self.a, text="in")
+        # Close b's interval, send a gap message, reopen.
+        deactivate(pb, timezone.now())
+        m_gap = Message.objects.create(conversation=convo, sender=self.a, text="gap")
+        activate(pb, timezone.now())
+        m2 = Message.objects.create(conversation=convo, sender=self.a, text="back")
+
+        visible_ids = set(visible_messages_for(convo, self.b).values_list("id", flat=True))
+        self.assertIn(m1.id, visible_ids)
+        self.assertNotIn(m_gap.id, visible_ids)
+        self.assertIn(m2.id, visible_ids)

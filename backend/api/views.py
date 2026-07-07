@@ -44,6 +44,8 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    Participant,
+    ParticipantInterval,
     Post,
     PostImage,
 )
@@ -115,6 +117,130 @@ def can_message(user, other):
     if is_blocked_between(user, other):
         return False
     return other.id in connected_user_ids(user)
+
+
+# Group-chat membership states (Phase 6a). Mirrors the ACCEPTED/PENDING and
+# ACTIVE/INVITED aliases above so call sites read as state names, not strings.
+ACTIVE_P = Participant.Status.ACTIVE
+PENDING_P = Participant.Status.PENDING
+
+
+def active_participant_ids(convo):
+    """The user ids currently ``active`` in ``convo`` — the clique that must
+    stay fully mutually-connected. Excludes anyone who has left."""
+    return set(
+        convo.participants.filter(status=ACTIVE_P, left_at__isnull=True)
+        .values_list("user_id", flat=True)
+    )
+
+
+def participant_user_ids(convo):
+    """Everyone still attached to ``convo`` — active or pending, not left."""
+    return set(
+        convo.participants.filter(left_at__isnull=True).values_list("user_id", flat=True)
+    )
+
+
+def open_interval(participant):
+    """Open a fresh access interval for ``participant`` starting now-ish.
+
+    Kept separate from ``activate`` so callers that already know they need a
+    new interval (e.g. a migration backfill) don't have to touch status too.
+    """
+    return ParticipantInterval.objects.create(
+        participant=participant, started_at=timezone.now()
+    )
+
+
+def close_intervals(participant, when):
+    """Close any of ``participant``'s open-ended intervals as of ``when``.
+
+    A participant should have at most one open interval at a time, but this
+    closes all of them defensively so a data hiccup can't leave a stale one
+    silently extending visibility forever.
+    """
+    participant.intervals.filter(ended_at__isnull=True).update(ended_at=when)
+
+
+def activate(participant, when):
+    """Make a participant active and open a fresh access interval (idempotent).
+
+    Safe to call on an already-active participant with an already-open
+    interval — the promotion sweep and reconnection flows both call this
+    without first checking current state.
+    """
+    open_iv = participant.intervals.filter(ended_at__isnull=True).exists()
+    if participant.status != ACTIVE_P or participant.left_at is not None:
+        participant.status = ACTIVE_P
+        participant.left_at = None
+        participant.save(update_fields=["status", "left_at"])
+    if not open_iv:
+        ParticipantInterval.objects.create(participant=participant, started_at=when)
+
+
+def deactivate(participant, when):
+    """Drop a participant to pending and close any open interval.
+
+    Closing the interval here (rather than leaving it to whoever re-promotes
+    them) means the "gap" is anchored to the moment they actually dropped out,
+    so messages sent in that gap are never visible to them even if they're
+    re-promoted much later.
+    """
+    participant.intervals.filter(ended_at__isnull=True).update(ended_at=when)
+    if participant.status != PENDING_P:
+        participant.status = PENDING_P
+        participant.save(update_fields=["status"])
+
+
+def promote_participants(convo, when):
+    """Promote every pending participant now connected to all current active
+    members — one at a time, re-checking after each.
+
+    This is *not* a maximal-clique search: it applies a simple event rule
+    (does this pending person now connect to everyone currently active?) and
+    re-derives the active set after every single promotion before considering
+    the next pending person. That one-at-a-time-with-recheck shape is what
+    keeps the invariant (active participants are always a full clique) from
+    breaking — without it, two pending people who aren't connected to each
+    other could both get admitted in the same pass because each was checked
+    against the *pre-promotion* active set.
+    """
+    changed = True
+    while changed:
+        changed = False
+        actives = active_participant_ids(convo)
+        pending = convo.participants.filter(status=PENDING_P, left_at__isnull=True)
+        for p in pending.select_related("user"):
+            connected = connected_user_ids(p.user)
+            if actives <= connected:  # connected to every active member
+                activate(p, when)
+                changed = True
+                break  # re-derive actives before considering the next one
+
+
+def must_connect_with(convo, user):
+    """Active members ``user`` must still connect with to join (drives the
+    locked pending panel + the 'connect with X & Y' prompt)."""
+    connected = connected_user_ids(user)
+    missing_ids = active_participant_ids(convo) - connected - {user.id}
+    return list(User.objects.filter(id__in=missing_ids, is_active=True))
+
+
+def visible_messages_for(convo, user):
+    """Messages ``user`` may see: those whose ``created_at`` falls in one of
+    their access intervals. Empty for a pending/never-joined participant —
+    dropping to pending and later being re-promoted must never resurrect the
+    messages sent while they were out."""
+    intervals = ParticipantInterval.objects.filter(
+        participant__conversation=convo, participant__user=user
+    ).values_list("started_at", "ended_at")
+    window = Q(pk__in=[])
+    for started_at, ended_at in intervals:
+        span = Q(created_at__gte=started_at)
+        if ended_at is not None:
+            span &= Q(created_at__lt=ended_at)
+        window |= span
+    return convo.messages.filter(window).select_related("sender")
 
 
 def group_role(user, group_id):
