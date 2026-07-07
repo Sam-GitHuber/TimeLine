@@ -270,11 +270,11 @@ The Phase 5 messaging companion drawer (`MessagesDrawer.jsx`, driven by
 - **Generalise the model** (Participant table) rather than parallel group-chat
   models — one code path for DMs and group chats; migrate existing 1:1 threads in.
 
-## Open call to confirm at build time
+## Group deletion
 
-- **Deleting a `Group`** — cascade-delete its associated chats, or detach them to
-  standalone if the clique still holds? Leaning cascade (they were scoped to the
-  group); confirm when we get there.
+- **Deleting a `Group` cascade-deletes its associated chats** (confirmed with the
+  user, 2026-07-07) — they were scoped to the group, so the `Conversation.group`
+  FK uses `on_delete=CASCADE`.
 
 ## Notes / decisions log
 
