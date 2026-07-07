@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
@@ -30,26 +30,26 @@ export default function GroupFormPage() {
   const [removeAvatar, setRemoveAvatar] = useState(false);
   const [loadedFor, setLoadedFor] = useState(null);
 
-  // Prefill once the group loads (edit mode).
+  // Prefill once the group loads (edit mode). Adjusting state *during render*
+  // when a prop changes is React's documented alternative to an effect here — it
+  // re-renders immediately without an intermediate paint, and the `loadedFor`
+  // guard means we only seed the fields once (never clobbering later edits).
   const group = existing.data;
-  useEffect(() => {
-    if (group && loadedFor !== group.id) {
-      setName(group.name);
-      setDescription(group.description || "");
-      setLoadedFor(group.id);
-    }
-  }, [group, loadedFor]);
+  if (group && loadedFor !== group.id) {
+    setName(group.name);
+    setDescription(group.description || "");
+    setLoadedFor(group.id);
+  }
 
-  const [preview, setPreview] = useState(null);
+  // Local preview for a freshly chosen avatar; revoked on change/unmount.
+  const preview = useMemo(
+    () => (avatarFile ? URL.createObjectURL(avatarFile) : null),
+    [avatarFile]
+  );
   useEffect(() => {
-    if (!avatarFile) {
-      setPreview(null);
-      return;
-    }
-    const url = URL.createObjectURL(avatarFile);
-    setPreview(url);
-    return () => URL.revokeObjectURL(url);
-  }, [avatarFile]);
+    if (!preview) return;
+    return () => URL.revokeObjectURL(preview);
+  }, [preview]);
 
   const mutation = useMutation({
     mutationFn: () =>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
@@ -19,14 +19,16 @@ export default function ComposeBox({ group = null }) {
   const fileInputRef = useRef(null);
   const queryClient = useQueryClient();
 
-  // Object URLs for local previews. Created from the chosen files and revoked
-  // when they change / on unmount so we don't leak blob URLs.
-  const [previews, setPreviews] = useState([]);
-  useEffect(() => {
-    const urls = images.map((file) => URL.createObjectURL(file));
-    setPreviews(urls);
-    return () => urls.forEach((url) => URL.revokeObjectURL(url));
-  }, [images]);
+  // Object URLs for local previews. Derived from the chosen files during render,
+  // then revoked when they change / on unmount so we don't leak blob URLs.
+  const previews = useMemo(
+    () => images.map((file) => URL.createObjectURL(file)),
+    [images]
+  );
+  useEffect(
+    () => () => previews.forEach((url) => URL.revokeObjectURL(url)),
+    [previews]
+  );
 
   const mutation = useMutation({
     mutationFn: ({ text: value, images: files }) =>
