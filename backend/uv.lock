@@ -37,7 +37,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dj-rest-auth", specifier = ">=7.0" },
-    { name = "django", specifier = ">=5.1,<5.2" },
+    { name = "django", specifier = ">=6.0.7,<6.1" },
     { name = "django-allauth", specifier = ">=65.0" },
     { name = "django-cors-headers", specifier = ">=4.9.0" },
     { name = "django-storages", specifier = ">=1.14" },
@@ -172,16 +172,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/14/fd/c8a185a98f6860b80
 
 [[package]]
 name = "django"
-version = "5.1.15"
+version = "6.0.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asgiref" },
     { name = "sqlparse" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/10/45/1ac68964193cfcc0b0912a0f68025d5bdb54f71ba7b8716e85b959874bd0/django-5.1.15.tar.gz", hash = "sha256:46a356b5ff867bece73fc6365e081f21c569973403ee7e9b9a0316f27d0eb947", size = 10719662, upload-time = "2025-12-02T14:01:31.931Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/55/664f24ff81c9ea19cb7dfc851afeae1f3c2390c7aee01d4ded68b5c1580d/django-6.0.7.tar.gz", hash = "sha256:2998503fc083124fb58037084bfa00de323c7c743f05f1b4284e77bff0ab8890", size = 10921299, upload-time = "2026-07-07T13:51:26.485Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/79/372e091f0eba4ddb8228245ccd1baaa140e9658711f5e3a0056e540b4c1e/django-5.1.15-py3-none-any.whl", hash = "sha256:117871e58d6eda37f09870b7d73a3d66567b03aecd515b386b1751177c413432", size = 8260901, upload-time = "2025-12-02T14:01:27.352Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/ec/1ce5334b6a2c52ce619c23a0be8d366a57a0e080ebb2d88266e5c849157c/django-6.0.7-py3-none-any.whl", hash = "sha256:a037427c2288443a8c02a1b02295a31c239663aa682bc50b1976afb7cf6a769e", size = 8373344, upload-time = "2026-07-07T13:51:20.007Z" },
 ]
 
 [[package]]
