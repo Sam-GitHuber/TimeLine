@@ -955,12 +955,21 @@ def user_conversations(user):
     return [c for c in qs if _conversation_visible(c, user, blocked)]
 
 
-def _ensure_direct_participants(convo, when):
+def _ensure_direct_participants(convo):
     """Give a direct conversation two active ``Participant`` rows + open
     intervals, idempotently — mirrors the ``0009`` backfill migration, so a 1:1
     opened via the API is immediately participant-complete (Task 4's
     ``_create_direct`` didn't wire this; the participant-based views need it
     for a freshly created thread to behave like a promoted group chat).
+
+    Intervals always open at ``convo.created_at``, never "now": a 1:1's two
+    participants have implicitly been in the thread since it was created —
+    there's no pending/gap concept for direct chats. Using ``convo.created_at``
+    is a no-op for a brand-new conversation (created_at ≈ now) but is essential
+    for a pre-existing thread that never got Participant rows (e.g. one built
+    directly off the model, as Phase 5's tests do, then re-opened via this
+    view) — opening at "now" there would clip the whole prior history out of
+    ``visible_messages_for`` for both participants.
     """
     for user_id in (convo.user_a_id, convo.user_b_id):
         if user_id is None:
@@ -968,7 +977,7 @@ def _ensure_direct_participants(convo, when):
         participant, _created = Participant.objects.get_or_create(
             conversation=convo, user_id=user_id, defaults={"status": ACTIVE_P},
         )
-        activate(participant, when)
+        activate(participant, convo.created_at)
 
 
 class ConversationListCreateView(generics.ListCreateAPIView):
@@ -1031,7 +1040,7 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         # Idempotent: makes both sides active Participants with an open
         # interval, whether this is a brand-new thread or a pre-Task-4 one
         # that never got them.
-        _ensure_direct_participants(convo, timezone.now())
+        _ensure_direct_participants(convo)
 
         decorate_conversations([convo], request.user)
         serializer = self.get_serializer(convo)
@@ -1214,14 +1223,15 @@ class ConversationMessagesView(generics.ListAPIView):
 
 class ConversationReadView(APIView):
     """Mark a conversation read up to now (``POST /conversations/<pk>/read/``),
-    which clears your unread count for it. Participant-only (404 otherwise)."""
+    which clears your unread count for it. Participant-only (404 otherwise) —
+    resolved via ``_viewer_conversation_or_404`` so this works for a group chat
+    member (any non-left status) too, not just a legacy direct pair; a pending
+    member marking read is harmless (they can't see any messages yet anyway,
+    since ``visible_messages_for`` clips to their intervals)."""
 
     def post(self, request, pk):
         user = request.user
-        convo = get_object_or_404(
-            Conversation.objects.filter(Q(user_a=user) | Q(user_b=user)),
-            pk=pk,
-        )
+        convo = _viewer_conversation_or_404(pk, user)
         ConversationRead.objects.update_or_create(
             conversation=convo,
             user=user,

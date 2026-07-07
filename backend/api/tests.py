@@ -873,6 +873,31 @@ class ConversationStartTests(MessagingBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_reopening_a_participant_less_thread_preserves_history(self):
+        """Finding 1 regression: a 1:1 that predates Participant rows (built
+        directly off the model, as ``MessageSendTests`` etc. still do — mimics
+        a pre-Task-5 thread) must not have its history clipped when it's
+        re-opened through the API (the profile "Message" button re-POSTs to
+        ``/api/conversations/``). ``_ensure_direct_participants`` must open
+        each participant's interval at ``convo.created_at``, not "now", or
+        every message sent before the re-open silently vanishes from both
+        sides' view."""
+        convo = Conversation.objects.create(user_a=self.me, user_b=self.friend)
+        old_message = Message.objects.create(
+            conversation=convo, sender=self.friend, text="hello from before"
+        )
+
+        resp = self.open_with(self.friend)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["id"], convo.id)
+
+        for user in (self.me, self.friend):
+            self.client.force_authenticate(user)
+            msgs = self.client.get(messages_url(convo))
+            self.assertEqual(msgs.status_code, status.HTTP_200_OK)
+            texts = [m["text"] for m in msgs.data["results"]]
+            self.assertIn(old_message.text, texts)
+
 
 class MessageSendTests(MessagingBase):
     def setUp(self):
@@ -1773,3 +1798,19 @@ class GroupChatViewTests(APITestCase):
         self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "one"}, format="json")
         res = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
         self.assertEqual(len(res.data["results"]), 1)
+
+    def test_active_member_can_mark_group_chat_read(self):
+        """Finding 2 regression: ConversationReadView used to resolve the
+        conversation via the legacy user_a/user_b pair only, which always
+        404s for a group chat (null user_a/user_b) — a passive member who
+        only reads, never sends, could never clear their unread badge."""
+        self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "hi"}, format="json")
+        self.client.force_authenticate(self.b)
+        unread_before = self.client.get(UNREAD_COUNT_URL)
+        self.assertGreaterEqual(unread_before.data["count"], 1)
+
+        res = self.client.post(f"/api/conversations/{self.convo_id}/read/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        unread_after = self.client.get(UNREAD_COUNT_URL)
+        self.assertEqual(unread_after.data["count"], 0)
