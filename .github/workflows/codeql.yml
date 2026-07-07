@@ -1,0 +1,55 @@
+# CodeQL — GitHub's static security analysis ("SonarQube, but free" for a
+# public repo). It looks for real vulnerability patterns (SQL injection, XSS,
+# path traversal, unsafe deserialization, etc.) across both apps in the repo
+# and reports them in the Security tab + as annotations on the PR that
+# introduced them.
+#
+# Runs on every push/PR to main so a problem is caught before merge, plus a
+# weekly scheduled sweep so newly-published query rules get applied to code
+# that hasn't changed. Python and JS are analysed independently (build-mode
+# "none" — neither needs compiling, CodeQL just reads the source).
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 05:32 UTC. Odd minute so we're not competing with the
+    # top-of-the-hour rush on GitHub's shared runners.
+    - cron: "32 5 * * 1"
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # CodeQL needs to write its findings back to the Security tab.
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

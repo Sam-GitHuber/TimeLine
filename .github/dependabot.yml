@@ -1,0 +1,35 @@
+# Dependabot — watches our dependencies for known vulnerabilities and stale
+# versions, and opens a PR (which the normal CI then runs against) to bump
+# them. Grouped weekly so it's a digest, not a firehose.
+#
+# Three ecosystems, one per place we declare dependencies:
+#   uv             — the Python backend (reads pyproject.toml + uv.lock)
+#   npm            — the React frontend (package.json + package-lock.json)
+#   github-actions — the action versions pinned in .github/workflows/*
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    # One combined PR for routine version bumps keeps the noise down; security
+    # fixes still come through on their own regardless of this grouping.
+    groups:
+      backend-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      frontend-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
