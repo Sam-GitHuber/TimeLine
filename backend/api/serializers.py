@@ -235,36 +235,83 @@ class MessageCreateSerializer(serializers.ModelSerializer):
         return stripped
 
 
-class ConversationSerializer(serializers.ModelSerializer):
-    """A row in your conversation list.
+class ParticipantSerializer(serializers.Serializer):
+    """One member of a group chat (or an implicit 1:1 side) for the
+    ``participants`` list on a conversation — id, display name, avatar thumb,
+    and their membership ``status`` (``"active"``/``"pending"``), enough to
+    render the member list and explain a pending-lock panel."""
 
-    ``other`` is the person you're talking to (the participant who isn't you),
-    resolved per-viewer in the view and stashed on the instance. ``last_message``
-    is a short preview of the most recent message (or ``null`` for an empty
-    thread), and ``unread_count`` is how many messages you haven't read. The list
-    is ordered by ``updated_at`` desc in the view — most-recent-activity first.
+    id = serializers.IntegerField(source="user.id")
+    display_name = serializers.CharField(source="user.display_name")
+    avatar_thumb = serializers.ImageField(source="user.avatar_thumb", allow_null=True)
+    status = serializers.CharField()
+
+
+class ConversationSerializer(serializers.ModelSerializer):
+    """A row in your conversation list, or the single-thread detail view.
+
+    Covers both a 1:1 (``kind="direct"``) and a group chat (Phase 6a):
+    ``other`` stays populated for a direct thread — the person you're talking
+    to, resolved per-viewer in the view — for backward-compatible Phase 5
+    rendering. ``title``/``group``/``participants`` describe a group chat (see
+    ``chat_display_for``). ``my_status`` is your own membership state
+    (``"active"``/``"pending"`` — a pending member sees a locked, read-only
+    view driven by ``must_connect_with``). ``last_message``/``unread_count``
+    are attached per-viewer by ``decorate_conversations`` (no N+1 across the
+    list). ``can_send`` reports whether you may still post — set only on the
+    detail view (the composer keys off it); history stays visible even when
+    it's False.
     """
 
-    other = AuthorSerializer(read_only=True)
+    group = serializers.SerializerMethodField()
+    other = serializers.SerializerMethodField()
+    participants = ParticipantSerializer(source="participant_rows", many=True, read_only=True)
+    my_status = serializers.SerializerMethodField()
+    must_connect_with = AuthorSerializer(source="must_connect", many=True, read_only=True)
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.IntegerField(read_only=True)
-    # Whether you can still *send* in this thread (connected, not blocked). Set
-    # only on the conversation-detail view (the thread page's composer keys off
-    # it); ``null`` in the list, which doesn't need it.
-    can_message = serializers.SerializerMethodField()
+    # Whether you can still *send* in this thread (connected/active, not
+    # blocked). Set only on the conversation-detail view; ``null`` in the
+    # list, which doesn't need it. Renamed from Phase 5's ``can_message``.
+    can_send = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
         fields = (
             "id",
+            "kind",
+            "title",
+            "group",
             "other",
+            "participants",
+            "my_status",
+            "must_connect_with",
             "last_message",
             "unread_count",
-            "can_message",
+            "can_send",
             "updated_at",
         )
+        read_only_fields = ("id", "kind", "title", "updated_at")
 
-    def get_can_message(self, obj):
+    def get_other(self, obj):
+        if obj.kind != Conversation.Kind.DIRECT:
+            return None
+        other = getattr(obj, "other", None)
+        if other is None:
+            return None
+        return AuthorSerializer(other, context=self.context).data
+
+    def get_group(self, obj):
+        # The view (``decorate_conversations``) precomputes this via
+        # ``chat_display_for`` and stashes it on the instance — this
+        # serializer can't import from ``views`` (views already imports from
+        # here), so it reads the result rather than calling the helper.
+        return getattr(obj, "_group_display", None)
+
+    def get_my_status(self, obj):
+        return getattr(obj, "my_status", None)
+
+    def get_can_send(self, obj):
         return getattr(obj, "_can_message", None)
 
     def get_last_message(self, obj):

@@ -1739,3 +1739,37 @@ class CreateGroupChatTests(APITestCase):
         # b is a connection but not a group member.
         res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id], "group_id": group.id}, format="json")
         self.assertEqual(res.status_code, 400)
+
+
+class GroupChatViewTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD, first_name="A", last_name="A")
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD, first_name="B", last_name="B")
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD, first_name="C", last_name="C")
+        Connection.objects.create(requester=self.a, requestee=self.b, status="accepted")
+        Connection.objects.create(requester=self.a, requestee=self.c, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.convo_id = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": [self.b.id, self.c.id], "title": "T"}, format="json"
+        ).data["id"]
+
+    def test_list_includes_group_chat_with_my_status_active(self):
+        res = self.client.get(CONVERSATIONS_URL)
+        row = [c for c in res.data["results"] if c["id"] == self.convo_id][0]
+        self.assertEqual(row["kind"], "group")
+        self.assertEqual(row["my_status"], "active")
+
+    def test_pending_member_sees_locked_chat_and_cannot_read_messages(self):
+        # c is pending (not connected to b). Send a message as a.
+        self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "hi"}, format="json")
+        self.client.force_authenticate(self.c)
+        detail = self.client.get(f"/api/conversations/{self.convo_id}/")
+        self.assertEqual(detail.data["my_status"], "pending")
+        self.assertEqual({u["id"] for u in detail.data["must_connect_with"]}, {self.b.id})
+        msgs = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
+        self.assertEqual(msgs.status_code, 403)
+
+    def test_active_member_reads_only_their_interval(self):
+        self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "one"}, format="json")
+        res = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
+        self.assertEqual(len(res.data["results"]), 1)
