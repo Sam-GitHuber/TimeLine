@@ -21,3 +21,34 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "requests>=2.34.2",
 ]
+
+# Dev-only tooling (linters/scanners). `uv sync` installs these by default;
+# production images can skip them with `uv sync --no-dev`.
+[dependency-groups]
+dev = [
+    "ruff>=0.14",
+    "bandit>=1.9",
+]
+
+# Ruff — fast Python linter. We run a focused, high-signal ruleset rather than
+# everything, so CI failures mean "real problem", not "cosmetic nit".
+[tool.ruff]
+# Auto-generated migrations aren't ours to lint.
+extend-exclude = ["**/migrations/**"]
+
+[tool.ruff.lint]
+#   E/F  — pyflakes + pycodestyle errors (undefined names, unused imports, …)
+#   I    — import sorting
+#   B    — flake8-bugbear: likely bugs (mutable defaults, raise-without-from, …)
+#   UP   — pyupgrade: keep syntax modern for our Python floor
+select = ["E", "F", "I", "B", "UP"]
+# E501 (line-too-long) is the one purely-cosmetic rule; the codebase favours
+# long, explanatory strings, so we don't gate on it.
+ignore = ["E501"]
+
+# Bandit — security-focused static analysis (hardcoded secrets, unsafe subprocess
+# / eval / yaml.load, etc.). Runs over our source packages only.
+[tool.bandit]
+# Test files use bare asserts (B101) legitimately; skip them here.
+exclude_dirs = ["tests"]
+skips = ["B101"]

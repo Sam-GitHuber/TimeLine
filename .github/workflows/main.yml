@@ -55,6 +55,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      # Lint + security scan before the tests so problems surface fast. These
+      # ride inside the "backend" job, so they're covered by the existing
+      # branch-protection requirement without adding a new required check.
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Security scan (bandit)
+        run: uv run bandit -c pyproject.toml -r api accounts config -q
+
       - name: Run migrations (sanity check)
         run: uv run python manage.py migrate --noinput
 
@@ -81,5 +90,35 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lint (eslint)
+        run: npm run lint
+
       - name: Run tests
         run: npm test
+
+  # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
+  # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't
+  # ship. Its own job so a finding here is easy to tell apart from a test
+  # failure; not (yet) a required check.
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep
+        run: >-
+          semgrep scan --error --metrics off
+          --config p/python --config p/django
+          --config p/javascript --config p/react --config p/secrets
+          --exclude migrations --exclude node_modules
+          --exclude dist --exclude .venv
+          backend frontend/src
