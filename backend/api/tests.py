@@ -1939,3 +1939,32 @@ class SeverTests(APITestCase):
         self.client.post(f"/api/connection-requests/{req.id}/approve/")
         convo = Conversation.objects.get(id=self.cid)
         self.assertEqual(convo.participants.get(user=self.a).status, "active")
+
+
+class GroupChatLifecycleTests(APITestCase):
+    def test_leaving_group_removes_you_from_its_chats(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        Connection.objects.create(requester=a, requestee=b, status="accepted")
+        group = Group.objects.create(name="Fam", creator=a)
+        GroupMembership.objects.create(group=group, user=a, role="admin", status="active")
+        GroupMembership.objects.create(group=group, user=b, role="member", status="active")
+        self.client.force_authenticate(a)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [b.id], "group_id": group.id}, format="json").data["id"]
+        # b leaves the group.
+        self.client.force_authenticate(b)
+        self.client.delete(f"/api/groups/{group.id}/members/{b.id}/")
+        p = Participant.objects.get(conversation_id=cid, user=b)
+        self.assertIsNotNone(p.left_at)
+
+    def test_deleting_group_cascades_to_its_chats(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        Connection.objects.create(requester=a, requestee=b, status="accepted")
+        group = Group.objects.create(name="Fam", creator=a)
+        GroupMembership.objects.create(group=group, user=a, role="admin", status="active")
+        GroupMembership.objects.create(group=group, user=b, role="member", status="active")
+        self.client.force_authenticate(a)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [b.id], "group_id": group.id}, format="json").data["id"]
+        group.delete()
+        self.assertFalse(Conversation.objects.filter(id=cid).exists())

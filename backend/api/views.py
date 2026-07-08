@@ -1764,6 +1764,12 @@ class GroupMemberDetailView(APIView):
     admin-only. The last-admin guardrail applies either way: an admin can't leave
     or be removed while they're the only admin — promote someone first — so a
     group is never orphaned.
+
+    Dropping the membership also drops the departing user from every chat
+    scoped to this group: their participant row in each such ``Conversation``
+    is deactivated and tombstoned with ``left_at`` (mirroring
+    ``ConversationLeaveView``), then ``promote_participants`` re-runs for the
+    others. Membership delete + chat departure happen in one transaction.
     """
 
     def delete(self, request, pk, user_id):
@@ -1788,7 +1794,16 @@ class GroupMemberDetailView(APIView):
                     )
                 }
             )
-        target.delete()
+        with transaction.atomic():
+            target.delete()
+            now = timezone.now()
+            for convo in Conversation.objects.filter(group_id=group.id):
+                p = convo.participants.filter(user_id=user_id, left_at__isnull=True).first()
+                if p is not None:
+                    deactivate(p, now)
+                    p.left_at = now
+                    p.save(update_fields=["left_at"])
+                    promote_participants(convo, now)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
