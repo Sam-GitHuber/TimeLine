@@ -957,6 +957,35 @@ class MessageSendTests(MessagingBase):
         resp = self.client.post(messages_url(self.convo), {"text": "again"})
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_disconnect_does_not_lock_you_out_of_an_api_opened_1to1(self):
+        """Regression: a 1:1 opened through the API has active ``Participant``
+        rows (unlike the sibling test's model-built ``self.convo``). A disconnect
+        must not sweep that direct thread into the group-chat sever machinery —
+        doing so dropped the initiator to ``pending`` in their own DM, which
+        made their history read 403 and rendered the group "connect to join"
+        lock panel on a 1:1, regressing the Phase 5 guarantee that history stays
+        readable after a disconnect."""
+        opened = self.open_with(self.friend)
+        convo = Conversation.objects.get(pk=opened.data["id"])
+        self.client.post(messages_url(convo), {"text": "hello"})
+
+        self.client.delete(connect_url(self.friend))
+
+        # History still readable, and the message is still there.
+        resp = self.client.get(messages_url(convo))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("hello", [m["text"] for m in resp.data["results"]])
+
+        # The detail view stays "active" (not a pending group lock), but the
+        # composer is closed.
+        detail = self.client.get(f"{CONVERSATIONS_URL}{convo.pk}/")
+        self.assertEqual(detail.data["my_status"], "active")
+        self.assertFalse(detail.data["can_send"])
+
+        # Sending is barred (disconnected), same as the legacy path.
+        again = self.client.post(messages_url(convo), {"text": "again"})
+        self.assertEqual(again.status_code, status.HTTP_403_FORBIDDEN)
+
 
 class MessageDeleteTests(MessagingBase):
     def setUp(self):
@@ -1765,6 +1794,18 @@ class CreateGroupChatTests(APITestCase):
         res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id], "group_id": group.id}, format="json")
         self.assertEqual(res.status_code, 400)
 
+    def test_all_invitees_filtered_out_is_rejected_not_a_group_of_one(self):
+        """Finding: if every id resolves to nothing real (unknown/inactive/
+        yourself), the create must 400 rather than silently making a lone-
+        creator 'group chat of one'."""
+        res = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [999999, self.a.id]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(Conversation.objects.count(), 0)
+
 
 class GroupChatViewTests(APITestCase):
     def setUp(self):
@@ -1793,6 +1834,27 @@ class GroupChatViewTests(APITestCase):
         self.assertEqual({u["id"] for u in detail.data["must_connect_with"]}, {self.b.id})
         msgs = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
         self.assertEqual(msgs.status_code, 403)
+
+    def test_pending_member_does_not_get_last_message_text_leaked(self):
+        """Finding: the ``last_message`` preview must be interval-clipped to
+        what the viewer may see. A pending member is blocked from every message,
+        so their list/detail payload must not carry the text of a message they
+        can't read."""
+        self.client.post(
+            f"/api/conversations/{self.convo_id}/messages/",
+            {"text": "secret plans"},
+            format="json",
+        )
+        self.client.force_authenticate(self.c)  # pending
+        detail = self.client.get(f"/api/conversations/{self.convo_id}/")
+        self.assertEqual(detail.data["my_status"], "pending")
+        self.assertIsNone(detail.data["last_message"])
+        row = [
+            c
+            for c in self.client.get(CONVERSATIONS_URL).data["results"]
+            if c["id"] == self.convo_id
+        ][0]
+        self.assertIsNone(row["last_message"])
 
     def test_active_member_reads_only_their_interval(self):
         self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "one"}, format="json")

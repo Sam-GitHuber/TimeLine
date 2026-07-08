@@ -125,10 +125,15 @@ PENDING_P = Participant.Status.PENDING
 
 def active_participant_ids(convo):
     """The user ids currently ``active`` in ``convo`` — the clique that must
-    stay fully mutually-connected. Excludes anyone who has left."""
+    stay fully mutually-connected. Excludes anyone who has left, and anyone
+    whose account is deactivated: a disabled account can no longer connect to
+    anyone, so counting it toward the clique would strand pending invitees
+    forever (they can never satisfy a ``must_connect_with`` that includes a
+    deactivated member, which ``must_connect_with`` itself already filters out)."""
     return set(
-        convo.participants.filter(status=ACTIVE_P, left_at__isnull=True)
-        .values_list("user_id", flat=True)
+        convo.participants.filter(
+            status=ACTIVE_P, left_at__isnull=True, user__is_active=True
+        ).values_list("user_id", flat=True)
     )
 
 
@@ -196,9 +201,20 @@ def promote_participants(convo, when):
 
 
 def _shared_active_chats(u1, u2):
-    """Conversations where both ``u1`` and ``u2`` are currently active
-    participants — the chats a disconnect/block between them would touch."""
+    """Group chats where both ``u1`` and ``u2`` are currently active
+    participants — the chats a disconnect/block between them would touch.
+
+    Restricted to ``kind=GROUP`` on purpose: a direct 1:1 also has both people
+    as active participants (see ``_ensure_direct_participants`` / the ``0009``
+    backfill), but direct threads never use the pending/clique mechanism — their
+    composer gate is ``can_message`` and their history must stay readable after
+    a disconnect (the Phase 5 rule). Without this filter a disconnect would sweep
+    the pair's own DM into ``sever_shared_chats``, dropping the initiator to
+    ``pending`` in their own 1:1 — locking them out of their message history
+    (``get_queryset`` 403s a non-active viewer) and showing the group
+    "connect to join" panel on a direct thread."""
     return Conversation.objects.filter(
+        kind=Conversation.Kind.GROUP,
         participants__user=u1, participants__status=ACTIVE_P, participants__left_at__isnull=True
     ).filter(
         participants__user=u2, participants__status=ACTIVE_P, participants__left_at__isnull=True
@@ -299,6 +315,24 @@ def visible_messages_for(convo, user):
     return convo.messages.filter(window).select_related("sender")
 
 
+def unread_count_for(convo, user, read_at):
+    """How many messages ``user`` hasn't read in ``convo``: those visible to
+    them (interval-clipped via ``_messages_for_viewer``), not their own, not
+    deleted, and newer than their read marker (all of them if ``read_at`` is
+    ``None`` — they've never opened it). The single implementation of the
+    unread rule, shared by the per-thread badge (``decorate_conversations``)
+    and the nav-badge total (``UnreadMessageCountView``) so the two can't
+    drift."""
+    qs = (
+        _messages_for_viewer(convo, user)
+        .filter(deleted_at__isnull=True)
+        .exclude(sender=user)
+    )
+    if read_at is not None:
+        qs = qs.filter(created_at__gt=read_at)
+    return qs.count()
+
+
 def group_role(user, group_id):
     """The user's role in a group if they're an **active** member, else None.
 
@@ -337,12 +371,29 @@ def can_add_to_group(inviter, invitee):
     return can_message(inviter, invitee)
 
 
-def chat_display_for(convo, user):
-    """(title, kind, group_dict_or_None) for the list/detail serializer."""
-    group = None
+def chat_display_for(convo):
+    """The ``{id, name}`` dict for a group-scoped chat, else ``None`` — the
+    ``group`` field the list/detail serializer renders. ``title``/``kind`` come
+    straight off the model, so they aren't returned here."""
     if convo.group_id:
-        group = {"id": convo.group_id, "name": convo.group.name}
-    return convo.title, convo.kind, group
+        return {"id": convo.group_id, "name": convo.group.name}
+    return None
+
+
+def _chat_label(convo, viewer):
+    """A human label for a chat in the disconnect-impact warning: its title, or
+    — for an untitled chat — a comma-joined list of the other active members'
+    names, so the modal never renders a blank bullet. Mirrors the untitled-group
+    fallback ``ConversationRow`` uses on the frontend."""
+    if convo.title:
+        return convo.title
+    names = [
+        p.user.display_name
+        for p in convo.participants.filter(status=ACTIVE_P, left_at__isnull=True)
+        .exclude(user=viewer)
+        .select_related("user")
+    ]
+    return ", ".join(names) if names else "Group chat"
 
 
 def decorate_conversations(conversations, user):
@@ -372,22 +423,13 @@ def decorate_conversations(conversations, user):
         convo.must_connect = (
             must_connect_with(convo, user) if convo.my_status == PENDING_P else []
         )
-        _title, _kind, convo._group_display = chat_display_for(convo, user)
+        convo._group_display = chat_display_for(convo)
         if convo.kind == Conversation.Kind.DIRECT:
             convo.other = convo.other_participant(user)
 
     ids = [c.id for c in conversations]
     if not ids:
         return conversations
-
-    # Latest message per conversation, in one query (Postgres DISTINCT ON).
-    latest = (
-        Message.objects.filter(conversation_id__in=ids)
-        .order_by("conversation_id", "-created_at", "-id")
-        .distinct("conversation_id")
-        .select_related("sender")
-    )
-    last_by_convo = {m.conversation_id: m for m in latest}
 
     # Your read marker per conversation, in one query.
     read_at_by_convo = dict(
@@ -397,16 +439,16 @@ def decorate_conversations(conversations, user):
     )
 
     for convo in conversations:
-        convo._last_message = last_by_convo.get(convo.id)
-        unread_qs = (
-            _messages_for_viewer(convo, user)
-            .filter(deleted_at__isnull=True)
-            .exclude(sender=user)
+        # The last-message preview must be drawn from what *this viewer* may
+        # see, not the conversation's globally-latest message — otherwise a
+        # pending (or since-severed) member, who is interval-clipped out of the
+        # thread, would get the text of a message they can't read leaked into
+        # their list/detail payload. Empty visible set → no preview.
+        visible = _messages_for_viewer(convo, user)
+        convo._last_message = visible.order_by("-created_at", "-id").first()
+        convo.unread_count = unread_count_for(
+            convo, user, read_at_by_convo.get(convo.id)
         )
-        read_at = read_at_by_convo.get(convo.id)
-        if read_at is not None:
-            unread_qs = unread_qs.filter(created_at__gt=read_at)
-        convo.unread_count = unread_qs.count()
     return conversations
 
 
@@ -1122,6 +1164,13 @@ class ConversationListCreateView(generics.ListCreateAPIView):
                 raise NotFound()
 
         invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
+        if not invitees:
+            # Every id was unknown/inactive/yourself — don't silently create a
+            # "group chat of one" (the direct path 404s an unknown user; this is
+            # the same guard for the multi-person path).
+            raise ValidationError(
+                {"participant_ids": "Pick at least one connection to start a chat."}
+            )
         for invitee in invitees:
             if not can_add_to_group(request.user, invitee):
                 raise PermissionDenied("You can only add people you're connected with.")
@@ -1406,17 +1455,10 @@ class UnreadMessageCountView(APIView):
                 conversation_id__in=[c.id for c in conversations], user=user
             ).values_list("conversation_id", "last_read_at")
         )
-        total = 0
-        for convo in conversations:
-            unread_qs = (
-                _messages_for_viewer(convo, user)
-                .filter(deleted_at__isnull=True)
-                .exclude(sender=user)
-            )
-            read_at = read_at_by_convo.get(convo.id)
-            if read_at is not None:
-                unread_qs = unread_qs.filter(created_at__gt=read_at)
-            total += unread_qs.count()
+        total = sum(
+            unread_count_for(convo, user, read_at_by_convo.get(convo.id))
+            for convo in conversations
+        )
         return Response({"count": total})
 
 
@@ -1476,7 +1518,10 @@ class DisconnectImpactView(APIView):
     def get(self, request, pk):
         other = get_object_or_404(User, pk=pk)
         chats = _shared_active_chats(request.user, other)
-        data = [{"id": c.id, "title": c.title, "kind": c.kind} for c in chats]
+        data = [
+            {"id": c.id, "title": _chat_label(c, request.user), "kind": c.kind}
+            for c in chats
+        ]
         return Response({"chats": data})
 
 
