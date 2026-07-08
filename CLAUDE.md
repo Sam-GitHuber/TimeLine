@@ -83,12 +83,32 @@ comments. Group posts stay *out* of the home feed by default, with an **opt-in
 `is_group_admin`/`can_add_to_group`) mirror Phase 5's gates. Backend + frontend
 tests pass. See `docs/phases/phase-6-groups.md`.
 
-Phase 6a (group messaging) is next — already fleshed out (extends Phase 5 DMs to
-group conversations, built on this phase's `GroupMembership`; adds "leave a
-conversation"). Confirm its plan with the user before building.** Keep this
-line current: update it
-whenever a phase starts or finishes, but keep the detail in the phase docs, not
-here.
+Phase 6a (group messaging) — done. Phase 5's pair-shaped `Conversation`
+generalised to an N-participant set via new `Participant` + `ParticipantInterval`
+tables (kept additive — `user_a`/`user_b` made nullable, so Phase 5 stayed green;
+`0008` schema + `0009` backfill). A small event-driven membership state machine
+holds the **clique invariant** (every active participant is mutually connected):
+invitees land `pending` and `promote` one-at-a-time once connected to all actives;
+disconnect/block `sever`s the *initiator* to pending (with a warning modal listing
+the chats they'll leave) and auto-returns them on reconnect; leaving a `Group`
+drops you from its chats. History is **interval-clipped** — you never see messages
+sent while you were pending/away, but keep everything from before. Endpoints
+extend Phase 5: `POST /api/conversations/` takes `participant_ids`(+`title`/
+`group_id`); `.../participants/` (add), `.../leave/` (leave/decline),
+`users/<id>/disconnect-impact/`. `can_message`→`can_send` in the payload; unread
+(per-thread + nav badge) counts the interval-clipped set. Frontend extends the
+companion drawer: multi-select `NewChatPicker`, group thread header + add/leave,
+locked `PendingChatPanel`, `DisconnectWarningModal`, and a "Start a chat" entry on
+the group page. Polling unchanged. A dev-only `seed_demo` management command
+rebuilds a full demo world. Backend 147 + frontend 98 tests pass. See
+`docs/phases/phase-6a-group-messaging.md`.
+
+**Phase 7 (self-hosted home-server beta) is next** — productionisation on a home
+server (real domain/TLS, backups, private/signed media, hardening). It's already
+detailed; review its doc and confirm scope with the user before building.
+
+Keep this line current: update it whenever a phase starts or finishes, but keep
+the detail in the phase docs, not here.
 
 ## Before doing any work
 

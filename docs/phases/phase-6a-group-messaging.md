@@ -1,7 +1,7 @@
 # Phase 6a — Group Messaging
 
-**Status:** planned — design agreed with the user (2026-07-07), ready to build.
-Extends Phase 5 direct messaging into multi-participant chats. See the decisions
+**Status:** done (2026-07-08). Extends Phase 5 direct messaging into
+multi-participant chats. See the decisions
 log at the bottom for the choices made while designing.
 
 ## Goal
@@ -42,35 +42,35 @@ connection is accepted, they're pulled into the chat automatically.
 
 ## Definition of done
 
-- [ ] `Conversation` generalised to N participants via a new `Participant`
+- [x] `Conversation` generalised to N participants via a new `Participant`
       table; existing 1:1 threads migrated in (2 participants each).
-- [ ] `ParticipantInterval` table backs history visibility (access is a set of
+- [x] `ParticipantInterval` table backs history visibility (access is a set of
       time spans, not a single join point).
-- [ ] Create a group chat (standalone or group-scoped); creator active, invitees
+- [x] Create a group chat (standalone or group-scoped); creator active, invitees
       added `pending` and promoted per the clique rule.
-- [ ] A `pending` invitee sees a **locked** chat: no messages, a "connect with
+- [x] A `pending` invitee sees a **locked** chat: no messages, a "connect with
       C & D to join" panel with inline connection-request buttons, and a
       **Decline / Leave** button to drop the invite.
-- [ ] View a group thread oldest-first, paginated, **clipped to your access
+- [x] View a group thread oldest-first, paginated, **clipped to your access
       intervals** (you never see what was said while you were pending; you keep
       everything from before you dropped out).
-- [ ] Send a message (active participants only); soft-delete your own message
+- [x] Send a message (active participants only); soft-delete your own message
       (carried over from Phase 5).
-- [ ] Any active member can add more of **their own** connections (add-gate =
+- [x] Any active member can add more of **their own** connections (add-gate =
       Phase 5/6 `can_message`/`can_add_to_group`; group members too for a
       group-scoped chat). No admin concept — **self-leave only**, no removing
       others.
-- [ ] **Sever handling:** disconnecting or blocking an active co-member warns you
+- [x] **Sever handling:** disconnecting or blocking an active co-member warns you
       it will pull you from the shared chats, then drops **you** (the initiator)
       to `pending` in each; you auto-return once connected to everyone still
       active.
-- [ ] Per-member unread counts + the total nav badge include group chats
+- [x] Per-member unread counts + the total nav badge include group chats
       (`ConversationRead` already per-member — unchanged).
-- [ ] Group-associated lifecycle: leaving / being removed from a `Group` removes
+- [x] Group-associated lifecycle: leaving / being removed from a `Group` removes
       you from that group's chats.
-- [ ] Near-real-time via **polling** (reuse Phase 5 cadence) — no new realtime
+- [x] Near-real-time via **polling** (reuse Phase 5 cadence) — no new realtime
       infra.
-- [ ] Backend + frontend tests (below), following the established pattern.
+- [x] Backend + frontend tests (below), following the established pattern.
 
 ## Data model
 
@@ -285,3 +285,28 @@ The Phase 5 messaging companion drawer (`MessagesDrawer.jsx`, driven by
 - **Design agreed 2026-07-07** via the brainstorming flow — see the Decisions
   section above for the resolved questions (clique gate, interval history, sever
   semantics, add/leave permissions, data-model generalisation).
+- **Implemented 2026-07-08 (built task-by-task from
+  `docs/superpowers/plans/2026-07-07-phase-6a-group-messaging.md`).** Notes on
+  where the build refined the plan above:
+  - **`user_a`/`user_b` were kept, not dropped.** The Data-model section above
+    says "drop `user_a`/`user_b` and the unordered-pair constraint", but the
+    migration made them **nullable** and left them in place, so every Phase 5
+    test stayed green through the refactor (additive migration `0008` + backfill
+    `0009`). Direct-chat get-or-create still keys on the `(user_a, user_b)`
+    pair; `_ensure_direct_participants` lazily gives a 1:1 thread its two active
+    `Participant` rows + open intervals so it behaves like a promoted group chat.
+    Dropping the pair columns is a future cleanup, not required for the feature.
+  - **`can_message` → `can_send` in the conversation payload.** The serializer
+    field was renamed for N-participant chats; Phase 5 frontend (`api.js`,
+    drawer) and tests were updated in lockstep.
+  - **List unread is interval-clipped.** Both the per-thread badge and the total
+    nav count (`/messages/unread-count/`) count over `visible_messages_for`, so
+    a member never sees an unread bump from messages sent during a gap they were
+    pending/away for.
+  - **Dev seed command added (`api/management/commands/seed_demo.py`).** Rebuilds
+    a full demo world (connected + unconnected people, groups, DMs, and two group
+    chats incl. a pending participant) idempotently — handy for exercising this
+    phase by hand after the dev DB's users were lost. Deletes demo conversations
+    before users so standalone group chats don't survive as orphans.
+  - **Tests:** backend `api` suite at 147 passing (adds the group-messaging +
+    seed classes); frontend Vitest at 98 passing. Both green.
