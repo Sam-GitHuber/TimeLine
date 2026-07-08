@@ -104,6 +104,7 @@ export default function ProfilePage() {
                   )}
                   <ConnectButton
                     userId={user.id}
+                    displayName={user.display_name}
                     connectionStatus={user.connection_status}
                   />
                 </div>

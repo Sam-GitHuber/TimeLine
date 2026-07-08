@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
+import DisconnectWarningModal from "./DisconnectWarningModal.jsx";
 
 // A connection control reflecting the private, mutual connection flow.
 // `connectionStatus` is one of "none" | "requested" | "incoming" | "connected":
@@ -11,8 +13,15 @@ import { api } from "../api.js";
 // backend accepts the existing request instead of making a second one.
 // On success it invalidates the people list, feed, that user's profile, and the
 // connection-requests inbox so every view reflects the change.
-export default function ConnectButton({ userId, connectionStatus }) {
+//
+// Disconnecting from an accepted connection can sever group chats you only
+// share through them (you're dropped to pending there until reconnected with
+// everyone). Withdrawing a still-pending request never had a live connection
+// to break anything, so only the "connected" state routes through the warning
+// modal — everything else mutates straight away, same as before.
+export default function ConnectButton({ userId, displayName, connectionStatus }) {
   const queryClient = useQueryClient();
+  const [showWarning, setShowWarning] = useState(false);
 
   const isConnectAction =
     connectionStatus === "none" || connectionStatus === "incoming";
@@ -25,8 +34,17 @@ export default function ConnectButton({ userId, connectionStatus }) {
       queryClient.invalidateQueries({ queryKey: ["feed"] });
       queryClient.invalidateQueries({ queryKey: ["user", userId] });
       queryClient.invalidateQueries({ queryKey: ["connectionRequests"] });
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
+
+  function handleClick() {
+    if (connectionStatus === "connected") {
+      setShowWarning(true);
+      return;
+    }
+    mutation.mutate();
+  }
 
   const label =
     {
@@ -47,14 +65,28 @@ export default function ConnectButton({ userId, connectionStatus }) {
   }[connectionStatus];
 
   return (
-    <button
-      type="button"
-      onClick={() => mutation.mutate()}
-      disabled={mutation.isPending}
-      className={`btn btn-sm ${styling}`}
-      title={title}
-    >
-      {label}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={mutation.isPending}
+        className={`btn btn-sm ${styling}`}
+        title={title}
+      >
+        {label}
+      </button>
+      {showWarning && (
+        <DisconnectWarningModal
+          userId={userId}
+          userName={displayName}
+          action="disconnect"
+          onConfirm={() => {
+            setShowWarning(false);
+            mutation.mutate();
+          }}
+          onCancel={() => setShowWarning(false)}
+        />
+      )}
+    </>
   );
 }

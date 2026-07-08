@@ -39,6 +39,7 @@ vi.mock("./api.js", () => ({
     unblockUser: vi.fn(),
     addParticipants: vi.fn(),
     leaveConversation: vi.fn(),
+    getDisconnectImpact: vi.fn(),
   },
   CONVERSATION_LIST_POLL_MS: 1_000_000, // effectively off in tests
   MESSAGE_POLL_MS: 1_000_000,
@@ -537,9 +538,8 @@ describe("Profile messaging + block controls", () => {
     ).toBeInTheDocument();
   });
 
-  it("blocks a user after confirmation", async () => {
+  it("blocks a user after confirming the warning modal (no shared chats)", async () => {
     const user = userEvent.setup();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     api.getUser.mockResolvedValue({
       id: 2,
       display_name: "Priya",
@@ -548,13 +548,115 @@ describe("Profile messaging + block controls", () => {
       bio: "",
     });
     api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({ chats: [] });
     api.blockUser.mockResolvedValue({ detail: "Blocked.", is_blocked: true });
 
     renderAt("/u/2");
     await user.click(await screen.findByRole("button", { name: "Block" }));
 
+    const dialog = await screen.findByRole("dialog", {
+      name: /block confirmation/i,
+    });
+    expect(api.blockUser).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
     await waitFor(() => expect(api.blockUser).toHaveBeenCalledWith(2));
-    window.confirm.mockRestore();
+  });
+
+  it("warns about shared group chats before blocking, and only blocks on Confirm", async () => {
+    const user = userEvent.setup();
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "none",
+      is_blocked: false,
+      bio: "",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({
+      chats: [
+        { id: 11, title: "Book Club", kind: "group" },
+        { id: 12, title: "Trip planning", kind: "group" },
+      ],
+    });
+    api.blockUser.mockResolvedValue({ detail: "Blocked.", is_blocked: true });
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Block" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /block confirmation/i,
+    });
+    expect(within(dialog).getByText("Book Club")).toBeInTheDocument();
+    expect(within(dialog).getByText("Trip planning")).toBeInTheDocument();
+    // Not fired just for showing the warning.
+    expect(api.blockUser).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => expect(api.blockUser).toHaveBeenCalledWith(2));
+  });
+
+  it("warns about shared group chats before disconnecting, and only disconnects on Confirm", async () => {
+    const user = userEvent.setup();
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: false,
+      bio: "",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({
+      chats: [
+        { id: 11, title: "Book Club", kind: "group" },
+        { id: 12, title: "Trip planning", kind: "group" },
+      ],
+    });
+    api.disconnect.mockResolvedValue({ connection_status: "none" });
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Connected" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /disconnect confirmation/i,
+    });
+    expect(within(dialog).getByText("Book Club")).toBeInTheDocument();
+    expect(within(dialog).getByText("Trip planning")).toBeInTheDocument();
+    expect(api.disconnect).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => expect(api.disconnect).toHaveBeenCalledWith(2));
+  });
+
+  it("cancels out of the disconnect warning without disconnecting", async () => {
+    const user = userEvent.setup();
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: false,
+      bio: "",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({
+      chats: [{ id: 11, title: "Book Club", kind: "group" }],
+    });
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Connected" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /disconnect confirmation/i,
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(
+      screen.queryByRole("dialog", { name: /disconnect confirmation/i })
+    ).not.toBeInTheDocument();
+    expect(api.disconnect).not.toHaveBeenCalled();
   });
 
   it("shows Unblock and the blocked note when you've blocked them", async () => {
