@@ -25,6 +25,7 @@ vi.mock("./api.js", () => ({
     getConnectionRequests: vi.fn(),
     getConversations: vi.fn(),
     openConversation: vi.fn(),
+    createGroupChat: vi.fn(),
     getConversation: vi.fn(),
     getMessages: vi.fn(),
     sendMessage: vi.fn(),
@@ -167,16 +168,20 @@ describe("Nav unread badge", () => {
   });
 });
 
-describe("Messages drawer — new message", () => {
-  it("picks a connection and opens the thread", async () => {
-    const user = userEvent.setup();
-    api.getConversations.mockResolvedValue(page([]));
+describe("Messages drawer — new chat", () => {
+  beforeEach(() => {
     api.listUsers.mockResolvedValue(
       page([
         { id: 2, display_name: "Priya", connection_status: "connected" },
-        { id: 3, display_name: "Stranger", connection_status: "none" },
+        { id: 3, display_name: "Sanjay", connection_status: "connected" },
+        { id: 4, display_name: "Stranger", connection_status: "none" },
       ])
     );
+  });
+
+  it("checks one connection with no title and opens a 1:1 thread", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
     api.openConversation.mockResolvedValue({ id: 7 });
 
     renderAt("/");
@@ -191,8 +196,35 @@ describe("Messages drawer — new message", () => {
     expect(await screen.findByText("Priya")).toBeInTheDocument();
     expect(screen.queryByText("Stranger")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Priya/ }));
+    await user.click(screen.getByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
     await waitFor(() => expect(api.openConversation).toHaveBeenCalledWith(2));
+  });
+
+  it("checks two connections and creates a group chat", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+    api.createGroupChat.mockResolvedValue({ id: 9 });
+
+    renderAt("/");
+    await openDrawer(user);
+    const composeButtons = await screen.findAllByRole("button", {
+      name: "New message",
+    });
+    await user.click(composeButtons[0]);
+
+    await user.click(await screen.findByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(api.createGroupChat).toHaveBeenCalledWith({
+        participantIds: [2, 3],
+        title: "",
+        groupId: null,
+      })
+    );
   });
 });
 

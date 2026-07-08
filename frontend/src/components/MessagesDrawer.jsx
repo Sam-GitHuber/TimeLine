@@ -8,7 +8,8 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
-import { SpineMark, StrokeIcon, IconButton } from "./drawer-chrome.jsx";
+import { SpineMark, StrokeIcon, IconButton, PanelHeader } from "./drawer-chrome.jsx";
+import NewChatPicker from "./NewChatPicker.jsx";
 import {
   api,
   MESSAGE_POLL_MS,
@@ -16,7 +17,6 @@ import {
 } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useMessaging } from "../messaging.jsx";
-import { useConnections } from "../hooks.js";
 import { formatRelativeTime } from "../utils.js";
 
 // The messages drawer: a non-modal panel docked to the right edge, so a
@@ -25,7 +25,7 @@ import { formatRelativeTime } from "../utils.js";
 // interactive, so you can read and reply without losing your place. It walks
 // between three views (list → thread → new message) held in messaging context.
 export default function MessagesDrawer() {
-  const { isOpen, view, close } = useMessaging();
+  const { isOpen, view, close, newPrefill } = useMessaging();
   const panelRef = useRef(null);
 
   // Esc closes; focus lands in the panel so keys + screen readers work. We
@@ -53,31 +53,9 @@ export default function MessagesDrawer() {
     >
       {view === "list" && <ConversationListView />}
       {view === "thread" && <ConversationThreadView />}
-      {view === "new" && <NewMessageView />}
+      {view === "new" && <NewChatPicker prefill={newPrefill} />}
     </aside>,
     document.body
-  );
-}
-
-// One header shape for all three views: optional back, a title area, optional
-// actions, and always a close button — so the panel feels like one place.
-function PanelHeader({ onBack, actions, children }) {
-  const { close } = useMessaging();
-  return (
-    <header className="flex items-center gap-1.5 border-b border-line px-3 py-2.5">
-      {onBack && (
-        <IconButton onClick={onBack} label="Back">
-          <StrokeIcon path="M15 5l-7 7 7 7" />
-        </IconButton>
-      )}
-      <div className="flex min-w-0 flex-1 items-center gap-2 pl-1">
-        {children}
-      </div>
-      {actions}
-      <IconButton onClick={close} label="Close messages">
-        <StrokeIcon path="M6 6l12 12M18 6L6 18" />
-      </IconButton>
-    </header>
   );
 }
 
@@ -423,92 +401,5 @@ function MessageBubble({ message, mine, onDelete, deleting }) {
         </span>
       </div>
     </li>
-  );
-}
-
-/* ---- View: start a new message --------------------------------------------- */
-
-function NewMessageView() {
-  const { openList, openThread } = useMessaging();
-  const [term, setTerm] = useState("");
-
-  // Recipients are your connections (messaging is connection-gated). The shared
-  // hook pulls every page of the ["users"] list and filters to accepted
-  // connections narrowed by the search term — same source the group-invite
-  // picker uses, so paging/filter behaviour can't drift between them.
-  const { connections, filtered, isLoading, isError } = useConnections(term);
-
-  const open = useMutation({
-    mutationFn: (userId) => api.openConversation(userId),
-    onSuccess: (conversation) => openThread(conversation.id),
-  });
-
-  return (
-    <>
-      <PanelHeader onBack={openList}>
-        <h2 className="truncate font-display text-lg font-bold -tracking-[0.02em] text-ink">
-          New message
-        </h2>
-      </PanelHeader>
-
-      <div className="border-b border-line px-3 py-2.5">
-        <input
-          type="search"
-          value={term}
-          onChange={(e) => setTerm(e.target.value)}
-          placeholder="Search your connections…"
-          aria-label="Search your connections"
-          className="w-full rounded-xl border border-line-strong bg-raised px-3.5 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
-        />
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        {isLoading && (
-          <p className="px-5 py-10 text-center text-ink-faint">Loading…</p>
-        )}
-        {isError && (
-          <p className="px-5 py-10 text-center text-red-600">
-            Couldn’t load your connections.
-          </p>
-        )}
-        {!isLoading && !isError && connections.length === 0 && (
-          <div className="px-6 py-12 text-center text-ink-faint">
-            <p className="font-medium text-ink">No connections yet</p>
-            <p className="mt-1 text-sm">
-              You can only message people you’re connected with. Find people to
-              connect with first.
-            </p>
-          </div>
-        )}
-        {!isLoading &&
-          connections.length > 0 &&
-          filtered.length === 0 && (
-            <p className="px-5 py-10 text-center text-ink-faint">
-              No connections match “{term}”.
-            </p>
-          )}
-
-        {filtered.map((person) => (
-          <button
-            key={person.id}
-            type="button"
-            onClick={() => open.mutate(person.id)}
-            disabled={open.isPending}
-            className="flex w-full items-center gap-3 border-b border-line px-4 py-3 text-left transition hover:bg-accent-tint/40 disabled:opacity-60"
-          >
-            <Avatar user={person} size="md" />
-            <span className="min-w-0 flex-1 truncate font-semibold text-ink">
-              {person.display_name}
-            </span>
-          </button>
-        ))}
-      </div>
-
-      {open.isError && (
-        <p className="border-t border-line px-4 py-2 text-sm text-red-600">
-          {open.error?.message || "Couldn’t open that conversation."}
-        </p>
-      )}
-    </>
   );
 }
