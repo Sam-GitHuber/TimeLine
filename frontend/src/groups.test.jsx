@@ -12,11 +12,21 @@ import GroupFormPage from "./pages/GroupFormPage.jsx";
 import GroupInvitePicker from "./components/GroupInvitePicker.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
 import { api } from "./api.js";
+import { useMessaging } from "./messaging.jsx";
 
 // Phase 6: groups. The scoping/permission rules are enforced (and tested) on the
 // backend; here we check the frontend wires the group UI to the API correctly —
 // the feed "include groups" toggle, posting into a group, the group label on a
 // post, listing/creating groups, and admin-only controls.
+//
+// GroupPage now also opens the messages drawer's new-chat picker scoped to the
+// group (Phase 6a "Start a chat"), so useMessaging is mocked here too — a real
+// MessagingProvider would need the drawer mounted, which is out of scope for
+// these tests; we only need to assert openNew is called correctly.
+vi.mock("./messaging.jsx", () => ({
+  useMessaging: vi.fn(() => ({ openNew: vi.fn() })),
+}));
+
 vi.mock("./api.js", () => ({
   api: {
     getFeed: vi.fn(),
@@ -194,6 +204,38 @@ describe("GroupPage admin controls", () => {
     expect(
       await screen.findByText("Group not available")
     ).toBeInTheDocument();
+  });
+});
+
+describe("GroupPage start a chat", () => {
+  it("opens the new-chat picker scoped to the group's members", async () => {
+    const user = userEvent.setup();
+    const openNew = vi.fn();
+    useMessaging.mockReturnValue({ openNew });
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    api.getGroupMembers.mockResolvedValue([
+      { user: { id: 1, display_name: "You" }, role: "member" },
+      { user: { id: 2, display_name: "Priya" }, role: "admin" },
+    ]);
+
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    await user.click(
+      await screen.findByRole("button", { name: "Start a chat" })
+    );
+
+    expect(openNew).toHaveBeenCalledWith({
+      groupId: 7,
+      groupName: "Trip",
+      memberIds: [1, 2],
+    });
   });
 });
 
