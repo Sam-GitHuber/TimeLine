@@ -44,8 +44,9 @@ See `docs/SHARED.md` for the overall stack and why each piece was chosen.
 
 ## Notes / decisions log
 
-- **Versions landed:** Django 5.1, DRF 3.17, `psycopg` 3 (binary), Postgres 16,
-  Node 22, React 18.3, Vite 6, Tailwind 4.
+- **Versions landed:** Django 5.1 (since bumped to **6.0** by Dependabot —
+  pinned `>=6.0.7,<6.1` in `backend/pyproject.toml`/`uv.lock`), DRF 3.17,
+  `psycopg` 3 (binary), Postgres 16, Node 22, React 18.3, Vite 6, Tailwind 4.
 - **Django project is named `config`**, with a single app `api` holding the
   `/api/hello` endpoint. URLs: `config/urls.py` includes `api/urls.py`.
 - **Settings are env-driven** (`config/settings.py` reads `os.environ`): secret
