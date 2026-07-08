@@ -52,6 +52,7 @@ export default function FindPeoplePage() {
           </Link>
           <ConnectButton
             userId={person.id}
+            displayName={person.display_name}
             connectionStatus={person.connection_status}
           />
         </div>

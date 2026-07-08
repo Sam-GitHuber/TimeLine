@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import App from "./App.jsx";
 import { renderWithAuth, fakeUser } from "./test-utils.jsx";
 import { api } from "./api.js";
+import { MessagingProvider } from "./messaging.jsx";
+import NewChatPicker from "./components/NewChatPicker.jsx";
 
 // Phase 5 messaging is a companion drawer (not a route): the nav "Messages"
 // button opens it over the feed, and it walks list → thread → new message. We
@@ -25,6 +27,7 @@ vi.mock("./api.js", () => ({
     getConnectionRequests: vi.fn(),
     getConversations: vi.fn(),
     openConversation: vi.fn(),
+    createGroupChat: vi.fn(),
     getConversation: vi.fn(),
     getMessages: vi.fn(),
     sendMessage: vi.fn(),
@@ -34,6 +37,9 @@ vi.mock("./api.js", () => ({
     getGroupInvites: vi.fn(),
     blockUser: vi.fn(),
     unblockUser: vi.fn(),
+    addParticipants: vi.fn(),
+    leaveConversation: vi.fn(),
+    getDisconnectImpact: vi.fn(),
   },
   CONVERSATION_LIST_POLL_MS: 1_000_000, // effectively off in tests
   MESSAGE_POLL_MS: 1_000_000,
@@ -63,16 +69,59 @@ function convoRow(overrides = {}) {
   };
 }
 
-function convoDetail(overrides = {}) {
+function groupConvoRow(overrides = {}) {
   return {
-    id: 7,
-    other: { id: 2, display_name: "Priya", avatar_thumb: null },
-    last_message: null,
+    id: 11,
+    kind: "group",
+    title: "Book Club",
+    other: null,
+    participants: [
+      { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
+      { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "active" },
+    ],
+    my_status: "active",
+    last_message: {
+      text: "see you then",
+      is_deleted: false,
+      sender_id: 2,
+      created_at: new Date().toISOString(),
+    },
     unread_count: 0,
-    can_message: true,
     updated_at: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function convoDetail(overrides = {}) {
+  return {
+    id: 7,
+    kind: "direct",
+    title: "",
+    other: { id: 2, display_name: "Priya", avatar_thumb: null },
+    participants: [],
+    my_status: "active",
+    must_connect_with: [],
+    last_message: null,
+    unread_count: 0,
+    can_send: true,
+    updated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function groupConvoDetail(overrides = {}) {
+  return convoDetail({
+    id: 11,
+    kind: "group",
+    title: "Book Club",
+    other: null,
+    participants: [
+      { id: fakeUser.pk, display_name: "you", avatar_thumb: null, status: "active" },
+      { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
+      { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "active" },
+    ],
+    ...overrides,
+  });
 }
 
 async function openDrawer(user) {
@@ -116,6 +165,47 @@ describe("Messages drawer — list", () => {
     expect(
       screen.getAllByRole("button", { name: "New message" }).length
     ).toBeGreaterThan(0);
+  });
+
+  it("shows a group row's title + stacked avatars, and a pending row's invited hint with no preview", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      page([
+        convoRow(),
+        groupConvoRow({
+          id: 12,
+          title: "",
+          my_status: "pending",
+          // The backend's participants list includes the viewer themselves
+          // (matching the real payload) — the fallback name must exclude them.
+          participants: [
+            { id: fakeUser.pk, display_name: "you", avatar_thumb: null, status: "active" },
+            { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
+            { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "pending" },
+          ],
+          last_message: {
+            text: "secret plans",
+            is_deleted: false,
+            sender_id: 2,
+            created_at: new Date().toISOString(),
+          },
+        }),
+      ])
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+
+    const drawer = await screen.findByRole("dialog", { name: "Messages" });
+    // Untitled group falls back to a comma-joined list of participant names,
+    // excluding the viewer themselves (who is also in `participants`).
+    const groupName = within(drawer).getByText("Priya, Sanjay");
+    expect(groupName).toBeInTheDocument();
+    expect(groupName.textContent).not.toContain("you");
+    expect(
+      within(drawer).getByText(/Invited — connect to join/i)
+    ).toBeInTheDocument();
+    expect(within(drawer).queryByText("secret plans")).not.toBeInTheDocument();
   });
 
   it("leaves the feed mounted underneath (companion, not a route)", async () => {
@@ -167,16 +257,20 @@ describe("Nav unread badge", () => {
   });
 });
 
-describe("Messages drawer — new message", () => {
-  it("picks a connection and opens the thread", async () => {
-    const user = userEvent.setup();
-    api.getConversations.mockResolvedValue(page([]));
+describe("Messages drawer — new chat", () => {
+  beforeEach(() => {
     api.listUsers.mockResolvedValue(
       page([
         { id: 2, display_name: "Priya", connection_status: "connected" },
-        { id: 3, display_name: "Stranger", connection_status: "none" },
+        { id: 3, display_name: "Sanjay", connection_status: "connected" },
+        { id: 4, display_name: "Stranger", connection_status: "none" },
       ])
     );
+  });
+
+  it("checks one connection with no title and opens a 1:1 thread", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
     api.openConversation.mockResolvedValue({ id: 7 });
 
     renderAt("/");
@@ -191,8 +285,51 @@ describe("Messages drawer — new message", () => {
     expect(await screen.findByText("Priya")).toBeInTheDocument();
     expect(screen.queryByText("Stranger")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Priya/ }));
+    await user.click(screen.getByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
     await waitFor(() => expect(api.openConversation).toHaveBeenCalledWith(2));
+  });
+
+  it("checks two connections and creates a group chat", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+    api.createGroupChat.mockResolvedValue({ id: 9 });
+
+    renderAt("/");
+    await openDrawer(user);
+    const composeButtons = await screen.findAllByRole("button", {
+      name: "New message",
+    });
+    await user.click(composeButtons[0]);
+
+    await user.click(await screen.findByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(api.createGroupChat).toHaveBeenCalledWith({
+        participantIds: [2, 3],
+        title: "",
+        groupId: null,
+      })
+    );
+  });
+
+  it("scopes the picker to prefill.memberIds when opened from a group", async () => {
+    // Both Priya and Sanjay are connections, but only Priya is a member of
+    // the group this chat is being started from — Sanjay must not appear.
+    renderWithAuth(
+      <MessagingProvider>
+        <NewChatPicker
+          prefill={{ groupId: 5, groupName: "Book Club", memberIds: [2] }}
+        />
+      </MessagingProvider>
+    );
+
+    expect(await screen.findByText("Priya")).toBeInTheDocument();
+    expect(screen.queryByText("Sanjay")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stranger")).not.toBeInTheDocument();
   });
 });
 
@@ -256,7 +393,7 @@ describe("Messages drawer — thread", () => {
   it("hides the composer when you can no longer message", async () => {
     const user = userEvent.setup();
     api.getConversations.mockResolvedValue(page([convoRow()]));
-    api.getConversation.mockResolvedValue(convoDetail({ can_message: false }));
+    api.getConversation.mockResolvedValue(convoDetail({ can_send: false }));
 
     renderAt("/");
     await openDrawer(user);
@@ -291,6 +428,93 @@ describe("Messages drawer — thread", () => {
   });
 });
 
+describe("Messages drawer — group thread", () => {
+  it("locks a pending group chat behind a PendingChatPanel with a Connect button", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(
+      groupConvoDetail({
+        my_status: "pending",
+        must_connect_with: [{ id: 5, display_name: "Amara", avatar_thumb: null }],
+        can_send: false,
+      })
+    );
+    api.connect.mockResolvedValue({});
+
+    renderAt("/messages/11");
+
+    expect(await screen.findByText(/connect with/i)).toBeInTheDocument();
+    expect(screen.getAllByText("Amara").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByPlaceholderText(/write a message/i)
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledWith(5));
+
+    expect(
+      screen.getByRole("button", { name: /decline|leave/i })
+    ).toBeInTheDocument();
+  });
+
+  it("shows the title, participant avatars, and composer for an active group chat", async () => {
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+
+    renderAt("/messages/11");
+
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
+    expect(
+      await screen.findByPlaceholderText(/write a message/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /add people/i })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /leave/i })).toBeInTheDocument();
+  });
+
+  it("leaves a group chat and returns to the list", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversations.mockResolvedValue(page([]));
+    api.leaveConversation.mockResolvedValue({});
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+
+    await user.click(screen.getByRole("button", { name: /leave/i }));
+
+    await waitFor(() => expect(api.leaveConversation).toHaveBeenCalledWith(11));
+    expect(await screen.findByText(/No conversations yet/i)).toBeInTheDocument();
+  });
+
+  it("adds people to the current chat via the Add people picker", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.listUsers.mockResolvedValue(
+      page([{ id: 4, display_name: "Nadia", connection_status: "connected" }])
+    );
+    api.addParticipants.mockResolvedValue({});
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+
+    await user.click(screen.getByRole("button", { name: /add people/i }));
+
+    await user.click(await screen.findByRole("checkbox", { name: "Nadia" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(api.addParticipants).toHaveBeenCalledWith(11, [4])
+    );
+    expect(api.createGroupChat).not.toHaveBeenCalled();
+    expect(api.openConversation).not.toHaveBeenCalled();
+    // Back in the thread it was added to.
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
+  });
+});
+
 describe("Profile messaging + block controls", () => {
   it("offers Message on a connected profile and opens the thread drawer", async () => {
     const user = userEvent.setup();
@@ -314,9 +538,8 @@ describe("Profile messaging + block controls", () => {
     ).toBeInTheDocument();
   });
 
-  it("blocks a user after confirmation", async () => {
+  it("blocks a user after confirming the warning modal (no shared chats)", async () => {
     const user = userEvent.setup();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     api.getUser.mockResolvedValue({
       id: 2,
       display_name: "Priya",
@@ -325,13 +548,115 @@ describe("Profile messaging + block controls", () => {
       bio: "",
     });
     api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({ chats: [] });
     api.blockUser.mockResolvedValue({ detail: "Blocked.", is_blocked: true });
 
     renderAt("/u/2");
     await user.click(await screen.findByRole("button", { name: "Block" }));
 
+    const dialog = await screen.findByRole("dialog", {
+      name: /block confirmation/i,
+    });
+    expect(api.blockUser).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
     await waitFor(() => expect(api.blockUser).toHaveBeenCalledWith(2));
-    window.confirm.mockRestore();
+  });
+
+  it("warns about shared group chats before blocking, and only blocks on Confirm", async () => {
+    const user = userEvent.setup();
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "none",
+      is_blocked: false,
+      bio: "",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({
+      chats: [
+        { id: 11, title: "Book Club", kind: "group" },
+        { id: 12, title: "Trip planning", kind: "group" },
+      ],
+    });
+    api.blockUser.mockResolvedValue({ detail: "Blocked.", is_blocked: true });
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Block" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /block confirmation/i,
+    });
+    expect(within(dialog).getByText("Book Club")).toBeInTheDocument();
+    expect(within(dialog).getByText("Trip planning")).toBeInTheDocument();
+    // Not fired just for showing the warning.
+    expect(api.blockUser).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => expect(api.blockUser).toHaveBeenCalledWith(2));
+  });
+
+  it("warns about shared group chats before disconnecting, and only disconnects on Confirm", async () => {
+    const user = userEvent.setup();
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: false,
+      bio: "",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({
+      chats: [
+        { id: 11, title: "Book Club", kind: "group" },
+        { id: 12, title: "Trip planning", kind: "group" },
+      ],
+    });
+    api.disconnect.mockResolvedValue({ connection_status: "none" });
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Connected" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /disconnect confirmation/i,
+    });
+    expect(within(dialog).getByText("Book Club")).toBeInTheDocument();
+    expect(within(dialog).getByText("Trip planning")).toBeInTheDocument();
+    expect(api.disconnect).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => expect(api.disconnect).toHaveBeenCalledWith(2));
+  });
+
+  it("cancels out of the disconnect warning without disconnecting", async () => {
+    const user = userEvent.setup();
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: false,
+      bio: "",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({
+      chats: [{ id: 11, title: "Book Club", kind: "group" }],
+    });
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Connected" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /disconnect confirmation/i,
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(
+      screen.queryByRole("dialog", { name: /disconnect confirmation/i })
+    ).not.toBeInTheDocument();
+    expect(api.disconnect).not.toHaveBeenCalled();
   });
 
   it("shows Unblock and the blocked note when you've blocked them", async () => {

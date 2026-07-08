@@ -1,3 +1,5 @@
+import { useMessaging } from "../messaging.jsx";
+
 // Shared chrome for the two companion drawers (Messages on the right, Groups on
 // the left). Keeping these in one place is what lets both panels read as one
 // system — the same brand glyph, icon stroke, and icon-button treatment — so a
@@ -57,5 +59,30 @@ export function IconButton({ onClick, label, children }) {
     >
       {children}
     </button>
+  );
+}
+
+// One header shape for every companion-drawer view: optional back, a title
+// area, optional actions, and always a close button — so the panel feels like
+// one place no matter which view is showing. Shared here (not owned by
+// MessagesDrawer) so a picker component like NewChatPicker can use the same
+// header without an import cycle.
+export function PanelHeader({ onBack, actions, children }) {
+  const { close } = useMessaging();
+  return (
+    <header className="flex items-center gap-1.5 border-b border-line px-3 py-2.5">
+      {onBack && (
+        <IconButton onClick={onBack} label="Back">
+          <StrokeIcon path="M15 5l-7 7 7 7" />
+        </IconButton>
+      )}
+      <div className="flex min-w-0 flex-1 items-center gap-2 pl-1">
+        {children}
+      </div>
+      {actions}
+      <IconButton onClick={close} label="Close messages">
+        <StrokeIcon path="M6 6l12 12M18 6L6 18" />
+      </IconButton>
+    </header>
   );
 }

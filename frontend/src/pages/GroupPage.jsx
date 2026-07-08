@@ -10,6 +10,7 @@ import GroupInvitePicker from "../components/GroupInvitePicker.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { useMessaging } from "../messaging.jsx";
 
 // A single group: its header + timeline. Members only — the backend 404s a
 // non-member, and we render a friendly "not in this group" state for that.
@@ -21,6 +22,7 @@ export default function GroupPage() {
   const { user: me } = useAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { openNew } = useMessaging();
 
   const [showInvite, setShowInvite] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
@@ -34,6 +36,15 @@ export default function GroupPage() {
   const postsQuery = useInfiniteList(["groupPosts", groupId], () =>
     api.getGroupPosts(groupId)
   );
+
+  // Shares the ["groupMembers", groupId] cache with GroupMembersPanel, so
+  // opening that panel doesn't re-fetch what "Start a chat" already loaded (or
+  // vice versa). Loaded eagerly (not just on click) so the button responds
+  // instantly instead of the picker popping open a beat late.
+  const membersQuery = useQuery({
+    queryKey: ["groupMembers", groupId],
+    queryFn: () => api.getGroupMembers(groupId),
+  });
 
   const leave = useMutation({
     mutationFn: () => api.removeGroupMember(groupId, me.pk),
@@ -143,6 +154,20 @@ export default function GroupPage() {
                 className="btn btn-ghost btn-sm"
               >
                 {showMembers ? "Hide members" : "Members"}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  openNew({
+                    groupId: group.id,
+                    groupName: group.name,
+                    memberIds: (membersQuery.data ?? []).map((m) => m.user.id),
+                  })
+                }
+                disabled={membersQuery.isLoading}
+                className="btn btn-ghost btn-sm"
+              >
+                Start a chat
               </button>
               <button
                 type="button"

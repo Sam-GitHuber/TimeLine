@@ -17,6 +17,11 @@ export function MessagingProvider({ children }) {
   // "closed" | "list" | "thread" | "new"
   const [view, setView] = useState("closed");
   const [conversationId, setConversationId] = useState(null);
+  // Carries context into the "new" view when it's opened from somewhere more
+  // specific than the plain compose button — e.g. a group's "start a group
+  // chat" action passes { groupId, groupName, memberIds } so NewChatPicker can
+  // narrow its list to that group's members and scope the chat to it.
+  const [newPrefill, setNewPrefill] = useState(null);
 
   const openList = useCallback(() => {
     setConversationId(null);
@@ -28,7 +33,10 @@ export function MessagingProvider({ children }) {
     setView("thread");
   }, []);
 
-  const openNew = useCallback(() => setView("new"), []);
+  const openNew = useCallback((prefill = null) => {
+    setNewPrefill(prefill);
+    setView("new");
+  }, []);
   const close = useCallback(() => setView("closed"), []);
 
   // The nav button: open to the list, or close if it's already showing.
@@ -42,13 +50,23 @@ export function MessagingProvider({ children }) {
       view,
       isOpen: view !== "closed",
       conversationId,
+      newPrefill,
       openList,
       openThread,
       openNew,
       close,
       toggle,
     }),
-    [view, conversationId, openList, openThread, openNew, close, toggle]
+    [
+      view,
+      conversationId,
+      newPrefill,
+      openList,
+      openThread,
+      openNew,
+      close,
+      toggle,
+    ]
   );
 
   return (

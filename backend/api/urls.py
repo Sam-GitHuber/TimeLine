@@ -30,6 +30,11 @@ urlpatterns = [
         views.BlockView.as_view(),
         name="user-block",
     ),
+    path(
+        "users/<int:pk>/disconnect-impact/",
+        views.DisconnectImpactView.as_view(),
+        name="disconnect-impact",
+    ),
     # Incoming connection requests (people asking to connect) + approve/reject.
     path(
         "connection-requests/",
@@ -56,6 +61,16 @@ urlpatterns = [
         "conversations/<int:pk>/",
         views.ConversationDetailView.as_view(),
         name="conversation-detail",
+    ),
+    path(
+        "conversations/<int:pk>/participants/",
+        views.ConversationParticipantsView.as_view(),
+        name="conversation-participants",
+    ),
+    path(
+        "conversations/<int:pk>/leave/",
+        views.ConversationLeaveView.as_view(),
+        name="conversation-leave",
     ),
     path(
         "conversations/<int:pk>/messages/",

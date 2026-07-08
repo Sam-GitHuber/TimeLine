@@ -17,6 +17,15 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from api.views import (
+    activate,
+    active_participant_ids,
+    deactivate,
+    must_connect_with,
+    promote_participants,
+    visible_messages_for,
+)
+
 from .models import (
     Block,
     Comment,
@@ -26,6 +35,8 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    Participant,
+    ParticipantInterval,
     Post,
 )
 
@@ -862,6 +873,31 @@ class ConversationStartTests(MessagingBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_reopening_a_participant_less_thread_preserves_history(self):
+        """Finding 1 regression: a 1:1 that predates Participant rows (built
+        directly off the model, as ``MessageSendTests`` etc. still do — mimics
+        a pre-Task-5 thread) must not have its history clipped when it's
+        re-opened through the API (the profile "Message" button re-POSTs to
+        ``/api/conversations/``). ``_ensure_direct_participants`` must open
+        each participant's interval at ``convo.created_at``, not "now", or
+        every message sent before the re-open silently vanishes from both
+        sides' view."""
+        convo = Conversation.objects.create(user_a=self.me, user_b=self.friend)
+        old_message = Message.objects.create(
+            conversation=convo, sender=self.friend, text="hello from before"
+        )
+
+        resp = self.open_with(self.friend)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["id"], convo.id)
+
+        for user in (self.me, self.friend):
+            self.client.force_authenticate(user)
+            msgs = self.client.get(messages_url(convo))
+            self.assertEqual(msgs.status_code, status.HTTP_200_OK)
+            texts = [m["text"] for m in msgs.data["results"]]
+            self.assertIn(old_message.text, texts)
+
 
 class MessageSendTests(MessagingBase):
     def setUp(self):
@@ -920,6 +956,35 @@ class MessageSendTests(MessagingBase):
         )
         resp = self.client.post(messages_url(self.convo), {"text": "again"})
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_disconnect_does_not_lock_you_out_of_an_api_opened_1to1(self):
+        """Regression: a 1:1 opened through the API has active ``Participant``
+        rows (unlike the sibling test's model-built ``self.convo``). A disconnect
+        must not sweep that direct thread into the group-chat sever machinery —
+        doing so dropped the initiator to ``pending`` in their own DM, which
+        made their history read 403 and rendered the group "connect to join"
+        lock panel on a 1:1, regressing the Phase 5 guarantee that history stays
+        readable after a disconnect."""
+        opened = self.open_with(self.friend)
+        convo = Conversation.objects.get(pk=opened.data["id"])
+        self.client.post(messages_url(convo), {"text": "hello"})
+
+        self.client.delete(connect_url(self.friend))
+
+        # History still readable, and the message is still there.
+        resp = self.client.get(messages_url(convo))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("hello", [m["text"] for m in resp.data["results"]])
+
+        # The detail view stays "active" (not a pending group lock), but the
+        # composer is closed.
+        detail = self.client.get(f"{CONVERSATIONS_URL}{convo.pk}/")
+        self.assertEqual(detail.data["my_status"], "active")
+        self.assertFalse(detail.data["can_send"])
+
+        # Sending is barred (disconnected), same as the legacy path.
+        again = self.client.post(messages_url(convo), {"text": "again"})
+        self.assertEqual(again.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class MessageDeleteTests(MessagingBase):
@@ -1590,7 +1655,456 @@ class GroupAuthRequiredTests(APITestCase):
         )
 
 
+class GroupChatModelTests(APITestCase):
+    def test_conversation_defaults_to_direct_kind(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        convo = Conversation.objects.create(user_a=a, user_b=b)
+        self.assertEqual(convo.kind, "direct")
+        self.assertIsNone(convo.group)
+
+    def test_participant_and_interval_round_trip(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        convo = Conversation.objects.create(kind="group", created_by=a)
+        p = Participant.objects.create(conversation=convo, user=a, status="active")
+        ParticipantInterval.objects.create(participant=p, started_at=timezone.now())
+        self.assertEqual(convo.participants.count(), 1)
+        self.assertEqual(p.intervals.count(), 1)
+        self.assertIsNone(p.intervals.first().ended_at)
+
+
 def is_admin(group, user):
     return GroupMembership.objects.filter(
         group=group, user=user, role=ADMIN_ROLE, status=ACTIVE_STATUS
     ).exists()
+
+
+class BackfillParticipantsMigrationTests(APITestCase):
+    def test_existing_conversation_gets_two_active_participants(self):
+        # A conversation created "before" the backfill (rows already exist).
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        convo = Conversation.objects.create(user_a=a, user_b=b)
+        Participant.objects.filter(conversation=convo).delete()  # simulate pre-migration
+
+        # Re-run the data migration's forward function directly.
+        from api.migrations._backfill import _backfill
+
+        _backfill(Conversation, Participant, ParticipantInterval)
+
+        parts = Participant.objects.filter(conversation=convo)
+        self.assertEqual(parts.count(), 2)
+        self.assertTrue(all(p.status == "active" for p in parts))
+        for p in parts:
+            iv = p.intervals.get()
+            self.assertEqual(iv.started_at, convo.created_at)
+            self.assertIsNone(iv.ended_at)
+
+
+class MembershipHelperTests(APITestCase):
+    def _connect(self, u1, u2):
+        Connection.objects.create(requester=u1, requestee=u2, status="accepted")
+
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+
+    def test_promote_requires_connection_to_all_actives(self):
+        # a connected to b and c; b and c NOT connected to each other.
+        self._connect(self.a, self.b)
+        self._connect(self.a, self.c)
+        convo = Conversation.objects.create(kind="group", created_by=self.a)
+        pa = Participant.objects.create(conversation=convo, user=self.a, status="active")
+        ParticipantInterval.objects.create(participant=pa, started_at=timezone.now())
+        Participant.objects.create(conversation=convo, user=self.b, status="pending")
+        Participant.objects.create(conversation=convo, user=self.c, status="pending")
+
+        promote_participants(convo, timezone.now())
+
+        # First pending connected to all actives {a} → promotes (now active {a,b}).
+        # Second pending must connect to {a,b}; not connected to b → stays pending.
+        actives = active_participant_ids(convo)
+        self.assertEqual(len(actives), 2)
+        self.assertIn(self.a.id, actives)
+
+    def test_must_connect_with_lists_unconnected_actives(self):
+        self._connect(self.a, self.b)
+        convo = Conversation.objects.create(kind="group", created_by=self.a)
+        for u, st in [(self.a, "active"), (self.b, "active"), (self.c, "pending")]:
+            p = Participant.objects.create(conversation=convo, user=u, status=st)
+            if st == "active":
+                ParticipantInterval.objects.create(participant=p, started_at=timezone.now())
+        # c is connected to nobody active → must connect with a and b.
+        ids = {u.id for u in must_connect_with(convo, self.c)}
+        self.assertEqual(ids, {self.a.id, self.b.id})
+
+    def test_visible_messages_clipped_to_intervals(self):
+        self._connect(self.a, self.b)
+        convo = Conversation.objects.create(kind="group", created_by=self.a)
+        pa = Participant.objects.create(conversation=convo, user=self.a, status="active")
+        pb = Participant.objects.create(conversation=convo, user=self.b, status="active")
+        ParticipantInterval.objects.create(participant=pa, started_at=timezone.now())
+        t0 = timezone.now()
+        ParticipantInterval.objects.create(participant=pb, started_at=t0)
+        m1 = Message.objects.create(conversation=convo, sender=self.a, text="in")
+        # Close b's interval, send a gap message, reopen.
+        deactivate(pb, timezone.now())
+        m_gap = Message.objects.create(conversation=convo, sender=self.a, text="gap")
+        activate(pb, timezone.now())
+        m2 = Message.objects.create(conversation=convo, sender=self.a, text="back")
+
+        visible_ids = set(visible_messages_for(convo, self.b).values_list("id", flat=True))
+        self.assertIn(m1.id, visible_ids)
+        self.assertNotIn(m_gap.id, visible_ids)
+        self.assertIn(m2.id, visible_ids)
+
+
+class CreateGroupChatTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD, first_name="A", last_name="A")
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD, first_name="B", last_name="B")
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD, first_name="C", last_name="C")
+        for u in (self.b, self.c):
+            Connection.objects.create(requester=self.a, requestee=u, status="accepted")
+        self.client.force_authenticate(self.a)
+
+    def test_create_group_chat_creator_active_invitees_promoted_per_clique(self):
+        # b and c are NOT connected to each other.
+        res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id, self.c.id], "title": "Trip"}, format="json")
+        self.assertEqual(res.status_code, 201)
+        convo = Conversation.objects.get(id=res.data["id"])
+        self.assertEqual(convo.kind, "group")
+        self.assertEqual(convo.title, "Trip")
+        actives = set(convo.participants.filter(status="active").values_list("user_id", flat=True))
+        # a (creator) + exactly one of b/c can be active; the other stays pending.
+        self.assertIn(self.a.id, actives)
+        self.assertEqual(len(actives), 2)
+        self.assertEqual(convo.participants.filter(status="pending").count(), 1)
+
+    def test_cannot_add_a_non_connection(self):
+        stranger = User.objects.create_user(email="s@x.com", password=PASSWORD)
+        res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [stranger.id]}, format="json")
+        self.assertEqual(res.status_code, 403)
+
+    def test_group_scoped_requires_group_membership(self):
+        group = Group.objects.create(name="Fam", creator=self.a)
+        GroupMembership.objects.create(group=group, user=self.a, role="admin", status="active")
+        # b is a connection but not a group member.
+        res = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id], "group_id": group.id}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_all_invitees_filtered_out_is_rejected_not_a_group_of_one(self):
+        """Finding: if every id resolves to nothing real (unknown/inactive/
+        yourself), the create must 400 rather than silently making a lone-
+        creator 'group chat of one'."""
+        res = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [999999, self.a.id]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(Conversation.objects.count(), 0)
+
+
+class GroupChatViewTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD, first_name="A", last_name="A")
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD, first_name="B", last_name="B")
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD, first_name="C", last_name="C")
+        Connection.objects.create(requester=self.a, requestee=self.b, status="accepted")
+        Connection.objects.create(requester=self.a, requestee=self.c, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.convo_id = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": [self.b.id, self.c.id], "title": "T"}, format="json"
+        ).data["id"]
+
+    def test_list_includes_group_chat_with_my_status_active(self):
+        res = self.client.get(CONVERSATIONS_URL)
+        row = [c for c in res.data["results"] if c["id"] == self.convo_id][0]
+        self.assertEqual(row["kind"], "group")
+        self.assertEqual(row["my_status"], "active")
+
+    def test_pending_member_sees_locked_chat_and_cannot_read_messages(self):
+        # c is pending (not connected to b). Send a message as a.
+        self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "hi"}, format="json")
+        self.client.force_authenticate(self.c)
+        detail = self.client.get(f"/api/conversations/{self.convo_id}/")
+        self.assertEqual(detail.data["my_status"], "pending")
+        self.assertEqual({u["id"] for u in detail.data["must_connect_with"]}, {self.b.id})
+        msgs = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
+        self.assertEqual(msgs.status_code, 403)
+
+    def test_pending_member_does_not_get_last_message_text_leaked(self):
+        """Finding: the ``last_message`` preview must be interval-clipped to
+        what the viewer may see. A pending member is blocked from every message,
+        so their list/detail payload must not carry the text of a message they
+        can't read."""
+        self.client.post(
+            f"/api/conversations/{self.convo_id}/messages/",
+            {"text": "secret plans"},
+            format="json",
+        )
+        self.client.force_authenticate(self.c)  # pending
+        detail = self.client.get(f"/api/conversations/{self.convo_id}/")
+        self.assertEqual(detail.data["my_status"], "pending")
+        self.assertIsNone(detail.data["last_message"])
+        row = [
+            c
+            for c in self.client.get(CONVERSATIONS_URL).data["results"]
+            if c["id"] == self.convo_id
+        ][0]
+        self.assertIsNone(row["last_message"])
+
+    def test_active_member_reads_only_their_interval(self):
+        self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "one"}, format="json")
+        res = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
+        self.assertEqual(len(res.data["results"]), 1)
+
+    def test_active_member_can_mark_group_chat_read(self):
+        """Finding 2 regression: ConversationReadView used to resolve the
+        conversation via the legacy user_a/user_b pair only, which always
+        404s for a group chat (null user_a/user_b) — a passive member who
+        only reads, never sends, could never clear their unread badge."""
+        self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "hi"}, format="json")
+        self.client.force_authenticate(self.b)
+        unread_before = self.client.get(UNREAD_COUNT_URL)
+        self.assertGreaterEqual(unread_before.data["count"], 1)
+
+        res = self.client.post(f"/api/conversations/{self.convo_id}/read/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        unread_after = self.client.get(UNREAD_COUNT_URL)
+        self.assertEqual(unread_after.data["count"], 0)
+
+
+class AddParticipantsTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        self.d = User.objects.create_user(email="d@x.com", password=PASSWORD)
+        Connection.objects.create(requester=self.a, requestee=self.b, status="accepted")
+        Connection.objects.create(requester=self.a, requestee=self.d, status="accepted")
+        Connection.objects.create(requester=self.b, requestee=self.d, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id]}, format="json").data["id"]
+
+    def test_active_member_adds_a_mutual_connection(self):
+        res = self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [self.d.id]}, format="json")
+        self.assertEqual(res.status_code, 200)
+        convo = Conversation.objects.get(id=self.cid)
+        # d connected to a and b → promotes straight to active.
+        self.assertIn(self.d.id, set(convo.participants.filter(status="active").values_list("user_id", flat=True)))
+
+    def test_non_member_cannot_add(self):
+        self.client.force_authenticate(self.d)
+        res = self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [self.b.id]}, format="json")
+        self.assertEqual(res.status_code, 403)
+
+    def test_re_add_after_leave_resets_left_at(self):
+        # b leaves, then a (still active) re-adds them — must not silently
+        # no-op via get_or_create finding the tombstoned row.
+        self.client.force_authenticate(self.b)
+        self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.client.force_authenticate(self.a)
+        res = self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [self.b.id]}, format="json")
+        self.assertEqual(res.status_code, 200)
+        p = Participant.objects.get(conversation_id=self.cid, user=self.b)
+        self.assertIsNone(p.left_at)
+        self.assertIn(p.status, ("active", "pending"))
+
+
+class LeaveChatTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        Connection.objects.create(requester=self.a, requestee=self.b, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id]}, format="json").data["id"]
+
+    def test_leave_closes_interval_and_drops_you(self):
+        res = self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.assertEqual(res.status_code, 200)
+        p = Participant.objects.get(conversation_id=self.cid, user=self.a)
+        self.assertIsNotNone(p.left_at)
+        self.assertFalse(p.intervals.filter(ended_at__isnull=True).exists())
+
+    def test_pending_invitee_can_decline(self):
+        # c pending (never connected to b).
+        c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+        Connection.objects.create(requester=self.a, requestee=c, status="accepted")
+        self.client.post(f"/api/conversations/{self.cid}/participants/", {"user_ids": [c.id]}, format="json")
+        self.client.force_authenticate(c)
+        res = self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNotNone(Participant.objects.get(conversation_id=self.cid, user=c).left_at)
+
+    def test_non_participant_gets_404(self):
+        stranger = User.objects.create_user(email="stranger@x.com", password=PASSWORD)
+        self.client.force_authenticate(stranger)
+        res = self.client.post(f"/api/conversations/{self.cid}/leave/")
+        self.assertEqual(res.status_code, 404)
+
+
+class PromoteOnConnectTests(APITestCase):
+    def test_pending_member_auto_joins_when_last_connection_accepted(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+        Connection.objects.create(requester=a, requestee=b, status="accepted")
+        Connection.objects.create(requester=a, requestee=c, status="accepted")
+        self.client.force_authenticate(a)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [b.id, c.id]}, format="json").data["id"]
+        convo = Conversation.objects.get(id=cid)
+        pending = convo.participants.get(status="pending")  # b or c
+        other_active = convo.participants.exclude(user=a).get(status="active")
+        # The pending one requests the active one; accept it.
+        req = Connection.objects.create(requester=pending.user, requestee=other_active.user, status="pending")
+        self.client.force_authenticate(other_active.user)
+        res = self.client.post(f"/api/connection-requests/{req.id}/approve/")
+        self.assertEqual(res.status_code, 200)
+        convo.refresh_from_db()
+        self.assertEqual(convo.participants.filter(status="active").count(), 3)
+
+
+class SeverTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+        for x, y in [(self.a, self.b), (self.a, self.c), (self.b, self.c)]:
+            Connection.objects.create(requester=x, requestee=y, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id, self.c.id]}, format="json").data["id"]
+
+    def test_disconnect_impact_lists_shared_chat(self):
+        res = self.client.get(f"/api/users/{self.b.id}/disconnect-impact/")
+        self.assertEqual([c["id"] for c in res.data["chats"]], [self.cid])
+
+    def test_disconnect_drops_initiator_to_pending_other_stays(self):
+        self.client.delete(f"/api/users/{self.b.id}/connect/")
+        convo = Conversation.objects.get(id=self.cid)
+        self.assertEqual(convo.participants.get(user=self.a).status, "pending")
+        self.assertEqual(convo.participants.get(user=self.b).status, "active")
+
+    def test_block_pulls_blocker_out_of_shared_chat(self):
+        self.client.post(f"/api/users/{self.b.id}/block/")
+        convo = Conversation.objects.get(id=self.cid)
+        self.assertEqual(convo.participants.get(user=self.a).status, "pending")
+
+    def test_initiator_auto_returns_on_reconnect(self):
+        self.client.delete(f"/api/users/{self.b.id}/connect/")
+        # a re-requests b; b accepts.
+        self.client.post(f"/api/users/{self.b.id}/connect/")
+        req = Connection.objects.get(requester=self.a, requestee=self.b)
+        self.client.force_authenticate(self.b)
+        self.client.post(f"/api/connection-requests/{req.id}/approve/")
+        convo = Conversation.objects.get(id=self.cid)
+        self.assertEqual(convo.participants.get(user=self.a).status, "active")
+
+
+class GroupChatLifecycleTests(APITestCase):
+    def test_leaving_group_removes_you_from_its_chats(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        Connection.objects.create(requester=a, requestee=b, status="accepted")
+        group = Group.objects.create(name="Fam", creator=a)
+        GroupMembership.objects.create(group=group, user=a, role="admin", status="active")
+        GroupMembership.objects.create(group=group, user=b, role="member", status="active")
+        self.client.force_authenticate(a)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [b.id], "group_id": group.id}, format="json").data["id"]
+        # b leaves the group.
+        self.client.force_authenticate(b)
+        self.client.delete(f"/api/groups/{group.id}/members/{b.id}/")
+        p = Participant.objects.get(conversation_id=cid, user=b)
+        self.assertIsNotNone(p.left_at)
+
+    def test_admin_removing_another_member_drops_them_from_chats(self):
+        admin = User.objects.create_user(email="admin@x.com", password=PASSWORD)
+        member = User.objects.create_user(email="member@x.com", password=PASSWORD)
+        Connection.objects.create(requester=admin, requestee=member, status="accepted")
+        group = Group.objects.create(name="Fam", creator=admin)
+        GroupMembership.objects.create(group=group, user=admin, role="admin", status="active")
+        GroupMembership.objects.create(group=group, user=member, role="member", status="active")
+        self.client.force_authenticate(admin)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [member.id], "group_id": group.id}, format="json").data["id"]
+        member_participant = Participant.objects.get(conversation_id=cid, user=member)
+        self.assertIsNone(member_participant.left_at)
+        # Admin removes the member (not a self-leave) — actor stays admin.
+        self.client.delete(f"/api/groups/{group.id}/members/{member.id}/")
+        member_participant.refresh_from_db()
+        self.assertIsNotNone(member_participant.left_at)
+        admin_participant = Participant.objects.get(conversation_id=cid, user=admin)
+        self.assertIsNone(admin_participant.left_at)
+
+    def test_deleting_group_cascades_to_its_chats(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        Connection.objects.create(requester=a, requestee=b, status="accepted")
+        group = Group.objects.create(name="Fam", creator=a)
+        GroupMembership.objects.create(group=group, user=a, role="admin", status="active")
+        GroupMembership.objects.create(group=group, user=b, role="member", status="active")
+        self.client.force_authenticate(a)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [b.id], "group_id": group.id}, format="json").data["id"]
+        group.delete()
+        self.assertFalse(Conversation.objects.filter(id=cid).exists())
+
+
+class SeedDemoCommandTests(APITestCase):
+    """The seed_demo management command that rebuilds the full demo world."""
+
+    def test_seed_creates_the_full_demo_world(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", verbosity=0)
+
+        # Six active accounts.
+        self.assertEqual(User.objects.count(), 6)
+        self.assertTrue(all(u.is_active for u in User.objects.all()))
+        # Connections: 5 accepted + 2 pending requests.
+        self.assertEqual(Connection.objects.filter(status="accepted").count(), 5)
+        self.assertEqual(Connection.objects.filter(status="pending").count(), 2)
+        # Posts (personal + group) and a threaded comment (a reply with a parent).
+        self.assertTrue(Post.objects.filter(group__isnull=True).exists())
+        self.assertTrue(Post.objects.filter(group__isnull=False).exists())
+        self.assertTrue(Comment.objects.filter(parent__isnull=False).exists())
+        # Two groups, one with a pending invite.
+        self.assertEqual(Group.objects.count(), 2)
+        self.assertTrue(GroupMembership.objects.filter(status="invited").exists())
+        # Direct + group conversations exist.
+        self.assertEqual(Conversation.objects.filter(kind="direct").count(), 2)
+        self.assertEqual(Conversation.objects.filter(kind="group").count(), 2)
+
+    def test_seed_group_chat_has_a_pending_participant(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", verbosity=0)
+        # The "Mystery trip" chat: dave can't connect to bob, so he's pending.
+        trip = Conversation.objects.get(title="Mystery trip")
+        self.assertTrue(
+            trip.participants.filter(user__email="dave@example.com", status="pending").exists()
+        )
+        self.assertEqual(trip.participants.filter(status="active").count(), 2)
+
+    def test_seed_is_idempotent(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", verbosity=0)
+        call_command("seed_demo", verbosity=0)
+
+        # Rebuild, not pile-up: counts are stable across a second run.
+        self.assertEqual(User.objects.filter(email__endswith="@example.com").count(), 6)
+        self.assertEqual(Connection.objects.filter(status="accepted").count(), 5)
+        self.assertEqual(Group.objects.count(), 2)
+        self.assertEqual(Conversation.objects.count(), 4)
+        self.assertEqual(
+            Post.objects.filter(author__email="alice@example.com", group__isnull=True).count(),
+            2,
+        )
+
+    def test_seeded_account_can_log_in_with_the_password(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", password="s3cret-demo-pw", verbosity=0)
+        alice = User.objects.get(email="alice@example.com")
+        self.assertTrue(alice.check_password("s3cret-demo-pw"))

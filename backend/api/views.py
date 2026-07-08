@@ -6,10 +6,8 @@ from django.db.models import (
     Case,
     Count,
     Exists,
-    F,
     OuterRef,
     Q,
-    Subquery,
     Value,
     When,
 )
@@ -44,6 +42,8 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    Participant,
+    ParticipantInterval,
     Post,
     PostImage,
 )
@@ -117,6 +117,222 @@ def can_message(user, other):
     return other.id in connected_user_ids(user)
 
 
+# Group-chat membership states (Phase 6a). Mirrors the ACCEPTED/PENDING and
+# ACTIVE/INVITED aliases above so call sites read as state names, not strings.
+ACTIVE_P = Participant.Status.ACTIVE
+PENDING_P = Participant.Status.PENDING
+
+
+def active_participant_ids(convo):
+    """The user ids currently ``active`` in ``convo`` — the clique that must
+    stay fully mutually-connected. Excludes anyone who has left, and anyone
+    whose account is deactivated: a disabled account can no longer connect to
+    anyone, so counting it toward the clique would strand pending invitees
+    forever (they can never satisfy a ``must_connect_with`` that includes a
+    deactivated member, which ``must_connect_with`` itself already filters out)."""
+    return set(
+        convo.participants.filter(
+            status=ACTIVE_P, left_at__isnull=True, user__is_active=True
+        ).values_list("user_id", flat=True)
+    )
+
+
+def participant_user_ids(convo):
+    """Everyone still attached to ``convo`` — active or pending, not left."""
+    return set(
+        convo.participants.filter(left_at__isnull=True).values_list("user_id", flat=True)
+    )
+
+
+def activate(participant, when):
+    """Make a participant active and open a fresh access interval (idempotent).
+
+    Safe to call on an already-active participant with an already-open
+    interval — the promotion sweep and reconnection flows both call this
+    without first checking current state.
+    """
+    open_iv = participant.intervals.filter(ended_at__isnull=True).exists()
+    if participant.status != ACTIVE_P or participant.left_at is not None:
+        participant.status = ACTIVE_P
+        participant.left_at = None
+        participant.save(update_fields=["status", "left_at"])
+    if not open_iv:
+        ParticipantInterval.objects.create(participant=participant, started_at=when)
+
+
+def deactivate(participant, when):
+    """Drop a participant to pending and close any open interval.
+
+    Closing the interval here (rather than leaving it to whoever re-promotes
+    them) means the "gap" is anchored to the moment they actually dropped out,
+    so messages sent in that gap are never visible to them even if they're
+    re-promoted much later.
+    """
+    participant.intervals.filter(ended_at__isnull=True).update(ended_at=when)
+    if participant.status != PENDING_P:
+        participant.status = PENDING_P
+        participant.save(update_fields=["status"])
+
+
+def promote_participants(convo, when):
+    """Promote every pending participant now connected to all current active
+    members — one at a time, re-checking after each.
+
+    This is *not* a maximal-clique search: it applies a simple event rule
+    (does this pending person now connect to everyone currently active?) and
+    re-derives the active set after every single promotion before considering
+    the next pending person. That one-at-a-time-with-recheck shape is what
+    keeps the invariant (active participants are always a full clique) from
+    breaking — without it, two pending people who aren't connected to each
+    other could both get admitted in the same pass because each was checked
+    against the *pre-promotion* active set.
+    """
+    changed = True
+    while changed:
+        changed = False
+        actives = active_participant_ids(convo)
+        pending = convo.participants.filter(status=PENDING_P, left_at__isnull=True)
+        for p in pending.select_related("user"):
+            connected = connected_user_ids(p.user)
+            if actives <= connected:  # connected to every active member
+                activate(p, when)
+                changed = True
+                break  # re-derive actives before considering the next one
+
+
+def _shared_active_chats(u1, u2):
+    """Group chats where both ``u1`` and ``u2`` are currently active
+    participants — the chats a disconnect/block between them would touch.
+
+    Restricted to ``kind=GROUP`` on purpose: a direct 1:1 also has both people
+    as active participants (see ``_ensure_direct_participants`` / the ``0009``
+    backfill), but direct threads never use the pending/clique mechanism — their
+    composer gate is ``can_message`` and their history must stay readable after
+    a disconnect (the Phase 5 rule). Without this filter a disconnect would sweep
+    the pair's own DM into ``sever_shared_chats``, dropping the initiator to
+    ``pending`` in their own 1:1 — locking them out of their message history
+    (``get_queryset`` 403s a non-active viewer) and showing the group
+    "connect to join" panel on a direct thread."""
+    return Conversation.objects.filter(
+        kind=Conversation.Kind.GROUP,
+        participants__user=u1, participants__status=ACTIVE_P, participants__left_at__isnull=True
+    ).filter(
+        participants__user=u2, participants__status=ACTIVE_P, participants__left_at__isnull=True
+    ).distinct()
+
+
+def sever_shared_chats(initiator, other, when):
+    """Drop the ``initiator`` to pending in every chat both are active in.
+
+    Only closes the initiator's interval here — it does *not* re-run
+    ``promote_participants`` itself. The caller must do that only after the
+    ``Connection`` row between initiator and other has actually been deleted:
+    if promotion ran first (or the Connection were still intact), the
+    initiator would still show up in ``connected_user_ids(initiator)`` as
+    connected to ``other`` and would be immediately re-promoted, defeating the
+    whole point of severing. Returns the affected conversations so the caller
+    can re-settle promotion afterwards (for the other, still-connected
+    participants, not the initiator).
+    """
+    convos = list(_shared_active_chats(initiator, other))
+    for convo in convos:
+        p = convo.participants.get(user=initiator)
+        deactivate(p, when)
+    return convos
+
+
+def promote_shared_chats(u1, u2, when):
+    """After u1↔u2 become connected, promote eligible pendings in every chat they
+    both belong to."""
+    shared = Conversation.objects.filter(
+        participants__user=u1, participants__left_at__isnull=True
+    ).filter(
+        participants__user=u2, participants__left_at__isnull=True
+    ).distinct()
+    for convo in shared:
+        promote_participants(convo, when)
+
+
+def must_connect_with(convo, user):
+    """Active members ``user`` must still connect with to join (drives the
+    locked pending panel + the 'connect with X & Y' prompt)."""
+    connected = connected_user_ids(user)
+    missing_ids = active_participant_ids(convo) - connected - {user.id}
+    return list(User.objects.filter(id__in=missing_ids, is_active=True))
+
+
+def _viewer_participant_status(convo, user):
+    """``user``'s membership state in ``convo`` — ``"active"``/``"pending"`` —
+    or ``None`` if they aren't in it at all.
+
+    Reads the ``Participant`` row when there is one: every group chat (all
+    members get one) and every 1:1 opened since ``_create_direct`` started
+    creating them (see ``_ensure_direct_participants``). Falls back to the
+    legacy ``user_a``/``user_b`` pair — implicitly ``"active"`` — for a direct
+    thread that predates Participant rows, or is built straight off the model
+    (as Phase 5's test suite still does), so those keep behaving exactly as
+    they did before Phase 6a.
+    """
+    row = Participant.objects.filter(
+        conversation=convo, user=user, left_at__isnull=True
+    ).first()
+    if row is not None:
+        return row.status
+    if convo.kind == Conversation.Kind.DIRECT and user.id in (
+        convo.user_a_id,
+        convo.user_b_id,
+    ):
+        return ACTIVE_P
+    return None
+
+
+def _messages_for_viewer(convo, user):
+    """The messages ``user`` may see in ``convo``: interval-clipped via
+    ``visible_messages_for`` when they have a ``Participant`` row, else the
+    full thread — a legacy/Participant-less direct conversation (see
+    ``_viewer_participant_status``)."""
+    if Participant.objects.filter(
+        conversation=convo, user=user, left_at__isnull=True
+    ).exists():
+        return visible_messages_for(convo, user)
+    return convo.messages.select_related("sender")
+
+
+def visible_messages_for(convo, user):
+    """Messages ``user`` may see: those whose ``created_at`` falls in one of
+    their access intervals. Empty for a pending/never-joined participant —
+    dropping to pending and later being re-promoted must never resurrect the
+    messages sent while they were out."""
+    intervals = ParticipantInterval.objects.filter(
+        participant__conversation=convo, participant__user=user
+    ).values_list("started_at", "ended_at")
+    window = Q(pk__in=[])
+    for started_at, ended_at in intervals:
+        span = Q(created_at__gte=started_at)
+        if ended_at is not None:
+            span &= Q(created_at__lt=ended_at)
+        window |= span
+    return convo.messages.filter(window).select_related("sender")
+
+
+def unread_count_for(convo, user, read_at):
+    """How many messages ``user`` hasn't read in ``convo``: those visible to
+    them (interval-clipped via ``_messages_for_viewer``), not their own, not
+    deleted, and newer than their read marker (all of them if ``read_at`` is
+    ``None`` — they've never opened it). The single implementation of the
+    unread rule, shared by the per-thread badge (``decorate_conversations``)
+    and the nav-badge total (``UnreadMessageCountView``) so the two can't
+    drift."""
+    qs = (
+        _messages_for_viewer(convo, user)
+        .filter(deleted_at__isnull=True)
+        .exclude(sender=user)
+    )
+    if read_at is not None:
+        qs = qs.filter(created_at__gt=read_at)
+    return qs.count()
+
+
 def group_role(user, group_id):
     """The user's role in a group if they're an **active** member, else None.
 
@@ -155,50 +371,84 @@ def can_add_to_group(inviter, invitee):
     return can_message(inviter, invitee)
 
 
-def decorate_conversations(conversations, user):
-    """Attach the per-viewer fields the conversation list serializer needs, in a
-    fixed number of queries (no N+1 across the page).
+def chat_display_for(convo):
+    """The ``{id, name}`` dict for a group-scoped chat, else ``None`` — the
+    ``group`` field the list/detail serializer renders. ``title``/``kind`` come
+    straight off the model, so they aren't returned here."""
+    if convo.group_id:
+        return {"id": convo.group_id, "name": convo.group.name}
+    return None
 
-    For each conversation, sets ``.other`` (the other participant), attaches the
-    latest message as ``._last_message`` (or ``None``), and ``.unread_count``
-    (messages you didn't send, newer than your read marker, not deleted).
-    ``conversations`` must already have ``user_a``/``user_b`` selected.
+
+def _chat_label(convo, viewer):
+    """A human label for a chat in the disconnect-impact warning: its title, or
+    — for an untitled chat — a comma-joined list of the other active members'
+    names, so the modal never renders a blank bullet. Mirrors the untitled-group
+    fallback ``ConversationRow`` uses on the frontend."""
+    if convo.title:
+        return convo.title
+    names = [
+        p.user.display_name
+        for p in convo.participants.filter(status=ACTIVE_P, left_at__isnull=True)
+        .exclude(user=viewer)
+        .select_related("user")
+    ]
+    return ", ".join(names) if names else "Group chat"
+
+
+def decorate_conversations(conversations, user):
+    """Attach the per-viewer fields the conversation list/detail serializer
+    needs.
+
+    For each conversation, sets: ``.my_status`` (your membership state —
+    ``"active"``/``"pending"``, via ``_viewer_participant_status``),
+    ``.participant_rows`` (active + pending members, not left, with users —
+    what ``participants`` renders), ``.must_connect`` (the active members you
+    still need to connect with, while pending — else ``[]``),
+    ``._group_display`` (via ``chat_display_for``), and — for direct chats only
+    — ``.other`` (backward-compatible with Phase 5). Also attaches the latest
+    message as ``._last_message`` (or ``None``, one query for the whole page)
+    and ``.unread_count`` (messages you didn't send, newer than your read
+    marker, not deleted, clipped to your visible interval — a per-conversation
+    query each; acceptable at family scale).
     """
     conversations = list(conversations)
     for convo in conversations:
-        convo.other = convo.other_participant(user)
+        convo.my_status = _viewer_participant_status(convo, user)
+        convo.participant_rows = list(
+            convo.participants.filter(left_at__isnull=True)
+            .select_related("user")
+            .order_by("user__first_name", "user__last_name", "user__email")
+        )
+        convo.must_connect = (
+            must_connect_with(convo, user) if convo.my_status == PENDING_P else []
+        )
+        convo._group_display = chat_display_for(convo)
+        if convo.kind == Conversation.Kind.DIRECT:
+            convo.other = convo.other_participant(user)
+
     ids = [c.id for c in conversations]
     if not ids:
         return conversations
 
-    # Latest message per conversation, in one query (Postgres DISTINCT ON).
-    latest = (
-        Message.objects.filter(conversation_id__in=ids)
-        .order_by("conversation_id", "-created_at", "-id")
-        .distinct("conversation_id")
-        .select_related("sender")
+    # Your read marker per conversation, in one query.
+    read_at_by_convo = dict(
+        ConversationRead.objects.filter(
+            conversation_id__in=ids, user=user
+        ).values_list("conversation_id", "last_read_at")
     )
-    last_by_convo = {m.conversation_id: m for m in latest}
-
-    # Unread-per-conversation in one query: count each viewer-unseen message
-    # (not yours, not deleted, newer than your read marker — or all of them if
-    # you've never opened the thread), grouped by conversation.
-    read_at = ConversationRead.objects.filter(
-        conversation_id=OuterRef("conversation_id"), user=user
-    ).values("last_read_at")[:1]
-    unread_rows = (
-        Message.objects.filter(conversation_id__in=ids, deleted_at__isnull=True)
-        .exclude(sender=user)
-        .annotate(read_at=Subquery(read_at))
-        .filter(Q(read_at__isnull=True) | Q(created_at__gt=F("read_at")))
-        .values("conversation_id")
-        .annotate(n=Count("id"))
-    )
-    unread_by_convo = {r["conversation_id"]: r["n"] for r in unread_rows}
 
     for convo in conversations:
-        convo._last_message = last_by_convo.get(convo.id)
-        convo.unread_count = unread_by_convo.get(convo.id, 0)
+        # The last-message preview must be drawn from what *this viewer* may
+        # see, not the conversation's globally-latest message — otherwise a
+        # pending (or since-severed) member, who is interval-clipped out of the
+        # thread, would get the text of a message they can't read leaked into
+        # their list/detail payload. Empty visible set → no preview.
+        visible = _messages_for_viewer(convo, user)
+        convo._last_message = visible.order_by("-created_at", "-id").first()
+        convo.unread_count = unread_count_for(
+            convo, user, read_at_by_convo.get(convo.id)
+        )
     return conversations
 
 
@@ -580,6 +830,7 @@ class ConnectView(APIView):
             # They asked you first — approving it connects you both now.
             existing.status = ACCEPTED
             existing.save(update_fields=["status"])
+            promote_shared_chats(existing.requester, existing.requestee, timezone.now())
             return Response(
                 {"detail": "Connected.", "connection_status": "connected"},
                 status=status.HTTP_200_OK,
@@ -595,10 +846,18 @@ class ConnectView(APIView):
 
     def delete(self, request, pk):
         target = self._target(pk)
-        Connection.objects.filter(
-            Q(requester=request.user, requestee=target)
-            | Q(requester=target, requestee=request.user)
-        ).delete()
+        now = timezone.now()
+        with transaction.atomic():
+            # Sever must run — and close the initiator's interval — before the
+            # Connection row is gone; see sever_shared_chats' docstring for why
+            # promotion is deferred until after the delete below.
+            convos = sever_shared_chats(request.user, target, now)
+            Connection.objects.filter(
+                Q(requester=request.user, requestee=target)
+                | Q(requester=target, requestee=request.user)
+            ).delete()
+            for convo in convos:
+                promote_participants(convo, now)
         return Response(
             {"detail": "Removed.", "connection_status": "none"},
             status=status.HTTP_200_OK,
@@ -640,6 +899,7 @@ class ConnectionRequestActionView(APIView):
         if self.action == "approve":
             connection.status = ACCEPTED
             connection.save(update_fields=["status"])
+            promote_shared_chats(connection.requester, connection.requestee, timezone.now())
             return Response({"detail": "Approved."}, status=status.HTTP_200_OK)
         connection.delete()
         return Response({"detail": "Rejected."}, status=status.HTTP_200_OK)
@@ -726,37 +986,92 @@ class PostCommentsView(APIView):
 # --- Direct messaging (Phase 5) ------------------------------------------------
 
 
-def user_conversations(user):
-    """The conversations ``user`` participates in that should be shown to them,
-    newest-activity first.
-
-    Hides a conversation whose other participant is deactivated or blocked
-    (either direction) — a block cuts the pair off from each other, so the thread
-    disappears from both lists, consistent with the feed hiding a banned member.
-    """
+def _blocked_with_ids(user):
+    """Flatten ``user``'s ``Block`` rows (either direction) into the set of
+    user ids they're blocked-with — the endpoint that isn't them in each
+    pair."""
     blocked_ids = set(
         Block.objects.filter(Q(blocker=user) | Q(blocked=user)).values_list(
             "blocker_id", "blocked_id"
         )
     )
-    # Flatten the (blocker, blocked) pairs into "everyone I'm blocked-with" —
-    # the endpoint that isn't me in each pair.
-    hidden = {
+    return {
         blocker if blocker != user.id else blocked
         for blocker, blocked in blocked_ids
     }
-    return (
-        Conversation.objects.filter(Q(user_a=user) | Q(user_b=user))
-        .filter(
-            # The *other* participant must be active.
-            Q(user_a=user, user_b__is_active=True)
-            | Q(user_b=user, user_a__is_active=True)
+
+
+def _conversation_visible(convo, user, blocked):
+    """Whether ``convo`` should appear in ``user``'s list.
+
+    Group chats are always visible — the Participant rows already gate
+    membership, and a pending member is meant to see a locked row (see
+    ``chat_display_for``/``.my_status``). A direct thread is hidden if the
+    other party is deactivated or blocked either way — the Phase 5 rule,
+    unchanged: a block cuts the pair off from each other so the thread
+    disappears from both lists, consistent with the feed hiding a banned
+    member.
+    """
+    if convo.kind != Conversation.Kind.DIRECT:
+        return True
+    other = convo.other_participant(user)
+    if other is None or not other.is_active:
+        return False
+    return other.id not in blocked
+
+
+def user_conversations(user):
+    """The conversations ``user`` participates in that should be shown to
+    them, newest-activity first.
+
+    Participant-based: matches any conversation with a non-left
+    ``Participant`` row for ``user`` — active *or* pending, so a pending group
+    member still sees the locked chat in their list. Also matches the legacy
+    ``user_a``/``user_b`` pair directly, so a direct thread that predates
+    Participant rows (or is built straight off the model, as some tests still
+    do) keeps showing up — every 1:1 opened through the API gets participant
+    rows going forward (see ``_ensure_direct_participants``).
+    ``_conversation_visible`` then applies the Phase 5 block/deactivation rule
+    to the direct ones. Returns a plain list (not a queryset) — the caller
+    paginates it directly.
+    """
+    blocked = _blocked_with_ids(user)
+    participant_convo_ids = Participant.objects.filter(
+        user=user, left_at__isnull=True
+    ).values_list("conversation_id", flat=True)
+    qs = (
+        Conversation.objects.filter(
+            Q(id__in=participant_convo_ids) | Q(user_a=user) | Q(user_b=user)
         )
-        .exclude(user_a_id__in=hidden)
-        .exclude(user_b_id__in=hidden)
-        .select_related("user_a", "user_b")
+        .select_related("user_a", "user_b", "group")
         .order_by("-updated_at", "-id")
     )
+    return [c for c in qs if _conversation_visible(c, user, blocked)]
+
+
+def _ensure_direct_participants(convo):
+    """Give a direct conversation two active ``Participant`` rows + open
+    intervals, idempotently — mirrors the ``0009`` backfill migration, so a 1:1
+    opened via the API is immediately participant-complete (Task 4's
+    ``_create_direct`` didn't wire this; the participant-based views need it
+    for a freshly created thread to behave like a promoted group chat).
+
+    Intervals always open at ``convo.created_at``, never "now": a 1:1's two
+    participants have implicitly been in the thread since it was created —
+    there's no pending/gap concept for direct chats. Using ``convo.created_at``
+    is a no-op for a brand-new conversation (created_at ≈ now) but is essential
+    for a pre-existing thread that never got Participant rows (e.g. one built
+    directly off the model, as Phase 5's tests do, then re-opened via this
+    view) — opening at "now" there would clip the whole prior history out of
+    ``visible_messages_for`` for both participants.
+    """
+    for user_id in (convo.user_a_id, convo.user_b_id):
+        if user_id is None:
+            continue
+        participant, _created = Participant.objects.get_or_create(
+            conversation=convo, user_id=user_id, defaults={"status": ACTIVE_P},
+        )
+        activate(participant, convo.created_at)
 
 
 class ConversationListCreateView(generics.ListCreateAPIView):
@@ -786,6 +1101,11 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
+        if "participant_ids" in request.data:
+            return self._create_group(request)
+        return self._create_direct(request)
+
+    def _create_direct(self, request):
         user_id = request.data.get("user_id")
         if user_id is None:
             raise ValidationError({"user_id": "This field is required."})
@@ -811,37 +1131,194 @@ class ConversationListCreateView(generics.ListCreateAPIView):
             convo = Conversation.objects.get(
                 Q(user_a=a, user_b=b) | Q(user_a=b, user_b=a)
             )
+        # Idempotent: makes both sides active Participants with an open
+        # interval, whether this is a brand-new thread or a pre-Task-4 one
+        # that never got them.
+        _ensure_direct_participants(convo)
 
         decorate_conversations([convo], request.user)
         serializer = self.get_serializer(convo)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+    def _create_group(self, request):
+        """Open a group chat: creator active, invitees pending then promoted
+        per the clique rule (``promote_participants``).
+
+        Connection-gated exactly like a 1:1 (``can_add_to_group`` — same gate
+        as ``can_message``): every invitee must be one of the creator's
+        connections, or this 403s. A ``group_id`` additionally scopes the chat
+        to a Phase 6 ``Group`` — the caller must be a member (404, not leaking
+        the group's existence, if not) and so must every invitee (400 — a
+        validation error on the invite list, not a permission error, since the
+        caller *can* message them, just not into this group).
+        """
+        ids = request.data.get("participant_ids") or []
+        if not isinstance(ids, list) or not ids:
+            raise ValidationError({"participant_ids": "Pick at least one connection."})
+        title = (request.data.get("title") or "").strip()[:100]
+        group_id = request.data.get("group_id")
+        group = None
+        if group_id is not None:
+            group = get_object_or_404(Group, pk=group_id)
+            if not is_group_member(request.user, group.id):
+                raise NotFound()
+
+        invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
+        if not invitees:
+            # Every id was unknown/inactive/yourself — don't silently create a
+            # "group chat of one" (the direct path 404s an unknown user; this is
+            # the same guard for the multi-person path).
+            raise ValidationError(
+                {"participant_ids": "Pick at least one connection to start a chat."}
+            )
+        for invitee in invitees:
+            if not can_add_to_group(request.user, invitee):
+                raise PermissionDenied("You can only add people you're connected with.")
+            if group is not None and not is_group_member(invitee, group.id):
+                raise ValidationError({"participant_ids": f"{invitee.pk} isn't in this group."})
+
+        now = timezone.now()
+        with transaction.atomic():
+            convo = Conversation.objects.create(
+                kind=Conversation.Kind.GROUP, group=group, title=title,
+                created_by=request.user, updated_at=now,
+            )
+            creator = Participant.objects.create(
+                conversation=convo, user=request.user, status=ACTIVE_P,
+            )
+            activate(creator, now)
+            for invitee in invitees:
+                Participant.objects.create(
+                    conversation=convo, user=invitee, status=PENDING_P,
+                    invited_by=request.user,
+                )
+            promote_participants(convo, now)
+        decorate_conversations([convo], request.user)
+        return Response(self.get_serializer(convo).data, status=status.HTTP_201_CREATED)
+
+
+class ConversationParticipantsView(APIView):
+    """Add more people to an existing chat
+    (``POST /conversations/<pk>/participants/`` body ``{user_ids: [...]}``).
+
+    Any *active* member (not pending, not left) can invite more of their own
+    connections — same gate as opening the chat (``can_add_to_group``), plus
+    group membership for a group-scoped chat, consistent with
+    ``_create_group``. New rows land pending, then ``promote_participants``
+    runs the clique rule immediately, so an invitee connected to everyone
+    already active goes straight in. ``get_or_create`` keeps re-adding an
+    existing participant a no-op rather than a duplicate row.
+    """
+
+    def post(self, request, pk):
+        convo = get_object_or_404(Conversation, pk=pk)
+        me = convo.participants.filter(
+            user=request.user, status=ACTIVE_P, left_at__isnull=True
+        ).first()
+        if me is None:
+            raise PermissionDenied("Only an active member can add people.")
+        ids = request.data.get("user_ids") or []
+        invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
+        for invitee in invitees:
+            if not can_add_to_group(request.user, invitee):
+                raise PermissionDenied("You can only add people you're connected with.")
+            if convo.group_id and not is_group_member(invitee, convo.group_id):
+                raise ValidationError({"user_ids": f"{invitee.pk} isn't in this group."})
+        now = timezone.now()
+        with transaction.atomic():
+            for invitee in invitees:
+                participant, created = Participant.objects.get_or_create(
+                    conversation=convo, user=invitee,
+                    defaults={"status": PENDING_P, "invited_by": request.user},
+                )
+                if not created and participant.left_at is not None:
+                    # They previously left/declined — re-adding must actually
+                    # bring them back, not silently no-op on the tombstoned
+                    # row get_or_create just found.
+                    participant.left_at = None
+                    participant.status = PENDING_P
+                    participant.save(update_fields=["left_at", "status"])
+            promote_participants(convo, now)
+        return Response({"detail": "Added."}, status=status.HTTP_200_OK)
+
+
+class ConversationLeaveView(APIView):
+    """Leave (or decline) a chat (``POST /conversations/<pk>/leave/``).
+
+    Works from either ``active`` or ``pending`` status — an active member
+    leaving, or a pending invitee declining. Closes the participant's open
+    access interval (see ``deactivate``), tombstones the row with
+    ``left_at``, then re-runs ``promote_participants`` so anyone still
+    pending gets re-checked against the (now smaller) active clique. 404 if
+    the caller has no non-left participant row for this conversation —
+    a chat you're not in shouldn't even reveal it exists.
+    """
+
+    def post(self, request, pk):
+        p = get_object_or_404(
+            Participant, conversation_id=pk, user=request.user, left_at__isnull=True
+        )
+        now = timezone.now()
+        with transaction.atomic():
+            deactivate(p, now)
+            p.left_at = now
+            p.save(update_fields=["left_at"])
+            promote_participants(p.conversation, now)
+        return Response({"detail": "Left the chat."}, status=status.HTTP_200_OK)
+
+
+def _viewer_conversation_or_404(pk, user):
+    """Fetch a conversation ``user`` is a member of (any status), or 404.
+
+    Matches either a ``Participant`` row (any status, not left — every group
+    chat, and every 1:1 opened since ``_ensure_direct_participants``) or the
+    legacy ``user_a``/``user_b`` pair (a direct thread predating Participant
+    rows). 404, not 403, for a non-member — a thread you're not in shouldn't
+    even reveal it exists.
+    """
+    return get_object_or_404(
+        Conversation.objects.select_related("user_a", "user_b", "group")
+        .filter(
+            Q(user_a=user)
+            | Q(user_b=user)
+            | Q(participants__user=user, participants__left_at__isnull=True)
+        )
+        .distinct(),
+        pk=pk,
+    )
+
 
 class ConversationDetailView(generics.RetrieveAPIView):
-    """A single conversation (``GET /conversations/<pk>/``) — the other person,
-    last-message preview, and your unread count.
+    """A single conversation (``GET /conversations/<pk>/``) — the other person
+    (direct) or the member list (group), last-message preview, your unread
+    count, and ``my_status``/``must_connect_with`` (drives a group's locked
+    pending panel).
 
-    Drives the thread page's header (who you're talking to) so it's correct even
-    on a cold page load/refresh, not only when arriving from the list.
-    Participant-scoped, and hidden (404) if the pair is blocked either way."""
+    Drives the thread page's header so it's correct even on a cold page
+    load/refresh, not only when arriving from the list. Participant-scoped —
+    404 if you're not a member at all, or (direct only) if the pair is blocked
+    either way.
+    """
 
     serializer_class = ConversationSerializer
 
     def get_object(self):
         user = self.request.user
-        convo = get_object_or_404(
-            Conversation.objects.select_related("user_a", "user_b").filter(
-                Q(user_a=user) | Q(user_b=user)
-            ),
-            pk=self.kwargs["pk"],
-        )
-        other = convo.other_participant(user)
-        if is_blocked_between(user, other):
-            raise NotFound()
+        convo = _viewer_conversation_or_404(self.kwargs["pk"], user)
         decorate_conversations([convo], user)
-        # Whether new messages are still allowed (drives the composer). History
-        # stays readable after a disconnect even when this is False.
-        convo._can_message = can_message(user, other)
+        if convo.my_status is None:
+            raise NotFound()
+        if convo.kind == Conversation.Kind.DIRECT:
+            other = convo.other_participant(user)
+            if is_blocked_between(user, other):
+                raise NotFound()
+            # Whether new messages are still allowed (drives the composer).
+            # History stays readable after a disconnect even when this is
+            # False.
+            convo._can_message = can_message(user, other)
+        else:
+            # A pending group member can read the locked panel but not send.
+            convo._can_message = convo.my_status == ACTIVE_P
         return convo
 
 
@@ -849,40 +1326,50 @@ class ConversationMessagesView(generics.ListAPIView):
     """The messages in a conversation (GET) and sending one (POST) at
     ``/conversations/<pk>/messages/``.
 
-    You must be a participant, else 404 (we don't reveal a thread you're not in).
-    A blocked pair can't see the thread at all (404). GET returns messages
-    oldest-first, paginated. POST re-checks ``can_message`` — disconnecting or a
-    block stops *future* messages even though the history stays visible — takes
-    the sender from the session, bumps the conversation's activity time, and
-    marks it read for you (you've clearly caught up).
+    You must be a participant, else 404 (we don't reveal a thread you're not
+    in). A blocked direct pair can't see the thread at all (404). A pending
+    group member sees the thread exists (via the detail view) but can't read
+    or send here — 403 — until they're promoted to active. GET returns
+    messages oldest-first, paginated, clipped to your access interval(s) for a
+    group chat. POST re-checks the send gate — disconnecting/a block (direct)
+    or dropping to pending (group) stops *future* messages even though history
+    stays visible — takes the sender from the session, bumps the
+    conversation's activity time, and marks it read for you.
     """
 
     serializer_class = MessageSerializer
 
     def _conversation(self):
-        # Participant-scoped: only the two people in the thread can reach it, and
-        # a block hides it from both. 404 otherwise (don't leak its existence).
         user = self.request.user
-        convo = get_object_or_404(
-            Conversation.objects.select_related("user_a", "user_b").filter(
-                Q(user_a=user) | Q(user_b=user)
-            ),
-            pk=self.kwargs["pk"],
-        )
-        other = convo.other_participant(user)
-        if is_blocked_between(user, other):
+        convo = _viewer_conversation_or_404(self.kwargs["pk"], user)
+        my_status = _viewer_participant_status(convo, user)
+        if my_status is None:
             raise NotFound()
-        return convo, other
+        if convo.kind == Conversation.Kind.DIRECT:
+            other = convo.other_participant(user)
+            if is_blocked_between(user, other):
+                raise NotFound()
+        return convo, my_status
 
     def get_queryset(self):
-        convo, _other = self._conversation()
-        return convo.messages.select_related("sender")
+        convo, my_status = self._conversation()
+        if my_status != ACTIVE_P:
+            raise PermissionDenied(
+                "Connect with everyone to join this chat."
+            )
+        return _messages_for_viewer(convo, self.request.user)
 
     def post(self, request, pk):
-        convo, other = self._conversation()
-        if not can_message(request.user, other):
+        convo, my_status = self._conversation()
+        if convo.kind == Conversation.Kind.DIRECT:
+            other = convo.other_participant(request.user)
+            if not can_message(request.user, other):
+                raise PermissionDenied(
+                    "You can no longer message this person."
+                )
+        elif my_status != ACTIVE_P:
             raise PermissionDenied(
-                "You can no longer message this person."
+                "Connect with everyone to join this chat."
             )
         serializer = MessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -907,14 +1394,15 @@ class ConversationMessagesView(generics.ListAPIView):
 
 class ConversationReadView(APIView):
     """Mark a conversation read up to now (``POST /conversations/<pk>/read/``),
-    which clears your unread count for it. Participant-only (404 otherwise)."""
+    which clears your unread count for it. Participant-only (404 otherwise) —
+    resolved via ``_viewer_conversation_or_404`` so this works for a group chat
+    member (any non-left status) too, not just a legacy direct pair; a pending
+    member marking read is harmless (they can't see any messages yet anyway,
+    since ``visible_messages_for`` clips to their intervals)."""
 
     def post(self, request, pk):
         user = request.user
-        convo = get_object_or_404(
-            Conversation.objects.filter(Q(user_a=user) | Q(user_b=user)),
-            pk=pk,
-        )
+        convo = _viewer_conversation_or_404(pk, user)
         ConversationRead.objects.update_or_create(
             conversation=convo,
             user=user,
@@ -951,28 +1439,27 @@ class MessageDeleteView(APIView):
 
 class UnreadMessageCountView(APIView):
     """Your total unread-message count across all conversations, for the nav
-    badge (``GET /messages/unread-count/``). One query, mirrors the per-thread
-    unread rule (not yours, not deleted, newer than your read marker), and
+    badge (``GET /messages/unread-count/``). Mirrors the per-thread unread
+    rule (not yours, not deleted, newer than your read marker) applied to each
+    conversation's interval-clipped visible set (a query per conversation —
+    family scale, same trade-off ``decorate_conversations`` makes), and
     ignores blocked/inactive threads via ``user_conversations``."""
 
     def get(self, request):
         user = request.user
-        convo_ids = list(user_conversations(user).values_list("id", flat=True))
-        if not convo_ids:
+        conversations = user_conversations(user)
+        if not conversations:
             return Response({"count": 0})
-        read_at = ConversationRead.objects.filter(
-            conversation_id=OuterRef("conversation_id"), user=user
-        ).values("last_read_at")[:1]
-        count = (
-            Message.objects.filter(
-                conversation_id__in=convo_ids, deleted_at__isnull=True
-            )
-            .exclude(sender=user)
-            .annotate(read_at=Subquery(read_at))
-            .filter(Q(read_at__isnull=True) | Q(created_at__gt=F("read_at")))
-            .count()
+        read_at_by_convo = dict(
+            ConversationRead.objects.filter(
+                conversation_id__in=[c.id for c in conversations], user=user
+            ).values_list("conversation_id", "last_read_at")
         )
-        return Response({"count": count})
+        total = sum(
+            unread_count_for(convo, user, read_at_by_convo.get(convo.id))
+            for convo in conversations
+        )
+        return Response({"count": total})
 
 
 class BlockView(APIView):
@@ -993,16 +1480,22 @@ class BlockView(APIView):
                 {"detail": "You can't block yourself."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        now = timezone.now()
         with transaction.atomic():
             Block.objects.get_or_create(
                 blocker=request.user, blocked=target
             )
+            # Sever before the Connection delete — see sever_shared_chats'
+            # docstring for why promotion is deferred until after it.
+            convos = sever_shared_chats(request.user, target, now)
             # Blocking severs any connection — you shouldn't stay "connected"
             # to someone you've blocked.
             Connection.objects.filter(
                 Q(requester=request.user, requestee=target)
                 | Q(requester=target, requestee=request.user)
             ).delete()
+            for convo in convos:
+                promote_participants(convo, now)
         return Response(
             {"detail": "Blocked.", "is_blocked": True},
             status=status.HTTP_200_OK,
@@ -1015,6 +1508,21 @@ class BlockView(APIView):
             {"detail": "Unblocked.", "is_blocked": False},
             status=status.HTTP_200_OK,
         )
+
+
+class DisconnectImpactView(APIView):
+    """``GET /users/<pk>/disconnect-impact/`` — the chats a disconnect or
+    block against this user would drop you out of, so the frontend can warn
+    before the user confirms."""
+
+    def get(self, request, pk):
+        other = get_object_or_404(User, pk=pk)
+        chats = _shared_active_chats(request.user, other)
+        data = [
+            {"id": c.id, "title": _chat_label(c, request.user), "kind": c.kind}
+            for c in chats
+        ]
+        return Response({"chats": data})
 
 
 # --- Groups (Phase 6) ----------------------------------------------------------
@@ -1301,6 +1809,12 @@ class GroupMemberDetailView(APIView):
     admin-only. The last-admin guardrail applies either way: an admin can't leave
     or be removed while they're the only admin — promote someone first — so a
     group is never orphaned.
+
+    Dropping the membership also drops the departing user from every chat
+    scoped to this group: their participant row in each such ``Conversation``
+    is deactivated and tombstoned with ``left_at`` (mirroring
+    ``ConversationLeaveView``), then ``promote_participants`` re-runs for the
+    others. Membership delete + chat departure happen in one transaction.
     """
 
     def delete(self, request, pk, user_id):
@@ -1325,7 +1839,16 @@ class GroupMemberDetailView(APIView):
                     )
                 }
             )
-        target.delete()
+        with transaction.atomic():
+            target.delete()
+            now = timezone.now()
+            for convo in Conversation.objects.filter(group_id=group.id):
+                p = convo.participants.filter(user_id=user_id, left_at__isnull=True).first()
+                if p is not None:
+                    deactivate(p, now)
+                    p.left_at = now
+                    p.save(update_fields=["left_at"])
+                    promote_participants(convo, now)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

@@ -151,6 +151,69 @@ describe("api CSRF + fetch wiring", () => {
     expect(url).toBe("http://localhost:8000/api/feed/?page=3");
   });
 
+  it("createGroupChat POSTs participant_ids/title/group_id", async () => {
+    document.cookie = "csrftoken=tok-g";
+    const fetchMock = stubFetch({ body: JSON.stringify({ id: 7 }) });
+
+    await api.createGroupChat({
+      participantIds: [1, 2],
+      title: "Trip",
+      groupId: 3,
+    });
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/conversations/");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({
+      participant_ids: [1, 2],
+      title: "Trip",
+      group_id: 3,
+    });
+  });
+
+  it("createGroupChat omits group_id when none is given", async () => {
+    const fetchMock = stubFetch({ body: JSON.stringify({ id: 8 }) });
+
+    await api.createGroupChat({ participantIds: [1, 2] });
+
+    const [, opts] = fetchMock.mock.calls[0];
+    expect(JSON.parse(opts.body)).toEqual({
+      participant_ids: [1, 2],
+      title: "",
+    });
+  });
+
+  it("addParticipants POSTs user_ids to the conversation's participants endpoint", async () => {
+    const fetchMock = stubFetch({ body: "{}" });
+
+    await api.addParticipants(9, [4, 5]);
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/conversations/9/participants/");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ user_ids: [4, 5] });
+  });
+
+  it("leaveConversation POSTs to the conversation's leave endpoint", async () => {
+    const fetchMock = stubFetch({ body: "{}" });
+
+    await api.leaveConversation(9);
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/conversations/9/leave/");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("getDisconnectImpact GETs the user's disconnect-impact endpoint", async () => {
+    const fetchMock = stubFetch({ body: JSON.stringify({ conversations: [] }) });
+
+    await api.getDisconnectImpact(6);
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/users/6/disconnect-impact/");
+    expect(opts.method ?? "GET").toBe("GET");
+  });
+
   it("throws with the backend's error message on a non-OK response", async () => {
     stubFetch({
       ok: false,
