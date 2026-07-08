@@ -1986,3 +1986,63 @@ class GroupChatLifecycleTests(APITestCase):
         cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [b.id], "group_id": group.id}, format="json").data["id"]
         group.delete()
         self.assertFalse(Conversation.objects.filter(id=cid).exists())
+
+
+class SeedDemoCommandTests(APITestCase):
+    """The seed_demo management command that rebuilds the full demo world."""
+
+    def test_seed_creates_the_full_demo_world(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", verbosity=0)
+
+        # Six active accounts.
+        self.assertEqual(User.objects.count(), 6)
+        self.assertTrue(all(u.is_active for u in User.objects.all()))
+        # Connections: 5 accepted + 2 pending requests.
+        self.assertEqual(Connection.objects.filter(status="accepted").count(), 5)
+        self.assertEqual(Connection.objects.filter(status="pending").count(), 2)
+        # Posts (personal + group) and a threaded comment (a reply with a parent).
+        self.assertTrue(Post.objects.filter(group__isnull=True).exists())
+        self.assertTrue(Post.objects.filter(group__isnull=False).exists())
+        self.assertTrue(Comment.objects.filter(parent__isnull=False).exists())
+        # Two groups, one with a pending invite.
+        self.assertEqual(Group.objects.count(), 2)
+        self.assertTrue(GroupMembership.objects.filter(status="invited").exists())
+        # Direct + group conversations exist.
+        self.assertEqual(Conversation.objects.filter(kind="direct").count(), 2)
+        self.assertEqual(Conversation.objects.filter(kind="group").count(), 2)
+
+    def test_seed_group_chat_has_a_pending_participant(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", verbosity=0)
+        # The "Mystery trip" chat: dave can't connect to bob, so he's pending.
+        trip = Conversation.objects.get(title="Mystery trip")
+        self.assertTrue(
+            trip.participants.filter(user__email="dave@example.com", status="pending").exists()
+        )
+        self.assertEqual(trip.participants.filter(status="active").count(), 2)
+
+    def test_seed_is_idempotent(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", verbosity=0)
+        call_command("seed_demo", verbosity=0)
+
+        # Rebuild, not pile-up: counts are stable across a second run.
+        self.assertEqual(User.objects.filter(email__endswith="@example.com").count(), 6)
+        self.assertEqual(Connection.objects.filter(status="accepted").count(), 5)
+        self.assertEqual(Group.objects.count(), 2)
+        self.assertEqual(Conversation.objects.count(), 4)
+        self.assertEqual(
+            Post.objects.filter(author__email="alice@example.com", group__isnull=True).count(),
+            2,
+        )
+
+    def test_seeded_account_can_log_in_with_the_password(self):
+        from django.core.management import call_command
+
+        call_command("seed_demo", password="s3cret-demo-pw", verbosity=0)
+        alice = User.objects.get(email="alice@example.com")
+        self.assertTrue(alice.check_password("s3cret-demo-pw"))
