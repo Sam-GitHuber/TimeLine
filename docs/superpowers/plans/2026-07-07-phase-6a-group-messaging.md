@@ -1487,16 +1487,16 @@ git commit -m "feat(6a): start a group-scoped chat from a group"
 - Modify: `docs/phases/phase-6a-group-messaging.md` (tick the DoD, add a notes/decisions entry, mark **done**)
 - Modify: `CLAUDE.md` ("Current status" line)
 
-- [ ] **Step 1: Update the phase doc** — check off each Definition-of-done item that shipped, add a "Notes / decisions log" entry for anything non-obvious discovered while building (e.g. list unread computed over interval-clipped messages), and set **Status: done**.
-- [ ] **Step 2: Update `CLAUDE.md`** — replace the "Phase 6a … is next" line with a one-paragraph "done" summary in the same style as the other phases, and name the next phase.
-- [ ] **Step 3: Commit**
+- [x] **Step 1: Update the phase doc** — check off each Definition-of-done item that shipped, add a "Notes / decisions log" entry for anything non-obvious discovered while building (e.g. list unread computed over interval-clipped messages), and set **Status: done**.
+- [x] **Step 2: Update `CLAUDE.md`** — replace the "Phase 6a … is next" line with a one-paragraph "done" summary in the same style as the other phases, and name the next phase.
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/phases/phase-6a-group-messaging.md CLAUDE.md
 git commit -m "docs(6a): mark group messaging done; update status"
 ```
 
-- [ ] **Step 4: Open the PR**
+- [x] **Step 4: Open the PR**
 
 ```bash
 git push -u origin phase-6a-group-messaging
