@@ -257,6 +257,34 @@ export const api = {
   unblockUser: (userId) =>
     request(`/api/users/${userId}/block/`, { method: "DELETE" }),
 
+  // Create a multi-person chat. participantIds are your connections; a
+  // non-connection is rejected. Optional title, and groupId to scope it to a
+  // Phase 6 group (everyone must be a member of it).
+  createGroupChat: ({ participantIds, title = "", groupId = null } = {}) =>
+    request("/api/conversations/", {
+      method: "POST",
+      body: {
+        participant_ids: participantIds,
+        title,
+        ...(groupId ? { group_id: groupId } : {}),
+      },
+    }),
+
+  // Add more of your connections to an existing chat (any active member).
+  addParticipants: (conversationId, userIds) =>
+    request(`/api/conversations/${conversationId}/participants/`, {
+      method: "POST",
+      body: { user_ids: userIds },
+    }),
+
+  // Leave a chat (or decline an invite while pending).
+  leaveConversation: (conversationId) =>
+    request(`/api/conversations/${conversationId}/leave/`, { method: "POST" }),
+
+  // The chats a disconnect/block would remove you from (for the warning modal).
+  getDisconnectImpact: (userId) =>
+    request(`/api/users/${userId}/disconnect-impact/`),
+
   // --- Groups (Phase 6) ----------------------------------------------------
 
   // The groups you're an active member of, ordered by name; each with a
