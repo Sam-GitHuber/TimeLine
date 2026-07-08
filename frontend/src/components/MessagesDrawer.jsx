@@ -76,7 +76,7 @@ function ConversationListView() {
     <>
       <PanelHeader
         actions={
-          <IconButton onClick={openNew} label="New message">
+          <IconButton onClick={() => openNew()} label="New message">
             {/* compose / pencil */}
             <StrokeIcon path="M12 20h9 M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z" />
           </IconButton>
@@ -105,7 +105,7 @@ function ConversationListView() {
             </p>
             <button
               type="button"
-              onClick={openNew}
+              onClick={() => openNew()}
               className="btn btn-primary btn-sm mt-4"
             >
               New message

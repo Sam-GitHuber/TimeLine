@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import App from "./App.jsx";
 import { renderWithAuth, fakeUser } from "./test-utils.jsx";
 import { api } from "./api.js";
+import { MessagingProvider } from "./messaging.jsx";
+import NewChatPicker from "./components/NewChatPicker.jsx";
 
 // Phase 5 messaging is a companion drawer (not a route): the nav "Messages"
 // button opens it over the feed, and it walks list → thread → new message. We
@@ -225,6 +227,22 @@ describe("Messages drawer — new chat", () => {
         groupId: null,
       })
     );
+  });
+
+  it("scopes the picker to prefill.memberIds when opened from a group", async () => {
+    // Both Priya and Sanjay are connections, but only Priya is a member of
+    // the group this chat is being started from — Sanjay must not appear.
+    renderWithAuth(
+      <MessagingProvider>
+        <NewChatPicker
+          prefill={{ groupId: 5, groupName: "Book Club", memberIds: [2] }}
+        />
+      </MessagingProvider>
+    );
+
+    expect(await screen.findByText("Priya")).toBeInTheDocument();
+    expect(screen.queryByText("Sanjay")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stranger")).not.toBeInTheDocument();
   });
 });
 
