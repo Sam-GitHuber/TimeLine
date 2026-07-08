@@ -68,6 +68,29 @@ function convoRow(overrides = {}) {
   };
 }
 
+function groupConvoRow(overrides = {}) {
+  return {
+    id: 11,
+    kind: "group",
+    title: "Book Club",
+    other: null,
+    participants: [
+      { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
+      { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "active" },
+    ],
+    my_status: "active",
+    last_message: {
+      text: "see you then",
+      is_deleted: false,
+      sender_id: 2,
+      created_at: new Date().toISOString(),
+    },
+    unread_count: 0,
+    updated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 function convoDetail(overrides = {}) {
   return {
     id: 7,
@@ -141,6 +164,41 @@ describe("Messages drawer — list", () => {
     expect(
       screen.getAllByRole("button", { name: "New message" }).length
     ).toBeGreaterThan(0);
+  });
+
+  it("shows a group row's title + stacked avatars, and a pending row's invited hint with no preview", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      page([
+        convoRow(),
+        groupConvoRow({
+          id: 12,
+          title: "",
+          my_status: "pending",
+          participants: [
+            { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
+            { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "pending" },
+          ],
+          last_message: {
+            text: "secret plans",
+            is_deleted: false,
+            sender_id: 2,
+            created_at: new Date().toISOString(),
+          },
+        }),
+      ])
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+
+    const drawer = await screen.findByRole("dialog", { name: "Messages" });
+    // Untitled group falls back to a comma-joined list of participant names.
+    expect(within(drawer).getByText("Priya, Sanjay")).toBeInTheDocument();
+    expect(
+      within(drawer).getByText(/Invited — connect to join/i)
+    ).toBeInTheDocument();
+    expect(within(drawer).queryByText("secret plans")).not.toBeInTheDocument();
   });
 
   it("leaves the feed mounted underneath (companion, not a route)", async () => {
