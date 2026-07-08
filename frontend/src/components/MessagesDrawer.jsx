@@ -10,6 +10,7 @@ import {
 import Avatar from "./Avatar.jsx";
 import { SpineMark, StrokeIcon, IconButton, PanelHeader } from "./drawer-chrome.jsx";
 import NewChatPicker from "./NewChatPicker.jsx";
+import PendingChatPanel from "./PendingChatPanel.jsx";
 import {
   api,
   MESSAGE_POLL_MS,
@@ -175,7 +176,7 @@ function ConversationRow({ convo, me, onOpen }) {
 /* ---- View: a single thread -------------------------------------------------- */
 
 function ConversationThreadView() {
-  const { conversationId, openList } = useMessaging();
+  const { conversationId, openList, openNew } = useMessaging();
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
   const [text, setText] = useState("");
@@ -187,6 +188,14 @@ function ConversationThreadView() {
     queryFn: () => api.getConversation(conversationId),
   });
 
+  const detail = convoQuery.data;
+  const isGroup = detail?.kind === "group";
+  // A pending group member (someone invited who hasn't connected with the
+  // whole clique yet) can't read or send here — the backend 403s the messages
+  // endpoint — so the thread is replaced by PendingChatPanel below instead of
+  // fetching a list it can't have.
+  const isPending = detail?.my_status === "pending";
+
   // Pull every message page (threads are short at family scale) so the newest
   // is always on screen, and poll so incoming messages appear without a reload.
   const messagesQuery = useInfiniteQuery({
@@ -196,6 +205,7 @@ function ConversationThreadView() {
     initialPageParam: undefined,
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
     refetchInterval: MESSAGE_POLL_MS,
+    enabled: !!detail && !isPending,
   });
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = messagesQuery;
   useEffect(() => {
@@ -237,6 +247,13 @@ function ConversationThreadView() {
     },
   });
 
+  // Leave (or, while pending, decline) a chat — group-only in the header;
+  // PendingChatPanel has its own copy of this for the locked view.
+  const leaveMutation = useMutation({
+    mutationFn: () => api.leaveConversation(conversationId),
+    onSuccess: () => openList(),
+  });
+
   function handleSubmit(event) {
     event.preventDefault();
     const value = text.trim();
@@ -244,14 +261,45 @@ function ConversationThreadView() {
     sendMutation.mutate(value);
   }
 
-  const other = convoQuery.data?.other;
-  const canSend = convoQuery.data?.can_message ?? false;
+  const other = detail?.other;
+  const participants = detail?.participants ?? [];
+  // Renamed from Phase 5's `can_message` — see ConversationSerializer.
+  const canSend = detail?.can_send ?? false;
 
   return (
     <>
-      <PanelHeader onBack={openList}>
+      <PanelHeader
+        onBack={openList}
+        actions={
+          isGroup &&
+          !convoQuery.isError &&
+          !isPending && (
+            <>
+              <IconButton
+                onClick={() => openNew({ addToConversationId: conversationId })}
+                label="Add people"
+              >
+                <StrokeIcon path="M16 19v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2 M9 11a4 4 0 100-8 4 4 0 000 8z M19 8v6 M22 11h-6" />
+              </IconButton>
+              <IconButton
+                onClick={() => leaveMutation.mutate()}
+                label="Leave chat"
+              >
+                <StrokeIcon path="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4 M16 17l5-5-5-5 M21 12H9" />
+              </IconButton>
+            </>
+          )
+        }
+      >
         {convoQuery.isError ? (
           <span className="font-semibold text-ink">Conversation</span>
+        ) : isGroup ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <AvatarStack participants={participants} />
+            <span className="truncate font-display font-bold -tracking-[0.02em] text-ink">
+              {detail.title || "Group chat"}
+            </span>
+          </div>
         ) : other ? (
           <Link
             to={`/u/${other.id}`}
@@ -283,6 +331,11 @@ function ConversationThreadView() {
             Back to messages
           </button>
         </div>
+      ) : isPending ? (
+        <PendingChatPanel
+          mustConnectWith={detail.must_connect_with}
+          conversationId={conversationId}
+        />
       ) : (
         <>
           <div ref={bodyRef} className="flex-1 overflow-y-auto px-4 py-4">
@@ -348,6 +401,25 @@ function ConversationThreadView() {
         </>
       )}
     </>
+  );
+}
+
+// A group thread's header identity: overlapping avatars (capped so a big
+// group doesn't blow out the header) with a ring so they read as a stack
+// rather than a row.
+function AvatarStack({ participants, max = 4 }) {
+  const shown = participants.slice(0, max);
+  return (
+    <div className="flex shrink-0 -space-x-2.5">
+      {shown.map((person) => (
+        <span
+          key={person.id}
+          className="rounded-full ring-2 ring-surface"
+        >
+          <Avatar user={person} size="sm" />
+        </span>
+      ))}
+    </div>
   );
 }
 

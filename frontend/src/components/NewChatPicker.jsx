@@ -15,7 +15,10 @@ import { useConnections } from "../hooks.js";
 //
 // `prefill` narrows the list to a specific group's members and scopes the
 // resulting chat to it — set when this view is opened from a group's "start a
-// group chat" action instead of the drawer's plain compose button.
+// group chat" action instead of the drawer's plain compose button. It also
+// doubles as an "add to an existing chat" mode: `{ addToConversationId }` (set
+// by the group thread's "Add people" control) skips creating anything and
+// instead adds the selected people to that chat, then reopens its thread.
 export default function NewChatPicker({ prefill }) {
   const { openList, openThread } = useMessaging();
   const queryClient = useQueryClient();
@@ -37,9 +40,14 @@ export default function NewChatPicker({ prefill }) {
     });
   }
 
+  const addToConversationId = prefill?.addToConversationId ?? null;
+
   const create = useMutation({
     mutationFn: () => {
       const ids = [...selected];
+      if (addToConversationId) {
+        return api.addParticipants(addToConversationId, ids);
+      }
       const label = title.trim();
       if (ids.length === 1 && !label) {
         return api.openConversation(ids[0]);
@@ -52,15 +60,30 @@ export default function NewChatPicker({ prefill }) {
     },
     onSuccess: (conversation) => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      openThread(conversation.id);
+      if (addToConversationId) {
+        queryClient.invalidateQueries({
+          queryKey: ["conversation", addToConversationId],
+        });
+        openThread(addToConversationId);
+      } else {
+        openThread(conversation.id);
+      }
     },
   });
 
   return (
     <>
-      <PanelHeader onBack={openList}>
+      <PanelHeader
+        onBack={
+          addToConversationId ? () => openThread(addToConversationId) : openList
+        }
+      >
         <h2 className="truncate font-display text-lg font-bold -tracking-[0.02em] text-ink">
-          {prefill?.groupName ? `New chat in ${prefill.groupName}` : "New message"}
+          {addToConversationId
+            ? "Add people"
+            : prefill?.groupName
+              ? `New chat in ${prefill.groupName}`
+              : "New message"}
         </h2>
       </PanelHeader>
 
@@ -121,14 +144,16 @@ export default function NewChatPicker({ prefill }) {
       </div>
 
       <div className="border-t border-line px-3 py-3">
-        <input
-          type="text"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Chat name (optional, for a group)"
-          aria-label="Chat name"
-          className="w-full rounded-xl border border-line-strong bg-raised px-3.5 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
-        />
+        {!addToConversationId && (
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Chat name (optional, for a group)"
+            aria-label="Chat name"
+            className="w-full rounded-xl border border-line-strong bg-raised px-3.5 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
+          />
+        )}
         <div className="mt-2 flex items-center justify-between gap-2">
           <span className="text-xs text-ink-faint">
             {selected.size === 0
@@ -146,7 +171,10 @@ export default function NewChatPicker({ prefill }) {
         </div>
         {create.isError && (
           <p className="mt-2 text-sm text-red-600">
-            {create.error?.message || "Couldn’t start that chat."}
+            {create.error?.message ||
+              (addToConversationId
+                ? "Couldn’t add them to this chat."
+                : "Couldn’t start that chat.")}
           </p>
         )}
       </div>

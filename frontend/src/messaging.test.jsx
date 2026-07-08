@@ -37,6 +37,8 @@ vi.mock("./api.js", () => ({
     getGroupInvites: vi.fn(),
     blockUser: vi.fn(),
     unblockUser: vi.fn(),
+    addParticipants: vi.fn(),
+    leaveConversation: vi.fn(),
   },
   CONVERSATION_LIST_POLL_MS: 1_000_000, // effectively off in tests
   MESSAGE_POLL_MS: 1_000_000,
@@ -69,13 +71,33 @@ function convoRow(overrides = {}) {
 function convoDetail(overrides = {}) {
   return {
     id: 7,
+    kind: "direct",
+    title: "",
     other: { id: 2, display_name: "Priya", avatar_thumb: null },
+    participants: [],
+    my_status: "active",
+    must_connect_with: [],
     last_message: null,
     unread_count: 0,
-    can_message: true,
+    can_send: true,
     updated_at: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function groupConvoDetail(overrides = {}) {
+  return convoDetail({
+    id: 11,
+    kind: "group",
+    title: "Book Club",
+    other: null,
+    participants: [
+      { id: fakeUser.pk, display_name: "you", avatar_thumb: null, status: "active" },
+      { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
+      { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "active" },
+    ],
+    ...overrides,
+  });
 }
 
 async function openDrawer(user) {
@@ -306,7 +328,7 @@ describe("Messages drawer — thread", () => {
   it("hides the composer when you can no longer message", async () => {
     const user = userEvent.setup();
     api.getConversations.mockResolvedValue(page([convoRow()]));
-    api.getConversation.mockResolvedValue(convoDetail({ can_message: false }));
+    api.getConversation.mockResolvedValue(convoDetail({ can_send: false }));
 
     renderAt("/");
     await openDrawer(user);
@@ -338,6 +360,93 @@ describe("Messages drawer — thread", () => {
     await user.click(await screen.findByRole("button", { name: /Priya/ }));
 
     expect(await screen.findByText("Message deleted")).toBeInTheDocument();
+  });
+});
+
+describe("Messages drawer — group thread", () => {
+  it("locks a pending group chat behind a PendingChatPanel with a Connect button", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(
+      groupConvoDetail({
+        my_status: "pending",
+        must_connect_with: [{ id: 5, display_name: "Amara", avatar_thumb: null }],
+        can_send: false,
+      })
+    );
+    api.connect.mockResolvedValue({});
+
+    renderAt("/messages/11");
+
+    expect(await screen.findByText(/connect with/i)).toBeInTheDocument();
+    expect(screen.getAllByText("Amara").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByPlaceholderText(/write a message/i)
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledWith(5));
+
+    expect(
+      screen.getByRole("button", { name: /decline|leave/i })
+    ).toBeInTheDocument();
+  });
+
+  it("shows the title, participant avatars, and composer for an active group chat", async () => {
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+
+    renderAt("/messages/11");
+
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
+    expect(
+      await screen.findByPlaceholderText(/write a message/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /add people/i })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /leave/i })).toBeInTheDocument();
+  });
+
+  it("leaves a group chat and returns to the list", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversations.mockResolvedValue(page([]));
+    api.leaveConversation.mockResolvedValue({});
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+
+    await user.click(screen.getByRole("button", { name: /leave/i }));
+
+    await waitFor(() => expect(api.leaveConversation).toHaveBeenCalledWith(11));
+    expect(await screen.findByText(/No conversations yet/i)).toBeInTheDocument();
+  });
+
+  it("adds people to the current chat via the Add people picker", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.listUsers.mockResolvedValue(
+      page([{ id: 4, display_name: "Nadia", connection_status: "connected" }])
+    );
+    api.addParticipants.mockResolvedValue({});
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+
+    await user.click(screen.getByRole("button", { name: /add people/i }));
+
+    await user.click(await screen.findByRole("checkbox", { name: "Nadia" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(api.addParticipants).toHaveBeenCalledWith(11, [4])
+    );
+    expect(api.createGroupChat).not.toHaveBeenCalled();
+    expect(api.openConversation).not.toHaveBeenCalled();
+    // Back in the thread it was added to.
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
   });
 });
 
