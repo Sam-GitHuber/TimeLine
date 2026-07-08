@@ -141,9 +141,15 @@ function ConversationRow({ convo, me, onOpen }) {
 
   // A group with no title falls back to a comma-joined list of its
   // participants' names, same idea as NewChatPicker's untitled-group preview.
+  // `participants` includes the viewer themselves, so exclude `me` from the
+  // fallback name — otherwise an untitled group renders as "You, Priya, Sanjay".
   const participants = convo.participants ?? [];
   const groupName =
-    convo.title || participants.map((person) => person.display_name).join(", ");
+    convo.title ||
+    participants
+      .filter((person) => person.id !== me?.pk)
+      .map((person) => person.display_name)
+      .join(", ");
 
   return (
     <button

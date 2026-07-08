@@ -175,7 +175,10 @@ describe("Messages drawer — list", () => {
           id: 12,
           title: "",
           my_status: "pending",
+          // The backend's participants list includes the viewer themselves
+          // (matching the real payload) — the fallback name must exclude them.
           participants: [
+            { id: fakeUser.pk, display_name: "you", avatar_thumb: null, status: "active" },
             { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
             { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "pending" },
           ],
@@ -193,8 +196,11 @@ describe("Messages drawer — list", () => {
     await openDrawer(user);
 
     const drawer = await screen.findByRole("dialog", { name: "Messages" });
-    // Untitled group falls back to a comma-joined list of participant names.
-    expect(within(drawer).getByText("Priya, Sanjay")).toBeInTheDocument();
+    // Untitled group falls back to a comma-joined list of participant names,
+    // excluding the viewer themselves (who is also in `participants`).
+    const groupName = within(drawer).getByText("Priya, Sanjay");
+    expect(groupName).toBeInTheDocument();
+    expect(groupName.textContent).not.toContain("you");
     expect(
       within(drawer).getByText(/Invited — connect to join/i)
     ).toBeInTheDocument();
