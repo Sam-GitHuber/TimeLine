@@ -1882,3 +1882,24 @@ class LeaveChatTests(APITestCase):
         self.client.force_authenticate(stranger)
         res = self.client.post(f"/api/conversations/{self.cid}/leave/")
         self.assertEqual(res.status_code, 404)
+
+
+class PromoteOnConnectTests(APITestCase):
+    def test_pending_member_auto_joins_when_last_connection_accepted(self):
+        a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+        Connection.objects.create(requester=a, requestee=b, status="accepted")
+        Connection.objects.create(requester=a, requestee=c, status="accepted")
+        self.client.force_authenticate(a)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [b.id, c.id]}, format="json").data["id"]
+        convo = Conversation.objects.get(id=cid)
+        pending = convo.participants.get(status="pending")  # b or c
+        other_active = convo.participants.exclude(user=a).get(status="active")
+        # The pending one requests the active one; accept it.
+        req = Connection.objects.create(requester=pending.user, requestee=other_active.user, status="pending")
+        self.client.force_authenticate(other_active.user)
+        res = self.client.post(f"/api/connection-requests/{req.id}/approve/")
+        self.assertEqual(res.status_code, 200)
+        convo.refresh_from_db()
+        self.assertEqual(convo.participants.filter(status="active").count(), 3)

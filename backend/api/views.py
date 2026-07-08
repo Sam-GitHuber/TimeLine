@@ -195,6 +195,18 @@ def promote_participants(convo, when):
                 break  # re-derive actives before considering the next one
 
 
+def promote_shared_chats(u1, u2, when):
+    """After u1↔u2 become connected, promote eligible pendings in every chat they
+    both belong to."""
+    shared = Conversation.objects.filter(
+        participants__user=u1, participants__left_at__isnull=True
+    ).filter(
+        participants__user=u2, participants__left_at__isnull=True
+    ).distinct()
+    for convo in shared:
+        promote_participants(convo, when)
+
+
 def must_connect_with(convo, user):
     """Active members ``user`` must still connect with to join (drives the
     locked pending panel + the 'connect with X & Y' prompt)."""
@@ -746,6 +758,7 @@ class ConnectView(APIView):
             # They asked you first — approving it connects you both now.
             existing.status = ACCEPTED
             existing.save(update_fields=["status"])
+            promote_shared_chats(existing.requester, existing.requestee, timezone.now())
             return Response(
                 {"detail": "Connected.", "connection_status": "connected"},
                 status=status.HTTP_200_OK,
@@ -806,6 +819,7 @@ class ConnectionRequestActionView(APIView):
         if self.action == "approve":
             connection.status = ACCEPTED
             connection.save(update_fields=["status"])
+            promote_shared_chats(connection.requester, connection.requestee, timezone.now())
             return Response({"detail": "Approved."}, status=status.HTTP_200_OK)
         connection.delete()
         return Response({"detail": "Rejected."}, status=status.HTTP_200_OK)
