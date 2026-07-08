@@ -1957,6 +1957,24 @@ class GroupChatLifecycleTests(APITestCase):
         p = Participant.objects.get(conversation_id=cid, user=b)
         self.assertIsNotNone(p.left_at)
 
+    def test_admin_removing_another_member_drops_them_from_chats(self):
+        admin = User.objects.create_user(email="admin@x.com", password=PASSWORD)
+        member = User.objects.create_user(email="member@x.com", password=PASSWORD)
+        Connection.objects.create(requester=admin, requestee=member, status="accepted")
+        group = Group.objects.create(name="Fam", creator=admin)
+        GroupMembership.objects.create(group=group, user=admin, role="admin", status="active")
+        GroupMembership.objects.create(group=group, user=member, role="member", status="active")
+        self.client.force_authenticate(admin)
+        cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [member.id], "group_id": group.id}, format="json").data["id"]
+        member_participant = Participant.objects.get(conversation_id=cid, user=member)
+        self.assertIsNone(member_participant.left_at)
+        # Admin removes the member (not a self-leave) — actor stays admin.
+        self.client.delete(f"/api/groups/{group.id}/members/{member.id}/")
+        member_participant.refresh_from_db()
+        self.assertIsNotNone(member_participant.left_at)
+        admin_participant = Participant.objects.get(conversation_id=cid, user=admin)
+        self.assertIsNone(admin_participant.left_at)
+
     def test_deleting_group_cascades_to_its_chats(self):
         a = User.objects.create_user(email="a@x.com", password=PASSWORD)
         b = User.objects.create_user(email="b@x.com", password=PASSWORD)
