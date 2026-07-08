@@ -1449,30 +1449,30 @@ git commit -m "feat(6a): warn before a disconnect/block that removes you from ch
 - Consumes: `useMessaging().openNew`, `api.getGroupMembers`.
 - Produces: a group view has a **Start a chat** button that opens the new-chat picker scoped to that group (`openNew({ groupId, groupName, memberIds })`), so the pool is group members ∩ your connections.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add a test to `frontend/src/groups.test.jsx`: render the group view, click **Start a chat**, assert `openNew` is invoked with the group's id and member ids. Expected: FAIL.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd frontend && npm test -- src/groups.test.jsx`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add a **Start a chat** button to the group view that calls `openNew({ groupId: group.id, groupName: group.name, memberIds })` where `memberIds` comes from `api.getGroupMembers(group.id)`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd frontend && npm test -- src/groups.test.jsx`
 Expected: PASS.
 
-- [ ] **Step 5: Full frontend + backend suites green**
+- [x] **Step 5: Full frontend + backend suites green**
 
 Run: `cd frontend && npm test` then `cd ../backend && uv run python manage.py test api`
 Expected: both PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/src/components/GroupsDrawer.jsx frontend/src/groups.test.jsx
