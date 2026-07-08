@@ -1903,3 +1903,39 @@ class PromoteOnConnectTests(APITestCase):
         self.assertEqual(res.status_code, 200)
         convo.refresh_from_db()
         self.assertEqual(convo.participants.filter(status="active").count(), 3)
+
+
+class SeverTests(APITestCase):
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+        for x, y in [(self.a, self.b), (self.a, self.c), (self.b, self.c)]:
+            Connection.objects.create(requester=x, requestee=y, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.cid = self.client.post(CONVERSATIONS_URL, {"participant_ids": [self.b.id, self.c.id]}, format="json").data["id"]
+
+    def test_disconnect_impact_lists_shared_chat(self):
+        res = self.client.get(f"/api/users/{self.b.id}/disconnect-impact/")
+        self.assertEqual([c["id"] for c in res.data["chats"]], [self.cid])
+
+    def test_disconnect_drops_initiator_to_pending_other_stays(self):
+        self.client.delete(f"/api/users/{self.b.id}/connect/")
+        convo = Conversation.objects.get(id=self.cid)
+        self.assertEqual(convo.participants.get(user=self.a).status, "pending")
+        self.assertEqual(convo.participants.get(user=self.b).status, "active")
+
+    def test_block_pulls_blocker_out_of_shared_chat(self):
+        self.client.post(f"/api/users/{self.b.id}/block/")
+        convo = Conversation.objects.get(id=self.cid)
+        self.assertEqual(convo.participants.get(user=self.a).status, "pending")
+
+    def test_initiator_auto_returns_on_reconnect(self):
+        self.client.delete(f"/api/users/{self.b.id}/connect/")
+        # a re-requests b; b accepts.
+        self.client.post(f"/api/users/{self.b.id}/connect/")
+        req = Connection.objects.get(requester=self.a, requestee=self.b)
+        self.client.force_authenticate(self.b)
+        self.client.post(f"/api/connection-requests/{req.id}/approve/")
+        convo = Conversation.objects.get(id=self.cid)
+        self.assertEqual(convo.participants.get(user=self.a).status, "active")

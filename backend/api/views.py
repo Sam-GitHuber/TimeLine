@@ -195,6 +195,36 @@ def promote_participants(convo, when):
                 break  # re-derive actives before considering the next one
 
 
+def _shared_active_chats(u1, u2):
+    """Conversations where both ``u1`` and ``u2`` are currently active
+    participants — the chats a disconnect/block between them would touch."""
+    return Conversation.objects.filter(
+        participants__user=u1, participants__status=ACTIVE_P, participants__left_at__isnull=True
+    ).filter(
+        participants__user=u2, participants__status=ACTIVE_P, participants__left_at__isnull=True
+    ).distinct()
+
+
+def sever_shared_chats(initiator, other, when):
+    """Drop the ``initiator`` to pending in every chat both are active in.
+
+    Only closes the initiator's interval here — it does *not* re-run
+    ``promote_participants`` itself. The caller must do that only after the
+    ``Connection`` row between initiator and other has actually been deleted:
+    if promotion ran first (or the Connection were still intact), the
+    initiator would still show up in ``connected_user_ids(initiator)`` as
+    connected to ``other`` and would be immediately re-promoted, defeating the
+    whole point of severing. Returns the affected conversations so the caller
+    can re-settle promotion afterwards (for the other, still-connected
+    participants, not the initiator).
+    """
+    convos = list(_shared_active_chats(initiator, other))
+    for convo in convos:
+        p = convo.participants.get(user=initiator)
+        deactivate(p, when)
+    return convos
+
+
 def promote_shared_chats(u1, u2, when):
     """After u1↔u2 become connected, promote eligible pendings in every chat they
     both belong to."""
@@ -774,10 +804,18 @@ class ConnectView(APIView):
 
     def delete(self, request, pk):
         target = self._target(pk)
-        Connection.objects.filter(
-            Q(requester=request.user, requestee=target)
-            | Q(requester=target, requestee=request.user)
-        ).delete()
+        now = timezone.now()
+        with transaction.atomic():
+            # Sever must run — and close the initiator's interval — before the
+            # Connection row is gone; see sever_shared_chats' docstring for why
+            # promotion is deferred until after the delete below.
+            convos = sever_shared_chats(request.user, target, now)
+            Connection.objects.filter(
+                Q(requester=request.user, requestee=target)
+                | Q(requester=target, requestee=request.user)
+            ).delete()
+            for convo in convos:
+                promote_participants(convo, now)
         return Response(
             {"detail": "Removed.", "connection_status": "none"},
             status=status.HTTP_200_OK,
@@ -1400,16 +1438,22 @@ class BlockView(APIView):
                 {"detail": "You can't block yourself."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        now = timezone.now()
         with transaction.atomic():
             Block.objects.get_or_create(
                 blocker=request.user, blocked=target
             )
+            # Sever before the Connection delete — see sever_shared_chats'
+            # docstring for why promotion is deferred until after it.
+            convos = sever_shared_chats(request.user, target, now)
             # Blocking severs any connection — you shouldn't stay "connected"
             # to someone you've blocked.
             Connection.objects.filter(
                 Q(requester=request.user, requestee=target)
                 | Q(requester=target, requestee=request.user)
             ).delete()
+            for convo in convos:
+                promote_participants(convo, now)
         return Response(
             {"detail": "Blocked.", "is_blocked": True},
             status=status.HTTP_200_OK,
@@ -1422,6 +1466,18 @@ class BlockView(APIView):
             {"detail": "Unblocked.", "is_blocked": False},
             status=status.HTTP_200_OK,
         )
+
+
+class DisconnectImpactView(APIView):
+    """``GET /users/<pk>/disconnect-impact/`` — the chats a disconnect or
+    block against this user would drop you out of, so the frontend can warn
+    before the user confirms."""
+
+    def get(self, request, pk):
+        other = get_object_or_404(User, pk=pk)
+        chats = _shared_active_chats(request.user, other)
+        data = [{"id": c.id, "title": c.title, "kind": c.kind} for c in chats]
+        return Response({"chats": data})
 
 
 # --- Groups (Phase 6) ----------------------------------------------------------

@@ -30,6 +30,11 @@ urlpatterns = [
         views.BlockView.as_view(),
         name="user-block",
     ),
+    path(
+        "users/<int:pk>/disconnect-impact/",
+        views.DisconnectImpactView.as_view(),
+        name="disconnect-impact",
+    ),
     # Incoming connection requests (people asking to connect) + approve/reject.
     path(
         "connection-requests/",
