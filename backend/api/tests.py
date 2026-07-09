@@ -486,6 +486,38 @@ class UserListTests(APITestCase):
         visible = {r["id"] for r in resp.data["results"]}
         self.assertEqual(visible, {self.other.pk})
 
+    def test_filter_connected_returns_only_accepted_connections(self):
+        # A mix of relationships: only the accepted one should come back.
+        connected = make_user("friend@example.com")
+        make_connection(self.me, connected, ACCEPTED)
+        pending = make_user("asked@example.com")
+        make_connection(self.me, pending, PENDING)
+        make_user("stranger@example.com")  # no relationship at all
+
+        resp = self.client.get(USERS_URL, {"filter": "connected"})
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r["id"] for r in resp.data["results"]}
+        self.assertEqual(ids, {connected.pk})
+        # `self.other` (from setUp) has no connection, so it's excluded too.
+        self.assertNotIn(self.other.pk, ids)
+
+    def test_filter_discover_excludes_existing_connections(self):
+        # Discover is for finding *new* people, so accepted connections drop off
+        # — but pending/incoming requests stay, to act on there.
+        connected = make_user("friend@example.com")
+        make_connection(self.me, connected, ACCEPTED)
+        pending = make_user("asked@example.com")
+        make_connection(self.me, pending, PENDING)
+
+        resp = self.client.get(USERS_URL, {"filter": "discover"})
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r["id"] for r in resp.data["results"]}
+        self.assertNotIn(connected.pk, ids)  # already connected → hidden
+        self.assertIn(pending.pk, ids)  # request in flight → still shown
+        self.assertIn(self.other.pk, ids)  # a stranger → shown
+
 
 class ProfileGatingTests(APITestCase):
     """Profile posts are private-by-default: only you and your connections can

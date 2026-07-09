@@ -18,8 +18,7 @@ const DRAWERS_DONT_FIT = "(max-width: 799px)";
 import FeedPage from "./pages/FeedPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import ProfileEditPage from "./pages/ProfileEditPage.jsx";
-import FindPeoplePage from "./pages/FindPeoplePage.jsx";
-import RequestsPage from "./pages/RequestsPage.jsx";
+import PeoplePage from "./pages/PeoplePage.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
 import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
@@ -29,8 +28,8 @@ import SignupPage from "./pages/SignupPage.jsx";
 // Route table:
 //   /login, /signup   → public auth pages
 //   /                 → the feed (home timeline)     ┐ require a logged-in user
-//   /people           → find people to connect with  │ (ProtectedRoute gate)
-//   /requests         → incoming connection requests  │
+//   /people           → people hub: Discover + Requests │ (ProtectedRoute gate)
+//   /requests         → legacy → /people?tab=requests    │
 //   /settings         → edit your own profile          │
 //   /u/:id            → a person's profile (by user id) ┘
 // The protected pages render inside Layout, which provides the nav bar (with
@@ -97,8 +96,13 @@ export default function App() {
           }
         >
           <Route index element={<FeedPage />} />
-          <Route path="people" element={<FindPeoplePage />} />
-          <Route path="requests" element={<RequestsPage />} />
+          <Route path="people" element={<PeoplePage />} />
+          {/* Requests folded into the People hub as a tab; the old URL still
+              works, landing on that tab. */}
+          <Route
+            path="requests"
+            element={<Navigate to="/people?tab=requests" replace />}
+          />
           <Route path="settings" element={<ProfileEditPage />} />
           <Route path="u/:id" element={<ProfilePage />} />
           {/* Groups (Phase 6) — the list is a left companion drawer, not a

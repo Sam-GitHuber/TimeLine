@@ -31,6 +31,7 @@ export default function ConnectButton({ userId, displayName, connectionStatus })
       isConnectAction ? api.connect(userId) : api.disconnect(userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
       queryClient.invalidateQueries({ queryKey: ["feed"] });
       queryClient.invalidateQueries({ queryKey: ["user", userId] });
       queryClient.invalidateQueries({ queryKey: ["connectionRequests"] });

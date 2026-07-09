@@ -18,6 +18,8 @@ vi.mock("./api.js", () => ({
     getComments: vi.fn(),
     addComment: vi.fn(),
     listUsers: vi.fn(),
+    listConnections: vi.fn(),
+    listDiscover: vi.fn(),
     getUser: vi.fn(),
     getUserPosts: vi.fn(),
     connect: vi.fn(),
@@ -65,6 +67,8 @@ beforeEach(() => {
   // Sensible empty defaults; individual tests override as needed.
   api.getFeed.mockResolvedValue(page([]));
   api.listUsers.mockResolvedValue(page([]));
+  api.listConnections.mockResolvedValue(page([]));
+  api.listDiscover.mockResolvedValue(page([]));
   api.getUser.mockResolvedValue({
     id: 2,
     display_name: "Priya",
@@ -229,15 +233,52 @@ describe("Profile page", () => {
   });
 });
 
-describe("People page", () => {
+describe("People page — Connections tab (default)", () => {
+  it("lands on your connections and links each through to their profile", async () => {
+    api.listConnections.mockResolvedValue(
+      page([{ id: 2, display_name: "Priya", connection_status: "connected" }])
+    );
+
+    renderAt("/people");
+
+    // Connections is the default tab, so it's what a returning user sees first.
+    expect(
+      screen.getByRole("tab", { name: "Connections" })
+    ).toHaveAttribute("aria-selected", "true");
+    const nameLink = await screen.findByRole("link", { name: "Priya" });
+    expect(nameLink).toHaveAttribute("href", "/u/2");
+    // No Connect/disconnect button clutters the directory.
+    expect(screen.queryByRole("button", { name: "Connected" })).not.toBeInTheDocument();
+  });
+
+  it("offers a way to find people when you have no connections", async () => {
+    const user = userEvent.setup();
+    api.listConnections.mockResolvedValue(page([]));
+    api.listDiscover.mockResolvedValue(
+      page([{ id: 9, display_name: "Sam", connection_status: "none" }])
+    );
+
+    renderAt("/people");
+
+    // The empty state sends you to Discover.
+    await user.click(await screen.findByRole("button", { name: "Find people" }));
+    expect(await screen.findByText("Sam")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Discover" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+  });
+});
+
+describe("People page — Discover tab", () => {
   it("lists other members and sends a connection request on click", async () => {
     const user = userEvent.setup();
-    api.listUsers.mockResolvedValue(
+    api.listDiscover.mockResolvedValue(
       page([{ id: 2, display_name: "Priya", connection_status: "none" }])
     );
     api.connect.mockResolvedValue({ connection_status: "requested" });
 
-    renderAt("/people");
+    renderAt("/people?tab=discover");
 
     await screen.findByText("Priya");
     await user.click(screen.getByRole("button", { name: "Connect" }));
@@ -246,11 +287,11 @@ describe("People page", () => {
   });
 
   it("shows a pending request as 'Requested'", async () => {
-    api.listUsers.mockResolvedValue(
+    api.listDiscover.mockResolvedValue(
       page([{ id: 3, display_name: "Tom", connection_status: "requested" }])
     );
 
-    renderAt("/people");
+    renderAt("/people?tab=discover");
 
     expect(
       await screen.findByRole("button", { name: "Requested" })
@@ -258,11 +299,11 @@ describe("People page", () => {
   });
 
   it("shows an incoming request as 'Approve'", async () => {
-    api.listUsers.mockResolvedValue(
+    api.listDiscover.mockResolvedValue(
       page([{ id: 4, display_name: "Ada", connection_status: "incoming" }])
     );
 
-    renderAt("/people");
+    renderAt("/people?tab=discover");
 
     expect(
       await screen.findByRole("button", { name: "Approve" })
@@ -271,17 +312,17 @@ describe("People page", () => {
 
   it("reaches members past the first page via 'Load more'", async () => {
     const user = userEvent.setup();
-    api.listUsers.mockResolvedValue(
+    api.listDiscover.mockResolvedValue(
       page(
         [{ id: 2, display_name: "Priya", connection_status: "none" }],
-        "http://localhost:8000/api/users/?page=2"
+        "http://localhost:8000/api/users/?filter=discover&page=2"
       )
     );
     api.getPage.mockResolvedValue(
       page([{ id: 3, display_name: "Tom", connection_status: "none" }])
     );
 
-    renderAt("/people");
+    renderAt("/people?tab=discover");
 
     await screen.findByText("Priya");
     // Tom is on page 2 — unreachable before (the bug this fixes) and hidden now.
@@ -311,6 +352,56 @@ describe("Requests page", () => {
     await user.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(api.approveRequest).toHaveBeenCalledWith(55));
+  });
+
+  it("is reachable as a tab within the People hub", async () => {
+    const user = userEvent.setup();
+    api.listConnections.mockResolvedValue(
+      page([{ id: 2, display_name: "Priya", connection_status: "connected" }])
+    );
+    api.getConnectionRequests.mockResolvedValue(
+      page([
+        {
+          id: 55,
+          requester: { id: 3, display_name: "Ada" },
+          created_at: "2026-07-04T08:00:00Z",
+        },
+      ])
+    );
+
+    renderAt("/people");
+
+    // Connections is the default tab: your people show, requests don't.
+    await screen.findByText("Priya");
+    expect(screen.queryByText("Ada")).not.toBeInTheDocument();
+
+    // The Requests tab carries the pending count and reveals the request.
+    await user.click(screen.getByRole("tab", { name: /Requests/ }));
+    expect(await screen.findByText("Ada")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Approve" })
+    ).toBeInTheDocument();
+  });
+
+  it("redirects the legacy /requests URL to the Requests tab", async () => {
+    api.getConnectionRequests.mockResolvedValue(
+      page([
+        {
+          id: 55,
+          requester: { id: 3, display_name: "Ada" },
+          created_at: "2026-07-04T08:00:00Z",
+        },
+      ])
+    );
+
+    renderAt("/requests");
+
+    // The redirect lands on People with the Requests tab active.
+    expect(await screen.findByText("Ada")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Requests/ })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
   });
 
   it("reaches requests past the first page via 'Load more'", async () => {
@@ -349,20 +440,25 @@ describe("Requests page", () => {
 
 describe("Admin link", () => {
   it("shows an Admin link only for staff users", async () => {
+    const user = userEvent.setup();
     renderAt("/", {
       user: { pk: 9, email: "boss@example.com", display_name: "boss", is_staff: true },
     });
-    const adminLink = await screen.findByRole("link", { name: "Admin" });
+    // Admin now lives inside the avatar menu.
+    await user.click(await screen.findByRole("button", { name: "Account menu" }));
+    const adminLink = await screen.findByRole("menuitem", { name: "Admin" });
     expect(adminLink).toHaveAttribute("href", expect.stringContaining("/admin/"));
     expect(adminLink).toHaveAttribute("target", "_blank");
   });
 
   it("hides the Admin link for non-staff users", async () => {
+    const user = userEvent.setup();
     renderAt("/", {
       user: { pk: 10, email: "member@example.com", display_name: "member", is_staff: false },
     });
     await screen.findByText(/your feed is empty/i);
-    expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    expect(screen.queryByRole("menuitem", { name: "Admin" })).not.toBeInTheDocument();
   });
 });
 

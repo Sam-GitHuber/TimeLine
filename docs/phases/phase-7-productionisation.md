@@ -47,6 +47,7 @@ Phases 2–6 — running on the home server, surviving reboots.
       `CSRF_COOKIE_SECURE` / `SESSION_COOKIE_SECURE`, origin settled so the SPA
       can read `csrftoken`
 - [ ] A **documented, repeatable deploy** (ship a new version to the box)
+- [ ] A **continuous deploy added to CI**
 - [ ] Basic **uptime monitoring** + alert
 - [ ] **Terms of Service + privacy policy** published; content-takedown +
       delete-my-data path exists (see Legal / IP in `docs/SHARED.md`)
@@ -101,18 +102,22 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
 - **Exposure = port-forwarding + dynamic DNS (user, 2026-07-05).** Chosen over a
   Cloudflare Tunnel; home-IP-exposure + CGNAT caveats above, Cloudflare Tunnel is
   the documented fallback.
+- **CGNAT check PASSED (2026-07-09).** Public IP (as seen by the internet) ==
+  router WAN IP, so no carrier-grade NAT — inbound port-forwarding is viable, the
+  port-forward + DDNS plan stands, Cloudflare Tunnel fallback not needed. (Home IP
+  is dynamic, hence DDNS.)
 - **Photos on the PC's local disk this phase (user, 2026-07-05).** No paid cloud
   storage until proven; media on a persistent volume with off-box backups, moves
   to S3 in Phase 7b. **The media folder must be in the off-box backup** — one
   aging PC is a single point of failure holding real family photos.
 - **Off-box backups are non-negotiable.** Nightly DB dump + media archive to a
   second device/cloud drive, restore tested once. Also what makes 7b low-risk.
-- **Domain: `timeline.me` (chosen candidate, not yet purchased).** Bare
-  `timeline.com`/`.org`/`.app`/`.social` are taken/unbuyable; as of 2026-07-04
-  raw-`timeline` `.me`/`.family`/`.gallery`/`.house` were available. `.me` reads
-  as "my timeline," reputable ccTLD; `.family` runner-up. ~**$15–20/yr** — check
-  the **renewal** price. Buy from a no-upsell registrar (Cloudflare at-cost /
-  Namecheap), auto-renew + free WHOIS privacy on. Buy any time; re-verify at
-  purchase.
+- **Domain: `your-timeline.net` — PURCHASED (user, 2026-07-09) via Cloudflare
+  Registrar.** Bare `timeline.me` (the earlier chosen candidate) was taken by
+  purchase time, so `your-timeline.net` was registered instead — reputable
+  classic TLD, reads as "*your* timeline." Bought through Cloudflare (at-cost, no
+  upsells), with auto-renew + free WHOIS privacy on (WHOIS privacy matters:
+  domain will resolve to the home public IP). All Caddy / DDNS config targets
+  `your-timeline.net`.
 - **Reverse proxy: Caddy (recommended)** for tiny-config auto-HTTPS + same-origin
   serving; nginx + certbot is the manual alternative.

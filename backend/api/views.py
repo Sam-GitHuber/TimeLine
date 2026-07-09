@@ -722,18 +722,37 @@ class UserPostsView(generics.ListAPIView):
 
 
 class UserListView(generics.ListAPIView):
-    """People to connect with: every other active member, with your status."""
+    """People, with your relationship to each. Two audiences share this list:
+
+    - no filter — every other active member (the raw list the message/group
+      pickers filter client-side for connections),
+    - ``?filter=connected`` — only people you're accepted-connected with (the
+      People hub's **Connections** tab),
+    - ``?filter=discover`` — everyone you're *not* yet connected with (its
+      **Discover** tab), so people already in Connections don't clutter the
+      "find new people" view. Pending/incoming requests still show, so you can
+      act on them there.
+
+    Same serializer and pagination throughout; the filter just narrows the rows,
+    so there's one endpoint to keep in step rather than three.
+    """
 
     serializer_class = UserListSerializer
 
     def get_queryset(self):
         user = self.request.user
-        return (
+        qs = (
             User.objects.filter(is_active=True)
             .exclude(pk=user.pk)
             .annotate(connection_status=connection_status_annotation(user))
             .order_by("first_name", "last_name", "email")
         )
+        filter_ = self.request.query_params.get("filter")
+        if filter_ == "connected":
+            qs = qs.filter(pk__in=connected_user_ids(user))
+        elif filter_ == "discover":
+            qs = qs.exclude(pk__in=connected_user_ids(user))
+        return qs
 
 
 class UserDetailView(generics.RetrieveAPIView):
