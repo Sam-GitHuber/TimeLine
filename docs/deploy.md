@@ -63,6 +63,38 @@ images, and tails the backend log. It **aborts** if `/srv/timeline` isn't mounte
 or `.env.prod` is missing. Migrations + `collectstatic` run automatically in the
 backend entrypoint.
 
+## Going public: dynamic DNS (Cloudflare)
+
+The home connection's public IP changes over time, so a **DDNS updater** keeps the
+Cloudflare A record for `your-timeline.net` pointed at the current IP. The router's
+built-in DDNS doesn't support Cloudflare, so we run a small updater on the box.
+
+One-time setup (on the server):
+
+```bash
+# 1. Config file with the Cloudflare API token (Edit-zone-DNS, scoped to the zone).
+sudo mkdir -p /etc/timeline
+sudo cp deploy/cloudflare-ddns.env.example /etc/timeline/cloudflare-ddns.env
+sudo nano /etc/timeline/cloudflare-ddns.env      # paste the real token
+sudo chmod 600 /etc/timeline/cloudflare-ddns.env
+
+# 2. Test it once by hand — should create/point the A record at the home IP.
+sudo /home/sam/TimeLine/deploy/cloudflare-ddns.sh
+
+# 3. Install + enable the systemd timer (runs at boot + every 5 min).
+sudo cp deploy/cloudflare-ddns.service deploy/cloudflare-ddns.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cloudflare-ddns.timer
+
+# 4. Verify.
+systemctl status cloudflare-ddns.timer --no-pager
+journalctl -u cloudflare-ddns.service --no-pager -n 20
+```
+
+The A record must be **DNS only (grey cloud)**, not Proxied — Caddy needs a direct
+route for its Let's Encrypt challenge, and the domain resolves to the home IP
+(accepted trade-off; WHOIS privacy is on).
+
 ## Everyday operations
 
 ```bash

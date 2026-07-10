@@ -1,0 +1,14 @@
+# systemd timer: run the Cloudflare DDNS updater shortly after boot and every
+# 5 minutes thereafter, so the domain follows the home IP quickly when it changes.
+# Enable: sudo systemctl enable --now cloudflare-ddns.timer
+[Unit]
+Description=Run the TimeLine Cloudflare DDNS updater periodically
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+# If the machine was off when a run was due, run once on the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

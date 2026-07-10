@@ -1,0 +1,12 @@
+# systemd service: run the Cloudflare DDNS updater once.
+# Install: sudo cp deploy/cloudflare-ddns.{service,timer} /etc/systemd/system/
+# (paired with cloudflare-ddns.timer, which triggers it on a schedule).
+[Unit]
+Description=Update Cloudflare DNS to the current public IP (TimeLine DDNS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs the updater from its checked-out location, so `git pull` updates it too.
+ExecStart=/home/sam/TimeLine/deploy/cloudflare-ddns.sh
