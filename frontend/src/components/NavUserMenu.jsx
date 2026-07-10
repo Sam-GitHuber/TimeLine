@@ -13,6 +13,8 @@ export default function NavUserMenu() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
+  const triggerRef = useRef(null);
+  const listRef = useRef(null);
 
   // Close on a click anywhere outside the menu, and on Escape — the two things a
   // user expects of any dropdown. We only wire these up while it's open.
@@ -22,7 +24,12 @@ export default function NavUserMenu() {
       if (menuRef.current && !menuRef.current.contains(e.target)) setOpen(false);
     }
     function onKeyDown(e) {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        setOpen(false);
+        // Return focus to the trigger — Escape should never leave focus
+        // orphaned on a menu that's no longer there.
+        triggerRef.current?.focus();
+      }
     }
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -31,6 +38,33 @@ export default function NavUserMenu() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [open]);
+
+  // On open, move focus into the menu (its first item) so keyboard users land
+  // where they'd expect — the menu-button pattern.
+  useEffect(() => {
+    if (!open) return;
+    const items = listRef.current?.querySelectorAll('[role="menuitem"]');
+    items?.[0]?.focus();
+  }, [open]);
+
+  // Up/Down (and Home/End) cycle focus through the items, the WAI-ARIA menu
+  // pattern; the browser's own Tab order is the fallback.
+  function onMenuKeyDown(e) {
+    const items = Array.from(
+      listRef.current?.querySelectorAll('[role="menuitem"]') ?? []
+    );
+    if (items.length === 0) return;
+    const i = items.indexOf(document.activeElement);
+    let next = null;
+    if (e.key === "ArrowDown") next = items[(i + 1) % items.length];
+    else if (e.key === "ArrowUp")
+      next = items[(i - 1 + items.length) % items.length];
+    else if (e.key === "Home") next = items[0];
+    else if (e.key === "End") next = items[items.length - 1];
+    if (!next) return;
+    e.preventDefault();
+    next.focus();
+  }
 
   // The Django admin lives on the API host, not the SPA — build the link from the
   // same base URL the API client uses so it's correct in every environment.
@@ -54,6 +88,7 @@ export default function NavUserMenu() {
     <div className="relative" ref={menuRef}>
       <button
         type="button"
+        ref={triggerRef}
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -84,6 +119,8 @@ export default function NavUserMenu() {
       {open && (
         <div
           role="menu"
+          ref={listRef}
+          onKeyDown={onMenuKeyDown}
           className="absolute right-0 top-full z-20 mt-2 w-56 overflow-hidden rounded-xl border border-line bg-raised p-1 shadow-lg"
         >
           {user && (

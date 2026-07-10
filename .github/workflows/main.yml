@@ -5,8 +5,9 @@
 #              don't get surprised by SQLite-only behaviour).
 #   frontend — Vitest (React Testing Library).
 #
-# These job names ("backend", "frontend") are the required status checks for
-# branch protection on main — see docs/phases/phase-2-accounts.md.
+# The job names here ("backend", "frontend", "semgrep") plus CodeQL's
+# "Analyze (…)" jobs are the required status checks for branch protection on
+# main — all must pass before a PR can merge.
 name: CI
 
 on: [push, pull_request]
@@ -99,7 +100,7 @@ jobs:
   # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
   # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't
   # ship. Its own job so a finding here is easy to tell apart from a test
-  # failure; not (yet) a required check.
+  # failure; a required check for branch protection on main.
   semgrep:
     runs-on: ubuntu-latest
     steps:

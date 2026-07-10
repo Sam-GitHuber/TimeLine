@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
@@ -32,11 +33,40 @@ export default function PeoplePage() {
   const pendingCount = requestsData?.count ?? 0;
 
   function selectTab(next) {
-    // Connections is the default, so it needs no param — keeps the URL clean.
-    // `replace` so flipping tabs doesn't stack history entries.
-    setSearchParams(next === "connections" ? {} : { tab: next }, {
-      replace: true,
-    });
+    // Merge into whatever's already in the URL rather than replacing it, so a
+    // future `?q=`/scroll param on this page survives a tab switch. Connections
+    // is the default, so it drops the `tab` param entirely — keeps the URL
+    // clean. `replace` so flipping tabs doesn't stack history entries.
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        if (next === "connections") p.delete("tab");
+        else p.set("tab", next);
+        return p;
+      },
+      { replace: true }
+    );
+  }
+
+  // Roving focus for the tablist: Left/Right (and Home/End) move between tabs,
+  // the WAI-ARIA tabs pattern. Only the active tab is in the tab order; the
+  // arrows reach the rest. Moving focus also selects (automatic activation),
+  // which is fine here — switching panels is cheap.
+  const tabRefs = useRef({});
+  function onTabsKeyDown(e) {
+    const idx = TABS.indexOf(tab);
+    let nextIdx = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown")
+      nextIdx = (idx + 1) % TABS.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp")
+      nextIdx = (idx - 1 + TABS.length) % TABS.length;
+    else if (e.key === "Home") nextIdx = 0;
+    else if (e.key === "End") nextIdx = TABS.length - 1;
+    if (nextIdx === null) return;
+    e.preventDefault();
+    const nextTab = TABS[nextIdx];
+    selectTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
   }
 
   return (
@@ -48,23 +78,30 @@ export default function PeoplePage() {
         <div
           role="tablist"
           aria-label="People"
+          onKeyDown={onTabsKeyDown}
           className="mt-3 inline-flex rounded-xl bg-ink/[0.05] p-1"
         >
           <SegmentButton
+            tabKey="connections"
             active={tab === "connections"}
             onClick={() => selectTab("connections")}
+            buttonRef={(el) => (tabRefs.current.connections = el)}
           >
             Connections
           </SegmentButton>
           <SegmentButton
+            tabKey="discover"
             active={tab === "discover"}
             onClick={() => selectTab("discover")}
+            buttonRef={(el) => (tabRefs.current.discover = el)}
           >
             Discover
           </SegmentButton>
           <SegmentButton
+            tabKey="requests"
             active={tab === "requests"}
             onClick={() => selectTab("requests")}
+            buttonRef={(el) => (tabRefs.current.requests = el)}
           >
             Requests
             {pendingCount > 0 && (
@@ -82,23 +119,36 @@ export default function PeoplePage() {
         </div>
       </div>
 
-      {tab === "requests" ? (
-        <RequestsList />
-      ) : tab === "discover" ? (
-        <DiscoverList />
-      ) : (
-        <ConnectionsList onFindPeople={() => selectTab("discover")} />
-      )}
+      {/* Only the active panel is rendered, so a single element carrying the
+          active tab's ids is enough to satisfy the tab↔panel wiring. */}
+      <div
+        role="tabpanel"
+        id={`people-panel-${tab}`}
+        aria-labelledby={`people-tab-${tab}`}
+        tabIndex={0}
+      >
+        {tab === "requests" ? (
+          <RequestsList />
+        ) : tab === "discover" ? (
+          <DiscoverList />
+        ) : (
+          <ConnectionsList onFindPeople={() => selectTab("discover")} />
+        )}
+      </div>
     </div>
   );
 }
 
-function SegmentButton({ active, onClick, children }) {
+function SegmentButton({ tabKey, active, onClick, buttonRef, children }) {
   return (
     <button
       type="button"
       role="tab"
+      id={`people-tab-${tabKey}`}
       aria-selected={active}
+      aria-controls={`people-panel-${tabKey}`}
+      tabIndex={active ? 0 : -1}
+      ref={buttonRef}
       onClick={onClick}
       className={`inline-flex items-center whitespace-nowrap rounded-lg px-4 py-1.5 text-sm font-medium tracking-tight transition ${
         active ? "bg-raised text-ink shadow-sm" : "text-ink-soft hover:text-ink"
