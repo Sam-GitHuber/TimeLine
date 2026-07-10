@@ -75,7 +75,26 @@ services:
     restart: unless-stopped
 
 volumes:
+  # Postgres data + uploaded media live on the 1 TB NVMe "data disk" mounted at
+  # /srv/timeline on the server — NOT the small 250 GB OS SSD. (Docker named
+  # volumes default to /var/lib/docker/volumes on the OS disk, so this has to be
+  # pinned explicitly.) These are "local" volumes bind-mounted to that path, so
+  # `docker inspect` reports the real location and this file records where data
+  # lives. On the server, Docker's systemd unit has RequiresMountsFor=/srv/timeline,
+  # so the whole stack refuses to start if the data disk isn't mounted — it can
+  # never silently write to the OS SSD instead. See phase-7 decisions log.
   postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/timeline/postgres
   media:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/timeline/media
+  # Caddy's TLS certs + state are tiny; fine to leave on the OS disk.
   caddy_data:
   caddy_config:

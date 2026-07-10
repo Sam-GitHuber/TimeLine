@@ -41,7 +41,9 @@ Phases 2–6 — running on the home server, surviving reboots.
       (Let's Encrypt) — verified on mobile data, not wifi
 - [ ] A **reverse proxy (Caddy recommended)** serves SPA + API **same-origin**
       (auto-HTTPS *and* satisfies the CSRF-cookie requirement — see below)
-- [ ] Postgres data + uploaded **media on persistent volumes**
+- [ ] Postgres data + uploaded **media on persistent volumes**, and those
+      volumes live on the **1 TB NVMe** (data disk), **not** the 250 GB SATA
+      SSD that boots the OS — see decisions log below
 - [ ] **Automated nightly backups copied OFF the PC** (DB dump *and* media) with a
       **restore that's been tested**
 - [ ] Secrets in an env file, **not** in the repo
@@ -128,6 +130,39 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   **LAN-test mode**: `SITE_ADDRESS=:80 VITE_API_URL=http://<ip>` for a first run
   before DNS/HTTPS. Still to do on the box: deploy key + clone, real `.env.prod`,
   bring up, prove reboot-survival, then DNS/DDNS + port-forward + external test.
+- **Continuous deploy: manual first, then pull-based via GHCR (user,
+  2026-07-10).** Ordering decision: build and prove a **manual, documented
+  deploy** (a `deploy.sh` run on the box: `git pull` →
+  `docker compose -f docker-compose.prod.yml up -d --build` → migrate) **before**
+  automating — never automate a deploy you haven't run by hand. Once happy,
+  automate with the **pull-based** pattern (chosen over SSH-push): GitHub Actions
+  runs CI on `main`, and if green **builds + pushes an image to GHCR**; a small
+  agent on the box (**Watchtower** or a systemd timer) notices the new image and
+  redeploys. Chosen because the box forwards **only 80/443, not SSH** — CD must
+  be **outbound from the house**, so GitHub can't SSH in. (Rejected alternative:
+  Tailscale-tunnelled SSH push from Actions — cleaner/immediate but puts
+  Tailscale in the deploy critical path; kept as a fallback.) Note: moving to
+  GHCR is a shift from today's "box builds the images itself" — a later step,
+  not needed for the manual deploy.
+- **Data lives on the 1 TB NVMe, not the OS disk (user, 2026-07-10).** The OS
+  boots off the small 250 GB SATA SSD (firmware can't boot NVMe — see hardware
+  note); the 1 TB Samsung 980 NVMe is the **data disk**. Postgres data **and**
+  uploaded media must live on the NVMe, not the OS SSD. Reasons: (1) capacity —
+  real family photos will dwarf 250 GB; (2) don't fill the root/boot disk (a
+  full OS disk takes the whole box down); (3) keeps data on the faster disk.
+  **The catch:** the prod compose file uses Docker *named* volumes
+  (`postgres_data`, `media`, …), which by default live under
+  `/var/lib/docker/volumes` — i.e. on the **OS SSD**. So this doesn't happen for
+  free. Plan (walked through live): partition + format the NVMe (single ext4),
+  mount it at a stable path via `/etc/fstab` (mount **by UUID**, not
+  `/dev/nvme…`, so it survives disk-order changes), then point the DB + media
+  volumes at it — either bind-mount subdirectories of the NVMe mount, or
+  `local` volumes with `driver_opts` `device=`/`o=bind` targeting NVMe paths.
+  `caddy_data`/`caddy_config` are tiny (TLS certs) and can stay on the OS disk.
+  **Verify before inviting anyone:** `docker inspect` the volumes and confirm
+  their mountpoints resolve onto the NVMe, and that a reboot re-mounts it (so the
+  stack doesn't come up writing to the OS disk because the NVMe wasn't mounted
+  yet). Off-box backups (below) still cover both DB and media regardless of disk.
 - **Two-step productionisation (user, 2026-07-05).** Self-host the finished app
   at home first for a cheap, reversible friends/family beta; migrate to AWS
   (Phase 7b) only once proven. Known cost: a one-time home→cloud data migration,
