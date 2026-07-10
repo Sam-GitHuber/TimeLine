@@ -41,8 +41,9 @@ Phases 2–6 — running on the home server, surviving reboots.
       pre-reboot post persisted (see decisions log)
 - [ ] Reachable **from outside the home network** at the domain over **HTTPS**
       (Let's Encrypt) — verified on mobile data, not wifi
-- [ ] A **reverse proxy (Caddy recommended)** serves SPA + API **same-origin**
-      (auto-HTTPS *and* satisfies the CSRF-cookie requirement — see below)
+- [x] A **reverse proxy (Caddy recommended)** serves SPA + API **same-origin**
+      (auto-HTTPS *and* satisfies the CSRF-cookie requirement — see below) —
+      done 2026-07-10: Let's Encrypt cert obtained via HTTP-01, http→https 308
 - [x] Postgres data + uploaded **media on persistent volumes**, and those
       volumes live on the **1 TB NVMe** (data disk), **not** the 250 GB SATA
       SSD that boots the OS — see decisions log below (done 2026-07-10;
@@ -51,9 +52,10 @@ Phases 2–6 — running on the home server, surviving reboots.
       **restore that's been tested**
 - [x] Secrets in an env file, **not** in the repo (`.env.prod`, gitignored,
       mode 600, secrets generated on the box; done 2026-07-10)
-- [ ] Prod cookie hardening: `DJANGO_COOKIE_SECURE=true` +
+- [x] Prod cookie hardening: `DJANGO_COOKIE_SECURE=true` +
       `CSRF_COOKIE_SECURE` / `SESSION_COOKIE_SECURE`, origin settled so the SPA
-      can read `csrftoken`
+      can read `csrftoken` — done 2026-07-10 (flipped from the LAN-test `false`
+      once HTTPS was live; verify login end-to-end on mobile data)
 - [x] A **documented, repeatable deploy** (ship a new version to the box) —
       `deploy/deploy.sh` + runbook `docs/deploy.md` (done 2026-07-10)
 - [ ] A **continuous deploy added to CI**
@@ -136,6 +138,21 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   **LAN-test mode**: `SITE_ADDRESS=:80 VITE_API_URL=http://<ip>` for a first run
   before DNS/HTTPS. Still to do on the box: deploy key + clone, real `.env.prod`,
   bring up, prove reboot-survival, then DNS/DDNS + port-forward + external test.
+- **Live on public HTTPS (2026-07-10).** Port-forwarded **TCP 80 + 443** only
+  (Vodafone Power Hub → Static Port Mapping → `timeline-server`/192.168.1.95);
+  SSH stays LAN-only. Verified port 80 open from the internet via check-host.net
+  nodes (IR/NL/RS/US) *before* flipping HTTPS, so Let's Encrypt would pass first
+  try. Then flipped `.env.prod` to `DJANGO_COOKIE_SECURE=true` +
+  `DJANGO_CORS_ALLOWED_ORIGINS=https://your-timeline.net` (kept the LAN IP in
+  ALLOWED_HOSTS for admin) and redeployed with compose defaults (no
+  SITE_ADDRESS/VITE_API_URL overrides), so the SPA is rebuilt against
+  `https://your-timeline.net` and Caddy serves the apex. Caddy obtained a
+  Let's Encrypt cert via HTTP-01 on the first attempt (`certificate obtained
+  successfully`); `https://your-timeline.net` returns 200 with a browser-trusted
+  cert (issuer Let's Encrypt, ~90-day), `http→https` 308, API 401-gated, and
+  port 443 confirmed open from external nodes. HSTS still off (opt-in) until the
+  site is proven stable. **To roll back to a LAN test:** pass
+  `SITE_ADDRESS=:80 VITE_API_URL=http://192.168.1.95` and set COOKIE_SECURE=false.
 - **Dynamic DNS via Cloudflare API updater (2026-07-10).** Router DDNS
   (DynDNS/No-IP/ChangeIP/Dyn/EasyDNS/ZoneEdit) has no Cloudflare option and the
   domain is on Cloudflare, so DDNS runs on the box: `deploy/cloudflare-ddns.sh`
