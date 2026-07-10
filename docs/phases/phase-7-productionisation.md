@@ -30,9 +30,11 @@ Phases 2–6 — running on the home server, surviving reboots.
 
 ## Definition of done
 
-- [ ] Old PC wiped, running **Ubuntu Server LTS**
-- [ ] Server hardened: non-root user, SSH-key login (passwords off), `ufw`
-      firewall (only 22/80/443), automatic security updates
+- [x] Old PC wiped, running **Ubuntu Server LTS** (Ubuntu 26.04 LTS on the
+      250 GB SATA SSD — see hardware note below)
+- [x] Server hardened: non-root user (`sam`), SSH-key login (passwords off,
+      root SSH off), `ufw` firewall (only 22/80/443), automatic security
+      updates (on by default in 26.04)
 - [ ] **Docker + Compose**; a **production** compose file runs the whole stack
       and **survives a reboot** (restart policies + Docker as a system service)
 - [ ] Reachable **from outside the home network** at the domain over **HTTPS**
@@ -95,6 +97,37 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
 
 ## Notes / decisions log
 
+- **Server hardware + boot gotcha (2026-07-10).** The repurposed spare PC is an
+  **ASUS** box with **two SSDs**: a 250 GB Samsung 840 EVO (SATA) and a 1 TB
+  Samsung 980 (**NVMe**). The **motherboard firmware cannot boot from NVMe** — the
+  980 never appears anywhere in the BIOS (no NVMe config section at all), even with
+  CSM disabled. Linux *uses* the NVMe fine once running; the firmware just can't
+  *start* from it. Symptom was three installs that completed but produced no
+  `ubuntu` boot entry. **Resolution: OS on the 250 GB SATA SSD** (the only bootable
+  disk; Windows on it was wiped), **1 TB NVMe reserved for data/media** — not yet
+  partitioned/mounted (a later step). Also: the install must be **UEFI** (CSM
+  **disabled**) — a CSM/legacy install produced a non-bootable drive. Verify UEFI by
+  the presence of a `/boot/efi` (EFI System Partition) at the storage-summary step.
+- **Server access facts (2026-07-10).** Hostname `timeline-server`, admin user
+  `sam`, current LAN IP `192.168.1.95` (**DHCP lease — still needs a router
+  reservation for stability before port-forwarding**). Mac connects via `ssh
+  timeline-server` (ed25519 key, passphrase in macOS Keychain; `~/.ssh/config`
+  alias). Guided-LVM "100 GB quirk" hit again — root LV expanded to fill the disk.
+- **Production stack built (2026-07-10).** Added alongside the dev stack (dev
+  untouched): `docker-compose.prod.yml` (project name `timeline-prod` so its
+  volumes can't collide with dev's), a **Caddy** `web` service (`deploy/Caddyfile`
+  + `deploy/web.Dockerfile`) that builds the SPA and serves it **same-origin** with
+  the API (auto-HTTPS via `SITE_ADDRESS`), backend on **gunicorn** + **WhiteNoise**
+  (`backend/entrypoint.prod.sh`: migrate → collectstatic → gunicorn), and prod
+  security settings in `settings.py` (secure cookies, `SECURE_PROXY_SSL_HEADER`,
+  opt-in HSTS) — all gated so dev/CI (DEBUG on / DEBUG-off-in-tests) are unaffected.
+  Persistent volumes: `postgres_data`, `media`, `caddy_data/config`. Secrets in
+  `.env.prod` (gitignored; template `.env.prod.example`). **Verified end-to-end
+  locally** (SPA, API 401-gating, admin, WhiteNoise static, CSRF `Secure` cookie,
+  security headers) and full 167-test backend suite green with prod settings.
+  **LAN-test mode**: `SITE_ADDRESS=:80 VITE_API_URL=http://<ip>` for a first run
+  before DNS/HTTPS. Still to do on the box: deploy key + clone, real `.env.prod`,
+  bring up, prove reboot-survival, then DNS/DDNS + port-forward + external test.
 - **Two-step productionisation (user, 2026-07-05).** Self-host the finished app
   at home first for a cheap, reversible friends/family beta; migrate to AWS
   (Phase 7b) only once proven. Known cost: a one-time home→cloud data migration,

@@ -1,0 +1,38 @@
+# Caddy reverse proxy for the TimeLine production stack (Phase 7 home-server beta).
+#
+# One origin serves the whole app, which is what keeps the SPA and API same-origin
+# (so the CSRF cookie is readable — see phase-7 CSRF note). Caddy also gets and
+# renews HTTPS certificates automatically from Let's Encrypt.
+#
+# SITE_ADDRESS controls the site + TLS behaviour, set in docker-compose.prod.yml:
+#   your-timeline.net   → public domain, automatic Let's Encrypt HTTPS
+#   :80                 → plain HTTP, no certs (handy for first LAN test before DNS)
+{$SITE_ADDRESS:your-timeline.net} {
+	# Compress responses. zstd/gzip are widely supported by browsers.
+	encode zstd gzip
+
+	# API, Django admin, and Django's own static files (admin + DRF browsable
+	# API, served by WhiteNoise inside gunicorn) → the backend container.
+	@backend path /api/* /admin/* /static/*
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	# User-uploaded media (post photos, avatars) → served straight off the shared
+	# media volume mounted at /srv/media. Filenames are UUIDs (see api/imaging.py)
+	# so URLs can't be guessed by walking ids. (Private/signed media is Phase 7b.)
+	@media path /media/*
+	handle @media {
+		root * /srv
+		file_server
+	}
+
+	# Everything else is the compiled React single-page app. Unknown paths fall
+	# back to index.html so client-side routes (e.g. /u/5, /settings) survive a
+	# page refresh or a shared deep link.
+	handle {
+		root * /srv/app
+		try_files {path} /index.html
+		file_server
+	}
+}
