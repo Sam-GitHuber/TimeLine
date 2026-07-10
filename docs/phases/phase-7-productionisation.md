@@ -1,11 +1,22 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
-**Status:** not started
+**Status:** in progress — **the app is LIVE on public HTTPS** at
+https://your-timeline.net (home server, 2026-07-10). 9/15 DoD items done.
 
-> **When we start this phase, walk the user through it step by step.** They are
-> new to servers/hosting and want simple, one-thing-at-a-time guidance. That
-> hand-holding happens live — it is deliberately **not** written out here, to
-> keep this doc short. This file records *what* and *why*, not the keystrokes.
+> **RESUME HERE (next session).** The core is done: the site is deployed on the
+> box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
+> a Let's Encrypt cert (verified on mobile data). **Remaining, in priority order:**
+> 1. **Off-box backups + a tested restore** ← do first; protects real data.
+> 2. **`/security-review`** and fix findings.
+> 3. **ToS + privacy policy + delete-my-data / takedown path.**
+> 4. Continuous deploy in CI (pull-based via GHCR — decided, see log), uptime
+>    monitoring, monthly cost note.
+>
+> **Hard gate:** do NOT invite real friends/family until 1–3 are done.
+> **Live-work reminder:** the user is new to servers — walk each box step
+> one-thing-at-a-time, live; this doc records *what/why*, not keystrokes.
+> Operational how-to (deploy, ops, DDNS) is in `docs/deploy.md`.
+> The box runs from branch **`phase-7-home-deploy`** (PR open to `main`).
 
 ## Goal
 
