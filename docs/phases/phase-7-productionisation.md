@@ -39,8 +39,9 @@ Phases 2–6 — running on the home server, surviving reboots.
       and **survives a reboot** (restart policies + Docker as a system service)
       — proven 2026-07-10: hard reboot, all 3 containers auto-restarted, a
       pre-reboot post persisted (see decisions log)
-- [ ] Reachable **from outside the home network** at the domain over **HTTPS**
-      (Let's Encrypt) — verified on mobile data, not wifi
+- [x] Reachable **from outside the home network** at the domain over **HTTPS**
+      (Let's Encrypt) — verified on mobile data, not wifi (done 2026-07-10:
+      https://your-timeline.net loads + login works from a phone off wifi)
 - [x] A **reverse proxy (Caddy recommended)** serves SPA + API **same-origin**
       (auto-HTTPS *and* satisfies the CSRF-cookie requirement — see below) —
       done 2026-07-10: Let's Encrypt cert obtained via HTTP-01, http→https 308
