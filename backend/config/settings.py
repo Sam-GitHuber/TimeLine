@@ -98,6 +98,10 @@ AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # WhiteNoise serves collected static files (admin + DRF browsable API) in
+    # production; it must sit directly after SecurityMiddleware. Harmless in dev
+    # (Django's staticfiles app still serves them there via runserver).
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     # CORS must come before CommonMiddleware so it can add headers to responses.
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -183,6 +187,11 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 
+# Where `collectstatic` gathers Django's own static files (admin, DRF browsable
+# API) in production so WhiteNoise can serve them. Unused by the dev runserver,
+# which serves them straight from each app — so this is harmless in dev.
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
 # User-uploaded files (post photos, avatars — Phase 4).
 # In development these live in a local folder (bind-mounted / gitignored) and are
 # served by Django (see config/urls.py, DEBUG-only). Production will move them to
@@ -214,7 +223,14 @@ else:
 STORAGES = {
     "default": _default_storage,
     "staticfiles": {
-        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        # Dev: plain storage (runserver serves straight from the apps). Prod:
+        # WhiteNoise's compressed, hash-manifested storage — long-cache-friendly
+        # filenames + gzip/brotli, built by `collectstatic`.
+        "BACKEND": (
+            "django.contrib.staticfiles.storage.StaticFilesStorage"
+            if DEBUG
+            else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+        ),
     },
 }
 
@@ -307,5 +323,31 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 
 # Cross-origin (Vite :5173 → Django :8000) unsafe requests must have their
-# Origin trusted for Django's CSRF check. Same allowlist as CORS.
+# Origin trusted for Django's CSRF check. Same allowlist as CORS. In the
+# same-origin production setup (Caddy serves SPA + API on one domain), this is
+# set to https://your-timeline.net via DJANGO_CORS_ALLOWED_ORIGINS.
 CSRF_TRUSTED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
+
+
+# --- Production security -------------------------------------------------------
+# Everything below only bites with DEBUG off (the home-server/prod deploy) — dev
+# stays plain HTTP. Behind Caddy, which terminates TLS and forwards the original
+# scheme in this header, so Django's request.is_secure() reports HTTPS correctly.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# Send the session + CSRF cookies only over HTTPS in production. Mirrors the JWT
+# cookie's DJANGO_COOKIE_SECURE (defaults to "on unless DEBUG"). The CSRF cookie
+# deliberately stays readable by JS (not httpOnly) so the SPA can echo it back in
+# the X-CSRFToken header — see the Phase 2 CSRF note in phase-7 docs.
+SESSION_COOKIE_SECURE = env_bool("DJANGO_COOKIE_SECURE", default=not DEBUG)
+CSRF_COOKIE_SECURE = env_bool("DJANGO_COOKIE_SECURE", default=not DEBUG)
+
+# HSTS tells browsers "only ever reach this domain over HTTPS". Opt-in via env,
+# default OFF: during the beta a certificate hiccup shouldn't hard-lock the domain
+# to HTTPS in visitors' browsers. Once stable, raise DJANGO_HSTS_SECONDS to e.g.
+# 2592000 (30 days), then 31536000 (1 year), before considering preload.
+SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool(
+    "DJANGO_HSTS_INCLUDE_SUBDOMAINS", default=False
+)
+SECURE_HSTS_PRELOAD = env_bool("DJANGO_HSTS_PRELOAD", default=False)

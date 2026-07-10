@@ -1,0 +1,81 @@
+# TimeLine PRODUCTION stack (Phase 7 home-server beta).
+#
+# Differs from docker-compose.yml (dev) in the ways that matter for a real,
+# internet-facing deployment:
+#   - backend runs gunicorn (not runserver) and has NO bind-mounted source
+#   - a Caddy "web" service terminates HTTPS and serves SPA + API same-origin
+#   - Postgres port is NOT published to the host (only reachable inside the stack)
+#   - persistent named volumes for DB data, uploaded media, and TLS certs
+#   - restart: unless-stopped everywhere, so the stack comes back after a reboot
+#
+# Bring it up on the server with:
+#   docker compose -f docker-compose.prod.yml up -d --build
+# Secrets live in .env.prod (created on the server, never committed).
+
+# Distinct project name so this stack's containers, network, and named volumes
+# (DB data, media, certs) are fully isolated from the dev stack's — they can't
+# accidentally share a Postgres volume even on a machine that runs both.
+name: timeline-prod
+
+services:
+  db:
+    image: postgres:16
+    # All Postgres + Django config comes from the server-only secrets file.
+    env_file: .env.prod
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-timeline} -d ${POSTGRES_DB:-timeline}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    # Production startup: wait for DB, migrate, collectstatic, run gunicorn.
+    command: ["bash", "/app/entrypoint.prod.sh"]
+    env_file: .env.prod
+    environment:
+      # The DB is reachable as "db" on the compose network, always on 5432.
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+    volumes:
+      # Uploaded media persists here and is shared (read-only) with Caddy.
+      - media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+      args:
+        # Baked into the SPA at build time (Vite inlines it). Same-origin as the
+        # site so the CSRF cookie is readable. Override for LAN testing.
+        VITE_API_URL: ${VITE_API_URL:-https://your-timeline.net}
+    environment:
+      # Caddy reads this to decide the site address + TLS. Default: the public
+      # domain (auto-HTTPS). For a first LAN test set SITE_ADDRESS=:80.
+      SITE_ADDRESS: ${SITE_ADDRESS:-your-timeline.net}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Serve uploaded media straight off the shared volume (read-only).
+      - media:/srv/media:ro
+      # Caddy's certificates + state persist so it isn't re-issuing on every boot.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  media:
+  caddy_data:
+  caddy_config:

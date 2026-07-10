@@ -14,6 +14,13 @@ dependencies = [
     "django-storages>=1.14",
     "djangorestframework>=3.17.1",
     "djangorestframework-simplejwt>=5.3",
+    # gunicorn: the production WSGI app server (replaces Django's dev `runserver`
+    # in the Phase 7 prod stack). Dev still uses runserver via entrypoint.sh.
+    "gunicorn>=23.0",
+    # WhiteNoise: lets gunicorn serve Django's own static files (admin + DRF
+    # browsable API) efficiently in production, so we don't need a separate
+    # static server for them. User-uploaded media is served by Caddy, not this.
+    "whitenoise>=6.7",
     # Pillow: image validation + thumbnail/downscale for post photos & avatars
     # (Phase 4). We decode every upload with it rather than trusting the
     # extension, and re-encode to strip EXIF (incl. GPS) — see api/imaging.py.

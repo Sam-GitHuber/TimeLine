@@ -132,6 +132,8 @@ celerybeat.pid
 
 # Environments
 .env
+# Production secrets file (the committed template is .env.prod.example).
+.env.prod
 .venv
 env/
 venv/
