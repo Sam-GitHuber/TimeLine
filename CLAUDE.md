@@ -103,9 +103,18 @@ the group page. Polling unchanged. A dev-only `seed_demo` management command
 rebuilds a full demo world. Backend 147 + frontend 98 tests pass. See
 `docs/phases/phase-6a-group-messaging.md`.
 
-**Phase 7 (self-hosted home-server beta) is next** — productionisation on a home
-server (real domain/TLS, backups, private/signed media, hardening). It's already
-detailed; review its doc and confirm scope with the user before building.
+**Phase 7 (self-hosted home-server beta) — in progress; the app is LIVE on
+public HTTPS.** As of 2026-07-10 it's deployed on the wiped home PC and reachable
+from outside at https://your-timeline.net (Caddy + Let's Encrypt, verified on
+mobile data): prod compose on the box, reboot-survival proven, Postgres+media on
+the 1 TB NVMe (`/srv/timeline`), DHCP reservation, Cloudflare DDNS, ports 80/443
+forwarded, secure cookies, `deploy/deploy.sh` + `docs/deploy.md` runbook. 9/15
+DoD done. **Remaining (priority order): off-box backups + tested restore →
+`/security-review` → ToS/privacy + delete-my-data → CI auto-deploy (pull/GHCR),
+uptime monitoring, cost note.** Hard gate: no real invites until backups,
+security-review, and ToS/privacy are done. Box runs from branch
+`phase-7-home-deploy`. See `docs/phases/phase-7-productionisation.md` (top has a
+"RESUME HERE" block) and `docs/deploy.md`.
 
 Keep this line current: update it whenever a phase starts or finishes, but keep
 the detail in the phase docs, not here.
