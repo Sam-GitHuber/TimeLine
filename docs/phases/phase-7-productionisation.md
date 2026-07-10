@@ -136,6 +136,17 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   **LAN-test mode**: `SITE_ADDRESS=:80 VITE_API_URL=http://<ip>` for a first run
   before DNS/HTTPS. Still to do on the box: deploy key + clone, real `.env.prod`,
   bring up, prove reboot-survival, then DNS/DDNS + port-forward + external test.
+- **Dynamic DNS via Cloudflare API updater (2026-07-10).** Router DDNS
+  (DynDNS/No-IP/ChangeIP/Dyn/EasyDNS/ZoneEdit) has no Cloudflare option and the
+  domain is on Cloudflare, so DDNS runs on the box: `deploy/cloudflare-ddns.sh`
+  (+ systemd `.service`/`.timer`, every 5 min) creates/updates the apex A record
+  when the public IPv4 changes, DNS-only (grey cloud) so Caddy can do the
+  Let's Encrypt HTTP challenge. Token in `/etc/timeline/cloudflare-ddns.env`
+  (root:600, off-repo). **IPv6 gotcha:** the box is dual-stack, so
+  `cloudflare.com/cdn-cgi/trace` first returned the *IPv6* address — pinned the
+  lookup to `curl -4` since we publish an A record and port-forward IPv4. Result:
+  `your-timeline.net` → `83.105.127.9` (the home IPv4), resolving publicly.
+  Apex only for now; `www` deferred.
 - **First real deploy + reboot-survival PROVEN on the box (2026-07-10).** Cloned
   the repo to `~/TimeLine`, generated `.env.prod` on the box (secrets never left
   the server; mode 600), brought the prod stack up in **LAN-test mode**
