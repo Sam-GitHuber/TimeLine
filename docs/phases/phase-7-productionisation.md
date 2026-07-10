@@ -43,7 +43,7 @@ Phases 2–6 — running on the home server, surviving reboots.
 
 - [x] Old PC wiped, running **Ubuntu Server LTS** (Ubuntu 26.04 LTS on the
       250 GB SATA SSD — see hardware note below)
-- [x] Server hardened: non-root user (`sam`), SSH-key login (passwords off,
+- [x] Server hardened: dedicated non-root user, SSH-key login (passwords off,
       root SSH off), `ufw` firewall (only 22/80/443), automatic security
       updates (on by default in 26.04)
 - [x] **Docker + Compose**; a **production** compose file runs the whole stack
@@ -129,10 +129,10 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   partitioned/mounted (a later step). Also: the install must be **UEFI** (CSM
   **disabled**) — a CSM/legacy install produced a non-bootable drive. Verify UEFI by
   the presence of a `/boot/efi` (EFI System Partition) at the storage-summary step.
-- **Server access facts (2026-07-10).** Hostname `timeline-server`, admin user
-  `sam`, LAN IP `192.168.1.95` (**router DHCP reservation set 2026-07-10** —
+- **Server access facts (2026-07-10).** Hostname `timeline-server`, a dedicated
+  non-root admin user, LAN IP `192.168.1.95` (**router DHCP reservation set 2026-07-10** —
   Settings → Local Network → Static DHCPv4 on the Vodafone Power Hub, binding
-  MAC `38:2c:4a:bc:67:f4` → `192.168.1.95`; interface `enp3s0`). Mac connects via `ssh
+  the box's NIC MAC → `192.168.1.95`; interface `enp3s0`). Mac connects via `ssh
   timeline-server` (ed25519 key, passphrase in macOS Keychain; `~/.ssh/config`
   alias). Guided-LVM "100 GB quirk" hit again — root LV expanded to fill the disk.
 - **Production stack built (2026-07-10).** Added alongside the dev stack (dev
@@ -174,7 +174,7 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   (root:600, off-repo). **IPv6 gotcha:** the box is dual-stack, so
   `cloudflare.com/cdn-cgi/trace` first returned the *IPv6* address — pinned the
   lookup to `curl -4` since we publish an A record and port-forward IPv4. Result:
-  `your-timeline.net` → `83.105.127.9` (the home IPv4), resolving publicly.
+  `your-timeline.net` → the home IPv4, resolving publicly.
   Apex only for now; `www` deferred.
 - **First real deploy + reboot-survival PROVEN on the box (2026-07-10).** Cloned
   the repo to `~/TimeLine`, generated `.env.prod` on the box (secrets never left
@@ -196,7 +196,7 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   this is the DHCP-lease instability already flagged — a lease change silently
   breaks inbound access and every diagnosis starts by chasing a "dead" box
   that's actually fine. **Fixed same session:** router DHCP reservation set
-  (MAC `38:2c:4a:bc:67:f4` → `192.168.1.95`) so the IP is now stable before
+  (NIC MAC → `192.168.1.95`) so the IP is now stable before
   port-forwarding. Also note:
   don't panic-diagnose a reboot as a wipe-induced boot failure until the console
   is checked — the SATA install booted fine; the NVMe wipe was irrelevant.

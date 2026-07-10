@@ -28,7 +28,9 @@ auth=(-H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/j
 #    Cloudflare rather than trusting a random third-party "what's my IP" site.
 #    Force IPv4 (-4): the box also has IPv6, and without this the trace returns
 #    the IPv6 address — but we publish an A (IPv4) record and port-forward IPv4.
-current_ip=$(curl -4 -fsS https://cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2}')
+#    Use the www host (not the apex): it's Cloudflare-fronted and won't 301, so
+#    `curl -f` (no -L) can't fail on an apex→www redirect.
+current_ip=$(curl -4 -fsS https://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2}')
 if [[ ! "$current_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "ERROR: could not determine public IPv4 (got: '${current_ip}')" >&2
   exit 1

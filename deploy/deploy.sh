@@ -34,6 +34,21 @@ main() {
     exit 1
   fi
 
+  # Safety 3: the compose file bind-mounts Postgres/media to these subdirs of the
+  # data disk. Docker's local bind driver does NOT create them — a fresh bring-up
+  # would fail with "no such file or directory". They're a one-time, root-owned
+  # `sudo mkdir` (see docs/deploy.md); check here rather than mkdir, since this
+  # script runs as an unprivileged user and can't create dirs on the root-owned
+  # mount.
+  for dir in "$DATA_MOUNT/postgres" "$DATA_MOUNT/media"; do
+    if [[ ! -d "$dir" ]]; then
+      echo "ERROR: data directory $dir does not exist." >&2
+      echo "       Create it once: sudo mkdir -p $DATA_MOUNT/{postgres,media}" >&2
+      echo "       (See docs/deploy.md — 'One-time server setup'.)" >&2
+      exit 1
+    fi
+  done
+
   echo "==> Pulling latest code ($(git rev-parse --abbrev-ref HEAD))..."
   git pull --ff-only
 

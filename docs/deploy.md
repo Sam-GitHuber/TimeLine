@@ -4,7 +4,7 @@ The repeatable runbook for the Phase 7 home server. The *why* behind these
 choices lives in `docs/phases/phase-7-productionisation.md`; this file is the
 *how*.
 
-**The box:** ASUS PC, hostname `timeline-server`, admin user `sam`, reached over
+**The box:** ASUS PC, hostname `timeline-server`, a dedicated non-root admin user, reached over
 SSH on the LAN (`ssh timeline-server`). OS on the 250 GB SATA SSD; **all app data
 (Postgres + media) on the 1 TB NVMe mounted at `/srv/timeline`**.
 
@@ -33,7 +33,19 @@ guard (`RequiresMountsFor=/srv/timeline`). What remains for a fresh checkout:
 
    `.env.prod` is gitignored and must **never** be committed.
 
-3. **First bring-up.** Two modes:
+3. **Create the data directories on the NVMe.** The prod compose file bind-mounts
+   Postgres and media to `/srv/timeline/postgres` and `/srv/timeline/media`.
+   Docker's bind driver won't create these — the first bring-up fails with "no
+   such file or directory" if they're missing. Make them once (root-owned; the
+   Postgres and backend containers manage their own contents):
+
+   ```bash
+   sudo mkdir -p /srv/timeline/{postgres,media}
+   ```
+
+   `deploy/deploy.sh` refuses to run if either is missing.
+
+4. **First bring-up.** Two modes:
 
    - **LAN test first (recommended)** — plain HTTP on the LAN IP, no domain/TLS
      yet, so you can confirm the app works before wiring DNS. Set these in
@@ -79,7 +91,7 @@ sudo nano /etc/timeline/cloudflare-ddns.env      # paste the real token
 sudo chmod 600 /etc/timeline/cloudflare-ddns.env
 
 # 2. Test it once by hand — should create/point the A record at the home IP.
-sudo /home/sam/TimeLine/deploy/cloudflare-ddns.sh
+sudo ~/TimeLine/deploy/cloudflare-ddns.sh
 
 # 3. Install + enable the systemd timer (runs at boot + every 5 min).
 sudo cp deploy/cloudflare-ddns.service deploy/cloudflare-ddns.timer /etc/systemd/system/
