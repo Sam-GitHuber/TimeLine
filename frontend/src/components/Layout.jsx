@@ -1,12 +1,12 @@
-import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, CONVERSATION_LIST_POLL_MS } from "../api.js";
-import { useAuth } from "../auth.jsx";
 import { useMediaQuery } from "../hooks.js";
 import { useMessaging } from "../messaging.jsx";
 import { useGroupsDrawer } from "../groups-drawer.jsx";
 import MessagesDrawer from "./MessagesDrawer.jsx";
 import GroupsDrawer from "./GroupsDrawer.jsx";
+import NavUserMenu from "./NavUserMenu.jsx";
 
 // The app shell: a top nav plus whichever page is active (<Outlet />).
 //
@@ -14,8 +14,6 @@ import GroupsDrawer from "./GroupsDrawer.jsx";
 // from the real API (via TanStack Query), so Layout no longer owns any posts
 // state — it just provides the chrome and the logged-in user's nav links.
 export default function Layout() {
-  const { user, logout } = useAuth();
-  const navigate = useNavigate();
   const messaging = useMessaging();
   const groupsDrawer = useGroupsDrawer();
 
@@ -67,22 +65,8 @@ export default function Layout() {
   });
   const unreadMessages = unreadData?.count ?? 0;
 
-  // The Django admin lives on the API host, not the SPA — build the link from
-  // the same base URL the API client uses so it's correct in every environment.
-  const adminUrl = `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/admin/`;
-
-  async function handleLogout() {
-    try {
-      await logout();
-    } finally {
-      // Even if the network call fails, send them to login — clicking logout
-      // should never leave you seemingly still logged in.
-      navigate("/login", { replace: true });
-    }
-  }
-
   const navLinkClass = ({ isActive }) =>
-    `rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
+    `whitespace-nowrap rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
       isActive
         ? "bg-ink/[0.06] text-ink"
         : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
@@ -121,8 +105,12 @@ export default function Layout() {
               <NavLink to="/" end className={navLinkClass}>
                 Feed
               </NavLink>
+              {/* People is now the relationships hub: Discover + a Requests
+                  tab. The pending-request count rides here (it used to be its
+                  own nav item) so "someone needs your attention" still shows. */}
               <NavLink to="/people" className={navLinkClass}>
                 People
+                {pendingCount > 0 && <NavBadge count={pendingCount} />}
               </NavLink>
               {/* Groups is a companion panel too — the mirror of Messages,
                   docked to the left edge. The button toggles the drawer; picking
@@ -131,18 +119,14 @@ export default function Layout() {
                 type="button"
                 onClick={toggleGroups}
                 aria-pressed={groupsDrawer.isOpen}
-                className={`rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
+                className={`whitespace-nowrap rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
                   groupsDrawer.isOpen
                     ? "bg-ink/[0.06] text-ink"
                     : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
                 }`}
               >
                 Groups
-                {groupInviteCount > 0 && (
-                  <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
-                    {groupInviteCount}
-                  </span>
-                )}
+                {groupInviteCount > 0 && <NavBadge count={groupInviteCount} />}
               </button>
               {/* Messages is a companion panel, not a page — the button toggles
                   the drawer so you keep your place in the feed. */}
@@ -150,52 +134,18 @@ export default function Layout() {
                 type="button"
                 onClick={toggleMessages}
                 aria-pressed={messaging.isOpen}
-                className={`rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
+                className={`whitespace-nowrap rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
                   messaging.isOpen
                     ? "bg-ink/[0.06] text-ink"
                     : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
                 }`}
               >
                 Messages
-                {unreadMessages > 0 && (
-                  <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
-                    {unreadMessages}
-                  </span>
-                )}
+                {unreadMessages > 0 && <NavBadge count={unreadMessages} />}
               </button>
-              <NavLink to="/requests" className={navLinkClass}>
-                Requests
-                {pendingCount > 0 && (
-                  <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
-                    {pendingCount}
-                  </span>
-                )}
-              </NavLink>
-              {user && (
-                <NavLink to={`/u/${user.pk}`} className={navLinkClass}>
-                  Profile
-                </NavLink>
-              )}
-              {/* Maintainer-only: the admin lives on the backend, so this is a
-                  plain external link (new tab). Visibility is cosmetic — Django
-                  enforces staff access server-side. */}
-              {user?.is_staff && (
-                <a
-                  href={adminUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="rounded-xl px-3 py-1.5 text-sm font-medium text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep"
-                >
-                  Admin
-                </a>
-              )}
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="rounded-xl px-3 py-1.5 text-sm font-medium text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep"
-              >
-                Log out
-              </button>
+              {/* Profile, Settings, Admin and Log out — all "about me" — live
+                  behind the avatar so they don't crowd the destinations. */}
+              <NavUserMenu />
             </div>
           </nav>
         </header>
@@ -211,5 +161,16 @@ export default function Layout() {
       <GroupsDrawer />
       <MessagesDrawer />
     </div>
+  );
+}
+
+// The small accent count pill on a nav item (pending requests, group invites,
+// unread messages). `inline-flex` inside a `whitespace-nowrap` item so it stays
+// on the same line as its label — the crowding used to break it onto its own.
+function NavBadge({ count }) {
+  return (
+    <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
+      {count}
+    </span>
   );
 }

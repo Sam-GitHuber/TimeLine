@@ -186,6 +186,16 @@ export const api = {
   // People to connect with — everyone else, each with your connection_status.
   listUsers: () => request("/api/users/"),
 
+  // Just the people you're already connected with — the People hub's
+  // "Connections" tab, a quick directory to reach a friend's profile. Same
+  // shape as listUsers (so pagination/rows are identical), narrowed server-side.
+  listConnections: () => request("/api/users/?filter=connected"),
+
+  // People you're *not* yet connected with — the "Discover" tab. Excludes your
+  // existing connections (they live on the Connections tab), so Discover stays a
+  // "find new people" view. Pending/incoming requests still appear here.
+  listDiscover: () => request("/api/users/?filter=discover"),
+
   getUser: (id) => request(`/api/users/${id}/`),
 
   getUserPosts: (id) => request(`/api/users/${id}/posts/`),

@@ -137,7 +137,9 @@ describe("Login flow", () => {
     renderApp("/");
     await screen.findByPlaceholderText("What's happening?");
 
-    await user.click(screen.getByRole("button", { name: "Log out" }));
+    // Log out now lives behind the avatar menu, so open that first.
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Log out" }));
 
     expect(api.logout).toHaveBeenCalled();
     expect(
