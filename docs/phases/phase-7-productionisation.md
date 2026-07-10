@@ -35,22 +35,27 @@ Phases 2–6 — running on the home server, surviving reboots.
 - [x] Server hardened: non-root user (`sam`), SSH-key login (passwords off,
       root SSH off), `ufw` firewall (only 22/80/443), automatic security
       updates (on by default in 26.04)
-- [ ] **Docker + Compose**; a **production** compose file runs the whole stack
+- [x] **Docker + Compose**; a **production** compose file runs the whole stack
       and **survives a reboot** (restart policies + Docker as a system service)
+      — proven 2026-07-10: hard reboot, all 3 containers auto-restarted, a
+      pre-reboot post persisted (see decisions log)
 - [ ] Reachable **from outside the home network** at the domain over **HTTPS**
       (Let's Encrypt) — verified on mobile data, not wifi
 - [ ] A **reverse proxy (Caddy recommended)** serves SPA + API **same-origin**
       (auto-HTTPS *and* satisfies the CSRF-cookie requirement — see below)
-- [ ] Postgres data + uploaded **media on persistent volumes**, and those
+- [x] Postgres data + uploaded **media on persistent volumes**, and those
       volumes live on the **1 TB NVMe** (data disk), **not** the 250 GB SATA
-      SSD that boots the OS — see decisions log below
+      SSD that boots the OS — see decisions log below (done 2026-07-10;
+      `docker volume inspect` confirms both pinned to `/srv/timeline`)
 - [ ] **Automated nightly backups copied OFF the PC** (DB dump *and* media) with a
       **restore that's been tested**
-- [ ] Secrets in an env file, **not** in the repo
+- [x] Secrets in an env file, **not** in the repo (`.env.prod`, gitignored,
+      mode 600, secrets generated on the box; done 2026-07-10)
 - [ ] Prod cookie hardening: `DJANGO_COOKIE_SECURE=true` +
       `CSRF_COOKIE_SECURE` / `SESSION_COOKIE_SECURE`, origin settled so the SPA
       can read `csrftoken`
-- [ ] A **documented, repeatable deploy** (ship a new version to the box)
+- [x] A **documented, repeatable deploy** (ship a new version to the box) —
+      `deploy/deploy.sh` + runbook `docs/deploy.md` (done 2026-07-10)
 - [ ] A **continuous deploy added to CI**
 - [ ] Basic **uptime monitoring** + alert
 - [ ] **Terms of Service + privacy policy** published; content-takedown +
@@ -130,6 +135,29 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   **LAN-test mode**: `SITE_ADDRESS=:80 VITE_API_URL=http://<ip>` for a first run
   before DNS/HTTPS. Still to do on the box: deploy key + clone, real `.env.prod`,
   bring up, prove reboot-survival, then DNS/DDNS + port-forward + external test.
+- **First real deploy + reboot-survival PROVEN on the box (2026-07-10).** Cloned
+  the repo to `~/TimeLine`, generated `.env.prod` on the box (secrets never left
+  the server; mode 600), brought the prod stack up in **LAN-test mode**
+  (`SITE_ADDRESS=:80 VITE_API_URL=http://192.168.1.95`, `DJANGO_COOKIE_SECURE=false`
+  — all three *temporary* for plain HTTP; flip for HTTPS). Verified SPA 200, API
+  401-gated, admin 302, WhiteNoise static 200, and both data volumes pinned to
+  `/srv/timeline` on the NVMe. Created the first superuser. Then hard-rebooted:
+  the NVMe re-mounted via fstab, Docker (guarded by `RequiresMountsFor`)
+  restarted all three containers unattended, and a post made *before* the reboot
+  was still present in the DB and in the browser. Reboot-survival + NVMe
+  persistence done.
+- **Gotcha: box "unreachable" for ~minutes after reboot = slow DHCP, not a crash
+  (2026-07-10).** After the reboot the box was un-pingable at 192.168.1.95 and no
+  host on the subnet answered SSH, which *looked* like a boot failure — but the
+  console showed a normal login prompt and `ip a` showed it *did* have .95; the
+  network simply came up late (link/DHCP negotiation after the login prompt).
+  It became reachable a few minutes later on its own. **Lesson + action item:**
+  this is the DHCP-lease instability already flagged — **set a router DHCP
+  reservation (or static IP) for the box's MAC (`38:2c:4a:bc:67:f4`) BEFORE
+  port-forwarding**, otherwise a lease change silently breaks inbound access and
+  every diagnosis starts by chasing a "dead" box that's actually fine. Also note:
+  don't panic-diagnose a reboot as a wipe-induced boot failure until the console
+  is checked — the SATA install booted fine; the NVMe wipe was irrelevant.
 - **Continuous deploy: manual first, then pull-based via GHCR (user,
   2026-07-10).** Ordering decision: build and prove a **manual, documented
   deploy** (a `deploy.sh` run on the box: `git pull` →
