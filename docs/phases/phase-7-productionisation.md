@@ -116,8 +116,9 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   **disabled**) — a CSM/legacy install produced a non-bootable drive. Verify UEFI by
   the presence of a `/boot/efi` (EFI System Partition) at the storage-summary step.
 - **Server access facts (2026-07-10).** Hostname `timeline-server`, admin user
-  `sam`, current LAN IP `192.168.1.95` (**DHCP lease — still needs a router
-  reservation for stability before port-forwarding**). Mac connects via `ssh
+  `sam`, LAN IP `192.168.1.95` (**router DHCP reservation set 2026-07-10** —
+  Settings → Local Network → Static DHCPv4 on the Vodafone Power Hub, binding
+  MAC `38:2c:4a:bc:67:f4` → `192.168.1.95`; interface `enp3s0`). Mac connects via `ssh
   timeline-server` (ed25519 key, passphrase in macOS Keychain; `~/.ssh/config`
   alias). Guided-LVM "100 GB quirk" hit again — root LV expanded to fill the disk.
 - **Production stack built (2026-07-10).** Added alongside the dev stack (dev
@@ -151,11 +152,12 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   host on the subnet answered SSH, which *looked* like a boot failure — but the
   console showed a normal login prompt and `ip a` showed it *did* have .95; the
   network simply came up late (link/DHCP negotiation after the login prompt).
-  It became reachable a few minutes later on its own. **Lesson + action item:**
-  this is the DHCP-lease instability already flagged — **set a router DHCP
-  reservation (or static IP) for the box's MAC (`38:2c:4a:bc:67:f4`) BEFORE
-  port-forwarding**, otherwise a lease change silently breaks inbound access and
-  every diagnosis starts by chasing a "dead" box that's actually fine. Also note:
+  It became reachable a few minutes later on its own. **Lesson:**
+  this is the DHCP-lease instability already flagged — a lease change silently
+  breaks inbound access and every diagnosis starts by chasing a "dead" box
+  that's actually fine. **Fixed same session:** router DHCP reservation set
+  (MAC `38:2c:4a:bc:67:f4` → `192.168.1.95`) so the IP is now stable before
+  port-forwarding. Also note:
   don't panic-diagnose a reboot as a wipe-induced boot failure until the console
   is checked — the SATA install booted fine; the NVMe wipe was irrelevant.
 - **Continuous deploy: manual first, then pull-based via GHCR (user,
