@@ -152,19 +152,20 @@ docker compose -f docker-compose.prod.yml exec -T db \
 find /srv/timeline/media -type f | wc -l
 ```
 
-Now restore the latest backup into scratch targets and verify:
+Now restore the latest backup into scratch targets and verify. Setting
+`TARGET_DB` alone is enough — the media dir defaults to a matching scratch path
+(`/srv/timeline/restore-<TARGET_DB>-media`), so there's no way to forget it and
+accidentally overwrite live media:
 
 ```bash
-TARGET_DB=timeline_restore_test \
-TARGET_MEDIA_DIR=/srv/timeline/restore-test-media \
-  ./deploy/restore.sh latest
+TARGET_DB=timeline_restore_test ./deploy/restore.sh latest
 ```
 
 It prints the restored **user count** and **media file count** at the end —
 they should match the live numbers above. Spot-check a restored image too:
 
 ```bash
-ls -R /srv/timeline/restore-test-media | head
+ls -R /srv/timeline/restore-timeline_restore_test-media | head
 ```
 
 Clean up the scratch copies:
@@ -172,7 +173,7 @@ Clean up the scratch copies:
 ```bash
 docker compose -f docker-compose.prod.yml exec -T db \
   sh -c 'dropdb -U "$POSTGRES_USER" timeline_restore_test'
-rm -rf /srv/timeline/restore-test-media
+rm -rf /srv/timeline/restore-timeline_restore_test-media
 ```
 
 Re-run this test occasionally (e.g. monthly) — backups rot silently otherwise.
@@ -183,6 +184,13 @@ Re-run this test occasionally (e.g. monthly) — backups rot silently otherwise.
 
 Only when live data is actually lost/corrupt. This **overwrites** the live DB
 and media and asks you to type a confirmation phrase.
+
+The script **stops the app** (`backend` + `web`) for the duration so nothing
+writes to the database while `pg_restore` is dropping and recreating objects,
+then brings it back up automatically once the restore succeeds. `db` stays up
+(the restore runs through it). If the restore aborts partway, the app is left
+stopped on purpose — the script prints the `docker compose … up -d` command to
+bring it back once you've resolved the problem.
 
 On a rebuilt box, first do the normal deploy setup (`docs/deploy.md`) so the
 stack + rclone config exist, then:

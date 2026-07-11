@@ -106,9 +106,12 @@ main() {
   # Off-site media-archive (changed/deleted files) older than its window.
   rclone delete "${RCLONE_REMOTE}media-archive/" --min-age "${MEDIA_ARCHIVE_KEEP_DAYS}d" || true
   rclone rmdirs "${RCLONE_REMOTE}media-archive/" --leave-root || true
-  # Local staged dumps: keep the newest LOCAL_KEEP, delete the rest.
+  # Local staged dumps: keep the newest LOCAL_KEEP, delete the rest. The
+  # trailing `|| true` matters: under `set -o pipefail`, if the glob ever
+  # matches nothing `ls` exits non-zero and would abort the script here —
+  # skipping the success healthcheck ping below and faking a backup failure.
   # shellcheck disable=SC2012
-  ls -1t "$LOCAL_STAGE"/db-*.dump 2>/dev/null | tail -n +"$((LOCAL_KEEP + 1))" | xargs -r rm -f
+  ls -1t "$LOCAL_STAGE"/db-*.dump 2>/dev/null | tail -n +"$((LOCAL_KEEP + 1))" | xargs -r rm -f || true
 
   # --- 5. Success signal ----------------------------------------------------
   # Only pinged on full success (this line is only reached if nothing above
