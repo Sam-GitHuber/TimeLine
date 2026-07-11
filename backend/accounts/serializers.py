@@ -1,7 +1,9 @@
+from allauth.account.adapter import get_adapter
 from dj_rest_auth.registration.serializers import RegisterSerializer
 from dj_rest_auth.serializers import (
     UserDetailsSerializer as BaseUserDetailsSerializer,
 )
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from api.imaging import (
@@ -10,6 +12,8 @@ from api.imaging import (
     process_avatar,
     save_avatar,
 )
+
+User = get_user_model()
 
 # A comfortable cap for a short "about me" — enough for a sentence or two,
 # bounded so it can't be used to dump unbounded text into the DB.
@@ -55,7 +59,25 @@ class CustomRegisterSerializer(RegisterSerializer):
         data["last_name"] = self.validated_data.get("last_name", "")
         return data
 
+    def validate_email(self, email):
+        # Account-enumeration hardening: deliberately do NOT reveal whether an
+        # email is already registered (the default raises a distinct "already
+        # registered" error, which lets anyone probe who has an account here —
+        # a real privacy leak for a members-only app). We only normalise the
+        # address; a duplicate is handled *silently* in save(), which returns
+        # the exact same "pending approval" response as a genuinely new sign-up.
+        return get_adapter().clean_email(email)
+
     def save(self, request):
+        email = self.validated_data.get("email", "")
+        if email and User.objects.filter(email__iexact=email).exists():
+            # The email is taken. Pretend the sign-up succeeded without creating
+            # or touching any account, so the response is indistinguishable from
+            # a new sign-up. Run a throwaway password hash first so this path
+            # takes about as long as the real one — otherwise the response time
+            # would itself be a reliable "does this email exist?" oracle.
+            User().set_password(self.validated_data.get("password1", ""))
+            return None
         user = super().save(request)
         # Pending approval: no one gets in without the maintainer's say-so.
         user.is_active = False

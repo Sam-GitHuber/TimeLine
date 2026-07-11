@@ -4,6 +4,10 @@ from . import views
 
 urlpatterns = [
     path("hello", views.hello, name="hello"),
+    # Authorization check for Caddy's forward_auth on /media/* (Phase 7).
+    # Returns 204 only for a logged-in, active member; Caddy serves the file
+    # only on that 2xx, so uploaded media isn't world-readable.
+    path("media-auth/", views.media_auth, name="media-auth"),
     # Timeline
     path("feed/", views.FeedView.as_view(), name="feed"),
     path("posts/", views.PostCreateView.as_view(), name="post-create"),

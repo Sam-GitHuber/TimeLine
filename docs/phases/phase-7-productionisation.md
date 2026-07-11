@@ -11,8 +11,12 @@ https://your-timeline.net (home server, 2026-07-10). 10/15 DoD items done.
 >    (systemd timer enabled, next run confirmed); the **tested restore passed on
 >    the box with real data** — DB user counts matched and uploaded images
 >    restored byte-for-byte (matching MD5s). Runbook `docs/backup-restore.md`.
-> 2. **`/security-review`** and fix findings.
-> 3. **ToS + privacy policy + delete-my-data / takedown path.**
+> 2. **`/security-review`** — DONE (2026-07-11). Review run; no HIGH. Three gaps
+>    fixed on branch `phase-7-security-hardening` (auth-gated media via Caddy
+>    `forward_auth`, LAN-only admin, sign-up enumeration hardening) — tests green.
+>    **Left: merge, deploy, then run the on-box verification checklist** (see the
+>    decisions-log entry) before ticking the DoD box.
+> 3. **ToS + privacy policy + delete-my-data / takedown path.**  ← next
 > 4. Continuous deploy in CI (pull-based via GHCR — decided, see log), uptime
 >    monitoring, monthly cost note.
 >
@@ -296,3 +300,40 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   root-owned `600` file is unreadable); (3) the restore's scratch media dir now
   defaults under **`LOCAL_STAGE`** (deploy-user-owned) instead of directly under
   root-owned `/srv/timeline`, where the non-root `mkdir` failed.
+- **Security review run + hardening landed (2026-07-11).** Ran a full-application
+  review (not a diff — everything's on `main`). Finding: the app layer is solid
+  (centralised connection/block/membership gates, session-derived authors, 404-not-
+  403 existence hiding, validate-by-decoding uploads with EXIF/SVG stripped, httpOnly
+  JWT + CSRF, fail-safe DEBUG/SECRET_KEY). **No HIGH.** Fixed the three real gaps on
+  branch `phase-7-security-hardening` (tests + ruff + bandit green, Caddyfile
+  `caddy validate`d):
+  1. **Uploaded media was world-readable** — Caddy served `/media/*` off disk with
+     no auth (only an unguessable UUID URL protected real family photos; no expiry,
+     no revocation). Chose **auth-only gating** (user's call): Caddy `forward_auth`s
+     every media request to a new backend endpoint `GET /api/media-auth/`, which
+     returns 204 only for a logged-in **active** member (SimpleJWT already rejects a
+     deactivated user's token, so a banned member's saved URLs stop resolving). A
+     leaked URL is now useless to a logged-out stranger. **Deferred to 7b:** full
+     *per-author connection* gating (a logged-in member could still fetch a photo
+     whose UUID they already hold) — accepted for a small closed beta; UUID stays a
+     second layer.
+  2. **Django admin was internet-facing** — restricted `/admin/` in Caddy to LAN +
+     loopback (`remote_ip` allow-list), public internet gets 403. **Deliberately
+     fail-closed:** the allow-list *excludes* Docker's own bridge range
+     (172.16.0.0/12), so if published-port NAT ever presented the bridge gateway as
+     the source IP instead of the real client, admin would lock out *everyone* (caught
+     instantly) rather than silently open to the world. Remote admin while away = SSH
+     to the box (`manage.py`) or an SSH tunnel. Added Caddy JSON access logging so the
+     source-IP behaviour is verifiable.
+  3. **Account enumeration at sign-up** — a duplicate email gave a distinct error,
+     letting anyone probe who has an account. Now a taken email returns the *identical*
+     "pending approval" 201 as a fresh sign-up (silent no-op in the serializer, with a
+     throwaway password hash to equalise timing); the existing account is never
+     touched.
+
+  **On-box verification still required after merge + deploy (then tick the DoD box):**
+  (a) media URL loads for a logged-in member and returns 401/403 in a logged-out/
+  private-window request; (b) `/admin/` opens from the LAN and **403s from mobile
+  data** (proves `remote_ip` sees real client IPs, i.e. the fail-closed exclusion
+  didn't just block everything); (c) sign-up with an existing email still returns the
+  generic pending-approval message.
