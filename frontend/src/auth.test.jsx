@@ -166,6 +166,8 @@ describe("Sign-up flow", () => {
       screen.getByLabelText("Confirm password"),
       "correcthorsebattery"
     );
+    // Must agree to the Terms + Privacy Policy before the button enables.
+    await user.click(screen.getByRole("checkbox"));
     await user.click(screen.getByRole("button", { name: "Sign up" }));
 
     expect(await screen.findByText(/pending approval/i)).toBeInTheDocument();
@@ -173,12 +175,38 @@ describe("Sign-up flow", () => {
       "new@example.com",
       "correcthorsebattery",
       "New",
-      "Member"
+      "Member",
+      true
     );
     // A pending account is not logged in — no feed.
     expect(
       screen.queryByPlaceholderText("What's happening?")
     ).not.toBeInTheDocument();
+  });
+
+  it("won't submit until the terms are accepted", async () => {
+    const user = userEvent.setup();
+    api.getCurrentUser.mockRejectedValue(new Error("401"));
+
+    renderApp("/signup");
+
+    await user.type(await screen.findByLabelText("First name"), "New");
+    await user.type(screen.getByLabelText("Last name"), "Member");
+    await user.type(screen.getByLabelText("Email"), "new@example.com");
+    await user.type(screen.getByLabelText("Password"), "correcthorsebattery");
+    await user.type(
+      screen.getByLabelText("Confirm password"),
+      "correcthorsebattery"
+    );
+
+    // Consent unticked → the button is disabled and nothing is sent.
+    expect(screen.getByRole("button", { name: "Sign up" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+    expect(api.register).not.toHaveBeenCalled();
+
+    // Tick it → the button enables.
+    await user.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("button", { name: "Sign up" })).toBeEnabled();
   });
 
   it("blocks submission when the passwords don't match", async () => {
@@ -192,9 +220,24 @@ describe("Sign-up flow", () => {
     await user.type(screen.getByLabelText("Email"), "new@example.com");
     await user.type(screen.getByLabelText("Password"), "one-password");
     await user.type(screen.getByLabelText("Confirm password"), "different");
+    await user.click(screen.getByRole("checkbox"));
     await user.click(screen.getByRole("button", { name: "Sign up" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/don't match/i);
     expect(api.register).not.toHaveBeenCalled();
+  });
+
+  it("reaches the Terms and Privacy pages (public, before login)", async () => {
+    api.getCurrentUser.mockRejectedValue(new Error("401"));
+
+    renderApp("/terms");
+    expect(
+      await screen.findByRole("heading", { name: "Terms of Service" })
+    ).toBeInTheDocument();
+
+    renderApp("/privacy");
+    expect(
+      await screen.findByRole("heading", { name: "Privacy Policy" })
+    ).toBeInTheDocument();
   });
 });

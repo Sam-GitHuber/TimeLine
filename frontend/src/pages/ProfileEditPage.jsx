@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
+import DeleteAccountSection from "../components/DeleteAccountSection.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 
@@ -180,6 +181,8 @@ export default function ProfileEditPage() {
           </button>
         </div>
       </form>
+
+      <DeleteAccountSection />
     </div>
   );
 }

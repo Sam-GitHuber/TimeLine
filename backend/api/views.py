@@ -58,6 +58,7 @@ from .serializers import (
     MessageCreateSerializer,
     MessageSerializer,
     PostSerializer,
+    ReportCreateSerializer,
     UserListSerializer,
 )
 
@@ -1973,3 +1974,108 @@ class GroupInviteActionView(APIView):
             return Response({"detail": "Joined."}, status=status.HTTP_200_OK)
         invite.delete()
         return Response({"detail": "Declined."}, status=status.HTTP_200_OK)
+
+
+# --- Content reports (Phase 7 — takedown path) ---------------------------------
+
+
+class ReportCreateView(generics.CreateAPIView):
+    """Flag a post or comment for the maintainer (``POST /api/reports/``).
+
+    Any logged-in member can raise a report; the reporter is the session user
+    (never the body). The report just records the flag — the maintainer reviews
+    it in the Django admin (where the reported post/comment is moderatable) and
+    removes the content if warranted. Returns 201 with the created report.
+    """
+
+    serializer_class = ReportCreateSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(reporter=self.request.user)
+
+
+# --- Account deletion (Phase 7 — delete-my-data path) --------------------------
+
+
+def delete_account(user):
+    """Hard-delete ``user`` and everything of theirs, safely and in one txn.
+
+    "Delete my data" for real (UK GDPR erasure): the account and its posts,
+    comments, messages, connections, memberships, blocks and reports all go.
+    Three things a naive ``user.delete()`` gets wrong, handled here:
+
+    1. **Media files.** The cascade drops ``PostImage``/avatar *rows* but leaves
+       the actual JPEGs on disk/in storage. We delete the files explicitly first
+       (their DB rows then cascade with the user).
+    2. **Last-admin groups.** A group outlives its members (``Group.creator`` is
+       SET_NULL, admin memberships CASCADE), so deleting a group's *only* admin
+       would leave it ungovernable. If other active members remain, we promote
+       the longest-standing one to admin before leaving.
+    3. **Emptied groups.** A group the user was the sole active member of becomes
+       memberless — dead space — so we delete it (and its avatar files) outright.
+
+    Everything runs in a transaction: either the account and all its traces go,
+    or nothing does.
+    """
+    my_active_memberships = list(
+        GroupMembership.objects.filter(
+            user=user, status=ACTIVE
+        ).select_related("group")
+    )
+
+    # File deletes aren't transactional, but they're safe to do first: we only
+    # reach here to delete the account, and an already-removed file just no-ops.
+    for img in PostImage.objects.filter(post__author=user):
+        img.image.delete(save=False)
+        img.thumbnail.delete(save=False)
+    user.avatar.delete(save=False)
+    user.avatar_thumb.delete(save=False)
+
+    with transaction.atomic():
+        groups_to_delete = []
+        for m in my_active_memberships:
+            others = GroupMembership.objects.filter(
+                group_id=m.group_id, status=ACTIVE
+            ).exclude(user=user)
+            if not others.exists():
+                # The user is this group's only active member — it dies with them.
+                groups_to_delete.append(m.group_id)
+                continue
+            # Sole admin of a group others are still in → hand the keys over to
+            # the longest-standing remaining member so the group stays governable.
+            if m.role == ADMIN and _active_admin_count(m.group_id) <= 1:
+                heir = others.order_by("created_at", "id").first()
+                heir.role = ADMIN
+                heir.save(update_fields=["role"])
+
+        # Delete the account. Cascades: posts (+ image rows), comments, sent
+        # messages, 1:1 conversations, chat participations, connections, blocks,
+        # read markers, group memberships, reports made.
+        user.delete()
+
+        # Now-memberless groups: remove them and their avatar files. Their posts
+        # (all by the departed sole member) and image files are already gone.
+        for group in Group.objects.filter(id__in=groups_to_delete):
+            group.avatar.delete(save=False)
+            group.avatar_thumb.delete(save=False)
+            group.delete()
+
+
+class DeleteAccountView(APIView):
+    """Delete your own account and all your data (``POST /api/account/delete/``).
+
+    Irreversible, so it's **password-reconfirmed**: the body must carry the
+    caller's current ``password``. This guards against a one-click mistake or an
+    unattended/hijacked session doing something unrecoverable — the same reason a
+    bank asks again before a transfer. On success everything is torn down (see
+    ``delete_account``) and 204 is returned; the client then clears its session.
+    """
+
+    def post(self, request):
+        password = request.data.get("password", "")
+        if not request.user.check_password(password):
+            raise ValidationError(
+                {"password": ["Password is incorrect."]}
+            )
+        delete_account(request.user)
+        return Response(status=status.HTTP_204_NO_CONTENT)

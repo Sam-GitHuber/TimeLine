@@ -139,4 +139,12 @@ urlpatterns = [
         views.GroupInviteActionView.as_view(action="reject"),
         name="group-invite-reject",
     ),
+    # Report a post/comment for the maintainer to review (Phase 7 takedown path).
+    path("reports/", views.ReportCreateView.as_view(), name="report-create"),
+    # Delete your own account + all your data (Phase 7 delete-my-data path).
+    path(
+        "account/delete/",
+        views.DeleteAccountView.as_view(),
+        name="account-delete",
+    ),
 ]

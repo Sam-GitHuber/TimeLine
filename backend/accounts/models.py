@@ -42,6 +42,14 @@ class User(AbstractUser):
         upload_to=avatar_thumb_upload_to, null=True, blank=True
     )
 
+    # When this person accepted the Terms of Service + privacy policy (Phase 7).
+    # Stamped at sign-up (registration is gated on ticking the box) — a defensible
+    # record of consent, which we need as a data controller under UK GDPR. Nullable
+    # because accounts created before this existed (e.g. the maintainer's own,
+    # created via createsuperuser) won't have it; a NULL means "no recorded
+    # acceptance", not "accepted at the epoch".
+    tos_accepted_at = models.DateTimeField(null=True, blank=True)
+
     objects = UserManager()
 
     def __str__(self):

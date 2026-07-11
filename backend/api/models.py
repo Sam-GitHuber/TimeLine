@@ -466,6 +466,76 @@ class ParticipantInterval(models.Model):
         return f"{self.participant_id}: {self.started_at} → {self.ended_at or '…'}"
 
 
+class Report(models.Model):
+    """A member's report of a post or comment for the maintainer to review
+    (Phase 7 — content-takedown path).
+
+    Required before inviting real people: as an operator we need a way for
+    someone to flag content they believe infringes copyright or shouldn't be
+    here, and for the maintainer to act on it (see the Legal / IP notes in
+    docs/SHARED.md). The report just *records the flag*; removal is a manual
+    admin action — the maintainer reads the reported item in the Django admin
+    (where posts and comments are already moderatable) and deletes it if
+    warranted, then marks the report resolved.
+
+    A report targets **exactly one** of a post or a comment (a DB check
+    constraint enforces the xor). ``reporter`` is CASCADE: if someone deletes
+    their account their open reports go with them (the flag was theirs to make).
+    The target FKs are CASCADE too — once the content is gone the report has done
+    its job.
+    """
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        RESOLVED = "resolved", "Resolved"
+        DISMISSED = "dismissed", "Dismissed"
+
+    reporter = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="reports_made",
+    )
+    post = models.ForeignKey(
+        Post,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="reports",
+    )
+    comment = models.ForeignKey(
+        Comment,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="reports",
+    )
+    reason = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=9,
+        choices=Status.choices,
+        default=Status.OPEN,
+        db_index=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            # Exactly one target: a report is about a post XOR a comment.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(post__isnull=False, comment__isnull=True)
+                    | models.Q(post__isnull=True, comment__isnull=False)
+                ),
+                name="report_targets_exactly_one",
+            ),
+        ]
+
+    def __str__(self):
+        target = self.post_id and f"post #{self.post_id}" or f"comment #{self.comment_id}"
+        return f"report #{self.pk} on {target} ({self.status})"
+
+
 class Group(models.Model):
     """A private, invite-only shared space with its own timeline (Phase 6).
 

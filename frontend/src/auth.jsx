@@ -56,8 +56,8 @@ export function AuthProvider({ children }) {
 
   // register does NOT log you in — new accounts are pending admin approval.
   const register = useCallback(
-    (email, password, firstName, lastName) =>
-      api.register(email, password, firstName, lastName),
+    (email, password, firstName, lastName, acceptTerms) =>
+      api.register(email, password, firstName, lastName, acceptTerms),
     []
   );
 

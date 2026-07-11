@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import CommentThread from "./CommentThread.jsx";
 import Lightbox from "./Lightbox.jsx";
+import ReportButton from "./ReportButton.jsx";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
 // A single post as an entry on the timeline: a node on the line, its clock time
@@ -112,7 +113,7 @@ export default function PostCard({ post }) {
           />
         )}
 
-        <div className="mt-3 -ml-2">
+        <div className="mt-3 -ml-2 flex items-center gap-3">
           <button
             type="button"
             onClick={() => setShowComments((v) => !v)}
@@ -121,6 +122,9 @@ export default function PostCard({ post }) {
           >
             {showComments ? "Hide comments" : "Comments"}
           </button>
+          <span className="text-sm font-medium text-ink-faint">
+            <ReportButton postId={post.id} authorId={author.id} />
+          </span>
         </div>
 
         {showComments && <CommentThread postId={post.id} />}
