@@ -40,8 +40,12 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 # forgotten var must NOT silently restore media over live — that would defeat a
 # "test". Derive a scratch media dir from the DB name instead, so a test that
 # only overrides the DB stays entirely off production.
+#
+# It lives under LOCAL_STAGE (the deploy user owns that, on the NVMe data disk) —
+# NOT directly under /srv/timeline, which is root-owned and would make `mkdir`
+# fail for the non-root deploy user this script runs as.
 if [[ -n "${TARGET_DB:-}" && -z "${TARGET_MEDIA_DIR:-}" ]]; then
-  TARGET_MEDIA_DIR="/srv/timeline/restore-${TARGET_DB}-media"
+  TARGET_MEDIA_DIR="${LOCAL_STAGE:-/srv/timeline/backups}/restore-${TARGET_DB}-media"
 fi
 TARGET_MEDIA_DIR="${TARGET_MEDIA_DIR:-/srv/timeline/media}"
 

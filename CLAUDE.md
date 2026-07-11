@@ -108,11 +108,13 @@ public HTTPS.** As of 2026-07-10 it's deployed on the wiped home PC and reachabl
 from outside at https://your-timeline.net (Caddy + Let's Encrypt, verified on
 mobile data): prod compose on the box, reboot-survival proven, Postgres+media on
 the 1 TB NVMe (`/srv/timeline`), DHCP reservation, Cloudflare DDNS, ports 80/443
-forwarded, secure cookies, `deploy/deploy.sh` + `docs/deploy.md` runbook. 9/15
-DoD done. **Remaining (priority order): off-box backups + tested restore →
-`/security-review` → ToS/privacy + delete-my-data → CI auto-deploy (pull/GHCR),
-uptime monitoring, cost note.** Hard gate: no real invites until backups,
-security-review, and ToS/privacy are done. See
+forwarded, secure cookies, `deploy/deploy.sh` + `docs/deploy.md` runbook. 10/15
+DoD done. **Nightly off-box backups are LIVE** (encrypted to Cloudflare R2 via
+`rclone crypt`, systemd timer) with a **restore tested on the box** (DB counts
+matched, media restored byte-for-byte) — see `docs/backup-restore.md`.
+**Remaining (priority order): `/security-review` → ToS/privacy + delete-my-data
+→ CI auto-deploy (pull/GHCR), uptime monitoring, cost note.** Hard gate: no real
+invites until security-review and ToS/privacy are done. See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 

@@ -1,17 +1,16 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
 **Status:** in progress — **the app is LIVE on public HTTPS** at
-https://your-timeline.net (home server, 2026-07-10). 9/15 DoD items done.
+https://your-timeline.net (home server, 2026-07-10). 10/15 DoD items done.
 
 > **RESUME HERE (next session).** The core is done: the site is deployed on the
 > box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
 > a Let's Encrypt cert (verified on mobile data). **Remaining, in priority order:**
-> 1. **Off-box backups + a tested restore** ← tooling BUILT (2026-07-11:
->    `deploy/backup.sh`/`restore.sh` + systemd timer → encrypted Cloudflare R2;
->    runbook `docs/backup-restore.md`; dump/restore pipeline validated locally).
->    **Remaining = run it ON THE BOX**: R2 bucket + `rclone crypt` setup, first
->    backup, install the timer, then the **tested restore** into a scratch
->    DB/dir. This item is not done until that restore passes on the box.
+> 1. ~~Off-box backups + a tested restore~~ **DONE (2026-07-11, on the box).**
+>    Nightly encrypted backups to Cloudflare R2 via `rclone crypt` are live
+>    (systemd timer enabled, next run confirmed); the **tested restore passed on
+>    the box with real data** — DB user counts matched and uploaded images
+>    restored byte-for-byte (matching MD5s). Runbook `docs/backup-restore.md`.
 > 2. **`/security-review`** and fix findings.
 > 3. **ToS + privacy policy + delete-my-data / takedown path.**
 > 4. Continuous deploy in CI (pull-based via GHCR — decided, see log), uptime
@@ -64,8 +63,10 @@ Phases 2–6 — running on the home server, surviving reboots.
       volumes live on the **1 TB NVMe** (data disk), **not** the 250 GB SATA
       SSD that boots the OS — see decisions log below (done 2026-07-10;
       `docker volume inspect` confirms both pinned to `/srv/timeline`)
-- [ ] **Automated nightly backups copied OFF the PC** (DB dump *and* media) with a
-      **restore that's been tested**
+- [x] **Automated nightly backups copied OFF the PC** (DB dump *and* media) with a
+      **restore that's been tested** — encrypted to Cloudflare R2 (`rclone crypt`),
+      nightly systemd timer; restore verified on the box 2026-07-11 (DB counts
+      matched, media restored byte-for-byte / matching MD5s)
 - [x] Secrets in an env file, **not** in the repo (`.env.prod`, gitignored,
       mode 600, secrets generated on the box; done 2026-07-10)
 - [x] Prod cookie hardening: `DJANGO_COOKIE_SECURE=true` +
@@ -279,7 +280,19 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   only on success → a *missing* ping surfaces silent backup rot. The
   dump→createdb→`pg_restore --clean --if-exists --no-owner`→verify pipeline was
   **validated locally against real Postgres 16 + the actual app schema** (dev
-  `db`); the rclone/R2/crypt layer and the mount guard are server-only and are the
-  remaining live steps. **DoD item stays unchecked until the tested restore is run
-  ON THE BOX** (into a scratch DB + scratch dir per the runbook) — tooling is done,
-  the *tested restore* is the gate.
+  `db`); the rclone/R2/crypt layer and the mount guard are server-only.
+- **Backups DONE — deployed + tested restore on the box (2026-07-11).** R2 bucket
+  `timeline-backups` + a bucket-scoped Object-R&W token; `rclone crypt` remote
+  configured (crypt password/salt saved off-box — losing them makes backups
+  permanently undecryptable); first manual backup ran, systemd timer enabled
+  (next run confirmed); healthcheck (healthchecks.io) wired. **Tested restore
+  passed with real data:** restored into a scratch DB + scratch dir, DB user
+  count matched live, and an uploaded photo (full + generated thumbnail)
+  restored **byte-for-byte — MD5s identical** after the encrypt→R2→decrypt→restore
+  round-trip. Three setup gotchas found + fixed (in code/runbook, not just on the
+  box): (1) the bucket-scoped token can't `CreateBucket`, so the R2 remote needs
+  **`no_check_bucket=true`** or the first upload 403s; (2) `backup.env` must be
+  **chown'd to the deploy user** (the service runs as that user, not root, so a
+  root-owned `600` file is unreadable); (3) the restore's scratch media dir now
+  defaults under **`LOCAL_STAGE`** (deploy-user-owned) instead of directly under
+  root-owned `/srv/timeline`, where the non-root `mkdir` failed.
