@@ -2173,6 +2173,9 @@ class ReportTests(APITestCase):
     def setUp(self):
         self.reporter = make_user("reporter@example.com")
         self.author = make_user("author@example.com")
+        # You can only report content you can *see*, so the reporter is connected
+        # with the author (their post + comment are then visible to the reporter).
+        make_connection(self.reporter, self.author)
         self.post = Post.objects.create(author=self.author, text="something")
         self.comment = Comment.objects.create(
             post=self.post, author=self.author, text="a comment"
@@ -2229,6 +2232,40 @@ class ReportTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_cannot_report_content_you_cannot_see(self):
+        # A stranger's post the reporter has no connection to: reporting it must
+        # 404 (same as everywhere else) rather than confirm the id exists.
+        stranger = make_user("stranger@example.com")
+        hidden = Post.objects.create(author=stranger, text="not for you")
+        hidden_comment = Comment.objects.create(
+            post=hidden, author=stranger, text="also hidden"
+        )
+
+        post_resp = self.client.post(
+            REPORTS_URL, {"post": hidden.pk}, format="json"
+        )
+        comment_resp = self.client.post(
+            REPORTS_URL, {"comment": hidden_comment.pk}, format="json"
+        )
+
+        self.assertEqual(post_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(comment_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Report.objects.count(), 0)
+
+    def test_reporting_the_same_item_twice_is_idempotent(self):
+        first = self.client.post(
+            REPORTS_URL, {"post": self.post.pk}, format="json"
+        )
+        second = self.client.post(
+            REPORTS_URL, {"post": self.post.pk, "reason": "again"}, format="json"
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        # The repeat returns the existing report (200), not a duplicate row.
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertEqual(Report.objects.count(), 1)
+
 
 # --- Phase 7: account deletion (delete-my-data path) --------------------------
 
@@ -2278,9 +2315,12 @@ class DeleteAccountTests(APITestCase):
         storage, name, thumb = image.image.storage, image.image.name, image.thumbnail.name
         self.assertTrue(storage.exists(name))
 
-        resp = self.client.post(
-            DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
-        )
+        # The files are removed on commit (so a rolled-back delete can't orphan
+        # the rows from their files), so run the on_commit callbacks to see it.
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            )
 
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(storage.exists(name))

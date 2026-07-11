@@ -25,7 +25,7 @@ class Migration(migrations.Migration):
                         verbose_name="ID",
                     ),
                 ),
-                ("reason", models.TextField(blank=True)),
+                ("reason", models.TextField(blank=True, max_length=1000)),
                 (
                     "status",
                     models.CharField(
@@ -83,7 +83,15 @@ class Migration(migrations.Migration):
                             _connector="OR",
                         ),
                         name="report_targets_exactly_one",
-                    )
+                    ),
+                    models.UniqueConstraint(
+                        fields=("reporter", "post"),
+                        name="one_report_per_reporter_post",
+                    ),
+                    models.UniqueConstraint(
+                        fields=("reporter", "comment"),
+                        name="one_report_per_reporter_comment",
+                    ),
                 ],
             },
         ),

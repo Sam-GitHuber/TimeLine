@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from .imaging import absolute_media_url
 from .models import (
+    REPORT_REASON_MAX_LENGTH,
     Comment,
     Connection,
     Conversation,
@@ -15,10 +16,6 @@ from .models import (
 )
 
 User = get_user_model()
-
-# A report reason is free text but bounded — a sentence or two of "why", not an
-# essay. Optional (the flag itself is the signal), capped to bound the DB row.
-REPORT_REASON_MAX_LENGTH = 1000
 
 # A generous cap so a post can't be used to dump unbounded text into the DB,
 # while being far more than any real status update needs. Comments share it.

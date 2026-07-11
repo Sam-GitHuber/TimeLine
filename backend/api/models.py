@@ -466,6 +466,13 @@ class ParticipantInterval(models.Model):
         return f"{self.participant_id}: {self.started_at} → {self.ended_at or '…'}"
 
 
+# A report reason is free text but bounded — a sentence or two of "why", not an
+# essay. Optional (the flag itself is the signal); capped to bound the DB row.
+# Defined here (next to the model) so the serializer's cap and the field's cap
+# are the same number from one source, not two that can drift.
+REPORT_REASON_MAX_LENGTH = 1000
+
+
 class Report(models.Model):
     """A member's report of a post or comment for the maintainer to review
     (Phase 7 — content-takedown path).
@@ -509,7 +516,7 @@ class Report(models.Model):
         blank=True,
         related_name="reports",
     )
-    reason = models.TextField(blank=True)
+    reason = models.TextField(blank=True, max_length=REPORT_REASON_MAX_LENGTH)
     status = models.CharField(
         max_length=9,
         choices=Status.choices,
@@ -528,6 +535,21 @@ class Report(models.Model):
                     | models.Q(post__isnull=True, comment__isnull=False)
                 ),
                 name="report_targets_exactly_one",
+            ),
+            # One open flag per (reporter, target): don't let a double-click or a
+            # repeat click stack duplicate rows in the moderation queue. The
+            # target column that isn't in use is NULL, and both Postgres and
+            # SQLite treat NULLs as distinct, so a comment-report (post NULL)
+            # never collides on the post constraint, and vice-versa. The view
+            # also pre-checks and returns the existing report, so this is the
+            # race-proof backstop, not the first line of defence.
+            models.UniqueConstraint(
+                fields=["reporter", "post"],
+                name="one_report_per_reporter_post",
+            ),
+            models.UniqueConstraint(
+                fields=["reporter", "comment"],
+                name="one_report_per_reporter_comment",
             ),
         ]
 
