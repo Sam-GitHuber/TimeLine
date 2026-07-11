@@ -21,7 +21,6 @@ https://your-timeline.net (home server, 2026-07-10). 9/15 DoD items done.
 > **Live-work reminder:** the user is new to servers — walk each box step
 > one-thing-at-a-time, live; this doc records *what/why*, not keystrokes.
 > Operational how-to (deploy, ops, DDNS) is in `docs/deploy.md`.
-> The box runs from branch **`phase-7-home-deploy`** (PR open to `main`).
 
 ## Goal
 

@@ -112,9 +112,9 @@ forwarded, secure cookies, `deploy/deploy.sh` + `docs/deploy.md` runbook. 9/15
 DoD done. **Remaining (priority order): off-box backups + tested restore →
 `/security-review` → ToS/privacy + delete-my-data → CI auto-deploy (pull/GHCR),
 uptime monitoring, cost note.** Hard gate: no real invites until backups,
-security-review, and ToS/privacy are done. Box runs from branch
-`phase-7-home-deploy`. See `docs/phases/phase-7-productionisation.md` (top has a
-"RESUME HERE" block) and `docs/deploy.md`.
+security-review, and ToS/privacy are done. See
+`docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
+`docs/deploy.md`.
 
 Keep this line current: update it whenever a phase starts or finishes, but keep
 the detail in the phase docs, not here.
