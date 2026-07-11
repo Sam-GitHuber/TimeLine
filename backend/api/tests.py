@@ -48,6 +48,7 @@ USERS_URL = "/api/users/"
 REQUESTS_URL = "/api/connection-requests/"
 CONVERSATIONS_URL = "/api/conversations/"
 UNREAD_COUNT_URL = "/api/messages/unread-count/"
+MEDIA_AUTH_URL = "/api/media-auth/"
 PASSWORD = "correct-horse-42-battery"
 
 ACCEPTED = Connection.Status.ACCEPTED
@@ -2140,3 +2141,21 @@ class SeedDemoCommandTests(APITestCase):
         call_command("seed_demo", password="s3cret-demo-pw", verbosity=0)
         alice = User.objects.get(email="alice@example.com")
         self.assertTrue(alice.check_password("s3cret-demo-pw"))
+
+
+class MediaAuthTests(APITestCase):
+    """The forward_auth gate Caddy calls before serving any /media/ file in
+    production (Phase 7 hardening). Uploaded photos aren't world-readable: Caddy
+    serves the file only when this returns 2xx — i.e. only for a logged-in,
+    active member."""
+
+    def test_anonymous_is_denied(self):
+        # No auth cookie → not 2xx, so Caddy refuses to serve the file. A media
+        # URL that leaks off the site is useless to a logged-out stranger.
+        resp = self.client.get(MEDIA_AUTH_URL)
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_logged_in_member_is_allowed(self):
+        self.client.force_authenticate(make_user("mediaviewer@example.com"))
+        resp = self.client.get(MEDIA_AUTH_URL)
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)

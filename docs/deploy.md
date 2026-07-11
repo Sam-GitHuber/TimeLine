@@ -128,6 +128,41 @@ docker compose -f docker-compose.prod.yml down
 docker compose -f docker-compose.prod.yml up -d
 ```
 
+## Admin access is LAN-only (security hardening)
+
+`/admin/` is **not reachable from the public internet** — Caddy 403s any request
+whose source isn't on the home LAN (`192.168.x` / `10.x`) or loopback. The admin
+login is the one high-value credential on the box, so it doesn't face internet
+brute-force traffic.
+
+- **From home:** open `https://your-timeline.net/admin/` on any device on the LAN —
+  it just works.
+- **While away:** SSH into the box and do it there. To approve a pending sign-up
+  without the web UI:
+
+  ```bash
+  docker compose -f docker-compose.prod.yml exec backend python manage.py shell -c \
+    "from django.contrib.auth import get_user_model as g; g().objects.filter(email='them@example.com').update(is_active=True)"
+  ```
+
+  (Or `ssh -L 8443:localhost:443 timeline-server` and browse `https://localhost:8443/admin/`
+  — works only if the tunnelled request presents an allowed source IP.)
+
+The allow-list deliberately **excludes** Docker's bridge range, so it fails *closed*:
+if it ever blocks you from the LAN too, that's the signal that Caddy isn't seeing
+real client IPs (check `docker compose -f docker-compose.prod.yml logs web`) — fix
+that rather than widening the list to the whole internet.
+
+## Uploaded media is authenticated
+
+Post photos and avatars under `/media/` are **not world-readable**. Caddy asks the
+backend (`forward_auth` → `/api/media-auth/`) before serving each file and returns
+it only to a logged-in, active member — so a leaked media URL is useless to an
+outsider, and a deactivated account's saved URLs stop resolving. Nothing to operate;
+just don't be surprised that `curl https://your-timeline.net/media/...` returns 401
+without a valid session cookie. (Per-author connection gating is a later, Phase 7b
+step; today any logged-in member can fetch a media file whose URL they already hold.)
+
 ## Verifying data really is on the NVMe
 
 After the first `up`, confirm Postgres + media resolve onto the data disk, not

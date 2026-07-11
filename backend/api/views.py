@@ -606,6 +606,33 @@ def hello(request):
     )
 
 
+@api_view(["GET"])
+def media_auth(request):
+    """Authorization gate for uploaded media (Phase 7 security hardening).
+
+    Uploaded photos and avatars are real friends'/family's images, so they must
+    not be world-readable. In production they're served straight off disk by
+    Caddy (fast), but Caddy asks *this* endpoint first via ``forward_auth`` on
+    every ``/media/`` request — we return 204 only for a logged-in, **active**
+    account, and Caddy serves the file only on that 2xx. Anything else (no
+    cookie, expired/invalid token, a since-deactivated account) is a non-2xx
+    here, so Caddy denies the file. Net effect: a media URL that leaks off the
+    site (referrer header, shared link, someone's browser history) is useless to
+    a logged-out stranger, and a banned member's saved URLs stop resolving.
+
+    This is *authentication* gating: any logged-in member may fetch any media
+    whose UUID filename they already hold. Full per-author connection gating
+    (checking the viewer is connected to the photo's author) is a heavier,
+    deferred Phase 7b step — see the phase-7 doc. The unguessable UUID filename
+    (``api/imaging.py``) remains a second layer underneath this.
+
+    Relies on the default auth (JWT-in-cookie) + ``IsAuthenticated`` permission;
+    ``get_user`` in SimpleJWT already rejects an inactive user's token, so no
+    extra active-check is needed here. It's a safe GET, so no CSRF applies.
+    """
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class FeedView(generics.ListAPIView):
     """The home timeline: your own posts plus everyone you're connected with.
 

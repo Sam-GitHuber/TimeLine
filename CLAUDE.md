@@ -112,9 +112,13 @@ forwarded, secure cookies, `deploy/deploy.sh` + `docs/deploy.md` runbook. 10/15
 DoD done. **Nightly off-box backups are LIVE** (encrypted to Cloudflare R2 via
 `rclone crypt`, systemd timer) with a **restore tested on the box** (DB counts
 matched, media restored byte-for-byte) — see `docs/backup-restore.md`.
-**Remaining (priority order): `/security-review` → ToS/privacy + delete-my-data
-→ CI auto-deploy (pull/GHCR), uptime monitoring, cost note.** Hard gate: no real
-invites until security-review and ToS/privacy are done. See
+**`/security-review` done (2026-07-11): full-app review, no HIGH; three gaps fixed
+— uploaded media now auth-gated (Caddy `forward_auth` → `/api/media-auth/`,
+logged-in active members only), Django `/admin/` restricted to the LAN (fail-closed),
+and sign-up account-enumeration closed. Pending merge + on-box verification (media
+loads in-session / 401s out; admin 403s from mobile data). Remaining (priority
+order): ToS/privacy + delete-my-data → CI auto-deploy (pull/GHCR), uptime
+monitoring, cost note.** Hard gate: no real invites until ToS/privacy are done. See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 

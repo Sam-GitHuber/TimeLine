@@ -11,18 +11,54 @@
 	# Compress responses. zstd/gzip are widely supported by browsers.
 	encode zstd gzip
 
-	# API, Django admin, and Django's own static files (admin + DRF browsable
-	# API, served by WhiteNoise inside gunicorn) → the backend container.
-	@backend path /api/* /admin/* /static/*
+	# Access log to stdout (JSON) so `docker compose logs web` shows who hit what
+	# — needed to verify the admin IP restriction below actually sees real client
+	# IPs, and generally useful during the beta.
+	log {
+		output stdout
+		format json
+	}
+
+	# Django admin → LAN + loopback only; the public internet gets 403 (Phase 7
+	# security hardening). The admin login is the one high-value credential on the
+	# box, so it shouldn't face the internet's brute-force traffic. You administer
+	# from a device on the home LAN (192.168.x / 10.x). Reach it while away by
+	# SSHing into the box (then `manage.py`, or an SSH port-forward).
+	#
+	# FAIL-CLOSED by design: the allow-list deliberately excludes Docker's own
+	# bridge range (172.16.0.0/12). Published ports on Linux preserve the real
+	# client IP (iptables DNAT), so Caddy sees 192.168.x from the LAN and real
+	# public IPs from outside. IF some networking quirk ever rewrote the source to
+	# the bridge gateway (a 172.x address) instead, this would block *everyone*
+	# (including you) rather than silently allow the whole internet — you'd notice
+	# immediately. Verify after deploy: /admin/ works from the LAN, 403s from
+	# mobile data.
+	@admin path /admin /admin/*
+	handle @admin {
+		@admin_denied not remote_ip 127.0.0.1/8 ::1 10.0.0.0/8 192.168.0.0/16
+		respond @admin_denied 403
+		reverse_proxy backend:8000
+	}
+
+	# API and Django's own static files (admin + DRF browsable API, served by
+	# WhiteNoise inside gunicorn) → the backend container.
+	@backend path /api/* /static/*
 	handle @backend {
 		reverse_proxy backend:8000
 	}
 
 	# User-uploaded media (post photos, avatars) → served straight off the shared
-	# media volume mounted at /srv/media. Filenames are UUIDs (see api/imaging.py)
-	# so URLs can't be guessed by walking ids. (Private/signed media is Phase 7b.)
+	# media volume mounted at /srv/media, but AUTHORIZED FIRST: Caddy asks the
+	# backend (forward_auth → /api/media-auth/) on every request and serves the
+	# file only if that returns 2xx — i.e. only for a logged-in, active member.
+	# So a leaked media URL is useless to a logged-out stranger, and a banned
+	# member's saved URLs stop working. UUID filenames (see api/imaging.py) remain
+	# a second layer. (Per-author connection gating is a deferred Phase 7b step.)
 	@media path /media/*
 	handle @media {
+		forward_auth backend:8000 {
+			uri /api/media-auth/
+		}
 		root * /srv
 		file_server
 	}

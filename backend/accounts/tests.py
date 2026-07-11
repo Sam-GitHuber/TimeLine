@@ -87,6 +87,42 @@ class RegistrationTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(User.objects.filter(email="noname@example.com").exists())
 
+    def test_registering_a_taken_email_is_not_revealed(self):
+        # Account-enumeration hardening: a second sign-up with an already-taken
+        # email must look *identical* to a fresh one (same status + body), so an
+        # outsider can't probe which emails have accounts on a members-only app.
+        first = self._register("dup@example.com")
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        again = self._register("dup@example.com")
+        self.assertEqual(again.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(again.data, first.data)
+        # No auth cookie leaked, and no second account created.
+        self.assertNotIn(AUTH_COOKIE, again.cookies)
+        self.assertEqual(User.objects.filter(email="dup@example.com").count(), 1)
+
+    def test_re_registering_does_not_touch_the_existing_account(self):
+        # The silent-duplicate path must not let someone overwrite an existing
+        # account's password (or any field) by "registering" its email again.
+        self._register("keep@example.com")
+        user = User.objects.get(email="keep@example.com")
+        original_hash = user.password
+
+        resp = self.client.post(
+            REGISTER_URL,
+            {
+                "email": "keep@example.com",
+                "password1": "a-totally-different-99-pw",
+                "password2": "a-totally-different-99-pw",
+                "first_name": "Mal", "last_name": "Lory",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        user.refresh_from_db()
+        self.assertEqual(user.password, original_hash)
+        self.assertEqual(user.first_name, "Reg")  # unchanged
+
 
 class LoginLogoutTests(APITestCase):
     def _register(self, email):
