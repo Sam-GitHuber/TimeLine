@@ -1,7 +1,7 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
 **Status:** in progress — **the app is LIVE on public HTTPS** at
-https://your-timeline.net (home server, 2026-07-10). 10/15 DoD items done.
+https://your-timeline.net (home server, 2026-07-10). 11/15 DoD items done.
 
 > **RESUME HERE (next session).** The core is done: the site is deployed on the
 > box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
@@ -11,12 +11,11 @@ https://your-timeline.net (home server, 2026-07-10). 10/15 DoD items done.
 >    (systemd timer enabled, next run confirmed); the **tested restore passed on
 >    the box with real data** — DB user counts matched and uploaded images
 >    restored byte-for-byte (matching MD5s). Runbook `docs/backup-restore.md`.
-> 2. **`/security-review`** — DONE (2026-07-11). Review run; no HIGH. Three gaps
->    fixed on branch `phase-7-security-hardening` (auth-gated media via Caddy
->    `forward_auth`, LAN-only admin, sign-up enumeration hardening) — tests green.
->    **Left: merge, deploy, then run the on-box verification checklist** (see the
->    decisions-log entry) before ticking the DoD box.
-> 3. **ToS + privacy policy + delete-my-data / takedown path.**  ← next
+> 2. **`/security-review`** — DONE + VERIFIED ON BOX (2026-07-11). Review run, no
+>    HIGH; three gaps fixed (#42) and deployed: auth-gated media (Caddy
+>    `forward_auth`), LAN-only admin, sign-up enumeration hardening. On-box checks
+>    all passed — see decisions log. DoD box ticked.
+> 3. **ToS + privacy policy + delete-my-data / takedown path.**  ← next (last hard gate)
 > 4. Continuous deploy in CI (pull-based via GHCR — decided, see log), uptime
 >    monitoring, monthly cost note.
 >
@@ -83,7 +82,9 @@ Phases 2–6 — running on the home server, surviving reboots.
 - [ ] Basic **uptime monitoring** + alert
 - [ ] **Terms of Service + privacy policy** published; content-takedown +
       delete-my-data path exists (see Legal / IP in `docs/SHARED.md`)
-- [ ] `/security-review` run and findings addressed
+- [x] `/security-review` run and findings addressed (2026-07-11: no HIGH; media
+      auth-gating, LAN-only admin, sign-up enumeration fix — deployed + verified on
+      the box, see decisions log)
 - [ ] Rough **monthly running cost** written down
 
 ## Steps (high level — details walked through live)
@@ -337,3 +338,26 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   data** (proves `remote_ip` sees real client IPs, i.e. the fail-closed exclusion
   didn't just block everything); (c) sign-up with an existing email still returns the
   generic pending-approval message.
+- **Deployed + verified on the box (2026-07-11).** #42 deployed via `deploy/deploy.sh`
+  (backend rebuilt → the `web` container recreated too, so Caddy re-read the mounted
+  Caddyfile); homepage + API stayed 200. Checks:
+  - **Media:** an unauthenticated request to a real uploaded photo returned **401**
+    (it was 200 before). ✓
+  - **Admin:** an off-LAN client returned **403**, a direct-LAN connection **200**,
+    and Caddy's JSON access log confirmed it filters on the *real* client IP
+    (`remote_ip` = the true public IP, **not** the Docker gateway) — so the
+    fail-closed 172.16/12 exclusion is safe and admin is genuinely off the internet. ✓
+    Handy test-vantage note: with a **VPN on**, a LAN machine hitting the public
+    domain exits via the VPN's public IP and comes back as a real outside client
+    (→ 403) — a convenient stand-in for the mobile-data test.
+  - **Enumeration:** registering the same email twice against the live API returned an
+    **identical 201 + body** both times, with only one account created; the throwaway
+    test account was deleted afterwards. ✓
+  - **Access nuance (documented):** a normal LAN device reaches `/admin/` via the
+    public domain fine — the router's hairpin keeps the source on the LAN (confirmed
+    on the Mac). A LAN device only gets 403 if something routes it *out* first — a
+    VPN, or **iCloud Private Relay** on iOS/macOS (separate from the VPN toggle), the
+    usual reason a phone on home Wi-Fi is still blocked. Fix on that device, or force
+    the domain to the box's LAN IP with a hosts entry, or approve sign-ups via a
+    `manage.py` one-liner over SSH. Genuinely-away devices (mobile data) correctly get
+    403. See `docs/deploy.md`.

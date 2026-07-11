@@ -131,27 +131,45 @@ docker compose -f docker-compose.prod.yml up -d
 ## Admin access is LAN-only (security hardening)
 
 `/admin/` is **not reachable from the public internet** — Caddy 403s any request
-whose source isn't on the home LAN (`192.168.x` / `10.x`) or loopback. The admin
+whose source IP isn't on the home LAN (`192.168.x` / `10.x`) or loopback. The admin
 login is the one high-value credential on the box, so it doesn't face internet
-brute-force traffic.
+brute-force traffic. (Verified 2026-07-11: a genuinely off-LAN client gets `403`; a
+LAN device gets in.)
 
-- **From home:** open `https://your-timeline.net/admin/` on any device on the LAN —
-  it just works.
-- **While away:** SSH into the box and do it there. To approve a pending sign-up
-  without the web UI:
+- **From home:** just open `https://your-timeline.net/admin/` on a device on the
+  LAN — it works. The router's hairpin (NAT loopback) keeps the source address on
+  the LAN, so Caddy sees a `192.168.x` client and allows it.
+- **If a LAN device gets a 403 anyway,** its traffic is leaving the LAN *before* it
+  reaches the box, so it looks like an outside client. The usual culprits, in order
+  of likelihood:
+  - a **VPN** is on (turn it off for this site), or
+  - **iCloud Private Relay** on an iPhone/Mac (Settings → your name → iCloud →
+    Private Relay) — this is separate from the VPN toggle and relays you through a
+    public IP, so it's the common reason a *phone on home Wi-Fi* is still blocked.
+
+  Rather than fiddle with those, you can force the domain to the box's LAN IP on
+  your admin machine with a one-line hosts entry (`/etc/hosts` on macOS/Linux,
+  `C:\Windows\System32\drivers\etc\hosts` on Windows) — the connection then stays on
+  the LAN regardless of relay/VPN:
+
+  ```
+  192.168.1.95   your-timeline.net
+  ```
+
+- **From genuinely away** (mobile data, a café, another house): you'll get `403` —
+  that's the point. SSH into the box and administer there. To approve a pending
+  sign-up without the web UI:
 
   ```bash
   docker compose -f docker-compose.prod.yml exec backend python manage.py shell -c \
     "from django.contrib.auth import get_user_model as g; g().objects.filter(email='them@example.com').update(is_active=True)"
   ```
 
-  (Or `ssh -L 8443:localhost:443 timeline-server` and browse `https://localhost:8443/admin/`
-  — works only if the tunnelled request presents an allowed source IP.)
-
 The allow-list deliberately **excludes** Docker's bridge range, so it fails *closed*:
-if it ever blocks you from the LAN too, that's the signal that Caddy isn't seeing
-real client IPs (check `docker compose -f docker-compose.prod.yml logs web`) — fix
-that rather than widening the list to the whole internet.
+if it ever blocks *every* device including a plain LAN one, that's the signal that
+Caddy isn't seeing real client IPs (check
+`docker compose -f docker-compose.prod.yml logs web` for `remote_ip`) — fix that
+rather than widening the list to the whole internet.
 
 ## Uploaded media is authenticated
 
