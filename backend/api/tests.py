@@ -17,6 +17,7 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from api import imaging
 from api.views import (
     activate,
     active_participant_ids,
@@ -725,6 +726,17 @@ def make_mpo_upload(name="phone.jpeg"):
     return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
 
 
+def make_large_photo_upload(name="big.jpg", edge=3000):
+    """A large, high-detail JPEG like a real phone camera produces. Random pixel
+    noise (not a flat colour) so it doesn't compress to nothing — the point is a
+    genuinely heavy original that our downscale/re-encode step has to shrink."""
+    buffer = BytesIO()
+    noise = Image.frombytes("RGB", (edge, edge), os.urandom(edge * edge * 3))
+    noise.save(buffer, "JPEG", quality=95)
+    buffer.seek(0)
+    return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
+
+
 @override_settings(MEDIA_ROOT=_PHOTO_MEDIA_ROOT)
 class PhotoPostTests(APITestCase):
     """Posts can carry photos, uploaded as multipart and processed server-side."""
@@ -818,6 +830,49 @@ class PhotoPostTests(APITestCase):
             POSTS_URL, {"text": "lots", "images": images}, format="multipart"
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Post.objects.count(), 0)
+
+    def test_full_batch_of_ten_photos_succeeds(self):
+        # The intended flow: post a whole camera-roll batch at once (issue #40).
+        images = [make_image_upload(f"{i}.jpg") for i in range(10)]
+        resp = self.client.post(
+            POSTS_URL, {"text": "holiday", "images": images}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Post.objects.get().images.count(), 10)
+
+    def test_upload_cap_is_phone_realistic(self):
+        # Regression guard for issue #40: the per-file cap is a DoS guard, not a
+        # storage limit, so it must sit above real phone-photo sizes (12–25 MB)
+        # or ordinary camera-roll uploads get wrongly rejected before compression.
+        self.assertGreaterEqual(imaging.MAX_UPLOAD_BYTES, 25 * 1024 * 1024)
+
+    def test_large_phone_photo_is_accepted_and_stored_compressed(self):
+        # A heavy original passes the (raised) cap and is stored much smaller,
+        # because process_image downscales + re-encodes it — the whole reason we
+        # can afford a generous input cap.
+        upload = make_large_photo_upload("camera.jpg")
+        uploaded_bytes = upload.size
+        resp = self.client.post(
+            POSTS_URL, {"images": [upload]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        stored = Post.objects.get().images.first().image
+        self.assertLess(stored.size, uploaded_bytes)
+
+    def test_oversized_photo_error_names_the_offending_file(self):
+        # In a batch, an opaque "too large" leaves the user guessing which photo
+        # to drop, so the error must name the file that failed. Patch the cap low
+        # so we don't have to build a real >30 MB upload just to trip it.
+        with mock.patch.object(imaging, "MAX_UPLOAD_BYTES", 100):
+            resp = self.client.post(
+                POSTS_URL,
+                {"text": "trip", "images": [make_image_upload("toobig.jpg")]},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("toobig.jpg", str(resp.data["images"]))
+        self.assertIn("too large", str(resp.data["images"]))
         self.assertEqual(Post.objects.count(), 0)
 
     def test_exif_metadata_is_stripped_from_stored_images(self):
