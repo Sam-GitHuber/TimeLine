@@ -143,6 +143,20 @@ export const api = {
     return request("/api/auth/user/", { method: "PATCH", body: form });
   },
 
+  // Change your own password while logged in (dj-rest-auth). The current
+  // password is required (the backend enforces it — see OLD_PASSWORD_FIELD_ENABLED),
+  // so a hijacked session can't silently rotate it. The confirm field is checked
+  // server-side too. On success the session stays valid — no re-login needed.
+  changePassword: (currentPassword, newPassword, confirmPassword) =>
+    request("/api/auth/password/change/", {
+      method: "POST",
+      body: {
+        old_password: currentPassword,
+        new_password1: newPassword,
+        new_password2: confirmPassword,
+      },
+    }),
+
   // Permanently delete your own account and all your data. Password-reconfirmed
   // (the backend rejects a wrong password) because it's irreversible. On success
   // the server returns 204 and the session is dead; the caller clears local state.

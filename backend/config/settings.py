@@ -282,6 +282,11 @@ REST_AUTH = {
     "SESSION_LOGIN": False,
     "REGISTER_SERIALIZER": "accounts.serializers.CustomRegisterSerializer",
     "USER_DETAILS_SERIALIZER": "accounts.serializers.UserDetailsSerializer",
+    # Require the current password to change it (dj-rest-auth leaves this off by
+    # default). Account hygiene: a hijacked session (e.g. via XSS) then can't
+    # silently rotate the password without also knowing the old one, and it stops
+    # a shoulder-surfer at an unlocked screen from locking the owner out.
+    "OLD_PASSWORD_FIELD_ENABLED": True,
 }
 
 SIMPLE_JWT = {
