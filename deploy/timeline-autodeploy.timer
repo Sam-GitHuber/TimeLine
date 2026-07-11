@@ -1,0 +1,16 @@
+# systemd timer: check for a new TimeLine release image every few minutes.
+# Enable: sudo systemctl enable --now timeline-autodeploy.timer
+[Unit]
+Description=Poll GHCR for a new TimeLine release image and redeploy
+
+[Timer]
+# First check 3 min after boot, then every 5 min. A check with no new release is
+# a cheap no-op (a GHCR manifest lookup), so a tight cadence just means a freshly
+# published release is live within a few minutes.
+OnBootSec=3min
+OnUnitActiveSec=5min
+# Jitter so the poll doesn't land on the exact same second every time.
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

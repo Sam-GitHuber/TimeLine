@@ -75,6 +75,75 @@ images, and tails the backend log. It **aborts** if `/srv/timeline` isn't mounte
 or `.env.prod` is missing. Migrations + `collectstatic` run automatically in the
 backend entrypoint.
 
+This build-on-box path stays the **fallback** — use it for a hotfix or if GHCR
+is unavailable. The normal path is now the automated one below.
+
+## Continuous deploy (automatic, on release)
+
+The everyday way to ship is now: **publish a GitHub Release, and the box deploys
+itself within a few minutes.** No SSH in from CI — the box only exposes 80/443,
+so deploys are *pull-based* (the box reaches out to GHCR; nothing reaches in).
+
+**How it flows:**
+
+1. You publish a Release on GitHub (from green `main` — see below).
+2. The **`Release images`** workflow (`.github/workflows/release-deploy.yml`)
+   builds the `backend` + `web` images and pushes them to GHCR, tagged with the
+   release tag **and** `latest`:
+   - `ghcr.io/sam-githuber/timeline-backend`
+   - `ghcr.io/sam-githuber/timeline-web`
+3. On the box, **`timeline-autodeploy.timer`** fires every ~5 min and runs
+   `deploy/autodeploy.sh`, which: `git pull`s the latest config (compose files,
+   GHCR override, Caddyfile), `docker compose pull`s the two `:latest` images,
+   and — **only if an image actually changed** — recreates the stack via the
+   GHCR override (`docker-compose.ghcr.yml`, `--no-build`, so the box runs the
+   pre-built image and never compiles). Migrations + `collectstatic` run in the
+   backend entrypoint as usual. A poll with no new release is a quiet no-op.
+
+**Cutting a release (the deploy trigger):**
+
+```bash
+# from a green main — tag vX.Y.Z and publish; --generate-notes writes a changelog
+gh release create v0.1.0 --generate-notes
+```
+
+Then watch it land on the box:
+
+```bash
+# the build+push run
+gh run watch $(gh run list --workflow "Release images" -L1 --json databaseId -q '.[0].databaseId')
+
+# on the box: the autodeploy log
+journalctl -u timeline-autodeploy.service -f
+```
+
+**One-time setup on the box** (walk through live):
+
+```bash
+# 1. Make the two GHCR packages PUBLIC so the box can pull with no credentials.
+#    After the first release pushes them, open each package on GitHub
+#    (Profile → Packages → timeline-backend / timeline-web →
+#    Package settings → Change visibility → Public). One-time per package.
+#    (They contain nothing secret — the repo is public and secrets stay in
+#    .env.prod at runtime — so public is the simple, safe default. To keep them
+#    private instead, `docker login ghcr.io` on the box with a read:packages
+#    token and skip this step.)
+
+# 2. Install + enable the timer (edit User= and the ExecStart= path first).
+sudo cp deploy/timeline-autodeploy.service deploy/timeline-autodeploy.timer \
+  /etc/systemd/system/
+sudoedit /etc/systemd/system/timeline-autodeploy.service   # set User= + path
+sudo systemctl daemon-reload
+sudo systemctl enable --now timeline-autodeploy.timer
+
+# 3. Prove it by hand once before trusting the timer.
+./deploy/autodeploy.sh
+systemctl status timeline-autodeploy.timer --no-pager
+```
+
+To pause auto-deploy (e.g. during maintenance): `sudo systemctl stop
+timeline-autodeploy.timer`. Re-enable with `start`.
+
 ## Going public: dynamic DNS (Cloudflare)
 
 The home connection's public IP changes over time, so a **DDNS updater** keeps the

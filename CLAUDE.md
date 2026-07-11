@@ -116,17 +116,18 @@ matched, media restored byte-for-byte) — see `docs/backup-restore.md`.
 no HIGH; three gaps fixed and deployed — uploaded media now auth-gated (Caddy
 `forward_auth` → `/api/media-auth/`, logged-in active members only; unauth → 401),
 Django `/admin/` restricted to the LAN (fail-closed; off-LAN → 403, LAN → ok), and
-sign-up account-enumeration closed (dup email → identical 201). 11/15 DoD live.
-**The last hard-gate item — ToS/privacy + delete-my-data + takedown — is built +
-tested on branch `phase-7-legal-delete`** (UK/UK-GDPR `/terms` + `/privacy` pages
-linked from sign-up + footer; required consent checkbox recording
-`User.tos_accepted_at`; password-reconfirmed **hard-delete** account endpoint
-`POST /api/account/delete/` that also cleans media files off disk, hands
-sole-admin groups to the longest-standing member, and deletes emptied groups; an
-in-app **Report** control → `Report` model reviewed in Django admin). Ticks the
-12th DoD box + closes the hard gate on merge + deploy. Remaining after that:
-CI auto-deploy (pull/GHCR), uptime monitoring, cost note.** Hard gate: no real
-invites until ToS/privacy + delete-my-data are live on the box. See
+sign-up account-enumeration closed (dup email → identical 201).
+**The last hard-gate item — ToS/privacy + delete-my-data + takedown — is now
+MERGED (#44) + DEPLOYED on the box (2026-07-11)** (UK/UK-GDPR `/terms` +
+`/privacy` pages linked from sign-up + footer, serving 200 over HTTPS; required
+consent checkbox recording `User.tos_accepted_at`; password-reconfirmed
+**hard-delete** account endpoint `POST /api/account/delete/` that also cleans
+media files off disk, hands sole-admin groups to the longest-standing member,
+and deletes emptied groups; an in-app **Report** control → `Report` model
+reviewed in Django admin). **12/15 DoD live; the hard gate is CLOSED — real
+friends/family can now be invited.** Remaining: continuous deploy (in
+progress — trigger on GitHub release published, pull-based via GHCR + a systemd
+timer on the box, outbound-only), uptime monitoring, cost note. See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 

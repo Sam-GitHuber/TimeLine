@@ -1,0 +1,24 @@
+# Pull-based production override: run the images the "Release images" workflow
+# built + pushed to GHCR, instead of building them on the box.
+#
+# This is the CONTINUOUS-DEPLOY path (deploy/autodeploy.sh). Layer it on top of
+# the prod file — the `image:` here wins over the prod file's `build:`, so with
+# `--no-build` the box runs the pre-built release image and never compiles:
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
+#     pull backend web
+#   docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
+#     up -d --no-build backend web
+#
+# TIMELINE_TAG selects which release to run; autodeploy.sh sets it to the exact
+# published tag, and it defaults to `latest` for a manual pull. db/web volumes,
+# Caddyfile mount, ports, and restart policy all still come from the prod file.
+#
+# The plain `deploy/deploy.sh` (build-on-box from source) stays as the fallback
+# path — use it for a hotfix or if GHCR is unavailable.
+services:
+  backend:
+    image: ghcr.io/sam-githuber/timeline-backend:${TIMELINE_TAG:-latest}
+
+  web:
+    image: ghcr.io/sam-githuber/timeline-web:${TIMELINE_TAG:-latest}

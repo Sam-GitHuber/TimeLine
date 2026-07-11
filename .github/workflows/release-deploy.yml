@@ -1,0 +1,77 @@
+# Release → build + push production images to GHCR.
+#
+# The home box exposes only 80/443 (not SSH), so continuous deploy must be
+# "pull-based": GitHub can't connect in, so instead this workflow BUILDS the two
+# production images and PUSHES them to the GitHub Container Registry (GHCR), and
+# a systemd timer ON THE BOX notices the new image and redeploys (outbound-only
+# — the box pulls from GHCR). See docs/deploy.md ("Continuous deploy") and the
+# phase-7 decisions log.
+#
+# Trigger: publishing a GitHub Release (a deliberate maintainer action from a
+# green main), NOT every merge — so a deploy is always something a human chose.
+# Fork PRs can't publish releases, so untrusted code never builds these images.
+#
+# Images (repo-scoped GHCR packages, one-time set to public so the box can pull
+# them anonymously — no registry credentials on the box):
+#   ghcr.io/sam-githuber/timeline-backend
+#   ghcr.io/sam-githuber/timeline-web
+# Each is tagged with the release tag (e.g. v0.1.0) AND `latest` (what the box
+# pulls). The box is a single amd64 PC, so we build amd64 only.
+name: Release images
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      # GHCR namespaces are lowercase; the owner is "Sam-GitHuber".
+      OWNER: sam-githuber
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout the released tag
+        uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # Automatic per-run token; packages:write above lets it push.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-backend:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-backend:${{ env.TAG }}
+          # Speed up repeat builds by caching layers in the GitHub Actions cache.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build + push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/web.Dockerfile
+          push: true
+          build-args: |
+            VITE_API_URL=https://your-timeline.net
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-web:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-web:${{ env.TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
