@@ -1,0 +1,16 @@
+# systemd timer: run the TimeLine off-site backup once a night.
+# Enable: sudo systemctl enable --now backup.timer
+[Unit]
+Description=Run the TimeLine off-site backup nightly
+
+[Timer]
+# 03:30 local time each day — a quiet hour for a home connection.
+OnCalendar=*-*-* 03:30:00
+# Spread the exact start a little (avoids every scheduled job firing at once).
+RandomizedDelaySec=15min
+# If the machine was off/asleep when a run was due, run once on the next boot —
+# a home server that's occasionally powered down still gets its backup.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

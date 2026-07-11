@@ -1,0 +1,25 @@
+# systemd service: run one off-site backup of the TimeLine database + media.
+# Paired with backup.timer, which triggers it nightly.
+#
+# Install:
+#   sudo cp deploy/backup.{service,timer} /etc/systemd/system/
+#   # then edit User= and ExecStart= below to your deploy user + checkout path
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now backup.timer
+#
+# Runs as the DEPLOY USER (not root): it needs docker-group access to reach the
+# `db` container and the rclone remote configured in that user's ~/.config/rclone.
+[Unit]
+Description=TimeLine off-site backup (Postgres dump + media sync to R2)
+# Docker must be up (the backup dumps from the running db container).
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Set these to your actual deploy user and repo checkout path.
+User=<user>
+ExecStart=/home/<user>/TimeLine/deploy/backup.sh
+# A backup should never hang forever holding things up; cap the run.
+TimeoutStartSec=1800
