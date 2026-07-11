@@ -1,6 +1,6 @@
 # Phase 2 — Accounts & Authentication
 
-**Status:** done 2026-07-04 (PR #5). Branch protection on `main` now requires the
+**Status:** done. Branch protection on `main` now requires the
 `backend` + `frontend` checks.
 
 ## Goal
