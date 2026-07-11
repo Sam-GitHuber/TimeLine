@@ -731,13 +731,23 @@ class PostCreateView(generics.CreateAPIView):
             )
 
         # Process every file up front: if any is invalid we bail here (400)
-        # before creating the post, so there's never an orphaned text row.
-        processed = [
-            process_image(
-                f, max_edge=POST_IMAGE_MAX_EDGE, thumb_edge=POST_THUMB_EDGE
-            )
-            for f in files
-        ]
+        # before creating the post, so there's never an orphaned text row. Name
+        # the offending photo in the error — in a batch of 10 an opaque "too
+        # large"/"not a valid image" leaves the user guessing which one to drop.
+        processed = []
+        for f in files:
+            try:
+                processed.append(
+                    process_image(
+                        f,
+                        max_edge=POST_IMAGE_MAX_EDGE,
+                        thumb_edge=POST_THUMB_EDGE,
+                    )
+                )
+            except ValidationError as exc:
+                detail = exc.detail
+                msg = detail[0] if isinstance(detail, list) else detail
+                raise ValidationError({"images": f"{f.name}: {msg}"}) from exc
 
         with transaction.atomic():
             # Author comes from the session, never the request body; group is the
