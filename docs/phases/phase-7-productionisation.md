@@ -1,10 +1,10 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
 **Status:** in progress — **the app is LIVE on public HTTPS** at
-https://your-timeline.net (home server, 2026-07-10). 11/15 DoD items live; the
-last hard-gate item (ToS + privacy + delete-my-data + takedown) is **built and
-tested on branch `phase-7-legal-delete`** — it ticks the 12th box once merged +
-deployed.
+https://your-timeline.net (home server, 2026-07-10). 12/15 DoD items live. The
+last hard-gate item (ToS + privacy + delete-my-data + takedown) **merged (#44)
+and deployed to the box 2026-07-11** — migrations applied, `/terms` + `/privacy`
+serving 200 over HTTPS. **The hard gate is now closed** (real invites unblocked).
 
 > **RESUME HERE (next session).** The core is done: the site is deployed on the
 > box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
@@ -18,20 +18,26 @@ deployed.
 >    HIGH; three gaps fixed (#42) and deployed: auth-gated media (Caddy
 >    `forward_auth`), LAN-only admin, sign-up enumeration hardening. On-box checks
 >    all passed — see decisions log. DoD box ticked.
-> 3. **ToS + privacy policy + delete-my-data / takedown path** — **BUILT + TESTED
->    on branch `phase-7-legal-delete`** (2026-07-11). Awaiting merge + deploy;
->    tick the DoD box and close the hard gate once it's live on the box. What
->    shipped: public `/terms` + `/privacy` pages (UK/UK-GDPR, linked from sign-up
->    + footer), a required consent checkbox recording `tos_accepted_at`, a
->    password-reconfirmed **hard-delete** account endpoint (cleans media files off
->    disk, hands sole-admin groups to the longest-standing member, deletes emptied
->    groups), and an in-app **Report** control → `Report` model reviewed in Django
->    admin. See decisions log + `docs/deploy.md` (handling reports & deletions).
-> 4. Continuous deploy in CI (pull-based via GHCR — decided, see log), uptime
->    monitoring, monthly cost note.
+> 3. **ToS + privacy policy + delete-my-data / takedown path** — **DONE +
+>    DEPLOYED ON BOX (2026-07-11, #44).** Merged to main and deployed via
+>    `deploy.sh`; migrations `accounts.0003_user_tos_accepted_at` +
+>    `api.0010_report` applied, static recollected, `/terms` + `/privacy` return
+>    200 over public HTTPS. What shipped: public `/terms` + `/privacy` pages
+>    (UK/UK-GDPR, linked from sign-up + footer), a required consent checkbox
+>    recording `tos_accepted_at`, a password-reconfirmed **hard-delete** account
+>    endpoint (cleans media files off disk, hands sole-admin groups to the
+>    longest-standing member, deletes emptied groups), and an in-app **Report**
+>    control → `Report` model reviewed in Django admin. See decisions log +
+>    `docs/deploy.md` (handling reports & deletions). **DoD box ticked; hard gate
+>    closed.**
+> 4. **Continuous deploy** — IN PROGRESS. Trigger: **GitHub release published**
+>    (not every merge). Pull-based via GHCR (decided, see log): the release
+>    workflow builds + pushes the images; a systemd timer on the box notices the
+>    new image and redeploys — outbound-only, since the box exposes 80/443, not
+>    SSH. Then: uptime monitoring, monthly cost note.
 >
-> **Hard gate:** do NOT invite real friends/family until 1–3 are done (1–2 done;
-> 3 is built, needs deploy).
+> **Hard gate:** CLOSED (2026-07-11) — items 1–3 all done + live on the box. Real
+> friends/family can now be invited.
 > **Live-work reminder:** the user is new to servers — walk each box step
 > one-thing-at-a-time, live; this doc records *what/why*, not keystrokes.
 > Operational how-to (deploy, ops, DDNS) is in `docs/deploy.md`.
@@ -92,10 +98,10 @@ Phases 2–6 — running on the home server, surviving reboots.
       `deploy/deploy.sh` + runbook `docs/deploy.md` (done 2026-07-10)
 - [ ] A **continuous deploy added to CI**
 - [ ] Basic **uptime monitoring** + alert
-- [ ] **Terms of Service + privacy policy** published; content-takedown +
+- [x] **Terms of Service + privacy policy** published; content-takedown +
       delete-my-data path exists (see Legal / IP in `docs/SHARED.md`)
-      — **built + tested on branch `phase-7-legal-delete` (2026-07-11);
-      ticks on merge + deploy.** See decisions log.
+      — merged (#44) + deployed to the box 2026-07-11; `/terms` + `/privacy`
+      serve 200 over HTTPS, delete-account + Report live. See decisions log.
 - [x] `/security-review` run and findings addressed (2026-07-11: no HIGH; media
       auth-gating, LAN-only admin, sign-up enumeration fix — deployed + verified on
       the box, see decisions log)
@@ -184,6 +190,13 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   - Tests: backend consent-gating + hard-delete teardown (files, last-admin
     promotion, emptied-group deletion) + report creation/scoping; frontend
     consent gate, delete flow, report flow, and the two public legal routes.
+  - **Merged + deployed (2026-07-11, #44).** Squash-merged to main
+    (`cd83708`), then `deploy/deploy.sh` on the box: fast-forward pull, image
+    rebuild, container recreate. Migrations `accounts.0003_user_tos_accepted_at`
+    + `api.0010_report` applied cleanly, `collectstatic` ran, gunicorn came back
+    up. Post-deploy smoke test from off-box: `/`, `/terms`, `/privacy` all 200
+    over HTTPS. **This ticked the 12th DoD box and closed the hard gate** — real
+    friends/family can now be invited.
 
 - **Server hardware + boot gotcha (2026-07-10).** The repurposed spare PC is an
   **ASUS** box with **two SSDs**: a 250 GB Samsung 840 EVO (SATA) and a 1 TB
@@ -281,6 +294,36 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   Tailscale in the deploy critical path; kept as a fallback.) Note: moving to
   GHCR is a shift from today's "box builds the images itself" — a later step,
   not needed for the manual deploy.
+- **Continuous deploy built: trigger on release, systemd timer over Watchtower
+  (2026-07-11, branch `phase-7-cd-on-release`).** Implemented the pull-based plan
+  above with two refinements the user asked for / I chose:
+  - **Trigger = GitHub Release published, not every merge to main.** A deploy is
+    now always a deliberate human action (`gh release create vX.Y.Z`), cut from a
+    green main — safer than auto-shipping every commit, and gives a natural
+    version/changelog. `.github/workflows/release-deploy.yml` builds both images
+    and pushes them to GHCR tagged `<release>` + `latest` (uses the built-in
+    `GITHUB_TOKEN` with `packages: write` — no PAT/secret needed). Fork PRs can't
+    publish releases, so untrusted code never builds our images.
+  - **Box side = a systemd timer, not Watchtower.** Chosen for consistency with
+    the box's existing pattern (backups + DDNS are already systemd timers) and
+    transparency — `deploy/autodeploy.sh` is a readable ~40-line script vs
+    Watchtower's opaque daemon. Every ~5 min it `git pull`s config, `docker
+    compose pull`s the `:latest` images, and **only if a digest changed** runs
+    `up -d --no-build` against a new `docker-compose.ghcr.yml` override (so the
+    box runs the pre-built image, never compiles). Reuses deploy.sh's guards
+    (data-disk mounted, `.env.prod` present). A no-release poll is a quiet no-op.
+  - **Hybrid config vs image: config via git, images via GHCR.** The Caddyfile is
+    host-mounted and the compose files declare ports/volumes, so those must stay
+    on the box's git checkout — autodeploy `git pull`s them; only the heavy image
+    build is offloaded to CI. Box stays on `main` (no detached-HEAD footgun; the
+    manual `deploy.sh` keeps working as the build-from-source fallback).
+  - **GHCR packages set PUBLIC (one-time).** Repo is already public and images
+    bake nothing secret (secrets stay in `.env.prod` at runtime), so public
+    packages let the box pull anonymously — no registry creds on the box. Flip to
+    private later = one `docker login ghcr.io` with a read:packages token.
+  - Still TODO before ticking the DoD box: cut the first release, make the two
+    packages public, install + enable the timer on the box, and watch a release
+    deploy end-to-end. Walk through live (user is new to servers).
 - **Data lives on the 1 TB NVMe, not the OS disk (user, 2026-07-10).** The OS
   boots off the small 250 GB SATA SSD (firmware can't boot NVMe — see hardware
   note); the 1 TB Samsung 980 NVMe is the **data disk**. Postgres data **and**

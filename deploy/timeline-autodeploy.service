@@ -1,0 +1,25 @@
+# systemd service: one continuous-deploy check for TimeLine.
+# Paired with timeline-autodeploy.timer, which triggers it every few minutes.
+#
+# Install:
+#   sudo cp deploy/timeline-autodeploy.{service,timer} /etc/systemd/system/
+#   # then edit User= and ExecStart= below to your deploy user + checkout path
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now timeline-autodeploy.timer
+#
+# Runs as the DEPLOY USER (not root): it needs docker-group access (to pull
+# images + recreate containers) and write access to the repo checkout (git pull).
+[Unit]
+Description=TimeLine continuous deploy (pull latest release image from GHCR, redeploy if changed)
+# Docker must be up, and we need the network to reach GHCR.
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Set these to your actual deploy user and repo checkout path.
+User=<user>
+ExecStart=/home/<user>/TimeLine/deploy/autodeploy.sh
+# A stuck pull/build should never hang forever; cap the run.
+TimeoutStartSec=1200
