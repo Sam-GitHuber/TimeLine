@@ -62,12 +62,17 @@ Then create both remotes (fill in the three R2 values and the two secrets):
 
 ```bash
 # Raw R2 (S3-compatible). Region is literally "auto" for R2.
+# no_check_bucket=true is REQUIRED: the API token is scoped to just this bucket
+# (least privilege), so it lacks the account-level CreateBucket permission rclone
+# otherwise tries to use on first upload — without this flag you get a 403
+# "AccessDenied / CreateBucket" on the first write.
 rclone config create timeline-r2 s3 \
   provider=Cloudflare \
   access_key_id=YOUR_R2_ACCESS_KEY_ID \
   secret_access_key=YOUR_R2_SECRET_ACCESS_KEY \
   endpoint=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com \
-  region=auto
+  region=auto \
+  no_check_bucket=true
 
 # Encryption layer, pointed at a path inside the bucket. rclone obscures the
 # passwords into the config automatically when created this way.
@@ -107,7 +112,19 @@ rclone delete timeline-crypt:canary/ && rm /tmp/canary.txt
 sudo mkdir -p /etc/timeline
 sudo cp deploy/backup.env.example /etc/timeline/backup.env
 sudo nano /etc/timeline/backup.env      # defaults are fine; set HEALTHCHECK_URL if you have one
+# The backup runs as the DEPLOY USER (not root), so it must be able to READ this
+# file — hand it to that user and keep it locked to just them:
+sudo chown "$USER:$USER" /etc/timeline/backup.env
 sudo chmod 600 /etc/timeline/backup.env
+```
+
+Also create the local staging dir the backup writes dumps to before upload. It
+sits under the root-owned `/srv/timeline`, so create it and give it to the
+deploy user (otherwise the backup's `mkdir` fails):
+
+```bash
+sudo mkdir -p /srv/timeline/backups
+sudo chown "$USER:$USER" /srv/timeline/backups
 ```
 
 ### 5. First backup by hand
@@ -154,18 +171,21 @@ find /srv/timeline/media -type f | wc -l
 
 Now restore the latest backup into scratch targets and verify. Setting
 `TARGET_DB` alone is enough — the media dir defaults to a matching scratch path
-(`/srv/timeline/restore-<TARGET_DB>-media`), so there's no way to forget it and
-accidentally overwrite live media:
+under the staging dir (`/srv/timeline/backups/restore-<TARGET_DB>-media`), so
+there's no way to forget it and accidentally overwrite live media:
 
 ```bash
 TARGET_DB=timeline_restore_test ./deploy/restore.sh latest
 ```
 
 It prints the restored **user count** and **media file count** at the end —
-they should match the live numbers above. Spot-check a restored image too:
+they should match the live numbers above. To prove the media came back intact
+(not just present), compare checksums of the live vs restored files — the two
+sorted lists must be identical:
 
 ```bash
-ls -R /srv/timeline/restore-timeline_restore_test-media | head
+find /srv/timeline/media -type f -exec md5sum {} \; | awk '{print $1}' | sort
+find /srv/timeline/backups/restore-timeline_restore_test-media -type f -exec md5sum {} \; | awk '{print $1}' | sort
 ```
 
 Clean up the scratch copies:
@@ -173,8 +193,13 @@ Clean up the scratch copies:
 ```bash
 docker compose -f docker-compose.prod.yml exec -T db \
   sh -c 'dropdb -U "$POSTGRES_USER" timeline_restore_test'
-rm -rf /srv/timeline/restore-timeline_restore_test-media
+rm -rf /srv/timeline/backups/restore-timeline_restore_test-media
 ```
+
+> **Media round-trip caveat:** this test only proves what's in the backup at the
+> time you run it. If you test with an empty media tree, you've only proven the
+> DB path — re-run it once real photos exist so the media encrypt→R2→restore
+> round-trip is exercised with actual files (the checksum check above is how).
 
 Re-run this test occasionally (e.g. monthly) — backups rot silently otherwise.
 
