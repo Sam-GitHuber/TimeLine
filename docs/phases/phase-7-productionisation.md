@@ -156,6 +156,22 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
 
 ## Notes / decisions log
 
+- **Phone-photo upload cap raised 10 MB → 30 MB (2026-07-12, issue #40, branch
+  `fix-40-phone-photo-size-cap`).** Real friends/family on modern iPhones/Androids
+  were hitting "Image is too large (max 10 MB)" on ordinary camera-roll photos,
+  which killed the intended "up to 10 photos per post" flow. The key insight:
+  `MAX_UPLOAD_BYTES` in `api/imaging.py` is a **DoS/memory guard** (stop a client
+  streaming an unbounded file into Pillow), **not a storage limit** — every
+  accepted photo is already downscaled to 2048px + re-encoded at JPEG q85, so the
+  *stored* file is well under 1 MB regardless of input size. So the fix is just to
+  raise the input ceiling to a phone-realistic 30 MB and let compression handle
+  actual storage/bandwidth. Verified no other layer blocks it: **Caddy** sets no
+  `request_body max_size` (unlimited body), and **Django** file uploads bypass
+  `DATA_UPLOAD_MAX_MEMORY_SIZE` (streamed to a temp file), so no settings change
+  was needed. Also made the per-file error name the offending photo
+  (`PostCreateView`) so a bad file in a batch of 10 isn't opaque. HEIC transcode
+  is the separate issue #41 (needs `pillow-heif`/`libheif` — a stack decision).
+
 - **ToS/privacy + delete-my-data + takedown built (2026-07-11, branch
   `phase-7-legal-delete`).** The last hard-gate item before real invites. Four
   user-confirmed decisions drove it:

@@ -26,9 +26,15 @@ from django.core.files.base import ContentFile
 from PIL import Image, ImageOps, UnidentifiedImageError
 from rest_framework import serializers
 
-# Hard cap on a single uploaded file. Generous for a phone photo, but stops a
-# client streaming an unbounded file into memory/disk.
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+# Hard cap on a single uploaded file. This is a DoS/memory guard only — it stops
+# a client streaming an unbounded file into Pillow — NOT a storage limit. Every
+# accepted photo is downscaled (POST_IMAGE_MAX_EDGE) and re-encoded at JPEG q85
+# below, so the *stored* file is typically well under 1 MB regardless of how big
+# the upload was. Set it to a realistic phone-photo ceiling: modern iPhone/Android
+# cameras routinely produce single 12–25 MB photos, so a lower cap would wrongly
+# reject ordinary camera-roll uploads (the whole "up to 10 photos" flow) even
+# though compression would have handled the size moments later. See issue #40.
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 30 MB
 
 # Raster formats we accept. SVG is intentionally absent (script vector → XSS);
 # so is anything Pillow can't identify. MPO is included because phones/cameras
