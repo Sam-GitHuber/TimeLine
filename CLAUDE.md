@@ -124,10 +124,12 @@ consent checkbox recording `User.tos_accepted_at`; password-reconfirmed
 **hard-delete** account endpoint `POST /api/account/delete/` that also cleans
 media files off disk, hands sole-admin groups to the longest-standing member,
 and deletes emptied groups; an in-app **Report** control → `Report` model
-reviewed in Django admin). **12/15 DoD live; the hard gate is CLOSED — real
-friends/family can now be invited.** Remaining: continuous deploy (in
-progress — trigger on GitHub release published, pull-based via GHCR + a systemd
-timer on the box, outbound-only), uptime monitoring, cost note. See
+reviewed in Django admin). **13/15 DoD live; the hard gate is CLOSED — real
+friends/family can now be invited.** **Continuous deploy is LIVE (#45):** ship a
+version with `gh release create vX.Y.Z` → a workflow builds + pushes images to
+GHCR, and `timeline-autodeploy.timer` on the box polls every ~5 min and
+redeploys only on change (pull-based, outbound-only; security-audited). Remaining
+DoD: uptime monitoring + monthly cost note. See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 
