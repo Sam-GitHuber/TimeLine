@@ -158,3 +158,9 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 (Database migrations are not auto-reversed — a rollback that spans a migration
 needs care. For the beta, prefer rolling *forward* with a fix.)
+
+## Backups & restore
+
+Nightly encrypted off-site backups (Postgres dump + media) to Cloudflare R2, plus
+the tested restore procedure, live in their own runbook: **`docs/backup-restore.md`**.
+Take an ad-hoc backup before a risky change with `./deploy/backup.sh`.

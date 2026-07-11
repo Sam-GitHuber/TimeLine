@@ -6,7 +6,12 @@ https://your-timeline.net (home server, 2026-07-10). 9/15 DoD items done.
 > **RESUME HERE (next session).** The core is done: the site is deployed on the
 > box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
 > a Let's Encrypt cert (verified on mobile data). **Remaining, in priority order:**
-> 1. **Off-box backups + a tested restore** ← do first; protects real data.
+> 1. **Off-box backups + a tested restore** ← tooling BUILT (2026-07-11:
+>    `deploy/backup.sh`/`restore.sh` + systemd timer → encrypted Cloudflare R2;
+>    runbook `docs/backup-restore.md`; dump/restore pipeline validated locally).
+>    **Remaining = run it ON THE BOX**: R2 bucket + `rclone crypt` setup, first
+>    backup, install the timer, then the **tested restore** into a scratch
+>    DB/dir. This item is not done until that restore passes on the box.
 > 2. **`/security-review`** and fix findings.
 > 3. **ToS + privacy policy + delete-my-data / takedown path.**
 > 4. Continuous deploy in CI (pull-based via GHCR — decided, see log), uptime
@@ -259,3 +264,23 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   `your-timeline.net`.
 - **Reverse proxy: Caddy (recommended)** for tiny-config auto-HTTPS + same-origin
   serving; nginx + certbot is the manual alternative.
+- **Backup tooling built (2026-07-11).** `deploy/backup.sh` (+ `backup.service`/
+  `backup.timer`, `backup.env.example`), `deploy/restore.sh`, and runbook
+  `docs/backup-restore.md`. Nightly systemd timer (03:30, mirrors the DDNS timer
+  pattern): `pg_dump -Fc` from inside the `db` container (so it never needs the DB
+  creds) + `rclone sync` of media, both to **Cloudflare R2** behind an **rclone
+  `crypt`** remote — encrypted before leaving the house. **Destination decision:
+  R2** (chosen over Backblaze B2 / self-managed) — reuses the existing Cloudflare
+  account, 10 GB free + zero egress, S3-compatible so it doubles as a stepping
+  stone to the Phase 7b S3 migration. **Key storage design:** media is *mirrored*
+  (`sync`), not snapshotted, so off-site size ≈ live media (not × retention),
+  keeping a small beta inside R2's free tier; DB dumps are tiny so ~30 dailies are
+  cheap; changed/deleted files divert to a dated `media-archive/` (30-day window)
+  so a local wipe can't propagate to the backup. Optional `HEALTHCHECK_URL` pinged
+  only on success → a *missing* ping surfaces silent backup rot. The
+  dump→createdb→`pg_restore --clean --if-exists --no-owner`→verify pipeline was
+  **validated locally against real Postgres 16 + the actual app schema** (dev
+  `db`); the rclone/R2/crypt layer and the mount guard are server-only and are the
+  remaining live steps. **DoD item stays unchecked until the tested restore is run
+  ON THE BOX** (into a scratch DB + scratch dir per the runbook) — tooling is done,
+  the *tested restore* is the gate.
