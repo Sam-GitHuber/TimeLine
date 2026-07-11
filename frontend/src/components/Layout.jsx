@@ -65,21 +65,26 @@ export default function Layout() {
   });
   const unreadMessages = unreadData?.count ?? 0;
 
-  const navLinkClass = ({ isActive }) =>
-    `whitespace-nowrap rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
-      isActive
-        ? "bg-ink/[0.06] text-ink"
-        : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
-    }`;
+  // Nav items collapse to icons on a phone (below `sm`) and expand to labelled
+  // pills on wider screens. The base here holds the shared shape; each item adds
+  // its icon (shown only on mobile) and text label (shown only from `sm` up).
+  const stateClass = (active) =>
+    active
+      ? "bg-ink/[0.06] text-ink"
+      : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep";
+  const navItemBase =
+    "relative flex items-center gap-1.5 whitespace-nowrap rounded-xl p-2 text-sm font-medium tracking-tight transition sm:px-3 sm:py-1.5";
+  const navLinkClass = ({ isActive }) => `${navItemBase} ${stateClass(isActive)}`;
 
   return (
     <div className="min-h-screen">
       <div className="mx-auto max-w-[640px] border-x border-line bg-surface">
         <header className="sticky top-0 z-10 border-b border-line bg-surface/80 backdrop-blur">
-          <nav className="flex items-center justify-between gap-3 px-5 py-3.5">
+          <nav className="flex items-center justify-between gap-2 px-4 py-3.5 sm:gap-3 sm:px-5">
             <Link
               to="/"
-              className="flex items-center gap-2 font-display text-xl font-bold -tracking-[0.02em] text-ink"
+              aria-label="TimeLine home"
+              className="flex shrink-0 items-center gap-2 font-display text-xl font-bold -tracking-[0.02em] text-ink"
             >
               <svg
                 width="15"
@@ -99,17 +104,29 @@ export default function Layout() {
                 />
                 <circle cx="8" cy="6" r="4" fill="var(--color-accent)" />
               </svg>
-              TimeLine
+              {/* The wordmark hides on the narrowest phones so the mark alone
+                  keeps the bar from overflowing; it returns from ~360px up. */}
+              <span className="hidden min-[360px]:inline">TimeLine</span>
             </Link>
             <div className="flex items-center gap-0.5">
-              <NavLink to="/" end className={navLinkClass}>
-                Feed
+              <NavLink to="/" end aria-label="Feed" className={navLinkClass}>
+                <HomeIcon className="h-5 w-5 sm:hidden" />
+                <span className="hidden sm:inline">Feed</span>
               </NavLink>
               {/* People is now the relationships hub: Discover + a Requests
                   tab. The pending-request count rides here (it used to be its
                   own nav item) so "someone needs your attention" still shows. */}
-              <NavLink to="/people" className={navLinkClass}>
-                People
+              <NavLink
+                to="/people"
+                aria-label={
+                  pendingCount > 0
+                    ? `People, ${pendingCount} pending request${pendingCount === 1 ? "" : "s"}`
+                    : "People"
+                }
+                className={navLinkClass}
+              >
+                <PeopleIcon className="h-5 w-5 sm:hidden" />
+                <span className="hidden sm:inline">People</span>
                 {pendingCount > 0 && <NavBadge count={pendingCount} />}
               </NavLink>
               {/* Groups is a companion panel too — the mirror of Messages,
@@ -119,13 +136,15 @@ export default function Layout() {
                 type="button"
                 onClick={toggleGroups}
                 aria-pressed={groupsDrawer.isOpen}
-                className={`whitespace-nowrap rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
-                  groupsDrawer.isOpen
-                    ? "bg-ink/[0.06] text-ink"
-                    : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
-                }`}
+                aria-label={
+                  groupInviteCount > 0
+                    ? `Groups, ${groupInviteCount} invitation${groupInviteCount === 1 ? "" : "s"}`
+                    : "Groups"
+                }
+                className={`${navItemBase} ${stateClass(groupsDrawer.isOpen)}`}
               >
-                Groups
+                <GroupsIcon className="h-5 w-5 sm:hidden" />
+                <span className="hidden sm:inline">Groups</span>
                 {groupInviteCount > 0 && <NavBadge count={groupInviteCount} />}
               </button>
               {/* Messages is a companion panel, not a page — the button toggles
@@ -134,13 +153,15 @@ export default function Layout() {
                 type="button"
                 onClick={toggleMessages}
                 aria-pressed={messaging.isOpen}
-                className={`whitespace-nowrap rounded-xl px-3 py-1.5 text-sm font-medium tracking-tight transition ${
-                  messaging.isOpen
-                    ? "bg-ink/[0.06] text-ink"
-                    : "text-ink-soft hover:bg-accent-tint hover:text-accent-deep"
-                }`}
+                aria-label={
+                  unreadMessages > 0
+                    ? `Messages, ${unreadMessages} unread`
+                    : "Messages"
+                }
+                className={`${navItemBase} ${stateClass(messaging.isOpen)}`}
               >
-                Messages
+                <MessagesIcon className="h-5 w-5 sm:hidden" />
+                <span className="hidden sm:inline">Messages</span>
                 {unreadMessages > 0 && <NavBadge count={unreadMessages} />}
               </button>
               {/* Profile, Settings, Admin and Log out — all "about me" — live
@@ -164,13 +185,102 @@ export default function Layout() {
   );
 }
 
-// The small accent count pill on a nav item (pending requests, group invites,
-// unread messages). `inline-flex` inside a `whitespace-nowrap` item so it stays
-// on the same line as its label — the crowding used to break it onto its own.
+// The nav "you have something waiting" indicator. On a phone the item is just an
+// icon, so the count wouldn't have room — we show a small accent dot pinned to
+// the icon's corner instead. From `sm` up (labels visible) it becomes the count
+// pill sitting after the label. The count itself is conveyed to screen readers
+// via each item's aria-label, so both forms here are decorative (aria-hidden).
 function NavBadge({ count }) {
   return (
-    <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white">
-      {count}
-    </span>
+    <>
+      <span
+        aria-hidden="true"
+        className="absolute right-1 top-1 h-2 w-2 rounded-full bg-accent ring-2 ring-surface sm:hidden"
+      />
+      <span
+        aria-hidden="true"
+        className="ml-1.5 hidden min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white sm:inline-flex"
+      >
+        {count}
+      </span>
+    </>
+  );
+}
+
+// ---- Mobile nav icons ----
+// Shown only below `sm`, where the labelled pills collapse to icons. Simple
+// stroke glyphs that inherit the item's text colour (so the active/hover states
+// carry through). Each is aria-hidden — the accessible name is the item's label.
+function HomeIcon(props) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M3 10.5 12 3l9 7.5" />
+      <path d="M5 9.5V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.5" />
+    </svg>
+  );
+}
+
+function PeopleIcon(props) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <circle cx="9" cy="8" r="3.2" />
+      <path d="M3.5 20a5.5 5.5 0 0 1 11 0" />
+      <path d="M15.5 5.1a3.2 3.2 0 0 1 0 5.8" />
+      <path d="M17 14.3a5.5 5.5 0 0 1 3.5 5.7" />
+    </svg>
+  );
+}
+
+function GroupsIcon(props) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M12 3 3 8l9 5 9-5-9-5Z" />
+      <path d="M3 12.5 12 17.5l9-5" />
+      <path d="M3 17 12 22l9-5" />
+    </svg>
+  );
+}
+
+function MessagesIcon(props) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M20.5 11.5a7.5 7.5 0 0 1-7.5 7.5 7.9 7.9 0 0 1-3.5-.8L4 20l1.3-4.2A7.5 7.5 0 0 1 4.5 11.5 7.5 7.5 0 0 1 12 4a7.5 7.5 0 0 1 8.5 7.5Z" />
+    </svg>
   );
 }
