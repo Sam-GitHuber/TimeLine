@@ -4,6 +4,7 @@ from dj_rest_auth.serializers import (
     UserDetailsSerializer as BaseUserDetailsSerializer,
 )
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from api.imaging import (
@@ -39,6 +40,11 @@ class CustomRegisterSerializer(RegisterSerializer):
     username = None
     first_name = serializers.CharField(max_length=150)
     last_name = serializers.CharField(max_length=150)
+    # Explicit consent to the Terms + privacy policy, required to sign up. As a
+    # data controller (UK GDPR) we record *that* the person agreed, and when
+    # (``tos_accepted_at``, stamped in ``save()``). Write-only — it's an input,
+    # not part of any response.
+    accept_terms = serializers.BooleanField(write_only=True)
 
     def validate_first_name(self, value):
         stripped = value.strip()
@@ -51,6 +57,15 @@ class CustomRegisterSerializer(RegisterSerializer):
         if not stripped:
             raise serializers.ValidationError("Last name can't be blank.")
         return stripped
+
+    def validate_accept_terms(self, value):
+        # A present-but-false box is a refusal — reject it. (An absent field is
+        # already a "this field is required" error from BooleanField.)
+        if not value:
+            raise serializers.ValidationError(
+                "You must accept the Terms and Privacy Policy to sign up."
+            )
+        return value
 
     def get_cleaned_data(self):
         # allauth's adapter.save_user reads first/last name from here.
@@ -80,8 +95,10 @@ class CustomRegisterSerializer(RegisterSerializer):
             return None
         user = super().save(request)
         # Pending approval: no one gets in without the maintainer's say-so.
+        # Record consent at the same moment (the box was required to get here).
         user.is_active = False
-        user.save(update_fields=["is_active"])
+        user.tos_accepted_at = timezone.now()
+        user.save(update_fields=["is_active", "tos_accepted_at"])
         return user
 
 

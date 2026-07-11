@@ -24,6 +24,8 @@ import GroupFormPage from "./pages/GroupFormPage.jsx";
 import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
+import TermsPage from "./pages/legal/TermsPage.jsx";
+import PrivacyPage from "./pages/legal/PrivacyPage.jsx";
 
 // Route table:
 //   /login, /signup   → public auth pages
@@ -83,6 +85,10 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
+      {/* Legal pages — public so they're reachable from sign-up (before login)
+          as well as from the in-app footer. */}
+      <Route path="/terms" element={<TermsPage />} />
+      <Route path="/privacy" element={<PrivacyPage />} />
 
       <Route element={<ProtectedRoute />}>
         <Route

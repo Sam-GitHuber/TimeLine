@@ -115,7 +115,7 @@ export const api = {
   // Registration creates a *pending* account; it does not log you in. We collect
   // the real name here (there are no usernames), so an approved account has a
   // display name from day one.
-  register: (email, password, firstName, lastName) =>
+  register: (email, password, firstName, lastName, acceptTerms = false) =>
     request("/api/auth/registration/", {
       method: "POST",
       body: {
@@ -124,6 +124,9 @@ export const api = {
         password2: password,
         first_name: firstName,
         last_name: lastName,
+        // Explicit consent to the Terms + privacy policy — required by the
+        // backend to create the account (it records when you agreed).
+        accept_terms: acceptTerms,
       },
     }),
 
@@ -139,6 +142,27 @@ export const api = {
     if (removeAvatar) form.append("remove_avatar", "true");
     return request("/api/auth/user/", { method: "PATCH", body: form });
   },
+
+  // Permanently delete your own account and all your data. Password-reconfirmed
+  // (the backend rejects a wrong password) because it's irreversible. On success
+  // the server returns 204 and the session is dead; the caller clears local state.
+  deleteAccount: (password) =>
+    request("/api/account/delete/", {
+      method: "POST",
+      body: { password },
+    }),
+
+  // Report a post or comment for the maintainer to review (Phase 7 takedown
+  // path). Pass exactly one of postId / commentId, plus an optional reason.
+  reportContent: ({ postId = null, commentId = null, reason = "" } = {}) =>
+    request("/api/reports/", {
+      method: "POST",
+      body: {
+        ...(postId ? { post: postId } : {}),
+        ...(commentId ? { comment: commentId } : {}),
+        reason,
+      },
+    }),
 
   // --- Timeline (Phase 3) --------------------------------------------------
 

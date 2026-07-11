@@ -73,7 +73,7 @@ describe("api CSRF + fetch wiring", () => {
   it("register sends matching password1/password2 and no auth-token handling", async () => {
     const fetchMock = stubFetch({ body: JSON.stringify({ detail: "pending" }) });
 
-    await api.register("new@b.com", "pw123456");
+    await api.register("new@b.com", "pw123456", "New", "Member", true);
 
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/auth/registration/");
@@ -81,6 +81,9 @@ describe("api CSRF + fetch wiring", () => {
       email: "new@b.com",
       password1: "pw123456",
       password2: "pw123456",
+      first_name: "New",
+      last_name: "Member",
+      accept_terms: true,
     });
   });
 

@@ -181,6 +181,35 @@ just don't be surprised that `curl https://your-timeline.net/media/...` returns 
 without a valid session cookie. (Per-author connection gating is a later, Phase 7b
 step; today any logged-in member can fetch a media file whose URL they already hold.)
 
+## Handling reports & deletion requests (moderation)
+
+Members can flag content and delete their own accounts (Phase 7 legal gate).
+
+- **Content reports.** A member's “Report” on a post or comment creates a report
+  row. Review them in the Django admin under **Api › Reports** (LAN-only, like the
+  rest of admin). Filter the list to `open`, open the flagged post/comment (both
+  are readable/deletable from their own admin pages), delete the content if it
+  breaks the Terms, then set the report’s **status** to `resolved` (or `dismissed`
+  if there’s nothing to do) to clear the queue.
+
+- **Account deletion is self-service and permanent.** A member deletes their own
+  account from **Settings** (password-reconfirmed). It hard-deletes their account
+  and content, removes their uploaded image files from `/srv/timeline/media`, and
+  hands any group they solely administered to the longest-standing remaining
+  member (a group they were the only member of is deleted). You don’t need to do
+  anything. To action a deletion request over SSH instead (e.g. someone locked
+  out), from inside the repo on the box:
+
+  ```bash
+  docker compose -f docker-compose.prod.yml exec backend python manage.py shell -c \
+    "from api.views import delete_account; from django.contrib.auth import get_user_model as g; delete_account(g().objects.get(email='them@example.com'))"
+  ```
+
+- **Backups caveat.** Deleted data can linger in the nightly encrypted R2 backups
+  until they age out (~30 days) — this is stated in the privacy policy. There’s no
+  need (and no clean way) to surgically scrub a single account from historical
+  encrypted backups; they roll over on their own.
+
 ## Verifying data really is on the NVMe
 
 After the first `up`, confirm Postgres + media resolve onto the data disk, not

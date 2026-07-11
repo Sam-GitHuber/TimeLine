@@ -48,6 +48,7 @@ class RegistrationTests(APITestCase):
                 "password2": PASSWORD,
                 "first_name": "Reg",
                 "last_name": "Ister",
+                "accept_terms": True,
             },
             format="json",
         )
@@ -115,6 +116,7 @@ class RegistrationTests(APITestCase):
                 "password1": "a-totally-different-99-pw",
                 "password2": "a-totally-different-99-pw",
                 "first_name": "Mal", "last_name": "Lory",
+                "accept_terms": True,
             },
             format="json",
         )
@@ -122,6 +124,47 @@ class RegistrationTests(APITestCase):
         user.refresh_from_db()
         self.assertEqual(user.password, original_hash)
         self.assertEqual(user.first_name, "Reg")  # unchanged
+
+    def test_register_records_when_terms_were_accepted(self):
+        # As a data controller we keep a defensible record of consent.
+        self._register("consenting@example.com")
+        user = User.objects.get(email="consenting@example.com")
+        self.assertIsNotNone(user.tos_accepted_at)
+
+    def test_register_requires_accepting_the_terms(self):
+        # Omitting the consent field is a 400 and creates no account.
+        resp = self.client.post(
+            REGISTER_URL,
+            {
+                "email": "unconsenting@example.com",
+                "password1": PASSWORD,
+                "password2": PASSWORD,
+                "first_name": "No", "last_name": "Thanks",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(
+            User.objects.filter(email="unconsenting@example.com").exists()
+        )
+
+    def test_register_rejects_an_unticked_consent_box(self):
+        # A present-but-false box is a refusal, not consent — also a 400.
+        resp = self.client.post(
+            REGISTER_URL,
+            {
+                "email": "refusing@example.com",
+                "password1": PASSWORD,
+                "password2": PASSWORD,
+                "first_name": "Not", "last_name": "Agreed",
+                "accept_terms": False,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(
+            User.objects.filter(email="refusing@example.com").exists()
+        )
 
 
 class LoginLogoutTests(APITestCase):
@@ -134,6 +177,7 @@ class LoginLogoutTests(APITestCase):
                 "password2": PASSWORD,
                 "first_name": "Log",
                 "last_name": "Inman",
+                "accept_terms": True,
             },
             format="json",
         )

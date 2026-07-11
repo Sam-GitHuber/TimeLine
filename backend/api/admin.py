@@ -11,6 +11,7 @@ from .models import (
     Message,
     Post,
     PostImage,
+    Report,
 )
 
 
@@ -151,3 +152,35 @@ class GroupMembershipAdmin(admin.ModelAdmin):
     list_filter = ("role", "status")
     search_fields = ("group__name", "user__email")
     ordering = ("-created_at",)
+
+
+@admin.register(Report)
+class ReportAdmin(admin.ModelAdmin):
+    """The maintainer's moderation queue (Phase 7 takedown path).
+
+    Filter to ``open`` reports, open the flagged post/comment (both are
+    moderatable in their own admin), delete the content if warranted, then set
+    the report's status to ``resolved``/``dismissed`` here to clear the queue.
+    """
+
+    list_display = (
+        "id",
+        "status",
+        "reporter",
+        "target",
+        "short_reason",
+        "created_at",
+    )
+    list_select_related = ("reporter", "post", "comment")
+    list_filter = ("status", "created_at")
+    search_fields = ("reason", "reporter__email")
+    ordering = ("-created_at",)
+    list_editable = ("status",)
+
+    @admin.display(description="target")
+    def target(self, obj):
+        return f"post #{obj.post_id}" if obj.post_id else f"comment #{obj.comment_id}"
+
+    @admin.display(description="reason")
+    def short_reason(self, obj):
+        return obj.reason[:60] + ("…" if len(obj.reason) > 60 else "")

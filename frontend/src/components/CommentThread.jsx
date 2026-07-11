@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
+import ReportButton from "./ReportButton.jsx";
 import { api } from "../api.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
@@ -106,6 +107,7 @@ function CommentNode({ comment, postId }) {
           >
             Reply
           </button>
+          <ReportButton commentId={comment.id} authorId={comment.author.id} />
           {replies.length > 0 && (
             <button
               type="button"

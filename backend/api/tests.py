@@ -38,6 +38,7 @@ from .models import (
     Participant,
     ParticipantInterval,
     Post,
+    Report,
 )
 
 User = get_user_model()
@@ -2159,3 +2160,198 @@ class MediaAuthTests(APITestCase):
         self.client.force_authenticate(make_user("mediaviewer@example.com"))
         resp = self.client.get(MEDIA_AUTH_URL)
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+
+# --- Phase 7: content reports (takedown path) ---------------------------------
+
+REPORTS_URL = "/api/reports/"
+
+
+class ReportTests(APITestCase):
+    """Flagging a post or comment for the maintainer to review."""
+
+    def setUp(self):
+        self.reporter = make_user("reporter@example.com")
+        self.author = make_user("author@example.com")
+        # You can only report content you can *see*, so the reporter is connected
+        # with the author (their post + comment are then visible to the reporter).
+        make_connection(self.reporter, self.author)
+        self.post = Post.objects.create(author=self.author, text="something")
+        self.comment = Comment.objects.create(
+            post=self.post, author=self.author, text="a comment"
+        )
+        self.client.force_authenticate(self.reporter)
+
+    def test_report_a_post(self):
+        resp = self.client.post(
+            REPORTS_URL,
+            {"post": self.post.pk, "reason": "not theirs to post"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        report = Report.objects.get()
+        self.assertEqual(report.reporter, self.reporter)
+        self.assertEqual(report.post_id, self.post.pk)
+        self.assertIsNone(report.comment_id)
+        self.assertEqual(report.status, Report.Status.OPEN)
+
+    def test_report_a_comment(self):
+        resp = self.client.post(
+            REPORTS_URL, {"comment": self.comment.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Report.objects.get().comment_id, self.comment.pk)
+
+    def test_report_needs_exactly_one_target(self):
+        # Neither…
+        none = self.client.post(REPORTS_URL, {"reason": "x"}, format="json")
+        self.assertEqual(none.status_code, status.HTTP_400_BAD_REQUEST)
+        # …nor both.
+        both = self.client.post(
+            REPORTS_URL,
+            {"post": self.post.pk, "comment": self.comment.pk},
+            format="json",
+        )
+        self.assertEqual(both.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Report.objects.count(), 0)
+
+    def test_reporter_is_the_session_user_not_the_body(self):
+        # A spoofed "reporter" in the body is ignored — it's taken from the session.
+        resp = self.client.post(
+            REPORTS_URL,
+            {"post": self.post.pk, "reporter": self.author.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Report.objects.get().reporter, self.reporter)
+
+    def test_anonymous_cannot_report(self):
+        self.client.force_authenticate(None)
+        resp = self.client.post(
+            REPORTS_URL, {"post": self.post.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_cannot_report_content_you_cannot_see(self):
+        # A stranger's post the reporter has no connection to: reporting it must
+        # 404 (same as everywhere else) rather than confirm the id exists.
+        stranger = make_user("stranger@example.com")
+        hidden = Post.objects.create(author=stranger, text="not for you")
+        hidden_comment = Comment.objects.create(
+            post=hidden, author=stranger, text="also hidden"
+        )
+
+        post_resp = self.client.post(
+            REPORTS_URL, {"post": hidden.pk}, format="json"
+        )
+        comment_resp = self.client.post(
+            REPORTS_URL, {"comment": hidden_comment.pk}, format="json"
+        )
+
+        self.assertEqual(post_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(comment_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Report.objects.count(), 0)
+
+    def test_reporting_the_same_item_twice_is_idempotent(self):
+        first = self.client.post(
+            REPORTS_URL, {"post": self.post.pk}, format="json"
+        )
+        second = self.client.post(
+            REPORTS_URL, {"post": self.post.pk, "reason": "again"}, format="json"
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        # The repeat returns the existing report (200), not a duplicate row.
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertEqual(Report.objects.count(), 1)
+
+
+# --- Phase 7: account deletion (delete-my-data path) --------------------------
+
+DELETE_ACCOUNT_URL = "/api/account/delete/"
+_DELETE_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-delete-")
+
+
+class DeleteAccountTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("leaver@example.com")
+        self.client.force_authenticate(self.me)
+
+    def test_wrong_password_is_rejected_and_account_survives(self):
+        resp = self.client.post(
+            DELETE_ACCOUNT_URL, {"password": "not-my-password"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(User.objects.filter(pk=self.me.pk).exists())
+
+    def test_deletes_account_and_its_content(self):
+        friend = make_user("friend@example.com")
+        make_connection(self.me, friend)
+        post = Post.objects.create(author=self.me, text="mine")
+        Comment.objects.create(post=post, author=self.me, text="my comment")
+
+        resp = self.client.post(
+            DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(User.objects.filter(pk=self.me.pk).exists())
+        # Their content is gone; the friend's account is untouched.
+        self.assertEqual(Post.objects.filter(author_id=self.me.pk).count(), 0)
+        self.assertEqual(Connection.objects.count(), 0)
+        self.assertTrue(User.objects.filter(pk=friend.pk).exists())
+
+    @override_settings(MEDIA_ROOT=_DELETE_MEDIA_ROOT)
+    def test_deletes_uploaded_media_files_from_storage(self):
+        # A real uploaded photo, then delete the account — the files must go too,
+        # not just their DB rows (the cascade wouldn't touch disk).
+        self.client.post(
+            POSTS_URL,
+            {"text": "with a photo", "images": [make_image_upload()]},
+            format="multipart",
+        )
+        image = Post.objects.get(author=self.me).images.get()
+        storage, name, thumb = image.image.storage, image.image.name, image.thumbnail.name
+        self.assertTrue(storage.exists(name))
+
+        # The files are removed on commit (so a rolled-back delete can't orphan
+        # the rows from their files), so run the on_commit callbacks to see it.
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(storage.exists(name))
+        self.assertFalse(storage.exists(thumb))
+        shutil.rmtree(_DELETE_MEDIA_ROOT, ignore_errors=True)
+
+    def test_sole_admin_hands_the_group_to_the_longest_standing_member(self):
+        group = make_group(self.me)  # me = the only admin
+        # Two other members; the earlier-joined one should inherit admin.
+        first = make_user("first@example.com")
+        second = make_user("second@example.com")
+        add_member(group, first)
+        add_member(group, second)
+
+        resp = self.client.post(
+            DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+        # The group survives and is still governable — `first` is now its admin.
+        self.assertTrue(Group.objects.filter(pk=group.pk).exists())
+        self.assertEqual(
+            GroupMembership.objects.get(group=group, user=first).role,
+            GroupMembership.Role.ADMIN,
+        )
+
+    def test_group_the_user_was_the_only_member_of_is_deleted(self):
+        group = make_group(self.me)  # me is the sole member
+
+        resp = self.client.post(
+            DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Group.objects.filter(pk=group.pk).exists())

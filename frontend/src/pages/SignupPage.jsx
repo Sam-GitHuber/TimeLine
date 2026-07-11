@@ -14,6 +14,7 @@ export default function SignupPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [acceptTerms, setAcceptTerms] = useState(false);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [pendingMessage, setPendingMessage] = useState(null);
@@ -27,7 +28,13 @@ export default function SignupPage() {
     }
     setSubmitting(true);
     try {
-      const result = await register(email, password, firstName, lastName);
+      const result = await register(
+        email,
+        password,
+        firstName,
+        lastName,
+        acceptTerms
+      );
       setPendingMessage(
         result?.detail ||
           "Account created and pending approval. You'll be able to log in once the site owner approves your account."
@@ -95,6 +102,34 @@ export default function SignupPage() {
           autoComplete="new-password"
         />
 
+        <label className="flex items-start gap-2 text-sm text-ink-soft">
+          <input
+            type="checkbox"
+            checked={acceptTerms}
+            onChange={(e) => setAcceptTerms(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-line-strong text-accent focus:ring-2 focus:ring-accent-tint"
+          />
+          <span>
+            I agree to the{" "}
+            <Link
+              to="/terms"
+              target="_blank"
+              className="font-medium text-accent-deep hover:underline"
+            >
+              Terms of Service
+            </Link>{" "}
+            and{" "}
+            <Link
+              to="/privacy"
+              target="_blank"
+              className="font-medium text-accent-deep hover:underline"
+            >
+              Privacy Policy
+            </Link>
+            .
+          </span>
+        </label>
+
         {error && (
           <p role="alert" className="text-sm text-red-600">
             {error}
@@ -109,7 +144,8 @@ export default function SignupPage() {
             !lastName ||
             !email ||
             !password ||
-            !confirm
+            !confirm ||
+            !acceptTerms
           }
           className="btn btn-primary btn-block"
         >

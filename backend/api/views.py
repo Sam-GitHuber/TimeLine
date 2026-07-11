@@ -46,6 +46,7 @@ from .models import (
     ParticipantInterval,
     Post,
     PostImage,
+    Report,
 )
 from .serializers import (
     CommentCreateSerializer,
@@ -58,6 +59,7 @@ from .serializers import (
     MessageCreateSerializer,
     MessageSerializer,
     PostSerializer,
+    ReportCreateSerializer,
     UserListSerializer,
 )
 
@@ -522,6 +524,37 @@ def feed_posts(user, include_groups=False):
         .select_related("author", "group")
         .prefetch_related("images")
     )
+
+
+def can_view_post(user, post, connected_ids=None):
+    """Whether ``user`` is allowed to *see* ``post`` — the same private-by-default
+    gate the feed, profiles and the comments view apply, in one place so a caller
+    that needs a yes/no (rather than a queryset) can't drift from it. A group post
+    additionally requires active membership. Pass ``connected_ids`` if the caller
+    already has it, to avoid recomputing.
+    """
+    if post.group_id and not is_group_member(user, post.group_id):
+        return False
+    return (
+        visible_posts(user, connected_ids=connected_ids, group=post.group_id or None)
+        .filter(pk=post.pk)
+        .exists()
+    )
+
+
+def can_view_comment(user, comment, connected_ids=None):
+    """Whether ``user`` can see ``comment``. Mirrors the pruned comment tree
+    (``PostCommentsView``): the comment's post must be visible, the comment's
+    author must be active, and — matching the connection-pruned tree — the author
+    must be the viewer or one of their connections.
+    """
+    if connected_ids is None:
+        connected_ids = connected_user_ids(user)
+    if not comment.author.is_active:
+        return False
+    if comment.author_id != user.id and comment.author_id not in connected_ids:
+        return False
+    return can_view_post(user, comment.post, connected_ids=connected_ids)
 
 
 def connection_status_annotation(user):
@@ -1973,3 +2006,161 @@ class GroupInviteActionView(APIView):
             return Response({"detail": "Joined."}, status=status.HTTP_200_OK)
         invite.delete()
         return Response({"detail": "Declined."}, status=status.HTTP_200_OK)
+
+
+# --- Content reports (Phase 7 — takedown path) ---------------------------------
+
+
+class ReportCreateView(generics.CreateAPIView):
+    """Flag a post or comment for the maintainer (``POST /api/reports/``).
+
+    Any logged-in member can raise a report; the reporter is the session user
+    (never the body). The report just records the flag — the maintainer reviews
+    it in the Django admin (where the reported post/comment is moderatable) and
+    removes the content if warranted.
+
+    Two guards beyond the serializer's xor/length checks:
+
+    - **You can only report content you can see.** Without this the endpoint
+      would confirm which post/comment ids exist (a 201-vs-400 oracle) for
+      content you have no relationship to — a hole in the same private-by-default
+      wall the feed and comments enforce. A non-visible target gets the same 404
+      it gets everywhere else, so existence isn't leaked either way.
+    - **One flag per (reporter, target).** A repeat/double-click returns your
+      existing report (200) instead of stacking duplicates in the queue; the
+      model's unique constraints are the race-proof backstop.
+
+    Returns 201 with the created report, or 200 with the existing one.
+    """
+
+    serializer_class = ReportCreateSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        post = serializer.validated_data.get("post")
+        comment = serializer.validated_data.get("comment")
+
+        connected_ids = connected_user_ids(request.user)
+        if post is not None and not can_view_post(
+            request.user, post, connected_ids
+        ):
+            raise NotFound()
+        if comment is not None and not can_view_comment(
+            request.user, comment, connected_ids
+        ):
+            raise NotFound()
+
+        # Idempotent: already flagged this item? Return that report, don't stack a
+        # duplicate. (The unique constraint still guards against a concurrent race
+        # slipping past this check.)
+        existing = Report.objects.filter(
+            reporter=request.user, post=post, comment=comment
+        ).first()
+        if existing is not None:
+            data = self.get_serializer(existing).data
+            return Response(data, status=status.HTTP_200_OK)
+
+        serializer.save(reporter=request.user)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data, status=status.HTTP_201_CREATED, headers=headers
+        )
+
+
+# --- Account deletion (Phase 7 — delete-my-data path) --------------------------
+
+
+def delete_account(user):
+    """Hard-delete ``user`` and everything of theirs, safely and in one txn.
+
+    "Delete my data" for real (UK GDPR erasure): the account and its posts,
+    comments, messages, connections, memberships, blocks and reports all go.
+    Three things a naive ``user.delete()`` gets wrong, handled here:
+
+    1. **Media files.** The cascade drops ``PostImage``/avatar *rows* but leaves
+       the actual JPEGs on disk/in storage. We gather them up front and delete
+       them **on commit** — file deletes aren't transactional, so doing them only
+       once the rows are certainly gone means a rolled-back delete can't leave the
+       account intact but its images vanished.
+    2. **Last-admin groups.** A group outlives its members (``Group.creator`` is
+       SET_NULL, admin memberships CASCADE), so deleting a group's *only* admin
+       would leave it ungovernable. If other active members remain, we promote
+       the longest-standing one to admin before leaving.
+    3. **Emptied groups.** A group the user was the sole active member of becomes
+       memberless — dead space — so we delete it (and its avatar files) outright.
+
+    Everything runs in a transaction: either the account and all its traces go,
+    or nothing does.
+    """
+    my_active_memberships = list(
+        GroupMembership.objects.filter(
+            user=user, status=ACTIVE
+        ).select_related("group")
+    )
+
+    # Gather every storage file to remove. We capture the FieldFiles now (they
+    # hold the storage + path) but only delete them after the transaction commits
+    # — see docstring point 1. An already-removed file just no-ops.
+    files_to_delete = [user.avatar, user.avatar_thumb]
+    for img in PostImage.objects.filter(post__author=user):
+        files_to_delete.append(img.image)
+        files_to_delete.append(img.thumbnail)
+
+    with transaction.atomic():
+        groups_to_delete = []
+        for m in my_active_memberships:
+            others = GroupMembership.objects.filter(
+                group_id=m.group_id, status=ACTIVE
+            ).exclude(user=user)
+            if not others.exists():
+                # The user is this group's only active member — it dies with them.
+                groups_to_delete.append(m.group_id)
+                continue
+            # Sole admin of a group others are still in → hand the keys over to
+            # the longest-standing remaining member so the group stays governable.
+            if m.role == ADMIN and _active_admin_count(m.group_id) <= 1:
+                heir = others.order_by("created_at", "id").first()
+                heir.role = ADMIN
+                heir.save(update_fields=["role"])
+
+        # Delete the account. Cascades: posts (+ image rows), comments, sent
+        # messages, 1:1 conversations, chat participations, connections, blocks,
+        # read markers, group memberships, reports made.
+        user.delete()
+
+        # Now-memberless groups: remove them (capturing their avatar files for the
+        # same on-commit sweep). Their posts — all by the departed sole member —
+        # and those posts' image files are already accounted for above.
+        for group in Group.objects.filter(id__in=groups_to_delete):
+            files_to_delete.append(group.avatar)
+            files_to_delete.append(group.avatar_thumb)
+            group.delete()
+
+        # Only once the whole delete has committed do we touch storage.
+        def _remove_files(files=files_to_delete):
+            for f in files:
+                if f:
+                    f.delete(save=False)
+
+        transaction.on_commit(_remove_files)
+
+
+class DeleteAccountView(APIView):
+    """Delete your own account and all your data (``POST /api/account/delete/``).
+
+    Irreversible, so it's **password-reconfirmed**: the body must carry the
+    caller's current ``password``. This guards against a one-click mistake or an
+    unattended/hijacked session doing something unrecoverable — the same reason a
+    bank asks again before a transfer. On success everything is torn down (see
+    ``delete_account``) and 204 is returned; the client then clears its session.
+    """
+
+    def post(self, request):
+        password = request.data.get("password", "")
+        if not request.user.check_password(password):
+            raise ValidationError(
+                {"password": ["Password is incorrect."]}
+            )
+        delete_account(request.user)
+        return Response(status=status.HTTP_204_NO_CONTENT)

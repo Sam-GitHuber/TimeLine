@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from .imaging import absolute_media_url
 from .models import (
+    REPORT_REASON_MAX_LENGTH,
     Comment,
     Connection,
     Conversation,
@@ -11,6 +12,7 @@ from .models import (
     Message,
     Post,
     PostImage,
+    Report,
 )
 
 User = get_user_model()
@@ -433,3 +435,32 @@ class GroupInviteSerializer(serializers.ModelSerializer):
                 obj.group.avatar_thumb, self.context.get("request")
             ),
         }
+
+
+class ReportCreateSerializer(serializers.ModelSerializer):
+    """Flag a post or comment for the maintainer (Phase 7 takedown path).
+
+    The body carries **exactly one** target — ``post`` OR ``comment`` (by id) —
+    plus an optional free-text ``reason``. ``reporter`` and ``status`` are set by
+    the view/model, never the body. The model's check constraint is the ultimate
+    guardrail; validating here too gives a clean 400 instead of a 500.
+    """
+
+    reason = serializers.CharField(
+        max_length=REPORT_REASON_MAX_LENGTH,
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+
+    class Meta:
+        model = Report
+        fields = ("id", "post", "comment", "reason", "created_at")
+        read_only_fields = ("id", "created_at")
+
+    def validate(self, attrs):
+        if bool(attrs.get("post")) == bool(attrs.get("comment")):
+            raise serializers.ValidationError(
+                "Report exactly one of a post or a comment."
+            )
+        return attrs

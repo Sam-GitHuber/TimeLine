@@ -174,6 +174,19 @@ export default function Layout() {
         <main>
           <Outlet />
         </main>
+
+        {/* A quiet footer with the legal links, so the Terms and Privacy Policy
+            are reachable from anywhere in the app (they're also linked from
+            sign-up, before login). */}
+        <footer className="border-t border-line px-5 py-4 text-center text-xs text-ink-faint">
+          <Link to="/terms" className="hover:text-accent-deep hover:underline">
+            Terms
+          </Link>
+          <span className="px-1.5">·</span>
+          <Link to="/privacy" className="hover:text-accent-deep hover:underline">
+            Privacy
+          </Link>
+        </footer>
       </div>
 
       {/* Both companion drawers portal to <body>, so they sit above the column

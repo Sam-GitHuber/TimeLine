@@ -1,7 +1,10 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
 **Status:** in progress — **the app is LIVE on public HTTPS** at
-https://your-timeline.net (home server, 2026-07-10). 11/15 DoD items done.
+https://your-timeline.net (home server, 2026-07-10). 11/15 DoD items live; the
+last hard-gate item (ToS + privacy + delete-my-data + takedown) is **built and
+tested on branch `phase-7-legal-delete`** — it ticks the 12th box once merged +
+deployed.
 
 > **RESUME HERE (next session).** The core is done: the site is deployed on the
 > box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
@@ -15,11 +18,20 @@ https://your-timeline.net (home server, 2026-07-10). 11/15 DoD items done.
 >    HIGH; three gaps fixed (#42) and deployed: auth-gated media (Caddy
 >    `forward_auth`), LAN-only admin, sign-up enumeration hardening. On-box checks
 >    all passed — see decisions log. DoD box ticked.
-> 3. **ToS + privacy policy + delete-my-data / takedown path.**  ← next (last hard gate)
+> 3. **ToS + privacy policy + delete-my-data / takedown path** — **BUILT + TESTED
+>    on branch `phase-7-legal-delete`** (2026-07-11). Awaiting merge + deploy;
+>    tick the DoD box and close the hard gate once it's live on the box. What
+>    shipped: public `/terms` + `/privacy` pages (UK/UK-GDPR, linked from sign-up
+>    + footer), a required consent checkbox recording `tos_accepted_at`, a
+>    password-reconfirmed **hard-delete** account endpoint (cleans media files off
+>    disk, hands sole-admin groups to the longest-standing member, deletes emptied
+>    groups), and an in-app **Report** control → `Report` model reviewed in Django
+>    admin. See decisions log + `docs/deploy.md` (handling reports & deletions).
 > 4. Continuous deploy in CI (pull-based via GHCR — decided, see log), uptime
 >    monitoring, monthly cost note.
 >
-> **Hard gate:** do NOT invite real friends/family until 1–3 are done.
+> **Hard gate:** do NOT invite real friends/family until 1–3 are done (1–2 done;
+> 3 is built, needs deploy).
 > **Live-work reminder:** the user is new to servers — walk each box step
 > one-thing-at-a-time, live; this doc records *what/why*, not keystrokes.
 > Operational how-to (deploy, ops, DDNS) is in `docs/deploy.md`.
@@ -82,6 +94,8 @@ Phases 2–6 — running on the home server, surviving reboots.
 - [ ] Basic **uptime monitoring** + alert
 - [ ] **Terms of Service + privacy policy** published; content-takedown +
       delete-my-data path exists (see Legal / IP in `docs/SHARED.md`)
+      — **built + tested on branch `phase-7-legal-delete` (2026-07-11);
+      ticks on merge + deploy.** See decisions log.
 - [x] `/security-review` run and findings addressed (2026-07-11: no HIGH; media
       auth-gating, LAN-only admin, sign-up enumeration fix — deployed + verified on
       the box, see decisions log)
@@ -127,6 +141,49 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   priority — see phase-2 notes.
 
 ## Notes / decisions log
+
+- **ToS/privacy + delete-my-data + takedown built (2026-07-11, branch
+  `phase-7-legal-delete`).** The last hard-gate item before real invites. Four
+  user-confirmed decisions drove it:
+  - **Jurisdiction: UK / UK-GDPR.** Documents written for England & Wales
+    governing law and UK GDPR / DPA 2018 (matches the repo's British spelling and
+    the home server's location). Data-controller contact is the maintainer's
+    email for now (`samejefford@gmail.com`) — swap for a role address later.
+    They're good-faith plain-English drafts, **not legal advice**; worth a
+    solicitor's eyes before any *broad/public* launch (proportionate to skip for
+    a private invite-only family beta). Single source of truth: the React page
+    components at `/terms` and `/privacy` (public routes, so reachable from
+    sign-up before login; also linked from an in-app footer).
+  - **Consent: required + recorded.** Sign-up now has a mandatory "I agree to the
+    Terms + Privacy Policy" checkbox (blocks submit) and stamps
+    `User.tos_accepted_at` — a defensible consent record. Enforced server-side in
+    `CustomRegisterSerializer` (a missing/false `accept_terms` is a 400), so it
+    can't be bypassed by hitting the API directly.
+  - **Deletion: hard delete.** `POST /api/account/delete/`, **password-
+    reconfirmed** (irreversible action ⇒ re-auth, like the bank-transfer
+    pattern). `delete_account()` does the teardown a naive `user.delete()` gets
+    wrong: (1) deletes the user's media **files** off storage first (the cascade
+    only drops rows, leaving JPEGs orphaned on the NVMe); (2) **last-admin
+    guardrail** — a group whose *only* admin is leaving hands admin to the
+    longest-standing remaining member (Group.creator is SET_NULL, so a group
+    outlives members); (3) a group the user was the *sole* member of is deleted
+    outright rather than left as dead space. All in one transaction. Chosen over
+    anonymise-and-keep because it's the cleaner erasure story for a privacy-first
+    app; accepted trade-off is that replies *others* wrote under a deleted user's
+    comment cascade away too.
+  - **Takedown: in-app Report.** A quiet "Report" control on posts + comments
+    (hidden on your own) → `POST /api/reports/` → a `Report` row (post XOR
+    comment, DB-enforced) surfaced in a Django-admin moderation queue
+    (filter to `open`, remove the content, mark resolved). Chosen over a
+    documented-email-only path so it's self-contained and testable; removal
+    itself stays a manual admin action (the maintainer's judgement).
+  - **Backups caveat, disclosed in the privacy policy:** deleted data can persist
+    in the encrypted R2 backups until they age out (~30-day window, matching the
+    `media-archive` retention). The policy states this honestly rather than
+    implying instant global erasure.
+  - Tests: backend consent-gating + hard-delete teardown (files, last-admin
+    promotion, emptied-group deletion) + report creation/scoping; frontend
+    consent gate, delete flow, report flow, and the two public legal routes.
 
 - **Server hardware + boot gotcha (2026-07-10).** The repurposed spare PC is an
   **ASUS** box with **two SSDs**: a 250 GB Samsung 840 EVO (SATA) and a 1 TB
