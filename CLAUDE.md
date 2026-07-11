@@ -108,17 +108,18 @@ public HTTPS.** As of 2026-07-10 it's deployed on the wiped home PC and reachabl
 from outside at https://your-timeline.net (Caddy + Let's Encrypt, verified on
 mobile data): prod compose on the box, reboot-survival proven, Postgres+media on
 the 1 TB NVMe (`/srv/timeline`), DHCP reservation, Cloudflare DDNS, ports 80/443
-forwarded, secure cookies, `deploy/deploy.sh` + `docs/deploy.md` runbook. 10/15
-DoD done. **Nightly off-box backups are LIVE** (encrypted to Cloudflare R2 via
+forwarded, secure cookies, `deploy/deploy.sh` + `docs/deploy.md` runbook.
+**Nightly off-box backups are LIVE** (encrypted to Cloudflare R2 via
 `rclone crypt`, systemd timer) with a **restore tested on the box** (DB counts
 matched, media restored byte-for-byte) — see `docs/backup-restore.md`.
-**`/security-review` done (2026-07-11): full-app review, no HIGH; three gaps fixed
-— uploaded media now auth-gated (Caddy `forward_auth` → `/api/media-auth/`,
-logged-in active members only), Django `/admin/` restricted to the LAN (fail-closed),
-and sign-up account-enumeration closed. Pending merge + on-box verification (media
-loads in-session / 401s out; admin 403s from mobile data). Remaining (priority
-order): ToS/privacy + delete-my-data → CI auto-deploy (pull/GHCR), uptime
-monitoring, cost note.** Hard gate: no real invites until ToS/privacy are done. See
+**`/security-review` done + verified on the box (2026-07-11, #42): full-app review,
+no HIGH; three gaps fixed and deployed — uploaded media now auth-gated (Caddy
+`forward_auth` → `/api/media-auth/`, logged-in active members only; unauth → 401),
+Django `/admin/` restricted to the LAN (fail-closed; off-LAN → 403, LAN → ok), and
+sign-up account-enumeration closed (dup email → identical 201). 11/15 DoD done.
+Remaining (priority order): ToS/privacy + delete-my-data → CI auto-deploy
+(pull/GHCR), uptime monitoring, cost note.** Hard gate: no real invites until
+ToS/privacy are done. See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 
