@@ -1,7 +1,7 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
 **Status:** in progress — **the app is LIVE on public HTTPS** at
-https://your-timeline.net (home server, 2026-07-10). 12/15 DoD items live. The
+https://your-timeline.net (home server, 2026-07-10). 13/15 DoD items live. The
 last hard-gate item (ToS + privacy + delete-my-data + takedown) **merged (#44)
 and deployed to the box 2026-07-11** — migrations applied, `/terms` + `/privacy`
 serving 200 over HTTPS. **The hard gate is now closed** (real invites unblocked).
@@ -30,11 +30,15 @@ serving 200 over HTTPS. **The hard gate is now closed** (real invites unblocked)
 >    control → `Report` model reviewed in Django admin. See decisions log +
 >    `docs/deploy.md` (handling reports & deletions). **DoD box ticked; hard gate
 >    closed.**
-> 4. **Continuous deploy** — IN PROGRESS. Trigger: **GitHub release published**
->    (not every merge). Pull-based via GHCR (decided, see log): the release
->    workflow builds + pushes the images; a systemd timer on the box notices the
->    new image and redeploys — outbound-only, since the box exposes 80/443, not
->    SSH. Then: uptime monitoring, monthly cost note.
+> 4. **Continuous deploy** — DONE + LIVE ON BOX (2026-07-11, #45). Trigger:
+>    **GitHub release published** (not every merge). Pull-based via GHCR: the
+>    release workflow builds + pushes both images; `timeline-autodeploy.timer` on
+>    the box polls every ~5 min and redeploys only on a digest change —
+>    outbound-only, since the box exposes 80/443, not SSH. Proven end-to-end:
+>    `v0.1.0` cut → images pushed → box cut over to the GHCR images, site stayed
+>    up; timer enabled + scheduling confirmed. Security-audited (see log). Ship a
+>    version with `gh release create vX.Y.Z --generate-notes`. **Remaining DoD:**
+>    uptime monitoring + monthly cost note.
 >
 > **Hard gate:** CLOSED (2026-07-11) — items 1–3 all done + live on the box. Real
 > friends/family can now be invited.
@@ -96,7 +100,11 @@ Phases 2–6 — running on the home server, surviving reboots.
       once HTTPS was live; verify login end-to-end on mobile data)
 - [x] A **documented, repeatable deploy** (ship a new version to the box) —
       `deploy/deploy.sh` + runbook `docs/deploy.md` (done 2026-07-10)
-- [ ] A **continuous deploy added to CI**
+- [x] A **continuous deploy added to CI** — deploy on **GitHub release
+      published**: workflow builds + pushes images to GHCR, a `systemd` timer on
+      the box polls + redeploys on change (pull-based, outbound-only). Live +
+      proven end-to-end 2026-07-11 (#45); security-audited. See decisions log +
+      `docs/deploy.md` ("Continuous deploy").
 - [ ] Basic **uptime monitoring** + alert
 - [x] **Terms of Service + privacy policy** published; content-takedown +
       delete-my-data path exists (see Legal / IP in `docs/SHARED.md`)
@@ -337,9 +345,32 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
     bake nothing secret (secrets stay in `.env.prod` at runtime), so public
     packages let the box pull anonymously — no registry creds on the box. Flip to
     private later = one `docker login ghcr.io` with a read:packages token.
-  - Still TODO before ticking the DoD box: cut the first release, make the two
-    packages public, install + enable the timer on the box, and watch a release
-    deploy end-to-end. Walk through live (user is new to servers).
+  - **Live + proven end-to-end (2026-07-11).** Cut `v0.1.0` → the `Release
+    images` workflow built + pushed both images to GHCR (packages came out
+    **public** automatically — inherited from the public repo, so the box pulls
+    anonymously with no creds). Ran `autodeploy.sh` by hand: the box cut over
+    from box-built images to the GHCR release images, site stayed up (`/`,
+    `/terms` 200; `/api/feed/` 401). A second run was a correct no-op. Installed
+    + enabled `timeline-autodeploy.timer` on the box (systemd `list-timers`
+    confirms a ~5-min cadence; the enable-time run was a clean no-op). DoD box
+    ticked.
+  - **Security audit of the CD pipeline (2026-07-11).** Reviewed the new attack
+    surface since it can push code to the live box. Verified: the release
+    workflow triggers **only** on `release: published` (fork PRs can't fire it);
+    sole collaborator/admin is the owner; `main` is protected (no force-push/
+    delete, `enforce_admins`, required checks); the box holds **no registry write
+    creds** (anonymous read-only pull, runs as non-root); **no secrets baked into
+    the public images** (searched the actual pushed backend image — no `.env`/
+    keys/`.git`; real `SECRET_KEY` injected at runtime, `DEBUG=false`, secure
+    cookies); only the auto-scoped `GITHUB_TOKEN` is used, no `pull_request_
+    target`. Net: the whole pipeline's trust reduces to **control of the GitHub
+    account** — nothing else can push a trusted image or commit. Residual risks
+    noted: (1) **account 2FA** is the crown-jewel control (independent of the
+    deploy flow, which uses machine tokens — recommended ON, no workflow
+    friction); (2) box deploys the mutable `:latest` tag (safe while only the
+    owner can push; optional hardening = pin the released digest); (3) docker
+    group = root-equivalent (inherent to Docker, pre-existing); (4) optional root
+    `.dockerignore` for belt-and-braces on the public web image's build context.
 - **Data lives on the 1 TB NVMe, not the OS disk (user, 2026-07-10).** The OS
   boots off the small 250 GB SATA SSD (firmware can't boot NVMe — see hardware
   note); the 1 TB Samsung 980 NVMe is the **data disk**. Postgres data **and**
