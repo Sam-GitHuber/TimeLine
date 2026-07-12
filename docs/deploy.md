@@ -315,3 +315,84 @@ needs care. For the beta, prefer rolling *forward* with a fix.)
 Nightly encrypted off-site backups (Postgres dump + media) to Cloudflare R2, plus
 the tested restore procedure, live in their own runbook: **`docs/backup-restore.md`**.
 Take an ad-hoc backup before a risky change with `./deploy/backup.sh`.
+
+## Uptime monitoring
+
+You want to hear about an outage from a robot, not from a friend texting "is the
+site down?". We reuse **[healthchecks.io](https://healthchecks.io)** — the same
+service the backup uses. It's a *passive* dead-man's-switch: it can't probe your
+site itself, so the box pings it. A small systemd timer curls the app's health
+endpoint (`GET /api/healthz/`, which returns 200 only when Caddy, gunicorn **and**
+Postgres are all alive) every 5 minutes and reports the result:
+
+- **Site healthy** → ping the check's success URL.
+- **Site answering but broken** (e.g. DB down → 503) → ping `<url>/fail` →
+  immediate alert.
+- **Box off / broadband down** → the timer can't run, so no ping arrives → the
+  check goes overdue and healthchecks.io alerts you. *Silence is the alarm.*
+
+That trio covers every realistic home outage (power cut, crashed box, crashed
+container, dead DB, dropped internet).
+
+> **Scope:** by default the probe hits the public hostname but pinned to loopback
+> (so it doesn't depend on the router "hairpinning"), which tests the whole local
+> serving stack but *not* the inbound path from the wider internet (port
+> forwarding / public DNS). Those rarely break once set. If you later want to
+> cover them too, add a second monitor on a machine *outside* your house.
+
+**One-time setup:**
+
+```text
+# 1. On healthchecks.io, create a SECOND check (separate from the backup one).
+#    Name it e.g. "timeline-uptime". Set Period = 5 min, Grace = 10 min, so a
+#    truly-down box alerts within ~15 min. Add an email/Slack/push integration.
+#    Copy its ping URL (looks like https://hc-ping.com/<uuid>).
+```
+
+```bash
+# 2. Config file with that ping URL (runs as the deploy user).
+sudo mkdir -p /etc/timeline
+sudo cp deploy/healthcheck.env.example /etc/timeline/healthcheck.env
+sudo nano /etc/timeline/healthcheck.env          # paste PING_URL=...
+sudo chown "$USER:$USER" /etc/timeline/healthcheck.env
+sudo chmod 600 /etc/timeline/healthcheck.env
+
+# 3. Prove it by hand first — should print "OK ... 200; success ping sent."
+#    and the check should flip to "up" on healthchecks.io within seconds.
+./deploy/healthcheck.sh
+
+# 4. Install + enable the timer (edit User= and the ExecStart= path first,
+#    same as the backup/autodeploy units).
+sudo cp deploy/timeline-healthcheck.{service,timer} /etc/systemd/system/
+sudo nano /etc/systemd/system/timeline-healthcheck.service   # set User= + path
+sudo systemctl daemon-reload
+sudo systemctl enable --now timeline-healthcheck.timer
+
+# 5. Confirm it's scheduled + watch one run.
+systemctl list-timers timeline-healthcheck.timer
+journalctl -u timeline-healthcheck.service -n 20
+```
+
+To test the alerting end-to-end: `docker compose -f docker-compose.prod.yml stop
+backend`, wait for the `/fail` alert to land, then `start` it again.
+
+## Monthly running cost
+
+The point of the home-server beta is to prove the app is worth keeping *before*
+paying for cloud (that's Phase 11 → AWS). So the running cost is deliberately
+close to zero — only the domain is a hard cash cost:
+
+| Item | Cost | Notes |
+|------|------|-------|
+| Domain `your-timeline.net` | ~**£10–15 / year** (~£1 / mo) | The only unavoidable bill. Renews annually. |
+| Cloudflare DNS + DDNS | £0 | Free plan. |
+| Cloudflare R2 (encrypted backups) | £0 | Well within the 10 GB free tier for a small beta — check with `rclone size timeline-crypt:`. |
+| healthchecks.io (uptime + backup) | £0 | Free tier (up to 20 checks). |
+| GitHub Actions + GHCR (CI + image registry) | £0 | Free for a public repo. |
+| Let's Encrypt TLS | £0 | Free, auto-renewed by Caddy. |
+| TLS/hosting/servers | £0 | Runs on the wiped home PC. |
+| **Electricity** | ~**£3–7 / mo** | The one variable cost: an always-on desktop drawing ~30–60 W ≈ 22–43 kWh/mo at ~£0.27/kWh (UK 2026). Depends on the actual box + tariff — measure with a plug meter for a real figure. |
+
+**Rough total: ~£4–8 / month**, dominated by electricity, plus the ~£12/yr
+domain. That's the baseline the eventual AWS bill (Phase 11) has to justify
+beating — see `docs/phases/phase-11-aws-migration.md`.

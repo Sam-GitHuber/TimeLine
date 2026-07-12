@@ -13,6 +13,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.db.utils import OperationalError
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from PIL import Image
@@ -2223,6 +2224,31 @@ class MediaAuthTests(APITestCase):
         self.client.force_authenticate(make_user("mediaviewer@example.com"))
         resp = self.client.get(MEDIA_AUTH_URL)
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+
+# --- Phase 7: uptime health probe --------------------------------------------
+
+HEALTHZ_URL = "/api/healthz/"
+
+
+class HealthzTests(APITestCase):
+    """The public liveness probe the on-box uptime monitor polls (Phase 7)."""
+
+    def test_healthz_is_public_and_ok(self):
+        # No auth: the monitor is anonymous, and a 200 confirms Caddy + gunicorn
+        # + the database are all alive (the view runs a SELECT 1).
+        resp = self.client.get(HEALTHZ_URL)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["status"], "ok")
+
+    def test_healthz_reports_503_when_db_is_down(self):
+        # If the DB is unreachable the probe must fail (503), not falsely report
+        # healthy — that's the whole point of touching the database here.
+        with mock.patch(
+            "django.db.connection.cursor", side_effect=OperationalError("db down")
+        ):
+            resp = self.client.get(HEALTHZ_URL)
+        self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
 # --- Phase 7: content reports (takedown path) ---------------------------------
