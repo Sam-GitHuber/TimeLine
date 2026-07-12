@@ -133,6 +133,24 @@ DoD: uptime monitoring + monthly cost note. See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 
+Phase 7b (emoji reactions) — done. React to any **post, comment, or reply** with
+**any keyboard emoji** (issue #48). A `Reaction` model (in the `api` app) targets
+a post *or* a comment via two nullable FKs + a check/conditional-unique
+constraints (no `GenericForeignKey`); `POST /api/posts|comments/<id>/react/`
+toggles (re-adding an emoji removes it), `GET .../reactions/` lists who reacted.
+Reactions are **pruned per viewer** exactly like the comment tree
+(`visible_reactor_ids` = self + connections; group membership gates post *access*
+but doesn't widen who you see), so counts/who-lists never leak a not-connected
+reactor — meaning two viewers can legitimately see different counts. Emoji are
+validated/normalised server-side (`api/emoji.py`, stdlib-only, no new dep) with a
+per-user-per-target cap. Frontend: a `ReactionBar` (chips + add-control + "Who
+reacted?") on posts and comments, using **`emoji-picker-element`** self-hosted
+(its data bundled by Vite as a first-party asset — the default jsDelivr CDN is
+never hit; code-split so it loads only when opened). Toggle response carries the
+fresh pruned summary for instant in-place update; existing feed poll reconciles.
+Backend 221 + frontend 117 tests pass. See
+`docs/phases/phase-7b-emoji-reactions.md`.
+
 Keep this line current: update it whenever a phase starts or finishes, but keep
 the detail in the phase docs, not here.
 

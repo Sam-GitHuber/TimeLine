@@ -22,6 +22,53 @@ User = get_user_model()
 POST_MAX_LENGTH = 5000
 
 
+def summarise_reactions(reactions, visible_ids, me_id):
+    """Aggregate a target's reactions into ``[{emoji, count, reacted}]``, pruned
+    to who the viewer may see (Phase 7b).
+
+    ``reactions`` is the target's (prefetched) ``Reaction`` rows. ``visible_ids``
+    is the set of user ids the viewer is allowed to see — themselves plus their
+    connections — mirroring the comment tree's pruning, so a reaction by someone
+    the viewer isn't connected with is never counted and can't leak a stranger.
+    Fail-closed: if ``visible_ids`` is ``None`` (context wasn't supplied) nothing
+    is shown rather than an unpruned count. ``reacted`` flags the emoji the
+    viewer themselves used, so the UI can highlight their own reaction.
+
+    Ordered by count (desc), then by the emoji string, so the display order is
+    stable and deterministic (tests, and no jitter between polls).
+    """
+    if visible_ids is None:
+        return []
+    counts = {}
+    reacted = set()
+    for r in reactions:
+        if r.user_id not in visible_ids:
+            continue
+        counts[r.emoji] = counts.get(r.emoji, 0) + 1
+        if r.user_id == me_id:
+            reacted.add(r.emoji)
+    items = [
+        {"emoji": emoji, "count": count, "reacted": emoji in reacted}
+        for emoji, count in counts.items()
+    ]
+    items.sort(key=lambda item: (-item["count"], item["emoji"]))
+    return items
+
+
+def reactions_representation(obj, context):
+    """The pruned reaction summary for a post or comment, from serializer context.
+
+    Reads the target's prefetched ``reactions`` and the viewer's
+    ``visible_reactor_ids`` (set by the view). Shared by ``PostSerializer`` and
+    ``CommentSerializer`` so both prune identically.
+    """
+    request = context.get("request")
+    me_id = request.user.id if request and request.user.is_authenticated else None
+    return summarise_reactions(
+        obj.reactions.all(), context.get("visible_reactor_ids"), me_id
+    )
+
+
 class AuthorSerializer(serializers.ModelSerializer):
     """The tiny slice of a user we embed in a post or expose in a list.
 
@@ -82,16 +129,37 @@ class PostSerializer(serializers.ModelSerializer):
     # Read-only here — the view sets the group from the validated request and
     # checks membership, never trusting the body to place a post in a group.
     group = serializers.SerializerMethodField()
+    # Pruned per viewer — see ``reactions_representation``. Read-only; reactions
+    # are added/removed via the toggle endpoint, never in the post body.
+    reactions = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
-        fields = ("id", "author", "text", "images", "group", "created_at")
-        read_only_fields = ("id", "author", "images", "group", "created_at")
+        fields = (
+            "id",
+            "author",
+            "text",
+            "images",
+            "group",
+            "reactions",
+            "created_at",
+        )
+        read_only_fields = (
+            "id",
+            "author",
+            "images",
+            "group",
+            "reactions",
+            "created_at",
+        )
 
     def get_group(self, obj):
         if obj.group_id is None:
             return None
         return {"id": obj.group_id, "name": obj.group.name}
+
+    def get_reactions(self, obj):
+        return reactions_representation(obj, self.context)
 
     def validate_text(self, value):
         # A photo-only post is fine, so blank text is allowed here; the view
@@ -162,16 +230,28 @@ class CommentSerializer(serializers.ModelSerializer):
 
     author = AuthorSerializer(read_only=True)
     replies = serializers.SerializerMethodField()
+    reactions = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
-        fields = ("id", "author", "parent", "text", "created_at", "replies")
+        fields = (
+            "id",
+            "author",
+            "parent",
+            "text",
+            "created_at",
+            "replies",
+            "reactions",
+        )
 
     def get_replies(self, obj):
         children = getattr(obj, "_visible_children", [])
         return CommentSerializer(
             children, many=True, context=self.context
         ).data
+
+    def get_reactions(self, obj):
+        return reactions_representation(obj, self.context)
 
 
 class CommentCreateSerializer(serializers.ModelSerializer):

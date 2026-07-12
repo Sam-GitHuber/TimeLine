@@ -678,3 +678,74 @@ class GroupMembership(models.Model):
 
     def __str__(self):
         return f"{self.user} · {self.group} ({self.role}, {self.status})"
+
+
+class Reaction(models.Model):
+    """An emoji reaction by a user on a single post *or* a single comment (7b).
+
+    The target is either a ``Post`` or a ``Comment`` — never both, never neither.
+    Rather than a ``GenericForeignKey`` (contenttypes machinery we don't need
+    when both targets are concrete, few, and already exist), it's two nullable
+    FKs guarded by a check constraint. A comment reaction covers replies too,
+    since ``Comment`` already backs both.
+
+    ``emoji`` is a normalised/validated Unicode emoji string (see
+    ``api.emoji.normalise_emoji``) — the picker sends real emoji, but the API
+    validates server-side and never trusts the client.
+
+    Visibility is **not** stored here: like comments, a reaction is pruned per
+    viewer when served (you only see reactions from yourself + people you may
+    see — connections, or fellow members on a group post), so a not-connected
+    reactor is never surfaced. See the reactions view/serializer.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="reactions",
+    )
+    post = models.ForeignKey(
+        Post,
+        on_delete=models.CASCADE,
+        related_name="reactions",
+        null=True,
+        blank=True,
+    )
+    comment = models.ForeignKey(
+        Comment,
+        on_delete=models.CASCADE,
+        related_name="reactions",
+        null=True,
+        blank=True,
+    )
+    emoji = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            # A reaction targets exactly one thing — a post XOR a comment.
+            models.CheckConstraint(
+                name="reaction_targets_post_xor_comment",
+                condition=(
+                    models.Q(post__isnull=False, comment__isnull=True)
+                    | models.Q(post__isnull=True, comment__isnull=False)
+                ),
+            ),
+            # One of each emoji per user per target, so re-adding toggles off.
+            # Conditional on the FK being set: a plain unique tuple treats the
+            # NULL side as always-distinct, which would let duplicates through.
+            models.UniqueConstraint(
+                fields=["user", "post", "emoji"],
+                condition=models.Q(post__isnull=False),
+                name="unique_user_post_emoji",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "comment", "emoji"],
+                condition=models.Q(comment__isnull=False),
+                name="unique_user_comment_emoji",
+            ),
+        ]
+
+    def __str__(self):
+        target = f"post {self.post_id}" if self.post_id else f"comment {self.comment_id}"
+        return f"{self.user} · {self.emoji} · {target}"
