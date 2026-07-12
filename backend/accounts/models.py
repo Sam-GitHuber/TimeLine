@@ -7,7 +7,7 @@ from .managers import UserManager
 
 
 class User(AbstractUser):
-    """Custom user model, set from the start (see docs/phases/phase-2-accounts.md).
+    """Custom user model, set from the start (see docs/reference/accounts.md).
 
     Django strongly recommends defining a custom user model at project start:
     swapping it in later — once real accounts exist — is a painful data

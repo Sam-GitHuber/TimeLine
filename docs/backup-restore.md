@@ -1,7 +1,8 @@
 # Backups & restore (home-server production)
 
 How TimeLine's data is backed up off the box and how to restore it. The *why*
-lives in `docs/phases/phase-7-productionisation.md`; this is the *how*.
+(R2, encrypted, media mirrored not snapshotted) lives in `docs/deploy.md`
+("Why it's built this way"); this is the *how*.
 
 **What's protected, and why both halves matter:**
 

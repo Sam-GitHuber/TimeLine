@@ -109,7 +109,7 @@ worth a real lawyer's time. Four distinct issues:
      social-networking classes at your national IP office (UK IPO / IP Australia
      — note British/AU spelling in this repo) **and** the US
      (`tmsearch.uspto.gov`) before locking the brand. Weigh this against the
-     `timeline.me` domain choice (see phase-7 notes).
+     domain choice (`your-timeline.net`, purchased — see `deploy.md`).
 
 2. **Copyright in user content — the real day-to-day risk.** Friends/family will
    upload photos/text they may not own the rights to. Mitigate with a short
@@ -136,11 +136,35 @@ privacy-first principle.
 
 - `/backend` — Django + Django REST Framework app (managed with `uv`)
 - `/frontend` — React (Vite + Tailwind) app
-- `/docs` — this file, plus one file per phase in `docs/phases/`
+- `/docs` — this file + `design-system.md` + the ops runbooks (`deploy.md`,
+  `backup-restore.md`); **`docs/reference/`** = how each shipped feature works and
+  why (start there for a feature question); **`docs/phases/`** = forward-looking
+  plans for work not yet built (notifications → open-source).
 - Root `docker-compose.yml` wires the three services together for local dev
 - The original template scaffolding (`src/`, `configuration/`, conda-based
   `requirements/`) is legacy from the repo's starter template and gets removed
   as the real backend/frontend are built — it's not part of the intended stack.
+
+**Codebase layout (the load-bearing facts):**
+
+- The Django project is named **`config`**; features live in two apps — **`api`**
+  (posts, feed, connections, comments, messaging, groups, reactions, reports) and
+  **`accounts`** (the custom user model + auth serializers). `config/urls.py`
+  includes `api/urls.py`.
+- **Settings are env-driven** (`config/settings.py` reads `os.environ` with
+  dev-safe defaults); `docker-compose.yml` supplies them via `${VAR:-default}` so
+  `docker compose up` works with no `.env`. Secrets are env-only (guarded — the app
+  refuses to boot with `DEBUG` off and no `DJANGO_SECRET_KEY`).
+- **Tailwind v4** uses the `@tailwindcss/vite` plugin + a single
+  `@import "tailwindcss";` — no `tailwind.config.js`/PostCSS (differs from the v3
+  setup most tutorials show). Design tokens live in a `@theme` block; see
+  `design-system.md`.
+- **Frontend → backend URL:** the browser calls the published host port (e.g.
+  `http://localhost:8000` via `VITE_API_URL`), *not* the Docker service name —
+  which is why CORS is required in dev.
+- Two dev gotchas worth remembering: a bind-mounted shell script loses its exec
+  bit (run it via `CMD ["bash", "..."]`, not the exec bit), and `db` has a
+  `pg_isready` healthcheck the backend waits on so startup order is safe.
 
 ### Running the dev stack (read this before `docker compose up`)
 
@@ -166,28 +190,31 @@ privacy-first principle.
 
 ## Roadmap (phases)
 
-Detailed plans live in `docs/phases/`, one file each. **Every phase ends in
-something that can actually be run and tested** — a demoable product, not just
-internal plumbing. Later phases are sketched now but get refined into full
-detail when we're about to start them.
+**Every phase ends in something that can actually be run and tested** — a
+demoable product, not just internal plumbing. **Done** phases (0–7b) are no longer
+tracked one-file-each; their durable reference lives in `docs/reference/` (and the
+ops runbooks) — the "Doc" column below points there. **Future** phases (8–12) are
+still plans in `docs/phases/`, sketched now and refined into full detail when
+we're about to start them; when one ships, its plan is distilled into a reference
+doc and deleted.
 
-| # | Phase | What you can run/test at the end | Doc |
+| # | Phase | What you can run/test at the end | Status · Doc |
 |---|---|---|---|
-| 0 | Prove the stack | `docker compose up` runs Django + React + Postgres talking to each other | `phase-0-docker-skeleton.md` |
-| 1 | Wireframe web app | A clickable, locally-runnable wireframe of the timeline UI, using mock data | `phase-1-wireframe.md` |
-| 2 | Accounts & auth | Sign up, log in, log out — real user accounts in the database | `phase-2-accounts.md` |
-| 3 | MVP timeline | Post text, follow people, see a real reverse-chronological feed of who you follow | `phase-3-mvp-timeline.md` |
-| 4 | Photos & profiles | Attach photos to posts; browse a person's profile page | `phase-4-photos-profiles.md` |
-| 5 | Direct messaging | One-to-one private messages between users | `phase-5-messaging.md` |
-| 6 | Groups | Shared group timelines you can post into and follow | `phase-6-groups.md` |
-| 6a | Group messaging | Group conversations (extends Phase 5 DMs); leave a conversation | `phase-6a-group-messaging.md` |
-| 7 | Self-hosted private beta | The finished app live on a wiped spare **home PC**, on a real HTTPS URL; close friends/family log in and bug-test it | `phase-7-productionisation.md` |
-| 7b | Emoji reactions | React to any post/comment/reply with any keyboard emoji; aggregated counts respecting visibility | `phase-7b-emoji-reactions.md` |
-| 8 | Notifications & activity centre | An in-site notification centre (kept, not vanishing on tap; handled ones dulled) with per-type preferences; events for post/comment replies, reactions, connection requests, group invites | `phase-8-notifications.md` |
-| 9 | iPhone app | An installable iOS app hitting the same backend, with push notifications | `phase-9-iphone-app.md` |
-| 10 | Android app | An installable Android app hitting the same backend, with push notifications | `phase-10-android-app.md` |
-| 11 | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | `phase-11-aws-migration.md` |
-| 12 | Open source & funding | Public repo with license + contribution guide, and a funding channel (e.g. Patreon) | `phase-12-open-source-funding.md` |
+| 0 | Prove the stack | `docker compose up` runs Django + React + Postgres talking to each other | done · `SHARED.md` (codebase layout) |
+| 1 | Wireframe web app | A clickable, locally-runnable wireframe of the timeline UI, using mock data | done · (superseded by real UI) |
+| 2 | Accounts & auth | Sign up, log in, log out — real user accounts in the database | done · `reference/accounts.md` |
+| 3 | MVP timeline | Post text, connect with people, see a real reverse-chronological feed | done · `reference/feed-and-posts.md`, `reference/connections.md` |
+| 4 | Photos & profiles | Attach photos to posts; browse a person's profile page | done · `reference/feed-and-posts.md` |
+| 5 | Direct messaging | One-to-one private messages between users | done · `reference/messaging.md` |
+| 6 | Groups | Shared group timelines you can post into | done · `reference/groups.md` |
+| 6a | Group messaging | Group conversations (extends DMs); leave a conversation | done · `reference/messaging.md` |
+| 7 | Self-hosted private beta | The finished app live on a wiped spare **home PC**, on a real HTTPS URL; close friends/family log in and bug-test it | done · `deploy.md`, `backup-restore.md` |
+| 7b | Emoji reactions | React to any post/comment/reply with any keyboard emoji; aggregated counts respecting visibility | done · `reference/reactions.md` |
+| 8 | Notifications & activity centre | An in-site notification centre (kept, not vanishing on tap; handled ones dulled) with per-type preferences; events for post/comment replies, reactions, connection requests, group invites | planned · `phases/phase-8-notifications.md` |
+| 9 | iPhone app | An installable iOS app hitting the same backend, with push notifications | planned · `phases/phase-9-iphone-app.md` |
+| 10 | Android app | An installable Android app hitting the same backend, with push notifications | planned · `phases/phase-10-android-app.md` |
+| 11 | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | planned · `phases/phase-11-aws-migration.md` |
+| 12 | Open source & funding | Public repo with license + contribution guide, and a funding channel (e.g. Patreon) | planned · `phases/phase-12-open-source-funding.md` |
 
 ### Why this order
 

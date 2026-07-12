@@ -82,7 +82,7 @@ volumes:
   # `docker inspect` reports the real location and this file records where data
   # lives. On the server, Docker's systemd unit has RequiresMountsFor=/srv/timeline,
   # so the whole stack refuses to start if the data disk isn't mounted — it can
-  # never silently write to the OS SSD instead. See phase-7 decisions log.
+  # never silently write to the OS SSD instead. See docs/deploy.md.
   postgres_data:
     driver: local
     driver_opts:

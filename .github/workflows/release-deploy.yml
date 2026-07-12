@@ -4,8 +4,8 @@
 # "pull-based": GitHub can't connect in, so instead this workflow BUILDS the two
 # production images and PUSHES them to the GitHub Container Registry (GHCR), and
 # a systemd timer ON THE BOX notices the new image and redeploys (outbound-only
-# — the box pulls from GHCR). See docs/deploy.md ("Continuous deploy") and the
-# phase-7 decisions log.
+# — the box pulls from GHCR). See docs/deploy.md ("Continuous deploy" and
+# "Why it's built this way").
 #
 # Trigger: publishing a GitHub Release (a deliberate maintainer action from a
 # green main), NOT every merge — so a deploy is always something a human chose.

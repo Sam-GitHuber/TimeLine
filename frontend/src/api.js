@@ -14,7 +14,7 @@
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 // Near-real-time messaging is done by polling for now, not WebSockets (see
-// docs/phases/phase-5-messaging.md — the swap to Channels later is deliberately
+// docs/reference/messaging.md — the swap to Channels later is deliberately
 // non-breaking). These are the one place the cadences live, so "go real-time"
 // is a localised change: an open thread refreshes briskly; the list + nav badge
 // tick more slowly.
