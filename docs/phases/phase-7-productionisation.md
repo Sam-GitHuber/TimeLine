@@ -156,6 +156,41 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
 
 ## Notes / decisions log
 
+- **Rate-limited the auth-sensitive endpoints (2026-07-12, issue #51, branch
+  `feat/rate-limit-auth`).** `login`, `password/change/`, and `account/delete/`
+  accepted unlimited credential/password guesses. Added DRF throttling (the
+  boring, batteries-included choice — no new dependency): `ScopedRateThrottle`
+  on three named scopes, rates in `DEFAULT_THROTTLE_RATES` (login 10/min,
+  password-change 10/min, account-delete 5/min; env-overridable). A tripped
+  limit is a clean `429 {"detail": "Request was throttled…"}` which the SPA
+  already surfaces via `firstErrorMessage`. Two non-obvious decisions worth
+  recording:
+    - **Login is keyed on IP, not the submitted email.** An email-keyed limit
+      would let an attacker lock a real member out of their *own* login by
+      spamming wrong passwords for their address (a denial-of-service). Per-IP
+      blunts online guessing without that foot-gun. Password-change and delete
+      are per-user (the caller is authenticated).
+    - **`NUM_PROXIES=1` is what makes the per-IP login limit actually hold.**
+      Caught in review. With it unset, DRF derives the throttle identity from the
+      *entire* `X-Forwarded-For` string. In prod Caddy *appends* the real client
+      IP to any client-supplied `X-Forwarded-For`, so an attacker could send a
+      rotating junk prefix and mint a fresh bucket per request — the login
+      throttle would be trivially bypassed. Setting `NUM_PROXIES=1` (we have
+      exactly one proxy hop, Caddy) tells DRF to trust only the last, Caddy-added
+      address. A regression test posts logins with a rotating `X-Forwarded-For`
+      prefix + constant trailing IP and asserts they still share one bucket.
+      (The admin LAN restriction is unaffected — it uses Caddy's own `remote_ip`,
+      the real TCP peer, not this header.)
+    - **Throttle counters need a cache shared across gunicorn workers.** The
+      default per-process `LocMemCache` would give each of the 3 prod workers its
+      own counter, inflating the real limit to ~3×. Switched prod to Django's
+      **database cache** (`DatabaseCache`, reuses Postgres — no Redis to run);
+      `entrypoint.prod.sh` now runs `createcachetable` (idempotent). Dev keeps
+      `LocMemCache` (single-process runserver). Tests auto-get the cache table
+      (Django's `create_test_db` calls `createcachetable`). Note: DRF binds the
+      throttle *rate* as a class attribute at import, so `@override_settings` on
+      `REST_FRAMEWORK` can't change it in a test — the throttle tests exercise the
+      real configured rate instead. Pairs with the enumeration hardening (#6).
 - **Logged-in "change password" added (2026-07-12, issue #36, branch
   `feat/change-password`).** Members had no way to rotate their own password once
   set. The `dj-rest-auth` endpoint (`POST /api/auth/password/change/`) already

@@ -26,6 +26,12 @@ echo "Postgres is up."
 echo "Applying database migrations..."
 python manage.py migrate --noinput
 
+# Create the database cache table backing DRF's auth-endpoint throttling. It's
+# shared across gunicorn workers (an in-process cache wouldn't be). Idempotent:
+# a no-op once the table exists, so it's safe to run on every boot.
+echo "Ensuring cache table exists..."
+python manage.py createcachetable
+
 # Gather Django's own static files (admin + DRF browsable API) into STATIC_ROOT
 # so WhiteNoise can serve them. --clear avoids stale files across deploys.
 echo "Collecting static files..."

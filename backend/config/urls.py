@@ -20,12 +20,30 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
-from accounts.views import InactiveRegisterView, csrf
+from accounts.views import (
+    InactiveRegisterView,
+    ThrottledLoginView,
+    ThrottledPasswordChangeView,
+    csrf,
+)
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("api.urls")),
-    # Auth API (dj-rest-auth): login/, logout/, user/, password/*, token/*.
+    # Rate-limited overrides of two dj-rest-auth endpoints. These must come
+    # BEFORE the include below — Django resolves URLs top-down and stops at the
+    # first match, so our throttled views win over the library's defaults.
+    path(
+        "api/auth/login/",
+        ThrottledLoginView.as_view(),
+        name="rest_login",
+    ),
+    path(
+        "api/auth/password/change/",
+        ThrottledPasswordChangeView.as_view(),
+        name="rest_password_change",
+    ),
+    # Auth API (dj-rest-auth): logout/, user/, password/reset*, token/*.
     path("api/auth/", include("dj_rest_auth.urls")),
     # Registration is our inactive-by-default view, not dj-rest-auth's default.
     path(

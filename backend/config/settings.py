@@ -240,6 +240,29 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
+# Caching
+# DRF's request throttling (see DEFAULT_THROTTLE_RATES below) keeps its per-IP /
+# per-user counters in Django's cache. In production the app runs under several
+# gunicorn worker processes, so the cache MUST be shared across them — a
+# per-process in-memory cache would give each worker its own counter and the
+# real limit would balloon to (rate x workers). The boring, no-new-infrastructure
+# choice on a single box is Django's database cache: it reuses the Postgres we
+# already run, is shared by every worker, and survives restarts. The cache table
+# is created by `manage.py createcachetable` (run in entrypoint.prod.sh, and
+# automatically during the test-database setup). Dev runs a single-process
+# runserver, so a local in-memory cache is fine there and saves creating a table.
+if DEBUG:
+    CACHES = {
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+            "LOCATION": "timeline_cache",
+        }
+    }
+
 # Django REST Framework
 # Phase 2: default every endpoint to "must be logged in", authenticated via the
 # JWT that lives in an httpOnly cookie. Endpoints that must stay open (login,
@@ -260,6 +283,38 @@ REST_FRAMEWORK = {
     # page for a text feed; revisit if it feels short in real use.
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
+    # Exactly ONE trusted proxy sits in front of us in production: Caddy (see
+    # deploy/Caddyfile), which appends the real client IP to X-Forwarded-For.
+    # Telling DRF NUM_PROXIES=1 makes it take the LAST address in that header —
+    # the one Caddy added — as the throttle identity. WITHOUT this, DRF falls
+    # back to using the *entire* X-Forwarded-For string; since Caddy appends to
+    # (rather than replaces) any client-supplied header, an attacker could send a
+    # rotating `X-Forwarded-For: <junk>` prefix and get a fresh throttle bucket
+    # per request, bypassing the per-IP login limit entirely. This is the crux
+    # that makes the login throttle below actually hold. (Only /api/* rides this
+    # proxy; the admin LAN restriction uses Caddy's own remote_ip, not this.)
+    "NUM_PROXIES": 1,
+    # Rate limits for the auth-sensitive endpoints (see the throttled views in
+    # accounts/views.py and DeleteAccountView). We deliberately DON'T set
+    # DEFAULT_THROTTLE_CLASSES — throttling is opt-in per view via a scope, so
+    # only these named scopes are limited; the rest of the API is untouched.
+    #   - login: per-IP (the caller is anonymous), to blunt online password
+    #     guessing against known accounts. Keyed on IP rather than the submitted
+    #     email on purpose: an email-keyed limit would let an attacker lock a
+    #     victim out of their own login by burning their bucket (a DoS).
+    #   - password_change / account_delete: per-user (the caller is logged in),
+    #     to blunt guessing the *current* password from a hijacked session.
+    # A tripped limit returns a clean 429 with a `detail` message the SPA already
+    # surfaces. Override via env if a real family member ever hits a wall.
+    "DEFAULT_THROTTLE_RATES": {
+        "login": os.environ.get("DJANGO_THROTTLE_LOGIN", "10/min"),
+        "password_change": os.environ.get(
+            "DJANGO_THROTTLE_PASSWORD_CHANGE", "10/min"
+        ),
+        "account_delete": os.environ.get(
+            "DJANGO_THROTTLE_ACCOUNT_DELETE", "5/min"
+        ),
+    },
 }
 
 # --- Authentication (dj-rest-auth + allauth + simplejwt) ---------------------
