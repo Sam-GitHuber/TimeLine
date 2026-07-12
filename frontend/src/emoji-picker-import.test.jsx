@@ -4,7 +4,7 @@ import { describe, it, expect } from "vitest";
 // unlike reactions.test.jsx which stubs the picker. Without this, a broken or
 // unresolvable emoji-data import (e.g. the package missing from the running
 // container's node_modules) sails past the whole suite and only blows up at
-// runtime in the browser. See docs/phases/phase-7b-emoji-reactions.md.
+// runtime in the browser. See docs/reference/reactions.md.
 describe("emoji picker data wiring", () => {
   it("resolves the bundled emoji data as a first-party (non-CDN) URL", async () => {
     const mod = await import(

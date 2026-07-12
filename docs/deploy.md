@@ -1,8 +1,13 @@
 # Deploying TimeLine (home-server production)
 
-The repeatable runbook for the Phase 7 home server. The *why* behind these
-choices lives in `docs/phases/phase-7-productionisation.md`; this file is the
-*how*.
+The repeatable runbook for the self-hosted home server, **and** the design
+rationale behind it (see "Why it's built this way" at the bottom). This is where
+the app lives today: a wiped spare PC in the maintainer's house serving a real
+HTTPS URL, so a few close friends/family can log in and use everything. It's
+**not** the final home — it's the cheap, fully reversible way to prove the app is
+worth keeping before paying for cloud (the AWS migration is a later, deferred
+step). Off-box backups (`backup-restore.md`) are what make that migration
+low-risk.
 
 **The box:** ASUS PC, hostname `timeline-server`, a dedicated non-root admin user, reached over
 SSH on the LAN (`ssh timeline-server`). OS on the 250 GB SATA SSD; **all app data
@@ -396,3 +401,80 @@ close to zero — only the domain is a hard cash cost:
 **Rough total: ~£4–8 / month**, dominated by electricity, plus the ~£12/yr
 domain. That's the baseline the eventual AWS bill (Phase 11) has to justify
 beating — see `docs/phases/phase-11-aws-migration.md`.
+
+## Why it's built this way (design decisions)
+
+The runbook above is the *how*; this is the durable *why* behind the ops choices,
+so a future change doesn't quietly undo the reasoning.
+
+- **Same-origin serving behind Caddy — because of CSRF.** The SPA reads the
+  non-httpOnly `csrftoken` cookie and echoes it as `X-CSRFToken` (see
+  `reference/accounts.md`). In production that needs either same-origin serving
+  (Caddy in front of both SPA and API — what we do) or split subdomains with
+  matching cookie-domain + trusted-origin config. Miss it and *every*
+  authenticated mutation 403s. Caddy also gives tiny-config auto-HTTPS (Let's
+  Encrypt via HTTP-01); nginx + certbot is the manual alternative.
+- **Exposure = port-forward + dynamic DNS, not a Cloudflare Tunnel.** Forward
+  **only 80/443** (never SSH/Postgres); admin over SSH on the LAN. Accepted
+  trade-off: the domain resolves to the home's public IP, so WHOIS privacy is on.
+  CGNAT would break inbound port-forwarding (checked — this ISP doesn't use it); a
+  **Cloudflare Tunnel** is the documented fallback that needs no port-forward and
+  hides the home IP. DDNS runs *on the box* (`deploy/cloudflare-ddns.sh` + a
+  systemd timer) because the router has no Cloudflare option; pin the IP lookup to
+  `curl -4` since we publish an A record (a dual-stack box otherwise returns its
+  IPv6). A **router DHCP reservation** pins the box's LAN IP — a lease change
+  otherwise silently breaks inbound access and looks like a crashed box.
+- **Data on the 1 TB NVMe, not the OS disk.** The OS boots off the small SATA SSD
+  (the motherboard firmware can't boot from NVMe — a hardware quirk of this box);
+  Postgres data *and* media live on the NVMe for capacity (family photos dwarf
+  250 GB), to avoid filling the boot disk (a full OS disk takes the box down), and
+  for speed. The catch: Docker named volumes default to `/var/lib/docker/volumes`
+  on the OS disk, so the volumes are explicitly pinned to the NVMe mount, and Docker
+  is guarded by `RequiresMountsFor` so it can't come up writing to the OS disk
+  before the NVMe mounts. Verify with `docker volume inspect` + a reboot test.
+- **Continuous deploy is pull-based and release-triggered.** The box forwards only
+  80/443, not SSH, so CD must be **outbound from the house** — GitHub can't SSH in.
+  So: `gh release create vX.Y.Z` → a workflow builds + pushes images to GHCR (using
+  the built-in `GITHUB_TOKEN`, no PAT); a systemd timer on the box polls every
+  ~5 min, `docker compose pull`s, and redeploys **only on a changed digest**.
+  Triggering on *release* (not every merge) keeps a deploy a deliberate human
+  action with a version/changelog, and fork PRs can't publish releases so untrusted
+  code never builds our images. Chosen a systemd timer over Watchtower for
+  consistency with the box's other timers (backups, DDNS) and transparency. Config
+  (Caddyfile, compose files) travels via `git pull`; only the heavy image build is
+  offloaded to CI, and the box stays on `main` so the manual `deploy.sh`
+  build-from-source path still works as a fallback. **Security:** the whole
+  pipeline's trust reduces to control of the GitHub account (2FA is the crown-jewel
+  control); the box holds no registry write creds and images bake nothing secret
+  (real secrets are injected at runtime from `.env.prod`).
+- **Backups: encrypted to Cloudflare R2, media mirrored not snapshotted.** See
+  `backup-restore.md` for the runbook. R2 was chosen (over B2 / self-managed)
+  because it reuses the Cloudflare account, has 10 GB free + zero egress, and is
+  S3-compatible so it doubles as a stepping stone to the Phase 11 S3 migration.
+  `rclone crypt` encrypts before anything leaves the house. Media is *mirrored*
+  (not snapshotted) so off-site size ≈ live media, with changed/deleted files
+  diverted to a dated `media-archive/` (30-day window) so a local wipe can't
+  propagate to the backup.
+- **Security hardening (from `/security-review`, no HIGH findings).** Three gaps
+  were closed: (1) **uploaded media auth-gated** via Caddy `forward_auth` →
+  `/api/media-auth/` (logged-in active members only; see `reference/feed-and-posts.md`);
+  (2) **Django `/admin/` restricted to the LAN** by Caddy `remote_ip` allow-list,
+  deliberately **fail-closed** — it *excludes* Docker's bridge range so a NAT
+  misconfig locks admin out (caught instantly) rather than silently opening it to
+  the world; (3) **sign-up enumeration closed** (see `reference/accounts.md`). Note
+  a normal LAN device reaches `/admin/` via the public domain through the router's
+  hairpin; it only 403s if something routes it *out* first (a VPN, or iCloud
+  Private Relay on iOS/macOS) — the usual reason a phone on home Wi-Fi is still
+  blocked.
+- **Uptime = an on-box active probe + a dead-man's switch.** healthchecks.io is
+  *passive* (it waits for pings, it does not probe your URL), so the active half
+  lives on our side: a 5-min timer curls `GET /api/healthz/` (public, runs
+  `SELECT 1` so "gunicorn up but Postgres down" is caught; 503 on DB error) and
+  pings success/`/fail`. The probe hits the public hostname **pinned to loopback**
+  (`curl --resolve …:127.0.0.1`) because many consumer routers can't hairpin a LAN
+  request to their own public IP — this exercises the real cert + routing + DB but
+  not the inbound internet path (static once set; an external check is a deferred
+  nice-to-have). If the box or broadband is down the timer can't run, so the
+  missing ping goes overdue → the dead-man's alert fires. No `Persistent=true` on
+  this timer (a catch-up ping would falsely claim the site was up during an
+  outage).

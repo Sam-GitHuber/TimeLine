@@ -123,7 +123,7 @@ describe("ReactionBar", () => {
   it("renders the popover in a body-level portal, not trapped inside the feed", async () => {
     // The popover overflows its post and must paint above later feed content, so
     // it is portalled to <body> with absolute (page-anchored) positioning,
-    // escaping the feed's stacking context. See docs/phases/phase-7b — the
+    // escaping the feed's stacking context. See docs/reference/reactions.md — the
     // "translucent picker" bug was later feed posts painting over an in-flow
     // popover.
     const { container } = renderWithAuth(

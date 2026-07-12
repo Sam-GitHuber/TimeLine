@@ -695,7 +695,7 @@ def media_auth(request):
     This is *authentication* gating: any logged-in member may fetch any media
     whose UUID filename they already hold. Full per-author connection gating
     (checking the viewer is connected to the photo's author) is a heavier,
-    deferred Phase 7b step — see the phase-7 doc. The unguessable UUID filename
+    deferred step — see docs/reference/feed-and-posts.md. The unguessable UUID filename
     (``api/imaging.py``) remains a second layer underneath this.
 
     Relies on the default auth (JWT-in-cookie) + ``IsAuthenticated`` permission;

@@ -78,7 +78,7 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "corsheaders",
     # Auth stack: dj-rest-auth exposes the API endpoints; allauth powers
-    # registration + email-based login. See docs/phases/phase-2-accounts.md.
+    # registration + email-based login. See docs/reference/accounts.md.
     "allauth",
     "allauth.account",
     "allauth.socialaccount",
@@ -93,7 +93,7 @@ INSTALLED_APPS = [
 SITE_ID = 1
 
 # Our custom user model (email login, no username). MUST be set before the
-# first migration that creates the user table (see phase-2 notes / DB reset).
+# first migration that creates the user table (see docs/reference/accounts.md).
 AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
@@ -319,7 +319,7 @@ REST_FRAMEWORK = {
 
 # --- Authentication (dj-rest-auth + allauth + simplejwt) ---------------------
 # JWT delivered in an httpOnly cookie so page JavaScript can't read it: an XSS
-# bug then can't exfiltrate a login. See docs/phases/phase-2-accounts.md.
+# bug then can't exfiltrate a login. See docs/reference/accounts.md.
 REST_AUTH = {
     "USE_JWT": True,
     "JWT_AUTH_COOKIE": "timeline-auth",
@@ -398,7 +398,7 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # Send the session + CSRF cookies only over HTTPS in production. Mirrors the JWT
 # cookie's DJANGO_COOKIE_SECURE (defaults to "on unless DEBUG"). The CSRF cookie
 # deliberately stays readable by JS (not httpOnly) so the SPA can echo it back in
-# the X-CSRFToken header — see the Phase 2 CSRF note in phase-7 docs.
+# the X-CSRFToken header — see the CSRF note in docs/reference/accounts.md.
 SESSION_COOKIE_SECURE = env_bool("DJANGO_COOKIE_SECURE", default=not DEBUG)
 CSRF_COOKIE_SECURE = env_bool("DJANGO_COOKIE_SECURE", default=not DEBUG)
 

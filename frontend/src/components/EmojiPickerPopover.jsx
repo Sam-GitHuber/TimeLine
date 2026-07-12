@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 // Vite bundles this JSON as a first-party asset and hands us its URL, so the
 // picker loads its emoji data from *our* origin. emoji-picker-element otherwise
 // defaults to a jsDelivr CDN — a third-party request we won't make (the app's
-// privacy stance is: no external calls, ever). See docs/phases/phase-7b.
+// privacy stance is: no external calls, ever). See docs/reference/reactions.md.
 import emojiDataUrl from "emoji-picker-element-data/en/emojibase/data.json?url";
 
 // Theme emoji-picker-element to the app's light look. Its style hooks are CSS

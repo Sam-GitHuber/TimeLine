@@ -4,7 +4,8 @@ A social timeline with **no algorithm and no ads** — just the people you follo
 in the order they posted. What Facebook was supposed to be.
 
 See [`docs/SHARED.md`](docs/SHARED.md) for the mission, principles, and tech
-stack, and [`docs/phases/`](docs/phases/) for the phased roadmap.
+stack, [`docs/reference/`](docs/reference/) for how each feature works, and
+[`docs/phases/`](docs/phases/) for the roadmap of what's still to come.
 
 ## Tech stack
 
