@@ -1133,7 +1133,14 @@ def _toggle_reaction(request, target_kwargs):
     try:
         emoji = normalise_emoji(raw)
     except InvalidEmoji as exc:
-        raise ValidationError({"emoji": str(exc)}) from exc
+        # Return a fixed, author-controlled message rather than the exception's
+        # text. normalise_emoji only ever raises safe literals, but piping an
+        # exception's string into an API response is the "information exposure
+        # through an exception" pattern CodeQL flags — so we don't. `from exc`
+        # still chains the original for server-side logs.
+        raise ValidationError(
+            {"emoji": "That's not a valid emoji."}
+        ) from exc
 
     mine = Reaction.objects.filter(user=request.user, **target_kwargs)
     existing = mine.filter(emoji=emoji).first()
