@@ -1,4 +1,4 @@
-# Phase 7b — Migrate to AWS Lightsail
+# Phase 11 — Migrate to AWS Lightsail
 
 **Status:** not started
 
@@ -53,7 +53,7 @@ server left running as an instant rollback until AWS is proven.
 - [ ] Secrets from AWS env/secret config, never the repo
 - [ ] Home server **decommissioned only after** AWS is verified stable (a few days
       on standby first)
-- [ ] Updated **monthly cost estimate** written down (feeds funding, Phase 10)
+- [ ] Updated **monthly cost estimate** written down (feeds funding, Phase 12)
 
 ## Steps (high level — details walked through live)
 
@@ -78,5 +78,5 @@ server left running as an instant rollback until AWS is proven.
   data, lean managed (automatic backups/patching) unless cost is tight.
 - **Same-origin serving still applies** (reverse proxy in front of SPA + API) so
   the CSRF-cookie flow keeps working — carry over the Phase 7 security notes.
-- **Confirm the monthly cost here** — the number that feeds the Phase 10 funding
+- **Confirm the monthly cost here** — the number that feeds the Phase 12 funding
   conversation.

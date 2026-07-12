@@ -44,10 +44,10 @@ once the product is solid — see the Roadmap below.
 | Data fetching (frontend) | TanStack Query | Handles loading/refreshing feed data cleanly. Add when the frontend first talks to the real API (Phase 3) |
 | Frontend tests | Vitest + React Testing Library | The standard test runner for Vite/React. `npm test`. Added in Phase 1 |
 | Python packaging | uv | Fast, modern Python package/venv manager |
-| Photo storage | S3-compatible object storage (via `django-storages`) | Built via `django-storages` from Phase 4, but backed by a **local disk volume** through the home-server beta (Phase 7); switches to an S3 bucket at the AWS migration (Phase 7b) as a config change, not a rewrite |
+| Photo storage | S3-compatible object storage (via `django-storages`) | Built via `django-storages` from Phase 4, but backed by a **local disk volume** through the home-server beta (Phase 7); switches to an S3 bucket at the AWS migration (Phase 11) as a config change, not a rewrite |
 | Local dev / packaging | Docker Compose | Three services: `frontend`, `backend`, `postgres` |
 | CI | GitHub Actions | Runs tests automatically on push (`.github/workflows/`) |
-| Hosting (future) | Home server first, then AWS Lightsail | Phase 7 self-hosts the finished app on a wiped spare PC for a cheap, reversible friends/family beta; Phase 7b migrates all data to AWS Lightsail once it's proven |
+| Hosting (future) | Home server first, then AWS Lightsail | Phase 7 self-hosts the finished app on a wiped spare PC for a cheap, reversible friends/family beta; Phase 11 migrates all data to AWS Lightsail once it's proven |
 
 ### Add later — only when actually needed (do NOT build these now)
 
@@ -120,7 +120,7 @@ worth a real lawyer's time. Four distinct issues:
 
 3. **Copyright in our own code — a choice, not a risk.** Auto-copyrighted to the
    author; the only decision is which **licence** to release under. Handled
-   deliberately at **Phase 10** (MIT/Apache = permissive; AGPL keeps
+   deliberately at **Phase 12** (MIT/Apache = permissive; AGPL keeps
    network-deployed forks open).
 
 4. **Dependency licences — fine.** Stack is permissive (Django = BSD, React =
@@ -182,10 +182,11 @@ detail when we're about to start them.
 | 6 | Groups | Shared group timelines you can post into and follow | `phase-6-groups.md` |
 | 6a | Group messaging | Group conversations (extends Phase 5 DMs); leave a conversation | `phase-6a-group-messaging.md` |
 | 7 | Self-hosted private beta | The finished app live on a wiped spare **home PC**, on a real HTTPS URL; close friends/family log in and bug-test it | `phase-7-productionisation.md` |
-| 7b | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | `phase-7b-aws-migration.md` |
-| 8 | iPhone app | An installable iOS app hitting the same backend | `phase-8-iphone-app.md` |
-| 9 | Android app | An installable Android app hitting the same backend | `phase-9-android-app.md` |
-| 10 | Open source & funding | Public repo with license + contribution guide, and a funding channel (e.g. Patreon) | `phase-10-open-source-funding.md` |
+| 8 | Notifications & activity centre | An in-site notification centre (kept, not vanishing on tap; handled ones dulled) with per-type preferences; events for post/comment replies, reactions, connection requests, group invites | `phase-8-notifications.md` |
+| 9 | iPhone app | An installable iOS app hitting the same backend, with push notifications | `phase-9-iphone-app.md` |
+| 10 | Android app | An installable Android app hitting the same backend, with push notifications | `phase-10-android-app.md` |
+| 11 | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | `phase-11-aws-migration.md` |
+| 12 | Open source & funding | Public repo with license + contribution guide, and a funding channel (e.g. Patreon) | `phase-12-open-source-funding.md` |
 
 ### Why this order
 
@@ -202,17 +203,35 @@ detail when we're about to start them.
   friends/family start using it later, so early usage doesn't shape the
   messaging/groups design — a deliberate choice; the maintainer wants a genuinely
   solid site before inviting anyone.)
-- **Productionise in two steps: home server (7) then AWS (7b).** Rather than
+- **Home-server beta (7) first, cloud (11) only once proven.** Rather than
   paying for cloud hosting on day one, we self-host the finished app on a wiped
   spare PC for a friends/family beta — cheap and fully reversible, so if it flops
-  we've spent nothing but a domain. Once it's proven, Phase 7b migrates all the
-  real data to AWS Lightsail. The known cost is a one-time home→cloud data
-  migration, deliberately accepted and de-risked by designing storage so photos
-  move to a bucket once and never move again.
-- **Apps (8–9) after the web app is solid.** The phone apps talk to the same
-  backend, so there's no point building them until that backend is stable and
-  deployed (Phase 7b).
-- **Open source & funding (10) last of the planned set,** but the repo stays
-  public throughout — phase 10 is about doing it *properly* (license,
+  we've spent nothing but a domain. **The AWS migration is deliberately pushed
+  back behind the phone apps** (see below): we spend cheap engineering time to
+  generate real demand before committing to recurring cloud cost. Once that
+  demand is proven, Phase 11 migrates all the real data to AWS Lightsail. The
+  known cost is a one-time home→cloud data migration, deliberately accepted and
+  de-risked by designing storage so photos move to a bucket once and never move
+  again.
+- **Notifications (8) before the apps.** The notification *system* — the event
+  types, the in-site activity centre (which keeps a history rather than losing a
+  notification the moment it's tapped), and per-type preferences — is backend +
+  web work that's independent of any phone, and it makes the web app better on
+  its own. Building it first means each app phase just adds the *push delivery
+  channel* (Apple's APNs / Google's FCM) on top of an API that already exists,
+  rather than one giant phase that invents the whole notification concept and an
+  app at the same time. Same layering as the `django-storages` seam: build the
+  hard shared part once, add the platform-specific channel later.
+- **Apps (9–10) run on the home-server beta, before AWS.** The phone apps are
+  just more clients of the same JSON API, so their real dependency is a stable
+  public HTTPS backend — which the home server already provides (Phase 7), not
+  AWS. We build the apps to prove that people will actually use TimeLine once
+  they can download it (and get push notifications), *then* let that proven
+  demand justify paying for always-on cloud hosting. If the apps ever strain the
+  home PC, that strain is itself the signal to do the migration. Distribution via
+  TestFlight / Play closed-testing keeps the beta invite-only, and sign-ups stay
+  admin-approved, so wider app reach never means uncontrolled data exposure.
+- **Open source & funding (12) last of the planned set,** but the repo stays
+  public throughout — phase 12 is about doing it *properly* (license,
   contribution guide) and asking for money only once there's a real product
   worth funding.
