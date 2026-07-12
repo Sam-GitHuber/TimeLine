@@ -12,8 +12,8 @@ from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
-from django.db.utils import OperationalError
 from django.db.models import Q
+from django.db.utils import OperationalError
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from PIL import Image
