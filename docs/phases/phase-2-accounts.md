@@ -164,7 +164,7 @@ This is the first phase holding real credentials.
   behaviour, leaks only membership existence (no credentials/session/data), and
   is low-value for a deliberately private, approval-gated friends-and-family app
   — so we accept it for now. **Revisit if sign-ups ever open to the public**
-  (e.g. around the Phase 10 openness/funding work): switch to generic
+  (e.g. around the Phase 12 openness/funding work): switch to generic
   "check your email"-style responses that don't distinguish existing accounts.
   Tracked in GitHub issue #6.
 

@@ -1,4 +1,4 @@
-# Phase 10 — Open Source & Funding
+# Phase 12 — Open Source & Funding
 
 **Status:** not started — sketch only, refine before starting
 

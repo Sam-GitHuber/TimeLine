@@ -54,7 +54,7 @@ bug-test it.
 
 This is **not** the app's final home — it's the cheap, fully reversible way to
 prove the app is worth keeping before paying for cloud. If the beta goes well,
-**Phase 7b** migrates all data to AWS; if it flops, nothing was spent but a
+**Phase 11** migrates all data to AWS; if it flops, nothing was spent but a
 domain.
 
 ## Precondition
@@ -128,7 +128,8 @@ Phases 2–6 — running on the home server, surviving reboots.
 7. Set up off-box backups and **test a restore**.
 8. Add uptime monitoring.
 9. Publish ToS/privacy; run `/security-review`.
-10. Invite 2–3 close testers; bug-bash; iterate. Then → Phase 7b.
+10. Invite 2–3 close testers; bug-bash; iterate. Then → Phase 8 (notifications),
+    then the phone apps (9–10), then the AWS migration (Phase 11).
 
 ## Security notes
 
@@ -440,8 +441,8 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   yet). Off-box backups (below) still cover both DB and media regardless of disk.
 - **Two-step productionisation (user, 2026-07-05).** Self-host the finished app
   at home first for a cheap, reversible friends/family beta; migrate to AWS
-  (Phase 7b) only once proven. Known cost: a one-time home→cloud data migration,
-  deliberately accepted and de-risked (see Phase 7b).
+  (Phase 11) only once proven. Known cost: a one-time home→cloud data migration,
+  deliberately accepted and de-risked (see Phase 11).
 - **Exposure = port-forwarding + dynamic DNS (user, 2026-07-05).** Chosen over a
   Cloudflare Tunnel; home-IP-exposure + CGNAT caveats above, Cloudflare Tunnel is
   the documented fallback.
@@ -451,10 +452,10 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   is dynamic, hence DDNS.)
 - **Photos on the PC's local disk this phase (user, 2026-07-05).** No paid cloud
   storage until proven; media on a persistent volume with off-box backups, moves
-  to S3 in Phase 7b. **The media folder must be in the off-box backup** — one
+  to S3 in Phase 11. **The media folder must be in the off-box backup** — one
   aging PC is a single point of failure holding real family photos.
 - **Off-box backups are non-negotiable.** Nightly DB dump + media archive to a
-  second device/cloud drive, restore tested once. Also what makes 7b low-risk.
+  second device/cloud drive, restore tested once. Also what makes Phase 11 low-risk.
 - **Domain: `your-timeline.net` — PURCHASED (user, 2026-07-09) via Cloudflare
   Registrar.** Bare `timeline.me` (the earlier chosen candidate) was taken by
   purchase time, so `your-timeline.net` was registered instead — reputable
@@ -472,7 +473,7 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   `crypt`** remote — encrypted before leaving the house. **Destination decision:
   R2** (chosen over Backblaze B2 / self-managed) — reuses the existing Cloudflare
   account, 10 GB free + zero egress, S3-compatible so it doubles as a stepping
-  stone to the Phase 7b S3 migration. **Key storage design:** media is *mirrored*
+  stone to the Phase 11 S3 migration. **Key storage design:** media is *mirrored*
   (`sync`), not snapshotted, so off-site size ≈ live media (not × retention),
   keeping a small beta inside R2's free tier; DB dumps are tiny so ~30 dailies are
   cheap; changed/deleted files divert to a dated `media-archive/` (30-day window)
@@ -509,7 +510,7 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
      every media request to a new backend endpoint `GET /api/media-auth/`, which
      returns 204 only for a logged-in **active** member (SimpleJWT already rejects a
      deactivated user's token, so a banned member's saved URLs stop resolving). A
-     leaked URL is now useless to a logged-out stranger. **Deferred to 7b:** full
+     leaked URL is now useless to a logged-out stranger. **Deferred to Phase 11:** full
      *per-author connection* gating (a logged-in member could still fetch a photo
      whose UUID they already hold) — accepted for a small closed beta; UUID stays a
      second layer.

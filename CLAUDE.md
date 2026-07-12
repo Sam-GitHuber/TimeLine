@@ -47,9 +47,9 @@ and edit their own name/avatar/bio at `/settings` (rides dj-rest-auth's
 first/last), so every account has a display name from day one. All image
 handling funnels through `api/imaging.py`: validate-by-decoding (SVG rejected),
 strip EXIF/GPS, size/count caps, downscale + thumbnail. Media goes through
-**`django-storages`** — local disk now, an S3 bucket at Phase 7b by config
+**`django-storages`** — local disk now, an S3 bucket at Phase 11 by config
 (`STORAGES` seam on `DJANGO_MEDIA_STORAGE`); dev serves `/media/` openly, real
-private/signed media is a Phase 7b task. Profile URLs stay numeric (`/u/:id`) —
+private/signed media is a Phase 11 task. Profile URLs stay numeric (`/u/:id`) —
 name-based slugs deferred. See `docs/phases/phase-4-photos-profiles.md`.
 
 Phase 5 (direct messaging) — done. Private 1:1 messaging between **connected**
@@ -159,8 +159,9 @@ the detail in the phase docs, not here.
 - When a phase is finished, mark its status as done in that file.
 - Every phase already has a doc in `docs/phases/`. Phases 0–4 and 7 are
   detailed (productionisation is split into **7 — self-hosted home-server beta**
-  and **7b — migrate to AWS**, both detailed); the rest — 5 (messaging), 6
-  (groups), and 8–10 — are marked "sketch only". Flesh those out into a full plan (definition
+  and **11 — migrate to AWS**, both detailed); the rest — 5 (messaging), 6
+  (groups), and 8–10/12 — are marked "sketch only" (8 notifications, 9 iPhone,
+  10 Android, 12 open-source/funding). Flesh those out into a full plan (definition
   of done, steps) *before* starting work on them, following the pattern of the
   detailed phase files, and confirm the plan with the user. (Messaging and
   groups were deliberately moved ahead of productionisation — see the "Why this

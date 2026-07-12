@@ -247,7 +247,7 @@ backend (`forward_auth` → `/api/media-auth/`) before serving each file and ret
 it only to a logged-in, active member — so a leaked media URL is useless to an
 outsider, and a deactivated account's saved URLs stop resolving. Nothing to operate;
 just don't be surprised that `curl https://your-timeline.net/media/...` returns 401
-without a valid session cookie. (Per-author connection gating is a later, Phase 7b
+without a valid session cookie. (Per-author connection gating is a later, Phase 11
 step; today any logged-in member can fetch a media file whose URL they already hold.)
 
 ## Handling reports & deletion requests (moderation)

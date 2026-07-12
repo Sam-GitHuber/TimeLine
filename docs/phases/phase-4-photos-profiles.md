@@ -19,7 +19,7 @@ with file uploads and storage, which has real cost and privacy implications.
 - [x] Posts can include image attachments (`PostImage` table — many per post)
 - [x] Images are stored via **`django-storages`** so the backend can be swapped
       by config: a **local disk volume** now (and through the home-server beta,
-      Phase 7), switching to an **S3 bucket** at the AWS migration (Phase 7b)
+      Phase 7), switching to an **S3 bucket** at the AWS migration (Phase 11)
       without a code change (`STORAGES` seam keyed on `DJANGO_MEDIA_STORAGE`)
 - [x] Uploads are validated (file type, size limits) and served safely
       (decode-with-Pillow, SVG rejected, size/count caps, EXIF stripped)
@@ -33,7 +33,7 @@ with file uploads and storage, which has real cost and privacy implications.
 1. Set up image storage through **`django-storages`** pointed at a local Docker
    volume for now. Using the `django-storages` abstraction from the start is
    deliberate: media stays on local disk through the home-server beta (Phase 7)
-   and becomes an S3 bucket at the AWS migration (Phase 7b) as a **config change,
+   and becomes an S3 bucket at the AWS migration (Phase 11) as a **config change,
    not a rewrite**. Keep storage **private** (not publicly listable).
 2. Add image upload endpoint(s) with validation (type/size).
 3. Extend the `Post` model / add an attachments table for images.
@@ -50,7 +50,7 @@ with file uploads and storage, which has real cost and privacy implications.
   not publicly listable.
 - Storage and bandwidth are the first real ongoing costs (near-zero on the home
   server, but real once photos live in an S3 bucket on AWS); note expected impact
-  so it feeds into the Phase 7b cost estimate and the eventual funding ask.
+  so it feeds into the Phase 11 cost estimate and the eventual funding ask.
 
 ## Notes / decisions log
 
@@ -115,7 +115,7 @@ with file uploads and storage, which has real cost and privacy implications.
 - **Unguessable filenames.** `upload_to` uses a UUID, so a raw media URL can't be
   found by walking ids. In dev, Django serves `/media/` openly (DEBUG-only) — an
   acceptable convenience, **not** real access control. Real private media
-  (S3 `private` ACL + signed URLs) lands at Phase 7b; the `STORAGES` config seam
+  (S3 `private` ACL + signed URLs) lands at Phase 11; the `STORAGES` config seam
   and the `default_acl: private` / `querystring_auth` options are already staged.
 - **Profile editing rides dj-rest-auth's existing `PATCH /api/auth/user/`** (no
   new endpoint): `UserDetailsSerializer` now writes first/last name + bio and
