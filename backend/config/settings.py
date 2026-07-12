@@ -283,6 +283,17 @@ REST_FRAMEWORK = {
     # page for a text feed; revisit if it feels short in real use.
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
+    # Exactly ONE trusted proxy sits in front of us in production: Caddy (see
+    # deploy/Caddyfile), which appends the real client IP to X-Forwarded-For.
+    # Telling DRF NUM_PROXIES=1 makes it take the LAST address in that header —
+    # the one Caddy added — as the throttle identity. WITHOUT this, DRF falls
+    # back to using the *entire* X-Forwarded-For string; since Caddy appends to
+    # (rather than replaces) any client-supplied header, an attacker could send a
+    # rotating `X-Forwarded-For: <junk>` prefix and get a fresh throttle bucket
+    # per request, bypassing the per-IP login limit entirely. This is the crux
+    # that makes the login throttle below actually hold. (Only /api/* rides this
+    # proxy; the admin LAN restriction uses Caddy's own remote_ip, not this.)
+    "NUM_PROXIES": 1,
     # Rate limits for the auth-sensitive endpoints (see the throttled views in
     # accounts/views.py and DeleteAccountView). We deliberately DON'T set
     # DEFAULT_THROTTLE_CLASSES — throttling is opt-in per view via a scope, so

@@ -184,7 +184,16 @@ class RegistrationTests(APITestCase):
         )
 
 
+@override_settings(CACHES=LOCMEM_CACHE)
 class LoginLogoutTests(APITestCase):
+    # Login is throttled (per IP). Pin an isolated, cleared cache so this
+    # class's own login calls can't inherit or leave throttle state.
+    def setUp(self):
+        cache.clear()
+
+    def tearDown(self):
+        cache.clear()
+
     def _register(self, email):
         return self.client.post(
             REGISTER_URL,
@@ -270,16 +279,21 @@ PASSWORD_CHANGE_URL = "/api/auth/password/change/"
 NEW_PASSWORD = "fresh-tuna-71-lantern"
 
 
+@override_settings(CACHES=LOCMEM_CACHE)
 class PasswordChangeTests(APITestCase):
     """Changing your own password while logged in (dj-rest-auth's
     password/change/). The current password is required — see
     OLD_PASSWORD_FIELD_ENABLED in settings."""
 
     def setUp(self):
+        cache.clear()  # password/change/ is throttled per user — isolate it
         self.user = User.objects.create_user(
             email="rotator@example.com", password=PASSWORD, is_active=True
         )
         self.client.force_authenticate(self.user)
+
+    def tearDown(self):
+        cache.clear()
 
     def _change(self, old, new1, new2):
         return self.client.post(
@@ -373,6 +387,31 @@ class LoginThrottleTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn(AUTH_COOKIE, resp.cookies)
+
+    def test_a_spoofed_x_forwarded_for_cannot_dodge_the_throttle(self):
+        # In production Caddy appends the real client IP to X-Forwarded-For, so
+        # the header Django sees is "<whatever the client sent>, <real ip>".
+        # NUM_PROXIES=1 makes DRF trust only the last entry (Caddy's), so an
+        # attacker rotating the spoofed prefix can't mint a fresh bucket. We
+        # simulate that here: a constant trailing "real" IP with a per-request
+        # junk prefix must still share ONE bucket and trip the 429.
+        wrong = {"email": "brute@example.com", "password": "wrong"}
+        limit = configured_throttle_limit("login")
+        for i in range(limit):
+            resp = self.client.post(
+                LOGIN_URL,
+                wrong,
+                format="json",
+                HTTP_X_FORWARDED_FOR=f"9.9.9.{i}, 203.0.113.7",
+            )
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        resp = self.client.post(
+            LOGIN_URL,
+            wrong,
+            format="json",
+            HTTP_X_FORWARDED_FOR="9.9.9.250, 203.0.113.7",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
 
 @override_settings(CACHES=LOCMEM_CACHE)

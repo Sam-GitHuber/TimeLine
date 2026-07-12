@@ -170,6 +170,17 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
       spamming wrong passwords for their address (a denial-of-service). Per-IP
       blunts online guessing without that foot-gun. Password-change and delete
       are per-user (the caller is authenticated).
+    - **`NUM_PROXIES=1` is what makes the per-IP login limit actually hold.**
+      Caught in review. With it unset, DRF derives the throttle identity from the
+      *entire* `X-Forwarded-For` string. In prod Caddy *appends* the real client
+      IP to any client-supplied `X-Forwarded-For`, so an attacker could send a
+      rotating junk prefix and mint a fresh bucket per request — the login
+      throttle would be trivially bypassed. Setting `NUM_PROXIES=1` (we have
+      exactly one proxy hop, Caddy) tells DRF to trust only the last, Caddy-added
+      address. A regression test posts logins with a rotating `X-Forwarded-For`
+      prefix + constant trailing IP and asserts they still share one bucket.
+      (The admin LAN restriction is unaffected — it uses Caddy's own `remote_ip`,
+      the real TCP peer, not this header.)
     - **Throttle counters need a cache shared across gunicorn workers.** The
       default per-process `LocMemCache` would give each of the 3 prod workers its
       own counter, inflating the real limit to ~3×. Switched prod to Django's

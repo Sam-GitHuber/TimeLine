@@ -2329,10 +2329,17 @@ DELETE_ACCOUNT_URL = "/api/account/delete/"
 _DELETE_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-delete-")
 
 
+@override_settings(
+    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+)
 class DeleteAccountTests(APITestCase):
     def setUp(self):
+        cache.clear()  # /account/delete/ is throttled per user — isolate it
         self.me = make_user("leaver@example.com")
         self.client.force_authenticate(self.me)
+
+    def tearDown(self):
+        cache.clear()
 
     def test_wrong_password_is_rejected_and_account_survives(self):
         resp = self.client.post(
