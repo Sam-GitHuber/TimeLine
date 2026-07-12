@@ -1151,7 +1151,19 @@ def _toggle_reaction(request, target_kwargs):
                     )
                 }
             )
-        Reaction.objects.create(user=request.user, emoji=emoji, **target_kwargs)
+        try:
+            # Own savepoint so a lost race rolls back just this insert, not the
+            # whole request transaction (which ATOMIC_REQUESTS may wrap).
+            with transaction.atomic():
+                Reaction.objects.create(
+                    user=request.user, emoji=emoji, **target_kwargs
+                )
+        except IntegrityError:
+            # A concurrent identical "add" (e.g. a double-click) landed the same
+            # (user, target, emoji) row between our read and our write. Both
+            # clicks wanted it added, so honour that: swallow the duplicate and
+            # return the current summary rather than 500.
+            pass
 
     target = target_kwargs.get("post") or target_kwargs.get("comment")
     summary = summarise_reactions(

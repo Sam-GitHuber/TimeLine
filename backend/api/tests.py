@@ -2588,6 +2588,29 @@ class PostReactionToggleTests(APITestCase):
             Reaction.objects.filter(post=self.post, user=self.me).exists()
         )
 
+    def test_concurrent_duplicate_add_does_not_500(self):
+        # A double-click race: the pre-existence read misses (mocked to None)
+        # but the (user, post, emoji) row already exists, so create() hits the
+        # unique constraint. The endpoint should swallow the duplicate — both
+        # clicks wanted it added — and return 200 with the reaction present,
+        # not a 500 from an unhandled IntegrityError.
+        Reaction.objects.create(post=self.post, user=self.me, emoji="👍")
+        with mock.patch(
+            "django.db.models.query.QuerySet.first", return_value=None
+        ):
+            resp = self.client.post(
+                react_post_url(self.post), {"emoji": "👍"}, format="json"
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        entry = summary_for(resp.data["reactions"], "👍")
+        self.assertEqual(entry["count"], 1)
+        self.assertEqual(
+            Reaction.objects.filter(
+                post=self.post, user=self.me, emoji="👍"
+            ).count(),
+            1,
+        )
+
     def test_reaction_appears_embedded_in_the_feed(self):
         self.client.post(react_post_url(self.post), {"emoji": "🎉"}, format="json")
         resp = self.client.get(FEED_URL)
