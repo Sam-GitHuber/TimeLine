@@ -23,6 +23,7 @@ from rest_framework.exceptions import (
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .imaging import (
@@ -2164,7 +2165,14 @@ class DeleteAccountView(APIView):
     unattended/hijacked session doing something unrecoverable — the same reason a
     bank asks again before a transfer. On success everything is torn down (see
     ``delete_account``) and 204 is returned; the client then clears its session.
+
+    Rate-limited per user (``account_delete`` scope): the password re-check is a
+    guessing oracle of the same shape as password change, so it gets the same
+    treatment — a burst of wrong-password attempts is cut off with a 429.
     """
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "account_delete"
 
     def post(self, request):
         password = request.data.get("password", "")

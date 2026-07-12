@@ -1,8 +1,37 @@
 from dj_rest_auth.registration.views import RegisterView
+from dj_rest_auth.views import LoginView, PasswordChangeView
 from django.middleware.csrf import get_token
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+
+
+class ThrottledLoginView(LoginView):
+    """dj-rest-auth's login, rate-limited per IP (``login`` scope).
+
+    Login is the classic online-guessing target: an attacker with (or guessing)
+    a known email tries passwords until one works. Since the caller is anonymous
+    here, ``ScopedRateThrottle`` keys the counter on the client IP, so a burst of
+    attempts from one source is cut off with a 429 well before it can grind
+    through a password list. Rate lives in ``DEFAULT_THROTTLE_RATES['login']``.
+    """
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+
+class ThrottledPasswordChangeView(PasswordChangeView):
+    """dj-rest-auth's password change, rate-limited per user (``password_change``).
+
+    The endpoint requires the *current* password (``OLD_PASSWORD_FIELD_ENABLED``),
+    so it's a small guessing oracle for anyone riding a hijacked session. The
+    caller is authenticated, so the throttle counter is keyed on the user id —
+    the limit is per account, not per IP.
+    """
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_change"
 
 
 class InactiveRegisterView(RegisterView):

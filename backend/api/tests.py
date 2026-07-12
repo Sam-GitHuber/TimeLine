@@ -8,6 +8,7 @@ from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models import Q
@@ -2410,3 +2411,35 @@ class DeleteAccountTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Group.objects.filter(pk=group.pk).exists())
+
+
+@override_settings(
+    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+)
+class DeleteAccountThrottleTests(APITestCase):
+    """Account delete is rate-limited per user: the password re-check is the same
+    guessing oracle as password change, so a burst is cut off (issue #51).
+
+    (We test the real configured rate rather than a per-test override: DRF binds
+    the throttle rate as a class attribute at import, so @override_settings on
+    REST_FRAMEWORK wouldn't reach it.)"""
+
+    def setUp(self):
+        cache.clear()
+        self.me = make_user("leaver@example.com")
+        self.client.force_authenticate(self.me)
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_a_burst_of_wrong_password_attempts_is_throttled(self):
+        rate = settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["account_delete"]
+        limit = int(rate.split("/")[0])
+        wrong = {"password": "not-my-password"}
+        for _ in range(limit):
+            resp = self.client.post(DELETE_ACCOUNT_URL, wrong, format="json")
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        resp = self.client.post(DELETE_ACCOUNT_URL, wrong, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        # Throttled before the delete logic ran — the account survives.
+        self.assertTrue(User.objects.filter(pk=self.me.pk).exists())

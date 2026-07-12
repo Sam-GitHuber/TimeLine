@@ -2,13 +2,30 @@ import shutil
 import tempfile
 from io import BytesIO
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import override_settings
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
 User = get_user_model()
+
+# A clean, per-process in-memory cache so throttle counters from one test can't
+# bleed into the next. (We can't override the throttle *rate* per-test — DRF
+# binds THROTTLE_RATES as a class attribute at import, so @override_settings on
+# REST_FRAMEWORK doesn't reach it — so the throttle tests exercise the real
+# configured rate, read via `configured_throttle_limit` below.)
+LOCMEM_CACHE = {
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+}
+
+
+def configured_throttle_limit(scope):
+    """The allowed request count for a throttle scope, e.g. "10/min" -> 10."""
+    rate = settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"][scope]
+    return int(rate.split("/")[0])
 
 REGISTER_URL = "/api/auth/registration/"
 LOGIN_URL = "/api/auth/login/"
@@ -317,6 +334,77 @@ class PasswordChangeTests(APITestCase):
         resp = self._change(PASSWORD, NEW_PASSWORD, NEW_PASSWORD)
 
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+@override_settings(CACHES=LOCMEM_CACHE)
+class LoginThrottleTests(APITestCase):
+    """Login is rate-limited per IP so a burst of password guesses is cut off
+    (issue #51). The counter is keyed on the client address, not the submitted
+    email, so an attacker can't lock a real member out of their own account."""
+
+    def setUp(self):
+        cache.clear()  # start each test with an empty throttle bucket
+        self.user = User.objects.create_user(
+            email="brute@example.com", password=PASSWORD, is_active=True
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_a_burst_of_attempts_is_throttled_with_429(self):
+        wrong = {"email": "brute@example.com", "password": "wrong"}
+        limit = configured_throttle_limit("login")
+        # Attempts up to the configured limit are let through to the login logic,
+        # which rejects the bad password with a 400…
+        for _ in range(limit):
+            resp = self.client.post(LOGIN_URL, wrong, format="json")
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # …the next one is refused outright, before credentials are even checked.
+        resp = self.client.post(LOGIN_URL, wrong, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        # A `detail` message the SPA already surfaces to the user.
+        self.assertIn("detail", resp.data)
+
+    def test_a_normal_login_within_the_limit_still_succeeds(self):
+        resp = self.client.post(
+            LOGIN_URL,
+            {"email": "brute@example.com", "password": PASSWORD},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn(AUTH_COOKIE, resp.cookies)
+
+
+@override_settings(CACHES=LOCMEM_CACHE)
+class PasswordChangeThrottleTests(APITestCase):
+    """Password change is rate-limited per user: the current-password check is a
+    guessing oracle for a hijacked session, so a burst is cut off (issue #51)."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(
+            email="rotator@example.com", password=PASSWORD, is_active=True
+        )
+        self.client.force_authenticate(self.user)
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_a_burst_of_wrong_current_password_attempts_is_throttled(self):
+        wrong = {
+            "old_password": "not-my-password",
+            "new_password1": NEW_PASSWORD,
+            "new_password2": NEW_PASSWORD,
+        }
+        limit = configured_throttle_limit("password_change")
+        for _ in range(limit):
+            resp = self.client.post(PASSWORD_CHANGE_URL, wrong, format="json")
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        resp = self.client.post(PASSWORD_CHANGE_URL, wrong, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        # Throttled, so nothing changed — the original password still works.
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
 
 
 # --- Phase 4: profile editing (name, bio, avatar) ---------------------------
