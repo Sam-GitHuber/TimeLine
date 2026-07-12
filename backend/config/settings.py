@@ -286,7 +286,7 @@ REST_AUTH = {
     # default). Account hygiene: a hijacked session (e.g. via XSS) then can't
     # silently rotate the password without also knowing the old one, and it stops
     # a shoulder-surfer at an unlocked screen from locking the owner out.
-    "OLD_PASSWORD_FIELD_ENABLED": True,
+    "OLD_PASSWORD_FIELD_ENABLED": True,  # nosec B105 — a feature flag, not a password
 }
 
 SIMPLE_JWT = {
