@@ -1,17 +1,19 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
-**Status:** all 15 DoD items code-complete (2026-07-12) — **the app is LIVE on
-public HTTPS** at https://your-timeline.net (home server, since 2026-07-10). The
-hard gate closed 2026-07-11 (ToS/privacy/delete-my-data + security review + off-
-box backups). The final two items — uptime monitoring + a monthly-cost note —
-landed 2026-07-12. **One on-box step remains before Phase 7 is fully done:**
-enable the uptime timer on the box (create the healthchecks.io check, fill
-`/etc/timeline/healthcheck.env`, `systemctl enable --now
-timeline-healthcheck.timer` — see `docs/deploy.md` "Uptime monitoring").
+**Status: DONE (2026-07-12).** All 15/15 DoD items are live on the box — **the
+app is LIVE on public HTTPS** at https://your-timeline.net (home server, since
+2026-07-10). The hard gate closed 2026-07-11 (ToS/privacy/delete-my-data +
+security review + off-box backups). The final two items — uptime monitoring
+(`GET /api/healthz/` + `timeline-healthcheck.timer` reporting to healthchecks.io,
+enabled on the box 2026-07-12, first probe returned 200 + pinged OK) and a
+monthly-cost note — landed 2026-07-12 (v0.4.0, #57). **Next phase: 8
+(notifications)** — flesh out `docs/phases/phase-8-notifications.md` before
+starting.
 
-> **RESUME HERE (next session).** The core is done: the site is deployed on the
+> **PHASE COMPLETE.** Nothing left to resume here. The site is deployed on the
 > box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
-> a Let's Encrypt cert (verified on mobile data). **Remaining, in priority order:**
+> a Let's Encrypt cert, backed up nightly off-site (tested restore), auto-deploys
+> on release, and is now uptime-monitored. History of how each item landed:
 > 1. ~~Off-box backups + a tested restore~~ **DONE (2026-07-11, on the box).**
 >    Nightly encrypted backups to Cloudflare R2 via `rclone crypt` are live
 >    (systemd timer enabled, next run confirmed); the **tested restore passed on
@@ -41,14 +43,14 @@ timeline-healthcheck.timer` — see `docs/deploy.md` "Uptime monitoring").
 >    `v0.1.0` cut → images pushed → box cut over to the GHCR images, site stayed
 >    up; timer enabled + scheduling confirmed. Security-audited (see log). Ship a
 >    version with `gh release create vX.Y.Z --generate-notes`.
-> 5. ~~Uptime monitoring + monthly cost note~~ **CODE-COMPLETE (2026-07-12).**
->    Added `GET /api/healthz/` + an on-box `timeline-healthcheck.timer` that
->    reports to healthchecks.io (reusing the backup's service), and a monthly-cost
->    table in `docs/deploy.md`. **Last on-box step:** create the healthchecks.io
->    uptime check, fill `/etc/timeline/healthcheck.env` with its ping URL, and
->    `systemctl enable --now timeline-healthcheck.timer` — walkthrough in
->    `docs/deploy.md` ("Uptime monitoring"). Until that's done the box isn't
->    actually being watched.
+> 5. ~~Uptime monitoring + monthly cost note~~ **DONE + LIVE ON BOX
+>    (2026-07-12, #57 / v0.4.0).** `GET /api/healthz/` (public; `SELECT 1` so a
+>    dead DB is caught; 503 not 500) + an on-box `timeline-healthcheck.timer`
+>    that probes it every 5 min and reports to a healthchecks.io check (reusing
+>    the backup's dead-man's-switch service). Enabled on the box: first manual
+>    run returned `200; success ping sent`, timer active + scheduling confirmed.
+>    Monthly-cost table (~£4–8/mo, mostly electricity) in `docs/deploy.md`.
+>    Walkthrough: `docs/deploy.md` ("Uptime monitoring").
 >
 > **Hard gate:** CLOSED (2026-07-11) — items 1–3 all done + live on the box. Real
 > friends/family can now be invited.
@@ -201,10 +203,13 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
       electricity for the always-on box) + ~£12/yr domain; R2 backups,
       healthchecks.io, Cloudflare, GH Actions/GHCR, Let's Encrypt all £0 on free
       tiers. This is the baseline Phase 11 (AWS) has to justify beating.
-    - **Still a user step on the box:** create the second healthchecks.io check,
-      drop its ping URL into `/etc/timeline/healthcheck.env`, and enable the
-      timer (walkthrough in `docs/deploy.md`). Code + units + docs ship in the
-      repo; the box isn't monitored until that one-time enablement is done.
+    - **Enabled on the box (2026-07-12).** Merged as #57, released as v0.4.0;
+      autodeploy pulled the image (endpoint went 200 within ~2 min) and
+      git-pull'd the scripts. On the box: created `/etc/timeline/healthcheck.env`
+      with the check's ping URL, installed the units (`User=sam`,
+      `/home/sam/TimeLine/deploy/healthcheck.sh`), enabled the timer. First
+      manual `./deploy/healthcheck.sh` → `200; success ping sent`; timer active,
+      next run scheduled. **Phase 7 fully complete.**
 
 - **Rate-limited the auth-sensitive endpoints (2026-07-12, issue #51, branch
   `feat/rate-limit-auth`).** `login`, `password/change/`, and `account/delete/`
