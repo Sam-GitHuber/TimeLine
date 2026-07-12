@@ -249,6 +249,76 @@ class LoginLogoutTests(APITestCase):
         self.assertEqual(resp.cookies[AUTH_COOKIE].value, "")
 
 
+PASSWORD_CHANGE_URL = "/api/auth/password/change/"
+NEW_PASSWORD = "fresh-tuna-71-lantern"
+
+
+class PasswordChangeTests(APITestCase):
+    """Changing your own password while logged in (dj-rest-auth's
+    password/change/). The current password is required — see
+    OLD_PASSWORD_FIELD_ENABLED in settings."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="rotator@example.com", password=PASSWORD, is_active=True
+        )
+        self.client.force_authenticate(self.user)
+
+    def _change(self, old, new1, new2):
+        return self.client.post(
+            PASSWORD_CHANGE_URL,
+            {"old_password": old, "new_password1": new1, "new_password2": new2},
+            format="json",
+        )
+
+    def test_changes_the_password_with_the_correct_current_one(self):
+        resp = self._change(PASSWORD, NEW_PASSWORD, NEW_PASSWORD)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(NEW_PASSWORD))
+        self.assertFalse(self.user.check_password(PASSWORD))
+
+    def test_wrong_current_password_is_rejected_and_password_unchanged(self):
+        resp = self._change("not-my-password", NEW_PASSWORD, NEW_PASSWORD)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
+
+    def test_the_current_password_is_required(self):
+        resp = self.client.post(
+            PASSWORD_CHANGE_URL,
+            {"new_password1": NEW_PASSWORD, "new_password2": NEW_PASSWORD},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("old_password", resp.data)
+
+    def test_mismatched_new_passwords_are_rejected(self):
+        resp = self._change(PASSWORD, NEW_PASSWORD, NEW_PASSWORD + "-oops")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
+
+    def test_a_weak_new_password_is_rejected(self):
+        # Django's validators run on the new password (too short / too common).
+        resp = self._change(PASSWORD, "123", "123")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
+
+    def test_anonymous_requests_are_refused(self):
+        self.client.force_authenticate(user=None)
+
+        resp = self._change(PASSWORD, NEW_PASSWORD, NEW_PASSWORD)
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
 # --- Phase 4: profile editing (name, bio, avatar) ---------------------------
 
 _AVATAR_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-avatars-")

@@ -156,6 +156,19 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
 
 ## Notes / decisions log
 
+- **Logged-in "change password" added (2026-07-12, issue #36, branch
+  `feat/change-password`).** Members had no way to rotate their own password once
+  set. The `dj-rest-auth` endpoint (`POST /api/auth/password/change/`) already
+  existed via the included URLs — this was purely a missing frontend + a settings
+  flip. The one non-obvious backend change: `dj-rest-auth` leaves the current
+  password **optional** by default (`OLD_PASSWORD_FIELD_ENABLED` defaults false),
+  so a change would go through with only the new password. We set it `True` so the
+  current password is required — a hijacked session (e.g. via XSS) then can't
+  silently rotate the password, and a shoulder-surfer at an unlocked screen can't
+  lock the owner out. Frontend is an inline expanding `ChangePasswordSection` on
+  `/settings` (not a modal — it's non-destructive), with a client-side
+  new≠confirm guard on top of the server's checks. No email involved, so this
+  ships independently of the forgotten-password reset (#38, blocked on email #37).
 - **Phone-photo upload cap raised 10 MB → 30 MB (2026-07-12, issue #40, branch
   `fix-40-phone-photo-size-cap`).** Real friends/family on modern iPhones/Androids
   were hitting "Image is too large (max 10 MB)" on ordinary camera-roll photos,
