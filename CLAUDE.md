@@ -128,12 +128,13 @@ reviewed in Django admin). **The hard gate is CLOSED — real friends/family can
 now be invited.** **Continuous deploy is LIVE (#45):** ship a
 version with `gh release create vX.Y.Z` → a workflow builds + pushes images to
 GHCR, and `timeline-autodeploy.timer` on the box polls every ~5 min and
-redeploys only on change (pull-based, outbound-only; security-audited). **All
-15/15 DoD are now code-complete: uptime monitoring (`GET /api/healthz/` +
-`timeline-healthcheck.timer` reporting to healthchecks.io) and a monthly-cost
-note landed 2026-07-12** — the only thing left is enabling the uptime timer on
-the box (create the check, fill `/etc/timeline/healthcheck.env`, enable the
-timer; walkthrough in `docs/deploy.md`). See
+redeploys only on change (pull-based, outbound-only; security-audited).
+**Phase 7 is now DONE — all 15/15 DoD live on the box.** The last items
+(2026-07-12, #57 / v0.4.0): uptime monitoring — a public `GET /api/healthz/`
+(`SELECT 1`, 503 on DB failure) probed every 5 min by an on-box
+`timeline-healthcheck.timer` reporting to a healthchecks.io check (enabled +
+verified on the box) — and a monthly running-cost note (~£4–8/mo, mostly
+electricity) in `docs/deploy.md`. **Next up: Phase 8 (notifications).** See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 
