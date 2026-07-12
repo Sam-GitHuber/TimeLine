@@ -11,6 +11,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
@@ -19,6 +20,11 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from api import imaging
+from api.emoji import (
+    MAX_REACTIONS_PER_USER_PER_TARGET,
+    InvalidEmoji,
+    normalise_emoji,
+)
 from api.views import (
     activate,
     active_participant_ids,
@@ -40,6 +46,7 @@ from .models import (
     Participant,
     ParticipantInterval,
     Post,
+    Reaction,
     Report,
 )
 
@@ -2450,3 +2457,289 @@ class DeleteAccountThrottleTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
         # Throttled before the delete logic ran — the account survives.
         self.assertTrue(User.objects.filter(pk=self.me.pk).exists())
+
+
+# --- Reactions (Phase 7b) ------------------------------------------------------
+
+
+def react_post_url(post):
+    return f"/api/posts/{post.pk}/react/"
+
+
+def post_reactions_url(post):
+    return f"/api/posts/{post.pk}/reactions/"
+
+
+def react_comment_url(comment):
+    return f"/api/comments/{comment.pk}/react/"
+
+
+def comment_reactions_url(comment):
+    return f"/api/comments/{comment.pk}/reactions/"
+
+
+def summary_for(reactions, emoji):
+    """Pull one emoji's entry out of an embedded ``reactions`` list, or None."""
+    return next((r for r in reactions if r["emoji"] == emoji), None)
+
+
+class EmojiValidationTests(SimpleTestCase):
+    """The server-side emoji normaliser — the API never trusts the client, so a
+    posted string is validated here before a row is written."""
+
+    def test_accepts_a_plain_emoji(self):
+        self.assertEqual(normalise_emoji("👍"), "👍")
+
+    def test_accepts_multi_codepoint_sequences(self):
+        # A skin-toned profession (ZWJ + modifier) and a flag (two regional
+        # indicators) are single emoji made of several code points — allowed.
+        for emoji in ("🧑🏽‍🚀", "👨‍👩‍👧‍👦", "🇬🇧", "1️⃣"):
+            self.assertEqual(normalise_emoji(emoji), emoji)
+
+    def test_normalises_to_nfc(self):
+        # Same visible emoji, different encoding → one canonical string, so it
+        # can't be double-counted.
+        import unicodedata
+
+        raw = unicodedata.normalize("NFD", "©️")
+        self.assertEqual(normalise_emoji(raw), unicodedata.normalize("NFC", raw))
+
+    def test_rejects_plain_text(self):
+        for bad in ("hello", "a", "👍 lol", "<script>", "123"):
+            with self.assertRaises(InvalidEmoji):
+                normalise_emoji(bad)
+
+    def test_rejects_empty_or_whitespace(self):
+        for bad in ("", "   ", "\n"):
+            with self.assertRaises(InvalidEmoji):
+                normalise_emoji(bad)
+
+    def test_rejects_only_joiners_or_modifiers(self):
+        # A skin-tone modifier or ZWJ on its own is not an emoji.
+        for bad in ("\U0001f3fb", "‍", "️"):
+            with self.assertRaises(InvalidEmoji):
+                normalise_emoji(bad)
+
+    def test_rejects_oversized_sequences(self):
+        with self.assertRaises(InvalidEmoji):
+            normalise_emoji("👍" * 20)
+
+
+class ReactionConstraintTests(APITestCase):
+    """The database guards behind the toggle logic — belt-and-braces, so a bug
+    (or a raw insert) can't create a nonsense or duplicate reaction."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.post = Post.objects.create(author=self.me, text="hi")
+        self.comment = Comment.objects.create(
+            post=self.post, author=self.me, text="c"
+        )
+
+    def test_a_reaction_must_target_exactly_one_thing(self):
+        # Neither target set → violates the XOR check constraint.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Reaction.objects.create(user=self.me, emoji="👍")
+
+    def test_a_reaction_cannot_target_both_post_and_comment(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Reaction.objects.create(
+                    user=self.me, post=self.post, comment=self.comment, emoji="👍"
+                )
+
+    def test_same_emoji_twice_on_a_post_is_rejected(self):
+        Reaction.objects.create(user=self.me, post=self.post, emoji="👍")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Reaction.objects.create(user=self.me, post=self.post, emoji="👍")
+
+    def test_same_emoji_twice_on_a_comment_is_rejected(self):
+        Reaction.objects.create(user=self.me, comment=self.comment, emoji="🎉")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Reaction.objects.create(
+                    user=self.me, comment=self.comment, emoji="🎉"
+                )
+
+
+class PostReactionToggleTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.post = Post.objects.create(author=self.me, text="hello")
+        self.client.force_authenticate(self.me)
+
+    def test_reacting_adds_then_toggles_off(self):
+        resp = self.client.post(react_post_url(self.post), {"emoji": "👍"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        entry = summary_for(resp.data["reactions"], "👍")
+        self.assertEqual(entry["count"], 1)
+        self.assertTrue(entry["reacted"])
+        self.assertEqual(
+            Reaction.objects.filter(post=self.post, user=self.me).count(), 1
+        )
+
+        # Same emoji again removes it.
+        resp = self.client.post(react_post_url(self.post), {"emoji": "👍"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(summary_for(resp.data["reactions"], "👍"))
+        self.assertFalse(
+            Reaction.objects.filter(post=self.post, user=self.me).exists()
+        )
+
+    def test_concurrent_duplicate_add_does_not_500(self):
+        # A double-click race: the pre-existence read misses (mocked to None)
+        # but the (user, post, emoji) row already exists, so create() hits the
+        # unique constraint. The endpoint should swallow the duplicate — both
+        # clicks wanted it added — and return 200 with the reaction present,
+        # not a 500 from an unhandled IntegrityError.
+        Reaction.objects.create(post=self.post, user=self.me, emoji="👍")
+        with mock.patch(
+            "django.db.models.query.QuerySet.first", return_value=None
+        ):
+            resp = self.client.post(
+                react_post_url(self.post), {"emoji": "👍"}, format="json"
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        entry = summary_for(resp.data["reactions"], "👍")
+        self.assertEqual(entry["count"], 1)
+        self.assertEqual(
+            Reaction.objects.filter(
+                post=self.post, user=self.me, emoji="👍"
+            ).count(),
+            1,
+        )
+
+    def test_reaction_appears_embedded_in_the_feed(self):
+        self.client.post(react_post_url(self.post), {"emoji": "🎉"}, format="json")
+        resp = self.client.get(FEED_URL)
+        post_data = next(p for p in resp.data["results"] if p["id"] == self.post.id)
+        entry = summary_for(post_data["reactions"], "🎉")
+        self.assertEqual(entry["count"], 1)
+        self.assertTrue(entry["reacted"])
+
+    def test_rejects_a_non_emoji(self):
+        resp = self.client.post(
+            react_post_url(self.post), {"emoji": "not-an-emoji"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Reaction.objects.filter(post=self.post).exists())
+
+    def test_distinct_emoji_cap_is_enforced(self):
+        emojis = [chr(0x1F600 + i) for i in range(MAX_REACTIONS_PER_USER_PER_TARGET)]
+        for emoji in emojis:
+            resp = self.client.post(
+                react_post_url(self.post), {"emoji": emoji}, format="json"
+            )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # One more distinct emoji is over the cap.
+        resp = self.client.post(
+            react_post_url(self.post), {"emoji": chr(0x1F680)}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            Reaction.objects.filter(post=self.post, user=self.me).count(),
+            MAX_REACTIONS_PER_USER_PER_TARGET,
+        )
+
+
+class ReactionVisibilityTests(APITestCase):
+    """Reactions ride the same visibility wall as the thing reacted to, and the
+    aggregate is pruned to who the viewer may see — a not-connected reactor never
+    leaks (issue #48)."""
+
+    def test_cannot_react_to_a_post_you_cannot_see(self):
+        author = make_user("author@example.com")
+        stranger = make_user("stranger@example.com")  # not connected
+        post = Post.objects.create(author=author, text="private")
+        self.client.force_authenticate(stranger)
+
+        resp = self.client.post(react_post_url(post), {"emoji": "👍"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Reaction.objects.exists())
+
+        # And the who-reacted list is equally invisible.
+        resp = self.client.get(post_reactions_url(post))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_a_not_connected_reactor_is_pruned_from_the_aggregate(self):
+        # me—A connected, A—B connected, me—B NOT. A posts; both me and B can see
+        # it (each connected to A). B's reaction must be invisible to me.
+        me = make_user("me@example.com")
+        a = make_user("a@example.com")
+        b = make_user("b@example.com")
+        make_connection(me, a)
+        make_connection(a, b)
+        post = Post.objects.create(author=a, text="A's post")
+
+        self.client.force_authenticate(b)
+        self.client.post(react_post_url(post), {"emoji": "👍"}, format="json")
+        self.client.force_authenticate(me)
+        self.client.post(react_post_url(post), {"emoji": "🎉"}, format="json")
+
+        # me sees their own 🎉 but not B's 👍.
+        resp = self.client.get(FEED_URL)
+        post_data = next(p for p in resp.data["results"] if p["id"] == post.id)
+        self.assertIsNone(summary_for(post_data["reactions"], "👍"))
+        self.assertEqual(summary_for(post_data["reactions"], "🎉")["count"], 1)
+
+        # The who-reacted list prunes B out too.
+        resp = self.client.get(post_reactions_url(post))
+        all_emoji = {group["emoji"] for group in resp.data}
+        self.assertNotIn("👍", all_emoji)
+
+    def test_group_membership_does_not_widen_the_reactor_set(self):
+        # All three are members of a group, but me is only connected to A (not B).
+        # A co-member you don't know is still pruned — membership gates access to
+        # the post, it doesn't widen who you see within it.
+        me = make_user("me@example.com")
+        a = make_user("a@example.com")
+        b = make_user("b@example.com")
+        make_connection(me, a)
+        group = make_group(a, name="Fam")
+        add_member(group, me)
+        add_member(group, b)
+        post = Post.objects.create(author=a, text="group post", group=group)
+
+        self.client.force_authenticate(b)
+        self.client.post(react_post_url(post), {"emoji": "👍"}, format="json")
+        self.client.force_authenticate(me)
+
+        resp = self.client.get(group_posts_url(group))
+        post_data = next(p for p in resp.data["results"] if p["id"] == post.id)
+        # B is a co-member but not connected to me → their reaction is pruned.
+        self.assertIsNone(summary_for(post_data["reactions"], "👍"))
+
+
+class CommentReactionTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        self.post = Post.objects.create(author=self.me, text="p")
+        self.comment = Comment.objects.create(
+            post=self.post, author=self.friend, text="nice"
+        )
+
+    def test_react_to_a_comment_and_see_it_in_the_tree(self):
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            react_comment_url(self.comment), {"emoji": "❤️"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        resp = self.client.get(comments_url(self.post))
+        node = next(c for c in resp.data if c["id"] == self.comment.id)
+        entry = summary_for(node["reactions"], "❤️")
+        self.assertEqual(entry["count"], 1)
+        self.assertTrue(entry["reacted"])
+
+    def test_cannot_react_to_a_comment_you_cannot_see(self):
+        stranger = make_user("stranger@example.com")
+        self.client.force_authenticate(stranger)
+        resp = self.client.post(
+            react_comment_url(self.comment), {"emoji": "👍"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Reaction.objects.exists())

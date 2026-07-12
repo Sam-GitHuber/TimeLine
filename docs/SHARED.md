@@ -182,6 +182,7 @@ detail when we're about to start them.
 | 6 | Groups | Shared group timelines you can post into and follow | `phase-6-groups.md` |
 | 6a | Group messaging | Group conversations (extends Phase 5 DMs); leave a conversation | `phase-6a-group-messaging.md` |
 | 7 | Self-hosted private beta | The finished app live on a wiped spare **home PC**, on a real HTTPS URL; close friends/family log in and bug-test it | `phase-7-productionisation.md` |
+| 7b | Emoji reactions | React to any post/comment/reply with any keyboard emoji; aggregated counts respecting visibility | `phase-7b-emoji-reactions.md` |
 | 8 | Notifications & activity centre | An in-site notification centre (kept, not vanishing on tap; handled ones dulled) with per-type preferences; events for post/comment replies, reactions, connection requests, group invites | `phase-8-notifications.md` |
 | 9 | iPhone app | An installable iOS app hitting the same backend, with push notifications | `phase-9-iphone-app.md` |
 | 10 | Android app | An installable Android app hitting the same backend, with push notifications | `phase-10-android-app.md` |

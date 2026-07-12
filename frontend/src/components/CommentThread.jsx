@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
+import ReactionBar from "./ReactionBar.jsx";
 import ReportButton from "./ReportButton.jsx";
 import { api } from "../api.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
@@ -135,6 +136,8 @@ function CommentNode({ comment, postId }) {
             </button>
           )}
         </div>
+
+        <ReactionBar commentId={comment.id} reactions={comment.reactions} />
 
         {showReply && (
           <div className="mt-2">

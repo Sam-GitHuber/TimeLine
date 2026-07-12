@@ -221,6 +221,29 @@ export const api = {
       body: parent ? { text, parent } : { text },
     }),
 
+  // --- Reactions (Phase 7b) ------------------------------------------------
+
+  // Toggle your emoji reaction on a post or comment: adds it, or removes it if
+  // you'd already used that emoji. Returns the target's fresh, viewer-pruned
+  // reaction summary (`{ reactions: [{ emoji, count, reacted }] }`). Pass
+  // exactly one of postId / commentId.
+  toggleReaction: ({ postId = null, commentId = null, emoji }) =>
+    request(
+      postId
+        ? `/api/posts/${postId}/react/`
+        : `/api/comments/${commentId}/react/`,
+      { method: "POST", body: { emoji } },
+    ),
+
+  // Who reacted, grouped by emoji (pruned to people you may see) — for the
+  // "who reacted" popover. Pass exactly one of postId / commentId.
+  getReactors: ({ postId = null, commentId = null }) =>
+    request(
+      postId
+        ? `/api/posts/${postId}/reactions/`
+        : `/api/comments/${commentId}/reactions/`,
+    ),
+
   // People to connect with — everyone else, each with your connection_status.
   listUsers: () => request("/api/users/"),
 

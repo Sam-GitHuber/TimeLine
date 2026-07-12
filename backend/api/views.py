@@ -26,6 +26,11 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from .emoji import (
+    MAX_REACTIONS_PER_USER_PER_TARGET,
+    InvalidEmoji,
+    normalise_emoji,
+)
 from .imaging import (
     MAX_IMAGES_PER_POST,
     POST_IMAGE_MAX_EDGE,
@@ -37,6 +42,7 @@ from .imaging import (
 )
 from .models import (
     Block,
+    Comment,
     Connection,
     Conversation,
     ConversationRead,
@@ -47,9 +53,11 @@ from .models import (
     ParticipantInterval,
     Post,
     PostImage,
+    Reaction,
     Report,
 )
 from .serializers import (
+    AuthorSerializer,
     CommentCreateSerializer,
     CommentSerializer,
     ConnectionRequestSerializer,
@@ -62,6 +70,7 @@ from .serializers import (
     PostSerializer,
     ReportCreateSerializer,
     UserListSerializer,
+    summarise_reactions,
 )
 
 User = get_user_model()
@@ -91,6 +100,33 @@ def connected_user_ids(user):
         requestee if requester == user.id else requester
         for requester, requestee in pairs
     }
+
+
+def visible_reactor_ids(user):
+    """The set of user ids whose reactions (and comments) ``user`` may see —
+    themselves plus their connections (Phase 7b).
+
+    This is exactly the comment tree's ``visible_author_ids``: reactions prune to
+    the same boundary as comments, so a reaction by someone the viewer isn't
+    connected with is never counted and can't leak a stranger. Group membership
+    gates *access* to a post; it does not widen this set (you still only see
+    reactions from members you're connected with — mirroring group comments).
+    """
+    return connected_user_ids(user) | {user.id}
+
+
+class ReactionContextMixin:
+    """Adds ``visible_reactor_ids`` to serializer context so ``PostSerializer``
+    can build its pruned reaction summary. Mixed into the post-serving views.
+
+    Computed once per request (not per post), so the whole feed's reaction
+    pruning costs one extra connections query, not N.
+    """
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["visible_reactor_ids"] = visible_reactor_ids(self.request.user)
+        return context
 
 
 def is_blocked_between(user, other):
@@ -488,7 +524,9 @@ def visible_posts(user, author=None, connected_ids=None, group=None):
         # query per group post; a post can carry several photos, so prefetch
         # those too rather than one query per post.
         .select_related("author", "group")
-        .prefetch_related("images")
+        # ``reactions`` too, so the serializer's pruned reaction summary is built
+        # from prefetched rows rather than a query per post.
+        .prefetch_related("images", "reactions")
     )
     qs = qs.filter(group__isnull=True) if group is None else qs.filter(group=group)
     if author is not None:
@@ -523,7 +561,7 @@ def feed_posts(user, include_groups=False):
         )
         .filter(Q(group__isnull=True) | Q(group_id__in=group_ids))
         .select_related("author", "group")
-        .prefetch_related("images")
+        .prefetch_related("images", "reactions")
     )
 
 
@@ -667,7 +705,7 @@ def media_auth(request):
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class FeedView(generics.ListAPIView):
+class FeedView(ReactionContextMixin, generics.ListAPIView):
     """The home timeline: your own posts plus everyone you're connected with.
 
     Strictly newest-first (Post's default ordering) — no ranking, ever. This is
@@ -686,7 +724,7 @@ class FeedView(generics.ListAPIView):
         return feed_posts(self.request.user, include_groups=include_groups)
 
 
-class PostCreateView(generics.CreateAPIView):
+class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
     """Create a post as the logged-in user, optionally with photos.
 
     Accepts JSON (text only) or multipart (text + repeated ``images`` files).
@@ -774,7 +812,7 @@ class PostCreateView(generics.CreateAPIView):
         )
 
 
-class UserPostsView(generics.ListAPIView):
+class UserPostsView(ReactionContextMixin, generics.ListAPIView):
     """One person's own posts, newest-first — drives the profile page.
 
     Private-by-default: you only see a user's posts if it's you, or you're
@@ -1047,16 +1085,22 @@ class PostCommentsView(APIView):
         # tree, so a banned member's comments vanish just like their posts do —
         # and their replies go with them (an orphaned reply is never reached).
         comments = list(
-            post.comments.select_related("author").filter(
-                author__is_active=True
-            )
+            post.comments.select_related("author")
+            .prefetch_related("reactions")
+            .filter(author__is_active=True)
         )
         # Prune to the viewer's connections (plus themselves) — the same rule for
-        # personal and group posts.
+        # personal and group posts. Reactions on those comments prune to the very
+        # same set, so it's passed straight into the serializer context.
         visible_author_ids = connected_ids | {request.user.id}
         tree = build_visible_comment_tree(comments, visible_author_ids)
         data = CommentSerializer(
-            tree, many=True, context={"request": request}
+            tree,
+            many=True,
+            context={
+                "request": request,
+                "visible_reactor_ids": visible_author_ids,
+            },
         ).data
         return Response(data)
 
@@ -1071,6 +1115,144 @@ class PostCommentsView(APIView):
             )
         serializer.save(author=request.user, post=post)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+# --- Reactions (Phase 7b) ------------------------------------------------------
+
+
+def _toggle_reaction(request, target_kwargs):
+    """Add or remove the requesting user's emoji reaction on a target.
+
+    ``target_kwargs`` is ``{"post": post}`` or ``{"comment": comment}`` — the
+    caller has already checked the target is visible to the user. Re-adding an
+    emoji you've already used removes it (the toggle). Adding a *new* emoji is
+    capped per user per target to bound abuse. Returns the target's freshly
+    aggregated, viewer-pruned reaction summary so the client can update in place.
+    """
+    raw = request.data.get("emoji", "")
+    try:
+        emoji = normalise_emoji(raw)
+    except InvalidEmoji as exc:
+        # Return a fixed, author-controlled message rather than the exception's
+        # text. normalise_emoji only ever raises safe literals, but piping an
+        # exception's string into an API response is the "information exposure
+        # through an exception" pattern CodeQL flags — so we don't. `from exc`
+        # still chains the original for server-side logs.
+        raise ValidationError(
+            {"emoji": "That's not a valid emoji."}
+        ) from exc
+
+    mine = Reaction.objects.filter(user=request.user, **target_kwargs)
+    existing = mine.filter(emoji=emoji).first()
+    if existing is not None:
+        existing.delete()
+    else:
+        # Count distinct emoji I've put on this target (one row per emoji, by the
+        # unique constraint) and refuse once the cap is hit.
+        if mine.count() >= MAX_REACTIONS_PER_USER_PER_TARGET:
+            raise ValidationError(
+                {
+                    "emoji": (
+                        "You've reacted to this as many times as allowed "
+                        f"({MAX_REACTIONS_PER_USER_PER_TARGET})."
+                    )
+                }
+            )
+        try:
+            # Own savepoint so a lost race rolls back just this insert, not the
+            # whole request transaction (which ATOMIC_REQUESTS may wrap).
+            with transaction.atomic():
+                Reaction.objects.create(
+                    user=request.user, emoji=emoji, **target_kwargs
+                )
+        except IntegrityError:
+            # A concurrent identical "add" (e.g. a double-click) landed the same
+            # (user, target, emoji) row between our read and our write. Both
+            # clicks wanted it added, so honour that: swallow the duplicate and
+            # return the current summary rather than 500.
+            pass
+
+    target = target_kwargs.get("post") or target_kwargs.get("comment")
+    summary = summarise_reactions(
+        target.reactions.all(), visible_reactor_ids(request.user), request.user.id
+    )
+    return Response({"reactions": summary})
+
+
+def _reactors_grouped(request, target):
+    """Who reacted to ``target``, grouped by emoji, pruned to people the viewer
+    may see — so a not-connected reactor never appears.
+
+    Returns ``[{emoji, count, users:[{id, display_name, avatar_thumb}]}]``,
+    ordered by count (desc) then emoji, matching the embedded summary's order.
+    """
+    visible = visible_reactor_ids(request.user)
+    rows = (
+        target.reactions.filter(user_id__in=visible)
+        .select_related("user")
+        .order_by("created_at", "id")
+    )
+    grouped = {}
+    for reaction in rows:
+        grouped.setdefault(reaction.emoji, []).append(reaction.user)
+    items = [
+        {
+            "emoji": emoji,
+            "count": len(users),
+            "users": AuthorSerializer(
+                users, many=True, context={"request": request}
+            ).data,
+        }
+        for emoji, users in grouped.items()
+    ]
+    items.sort(key=lambda item: (-item["count"], item["emoji"]))
+    return Response(items)
+
+
+class PostReactionView(APIView):
+    """Toggle your emoji reaction on a post (POST ``/posts/<pk>/react/``) or list
+    who reacted, grouped by emoji (GET ``/posts/<pk>/reactions/``).
+
+    Both are gated by ``can_view_post`` — the same wall the feed and comments
+    enforce — so you can't react to (or probe reactions on) a post you can't see;
+    a non-visible post gets a 404, never leaking its existence.
+    """
+
+    def _get_post_or_404(self, request, pk):
+        post = get_object_or_404(Post.objects.select_related("author"), pk=pk)
+        if not can_view_post(request.user, post):
+            raise NotFound()
+        return post
+
+    def post(self, request, pk):
+        return _toggle_reaction(request, {"post": self._get_post_or_404(request, pk)})
+
+    def get(self, request, pk):
+        return _reactors_grouped(request, self._get_post_or_404(request, pk))
+
+
+class CommentReactionView(APIView):
+    """Toggle your emoji reaction on a comment/reply (POST
+    ``/comments/<pk>/react/``) or list who reacted (GET
+    ``/comments/<pk>/reactions/``). Gated by ``can_view_comment`` — the same
+    connection-pruned visibility the comment tree uses.
+    """
+
+    def _get_comment_or_404(self, request, pk):
+        comment = get_object_or_404(
+            Comment.objects.select_related("author", "post"), pk=pk
+        )
+        if not can_view_comment(request.user, comment):
+            raise NotFound()
+        return comment
+
+    def post(self, request, pk):
+        return _toggle_reaction(
+            request, {"comment": self._get_comment_or_404(request, pk)}
+        )
+
+    def get(self, request, pk):
+        return _reactors_grouped(request, self._get_comment_or_404(request, pk))
 
 
 # --- Direct messaging (Phase 5) ------------------------------------------------
@@ -1790,7 +1972,7 @@ class GroupDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class GroupPostsView(generics.ListAPIView):
+class GroupPostsView(ReactionContextMixin, generics.ListAPIView):
     """A group's timeline (``GET /groups/<pk>/posts/``): its posts, newest-first,
     paginated. Members only — a non-member (or unknown group) gets 404, so a
     private group's contents and existence stay hidden.

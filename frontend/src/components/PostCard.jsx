@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import CommentThread from "./CommentThread.jsx";
 import Lightbox from "./Lightbox.jsx";
+import ReactionBar from "./ReactionBar.jsx";
 import ReportButton from "./ReportButton.jsx";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
@@ -112,6 +113,8 @@ export default function PostCard({ post }) {
             onIndexChange={setLightboxIndex}
           />
         )}
+
+        <ReactionBar postId={post.id} reactions={post.reactions} />
 
         <div className="mt-3 -ml-2 flex items-center gap-3">
           <button

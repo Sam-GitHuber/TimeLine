@@ -16,6 +16,28 @@ urlpatterns = [
         views.PostCommentsView.as_view(),
         name="post-comments",
     ),
+    # Reactions (Phase 7b): POST <path>/react/ toggles; GET <path>/reactions/
+    # lists who reacted (both pruned to the viewer's visibility).
+    path(
+        "posts/<int:pk>/react/",
+        views.PostReactionView.as_view(),
+        name="post-react",
+    ),
+    path(
+        "posts/<int:pk>/reactions/",
+        views.PostReactionView.as_view(),
+        name="post-reactions",
+    ),
+    path(
+        "comments/<int:pk>/react/",
+        views.CommentReactionView.as_view(),
+        name="comment-react",
+    ),
+    path(
+        "comments/<int:pk>/reactions/",
+        views.CommentReactionView.as_view(),
+        name="comment-reactions",
+    ),
     # People
     path("users/", views.UserListView.as_view(), name="user-list"),
     path("users/<int:pk>/", views.UserDetailView.as_view(), name="user-detail"),
