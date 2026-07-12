@@ -1,0 +1,25 @@
+# systemd service: one uptime probe of the TimeLine site.
+# Paired with timeline-healthcheck.timer, which triggers it every few minutes.
+#
+# Install:
+#   sudo cp deploy/timeline-healthcheck.{service,timer} /etc/systemd/system/
+#   # then edit User= and ExecStart= below to your deploy user + checkout path
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now timeline-healthcheck.timer
+#
+# Runs as the DEPLOY USER (not root): it only needs to curl the site and ping
+# healthchecks.io — no docker access required.
+[Unit]
+Description=TimeLine uptime probe (curl the health endpoint, report to healthchecks.io)
+# Needs the network to reach the site + healthchecks.io.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Set these to your actual deploy user and repo checkout path.
+User=<user>
+ExecStart=/home/<user>/TimeLine/deploy/healthcheck.sh
+# A stuck curl should never hang forever; cap the whole run generously above the
+# script's own per-request timeouts.
+TimeoutStartSec=120

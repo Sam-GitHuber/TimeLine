@@ -1,10 +1,13 @@
 # Phase 7 — Self-Hosted Private Beta (home server)
 
-**Status:** in progress — **the app is LIVE on public HTTPS** at
-https://your-timeline.net (home server, 2026-07-10). 13/15 DoD items live. The
-last hard-gate item (ToS + privacy + delete-my-data + takedown) **merged (#44)
-and deployed to the box 2026-07-11** — migrations applied, `/terms` + `/privacy`
-serving 200 over HTTPS. **The hard gate is now closed** (real invites unblocked).
+**Status:** all 15 DoD items code-complete (2026-07-12) — **the app is LIVE on
+public HTTPS** at https://your-timeline.net (home server, since 2026-07-10). The
+hard gate closed 2026-07-11 (ToS/privacy/delete-my-data + security review + off-
+box backups). The final two items — uptime monitoring + a monthly-cost note —
+landed 2026-07-12. **One on-box step remains before Phase 7 is fully done:**
+enable the uptime timer on the box (create the healthchecks.io check, fill
+`/etc/timeline/healthcheck.env`, `systemctl enable --now
+timeline-healthcheck.timer` — see `docs/deploy.md` "Uptime monitoring").
 
 > **RESUME HERE (next session).** The core is done: the site is deployed on the
 > box, survives reboots, data on the NVMe, reachable from outside over HTTPS with
@@ -37,8 +40,15 @@ serving 200 over HTTPS. **The hard gate is now closed** (real invites unblocked)
 >    outbound-only, since the box exposes 80/443, not SSH. Proven end-to-end:
 >    `v0.1.0` cut → images pushed → box cut over to the GHCR images, site stayed
 >    up; timer enabled + scheduling confirmed. Security-audited (see log). Ship a
->    version with `gh release create vX.Y.Z --generate-notes`. **Remaining DoD:**
->    uptime monitoring + monthly cost note.
+>    version with `gh release create vX.Y.Z --generate-notes`.
+> 5. ~~Uptime monitoring + monthly cost note~~ **CODE-COMPLETE (2026-07-12).**
+>    Added `GET /api/healthz/` + an on-box `timeline-healthcheck.timer` that
+>    reports to healthchecks.io (reusing the backup's service), and a monthly-cost
+>    table in `docs/deploy.md`. **Last on-box step:** create the healthchecks.io
+>    uptime check, fill `/etc/timeline/healthcheck.env` with its ping URL, and
+>    `systemctl enable --now timeline-healthcheck.timer` — walkthrough in
+>    `docs/deploy.md` ("Uptime monitoring"). Until that's done the box isn't
+>    actually being watched.
 >
 > **Hard gate:** CLOSED (2026-07-11) — items 1–3 all done + live on the box. Real
 > friends/family can now be invited.
@@ -105,7 +115,10 @@ Phases 2–6 — running on the home server, surviving reboots.
       the box polls + redeploys on change (pull-based, outbound-only). Live +
       proven end-to-end 2026-07-11 (#45); security-audited. See decisions log +
       `docs/deploy.md` ("Continuous deploy").
-- [ ] Basic **uptime monitoring** + alert
+- [x] Basic **uptime monitoring** + alert — an on-box systemd timer
+      (`timeline-healthcheck.timer`) curls `GET /api/healthz/` every 5 min and
+      reports to a healthchecks.io check (success ping / `/fail` / dead-man's
+      overdue). Setup walkthrough in `docs/deploy.md` ("Uptime monitoring").
 - [x] **Terms of Service + privacy policy** published; content-takedown +
       delete-my-data path exists (see Legal / IP in `docs/SHARED.md`)
       — merged (#44) + deployed to the box 2026-07-11; `/terms` + `/privacy`
@@ -113,7 +126,9 @@ Phases 2–6 — running on the home server, surviving reboots.
 - [x] `/security-review` run and findings addressed (2026-07-11: no HIGH; media
       auth-gating, LAN-only admin, sign-up enumeration fix — deployed + verified on
       the box, see decisions log)
-- [ ] Rough **monthly running cost** written down
+- [x] Rough **monthly running cost** written down — ~£4–8/mo (mostly
+      electricity) + ~£12/yr domain; everything else on free tiers. Table in
+      `docs/deploy.md` ("Monthly running cost").
 
 ## Steps (high level — details walked through live)
 
@@ -156,6 +171,40 @@ least-privilege DB access, no secrets in the repo, patched OS/deps.
   priority — see phase-2 notes.
 
 ## Notes / decisions log
+
+- **Uptime monitoring + monthly cost note — the last two DoD items
+  (2026-07-12).** Closes Phase 7's checklist (15/15 code-complete).
+    - **Reused healthchecks.io rather than adding a new service.** It's already
+      wired into the nightly backup, so the user has one dashboard. Key thing
+      learned/corrected: healthchecks.io is *passive only* — it waits for pings,
+      it does **not** actively probe your URL (their docs explicitly say it's not
+      for "monitoring website uptime by probing it"). So uptime needs an *active*
+      half on our side. Added `GET /api/healthz/` (public, `AllowAny`, runs a
+      `SELECT 1` so "gunicorn up but Postgres down" is caught; 503 on DB error,
+      never 500; minimal body so nothing leaks) + `deploy/healthcheck.sh` on a
+      5-min `timeline-healthcheck.timer` that pings success / `<url>/fail`.
+    - **Dead-man's switch covers the case the active probe can't.** If the box is
+      off or the broadband is down, the timer can't run, so no ping arrives and
+      the check goes overdue → alert. That's why the probe lives on the box, not
+      why that's a weakness.
+    - **Probe hits the public hostname pinned to loopback (`curl --resolve
+      …:127.0.0.1`), not the raw public URL.** Many consumer routers can't
+      "hairpin" a LAN request to their own public IP, which would make an honest
+      probe fail and cry wolf. Loopback-pinning still exercises Caddy's real cert
+      + routing + gunicorn + DB. Trade-off, documented: it does **not** test the
+      inbound internet path (port-forward / public DNS). Those are static once
+      set; a truly external check is a deferred nice-to-have (noted in deploy.md).
+    - **No `Persistent=true` on this timer** (unlike backup.timer): a made-up
+      catch-up ping after downtime would falsely tell healthchecks.io the site
+      was up *during* the outage. Just resume live.
+    - **Monthly cost written down** in `docs/deploy.md`: ~£4–8/mo (dominated by
+      electricity for the always-on box) + ~£12/yr domain; R2 backups,
+      healthchecks.io, Cloudflare, GH Actions/GHCR, Let's Encrypt all £0 on free
+      tiers. This is the baseline Phase 11 (AWS) has to justify beating.
+    - **Still a user step on the box:** create the second healthchecks.io check,
+      drop its ping URL into `/etc/timeline/healthcheck.env`, and enable the
+      timer (walkthrough in `docs/deploy.md`). Code + units + docs ship in the
+      repo; the box isn't monitored until that one-time enablement is done.
 
 - **Rate-limited the auth-sensitive endpoints (2026-07-12, issue #51, branch
   `feat/rate-limit-auth`).** `login`, `password/change/`, and `account/delete/`

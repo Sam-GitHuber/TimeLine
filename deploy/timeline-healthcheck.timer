@@ -1,0 +1,19 @@
+# systemd timer: probe the TimeLine site every few minutes.
+# Enable: sudo systemctl enable --now timeline-healthcheck.timer
+[Unit]
+Description=Poll the TimeLine health endpoint and report uptime to healthchecks.io
+
+[Timer]
+# First probe 2 min after boot, then every 5 min. Match the healthchecks.io
+# check's "period" to this (5 min) with a grace of ~5-10 min, so a truly-down
+# box (which can't send its ping) alerts within ~10-15 min.
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Jitter so the probe doesn't land on the exact same second every time.
+RandomizedDelaySec=20s
+# NOTE: deliberately no Persistent=true. Unlike the backup, a missed uptime
+# probe shouldn't be "made up" on next boot — a stale catch-up ping would tell
+# healthchecks.io the site was fine during an outage. Just resume live.
+
+[Install]
+WantedBy=timers.target

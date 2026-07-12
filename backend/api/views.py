@@ -705,6 +705,36 @@ def media_auth(request):
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def healthz(request):
+    """Liveness/readiness probe for uptime monitoring (Phase 7).
+
+    A tiny public endpoint the on-box healthcheck timer curls every few minutes
+    (``deploy/healthcheck.sh``): a 200 means the whole serving path is alive —
+    Caddy routed the request, gunicorn answered, and the database is reachable.
+    We deliberately run a trivial ``SELECT 1`` because "Django process up but
+    Postgres down" is a real outage the monitor must catch; a bare "return 200"
+    would report healthy while the site was actually broken.
+
+    On a DB error we return **503** (not 500) so the check reads as "temporarily
+    unavailable" rather than a code bug. The body is intentionally minimal — this
+    is unauthenticated, so it must not leak version strings, hostnames, or counts.
+    """
+    from django.db import connection
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:
+        return Response(
+            {"status": "unhealthy"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response({"status": "ok"})
+
+
 class FeedView(ReactionContextMixin, generics.ListAPIView):
     """The home timeline: your own posts plus everyone you're connected with.
 

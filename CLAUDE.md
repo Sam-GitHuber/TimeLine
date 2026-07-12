@@ -124,12 +124,16 @@ consent checkbox recording `User.tos_accepted_at`; password-reconfirmed
 **hard-delete** account endpoint `POST /api/account/delete/` that also cleans
 media files off disk, hands sole-admin groups to the longest-standing member,
 and deletes emptied groups; an in-app **Report** control → `Report` model
-reviewed in Django admin). **13/15 DoD live; the hard gate is CLOSED — real
-friends/family can now be invited.** **Continuous deploy is LIVE (#45):** ship a
+reviewed in Django admin). **The hard gate is CLOSED — real friends/family can
+now be invited.** **Continuous deploy is LIVE (#45):** ship a
 version with `gh release create vX.Y.Z` → a workflow builds + pushes images to
 GHCR, and `timeline-autodeploy.timer` on the box polls every ~5 min and
-redeploys only on change (pull-based, outbound-only; security-audited). Remaining
-DoD: uptime monitoring + monthly cost note. See
+redeploys only on change (pull-based, outbound-only; security-audited). **All
+15/15 DoD are now code-complete: uptime monitoring (`GET /api/healthz/` +
+`timeline-healthcheck.timer` reporting to healthchecks.io) and a monthly-cost
+note landed 2026-07-12** — the only thing left is enabling the uptime timer on
+the box (create the check, fill `/etc/timeline/healthcheck.env`, enable the
+timer; walkthrough in `docs/deploy.md`). See
 `docs/phases/phase-7-productionisation.md` (top has a "RESUME HERE" block) and
 `docs/deploy.md`.
 

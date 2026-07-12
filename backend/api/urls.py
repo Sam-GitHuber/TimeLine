@@ -8,6 +8,9 @@ urlpatterns = [
     # Returns 204 only for a logged-in, active member; Caddy serves the file
     # only on that 2xx, so uploaded media isn't world-readable.
     path("media-auth/", views.media_auth, name="media-auth"),
+    # Public liveness probe for uptime monitoring (Phase 7). 200 = Caddy +
+    # gunicorn + database all alive; polled by deploy/healthcheck.sh.
+    path("healthz/", views.healthz, name="healthz"),
     # Timeline
     path("feed/", views.FeedView.as_view(), name="feed"),
     path("posts/", views.PostCreateView.as_view(), name="post-create"),
