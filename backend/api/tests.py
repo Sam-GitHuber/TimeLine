@@ -26,6 +26,7 @@ from api.emoji import (
     InvalidEmoji,
     normalise_emoji,
 )
+from api import notifications
 from api.views import (
     activate,
     active_participant_ids,
@@ -44,6 +45,8 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    Notification,
+    NotificationPreference,
     Participant,
     ParticipantInterval,
     Post,
@@ -2769,3 +2772,311 @@ class CommentReactionTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertFalse(Reaction.objects.exists())
+
+
+# --- Notifications / activity centre (Phase 8) --------------------------------
+
+NOTIFICATIONS_URL = "/api/notifications/"
+NOTIF_UNREAD_URL = "/api/notifications/unread-count/"
+NOTIF_SEEN_URL = "/api/notifications/seen/"
+NOTIF_PREFS_URL = "/api/notification-preferences/"
+
+KIND = Notification.Kind
+
+
+def notif_addressed_url(n):
+    return f"/api/notifications/{n.pk}/addressed/"
+
+
+def approve_url(pk):
+    return f"{REQUESTS_URL}{pk}/approve/"
+
+
+def reject_url(pk):
+    return f"{REQUESTS_URL}{pk}/reject/"
+
+
+class NotificationEventGenerationTests(APITestCase):
+    """Each notifiable action creates the right notification for the right
+    person — and never for your own action."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        self.post = Post.objects.create(author=self.me, text="my post")
+
+    def test_top_level_comment_notifies_post_author(self):
+        self.client.force_authenticate(self.friend)
+        self.client.post(comments_url(self.post), {"text": "nice"}, format="json")
+        n = Notification.objects.get(recipient=self.me)
+        self.assertEqual(n.kind, KIND.POST_REPLY)
+        self.assertEqual(n.actor, self.friend)
+        self.assertEqual(n.post_id, self.post.id)
+        self.assertIsNone(n.seen_at)
+
+    def test_reply_notifies_parent_comment_author_not_post_author(self):
+        # me comments; friend replies to that comment → me is notified once, as a
+        # comment_reply (not a post_reply, and the post author isn't double-hit).
+        parent = Comment.objects.create(
+            post=self.post, author=self.me, text="top"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.post(
+            comments_url(self.post),
+            {"text": "re", "parent": parent.id},
+            format="json",
+        )
+        notes = Notification.objects.filter(recipient=self.me)
+        self.assertEqual(notes.count(), 1)
+        self.assertEqual(notes.first().kind, KIND.COMMENT_REPLY)
+
+    def test_reaction_notifies_target_author(self):
+        self.client.force_authenticate(self.friend)
+        self.client.post(
+            react_post_url(self.post), {"emoji": "👍"}, format="json"
+        )
+        n = Notification.objects.get(recipient=self.me)
+        self.assertEqual(n.kind, KIND.REACTION)
+        self.assertEqual(n.post_id, self.post.id)
+
+    def test_no_self_notification(self):
+        # Commenting on and reacting to your own post notifies nobody.
+        self.client.force_authenticate(self.me)
+        self.client.post(comments_url(self.post), {"text": "self"}, format="json")
+        self.client.post(
+            react_post_url(self.post), {"emoji": "🎉"}, format="json"
+        )
+        self.assertFalse(Notification.objects.exists())
+
+    def test_reaction_removal_creates_no_notification(self):
+        self.client.force_authenticate(self.friend)
+        # add then remove (toggle) the same emoji.
+        self.client.post(react_post_url(self.post), {"emoji": "👍"}, format="json")
+        self.client.post(react_post_url(self.post), {"emoji": "👍"}, format="json")
+        # One notification from the add; the remove added nothing.
+        self.assertEqual(Notification.objects.filter(recipient=self.me).count(), 1)
+
+    def test_reaction_dedupes_while_unread(self):
+        self.client.force_authenticate(self.friend)
+        # react, un-react, re-react, then a second emoji — all while the first
+        # notification is still unread → one bumped row, not four lines.
+        for emoji in ["👍", "👍", "👍", "❤️"]:
+            self.client.post(
+                react_post_url(self.post), {"emoji": emoji}, format="json"
+            )
+        self.assertEqual(Notification.objects.filter(recipient=self.me).count(), 1)
+
+
+class NotificationGatingTests(APITestCase):
+    """create_notification enforces the visibility gate and mute directly."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.other = make_user("other@example.com")
+        self.post = Post.objects.create(author=self.me, text="p")
+
+    def test_content_kind_gated_on_connection(self):
+        # Not connected: a reply/reaction from `other` must not notify `me`
+        # (mirrors the pruned comment tree — a stranger never surfaces).
+        n = notifications.create_notification(
+            recipient=self.me, actor=self.other,
+            kind=KIND.REACTION, post=self.post,
+        )
+        self.assertIsNone(n)
+        self.assertFalse(Notification.objects.exists())
+        # Once connected, the same call goes through.
+        make_connection(self.me, self.other)
+        n = notifications.create_notification(
+            recipient=self.me, actor=self.other,
+            kind=KIND.REACTION, post=self.post,
+        )
+        self.assertIsNotNone(n)
+
+    def test_muted_kind_creates_no_row(self):
+        make_connection(self.me, self.other)
+        NotificationPreference.objects.create(
+            user=self.me, kind=KIND.REACTION, enabled=False
+        )
+        n = notifications.create_notification(
+            recipient=self.me, actor=self.other,
+            kind=KIND.REACTION, post=self.post,
+        )
+        self.assertIsNone(n)
+
+    def test_request_kind_not_connection_gated(self):
+        # A connection request necessarily comes from a non-connection — it must
+        # still notify, or the whole feature is dead.
+        n = notifications.create_notification(
+            recipient=self.me, actor=self.other,
+            kind=KIND.CONNECTION_REQUEST,
+        )
+        self.assertIsNotNone(n)
+
+
+class NotificationConnectionFlowTests(APITestCase):
+    """Connection request → accept generates and *addresses* the right rows."""
+
+    def setUp(self):
+        self.requester = make_user("req@example.com")
+        self.owner = make_user("owner@example.com")
+
+    def test_request_notifies_and_approve_addresses_and_thanks(self):
+        self.client.force_authenticate(self.requester)
+        self.client.post(connect_url(self.owner))
+        req_note = Notification.objects.get(recipient=self.owner)
+        self.assertEqual(req_note.kind, KIND.CONNECTION_REQUEST)
+        self.assertIsNone(req_note.addressed_at)
+
+        # Owner approves → their request notification is addressed, and the
+        # requester gets a connection_accepted.
+        connection = Connection.objects.get()
+        self.client.force_authenticate(self.owner)
+        self.client.post(approve_url(connection.id))
+        req_note.refresh_from_db()
+        self.assertIsNotNone(req_note.addressed_at)
+        acc = Notification.objects.get(recipient=self.requester)
+        self.assertEqual(acc.kind, KIND.CONNECTION_ACCEPTED)
+
+    def test_reject_cascades_the_request_notification_away(self):
+        self.client.force_authenticate(self.requester)
+        self.client.post(connect_url(self.owner))
+        connection = Connection.objects.get()
+        self.client.force_authenticate(self.owner)
+        self.client.post(reject_url(connection.id))
+        # The Connection is gone and its notification cascaded with it.
+        self.assertFalse(Notification.objects.filter(recipient=self.owner).exists())
+
+
+class NotificationGroupInviteFlowTests(APITestCase):
+    def setUp(self):
+        self.owner = make_user("owner@example.com")
+        self.invitee = make_user("invitee@example.com")
+        make_connection(self.owner, self.invitee)
+        self.group = make_group(self.owner, name="Cousins")
+
+    def _invite(self):
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            group_members_url(self.group),
+            {"user_id": self.invitee.id},
+            format="json",
+        )
+        return GroupMembership.objects.get(
+            group=self.group, user=self.invitee, status=INVITED_STATUS
+        )
+
+    def test_invite_notifies_and_accept_addresses(self):
+        membership = self._invite()
+        note = Notification.objects.get(recipient=self.invitee)
+        self.assertEqual(note.kind, KIND.GROUP_INVITE)
+        self.assertEqual(note.group_id, self.group.id)
+        self.assertIsNone(note.addressed_at)
+
+        self.client.force_authenticate(self.invitee)
+        self.client.post(invite_accept_url(membership))
+        note.refresh_from_db()
+        self.assertIsNotNone(note.addressed_at)
+
+    def test_reject_addresses_but_keeps_the_notification(self):
+        # Reject deletes the membership row, but the notification targets the
+        # Group (which lives on), so it must be addressed explicitly, not lost.
+        membership = self._invite()
+        self.client.force_authenticate(self.invitee)
+        self.client.post(invite_reject_url(membership))
+        note = Notification.objects.get(recipient=self.invitee)
+        self.assertIsNotNone(note.addressed_at)
+
+
+class NotificationEndpointTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        # Two unread notifications for `me`, made by `friend`.
+        self.post = Post.objects.create(author=self.me, text="p")
+        self.n1 = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.POST_REPLY, post=self.post,
+        )
+        self.n2 = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.REACTION, post=self.post,
+        )
+
+    def test_list_is_scoped_and_newest_first(self):
+        self.client.force_authenticate(self.me)
+        resp = self.client.get(NOTIFICATIONS_URL)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [row["id"] for row in resp.data["results"]]
+        self.assertEqual(ids, [self.n2.id, self.n1.id])
+        # Payload is push-ready: text + url + target present.
+        row = resp.data["results"][0]
+        self.assertIn("text", row)
+        self.assertTrue(row["url"])
+        self.assertEqual(row["target"], {"type": "post", "id": self.post.id})
+        self.assertFalse(row["seen"])
+
+    def test_list_excludes_other_peoples_notifications(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.get(NOTIFICATIONS_URL)
+        self.assertEqual(resp.data["results"], [])
+
+    def test_unread_count_and_seen_clears_it(self):
+        self.client.force_authenticate(self.me)
+        self.assertEqual(self.client.get(NOTIF_UNREAD_URL).data["count"], 2)
+        resp = self.client.post(NOTIF_SEEN_URL)
+        self.assertEqual(resp.data["updated"], 2)
+        self.assertEqual(self.client.get(NOTIF_UNREAD_URL).data["count"], 0)
+        # Seen, not deleted — still listed, now flagged seen.
+        rows = self.client.get(NOTIFICATIONS_URL).data["results"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["seen"] for r in rows))
+
+    def test_addressed_implies_seen_and_dulls_one(self):
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(notif_addressed_url(self.n1))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.n1.refresh_from_db()
+        self.assertIsNotNone(self.n1.addressed_at)
+        self.assertIsNotNone(self.n1.seen_at)  # addressing implies seen
+        # The other is still unread.
+        self.assertEqual(self.client.get(NOTIF_UNREAD_URL).data["count"], 1)
+
+    def test_cannot_address_someone_elses_notification(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.post(notif_addressed_url(self.n1))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class NotificationPreferenceTests(APITestCase):
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.client.force_authenticate(self.me)
+
+    def test_defaults_all_mutable_kinds_enabled(self):
+        resp = self.client.get(NOTIF_PREFS_URL)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # Only the mutable (reply/reaction) kinds appear, all enabled by default.
+        self.assertEqual(
+            set(resp.data), set(Notification.MUTABLE_KINDS)
+        )
+        self.assertTrue(all(resp.data.values()))
+
+    def test_patch_mutes_a_kind(self):
+        resp = self.client.patch(
+            NOTIF_PREFS_URL, {KIND.REACTION: False}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data[KIND.REACTION])
+        self.assertTrue(
+            NotificationPreference.objects.filter(
+                user=self.me, kind=KIND.REACTION, enabled=False
+            ).exists()
+        )
+
+    def test_cannot_mute_an_always_on_kind(self):
+        resp = self.client.patch(
+            NOTIF_PREFS_URL, {KIND.CONNECTION_REQUEST: False}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

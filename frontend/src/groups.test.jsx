@@ -44,7 +44,12 @@ vi.mock("./api.js", () => ({
     removeGroupMember: vi.fn(),
     deleteGroup: vi.fn(),
     setGroupMemberRole: vi.fn(),
+    getUnreadNotificationCount: vi.fn(),
+    getNotifications: vi.fn(),
+    markNotificationsSeen: vi.fn(),
+    markNotificationAddressed: vi.fn(),
   },
+  NOTIFICATIONS_POLL_MS: 1_000_000,
 }));
 
 const emptyPage = { results: [], next: null };
@@ -57,6 +62,9 @@ beforeEach(() => {
   api.getGroupPosts.mockResolvedValue(emptyPage);
   api.getGroupMembers.mockResolvedValue([]);
   api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
+  api.getUnreadNotificationCount.mockResolvedValue({ count: 0 });
+  api.getNotifications.mockResolvedValue(emptyPage);
+  api.markNotificationsSeen.mockResolvedValue({ updated: 0 });
   api.createPost.mockResolvedValue({});
   api.createGroup.mockResolvedValue({ id: 42 });
   api.getComments.mockResolvedValue([]);

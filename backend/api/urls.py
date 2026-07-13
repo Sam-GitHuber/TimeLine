@@ -164,6 +164,34 @@ urlpatterns = [
         views.GroupInviteActionView.as_view(action="reject"),
         name="group-invite-reject",
     ),
+    # Notifications / activity centre (Phase 8). List is newest-first + paginated;
+    # unread-count drives the nav bell badge; seen clears the badge (keeping the
+    # items); addressed dulls one on click-through; preferences are per-kind mutes.
+    path(
+        "notifications/",
+        views.NotificationListView.as_view(),
+        name="notification-list",
+    ),
+    path(
+        "notifications/unread-count/",
+        views.NotificationUnreadCountView.as_view(),
+        name="notification-unread-count",
+    ),
+    path(
+        "notifications/seen/",
+        views.NotificationSeenView.as_view(),
+        name="notification-seen",
+    ),
+    path(
+        "notifications/<int:pk>/addressed/",
+        views.NotificationAddressedView.as_view(),
+        name="notification-addressed",
+    ),
+    path(
+        "notification-preferences/",
+        views.NotificationPreferencesView.as_view(),
+        name="notification-preferences",
+    ),
     # Report a post/comment for the maintainer to review (Phase 7 takedown path).
     path("reports/", views.ReportCreateView.as_view(), name="report-create"),
     # Delete your own account + all your data (Phase 7 delete-my-data path).
