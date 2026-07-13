@@ -20,13 +20,12 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from api import imaging
+from api import imaging, notifications
 from api.emoji import (
     MAX_REACTIONS_PER_USER_PER_TARGET,
     InvalidEmoji,
     normalise_emoji,
 )
-from api import notifications
 from api.views import (
     activate,
     active_participant_ids,
