@@ -3080,3 +3080,118 @@ class NotificationPreferenceTests(APITestCase):
             NOTIF_PREFS_URL, {KIND.CONNECTION_REQUEST: False}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# --- Post permalink endpoint + deep-link URLs ---------------------------------
+
+
+def post_detail_url(post):
+    return f"/api/posts/{post.pk}/"
+
+
+class PostDetailViewTests(APITestCase):
+    """The single-post permalink endpoint applies the same private-by-default
+    gate as every other post surface."""
+
+    def setUp(self):
+        self.author = make_user("author@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.author, self.friend)
+        self.stranger = make_user("stranger@example.com")
+        self.post = Post.objects.create(author=self.author, text="hello")
+
+    def test_connected_user_can_fetch_a_post(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.get(post_detail_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["id"], self.post.id)
+        self.assertEqual(resp.data["text"], "hello")
+
+    def test_author_can_fetch_their_own_post(self):
+        self.client.force_authenticate(self.author)
+        self.assertEqual(
+            self.client.get(post_detail_url(self.post)).status_code,
+            status.HTTP_200_OK,
+        )
+
+    def test_stranger_gets_404_not_existence_leak(self):
+        self.client.force_authenticate(self.stranger)
+        self.assertEqual(
+            self.client.get(post_detail_url(self.post)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_unknown_post_404(self):
+        self.client.force_authenticate(self.friend)
+        self.assertEqual(
+            self.client.get("/api/posts/999999/").status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_group_post_requires_membership(self):
+        group = make_group(self.author, name="Fam")
+        gpost = Post.objects.create(
+            author=self.author, group=group, text="in group"
+        )
+        # A connection who isn't a member can't see the group post.
+        self.client.force_authenticate(self.friend)
+        self.assertEqual(
+            self.client.get(post_detail_url(gpost)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        # Once a member (and connected with the author), they can.
+        add_member(group, self.friend)
+        self.assertEqual(
+            self.client.get(post_detail_url(gpost)).status_code,
+            status.HTTP_200_OK,
+        )
+
+
+class NotificationPermalinkUrlTests(APITestCase):
+    """Notifications deep-link to the post permalink, with ?comment for a
+    specific comment so the thread opens right at it."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        self.post = Post.objects.create(author=self.me, text="p")
+
+    def _url_of(self, notification):
+        self.client.force_authenticate(self.me)
+        rows = self.client.get(NOTIFICATIONS_URL).data["results"]
+        return next(r["url"] for r in rows if r["id"] == notification.id)
+
+    def test_post_reply_links_to_bare_permalink(self):
+        n = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.POST_REPLY, post=self.post,
+        )
+        self.assertEqual(self._url_of(n), f"/p/{self.post.id}")
+
+    def test_comment_reply_links_to_permalink_at_the_comment(self):
+        comment = Comment.objects.create(
+            post=self.post, author=self.me, text="top"
+        )
+        reply = Comment.objects.create(
+            post=self.post, author=self.friend, parent=comment, text="re"
+        )
+        n = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.COMMENT_REPLY, comment=reply,
+        )
+        self.assertEqual(
+            self._url_of(n), f"/p/{self.post.id}?comment={reply.id}"
+        )
+
+    def test_reaction_on_comment_links_at_the_comment(self):
+        comment = Comment.objects.create(
+            post=self.post, author=self.me, text="top"
+        )
+        n = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.REACTION, comment=comment,
+        )
+        self.assertEqual(
+            self._url_of(n), f"/p/{self.post.id}?comment={comment.id}"
+        )

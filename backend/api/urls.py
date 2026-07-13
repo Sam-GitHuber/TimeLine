@@ -14,6 +14,8 @@ urlpatterns = [
     # Timeline
     path("feed/", views.FeedView.as_view(), name="feed"),
     path("posts/", views.PostCreateView.as_view(), name="post-create"),
+    # Single post by id — the permalink endpoint a notification deep-links to.
+    path("posts/<int:pk>/", views.PostDetailView.as_view(), name="post-detail"),
     path(
         "posts/<int:pk>/comments/",
         views.PostCommentsView.as_view(),

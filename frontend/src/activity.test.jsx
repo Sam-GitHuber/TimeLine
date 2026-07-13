@@ -33,7 +33,7 @@ function note(overrides = {}) {
     actor: { id: 2, display_name: "Priya", avatar_thumb: null },
     text: "Priya replied to your post",
     target: { type: "post", id: 5 },
-    url: "/u/2?post=5",
+    url: "/p/5",
     created_at: "2026-07-13T08:00:00Z",
     seen: false,
     addressed: false,
@@ -109,10 +109,9 @@ describe("ActivityCenter", () => {
     );
 
     expect(api.markNotificationAddressed).toHaveBeenCalledWith(9);
-    // Deep-linked to the post's context (the author's profile, with the post
-    // id as a query hint).
+    // Deep-linked to the post permalink.
     await waitFor(() =>
-      expect(screen.getByTestId("path")).toHaveTextContent("/u/2")
+      expect(screen.getByTestId("path")).toHaveTextContent("/p/5")
     );
   });
 });

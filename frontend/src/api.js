@@ -216,6 +216,10 @@ export const api = {
     return request("/api/posts/", { method: "POST", body: form });
   },
 
+  // A single post by id — the permalink endpoint (`/p/:id`). Gated the same as
+  // every post surface; a post you can't see 404s.
+  getPost: (id) => request(`/api/posts/${id}/`),
+
   // The visible comment tree for a post (already pruned server-side to people
   // you're connected with), and adding a comment/reply.
   getComments: (postId) => request(`/api/posts/${postId}/comments/`),

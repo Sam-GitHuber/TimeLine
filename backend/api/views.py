@@ -847,6 +847,36 @@ class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
         )
 
 
+class PostDetailView(ReactionContextMixin, generics.RetrieveAPIView):
+    """A single post by id (``GET /api/posts/<pk>/``) — the permalink endpoint.
+
+    Backs the ``/p/:id`` permalink page, which a notification deep-links to so you
+    can open a thread straight to the reply you were notified about — even one 20
+    replies deep, or on a post that isn't on the first page of any feed. Fetching
+    the post by id (rather than hoping it's already loaded in some list) is the
+    only way that's reliable.
+
+    Same private-by-default gate as every other post surface: ``can_view_post``
+    (connection gate, plus active membership for a group post). A post you can't
+    see is a 404 — existence isn't leaked, matching the feed/comments/reactions.
+    The comment *tree* still comes from ``PostCommentsView``; this returns just the
+    post (with its pruned reaction summary, via ``ReactionContextMixin``).
+    """
+
+    serializer_class = PostSerializer
+
+    def get_object(self):
+        post = get_object_or_404(
+            Post.objects.select_related("author", "group").prefetch_related(
+                "images", "reactions"
+            ),
+            pk=self.kwargs["pk"],
+        )
+        if not can_view_post(self.request.user, post):
+            raise NotFound()
+        return post
+
+
 class UserPostsView(ReactionContextMixin, generics.ListAPIView):
     """One person's own posts, newest-first — drives the profile page.
 

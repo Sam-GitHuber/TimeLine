@@ -557,12 +557,11 @@ class NotificationSerializer(serializers.ModelSerializer):
 
     - ``text`` — a human-readable line, phrased **server-side** per ``kind`` so
       the web app and a future push payload share one wording.
-    - ``url`` — the in-app route to open. There's no post *permalink* today, so a
-      post/reply/reaction resolves to its context (the author's profile, or the
-      group timeline) with the post id as a query hint a future permalink can use;
-      requests/invites point at their existing inboxes. ``target`` also carries
-      ``{type, id}`` so a client can deep-link more precisely later without an API
-      change.
+    - ``url`` — the in-app route to open. Post/reply/reaction kinds deep-link to
+      the post **permalink** (``/p/<id>``); a comment reply/reaction adds
+      ``?comment=<id>`` so the thread opens *at that comment* (even one 20 replies
+      deep). Requests/invites point at their existing inboxes. ``target`` also
+      carries ``{type, id}`` for clients that want to route by target directly.
 
     ``seen``/``addressed`` are the two read-state booleans (see ``Notification``).
     All four target FKs cascade-delete, so a notification never outlives its
@@ -633,11 +632,17 @@ class NotificationSerializer(serializers.ModelSerializer):
 
     def get_url(self, obj):
         K = Notification.Kind
-        if obj.kind in (K.POST_REPLY, K.REACTION) and obj.post_id:
-            return self._post_url(obj.post)
+        # Post permalink (/p/<id>), with ?comment=<id> when the notification is
+        # about a specific comment so the thread opens right at it.
+        if obj.kind == K.POST_REPLY and obj.post_id:
+            return f"/p/{obj.post_id}"
         if obj.kind == K.COMMENT_REPLY and obj.comment_id:
-            # Derive the post context from the reply's comment.
-            return self._post_url(obj.comment.post, obj.comment.post_id)
+            return f"/p/{obj.comment.post_id}?comment={obj.comment_id}"
+        if obj.kind == K.REACTION:
+            if obj.comment_id:
+                return f"/p/{obj.comment.post_id}?comment={obj.comment_id}"
+            if obj.post_id:
+                return f"/p/{obj.post_id}"
         if obj.kind == K.CONNECTION_REQUEST:
             return "/requests"
         if obj.kind == K.CONNECTION_ACCEPTED and obj.actor_id:
@@ -645,15 +650,6 @@ class NotificationSerializer(serializers.ModelSerializer):
         if obj.kind == K.GROUP_INVITE:
             return "/group-invites"
         return "/"
-
-    def _post_url(self, post, post_id=None):
-        """A post's context route (no permalink exists yet): the group timeline
-        for a group post, else the author's profile — with the post id as a
-        query hint a future permalink/scroll-to can consume."""
-        pid = post_id or post.id
-        if post.group_id:
-            return f"/g/{post.group_id}?post={pid}"
-        return f"/u/{post.author_id}?post={pid}"
 
 
 class NotificationPreferencesSerializer(serializers.Serializer):

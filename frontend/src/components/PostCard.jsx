@@ -11,11 +11,19 @@ import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 // author comes embedded in the post from the API ({ id, display_name }), and
 // posts are identified by numeric user id in profile links (there is no
 // username).
-export default function PostCard({ post }) {
+// `defaultCommentsOpen` + `highlightCommentId` are used by the /p/:id permalink
+// page: it opens with the thread already expanded and deep-links to a specific
+// comment (see CommentThread). In the feed both are omitted, so nothing changes.
+export default function PostCard({
+  post,
+  defaultCommentsOpen = false,
+  highlightCommentId = null,
+}) {
   const author = post.author;
   // Comments load lazily: we only fetch a post's thread once you open it, so
-  // scrolling the feed doesn't fire a request per post.
-  const [showComments, setShowComments] = useState(false);
+  // scrolling the feed doesn't fire a request per post. On a permalink we start
+  // open so the deep-linked comment is reachable without a click.
+  const [showComments, setShowComments] = useState(defaultCommentsOpen);
   // Which photo the lightbox is showing; null = closed.
   const [lightboxIndex, setLightboxIndex] = useState(null);
 
@@ -130,7 +138,14 @@ export default function PostCard({ post }) {
           </span>
         </div>
 
-        {showComments && <CommentThread postId={post.id} />}
+        {showComments && (
+          <CommentThread
+            // Remount when the deep-link target changes so the highlight re-arms.
+            key={highlightCommentId ?? "thread"}
+            postId={post.id}
+            highlightCommentId={highlightCommentId}
+          />
+        )}
       </div>
     </article>
   );

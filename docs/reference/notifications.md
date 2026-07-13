@@ -157,7 +157,7 @@ phases add only the *transport*, never a new API shape:
   "actor": { "id": 7, "display_name": "Sam Lee", "avatar_thumb": "..." },
   "text": "Sam Lee replied to your post",   // phrased server-side, per kind
   "target": { "type": "post", "id": 42 },   // the concrete thing it points at
-  "url": "/u/7?post=42",                     // in-app deep-link route
+  "url": "/p/42",                            // in-app deep-link route (permalink)
   "created_at": "2026-07-13T09:00:00Z",
   "seen": false,
   "addressed": false
@@ -166,13 +166,13 @@ phases add only the *transport*, never a new API shape:
 
 - **`text`** is built server-side per `kind` (one place to phrase them; web and a
   future push payload share the wording).
-- **`url`** is the in-app route. There's **no post permalink** today, so a
-  post/reply/reaction resolves to its *context* — the group timeline (`/g/:id`) for
-  a group post, else the author's profile (`/u/:id`) — with the post id as a
-  `?post=` query hint a future permalink/scroll-to can consume. Requests →
-  `/requests`, group invites → `/group-invites`, connection-accepted → the new
-  connection's profile. `target {type, id}` rides along regardless, so a client can
-  deep-link more precisely later without an API change.
+- **`url`** is the in-app route. Post/reply/reaction kinds deep-link to the post
+  **permalink** `/p/<id>` (see [feed-and-posts](feed-and-posts.md)); a comment
+  reply/reaction adds `?comment=<id>` so the permalink page opens the thread *at
+  that comment* — even one 20 replies deep. Requests → `/requests`, group invites
+  → `/group-invites`, connection-accepted → the new connection's profile.
+  `target {type, id}` rides along regardless, so a client can route by target
+  directly without parsing the URL.
 
 ## Frontend
 
