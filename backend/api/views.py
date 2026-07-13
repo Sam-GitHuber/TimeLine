@@ -881,24 +881,35 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
 
     serializer_class = PostSerializer
 
-    def get_object(self):
-        post = get_object_or_404(
+    def _fetch_post(self):
+        return get_object_or_404(
             Post.objects.select_related("author", "group").prefetch_related(
                 "images", "reactions"
             ),
             pk=self.kwargs["pk"],
         )
+
+    def get_object(self):
+        post = self._fetch_post()
         if not can_view_post(self.request.user, post):
             raise NotFound()
         return post
 
     def _owned_object(self):
-        """The post, gated for a mutation: 404 if not visible (existence hidden),
-        else 403 unless it's the requester's own post."""
-        post = self.get_object()
-        if post.author_id != self.request.user.id:
-            raise PermissionDenied("You can only edit or delete your own posts.")
-        return post
+        """The post, gated for a mutation.
+
+        The author may always edit or delete **their own** post — even a group
+        post they've since left the group of (their content stays theirs to
+        remove; gating on ``can_view_post`` would 404 them out of their own
+        post). For anyone else the same existence-hiding wall as GET applies: a
+        post you can't see is 404 (no leak), one you can see but don't own is 403.
+        """
+        post = self._fetch_post()
+        if post.author_id == self.request.user.id:
+            return post
+        if not can_view_post(self.request.user, post):
+            raise NotFound()
+        raise PermissionDenied("You can only edit or delete your own posts.")
 
     def put(self, request, *args, **kwargs):
         # Only a partial text edit is supported — text is the sole writable field,
@@ -909,9 +920,14 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
         post = self._owned_object()
         serializer = self.get_serializer(post, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
+        new_text = serializer.validated_data.get("text", post.text)
+        # A no-op save (text unchanged, or an empty body) must NOT mark the post
+        # "edited" — the marker means the content really changed. Return the post
+        # as-is without stamping.
+        if new_text == post.text:
+            return Response(self.get_serializer(post).data)
         # Text-only edit: the post must still have text or at least one photo,
         # mirroring the create rule (a post can't be emptied to nothing).
-        new_text = serializer.validated_data.get("text", post.text)
         if not new_text and not post.images.exists():
             raise ValidationError(
                 {"detail": "A post needs some text or at least one photo."}

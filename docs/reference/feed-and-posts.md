@@ -86,6 +86,10 @@ Both edit and delete share the permalink route — `PostDetailView` is a
   media work in Phase 11.)*
 - **Permission shape mirrors `GroupDetailView`:** a post you can't see is a
   **404** (existence stays hidden); a post you can see but don't own is a **403**.
+  The **author path bypasses the visibility gate** — you can always edit/delete
+  your own post, including a group post you've since left the group of (your
+  content stays yours to remove). A no-op edit (text unchanged) is a 200 that
+  does **not** stamp `edited_at`, so the marker only ever means a real change.
 
 **The edited marker is the transparency floor.** `Post.edited_at` is **null until
 the first edit** — that's how "created but never edited" is told apart (no

@@ -97,7 +97,6 @@ export default function PostCard({
           <PostMenu
             postId={post.id}
             authorId={author.id}
-            group={post.group?.id ?? null}
             onEdit={() => setEditing(true)}
           />
         </div>

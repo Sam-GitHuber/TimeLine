@@ -44,10 +44,10 @@ describe("PostCard ⋯ menu — owner", () => {
     const user = userEvent.setup();
     renderWithAuth(<PostCard post={makePost()} />);
     await openMenu(user);
-    expect(screen.getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("menuitem", { name: "Report" }),
+      screen.queryByRole("button", { name: "Report" }),
     ).not.toBeInTheDocument();
   });
 
@@ -57,7 +57,7 @@ describe("PostCard ⋯ menu — owner", () => {
     renderWithAuth(<PostCard post={makePost()} />);
 
     await openMenu(user);
-    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
 
     const box = screen.getByRole("textbox", { name: "Edit post text" });
     expect(box).toHaveValue("original text");
@@ -80,7 +80,7 @@ describe("PostCard ⋯ menu — owner", () => {
     const user = userEvent.setup();
     renderWithAuth(<PostCard post={makePost()} />);
     await openMenu(user);
-    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(api.updatePost).not.toHaveBeenCalled();
     expect(screen.getByText("original text")).toBeInTheDocument();
@@ -90,7 +90,7 @@ describe("PostCard ⋯ menu — owner", () => {
     const user = userEvent.setup();
     renderWithAuth(<PostCard post={makePost()} />);
     await openMenu(user);
-    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.clear(screen.getByRole("textbox", { name: "Edit post text" }));
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
@@ -101,7 +101,7 @@ describe("PostCard ⋯ menu — owner", () => {
     renderWithAuth(<PostCard post={makePost()} />);
 
     await openMenu(user);
-    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
     // A confirm step appears; nothing deleted yet.
     expect(api.deletePost).not.toHaveBeenCalled();
     const dialog = screen.getByRole("dialog", { name: "Delete post" });
@@ -119,12 +119,12 @@ describe("PostCard ⋯ menu — non-owner", () => {
       <PostCard post={makePost({ author: { id: 999, display_name: "Them" } })} />,
     );
     await openMenu(user);
-    expect(screen.getByRole("menuitem", { name: "Report" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Report" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("menuitem", { name: "Edit" }),
+      screen.queryByRole("button", { name: "Edit" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("menuitem", { name: "Delete" }),
+      screen.queryByRole("button", { name: "Delete" }),
     ).not.toBeInTheDocument();
   });
 });

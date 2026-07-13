@@ -21,8 +21,9 @@ import { ReportModal } from "./ReportButton.jsx";
 // The menu paints through a body-level portal for the same reason the reaction
 // popover does — left in the post's stacking context, later feed cards would
 // paint over it. It's right-aligned under the kebab and closes on click-outside
-// or Escape.
-export default function PostMenu({ postId, authorId, onEdit, group = null }) {
+// or Escape, matching the QuickReactionPopover/ReactorsPopover convention (a
+// lightweight `role="dialog"` popover, not an ARIA menu).
+export default function PostMenu({ postId, authorId, onEdit }) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const triggerRef = useRef(null);
@@ -54,7 +55,7 @@ export default function PostMenu({ postId, authorId, onEdit, group = null }) {
         ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label="Post options"
         className="-mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
@@ -115,7 +116,11 @@ export default function PostMenu({ postId, authorId, onEdit, group = null }) {
 
       {confirmingDelete && (
         <ConfirmDeleteDialog
-          pending={deleteMutation.isPending}
+          // Stay in the busy state after success too: on a slow refetch the card
+          // hasn't unmounted yet, and a second click would re-fire deletePost on
+          // an already-deleted post (404). `isSuccess` keeps the button disabled
+          // until this card is removed from the list.
+          pending={deleteMutation.isPending || deleteMutation.isSuccess}
           error={deleteMutation.isError ? deleteMutation.error : null}
           onCancel={() => setConfirmingDelete(false)}
           onConfirm={() => deleteMutation.mutate()}
@@ -125,12 +130,15 @@ export default function PostMenu({ postId, authorId, onEdit, group = null }) {
   );
 }
 
-// One row in the dropdown. `danger` styles a destructive action (Delete).
+// One row in the dropdown — a plain button. We deliberately don't use ARIA
+// `menuitem`/`menu` roles: those advertise arrow-key navigation we don't
+// implement, so a `role="dialog"` popover of ordinary buttons (the house
+// QuickReactionPopover pattern) is the honest, consistent choice. `danger`
+// styles a destructive action (Delete).
 function MenuItem({ onClick, danger = false, children }) {
   return (
     <button
       type="button"
-      role="menuitem"
       onClick={onClick}
       className={`block w-full px-4 py-2 text-left text-sm font-medium transition hover:bg-accent-tint ${
         danger ? "text-red-600 hover:text-red-700" : "text-ink hover:text-accent-deep"
@@ -194,7 +202,7 @@ function MenuPanel({ anchorRef, onClose, children }) {
   return createPortal(
     <div
       ref={wrapRef}
-      role="menu"
+      role="dialog"
       aria-label="Post options"
       style={{
         position: "absolute",

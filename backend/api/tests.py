@@ -3186,6 +3186,18 @@ class EditDeletePostTests(APITestCase):
         self.post.refresh_from_db()
         self.assertEqual(self.post.text, "spaced")
 
+    def test_no_op_edit_does_not_mark_the_post_edited(self):
+        # Saving identical text (or an empty body) must not stamp edited_at — the
+        # "· edited" marker means the content really changed.
+        self.client.force_authenticate(self.author)
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "hello"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["edited_at"])
+        self.post.refresh_from_db()
+        self.assertIsNone(self.post.edited_at)
+
     def test_connected_non_owner_cannot_edit(self):
         # Visible to them, but not theirs — 403 (not 404: existence isn't hidden
         # from a connection, so the owner check is the honest signal).
@@ -3257,6 +3269,26 @@ class EditDeletePostTests(APITestCase):
         resp = self.client.delete(post_detail_url(self.post))
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertTrue(Post.objects.filter(pk=self.post.pk).exists())
+
+    def test_author_can_edit_and_delete_own_group_post_after_leaving(self):
+        # Your content stays yours to remove: gating mutations on can_view_post
+        # would 404 an author out of their own group post once they've left the
+        # group. The owner path must bypass the membership gate.
+        group = make_group(self.author, name="Fam")
+        gpost = Post.objects.create(
+            author=self.author, group=group, text="in group"
+        )
+        # The author leaves the group (their membership row is gone).
+        GroupMembership.objects.filter(group=group, user=self.author).delete()
+
+        self.client.force_authenticate(self.author)
+        edit = self.client.patch(
+            post_detail_url(gpost), {"text": "in group, fixed"}, format="json"
+        )
+        self.assertEqual(edit.status_code, status.HTTP_200_OK)
+        resp = self.client.delete(post_detail_url(gpost))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Post.objects.filter(pk=gpost.pk).exists())
 
 
 class NotificationPermalinkUrlTests(APITestCase):
