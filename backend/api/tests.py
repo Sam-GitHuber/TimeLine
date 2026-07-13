@@ -3146,6 +3146,151 @@ class PostDetailViewTests(APITestCase):
         )
 
 
+class EditDeletePostTests(APITestCase):
+    """Owner-only edit (PATCH) and delete (DELETE) of a post on the same
+    permalink route (issue #62)."""
+
+    def setUp(self):
+        self.author = make_user("author@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.author, self.friend)
+        self.stranger = make_user("stranger@example.com")
+        self.post = Post.objects.create(author=self.author, text="hello")
+
+    # --- Edit -----------------------------------------------------------------
+
+    def test_owner_can_edit_text_and_edit_is_stamped(self):
+        self.client.force_authenticate(self.author)
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "hello, fixed"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["text"], "hello, fixed")
+        # The response carries a non-null edit time so the client can mark it.
+        self.assertIsNotNone(resp.data["edited_at"])
+        self.post.refresh_from_db()
+        self.assertEqual(self.post.text, "hello, fixed")
+        self.assertIsNotNone(self.post.edited_at)
+
+    def test_unedited_post_has_null_edited_at(self):
+        # No marker on a post that was never edited.
+        self.client.force_authenticate(self.friend)
+        resp = self.client.get(post_detail_url(self.post))
+        self.assertIsNone(resp.data["edited_at"])
+
+    def test_edit_strips_whitespace(self):
+        self.client.force_authenticate(self.author)
+        self.client.patch(
+            post_detail_url(self.post), {"text": "  spaced  "}, format="json"
+        )
+        self.post.refresh_from_db()
+        self.assertEqual(self.post.text, "spaced")
+
+    def test_no_op_edit_does_not_mark_the_post_edited(self):
+        # Saving identical text (or an empty body) must not stamp edited_at — the
+        # "· edited" marker means the content really changed.
+        self.client.force_authenticate(self.author)
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "hello"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["edited_at"])
+        self.post.refresh_from_db()
+        self.assertIsNone(self.post.edited_at)
+
+    def test_connected_non_owner_cannot_edit(self):
+        # Visible to them, but not theirs — 403 (not 404: existence isn't hidden
+        # from a connection, so the owner check is the honest signal).
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "not mine"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.post.refresh_from_db()
+        self.assertEqual(self.post.text, "hello")
+
+    def test_stranger_editing_gets_404_not_existence_leak(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "nope"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cannot_empty_a_text_only_post(self):
+        self.client.force_authenticate(self.author)
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "   "}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.post.refresh_from_db()
+        self.assertEqual(self.post.text, "hello")
+
+    def test_put_is_not_allowed(self):
+        self.client.force_authenticate(self.author)
+        resp = self.client.put(
+            post_detail_url(self.post), {"text": "whole"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_anonymous_cannot_edit(self):
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "x"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # --- Delete ---------------------------------------------------------------
+
+    def test_owner_can_delete(self):
+        self.client.force_authenticate(self.author)
+        resp = self.client.delete(post_detail_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Post.objects.filter(pk=self.post.pk).exists())
+
+    def test_delete_cascades_to_comments_and_reactions(self):
+        comment = Comment.objects.create(
+            post=self.post, author=self.friend, text="nice"
+        )
+        reaction = Reaction.objects.create(
+            user=self.friend, post=self.post, emoji="👍"
+        )
+        self.client.force_authenticate(self.author)
+        self.client.delete(post_detail_url(self.post))
+        self.assertFalse(Comment.objects.filter(pk=comment.pk).exists())
+        self.assertFalse(Reaction.objects.filter(pk=reaction.pk).exists())
+
+    def test_connected_non_owner_cannot_delete(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.delete(post_detail_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Post.objects.filter(pk=self.post.pk).exists())
+
+    def test_stranger_deleting_gets_404(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.delete(post_detail_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(Post.objects.filter(pk=self.post.pk).exists())
+
+    def test_author_can_edit_and_delete_own_group_post_after_leaving(self):
+        # Your content stays yours to remove: gating mutations on can_view_post
+        # would 404 an author out of their own group post once they've left the
+        # group. The owner path must bypass the membership gate.
+        group = make_group(self.author, name="Fam")
+        gpost = Post.objects.create(
+            author=self.author, group=group, text="in group"
+        )
+        # The author leaves the group (their membership row is gone).
+        GroupMembership.objects.filter(group=group, user=self.author).delete()
+
+        self.client.force_authenticate(self.author)
+        edit = self.client.patch(
+            post_detail_url(gpost), {"text": "in group, fixed"}, format="json"
+        )
+        self.assertEqual(edit.status_code, status.HTTP_200_OK)
+        resp = self.client.delete(post_detail_url(gpost))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Post.objects.filter(pk=gpost.pk).exists())
+
+
 class NotificationPermalinkUrlTests(APITestCase):
     """Notifications deep-link to the post permalink, with ?comment for a
     specific comment so the thread opens right at it."""

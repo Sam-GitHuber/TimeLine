@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import CommentThread from "./CommentThread.jsx";
 import Lightbox from "./Lightbox.jsx";
 import ReactionBar from "./ReactionBar.jsx";
-import ReportButton from "./ReportButton.jsx";
+import PostMenu from "./PostMenu.jsx";
+import { api } from "../api.js";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
 // A single post as an entry on the timeline: a node on the line, its clock time
@@ -26,6 +28,8 @@ export default function PostCard({
   const [showComments, setShowComments] = useState(defaultCommentsOpen);
   // Which photo the lightbox is showing; null = closed.
   const [lightboxIndex, setLightboxIndex] = useState(null);
+  // Whether the post text is flipped into its inline editor (issue #62).
+  const [editing, setEditing] = useState(false);
 
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
@@ -51,33 +55,65 @@ export default function PostCard({
       </div>
 
       <div className="tl-body">
-        <div className="mb-1.5 flex flex-wrap items-baseline gap-x-1.5">
-          <Link
-            to={`/u/${author.id}`}
-            className="font-semibold text-ink transition hover:text-accent-deep"
-          >
-            {author.display_name}
-          </Link>
-          {/* When a group post surfaces in the merged feed, label which group it
-              came from so the stream doesn't feel context-less. Omitted on a
-              group's own timeline is fine — the label just links back to it. */}
-          {post.group && (
-            <span className="text-sm text-ink-faint">
-              in{" "}
-              <Link
-                to={`/g/${post.group.id}`}
-                className="font-medium text-accent-deep hover:underline"
+        <div className="mb-1.5 flex items-start justify-between gap-2">
+          <div className="flex flex-wrap items-baseline gap-x-1.5">
+            <Link
+              to={`/u/${author.id}`}
+              className="font-semibold text-ink transition hover:text-accent-deep"
+            >
+              {author.display_name}
+            </Link>
+            {/* When a group post surfaces in the merged feed, label which group
+                it came from so the stream doesn't feel context-less. Omitted on
+                a group's own timeline is fine — the label just links back to it. */}
+            {post.group && (
+              <span className="text-sm text-ink-faint">
+                in{" "}
+                <Link
+                  to={`/g/${post.group.id}`}
+                  className="font-medium text-accent-deep hover:underline"
+                >
+                  {post.group.name}
+                </Link>
+              </span>
+            )}
+            {/* Quiet "edited" marker: only on a post that really was edited
+                (edited_at is null until the first edit), with the exact edit
+                time on hover/focus — the same title/aria-label pattern the
+                created-at timestamp uses. Silently altering content others have
+                read would be a trust problem, so the marker isn't optional. */}
+            {post.edited_at && (
+              <span
+                className="cursor-default text-sm text-ink-faint"
+                title={`Edited ${formatAbsoluteTime(post.edited_at)}`}
+                aria-label={`Edited ${formatAbsoluteTime(post.edited_at)}`}
               >
-                {post.group.name}
-              </Link>
-            </span>
-          )}
+                · edited
+              </span>
+            )}
+          </div>
+
+          {/* The ⋯ overflow menu: Edit/Delete for the owner, Report otherwise. */}
+          <PostMenu
+            postId={post.id}
+            authorId={author.id}
+            onEdit={() => setEditing(true)}
+          />
         </div>
 
-        {post.text && (
-          <p className="whitespace-pre-wrap break-words text-[1.02rem] leading-relaxed text-ink">
-            {post.text}
-          </p>
+        {editing ? (
+          <PostEditor
+            postId={post.id}
+            initialText={post.text}
+            hasImages={post.images?.length > 0}
+            onDone={() => setEditing(false)}
+          />
+        ) : (
+          post.text && (
+            <p className="whitespace-pre-wrap break-words text-[1.02rem] leading-relaxed text-ink">
+              {post.text}
+            </p>
+          )
         )}
 
         {post.images?.length > 0 && (
@@ -133,9 +169,8 @@ export default function PostCard({
           >
             {showComments ? "Hide comments" : "Comments"}
           </button>
-          <span className="text-sm font-medium text-ink-faint">
-            <ReportButton postId={post.id} authorId={author.id} />
-          </span>
+          {/* Report has moved into the ⋯ menu in the header (issue #62), so it's
+              no longer here in the footer. */}
         </div>
 
         {showComments && (
@@ -148,5 +183,68 @@ export default function PostCard({
         )}
       </div>
     </article>
+  );
+}
+
+// The inline editor a post's text flips into when the owner picks "Edit" from
+// the ⋯ menu — an in-place textarea + Save/Cancel, mirroring the comment
+// composer rather than a separate edit page. On save it PATCHes the post and
+// invalidates every list the post can appear in so the new text (and the
+// "edited" marker) show up wherever it's rendered. Text-only in v1 — photos
+// aren't editable here.
+function PostEditor({ postId, initialText, hasImages = false, onDone }) {
+  const [text, setText] = useState(initialText ?? "");
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: (value) => api.updatePost(postId, value),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["feed"] });
+      queryClient.invalidateQueries({ queryKey: ["userPosts"] });
+      queryClient.invalidateQueries({ queryKey: ["groupPosts"] });
+      queryClient.invalidateQueries({ queryKey: ["post", String(postId)] });
+      onDone();
+    },
+  });
+
+  // A photo-only post may keep blank text, but a text-only post can't be
+  // emptied to nothing — matching the backend's guard.
+  const trimmed = text.trim();
+  const canSave = !mutation.isPending && (trimmed.length > 0 || hasImages);
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    if (!canSave) return;
+    mutation.mutate(trimmed);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="mt-1">
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        autoFocus
+        aria-label="Edit post text"
+        className="w-full resize-none rounded-xl border border-line-strong bg-surface px-3 py-2 text-[1.02rem] leading-relaxed text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
+      />
+      {mutation.isError && (
+        <p role="alert" className="mt-1 text-sm text-red-600">
+          {mutation.error?.message || "Couldn’t save your changes."}
+        </p>
+      )}
+      <div className="mt-1.5 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onDone}
+          className="rounded-lg px-3 py-1 text-sm font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
+        >
+          Cancel
+        </button>
+        <button type="submit" disabled={!canSave} className="btn btn-primary btn-sm">
+          {mutation.isPending ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </form>
   );
 }

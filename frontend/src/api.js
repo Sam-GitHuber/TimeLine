@@ -220,6 +220,16 @@ export const api = {
   // every post surface; a post you can't see 404s.
   getPost: (id) => request(`/api/posts/${id}/`),
 
+  // Edit your own post's text (issue #62). Owner-only server-side (a non-owner
+  // gets 403, a post you can't see 404s); the response carries a stamped
+  // `edited_at` so the feed can show an "edited" marker. Text only in v1.
+  updatePost: (id, text) =>
+    request(`/api/posts/${id}/`, { method: "PATCH", body: { text } }),
+
+  // Delete your own post (issue #62). Owner-only; cascades server-side to its
+  // photos, comments, reactions and notifications. Returns 204.
+  deletePost: (id) => request(`/api/posts/${id}/`, { method: "DELETE" }),
+
   // The visible comment tree for a post (already pruned server-side to people
   // you're connected with), and adding a comment/reply.
   getComments: (postId) => request(`/api/posts/${postId}/comments/`),

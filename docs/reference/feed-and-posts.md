@@ -58,6 +58,52 @@ a proxy / on a separate API domain). Nav badges read the paginator's `count`, no
   same `can_view_post` wall as the feed (a post you can't see 404s — existence
   isn't leaked). It backs the **`/p/:id` permalink page** (`PostPage`), which
   renders the post with its comment thread opened.
+
+### Editing & deleting your own posts
+
+The **`⋯` overflow menu** on a post's header (`PostMenu.jsx`, rendered by
+`PostCard`) is where per-post actions live. What it offers keys off the same
+owner check `ReportButton` uses (`user.pk === author.id`):
+
+- **Your own post:** **Edit** (flips the text into an inline editor — `PostEditor`
+  in `PostCard.jsx`, no separate page) and **Delete** (confirms first, since a
+  post can carry comments/reactions/photos).
+- **Someone else's post:** **Report** — the report control **moved off the footer
+  row into this menu**. (Comments still carry an inline `ReportButton`; only posts
+  moved.)
+
+Both edit and delete share the permalink route — `PostDetailView` is a
+`RetrieveUpdateDestroyAPIView`:
+
+- **`PATCH /api/posts/<id>/`** — **owner-only**, updates **text only** (v1 scope:
+  adding/removing photos is deliberately out). It stamps `edited_at` and rejects
+  emptying a text-only post (a post must still have text or a photo, mirroring
+  create). `PUT` is disallowed (405) — text is the only writable field.
+- **`DELETE /api/posts/<id>/`** — **owner-only**, 204 on success. The model's
+  CASCADE relations take the post's images, comments (and replies), reactions,
+  reports and notifications with it. *(As with group deletion, the DB rows
+  cascade but the image **files** on disk aren't swept — deferred with the S3
+  media work in Phase 11.)*
+- **Permission shape mirrors `GroupDetailView`:** a post you can't see is a
+  **404** (existence stays hidden); a post you can see but don't own is a **403**.
+  The **author path bypasses the visibility gate** — you can always edit/delete
+  your own post, including a group post you've since left the group of (your
+  content stays yours to remove). A no-op edit (text unchanged) is a 200 that
+  does **not** stamp `edited_at`, so the marker only ever means a real change.
+
+**The edited marker is the transparency floor.** `Post.edited_at` is **null until
+the first edit** — that's how "created but never edited" is told apart (no
+`updated_at`/timestamp-comparison guesswork). The serializer exposes it read-only;
+`PostCard` shows a quiet **"· edited"** next to the author line **only** when it's
+set, with the exact edit time on hover/focus (`title`/`aria-label`, the same
+pattern `created_at` uses). Silently altering content others have already read is
+a trust problem on an app holding real friends'/family's conversations, so the
+marker isn't optional.
+
+**No edit window and no version history** (v1) — this is a private friends/family
+app, not a public record; the "edited + when" marker is the agreed transparency
+floor. On the client, an edit/delete invalidates `["feed"]`, `["userPosts"]`,
+`["groupPosts"]` and `["post", id]` so the change shows wherever the post appears.
 - **Why fetch by id rather than reuse a feed row:** notifications
   ([notifications.md](notifications.md)) deep-link here, and the target post may
   be nowhere near the first page of any feed — fetching it directly is the only

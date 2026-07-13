@@ -144,6 +144,7 @@ class PostSerializer(serializers.ModelSerializer):
             "group",
             "reactions",
             "created_at",
+            "edited_at",
         )
         read_only_fields = (
             "id",
@@ -152,6 +153,9 @@ class PostSerializer(serializers.ModelSerializer):
             "group",
             "reactions",
             "created_at",
+            # Server-controlled — stamped by the update view on a real edit, never
+            # written from the request body.
+            "edited_at",
         )
 
     def get_group(self, obj):
