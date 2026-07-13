@@ -16,6 +16,7 @@
     "emoji-picker-element-data": "^1.8.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "react-easy-crop": "^6.2.2",
     "react-router-dom": "^7.18.1"
   },
   "devDependencies": {

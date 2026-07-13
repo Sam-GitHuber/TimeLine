@@ -114,6 +114,27 @@ All image handling — post photos *and* avatars — funnels through
   it. The `/settings` page PATCHes multipart, then refetches "who am I" so the new
   name/avatar propagate everywhere immediately.
 
+### Avatar reframing (client-side crop)
+
+Avatars are shown as circles (`Avatar.jsx` masks the square `avatar_thumb` with
+`rounded-full`), so how the square is cut matters. Rather than letting the
+backend blindly centre-crop, choosing an avatar first opens **`AvatarCropModal`**
+(built on `react-easy-crop`): drag to reposition, zoom with a slider / mouse
+wheel / two-finger pinch, inside a **round** cutout that dims everything outside
+it — a live preview of the circle people will actually see (issue #18). On
+confirm, the browser draws the chosen square to a canvas and uploads *just that
+square* (`cropImage.js`), capped at 1024px and re-encoded as JPEG.
+
+- **Why client-side, not "upload original + crop coords":** no new endpoint, DB
+  field, or migration — the smaller, boring option for a family-scale app. The
+  trade-off is we don't keep the uncropped original for later re-cropping.
+- **The server pipeline is unchanged and still authoritative.** The cropped file
+  goes through the same `process_image` (validate-by-decode, EXIF strip,
+  size/format caps). The crop is *framing only*; `thumb_square` centre-crop still
+  runs but is a no-op on an already-square upload.
+- **Shared by user and group avatars** — the same modal wires into both
+  `ProfileEditPage` and `GroupFormPage`, since both render the same circle.
+
 ## Storage & media serving
 
 - Media goes through **`django-storages`** so the backend is swappable **by

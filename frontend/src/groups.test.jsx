@@ -27,6 +27,19 @@ vi.mock("./messaging.jsx", () => ({
   useMessaging: vi.fn(() => ({ openNew: vi.fn() })),
 }));
 
+// Group avatars reuse the same crop modal as profile avatars (issue #18);
+// stubbed to a "Use photo" button so these tests stay about group wiring.
+vi.mock("./components/AvatarCropModal.jsx", () => ({
+  default: ({ onCropped }) => (
+    <button
+      type="button"
+      onClick={() => onCropped(new File(["cropped"], "avatar.jpg", { type: "image/jpeg" }))}
+    >
+      Use photo
+    </button>
+  ),
+}));
+
 vi.mock("./api.js", () => ({
   api: {
     getFeed: vi.fn(),
@@ -300,5 +313,24 @@ describe("GroupFormPage create", () => {
         expect.objectContaining({ name: "New Crew" })
       )
     );
+  });
+
+  it("reframes a chosen avatar through the crop modal before creating", async () => {
+    const user = userEvent.setup();
+    renderWithAuth(<GroupFormPage />, { route: "/groups/new" });
+    await user.type(
+      screen.getByPlaceholderText("Family, book club, five-a-side…"),
+      "Photo Crew"
+    );
+    // Choosing a file opens the crop modal; confirming it sets the avatar.
+    await user.upload(
+      screen.getByTestId("group-avatar-input"),
+      new File(["bytes"], "logo.png", { type: "image/png" })
+    );
+    await user.click(screen.getByRole("button", { name: "Use photo" }));
+    await user.click(screen.getByRole("button", { name: "Create group" }));
+
+    await waitFor(() => expect(api.createGroup).toHaveBeenCalledTimes(1));
+    expect(api.createGroup.mock.calls[0][0].avatar).toBeInstanceOf(File);
   });
 });
