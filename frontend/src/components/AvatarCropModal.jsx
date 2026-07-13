@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Cropper from "react-easy-crop";
 import { getCroppedImg } from "../cropImage.js";
@@ -20,23 +20,40 @@ export default function AvatarCropModal({ file, onCropped, onCancel }) {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState(null);
   const [loadError, setLoadError] = useState(false);
+  const [imageSrc, setImageSrc] = useState(null);
 
-  // An object URL for the chosen file; revoked on unmount.
-  const imageSrc = useMemo(() => URL.createObjectURL(file), [file]);
-  useEffect(() => () => URL.revokeObjectURL(imageSrc), [imageSrc]);
-
-  // Probe whether the browser can actually decode this file, independently of
-  // react-easy-crop. If it can't (an unsupported type the file picker still let
-  // through — e.g. HEIC on a browser without HEIC support — or a corrupt file),
-  // the cropper would just sit there and never report a crop, leaving "Use
-  // photo" disabled forever with no explanation. Instead we detect it and show
-  // a clear message. (The backend rejects the same files, but by then the user
-  // has already tried to save; catching it here is friendlier.)
+  // Make the object URL, probe that the browser can decode it, and revoke it —
+  // all in ONE effect keyed on the file. This has to be StrictMode-safe: React
+  // double-invokes effects in dev (setup → cleanup → setup), so a URL made in
+  // useMemo but revoked in a *separate* cleanup gets revoked out from under the
+  // <img>/Cropper on the throwaway first pass — which made even valid JPEGs
+  // fail to load. Here each setup owns a fresh URL and revokes exactly that one,
+  // and the committed state always points at a live URL.
+  //
+  // The probe is what turns an *undecodable* file (an unsupported type the file
+  // picker let through — e.g. HEIC without browser support — or a corrupt file)
+  // into a clear message, instead of a cropper that never reports a crop and
+  // leaves "Use photo" disabled forever. `cancelled` stops a stale probe from
+  // the first StrictMode pass flipping the error on after cleanup.
   useEffect(() => {
+    const url = URL.createObjectURL(file);
+    // The object URL is an external resource that must be revoked on cleanup, so
+    // it genuinely belongs to this effect (not render / useMemo) — the documented
+    // file-preview pattern. Hence the setState here is intentional.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setImageSrc(url);
+    setLoadError(false);
+    let cancelled = false;
     const probe = new Image();
-    probe.onerror = () => setLoadError(true);
-    probe.src = imageSrc;
-  }, [imageSrc]);
+    probe.onerror = () => {
+      if (!cancelled) setLoadError(true);
+    };
+    probe.src = url;
+    return () => {
+      cancelled = true;
+      URL.revokeObjectURL(url);
+    };
+  }, [file]);
 
   // Esc cancels, like every other dialog in the app.
   useEffect(() => {
@@ -114,6 +131,7 @@ export default function AvatarCropModal({ file, onCropped, onCancel }) {
             {/* react-easy-crop fills this relatively-positioned box. cropShape
                 "round" dims everything outside the circle — the crop preview. */}
             <div className="relative mt-4 h-72 w-full bg-black">
+              {imageSrc && (
               <Cropper
                 image={imageSrc}
                 crop={crop}
@@ -127,6 +145,7 @@ export default function AvatarCropModal({ file, onCropped, onCancel }) {
                 onZoomChange={setZoom}
                 onCropComplete={(_area, pixels) => setCroppedPixels(pixels)}
               />
+              )}
             </div>
 
             <div className="flex items-center gap-3 px-5 pt-4">
