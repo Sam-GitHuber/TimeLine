@@ -23,6 +23,21 @@ vi.mock("./api.js", () => ({
   },
 }));
 
+// The crop modal (issue #18) sits between choosing a file and setting the
+// avatar. Its real behaviour (react-easy-crop + canvas export) is covered in
+// avatar-crop.test.jsx; here we stub it to a "Use photo" button that hands back
+// a cropped File, so these tests stay about the form's wiring.
+vi.mock("./components/AvatarCropModal.jsx", () => ({
+  default: ({ onCropped }) => (
+    <button
+      type="button"
+      onClick={() => onCropped(new File(["cropped"], "avatar.jpg", { type: "image/jpeg" }))}
+    >
+      Use photo
+    </button>
+  ),
+}));
+
 function pngFile(name = "photo.png") {
   return new File(["fake-bytes"], name, { type: "image/png" });
 }
@@ -202,7 +217,9 @@ describe("ProfileEditPage", () => {
     await user.clear(screen.getByLabelText("First name"));
     await user.type(screen.getByLabelText("First name"), "New");
     await user.type(screen.getByLabelText("Bio"), "Hello there");
+    // Choosing a file opens the crop modal; confirming it sets the avatar.
     await user.upload(screen.getByTestId("avatar-file-input"), pngFile());
+    await user.click(screen.getByRole("button", { name: "Use photo" }));
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 

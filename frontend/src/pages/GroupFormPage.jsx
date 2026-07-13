@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
+import AvatarCropModal from "../components/AvatarCropModal.jsx";
 import { api } from "../api.js";
 
 // Create a new group, or edit an existing one (same form). In edit mode we
@@ -27,6 +28,7 @@ export default function GroupFormPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [avatarFile, setAvatarFile] = useState(null);
+  const [pendingFile, setPendingFile] = useState(null);
   const [removeAvatar, setRemoveAvatar] = useState(false);
   const [loadedFor, setLoadedFor] = useState(null);
 
@@ -72,13 +74,18 @@ export default function GroupFormPage() {
     },
   });
 
+  // A chosen file is reframed in the crop modal first (mirrors ProfileEditPage);
+  // the returned square becomes the avatar we'll upload.
   function handleAvatarChosen(event) {
     const file = event.target.files?.[0];
-    if (file) {
-      setAvatarFile(file);
-      setRemoveAvatar(false);
-    }
+    if (file) setPendingFile(file);
     event.target.value = "";
+  }
+
+  function handleCropped(file) {
+    setAvatarFile(file);
+    setRemoveAvatar(false);
+    setPendingFile(null);
   }
 
   function handleSubmit(event) {
@@ -203,6 +210,14 @@ export default function GroupFormPage() {
           </button>
         </div>
       </form>
+
+      {pendingFile && (
+        <AvatarCropModal
+          file={pendingFile}
+          onCropped={handleCropped}
+          onCancel={() => setPendingFile(null)}
+        />
+      )}
     </div>
   );
 }

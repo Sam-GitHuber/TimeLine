@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
+import AvatarCropModal from "../components/AvatarCropModal.jsx";
 import ChangePasswordSection from "../components/ChangePasswordSection.jsx";
 import NotificationPreferencesSection from "../components/NotificationPreferencesSection.jsx";
 import DeleteAccountSection from "../components/DeleteAccountSection.jsx";
@@ -21,8 +22,11 @@ export default function ProfileEditPage() {
   const [firstName, setFirstName] = useState(user?.first_name || "");
   const [lastName, setLastName] = useState(user?.last_name || "");
   const [bio, setBio] = useState(user?.bio || "");
-  // avatarFile: a newly chosen file. removeAvatar: clear the existing one.
+  // avatarFile: the cropped file ready to upload. pendingFile: a just-chosen
+  // file waiting to be reframed in the crop modal. removeAvatar: clear the
+  // existing one.
   const [avatarFile, setAvatarFile] = useState(null);
+  const [pendingFile, setPendingFile] = useState(null);
   const [removeAvatar, setRemoveAvatar] = useState(false);
 
   // Local preview for a freshly chosen avatar; revoked on change/unmount.
@@ -55,13 +59,18 @@ export default function ProfileEditPage() {
     },
   });
 
+  // A chosen file goes to the crop modal first; only the reframed square it
+  // returns becomes the avatar we'll upload.
   function handleAvatarChosen(event) {
     const file = event.target.files?.[0];
-    if (file) {
-      setAvatarFile(file);
-      setRemoveAvatar(false);
-    }
+    if (file) setPendingFile(file);
     event.target.value = "";
+  }
+
+  function handleCropped(file) {
+    setAvatarFile(file);
+    setRemoveAvatar(false);
+    setPendingFile(null);
   }
 
   function handleSubmit(event) {
@@ -183,6 +192,14 @@ export default function ProfileEditPage() {
           </button>
         </div>
       </form>
+
+      {pendingFile && (
+        <AvatarCropModal
+          file={pendingFile}
+          onCropped={handleCropped}
+          onCancel={() => setPendingFile(null)}
+        />
+      )}
 
       <NotificationPreferencesSection />
 
