@@ -40,9 +40,14 @@ vi.mock("./api.js", () => ({
     addParticipants: vi.fn(),
     leaveConversation: vi.fn(),
     getDisconnectImpact: vi.fn(),
+    getUnreadNotificationCount: vi.fn(),
+    getNotifications: vi.fn(),
+    markNotificationsSeen: vi.fn(),
+    markNotificationAddressed: vi.fn(),
   },
   CONVERSATION_LIST_POLL_MS: 1_000_000, // effectively off in tests
   MESSAGE_POLL_MS: 1_000_000,
+  NOTIFICATIONS_POLL_MS: 1_000_000,
 }));
 
 function page(results, next = null) {
@@ -134,6 +139,9 @@ beforeEach(() => {
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
   api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
+  api.getUnreadNotificationCount.mockResolvedValue({ count: 0 });
+  api.getNotifications.mockResolvedValue(page([]));
+  api.markNotificationsSeen.mockResolvedValue({ updated: 0 });
   api.getConversations.mockResolvedValue(page([]));
   api.listUsers.mockResolvedValue(page([]));
   api.getMessages.mockResolvedValue(page([]));

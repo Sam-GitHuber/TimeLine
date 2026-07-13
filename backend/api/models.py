@@ -749,3 +749,154 @@ class Reaction(models.Model):
     def __str__(self):
         target = f"post {self.post_id}" if self.post_id else f"comment {self.comment_id}"
         return f"{self.user} · {self.emoji} · {target}"
+
+
+class Notification(models.Model):
+    """One thing that happened *to* a user, for the in-site activity centre (8).
+
+    A notification is generated where the action happens (a reply, a reaction, a
+    connection request/accept, a group invite) and points the recipient at what
+    to look at. Like ``Reaction``, the **target** is one of a few concrete FKs
+    (post / comment / group / connection) rather than a ``GenericForeignKey`` —
+    the target set is small and known, so concrete FKs are indexable, cascade
+    cleanly, and need no contenttypes machinery. ``kind`` says which FK to read
+    and how to phrase/deep-link the notification.
+
+    **Three states, two nullable timestamps** (the product ask — a notification
+    is *kept*, not dropped the moment it's glanced at):
+
+    - ``seen_at is null``  → **unread**: bold, and it counts toward the nav badge.
+    - ``seen_at`` set, ``addressed_at`` null → **seen**: the badge has been
+      cleared (the centre was opened) but the item still stands out until dealt
+      with.
+    - ``addressed_at`` set → **addressed**: acted on (clicked through, or the
+      underlying request/invite was resolved elsewhere) — dulled but retained in
+      history.
+
+    The badge count is the number of **unread** rows. Notifications are never
+    auto-deleted; the read endpoint just skips any whose target no longer
+    resolves (a reply whose comment was deleted, say) so we never render a dead
+    deep-link.
+    """
+
+    class Kind(models.TextChoices):
+        POST_REPLY = "post_reply", "Reply to your post"
+        COMMENT_REPLY = "comment_reply", "Reply to your comment"
+        REACTION = "reaction", "Reaction to your content"
+        CONNECTION_REQUEST = "connection_request", "Connection request"
+        CONNECTION_ACCEPTED = "connection_accepted", "Connection accepted"
+        GROUP_INVITE = "group_invite", "Group invitation"
+
+    # Kinds a user is allowed to mute in preferences. The request/invite kinds
+    # are deliberately *always-on*: muting "someone wants to connect" or "you've
+    # been invited" would hide something you genuinely need to act on, and with
+    # the badges now unified into the activity centre it'd be the only signal.
+    MUTABLE_KINDS = frozenset(
+        {Kind.POST_REPLY, Kind.COMMENT_REPLY, Kind.REACTION}
+    )
+
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        db_index=True,
+    )
+    # Who did the thing. SET_NULL (not CASCADE) so that if the actor deletes
+    # their account we keep the recipient's history rather than silently
+    # vanishing rows out from under them; the row just reads as generic/system.
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="notifications_sent",
+        null=True,
+        blank=True,
+    )
+    kind = models.CharField(max_length=32, choices=Kind.choices)
+
+    # Concrete-FK target — at most one is set (a future system notice could set
+    # none). ``kind`` tells the serializer which to read. All CASCADE: if the
+    # target is deleted the notification goes with it (nothing to point at).
+    post = models.ForeignKey(
+        Post, on_delete=models.CASCADE, related_name="notifications",
+        null=True, blank=True,
+    )
+    comment = models.ForeignKey(
+        Comment, on_delete=models.CASCADE, related_name="notifications",
+        null=True, blank=True,
+    )
+    group = models.ForeignKey(
+        "Group", on_delete=models.CASCADE, related_name="notifications",
+        null=True, blank=True,
+    )
+    connection = models.ForeignKey(
+        Connection, on_delete=models.CASCADE, related_name="notifications",
+        null=True, blank=True,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    seen_at = models.DateTimeField(null=True, blank=True)
+    addressed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            # At most one concrete target set (zero allowed — a future
+            # system/system-wide notice may point at nothing).
+            models.CheckConstraint(
+                name="notification_at_most_one_target",
+                condition=(
+                    models.Q(post__isnull=True, comment__isnull=True,
+                             group__isnull=True, connection__isnull=True)
+                    | models.Q(post__isnull=False, comment__isnull=True,
+                               group__isnull=True, connection__isnull=True)
+                    | models.Q(post__isnull=True, comment__isnull=False,
+                               group__isnull=True, connection__isnull=True)
+                    | models.Q(post__isnull=True, comment__isnull=True,
+                               group__isnull=False, connection__isnull=True)
+                    | models.Q(post__isnull=True, comment__isnull=True,
+                               group__isnull=True, connection__isnull=False)
+                ),
+            ),
+        ]
+        indexes = [
+            # The newest-first list for one recipient.
+            models.Index(fields=["recipient", "-created_at"]),
+            # The unread-count badge query (recipient + seen_at IS NULL).
+            models.Index(fields=["recipient", "seen_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} → {self.recipient} (from {self.actor})"
+
+
+class NotificationPreference(models.Model):
+    """A user's on/off choice for one notification ``kind`` (Phase 8).
+
+    One row per ``(user, kind)``, with ``enabled``. Modelled as rows (not a JSON
+    blob on the user) so it's queryable and DB-unique, and adding a future kind
+    is a data concern, not a migration of everyone's blob.
+
+    **Absence means enabled** (opt-out): a user with no row for a kind is
+    notified — new kinds notify by default and users mute what they don't want.
+    Only ``Notification.MUTABLE_KINDS`` are ever written here; the always-on
+    request/invite kinds are never suppressed.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notification_preferences",
+    )
+    kind = models.CharField(max_length=32, choices=Notification.Kind.choices)
+    enabled = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "kind"], name="unique_user_notification_kind"
+            ),
+        ]
+
+    def __str__(self):
+        state = "on" if self.enabled else "off"
+        return f"{self.user} · {self.kind} · {state}"

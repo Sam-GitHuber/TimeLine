@@ -13,6 +13,7 @@ content was distilled into these files; the phase-by-phase history lives in git.
 | [messaging.md](messaging.md) | Direct + group messaging, blocking, the clique invariant, interval-clipped history, and the polling model |
 | [groups.md](groups.md) | Private invite-only group timelines, membership/roles, and connection-gated in-group visibility |
 | [reactions.md](reactions.md) | Emoji reactions on posts/comments/replies and their per-viewer pruning |
+| [notifications.md](notifications.md) | The unified activity centre: the `Notification` model, three read-states, per-type preferences, event generation, and the push-ready payload |
 
 **Not here (kept as their own topic docs):**
 
@@ -26,5 +27,5 @@ content was distilled into these files; the phase-by-phase history lives in git.
   tested restore.
 
 **Future work** still lives phase-by-phase in [`../phases/`](../phases/) — those
-are forward-looking plans (8 notifications → 12 open-source/funding), not
+are forward-looking plans (9 iPhone app → 12 open-source/funding), not
 reference. When one is built, distil it into a topic doc here and delete the plan.

@@ -26,6 +26,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from . import notifications
 from .emoji import (
     MAX_REACTIONS_PER_USER_PER_TARGET,
     InvalidEmoji,
@@ -49,6 +50,8 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    Notification,
+    NotificationPreference,
     Participant,
     ParticipantInterval,
     Post,
@@ -67,6 +70,8 @@ from .serializers import (
     GroupSerializer,
     MessageCreateSerializer,
     MessageSerializer,
+    NotificationPreferencesSerializer,
+    NotificationSerializer,
     PostSerializer,
     ReportCreateSerializer,
     UserListSerializer,
@@ -842,6 +847,36 @@ class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
         )
 
 
+class PostDetailView(ReactionContextMixin, generics.RetrieveAPIView):
+    """A single post by id (``GET /api/posts/<pk>/``) — the permalink endpoint.
+
+    Backs the ``/p/:id`` permalink page, which a notification deep-links to so you
+    can open a thread straight to the reply you were notified about — even one 20
+    replies deep, or on a post that isn't on the first page of any feed. Fetching
+    the post by id (rather than hoping it's already loaded in some list) is the
+    only way that's reliable.
+
+    Same private-by-default gate as every other post surface: ``can_view_post``
+    (connection gate, plus active membership for a group post). A post you can't
+    see is a 404 — existence isn't leaked, matching the feed/comments/reactions.
+    The comment *tree* still comes from ``PostCommentsView``; this returns just the
+    post (with its pruned reaction summary, via ``ReactionContextMixin``).
+    """
+
+    serializer_class = PostSerializer
+
+    def get_object(self):
+        post = get_object_or_404(
+            Post.objects.select_related("author", "group").prefetch_related(
+                "images", "reactions"
+            ),
+            pk=self.kwargs["pk"],
+        )
+        if not can_view_post(self.request.user, post):
+            raise NotFound()
+        return post
+
+
 class UserPostsView(ReactionContextMixin, generics.ListAPIView):
     """One person's own posts, newest-first — drives the profile page.
 
@@ -957,7 +992,7 @@ class ConnectView(APIView):
                 # Own savepoint so a lost race rolls back just this insert, not
                 # the whole request transaction (which ATOMIC_REQUESTS may wrap).
                 with transaction.atomic():
-                    Connection.objects.create(
+                    connection = Connection.objects.create(
                         requester=request.user, requestee=target
                     )
             except IntegrityError:
@@ -968,6 +1003,13 @@ class ConnectView(APIView):
                 if existing is None:
                     raise
             else:
+                # Notify the addressee that someone wants to connect (Phase 8).
+                notifications.create_notification(
+                    recipient=target,
+                    actor=request.user,
+                    kind=Notification.Kind.CONNECTION_REQUEST,
+                    connection=connection,
+                )
                 return Response(
                     {
                         "detail": "Request sent.",
@@ -989,6 +1031,15 @@ class ConnectView(APIView):
             existing.status = ACCEPTED
             existing.save(update_fields=["status"])
             promote_shared_chats(existing.requester, existing.requestee, timezone.now())
+            # Approving here resolves *their* request notification to you, and
+            # tells the requester you accepted (Phase 8).
+            notifications.address_connection_request(request.user, existing)
+            notifications.create_notification(
+                recipient=existing.requester,
+                actor=request.user,
+                kind=Notification.Kind.CONNECTION_ACCEPTED,
+                connection=existing,
+            )
             return Response(
                 {"detail": "Connected.", "connection_status": "connected"},
                 status=status.HTTP_200_OK,
@@ -1058,6 +1109,16 @@ class ConnectionRequestActionView(APIView):
             connection.status = ACCEPTED
             connection.save(update_fields=["status"])
             promote_shared_chats(connection.requester, connection.requestee, timezone.now())
+            # Resolve the request notification we're acting on, and notify the
+            # requester that we accepted (Phase 8). Rejecting instead deletes the
+            # Connection, which cascade-deletes its request notification.
+            notifications.address_connection_request(request.user, connection)
+            notifications.create_notification(
+                recipient=connection.requester,
+                actor=request.user,
+                kind=Notification.Kind.CONNECTION_ACCEPTED,
+                connection=connection,
+            )
             return Response({"detail": "Approved."}, status=status.HTTP_200_OK)
         connection.delete()
         return Response({"detail": "Rejected."}, status=status.HTTP_200_OK)
@@ -1143,7 +1204,25 @@ class PostCommentsView(APIView):
             raise ValidationError(
                 {"parent": "You can only reply to a comment on this post."}
             )
-        serializer.save(author=request.user, post=post)
+        comment = serializer.save(author=request.user, post=post)
+        # Notify the person being replied to (Phase 8). A top-level comment
+        # notifies the post's author (post_reply); a reply notifies the parent
+        # comment's author (comment_reply). create_notification handles the
+        # self/mute/visibility rules and no-ops when they apply.
+        if parent is None:
+            notifications.create_notification(
+                recipient=post.author,
+                actor=request.user,
+                kind=Notification.Kind.POST_REPLY,
+                post=post,
+            )
+        else:
+            notifications.create_notification(
+                recipient=parent.author,
+                actor=request.user,
+                kind=Notification.Kind.COMMENT_REPLY,
+                comment=comment,
+            )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -1201,6 +1280,17 @@ def _toggle_reaction(request, target_kwargs):
             # clicks wanted it added, so honour that: swallow the duplicate and
             # return the current summary rather than 500.
             pass
+        # Notify the target's author that someone reacted (Phase 8) — only on an
+        # *add*, never a removal. create_notification dedupes an unread reaction
+        # notification per (recipient, actor, target), so react/un-react/re-react
+        # or a second emoji bumps one row rather than stacking near-duplicates.
+        reacted_target = target_kwargs.get("post") or target_kwargs.get("comment")
+        notifications.create_notification(
+            recipient=reacted_target.author,
+            actor=request.user,
+            kind=Notification.Kind.REACTION,
+            **target_kwargs,
+        )
 
     target = target_kwargs.get("post") or target_kwargs.get("comment")
     summary = summarise_reactions(
@@ -2098,6 +2188,13 @@ class GroupMembersView(APIView):
             raise ValidationError(
                 {"user_id": "They've already been invited."}
             ) from None
+        # Notify the invitee (Phase 8).
+        notifications.create_notification(
+            recipient=invitee,
+            actor=request.user,
+            kind=Notification.Kind.GROUP_INVITE,
+            group=group,
+        )
         return Response(
             {"detail": "Invitation sent."}, status=status.HTTP_201_CREATED
         )
@@ -2223,12 +2320,129 @@ class GroupInviteActionView(APIView):
         invite = get_object_or_404(
             GroupMembership, pk=pk, user=request.user, status=INVITED
         )
+        # Either way the invite has been dealt with — address its notification so
+        # the unified badge stops counting it (reject deletes the membership row
+        # but the notification targets the Group, which lives on). (Phase 8.)
+        notifications.address_group_invite(request.user, invite.group)
         if self.action == "accept":
             invite.status = ACTIVE
             invite.save(update_fields=["status"])
             return Response({"detail": "Joined."}, status=status.HTTP_200_OK)
         invite.delete()
         return Response({"detail": "Declined."}, status=status.HTTP_200_OK)
+
+
+# --- Notifications / activity centre (Phase 8) --------------------------------
+
+
+def _notifications_for(user):
+    """A user's notifications, newest-first, with everything the serializer needs
+    to render text + deep-link URLs prefetched (no N+1 over a page)."""
+    return (
+        Notification.objects.filter(recipient=user)
+        .select_related(
+            "actor", "post", "post__author", "comment", "comment__post", "group"
+        )
+        .order_by("-created_at", "-id")
+    )
+
+
+class NotificationListView(generics.ListAPIView):
+    """Your notifications, newest-first, paginated (``GET /notifications/``).
+
+    Scoped to ``request.user`` as recipient — you only ever see your own. Each
+    item is the push-ready payload (see ``NotificationSerializer``). All target
+    FKs cascade-delete, so a notification never outlives its target; there are no
+    dead deep-links to filter here.
+    """
+
+    serializer_class = NotificationSerializer
+
+    def get_queryset(self):
+        return _notifications_for(self.request.user)
+
+
+class NotificationUnreadCountView(APIView):
+    """Your unread (not-yet-*seen*) notification count, for the nav bell badge
+    (``GET /notifications/unread-count/``). Unread = ``seen_at IS NULL`` — opening
+    the centre clears the badge even though the items stay in the list."""
+
+    def get(self, request):
+        count = Notification.objects.filter(
+            recipient=request.user, seen_at__isnull=True
+        ).count()
+        return Response({"count": count})
+
+
+class NotificationSeenView(APIView):
+    """Mark your unread notifications **seen** (``POST /notifications/seen/``) —
+    called when the activity centre is opened, clearing the badge while keeping
+    every item in the list. Optional body ``{ids: [...]}`` scopes it to specific
+    notifications; omit it to mark all currently-unread seen. Idempotent."""
+
+    def post(self, request):
+        qs = Notification.objects.filter(
+            recipient=request.user, seen_at__isnull=True
+        )
+        ids = request.data.get("ids")
+        if ids is not None:
+            if not isinstance(ids, list):
+                raise ValidationError({"ids": "Expected a list of ids."})
+            qs = qs.filter(id__in=ids)
+        updated = qs.update(seen_at=timezone.now())
+        return Response({"updated": updated})
+
+
+class NotificationAddressedView(APIView):
+    """Mark one notification **addressed** (``POST /notifications/<pk>/addressed/``)
+    — the dulled, dealt-with state — when the user clicks it through to its
+    target. Marking addressed also implies seen (you can't act on what you
+    haven't seen), so we set ``seen_at`` too if it wasn't already. 404 if the
+    notification isn't yours. Idempotent."""
+
+    def post(self, request, pk):
+        notification = get_object_or_404(
+            Notification, pk=pk, recipient=request.user
+        )
+        now = timezone.now()
+        fields = []
+        if notification.addressed_at is None:
+            notification.addressed_at = now
+            fields.append("addressed_at")
+        if notification.seen_at is None:
+            notification.seen_at = now
+            fields.append("seen_at")
+        if fields:
+            notification.save(update_fields=fields)
+        return Response({"detail": "Addressed."})
+
+
+class NotificationPreferencesView(APIView):
+    """Read (GET) or update (PATCH) your per-kind notification preferences at
+    ``/notification-preferences/``.
+
+    Presented as a flat ``{kind: bool}`` map over the **mutable** kinds only
+    (reply/reaction) — the connection/invite kinds are always-on and never
+    appear. Absence of a stored row means enabled; PATCH accepts a partial map
+    and upserts. A muted kind stops new notifications (``create_notification``
+    checks this), which also suppresses future push."""
+
+    def get(self, request):
+        return Response(
+            NotificationPreferencesSerializer().to_representation(request.user)
+        )
+
+    def patch(self, request):
+        serializer = NotificationPreferencesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        for kind, enabled in serializer.validated_data.items():
+            NotificationPreference.objects.update_or_create(
+                user=request.user, kind=kind, defaults={"enabled": enabled}
+            )
+        # Return the full, freshly-merged map so the client has the source of truth.
+        return Response(
+            NotificationPreferencesSerializer().to_representation(request.user)
+        )
 
 
 # --- Content reports (Phase 7 — takedown path) ---------------------------------

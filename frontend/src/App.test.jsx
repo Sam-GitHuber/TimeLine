@@ -39,9 +39,14 @@ vi.mock("./api.js", () => ({
     getGroupInvites: vi.fn(),
     blockUser: vi.fn(),
     unblockUser: vi.fn(),
+    getUnreadNotificationCount: vi.fn(),
+    getNotifications: vi.fn(),
+    markNotificationsSeen: vi.fn(),
+    markNotificationAddressed: vi.fn(),
   },
   CONVERSATION_LIST_POLL_MS: 12000,
   MESSAGE_POLL_MS: 4000,
+  NOTIFICATIONS_POLL_MS: 12000,
 }));
 
 // A DRF-style paginated payload.
@@ -81,6 +86,9 @@ beforeEach(() => {
   api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
   api.getGroups.mockResolvedValue(page([]));
   api.getConversations.mockResolvedValue(page([]));
+  api.getUnreadNotificationCount.mockResolvedValue({ count: 0 });
+  api.getNotifications.mockResolvedValue(page([]));
+  api.markNotificationsSeen.mockResolvedValue({ updated: 0 });
 });
 
 describe("Feed page", () => {

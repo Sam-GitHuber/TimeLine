@@ -7,6 +7,7 @@ import { useGroupsDrawer } from "../groups-drawer.jsx";
 import MessagesDrawer from "./MessagesDrawer.jsx";
 import GroupsDrawer from "./GroupsDrawer.jsx";
 import NavUserMenu from "./NavUserMenu.jsx";
+import ActivityCenter from "./ActivityCenter.jsx";
 
 // The app shell: a top nav plus whichever page is active (<Outlet />).
 //
@@ -35,25 +36,11 @@ export default function Layout() {
     messaging.toggle();
   }
 
-  // Count of pending connection requests, for the nav badge. Shares the
-  // ["connectionRequests"] cache key with the Requests page, so
-  // approving/rejecting there updates this badge automatically.
-  const { data: requestsData } = useQuery({
-    queryKey: ["connectionRequests"],
-    queryFn: api.getConnectionRequests,
-  });
-  // `count` is the paginator's true total; `results.length` would cap at one
-  // page (PAGE_SIZE) and under-report once there are more than a page of them.
-  const pendingCount = requestsData?.count ?? 0;
-
-  // Pending group invitations, for a badge on the Groups link. Shares the
-  // ["groupInvites"] key with the invitations page so accepting/declining there
-  // updates the badge.
-  const { data: groupInvitesData } = useQuery({
-    queryKey: ["groupInvites"],
-    queryFn: api.getGroupInvites,
-  });
-  const groupInviteCount = groupInvitesData?.count ?? 0;
+  // Connection requests and group invitations no longer carry their own nav
+  // badges: as of Phase 8 they generate notifications and surface in the unified
+  // activity centre (the bell), so "someone needs your attention" lives in one
+  // place. The People "Requests" tab and the group-invites inbox still hold the
+  // action lists — they just don't own a nav badge anymore.
 
   // Total unread messages, for the nav badge. Polled (no WebSockets yet — see
   // the Phase 5 doc) so it stays roughly current without the user reloading.
@@ -113,21 +100,12 @@ export default function Layout() {
                 <HomeIcon className="h-5 w-5 sm:hidden" />
                 <span className="hidden sm:inline">Feed</span>
               </NavLink>
-              {/* People is now the relationships hub: Discover + a Requests
-                  tab. The pending-request count rides here (it used to be its
-                  own nav item) so "someone needs your attention" still shows. */}
-              <NavLink
-                to="/people"
-                aria-label={
-                  pendingCount > 0
-                    ? `People, ${pendingCount} pending request${pendingCount === 1 ? "" : "s"}`
-                    : "People"
-                }
-                className={navLinkClass}
-              >
+              {/* People is the relationships hub: Discover + a Requests tab.
+                  The pending-request signal now lives in the activity centre
+                  (Phase 8), not on this link. */}
+              <NavLink to="/people" aria-label="People" className={navLinkClass}>
                 <PeopleIcon className="h-5 w-5 sm:hidden" />
                 <span className="hidden sm:inline">People</span>
-                {pendingCount > 0 && <NavBadge count={pendingCount} />}
               </NavLink>
               {/* Groups is a companion panel too — the mirror of Messages,
                   docked to the left edge. The button toggles the drawer; picking
@@ -136,16 +114,11 @@ export default function Layout() {
                 type="button"
                 onClick={toggleGroups}
                 aria-pressed={groupsDrawer.isOpen}
-                aria-label={
-                  groupInviteCount > 0
-                    ? `Groups, ${groupInviteCount} invitation${groupInviteCount === 1 ? "" : "s"}`
-                    : "Groups"
-                }
+                aria-label="Groups"
                 className={`${navItemBase} ${stateClass(groupsDrawer.isOpen)}`}
               >
                 <GroupsIcon className="h-5 w-5 sm:hidden" />
                 <span className="hidden sm:inline">Groups</span>
-                {groupInviteCount > 0 && <NavBadge count={groupInviteCount} />}
               </button>
               {/* Messages is a companion panel, not a page — the button toggles
                   the drawer so you keep your place in the feed. */}
@@ -164,6 +137,9 @@ export default function Layout() {
                 <span className="hidden sm:inline">Messages</span>
                 {unreadMessages > 0 && <NavBadge count={unreadMessages} />}
               </button>
+              {/* The unified activity centre (Phase 8): one bell for replies,
+                  reactions, connection requests and group invites. */}
+              <ActivityCenter />
               {/* Profile, Settings, Admin and Log out — all "about me" — live
                   behind the avatar so they don't crowd the destinations. */}
               <NavUserMenu />

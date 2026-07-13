@@ -97,6 +97,10 @@ Reactions mirror the [comment tree's](connections.md) per-viewer pruning exactly
   own chip toggles it off; a count reveals the visible "who reacted" list.
   TanStack Query with an optimistic toggle.
 
+Adding a reaction notifies the target's author via the activity centre (a
+`reaction` notification, pruned to the same connection boundary and de-duped while
+unread) — see [notifications](notifications.md).
+
 ## Out of scope
 
 - Reactions on direct/group **messages** (a possible follow-up).

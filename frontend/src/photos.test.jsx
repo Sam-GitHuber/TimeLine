@@ -17,6 +17,9 @@ vi.mock("./api.js", () => ({
     createPost: vi.fn(),
     updateProfile: vi.fn(),
     getComments: vi.fn().mockResolvedValue([]),
+    // ProfileEditPage now hosts the notification-preferences section.
+    getNotificationPreferences: vi.fn().mockResolvedValue({}),
+    updateNotificationPreferences: vi.fn(),
   },
 }));
 

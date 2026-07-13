@@ -20,6 +20,11 @@ const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 // tick more slowly.
 export const MESSAGE_POLL_MS = 4000;
 export const CONVERSATION_LIST_POLL_MS = 12000;
+// The activity-centre bell polls its unread count on the same slow cadence as
+// the conversation list — a notification isn't more urgent than a message, and
+// this keeps the nav badges ticking in step. Same non-breaking swap-to-Channels
+// note as messaging applies (docs/phases/phase-8-notifications.md).
+export const NOTIFICATIONS_POLL_MS = 12000;
 
 function getCookie(name) {
   const match = document.cookie.match(
@@ -210,6 +215,10 @@ export const api = {
     if (group) form.append("group", group);
     return request("/api/posts/", { method: "POST", body: form });
   },
+
+  // A single post by id — the permalink endpoint (`/p/:id`). Gated the same as
+  // every post surface; a post you can't see 404s.
+  getPost: (id) => request(`/api/posts/${id}/`),
 
   // The visible comment tree for a post (already pruned server-side to people
   // you're connected with), and adding a comment/reply.
@@ -420,4 +429,38 @@ export const api = {
 
   rejectGroupInvite: (id) =>
     request(`/api/group-invites/${id}/reject/`, { method: "POST" }),
+
+  // --- Notifications / activity centre (Phase 8) ---------------------------
+
+  // Your notifications, newest-first, paginated. Each carries a server-rendered
+  // `text`, a deep-link `url`, and `seen`/`addressed` flags (the three states).
+  getNotifications: () => request("/api/notifications/"),
+
+  // Unread (not-yet-seen) count for the nav bell badge. Polled.
+  getUnreadNotificationCount: () =>
+    request("/api/notifications/unread-count/"),
+
+  // Mark unread notifications seen (clears the badge, keeps the items). Called
+  // when the activity centre opens. Omit `ids` to mark all unread seen.
+  markNotificationsSeen: (ids) =>
+    request("/api/notifications/seen/", {
+      method: "POST",
+      body: ids ? { ids } : {},
+    }),
+
+  // Mark one notification addressed (the dulled, dealt-with state) on
+  // click-through. Addressing also implies seen.
+  markNotificationAddressed: (id) =>
+    request(`/api/notifications/${id}/addressed/`, { method: "POST" }),
+
+  // Per-kind notification preferences as a { kind: bool } map over the mutable
+  // kinds (reply/reaction). GET reads; PATCH accepts a partial map.
+  getNotificationPreferences: () =>
+    request("/api/notification-preferences/"),
+
+  updateNotificationPreferences: (prefs) =>
+    request("/api/notification-preferences/", {
+      method: "PATCH",
+      body: prefs,
+    }),
 };

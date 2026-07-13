@@ -22,9 +22,13 @@ vi.mock("./api.js", () => ({
       .mockResolvedValue({ results: [], next: null }),
     getUnreadMessageCount: vi.fn().mockResolvedValue({ count: 0 }),
     getGroupInvites: vi.fn().mockResolvedValue({ count: 0, results: [] }),
+    getUnreadNotificationCount: vi.fn().mockResolvedValue({ count: 0 }),
+    getNotifications: vi.fn().mockResolvedValue({ results: [], next: null }),
+    markNotificationsSeen: vi.fn().mockResolvedValue({ updated: 0 }),
   },
   CONVERSATION_LIST_POLL_MS: 12000,
   MESSAGE_POLL_MS: 4000,
+  NOTIFICATIONS_POLL_MS: 12000,
 }));
 
 import { api } from "./api.js";

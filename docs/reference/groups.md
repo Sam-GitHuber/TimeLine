@@ -132,6 +132,10 @@ beside the home feed). The group-invites nav badge lives on the toggle. The
 delete) show only to admins. On narrow viewports the two drawers coordinate
 (opening one closes the other below 800px, via a `useMediaQuery` hook).
 
+Group invitations generate a `group_invite` notification in the unified activity
+centre (accepting or rejecting **addresses** it) — see
+[notifications](notifications.md).
+
 ## Known limitations (documented, as planned)
 
 - An admin can't yet cancel a *pending* invite (the invitee can decline).

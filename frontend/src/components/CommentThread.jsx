@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
@@ -7,6 +7,28 @@ import ReportButton from "./ReportButton.jsx";
 import { api } from "../api.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
+// The set of comment ids that are *ancestors* of `targetId` — the nodes whose
+// replies must be expanded for the target to be visible. Replies start collapsed
+// (see CommentNode), so a deep-linked reply 20 levels down would otherwise be
+// hidden inside collapsed parents; expanding its ancestors reveals it.
+function ancestorIdsOf(comments, targetId) {
+  const found = new Set();
+  function walk(nodes, trail) {
+    for (const node of nodes) {
+      if (node.id === targetId) {
+        trail.forEach((id) => found.add(id));
+        return true;
+      }
+      if (node.replies?.length && walk(node.replies, [...trail, node.id])) {
+        return true;
+      }
+    }
+    return false;
+  }
+  walk(comments, []);
+  return found;
+}
+
 // The comment tree for one post, as a collapsible accordion.
 //
 // The backend returns an already-pruned nested tree: you only ever receive
@@ -14,11 +36,35 @@ import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 // author's comment and everything under it is dropped server-side, so there is
 // no hidden content here to leak (issue #12). The frontend just renders what it
 // gets, nesting `replies` under each comment.
-export default function CommentThread({ postId }) {
+//
+// `highlightCommentId` (from the /p/:id permalink's ?comment=) deep-links to one
+// comment: its ancestors are auto-expanded, it's scrolled into view, and it
+// pulses briefly so the eye lands on it — the point of a "someone replied" link.
+export default function CommentThread({ postId, highlightCommentId = null }) {
   const { data: comments, isLoading, isError, error } = useQuery({
     queryKey: ["comments", postId],
     queryFn: () => api.getComments(postId),
   });
+
+  // Which comment to visually highlight; cleared after a moment so the pulse
+  // fades. Initialised from the prop — the parent remounts this thread with a
+  // `key` tied to the target, so a new deep-link re-arms the highlight cleanly.
+  const [highlightId, setHighlightId] = useState(highlightCommentId);
+
+  // Once the tree is loaded, scroll the target into view and let the pulse fade.
+  useEffect(() => {
+    if (!highlightCommentId || !comments) return;
+    const el = document.getElementById(`comment-${highlightCommentId}`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    const timer = setTimeout(() => setHighlightId(null), 2600);
+    return () => clearTimeout(timer);
+  }, [comments, highlightCommentId]);
+
+  const expandIds =
+    highlightCommentId && comments
+      ? ancestorIdsOf(comments, highlightCommentId)
+      : null;
 
   return (
     <div className="mt-4 rounded-2xl border border-line bg-raised p-4">
@@ -43,6 +89,8 @@ export default function CommentThread({ postId }) {
                   key={comment.id}
                   comment={comment}
                   postId={postId}
+                  expandIds={expandIds}
+                  highlightId={highlightId}
                 />
               ))}
             </ul>
@@ -63,18 +111,29 @@ export default function CommentThread({ postId }) {
 // just the sub-thread you want — much easier to follow a long thread (and less
 // overwhelming) than a wall of nested replies. Opening the reply box, or having
 // posted a reply, reveals the sub-thread so you always see your own reply.
-function CommentNode({ comment, postId }) {
+function CommentNode({ comment, postId, expandIds = null, highlightId = null }) {
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
-  const [collapsed, setCollapsed] = useState(replies.length > 0);
+  // Replies start collapsed — unless this node is an ancestor of a deep-linked
+  // target (expandIds), in which case it opens so the target is reachable.
+  const [collapsed, setCollapsed] = useState(
+    replies.length > 0 && !(expandIds && expandIds.has(comment.id))
+  );
+  const isHighlighted = highlightId != null && comment.id === highlightId;
 
   return (
-    <li className="flex gap-2.5">
+    <li className="flex gap-2.5" id={`comment-${comment.id}`}>
       <Link to={`/u/${comment.author.id}`} tabIndex={-1} aria-hidden="true">
         <Avatar user={comment.author} size="sm" />
       </Link>
 
-      <div className="min-w-0 flex-1">
+      <div
+        className={`min-w-0 flex-1 ${
+          isHighlighted
+            ? "-mx-2 rounded-xl bg-accent-tint px-2 py-1 ring-2 ring-accent transition"
+            : ""
+        }`}
+      >
         <div className="flex items-baseline gap-x-2">
           <Link
             to={`/u/${comment.author.id}`}
@@ -155,7 +214,13 @@ function CommentNode({ comment, postId }) {
         {replies.length > 0 && !collapsed && (
           <ul className="mt-3 space-y-4 border-l-2 border-line pl-3">
             {replies.map((reply) => (
-              <CommentNode key={reply.id} comment={reply} postId={postId} />
+              <CommentNode
+                key={reply.id}
+                comment={reply}
+                postId={postId}
+                expandIds={expandIds}
+                highlightId={highlightId}
+              />
             ))}
           </ul>
         )}

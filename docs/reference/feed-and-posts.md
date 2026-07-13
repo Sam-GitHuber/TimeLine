@@ -52,6 +52,19 @@ a proxy / on a separate API domain). Nav badges read the paginator's `count`, no
   `["users"]` / `["user", id]` so posting or connecting refreshes the affected
   views immediately.
 
+### Permalink — a single post by id
+
+- **`GET /api/posts/<id>/`** (`PostDetailView`) returns one post, gated by the
+  same `can_view_post` wall as the feed (a post you can't see 404s — existence
+  isn't leaked). It backs the **`/p/:id` permalink page** (`PostPage`), which
+  renders the post with its comment thread opened.
+- **Why fetch by id rather than reuse a feed row:** notifications
+  ([notifications.md](notifications.md)) deep-link here, and the target post may
+  be nowhere near the first page of any feed — fetching it directly is the only
+  reliable way to open an old thread. `?comment=<id>` on the page scrolls to and
+  highlights a specific comment (auto-expanding its collapsed ancestors), so
+  "someone replied" lands you on the exact reply, even one deep in the tree.
+
 ## Photos
 
 - **`PostImage`** table (FK to `Post`) — **many photos per post**, not a single

@@ -16,6 +16,7 @@ import { GroupsDrawerProvider, useGroupsDrawer } from "./groups-drawer.jsx";
 // opening one closes the other. Kept in sync with Layout.jsx's coordination.
 const DRAWERS_DONT_FIT = "(max-width: 799px)";
 import FeedPage from "./pages/FeedPage.jsx";
+import PostPage from "./pages/PostPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import ProfileEditPage from "./pages/ProfileEditPage.jsx";
 import PeoplePage from "./pages/PeoplePage.jsx";
@@ -102,6 +103,9 @@ export default function App() {
           }
         >
           <Route index element={<FeedPage />} />
+          {/* Post permalink — where notifications deep-link (optionally with
+              ?comment=<id> to open the thread at a specific reply). */}
+          <Route path="p/:id" element={<PostPage />} />
           <Route path="people" element={<PeoplePage />} />
           {/* Requests folded into the People hub as a tab; the old URL still
               works, landing on that tab. */}

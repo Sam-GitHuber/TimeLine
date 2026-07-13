@@ -191,9 +191,9 @@ privacy-first principle.
 ## Roadmap (phases)
 
 **Every phase ends in something that can actually be run and tested** — a
-demoable product, not just internal plumbing. **Done** phases (0–7b) are no longer
+demoable product, not just internal plumbing. **Done** phases (0–8) are no longer
 tracked one-file-each; their durable reference lives in `docs/reference/` (and the
-ops runbooks) — the "Doc" column below points there. **Future** phases (8–12) are
+ops runbooks) — the "Doc" column below points there. **Future** phases (9–12) are
 still plans in `docs/phases/`, sketched now and refined into full detail when
 we're about to start them; when one ships, its plan is distilled into a reference
 doc and deleted.
@@ -210,7 +210,7 @@ doc and deleted.
 | 6a | Group messaging | Group conversations (extends DMs); leave a conversation | done · `reference/messaging.md` |
 | 7 | Self-hosted private beta | The finished app live on a wiped spare **home PC**, on a real HTTPS URL; close friends/family log in and bug-test it | done · `deploy.md`, `backup-restore.md` |
 | 7b | Emoji reactions | React to any post/comment/reply with any keyboard emoji; aggregated counts respecting visibility | done · `reference/reactions.md` |
-| 8 | Notifications & activity centre | An in-site notification centre (kept, not vanishing on tap; handled ones dulled) with per-type preferences; events for post/comment replies, reactions, connection requests, group invites | planned · `phases/phase-8-notifications.md` |
+| 8 | Notifications & activity centre | An in-site notification centre (kept, not vanishing on tap; handled ones dulled) with per-type preferences; events for post/comment replies, reactions, connection requests, group invites | done · `reference/notifications.md` |
 | 9 | iPhone app | An installable iOS app hitting the same backend, with push notifications | planned · `phases/phase-9-iphone-app.md` |
 | 10 | Android app | An installable Android app hitting the same backend, with push notifications | planned · `phases/phase-10-android-app.md` |
 | 11 | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | planned · `phases/phase-11-aws-migration.md` |

@@ -10,6 +10,7 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    Notification,
     Post,
     PostImage,
     Report,
@@ -544,3 +545,147 @@ class ReportCreateSerializer(serializers.ModelSerializer):
                 "Report exactly one of a post or a comment."
             )
         return attrs
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    """One activity-centre notification, in a **push-ready** shape (Phase 8).
+
+    The same payload the web dropdown renders is what the future iPhone/Android
+    phases (9–10) turn into an OS notification + deep-link — so the mobile phases
+    add only the *transport*, never a new API shape. The two pieces that make it
+    reusable:
+
+    - ``text`` — a human-readable line, phrased **server-side** per ``kind`` so
+      the web app and a future push payload share one wording.
+    - ``url`` — the in-app route to open. Post/reply/reaction kinds deep-link to
+      the post **permalink** (``/p/<id>``); a comment reply/reaction adds
+      ``?comment=<id>`` so the thread opens *at that comment* (even one 20 replies
+      deep). Requests/invites point at their existing inboxes. ``target`` also
+      carries ``{type, id}`` for clients that want to route by target directly.
+
+    ``seen``/``addressed`` are the two read-state booleans (see ``Notification``).
+    All four target FKs cascade-delete, so a notification never outlives its
+    target — there are no dangling deep-links to filter out.
+    """
+
+    actor = AuthorSerializer(read_only=True)
+    text = serializers.SerializerMethodField()
+    target = serializers.SerializerMethodField()
+    url = serializers.SerializerMethodField()
+    seen = serializers.SerializerMethodField()
+    addressed = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notification
+        fields = (
+            "id",
+            "kind",
+            "actor",
+            "text",
+            "target",
+            "url",
+            "created_at",
+            "seen",
+            "addressed",
+        )
+
+    def _actor_name(self, obj):
+        return obj.actor.display_name if obj.actor else "Someone"
+
+    def get_seen(self, obj):
+        return obj.seen_at is not None
+
+    def get_addressed(self, obj):
+        return obj.addressed_at is not None
+
+    def get_text(self, obj):
+        name = self._actor_name(obj)
+        K = Notification.Kind
+        if obj.kind == K.POST_REPLY:
+            return f"{name} replied to your post"
+        if obj.kind == K.COMMENT_REPLY:
+            return f"{name} replied to your comment"
+        if obj.kind == K.REACTION:
+            what = "post" if obj.post_id else "comment"
+            return f"{name} reacted to your {what}"
+        if obj.kind == K.CONNECTION_REQUEST:
+            return f"{name} asked to connect"
+        if obj.kind == K.CONNECTION_ACCEPTED:
+            return f"{name} accepted your connection request"
+        if obj.kind == K.GROUP_INVITE:
+            group_name = obj.group.name if obj.group_id else "a group"
+            return f"{name} invited you to {group_name}"
+        return f"{name} did something"
+
+    def get_target(self, obj):
+        """``{type, id}`` for the concrete thing the notification points at, or
+        ``None``. Lets a client deep-link precisely (now or in a future app)."""
+        if obj.post_id:
+            return {"type": "post", "id": obj.post_id}
+        if obj.comment_id:
+            return {"type": "comment", "id": obj.comment_id}
+        if obj.group_id:
+            return {"type": "group", "id": obj.group_id}
+        if obj.connection_id:
+            return {"type": "connection", "id": obj.connection_id}
+        return None
+
+    def get_url(self, obj):
+        K = Notification.Kind
+        # Post permalink (/p/<id>), with ?comment=<id> when the notification is
+        # about a specific comment so the thread opens right at it.
+        if obj.kind == K.POST_REPLY and obj.post_id:
+            return f"/p/{obj.post_id}"
+        if obj.kind == K.COMMENT_REPLY and obj.comment_id:
+            return f"/p/{obj.comment.post_id}?comment={obj.comment_id}"
+        if obj.kind == K.REACTION:
+            if obj.comment_id:
+                return f"/p/{obj.comment.post_id}?comment={obj.comment_id}"
+            if obj.post_id:
+                return f"/p/{obj.post_id}"
+        if obj.kind == K.CONNECTION_REQUEST:
+            return "/requests"
+        if obj.kind == K.CONNECTION_ACCEPTED and obj.actor_id:
+            return f"/u/{obj.actor_id}"
+        if obj.kind == K.GROUP_INVITE:
+            return "/group-invites"
+        return "/"
+
+
+class NotificationPreferencesSerializer(serializers.Serializer):
+    """The user's per-kind on/off map for the **mutable** kinds (Phase 8).
+
+    Not a ``ModelSerializer``: preferences are stored one row per (user, kind)
+    with *absence meaning enabled*, so the API presents them as a flat
+    ``{kind: bool}`` map over exactly ``Notification.MUTABLE_KINDS`` (the
+    request/invite kinds are always-on and never appear here). GET fills defaults
+    for kinds with no row; PATCH accepts a partial map and upserts.
+    """
+
+    def to_representation(self, user):
+        rows = {
+            p.kind: p.enabled
+            for p in user.notification_preferences.all()
+        }
+        return {
+            kind: rows.get(kind, True)
+            for kind in sorted(Notification.MUTABLE_KINDS)
+        }
+
+    def validate(self, attrs):
+        # DRF hands raw fields in via the view; we validate the incoming map here.
+        data = self.initial_data
+        if not isinstance(data, dict):
+            raise serializers.ValidationError("Expected a {kind: bool} object.")
+        cleaned = {}
+        for kind, enabled in data.items():
+            if kind not in Notification.MUTABLE_KINDS:
+                raise serializers.ValidationError(
+                    {kind: "Not a mutable notification kind."}
+                )
+            if not isinstance(enabled, bool):
+                raise serializers.ValidationError(
+                    {kind: "Expected true or false."}
+                )
+            cleaned[kind] = enabled
+        return cleaned
