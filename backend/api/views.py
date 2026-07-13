@@ -16,6 +16,7 @@ from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import (
+    MethodNotAllowed,
     NotFound,
     PermissionDenied,
     ValidationError,
@@ -847,20 +848,35 @@ class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
         )
 
 
-class PostDetailView(ReactionContextMixin, generics.RetrieveAPIView):
-    """A single post by id (``GET /api/posts/<pk>/``) — the permalink endpoint.
+class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView):
+    """A single post by id (``GET``), plus owner-only edit (``PATCH``) and delete
+    (``DELETE``) — all on ``/api/posts/<pk>/``.
 
-    Backs the ``/p/:id`` permalink page, which a notification deep-links to so you
-    can open a thread straight to the reply you were notified about — even one 20
-    replies deep, or on a post that isn't on the first page of any feed. Fetching
-    the post by id (rather than hoping it's already loaded in some list) is the
-    only way that's reliable.
+    **GET** backs the ``/p/:id`` permalink page, which a notification deep-links to
+    so you can open a thread straight to the reply you were notified about — even
+    one 20 replies deep, or on a post that isn't on the first page of any feed.
+    Fetching the post by id (rather than hoping it's already loaded in some list)
+    is the only way that's reliable.
 
     Same private-by-default gate as every other post surface: ``can_view_post``
     (connection gate, plus active membership for a group post). A post you can't
     see is a 404 — existence isn't leaked, matching the feed/comments/reactions.
     The comment *tree* still comes from ``PostCommentsView``; this returns just the
     post (with its pruned reaction summary, via ``ReactionContextMixin``).
+
+    **Edit / delete (issue #62)** are owner-only and share the same route:
+
+    - **PATCH** updates the post's **text** (v1 scope — adding/removing photos is
+      deliberately out of scope) and stamps ``edited_at`` so the feed can show a
+      quiet "· edited" marker. Silently changing content others have already read
+      would be a trust problem, so the marker isn't optional.
+    - **DELETE** removes the post; the model's CASCADE relations take its images,
+      comments (and replies), reactions, reports and notifications with it.
+
+    The mutation gate mirrors ``GroupDetailView``: a post you can't see is a 404
+    (existence hidden), a post you *can* see but don't own is a 403 — the owner
+    check never leaks a hidden post's existence. ``PUT`` is disallowed (405); a
+    partial ``PATCH`` is the only edit shape (text is the sole writable field).
     """
 
     serializer_class = PostSerializer
@@ -875,6 +891,39 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveAPIView):
         if not can_view_post(self.request.user, post):
             raise NotFound()
         return post
+
+    def _owned_object(self):
+        """The post, gated for a mutation: 404 if not visible (existence hidden),
+        else 403 unless it's the requester's own post."""
+        post = self.get_object()
+        if post.author_id != self.request.user.id:
+            raise PermissionDenied("You can only edit or delete your own posts.")
+        return post
+
+    def put(self, request, *args, **kwargs):
+        # Only a partial text edit is supported — text is the sole writable field,
+        # so a full-replace PUT has no meaning here.
+        raise MethodNotAllowed("PUT")
+
+    def patch(self, request, *args, **kwargs):
+        post = self._owned_object()
+        serializer = self.get_serializer(post, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        # Text-only edit: the post must still have text or at least one photo,
+        # mirroring the create rule (a post can't be emptied to nothing).
+        new_text = serializer.validated_data.get("text", post.text)
+        if not new_text and not post.images.exists():
+            raise ValidationError(
+                {"detail": "A post needs some text or at least one photo."}
+            )
+        # edited_at is read-only from the body; stamp it here on a real edit.
+        serializer.save(edited_at=timezone.now())
+        return Response(serializer.data)
+
+    def delete(self, request, *args, **kwargs):
+        post = self._owned_object()
+        post.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class UserPostsView(ReactionContextMixin, generics.ListAPIView):

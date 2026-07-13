@@ -41,6 +41,13 @@ class Post(models.Model):
     )
     text = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # When the author last edited the post's text (issue #62). **Null until the
+    # first edit** — that's how "created but never edited" is told apart, so the
+    # feed can show a quiet "· edited" marker only on posts that really were
+    # changed. Set explicitly in the update view (not ``auto_now``) so it tracks
+    # a real content edit, never an incidental ``save()`` — mirroring how
+    # ``Conversation.updated_at`` is bumped deliberately, not automatically.
+    edited_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         # Default to newest-first everywhere this model is queried. The ``-id``

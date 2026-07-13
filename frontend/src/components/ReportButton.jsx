@@ -35,7 +35,10 @@ export default function ReportButton({ postId = null, commentId = null, authorId
   );
 }
 
-function ReportModal({ postId, commentId, onClose }) {
+// The report dialog itself, exported so the post ⋯ overflow menu (issue #62)
+// can open it as its "Report" item without re-rendering the inline trigger.
+// `ReportButton` (the inline trigger) is still used for comments.
+export function ReportModal({ postId, commentId, onClose }) {
   const dialogRef = useRef(null);
   const [reason, setReason] = useState("");
   const [error, setError] = useState(null);
