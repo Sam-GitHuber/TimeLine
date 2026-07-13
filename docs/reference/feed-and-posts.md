@@ -134,6 +134,12 @@ square* (`cropImage.js`), capped at 1024px and re-encoded as JPEG.
   runs but is a no-op on an already-square upload.
 - **Shared by user and group avatars** — the same modal wires into both
   `ProfileEditPage` and `GroupFormPage`, since both render the same circle.
+- **Undecodable files fail early with a message.** The modal probes whether the
+  browser can decode the chosen file; if not (an unsupported type the file picker
+  let through — e.g. HEIC on a browser without HEIC support — or a corrupt file),
+  it shows "that file couldn't be opened, try a JPEG/PNG/WebP/GIF" instead of a
+  cropper that never lets you continue. The backend still rejects the same files;
+  this just surfaces it before the user tries to save.
 
 ## Storage & media serving
 

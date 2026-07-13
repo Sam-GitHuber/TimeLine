@@ -19,10 +19,24 @@ export default function AvatarCropModal({ file, onCropped, onCancel }) {
   const [croppedPixels, setCroppedPixels] = useState(null);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState(null);
+  const [loadError, setLoadError] = useState(false);
 
   // An object URL for the chosen file; revoked on unmount.
   const imageSrc = useMemo(() => URL.createObjectURL(file), [file]);
   useEffect(() => () => URL.revokeObjectURL(imageSrc), [imageSrc]);
+
+  // Probe whether the browser can actually decode this file, independently of
+  // react-easy-crop. If it can't (an unsupported type the file picker still let
+  // through — e.g. HEIC on a browser without HEIC support — or a corrupt file),
+  // the cropper would just sit there and never report a crop, leaving "Use
+  // photo" disabled forever with no explanation. Instead we detect it and show
+  // a clear message. (The backend rejects the same files, but by then the user
+  // has already tried to save; catching it here is friendlier.)
+  useEffect(() => {
+    const probe = new Image();
+    probe.onerror = () => setLoadError(true);
+    probe.src = imageSrc;
+  }, [imageSrc]);
 
   // Esc cancels, like every other dialog in the app.
   useEffect(() => {
@@ -76,54 +90,71 @@ export default function AvatarCropModal({ file, onCropped, onCancel }) {
           <h2 className="font-display text-lg font-bold -tracking-[0.01em] text-ink">
             Reframe your photo
           </h2>
-          <p className="mt-1 text-sm text-ink-soft">
-            Drag to reposition. Zoom with the slider, scroll, or pinch. The
-            circle is what people will see.
+          {!loadError && (
+            <p className="mt-1 text-sm text-ink-soft">
+              Drag to reposition. Zoom with the slider, scroll, or pinch. The
+              circle is what people will see.
+            </p>
+          )}
+        </div>
+
+        {loadError ? (
+          // The browser couldn't decode the file. Explain it and name the types
+          // that do work (mirrors the backend's allow-list), so the only way
+          // forward is Cancel + choose another photo.
+          <p
+            role="alert"
+            className="mx-5 mt-4 rounded-xl bg-accent-tint px-4 py-6 text-center text-sm text-ink-soft"
+          >
+            That file couldn’t be opened — it may be an unsupported type or
+            corrupted. Try a JPEG, PNG, WebP or GIF.
           </p>
-        </div>
+        ) : (
+          <>
+            {/* react-easy-crop fills this relatively-positioned box. cropShape
+                "round" dims everything outside the circle — the crop preview. */}
+            <div className="relative mt-4 h-72 w-full bg-black">
+              <Cropper
+                image={imageSrc}
+                crop={crop}
+                zoom={zoom}
+                aspect={1}
+                cropShape="round"
+                showGrid={false}
+                minZoom={1}
+                maxZoom={3}
+                onCropChange={setCrop}
+                onZoomChange={setZoom}
+                onCropComplete={(_area, pixels) => setCroppedPixels(pixels)}
+              />
+            </div>
 
-        {/* react-easy-crop fills this relatively-positioned box. cropShape
-            "round" dims everything outside the circle — the crop preview. */}
-        <div className="relative mt-4 h-72 w-full bg-black">
-          <Cropper
-            image={imageSrc}
-            crop={crop}
-            zoom={zoom}
-            aspect={1}
-            cropShape="round"
-            showGrid={false}
-            minZoom={1}
-            maxZoom={3}
-            onCropChange={setCrop}
-            onZoomChange={setZoom}
-            onCropComplete={(_area, pixels) => setCroppedPixels(pixels)}
-          />
-        </div>
-
-        <div className="flex items-center gap-3 px-5 pt-4">
-          <span aria-hidden="true" className="text-ink-faint">
-            {/* small mountain (zoom out) */}
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M4 19l5-7 4 5 3-4 4 6z" />
-            </svg>
-          </span>
-          <input
-            type="range"
-            min={1}
-            max={3}
-            step={0.01}
-            value={zoom}
-            onChange={(e) => setZoom(Number(e.target.value))}
-            aria-label="Zoom"
-            className="h-1 flex-1 cursor-pointer accent-accent"
-          />
-          <span aria-hidden="true" className="text-ink-soft">
-            {/* larger mountain (zoom in) */}
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M4 19l5-7 4 5 3-4 4 6z" />
-            </svg>
-          </span>
-        </div>
+            <div className="flex items-center gap-3 px-5 pt-4">
+              <span aria-hidden="true" className="text-ink-faint">
+                {/* small mountain (zoom out) */}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M4 19l5-7 4 5 3-4 4 6z" />
+                </svg>
+              </span>
+              <input
+                type="range"
+                min={1}
+                max={3}
+                step={0.01}
+                value={zoom}
+                onChange={(e) => setZoom(Number(e.target.value))}
+                aria-label="Zoom"
+                className="h-1 flex-1 cursor-pointer accent-accent"
+              />
+              <span aria-hidden="true" className="text-ink-soft">
+                {/* larger mountain (zoom in) */}
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M4 19l5-7 4 5 3-4 4 6z" />
+                </svg>
+              </span>
+            </div>
+          </>
+        )}
 
         {error && (
           <p role="alert" className="px-5 pt-3 text-sm text-red-600">
@@ -137,16 +168,18 @@ export default function AvatarCropModal({ file, onCropped, onCancel }) {
             onClick={onCancel}
             className="btn btn-ghost btn-sm"
           >
-            Cancel
+            {loadError ? "Close" : "Cancel"}
           </button>
-          <button
-            type="button"
-            onClick={handleUse}
-            disabled={!croppedPixels || working}
-            className="btn btn-primary btn-sm"
-          >
-            {working ? "Working…" : "Use photo"}
-          </button>
+          {!loadError && (
+            <button
+              type="button"
+              onClick={handleUse}
+              disabled={!croppedPixels || working}
+              className="btn btn-primary btn-sm"
+            >
+              {working ? "Working…" : "Use photo"}
+            </button>
+          )}
         </div>
       </div>
     </div>,

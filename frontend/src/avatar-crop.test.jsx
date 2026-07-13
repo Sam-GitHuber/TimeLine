@@ -62,6 +62,30 @@ describe("AvatarCropModal", () => {
     expect(onCropped.mock.calls[0][0]).toBeInstanceOf(File);
   });
 
+  it("shows a clear message when the browser can't decode the file", async () => {
+    // jsdom never loads images, so fake an <img> whose src always errors — the
+    // "unsupported / corrupt file" case (e.g. HEIC on a browser without HEIC).
+    const OriginalImage = global.Image;
+    global.Image = class {
+      set src(_value) {
+        if (this.onerror) queueMicrotask(() => this.onerror());
+      }
+    };
+    try {
+      const onCropped = vi.fn();
+      render(
+        <AvatarCropModal file={chosenFile()} onCropped={onCropped} onCancel={vi.fn()} />
+      );
+
+      expect(await screen.findByText(/couldn.t be opened/i)).toBeInTheDocument();
+      // No way to save a file that won't decode — only a way out.
+      expect(screen.queryByRole("button", { name: "Use photo" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    } finally {
+      global.Image = OriginalImage;
+    }
+  });
+
   it("cancels via the Cancel button and via Escape", async () => {
     const user = userEvent.setup();
     const onCancel = vi.fn();
