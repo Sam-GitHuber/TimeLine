@@ -7,7 +7,9 @@ HTTPS URL, so a few close friends/family can log in and use everything. It's
 **not** the final home — it's the cheap, fully reversible way to prove the app is
 worth keeping before paying for cloud (the AWS migration is a later, deferred
 step). Off-box backups (`backup-restore.md`) are what make that migration
-low-risk.
+low-risk. When it's time to shut the app down for good, `docs/teardown.md` is the
+reverse of this doc — the checklist for destroying every credential, closing the
+accounts, and deleting the data.
 
 **The box:** ASUS PC, hostname `timeline-server`, a dedicated non-root admin user, reached over
 SSH on the LAN (`ssh timeline-server`). OS on the 250 GB SATA SSD; **all app data
