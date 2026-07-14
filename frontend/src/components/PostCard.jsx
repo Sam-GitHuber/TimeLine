@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import Avatar from "./Avatar.jsx";
 import CommentThread from "./CommentThread.jsx";
 import Lightbox from "./Lightbox.jsx";
 import ReactionBar from "./ReactionBar.jsx";
@@ -59,7 +60,20 @@ export default function PostCard({
   return (
     <article className="tl-entry">
       <div className="tl-rail">
-        <span className="tl-node" aria-hidden="true" />
+        {/* The post's marker on the line is the poster's avatar (issue #64) — a
+            warmer, scannable-by-face cue than a plain dot. This avatar link is
+            decorative (tabIndex -1 + aria-hidden): the author's name below is
+            the single accessible link to the same profile, matching the
+            avatar+name pattern in CommentThread / GroupMembersPanel and avoiding
+            two identical adjacent links. Compose "now" node + day dots stay. */}
+        <Link
+          to={`/u/${author.id}`}
+          className="tl-avatar-node"
+          tabIndex={-1}
+          aria-hidden="true"
+        >
+          <Avatar user={author} size="xs" />
+        </Link>
         <time
           className="font-mono text-xs tabular-nums text-ink-faint"
           dateTime={post.created_at}

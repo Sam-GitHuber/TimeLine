@@ -72,6 +72,7 @@
 :root {
   --tl-gutter: 76px; /* width of the timeline's time rail */
   --tl-node: 12px;
+  --tl-node-avatar: 24px; /* poster avatar marking a post on the rail (#64) */
 }
 @media (max-width: 560px) {
   :root {
@@ -231,9 +232,33 @@
     z-index: 2;
     transition: border-color 0.15s ease, transform 0.15s ease;
   }
-  .tl-entry:hover .tl-node {
-    border-color: var(--color-accent);
-    transform: scale(1.12);
+  /* A post's marker is the poster's avatar (#64), centred on the spine with the
+     same right-offset formula as the dot so it stays threaded at any gutter
+     width. `line-height:0` drops the inline baseline strut that would otherwise
+     nudge the avatar off-centre inside the link. The ring + hover live on the
+     avatar element itself (`> *`), not the link, so the surface halo and accent
+     hug the visible circle exactly rather than the link's box. The halo hides
+     the spine right behind the bead so the line reads as threading through it. */
+  .tl-avatar-node {
+    position: absolute;
+    top: 3px;
+    right: calc(-1 * var(--tl-node-avatar) / 2 - 1px);
+    width: var(--tl-node-avatar);
+    height: var(--tl-node-avatar);
+    z-index: 2;
+    line-height: 0;
+  }
+  .tl-avatar-node > * {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px var(--color-surface);
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+  }
+  .tl-entry:hover .tl-avatar-node > * {
+    box-shadow: 0 0 0 2px var(--color-accent);
+    transform: scale(1.08);
   }
   .tl-body {
     padding-left: 20px;
@@ -287,10 +312,26 @@
   .tl-compose {
     border-bottom: 1px solid var(--color-line);
   }
+  /* Lift the pulsing "now" tip to the very top of the compose block so it caps
+     the line above your avatar (which now hangs on the spine below it). */
   .tl-compose .tl-node {
+    top: 1px;
     background: var(--color-accent);
     border-color: var(--color-accent);
     box-shadow: 0 0 0 4px var(--color-accent-tint);
+  }
+  /* Your own avatar sits on the spine like a post's marker (#64), just below the
+     "now" tip. No hover ring here — the accent-on-hover rule is scoped to
+     .tl-entry, so reusing .tl-avatar-node gives compose a plain bead for free. */
+  .tl-compose .tl-avatar-node {
+    top: 26px;
+  }
+  /* With the avatar moved onto the rail, the body no longer holds it: drop the
+     textarea down to sit beside the avatar, keeping the post-body left inset. */
+  .tl-compose-body {
+    padding-left: 20px;
+    padding-top: 24px;
+    min-width: 0;
   }
   .tl-compose .tl-node::after {
     content: "";

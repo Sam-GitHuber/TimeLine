@@ -25,6 +25,9 @@ function colorFor(seed) {
 
 export default function Avatar({ user, size = "md" }) {
   const sizes = {
+    // `xs` marks a post on the timeline rail (issue #64) — small enough to sit
+    // on the spine without crowding the clock time or author name.
+    xs: "h-6 w-6 text-[0.7rem]",
     sm: "h-8 w-8 text-sm",
     md: "h-10 w-10 text-base",
     lg: "h-20 w-20 text-3xl",

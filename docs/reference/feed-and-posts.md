@@ -169,6 +169,22 @@ counts exclude your own messages.
 - **Avatars** surface as a small square `avatar_thumb` on post/comment authors,
   the people list, and profile headers; `Avatar.jsx` renders the photo when
   present, else a coloured initial.
+- **The post's marker on the timeline rail is the poster's avatar** (issue #64),
+  not a plain dot — a warmer, scan-by-face cue that fits the "living line" look.
+  It's an `Avatar size="xs"` in a profile link (`.tl-avatar-node`), centred on
+  the spine with the same right-offset formula the old dot used (so it stays
+  threaded at any gutter width); a surface-coloured halo separates the bead from
+  the line, and hover adds an accent ring — both on the avatar element itself so
+  they hug the visible circle. The avatar link is decorative (`tabIndex=-1` +
+  `aria-hidden`) — the author's name beside it is the single accessible link to
+  the profile, matching the avatar+name pattern in `CommentThread` /
+  `GroupMembersPanel`. The **day-divider** dots (`.tl-day-dot`) stay plain.
+- **The compose box mirrors this**: the pulsing green **"now"** node (`.tl-node`,
+  TimeLine's live-tip "logo") is lifted to cap the top of the line, and *your own*
+  avatar hangs on the spine just below it (same `.tl-avatar-node`), so the live
+  end of the timeline reads like every other entry. The compose avatar gets no
+  accent hover ring — that rule is scoped to `.tl-entry`, so `.tl-compose` reuses
+  the class and gets a plain bead for free.
 
 ### The imaging pipeline (`api/imaging.py`)
 
