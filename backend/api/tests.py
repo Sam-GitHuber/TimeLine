@@ -144,6 +144,35 @@ class SettingsHardeningTests(SimpleTestCase):
         self.assertTrue(module.SECRET_KEY)
         self.assertIn("insecure", module.SECRET_KEY)
 
+    # A real secret key, so these email-guard tests get *past* the key guard
+    # above and reach the email-backend selection.
+    _PROD_ENV = {"DJANGO_DEBUG": "false", "DJANGO_SECRET_KEY": "k" * 50}
+
+    def test_missing_email_host_with_debug_off_refuses_to_boot(self):
+        # Production with no EMAIL_HOST and no explicit opt-in must fail loudly,
+        # so a misconfigured deploy can't silently log password-reset tokens to
+        # the container logs in plaintext (the console backend prints them).
+        with mock.patch.dict(os.environ, self._PROD_ENV, clear=True):
+            with self.assertRaisesRegex(ImproperlyConfigured, "EMAIL_HOST"):
+                load_settings_isolated()
+
+    def test_console_fallback_can_be_opted_into_for_a_lan_test(self):
+        # A deliberate LAN test (DEBUG off, no provider yet) opts back in.
+        env = {**self._PROD_ENV, "EMAIL_CONSOLE_FALLBACK": "true"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            module = load_settings_isolated()
+        self.assertEqual(
+            module.EMAIL_BACKEND, "django.core.mail.backends.console.EmailBackend"
+        )
+
+    def test_email_host_selects_smtp_with_debug_off(self):
+        env = {**self._PROD_ENV, "EMAIL_HOST": "smtp.resend.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            module = load_settings_isolated()
+        self.assertEqual(
+            module.EMAIL_BACKEND, "django.core.mail.backends.smtp.EmailBackend"
+        )
+
 
 class DisplayNameTests(APITestCase):
     def test_display_name_uses_full_name_when_set(self):
