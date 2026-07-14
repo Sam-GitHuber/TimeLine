@@ -261,9 +261,7 @@
     transition: box-shadow 0.15s ease, transform 0.15s ease;
   }
   .tl-entry:hover .tl-avatar-node > * {
-    box-shadow:
-      0 0 0 3px var(--color-surface),
-      0 0 0 5px var(--color-accent);
+    box-shadow: 0 0 0 2px var(--color-accent);
     transform: scale(1.08);
   }
   .tl-body {
