@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import CommentThread from "./CommentThread.jsx";
@@ -6,6 +6,7 @@ import Lightbox from "./Lightbox.jsx";
 import ReactionBar from "./ReactionBar.jsx";
 import PostMenu from "./PostMenu.jsx";
 import { api } from "../api.js";
+import { markPostCommentsSeen } from "../postCache.js";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
 // A single post as an entry on the timeline: a node on the line, its clock time
@@ -30,11 +31,30 @@ export default function PostCard({
   const [lightboxIndex, setLightboxIndex] = useState(null);
   // Whether the post text is flipped into its inline editor (issue #62).
   const [editing, setEditing] = useState(false);
+  const queryClient = useQueryClient();
+
+  // Opening the thread marks its comments seen server-side (the GET), so mirror
+  // that into the cached feed/profile/group/permalink data straight away — the
+  // "N new" badge then follows the (fresh, server-shaped) count and clears,
+  // instead of waiting for the next refetch. A permalink opens already-expanded,
+  // so mark it on mount too.
+  const openComments = () => markPostCommentsSeen(queryClient, post.id);
+  useEffect(() => {
+    if (defaultCommentsOpen) openComments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultCommentsOpen, post.id]);
 
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
 
   const { time, meridiem } = formatClockTime(post.created_at);
+
+  const commentCount = post.comment_count ?? 0;
+  const newCount = post.new_comment_count ?? 0;
+  // Driven purely by the server-shaped count (kept fresh via markPostCommentsSeen
+  // on open), so genuinely-new comments re-badge later. Hidden while the thread
+  // is open — you're already looking at them.
+  const showNew = newCount > 0 && !showComments;
 
   return (
     <article className="tl-entry">
@@ -163,11 +183,27 @@ export default function PostCard({
         <div className="mt-3 -ml-2 flex items-center gap-3">
           <button
             type="button"
-            onClick={() => setShowComments((v) => !v)}
+            onClick={() => {
+              if (!showComments) openComments();
+              setShowComments((v) => !v);
+            }}
             aria-expanded={showComments}
             className="rounded-lg px-2 py-1 text-sm font-medium text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
           >
             {showComments ? "Hide comments" : "Comments"}
+            {/* Total visible comments (issue #63) — matches what actually expands,
+                since the count is pruned server-side to your connections. Hidden
+                when zero so an empty thread just reads "Comments". */}
+            {commentCount > 0 && (
+              <span className="ml-1.5 tabular-nums">· {commentCount}</span>
+            )}
+            {/* New (unseen) comments, in the accent colour so they stand out.
+                Only before you've opened the thread — opening it marks them seen. */}
+            {showNew && (
+              <span className="ml-1.5 font-semibold tabular-nums text-accent-deep">
+                · {newCount} new
+              </span>
+            )}
           </button>
           {/* Report has moved into the ⋯ menu in the header (issue #62), so it's
               no longer here in the footer. */}
