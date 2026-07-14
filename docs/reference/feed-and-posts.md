@@ -169,6 +169,15 @@ counts exclude your own messages.
 - **Avatars** surface as a small square `avatar_thumb` on post/comment authors,
   the people list, and profile headers; `Avatar.jsx` renders the photo when
   present, else a coloured initial.
+- **The post's marker on the timeline rail is the poster's avatar** (issue #64),
+  not a plain dot — a warmer, scan-by-face cue that fits the "living line" look.
+  It's an `Avatar size="xs"` in a profile link (`.tl-avatar-node`), centred on
+  the spine with the same right-offset formula the old dot used (so it stays
+  threaded at any gutter width); a surface-coloured halo separates the bead from
+  the line, and hover adds an accent ring — both on the avatar element itself so
+  they hug the visible circle. The compose **"now"** node (`.tl-node`) and the
+  **day-divider** dots (`.tl-day-dot`) stay plain — they aren't posts and have
+  no author.
 
 ### The imaging pipeline (`api/imaging.py`)
 

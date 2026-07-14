@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import Avatar from "./Avatar.jsx";
 import CommentThread from "./CommentThread.jsx";
 import Lightbox from "./Lightbox.jsx";
 import ReactionBar from "./ReactionBar.jsx";
@@ -59,7 +60,17 @@ export default function PostCard({
   return (
     <article className="tl-entry">
       <div className="tl-rail">
-        <span className="tl-node" aria-hidden="true" />
+        {/* The post's marker on the line is the poster's avatar (issue #64) — a
+            warmer, scannable-by-face cue than a plain dot. The link carries the
+            accessible name (it identifies a person now), so the Avatar inside
+            stays decorative. Compose "now" node + day dots keep their dots. */}
+        <Link
+          to={`/u/${author.id}`}
+          className="tl-avatar-node"
+          aria-label={author.display_name}
+        >
+          <Avatar user={author} size="xs" />
+        </Link>
         <time
           className="font-mono text-xs tabular-nums text-ink-faint"
           dateTime={post.created_at}
