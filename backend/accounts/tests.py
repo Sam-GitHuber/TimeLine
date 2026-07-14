@@ -4,11 +4,14 @@ from io import BytesIO
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.cache import cache
 from django.test import override_settings
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
+
+from config.settings import _email_backend
 
 User = get_user_model()
 
@@ -53,6 +56,44 @@ class UserModelTests(APITestCase):
         self.assertTrue(admin.is_active)
         self.assertTrue(admin.is_staff)
         self.assertTrue(admin.is_superuser)
+
+
+class EmailConfigTests(APITestCase):
+    """Outbound email plumbing (see docs/deploy.md → Outbound email).
+
+    Delivery is the foundation for password recovery (#38): without a working
+    EMAIL_BACKEND and a From address, no mail can be sent at all.
+    """
+
+    def test_backend_is_smtp_when_a_host_is_configured(self):
+        # A configured EMAIL_HOST (production) selects the real SMTP backend.
+        self.assertEqual(
+            _email_backend("smtp.resend.com"),
+            "django.core.mail.backends.smtp.EmailBackend",
+        )
+
+    def test_backend_falls_back_to_console_without_a_host(self):
+        # No host (local dev, or a prod deploy that hasn't set EMAIL_HOST):
+        # mail is printed to the logs, never silently handed to a dead default.
+        for host in ("", None):
+            self.assertEqual(
+                _email_backend(host),
+                "django.core.mail.backends.console.EmailBackend",
+            )
+
+    def test_a_default_from_address_is_configured(self):
+        # Mail with no explicit sender must still go out with a real From — an
+        # unset DEFAULT_FROM_EMAIL makes Django fall back to webmaster@localhost.
+        self.assertTrue(settings.DEFAULT_FROM_EMAIL)
+        self.assertIn("@", settings.DEFAULT_FROM_EMAIL)
+
+    def test_mail_is_delivered_with_the_default_sender(self):
+        # End-to-end plumbing: send with no explicit from_email and confirm it
+        # lands, stamped with DEFAULT_FROM_EMAIL. (The test runner swaps in the
+        # in-memory backend, so this asserts wiring, not real delivery.)
+        mail.send_mail("Subject", "Body", None, ["someone@example.com"])
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].from_email, settings.DEFAULT_FROM_EMAIL)
 
 
 class RegistrationTests(APITestCase):

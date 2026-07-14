@@ -181,6 +181,51 @@ The A record must be **DNS only (grey cloud)**, not Proxied — Caddy needs a di
 route for its Let's Encrypt challenge, and the domain resolves to the home IP
 (accepted trade-off; WHOIS privacy is on).
 
+## Outbound email (Resend)
+
+The app needs to send mail (password recovery, and later email verification). We
+send over SMTP through **Resend** — a transactional email provider whose free
+tier (3,000 emails/month) is far more than a private friends/family beta uses.
+Any SMTP provider works; only the four `EMAIL_*` values in `.env.prod` change.
+
+Why a provider at all, rather than sending mail straight from the box? A home IP
+has no sending reputation and is on every mailbox provider's dynamic-IP blocklist,
+so self-sent mail lands in spam or is dropped outright. A provider sends from
+warmed, authenticated IPs — the difference between "reset link arrives" and
+"family member never gets it."
+
+```
+# 1. Create a Resend account (resend.com) and add the domain `your-timeline.net`
+#    (Domains → Add Domain).
+
+# 2. Resend shows a few DNS records (an SPF TXT record and DKIM CNAME/TXT
+#    records). Add each one in Cloudflare DNS (same zone as the A record above),
+#    as **DNS only (grey cloud)**. Wait for Resend to mark the domain "Verified"
+#    (usually minutes). This is what proves to receiving servers that mail
+#    "from" your-timeline.net is really authorised — without it, mail is
+#    spam-filtered or bounced.
+
+# 3. Create an API key (API Keys → Create). This is the SMTP password.
+
+# 4. Fill these into .env.prod (see .env.prod.example for the block):
+#      EMAIL_HOST=smtp.resend.com
+#      EMAIL_PORT=587
+#      EMAIL_USE_TLS=true
+#      EMAIL_HOST_USER=resend            # literal username for Resend
+#      EMAIL_HOST_PASSWORD=<the API key>
+#      DEFAULT_FROM_EMAIL=TimeLine <no-reply@your-timeline.net>
+#    then redeploy (the timer picks it up, or restart the backend by hand).
+
+# 5. Smoke-test a real delivered email from the prod stack:
+docker compose -f docker-compose.prod.yml exec backend \
+  python manage.py sendtestemail you@example.com
+#    Check the inbox (and spam). If it lands, delivery works end to end.
+```
+
+If `EMAIL_HOST` is left unset (e.g. a first LAN test before you have a provider),
+Django prints mail to the backend container logs instead of sending it — the
+reset/verification link is still visible via `docker compose … logs -f backend`.
+
 ## Everyday operations
 
 ```bash
@@ -393,6 +438,7 @@ close to zero — only the domain is a hard cash cost:
 | Cloudflare DNS + DDNS | £0 | Free plan. |
 | Cloudflare R2 (encrypted backups) | £0 | Well within the 10 GB free tier for a small beta — check with `rclone size timeline-crypt:`. |
 | healthchecks.io (uptime + backup) | £0 | Free tier (up to 20 checks). |
+| Resend (outbound email) | £0 | Free tier (3,000 emails/mo) — a private beta sends a handful. |
 | GitHub Actions + GHCR (CI + image registry) | £0 | Free for a public repo. |
 | Let's Encrypt TLS | £0 | Free, auto-renewed by Caddy. |
 | TLS/hosting/servers | £0 | Runs on the wiped home PC. |

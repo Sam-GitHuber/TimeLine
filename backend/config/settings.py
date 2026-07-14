@@ -367,6 +367,43 @@ AUTHENTICATION_BACKENDS = [
     "allauth.account.auth_backends.AuthenticationBackend",
 ]
 
+# --- Email -------------------------------------------------------------------
+# In development we print emails to the console, so the whole password-reset /
+# verification flow can be exercised with no provider configured — the message
+# (including any reset link) shows up in the backend container logs. In
+# production we send over SMTP; any transactional provider works (we use Resend),
+# configured entirely through env so switching providers is only a credentials
+# change. Provider + SPF/DKIM setup is documented in docs/deploy.md.
+#
+# The choice is presence-based: EMAIL_HOST set ⇒ SMTP, otherwise console. A prod
+# deploy that forgets EMAIL_HOST then logs its mail visibly instead of silently
+# handing it to a default SMTP backend pointed at nothing.
+def _email_backend(host):
+    """SMTP when a host is configured, else the console backend (dev / a prod
+    deploy that hasn't set EMAIL_HOST yet — mail is logged, not dropped)."""
+    if host:
+        return "django.core.mail.backends.smtp.EmailBackend"
+    return "django.core.mail.backends.console.EmailBackend"
+
+
+EMAIL_BACKEND = _email_backend(os.environ.get("EMAIL_HOST"))
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+# STARTTLS on the submission port (587) is the common default. For a provider
+# that wants implicit TLS on 465 instead, set EMAIL_USE_TLS=false,
+# EMAIL_USE_SSL=true, EMAIL_PORT=465. (The two must not both be true.)
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", default=True)
+EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", default=False)
+# The From address on outbound mail. It must live on a domain verified with the
+# provider (SPF/DKIM) or the mail is spam-filtered/dropped — see docs/deploy.md.
+DEFAULT_FROM_EMAIL = os.environ.get(
+    "DEFAULT_FROM_EMAIL", "TimeLine <no-reply@your-timeline.net>"
+)
+# Address for Django's own error mail (distinct from user-facing mail); align it.
+SERVER_EMAIL = os.environ.get("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
+
 # CORS — which browser origins may call this API.
 # The React dev server (Vite) runs on :5173. Comma-separated list via env.
 CORS_ALLOWED_ORIGINS = [
