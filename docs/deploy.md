@@ -222,9 +222,13 @@ docker compose -f docker-compose.prod.yml exec backend \
 #    Check the inbox (and spam). If it lands, delivery works end to end.
 ```
 
-If `EMAIL_HOST` is left unset (e.g. a first LAN test before you have a provider),
-Django prints mail to the backend container logs instead of sending it — the
-reset/verification link is still visible via `docker compose … logs -f backend`.
+**Fail-loud in production.** With `DEBUG` off, an unset `EMAIL_HOST` makes the
+app refuse to boot — so a misconfigured deploy can't silently start printing
+password-reset links (a plaintext account-takeover token) to the logs. For a
+deliberate LAN test *before* you have a provider, comment out `EMAIL_HOST` and
+set `EMAIL_CONSOLE_FALLBACK=true`: mail is then printed to the backend logs
+(visible via `docker compose … logs -f backend`) rather than sent. Never enable
+that in real production.
 
 ## Everyday operations
 

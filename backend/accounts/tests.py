@@ -1,17 +1,20 @@
+import os
 import shutil
 import tempfile
 from io import BytesIO
+from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
+from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from config.settings import _email_backend
+from config.settings import _email_backend, env_int
 
 User = get_user_model()
 
@@ -66,20 +69,43 @@ class EmailConfigTests(APITestCase):
     """
 
     def test_backend_is_smtp_when_a_host_is_configured(self):
-        # A configured EMAIL_HOST (production) selects the real SMTP backend.
+        # A configured EMAIL_HOST (production) selects the real SMTP backend —
+        # a host always wins, even if the console fallback is disabled.
         self.assertEqual(
-            _email_backend("smtp.resend.com"),
+            _email_backend("smtp.resend.com", False),
             "django.core.mail.backends.smtp.EmailBackend",
         )
 
-    def test_backend_falls_back_to_console_without_a_host(self):
-        # No host (local dev, or a prod deploy that hasn't set EMAIL_HOST):
-        # mail is printed to the logs, never silently handed to a dead default.
+    def test_console_backend_only_when_fallback_is_allowed(self):
+        # No host but the fallback is explicitly allowed (the DEBUG default):
+        # mail is printed to the logs rather than handed to a dead default.
         for host in ("", None):
             self.assertEqual(
-                _email_backend(host),
+                _email_backend(host, True),
                 "django.core.mail.backends.console.EmailBackend",
             )
+
+    def test_no_host_and_no_fallback_refuses_to_boot(self):
+        # Production with EMAIL_HOST unset and the fallback off must fail loudly
+        # rather than silently log password-reset tokens in plaintext.
+        for host in ("", None):
+            with self.assertRaises(ImproperlyConfigured):
+                _email_backend(host, False)
+
+    def test_email_timeout_is_bounded(self):
+        # A send must not be able to block forever on a slow/unreachable SMTP
+        # server and tie up the worker — a finite timeout is always configured.
+        self.assertIsNotNone(settings.EMAIL_TIMEOUT)
+        self.assertGreater(settings.EMAIL_TIMEOUT, 0)
+
+    def test_env_int_falls_back_on_a_non_numeric_value(self):
+        # A garbage EMAIL_PORT-style value degrades to the default (with a
+        # warning) instead of raising and taking the whole site down at import.
+        with mock.patch.dict(os.environ, {"PROBE_INT": "not-a-number"}):
+            with self.assertWarns(UserWarning):
+                self.assertEqual(env_int("PROBE_INT", 587), 587)
+        with mock.patch.dict(os.environ, {"PROBE_INT": "2587"}):
+            self.assertEqual(env_int("PROBE_INT", 587), 2587)
 
     def test_a_default_from_address_is_configured(self):
         # Mail with no explicit sender must still go out with a real From — an

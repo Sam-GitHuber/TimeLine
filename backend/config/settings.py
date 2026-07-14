@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import warnings
 from datetime import timedelta
 from pathlib import Path
 
@@ -24,6 +25,28 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 def env_bool(name, default=False):
     """Read a boolean-ish environment variable ("1"/"true"/"yes")."""
     return os.environ.get(name, str(default)).lower() in {"1", "true", "yes"}
+
+
+def env_int(name, default):
+    """Read an int-valued env var, falling back to ``default`` (with a warning)
+    if it's set to something non-numeric.
+
+    Deliberately does *not* raise: a typo in a non-critical tuning value (e.g.
+    ``EMAIL_PORT``) should degrade to the default, not crash settings import and
+    take the whole site down. Security-critical values (SECRET_KEY) still fail
+    loudly on their own.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        warnings.warn(
+            f"{name}={raw!r} is not a valid integer; using default {default}.",
+            stacklevel=2,
+        )
+        return default
 
 
 # Quick-start development settings - unsuitable for production
@@ -368,27 +391,36 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 # --- Email -------------------------------------------------------------------
-# In development we print emails to the console, so the whole password-reset /
-# verification flow can be exercised with no provider configured — the message
-# (including any reset link) shows up in the backend container logs. In
-# production we send over SMTP; any transactional provider works (we use Resend),
-# configured entirely through env so switching providers is only a credentials
-# change. Provider + SPF/DKIM setup is documented in docs/deploy.md.
+# In production we send over SMTP; any transactional provider works (we use
+# Resend), configured entirely through env so switching providers is only a
+# credentials change. Provider + SPF/DKIM setup is documented in docs/deploy.md.
 #
-# The choice is presence-based: EMAIL_HOST set ⇒ SMTP, otherwise console. A prod
-# deploy that forgets EMAIL_HOST then logs its mail visibly instead of silently
-# handing it to a default SMTP backend pointed at nothing.
-def _email_backend(host):
-    """SMTP when a host is configured, else the console backend (dev / a prod
-    deploy that hasn't set EMAIL_HOST yet — mail is logged, not dropped)."""
+# Backend selection is presence-based: EMAIL_HOST set ⇒ SMTP. With no host we
+# fall back to the console backend (mail printed to the logs) — but *only* when
+# that's explicitly allowed, which defaults to on in DEBUG and off otherwise.
+# The console backend prints reset/verification links in full, i.e. a plaintext
+# account-takeover token; in production an accidentally-unset EMAIL_HOST must
+# fail the deploy, not silently start logging those tokens. A deliberate LAN
+# test (DEBUG off, no provider yet) opts back in with EMAIL_CONSOLE_FALLBACK=true.
+EMAIL_CONSOLE_FALLBACK = env_bool("EMAIL_CONSOLE_FALLBACK", default=DEBUG)
+
+
+def _email_backend(host, console_fallback):
     if host:
         return "django.core.mail.backends.smtp.EmailBackend"
-    return "django.core.mail.backends.console.EmailBackend"
+    if console_fallback:
+        return "django.core.mail.backends.console.EmailBackend"
+    raise ImproperlyConfigured(
+        "No email backend configured: set EMAIL_HOST (see docs/deploy.md → "
+        "Outbound email), or set EMAIL_CONSOLE_FALLBACK=true to print mail to "
+        "the logs instead. The console fallback is off by default in production "
+        "because password-reset links would be written to the logs in plaintext."
+    )
 
 
-EMAIL_BACKEND = _email_backend(os.environ.get("EMAIL_HOST"))
+EMAIL_BACKEND = _email_backend(os.environ.get("EMAIL_HOST"), EMAIL_CONSOLE_FALLBACK)
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
-EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_PORT = env_int("EMAIL_PORT", 587)
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 # STARTTLS on the submission port (587) is the common default. For a provider
@@ -396,6 +428,10 @@ EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 # EMAIL_USE_SSL=true, EMAIL_PORT=465. (The two must not both be true.)
 EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", default=True)
 EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", default=False)
+# Cap how long a single send may block. Without it, the SMTP call can hang on a
+# slow or unreachable provider and tie up the worker (a stuck password-reset
+# request) until gunicorn's worker-timeout kills it. Seconds.
+EMAIL_TIMEOUT = env_int("EMAIL_TIMEOUT", 10)
 # The From address on outbound mail. It must live on a domain verified with the
 # provider (SPF/DKIM) or the mail is spam-filtered/dropped — see docs/deploy.md.
 DEFAULT_FROM_EMAIL = os.environ.get(
