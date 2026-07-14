@@ -33,7 +33,7 @@ dependencies = [
 # production images can skip them with `uv sync --no-dev`.
 [dependency-groups]
 dev = [
-    "ruff>=0.14",
+    "ruff>=0.15.21",
     "bandit>=1.9",
 ]
 
