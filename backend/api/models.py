@@ -207,6 +207,47 @@ class Comment(models.Model):
         return f"{self.author} · {preview}"
 
 
+class PostCommentRead(models.Model):
+    """How recently a user last opened a post's comment thread (issue #63).
+
+    One row per (post, user): ``last_seen_at`` is stamped whenever the user
+    opens the thread (the ``GET`` on the comments endpoint). It's the marker the
+    feed uses to show a "N new" count next to *Comments* — a visible comment is
+    "new" to you if its ``created_at`` is after this timestamp (a missing row
+    means you've never opened the thread, so every comment is new).
+
+    Deliberately the same shape as ``ConversationRead`` (which tracks how far a
+    participant has read a message thread): a single last-seen timestamp per
+    (thing, user), cheap to upsert on open and cheap to left-join when counting.
+    "Seen" here is thread-level, not per-comment — opening the thread clears the
+    whole count at once, matching how opening a conversation clears its unread
+    badge.
+    """
+
+    post = models.ForeignKey(
+        Post,
+        on_delete=models.CASCADE,
+        related_name="comment_reads",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="post_comment_reads",
+    )
+    last_seen_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["post", "user"],
+                name="unique_post_comment_read",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} saw {self.post} comments @ {self.last_seen_at}"
+
+
 class Conversation(models.Model):
     """A private 1:1 message thread between two accounts (Phase 5).
 

@@ -111,6 +111,54 @@ floor. On the client, an edit/delete invalidates `["feed"]`, `["userPosts"]`,
   highlights a specific comment (auto-expanding its collapsed ancestors), so
   "someone replied" lands you on the exact reply, even one deep in the tree.
 
+### Comment counts next to "Comments" (issue #63)
+
+The **Comments** control on each post shows two numbers: the **total** comments
+you'd see if you expanded the thread, and — in the accent colour — how many are
+**new** since you last opened it (e.g. *Comments · 12 · 3 new*). Both ride the
+feed payload, so nothing fires a request per post on feed load.
+
+- **Serializer fields.** `PostSerializer` gains read-only `comment_count` and
+  `new_comment_count`. They're **not** SQL annotations — they're computed once per
+  page by `comment_counts_for_posts(posts, viewer)` and handed to the serializer
+  via `context["comment_counts"]`. Absent from context (e.g. the create response)
+  ⇒ 0, which is correct for a brand-new post.
+- **Counts honour the exact same pruning as the thread.** The count must match
+  what actually opens, so `comment_counts_for_posts` reuses
+  `build_visible_comment_tree` (see [connections](connections.md#comments-threaded-connection-pruned)):
+  a comment from a not-connected or deactivated author — *and its whole subtree* —
+  is excluded. A plain `COUNT` can't express arbitrary-depth subtree pruning, and
+  a naive author-filtered count would over-count a connected author's reply
+  sitting under a hidden parent. Replies count toward the total (one number for
+  the whole visible thread).
+- **Cheap and page-size-independent.** One query loads every comment on the
+  page's posts, one loads the viewer's last-seen markers; the trees are built in
+  Python. This is wired in via `CommentCountMixin` on the feed, profile
+  (`UserPostsView`), and group (`GroupPostsView`) timelines, and directly on
+  `PostDetailView` so the `/p/:id` permalink carries the counts too.
+
+**The "new" marker — `PostCommentRead`.** A new model, one row per `(post, user)`
+with a single `last_seen_at`, deliberately the same shape as `ConversationRead`
+(messaging). A comment is **new** to you if it's visible, authored by *someone
+else*, and its `created_at` is after your `last_seen_at` for that post; a missing
+row (thread never opened) makes every such comment new. Your own comments are
+never "new" — you've self-evidently seen them, mirroring how unread message
+counts exclude your own messages.
+
+- **When "new" clears — on opening the thread.** `GET /api/posts/<id>/comments/`
+  upserts your `last_seen_at` to now, so opening the thread clears its whole
+  count at once (seen is thread-level, not per-comment) — consistent with how
+  opening a conversation clears its unread badge. The upsert is wrapped to
+  survive a concurrent-open race (two tabs both INSERT ⇒ one falls back to an
+  UPDATE, not a 500).
+- **Frontend keeps the badge honest via the cache, not a flag.** On open, the
+  client zeroes `new_comment_count` for that post in the cached feed / profile /
+  group / permalink queries (`markPostCommentsSeen`), mirroring the server's
+  reset without a refetch. The badge is then driven purely by that server-shaped
+  count — so it clears on open **and** genuinely-new later comments re-badge once
+  a refetch legitimately raises the count. (A per-card "already opened" flag
+  would suppress those later comments until the card remounted.)
+
 ## Photos
 
 - **`PostImage`** table (FK to `Post`) — **many photos per post**, not a single
