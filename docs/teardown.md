@@ -22,7 +22,7 @@ secret lives on the server. Work top to bottom in the [checklist](#teardown-chec
 
 | Service | What it's for | Secret / resource | Where it lives |
 |---------|---------------|-------------------|----------------|
-| **Domain registrar** | Owns `your-timeline.net` | The domain registration (annual bill) | Wherever you bought the domain |
+| **Cloudflare — Registrar** | Owns `your-timeline.net` | The domain registration (at-cost annual renewal) | Cloudflare dashboard → Domain Registration (same account as DNS + R2) |
 | **Cloudflare — DNS** | Public DNS for the domain + DDNS updates | **DDNS API token** (Edit-zone-DNS) | `/etc/timeline/cloudflare-ddns.env` → `CF_API_TOKEN` |
 | **Cloudflare — R2** | Off-site encrypted backups | Bucket `timeline-backups` + an **R2 API token** (Access Key ID + Secret) | rclone config: `~/.config/rclone/rclone.conf` |
 | **Cloudflare — Resend link** | Resend's access to auto-manage DNS records | An **authorized app / API connection** granted during Resend domain setup | Cloudflare dashboard (not a file) |
@@ -98,13 +98,21 @@ the box, revoke tokens *before* you delete the accounts that manage them).
 - [ ] Optionally wipe the checkout itself: `rm -rf ~/TimeLine`.
 
 ### 5. Close / release accounts (optional, once the above is done)
-- [ ] **Domain:** turn off auto-renew (or delete it) at your registrar so you
-      stop paying. Let it lapse, or keep it parked if you might return.
-- [ ] **DNS records:** delete the `your-timeline.net` zone in Cloudflare (removes
-      the A record + all the Resend SPF/DKIM records in one go).
-- [ ] **Resend / healthchecks.io / Cloudflare / GitHub accounts:** close any you
-      only ever created for this project. Keep the ones you use for other things —
-      you've already deleted this project's keys and data from them.
+- [ ] **Domain (Cloudflare Registrar):** Cloudflare → **Domain Registration** →
+      turn **off auto-renew** so you stop paying; the domain then lapses at the
+      end of the paid period. To *keep* the name, **transfer it out** to another
+      registrar instead. (Cloudflare-registered domains can't be deleted on
+      demand — they either expire or get transferred out.)
+- [ ] **DNS records:** while Cloudflare is still the registrar you can't delete
+      the `your-timeline.net` zone on its own — it goes away when the domain
+      expires or transfers out. To pull the records sooner, delete them
+      individually (the A record + the Resend SPF/DKIM records).
+- [ ] **Cloudflare account:** only closeable once the domain has expired or moved
+      out. Until then, keep it — its only remaining job is holding the domain
+      (every project API key and the R2 bucket are already gone from steps 3–4).
+- [ ] **Resend / healthchecks.io / GitHub accounts:** close any you created only
+      for this project; keep the ones you use elsewhere (their project keys and
+      data are already deleted).
 - [ ] **GitHub repo:** archive it (read-only, keeps history) or delete it, and
       delete the `timeline-backend` / `timeline-web` GHCR packages.
 
