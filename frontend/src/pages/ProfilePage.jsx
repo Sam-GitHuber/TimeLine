@@ -22,6 +22,16 @@ export default function ProfilePage() {
   // Profile editing happens in place, right here on your own profile (issue
   // #53) — an "Edit profile" button flips the header into the inline editor.
   const [editing, setEditing] = useState(false);
+  // The /u/:id route doesn't remount when you move between profiles, so reset
+  // the editor when the subject changes — otherwise editing your own profile
+  // then returning to it would silently reopen the form. This is React's
+  // "adjust state during render on prop change" pattern (cheaper than an effect,
+  // no extra render): https://react.dev/learn/you-might-not-need-an-effect
+  const [editingFor, setEditingFor] = useState(userId);
+  if (editingFor !== userId) {
+    setEditingFor(userId);
+    setEditing(false);
+  }
 
   const userQuery = useQuery({
     queryKey: ["user", userId],

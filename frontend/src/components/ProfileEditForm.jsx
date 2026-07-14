@@ -48,7 +48,15 @@ export default function ProfileEditForm({ onDone }) {
         removeAvatar: removeAvatar && !avatarFile,
       }),
     onSuccess: async () => {
-      await refreshUser();
+      // The profile is already saved server-side at this point. Refreshing
+      // "who am I" is best-effort — if that refetch blips, don't strand the
+      // user in an open editor with no error (the mutation succeeded); close
+      // anyway and let the invalidated queries below repaint the new details.
+      try {
+        await refreshUser();
+      } catch {
+        // ignore — the invalidations still pull the fresh profile
+      }
       // Any cached copy of this profile / the feed may show a stale name or
       // avatar — drop them so they refetch with the new details.
       queryClient.invalidateQueries({ queryKey: ["user"] });

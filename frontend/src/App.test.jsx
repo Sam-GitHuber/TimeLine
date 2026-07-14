@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Link, Routes, Route } from "react-router-dom";
 import App from "./App.jsx";
+import ProfilePage from "./pages/ProfilePage.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
 import { api } from "./api.js";
 
@@ -264,6 +266,46 @@ describe("Profile page", () => {
     expect(args.first_name).toBe("Ada");
     expect(args.last_name).toBe("Lovelace");
     // Saving drops back to the read-only header, on the same page.
+    expect(
+      await screen.findByRole("button", { name: "Edit profile" })
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("First name")).not.toBeInTheDocument();
+  });
+
+  it("closes the editor when you move to another profile and back", async () => {
+    // /u/:id is a single route, so ProfilePage stays mounted as the id param
+    // changes — its `editing` state must reset per subject, or returning to
+    // your own profile would silently reopen the form on stale intent.
+    const user = userEvent.setup();
+    api.getUser.mockImplementation((id) =>
+      Promise.resolve(
+        id === 1
+          ? { id: 1, display_name: "you", connection_status: "none" }
+          : { id: 2, display_name: "Priya", connection_status: "none" }
+      )
+    );
+
+    renderWithAuth(
+      <>
+        <Link to="/u/2">to Priya</Link>
+        <Link to="/u/1">to me</Link>
+        <Routes>
+          <Route path="/u/:id" element={<ProfilePage />} />
+        </Routes>
+      </>,
+      { route: "/u/1" }
+    );
+
+    // Open the editor on your own profile.
+    await user.click(await screen.findByRole("button", { name: "Edit profile" }));
+    expect(screen.getByLabelText("First name")).toBeInTheDocument();
+
+    // Param-only nav to someone else's profile (ProfilePage is not remounted).
+    await user.click(screen.getByRole("link", { name: "to Priya" }));
+    await screen.findByRole("heading", { name: "Priya" });
+
+    // Back to your own profile — the editor must not reappear.
+    await user.click(screen.getByRole("link", { name: "to me" }));
     expect(
       await screen.findByRole("button", { name: "Edit profile" })
     ).toBeInTheDocument();
