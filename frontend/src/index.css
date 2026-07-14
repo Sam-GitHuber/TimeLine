@@ -232,10 +232,6 @@
     z-index: 2;
     transition: border-color 0.15s ease, transform 0.15s ease;
   }
-  .tl-entry:hover .tl-node {
-    border-color: var(--color-accent);
-    transform: scale(1.12);
-  }
   /* A post's marker is the poster's avatar (#64), centred on the spine with the
      same right-offset formula as the dot so it stays threaded at any gutter
      width. `line-height:0` drops the inline baseline strut that would otherwise
