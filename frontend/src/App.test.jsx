@@ -22,6 +22,7 @@ vi.mock("./api.js", () => ({
     listDiscover: vi.fn(),
     getUser: vi.fn(),
     getUserPosts: vi.fn(),
+    updateProfile: vi.fn(),
     connect: vi.fn(),
     disconnect: vi.fn(),
     getConnectionRequests: vi.fn(),
@@ -80,6 +81,7 @@ beforeEach(() => {
     connection_status: "none",
   });
   api.getUserPosts.mockResolvedValue(page([]));
+  api.updateProfile.mockResolvedValue({ pk: 1 });
   api.getComments.mockResolvedValue([]);
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
@@ -238,6 +240,34 @@ describe("Profile page", () => {
     expect(
       screen.queryByRole("button", { name: /connect/i })
     ).not.toBeInTheDocument();
+  });
+
+  it("edits your own profile in place — no separate page (issue #53)", async () => {
+    const user = userEvent.setup();
+    api.getUser.mockResolvedValue({
+      id: 1,
+      display_name: "you",
+      connection_status: "none",
+    });
+
+    renderAt("/u/1");
+    // Editing happens right here: the button flips the header into a form, it
+    // doesn't navigate off to /settings.
+    await user.click(await screen.findByRole("button", { name: "Edit profile" }));
+
+    await user.type(screen.getByLabelText("First name"), "Ada");
+    await user.type(screen.getByLabelText("Last name"), "Lovelace");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledTimes(1));
+    const args = api.updateProfile.mock.calls[0][0];
+    expect(args.first_name).toBe("Ada");
+    expect(args.last_name).toBe("Lovelace");
+    // Saving drops back to the read-only header, on the same page.
+    expect(
+      await screen.findByRole("button", { name: "Edit profile" })
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("First name")).not.toBeInTheDocument();
   });
 });
 
