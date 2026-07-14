@@ -175,9 +175,16 @@ counts exclude your own messages.
   the spine with the same right-offset formula the old dot used (so it stays
   threaded at any gutter width); a surface-coloured halo separates the bead from
   the line, and hover adds an accent ring — both on the avatar element itself so
-  they hug the visible circle. The compose **"now"** node (`.tl-node`) and the
-  **day-divider** dots (`.tl-day-dot`) stay plain — they aren't posts and have
-  no author.
+  they hug the visible circle. The avatar link is decorative (`tabIndex=-1` +
+  `aria-hidden`) — the author's name beside it is the single accessible link to
+  the profile, matching the avatar+name pattern in `CommentThread` /
+  `GroupMembersPanel`. The **day-divider** dots (`.tl-day-dot`) stay plain.
+- **The compose box mirrors this**: the pulsing green **"now"** node (`.tl-node`,
+  TimeLine's live-tip "logo") is lifted to cap the top of the line, and *your own*
+  avatar hangs on the spine just below it (same `.tl-avatar-node`), so the live
+  end of the timeline reads like every other entry. The compose avatar gets no
+  accent hover ring — that rule is scoped to `.tl-entry`, so `.tl-compose` reuses
+  the class and gets a plain bead for free.
 
 ### The imaging pipeline (`api/imaging.py`)
 

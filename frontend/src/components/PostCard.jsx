@@ -61,13 +61,16 @@ export default function PostCard({
     <article className="tl-entry">
       <div className="tl-rail">
         {/* The post's marker on the line is the poster's avatar (issue #64) — a
-            warmer, scannable-by-face cue than a plain dot. The link carries the
-            accessible name (it identifies a person now), so the Avatar inside
-            stays decorative. Compose "now" node + day dots keep their dots. */}
+            warmer, scannable-by-face cue than a plain dot. This avatar link is
+            decorative (tabIndex -1 + aria-hidden): the author's name below is
+            the single accessible link to the same profile, matching the
+            avatar+name pattern in CommentThread / GroupMembersPanel and avoiding
+            two identical adjacent links. Compose "now" node + day dots stay. */}
         <Link
           to={`/u/${author.id}`}
           className="tl-avatar-node"
-          aria-label={author.display_name}
+          tabIndex={-1}
+          aria-hidden="true"
         >
           <Avatar user={author} size="xs" />
         </Link>

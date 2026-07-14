@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
@@ -71,15 +72,28 @@ export default function ComposeBox({ group = null }) {
   return (
     <form onSubmit={handleSubmit} className="tl-compose">
       <div className="tl-rail">
+        {/* The pulsing green "now" node is TimeLine's live tip / logo — kept,
+            just lifted above your avatar. Below it your own avatar hangs on the
+            spine exactly like a post's (issue #64), reusing .tl-avatar-node.
+            It's decorative (tabIndex -1 + aria-hidden) — the nav menu already
+            links to your profile — so it adds no duplicate tab stop. */}
         <span className="tl-node" aria-hidden="true" />
         <span className="tl-now font-mono text-xs font-medium text-accent-deep">
           now
         </span>
+        {user && (
+          <Link
+            to={`/u/${user.pk}`}
+            className="tl-avatar-node tl-compose-avatar"
+            tabIndex={-1}
+            aria-hidden="true"
+          >
+            <Avatar user={user} size="xs" />
+          </Link>
+        )}
       </div>
 
-      <div className="flex flex-1 gap-3 pl-5">
-        <Avatar user={user} size="md" />
-
+      <div className="tl-compose-body">
         <div className="flex-1">
           <textarea
             value={text}
