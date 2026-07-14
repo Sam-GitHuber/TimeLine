@@ -755,7 +755,7 @@ class CommentCountTests(APITestCase):
         # is pruned, so neither counts — matching the pruned tree (issue #12).
         stranger_top = self._comment(self.stranger, "stranger")
         self._comment(self.friend, "reply under stranger", parent=stranger_top)
-        visible = self._comment(self.friend, "visible top")
+        self._comment(self.friend, "visible top")
         row = self._feed_row()
         self.assertEqual(row["comment_count"], 1)  # only the visible top-level
 
@@ -795,7 +795,7 @@ class CommentCountTests(APITestCase):
         self.assertEqual(row["comment_count"], 1)
 
     def test_only_comments_after_last_seen_are_new(self):
-        old = self._comment(self.friend, "before")  # noqa: F841
+        self._comment(self.friend, "before")
         # Mark seen now, then a fresh comment lands after the marker.
         self.client.get(comments_url(self.post))
         self._comment(self.friend, "after")
