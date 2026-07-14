@@ -18,7 +18,7 @@ const DRAWERS_DONT_FIT = "(max-width: 799px)";
 import FeedPage from "./pages/FeedPage.jsx";
 import PostPage from "./pages/PostPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
-import ProfileEditPage from "./pages/ProfileEditPage.jsx";
+import SettingsPage from "./pages/SettingsPage.jsx";
 import PeoplePage from "./pages/PeoplePage.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
@@ -33,7 +33,7 @@ import PrivacyPage from "./pages/legal/PrivacyPage.jsx";
 //   /                 → the feed (home timeline)     ┐ require a logged-in user
 //   /people           → people hub: Discover + Requests │ (ProtectedRoute gate)
 //   /requests         → legacy → /people?tab=requests    │
-//   /settings         → edit your own profile          │
+//   /settings         → account & security settings    │
 //   /u/:id            → a person's profile (by user id) ┘
 // The protected pages render inside Layout, which provides the nav bar (with
 // the logout control). Each page fetches its own data from the API. Real URLs
@@ -113,7 +113,9 @@ export default function App() {
             path="requests"
             element={<Navigate to="/people?tab=requests" replace />}
           />
-          <Route path="settings" element={<ProfileEditPage />} />
+          {/* Account & security controls. Profile editing moved in-place onto
+              your own profile page (issue #53). */}
+          <Route path="settings" element={<SettingsPage />} />
           <Route path="u/:id" element={<ProfilePage />} />
           {/* Groups (Phase 6) — the list is a left companion drawer, not a
               page; legacy `/groups` opens it. The rest stay real pages. */}

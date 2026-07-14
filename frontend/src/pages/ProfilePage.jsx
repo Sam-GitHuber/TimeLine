@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
 import ConnectButton from "../components/ConnectButton.jsx";
 import MessageButton from "../components/MessageButton.jsx";
 import BlockButton from "../components/BlockButton.jsx";
+import ProfileEditForm from "../components/ProfileEditForm.jsx";
 import Timeline from "../components/Timeline.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
@@ -17,6 +19,19 @@ export default function ProfilePage() {
   const userId = Number(id);
   const { user: me } = useAuth();
   const isSelf = me?.pk === userId;
+  // Profile editing happens in place, right here on your own profile (issue
+  // #53) — an "Edit profile" button flips the header into the inline editor.
+  const [editing, setEditing] = useState(false);
+  // The /u/:id route doesn't remount when you move between profiles, so reset
+  // the editor when the subject changes — otherwise editing your own profile
+  // then returning to it would silently reopen the form. This is React's
+  // "adjust state during render on prop change" pattern (cheaper than an effect,
+  // no extra render): https://react.dev/learn/you-might-not-need-an-effect
+  const [editingFor, setEditingFor] = useState(userId);
+  if (editingFor !== userId) {
+    setEditingFor(userId);
+    setEditing(false);
+  }
 
   const userQuery = useQuery({
     queryKey: ["user", userId],
@@ -75,6 +90,9 @@ export default function ProfilePage() {
   return (
     <div>
       <section className="border-b border-line px-5 py-7">
+        {isSelf && editing ? (
+          <ProfileEditForm onDone={() => setEditing(false)} />
+        ) : (
         <div className="flex items-start gap-4">
           <Avatar user={user} size="lg" />
           <div className="min-w-0 flex-1">
@@ -82,13 +100,17 @@ export default function ProfilePage() {
               <h1 className="font-display text-2xl font-bold -tracking-[0.02em] text-ink">
                 {user.display_name}
               </h1>
-              {/* Your own page gets an Edit link. Everyone else's gets the
-                  connection/messaging actions — unless you've blocked them, in
-                  which case the only action is to unblock. */}
+              {/* Your own page gets an inline Edit button. Everyone else's gets
+                  the connection/messaging actions — unless you've blocked them,
+                  in which case the only action is to unblock. */}
               {isSelf ? (
-                <Link to="/settings" className="btn btn-ghost btn-sm shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setEditing(true)}
+                  className="btn btn-ghost btn-sm shrink-0"
+                >
                   Edit profile
-                </Link>
+                </button>
               ) : user.is_blocked ? (
                 <BlockButton
                   userId={user.id}
@@ -134,6 +156,7 @@ export default function ProfilePage() {
             )}
           </div>
         </div>
+        )}
       </section>
 
       {!canSeePosts ? (

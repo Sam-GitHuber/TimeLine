@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import Avatar from "./components/Avatar.jsx";
 import PostCard from "./components/PostCard.jsx";
 import ComposeBox from "./components/ComposeBox.jsx";
-import ProfileEditPage from "./pages/ProfileEditPage.jsx";
+import ProfileEditForm from "./components/ProfileEditForm.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
 import { api } from "./api.js";
 
@@ -17,9 +17,6 @@ vi.mock("./api.js", () => ({
     createPost: vi.fn(),
     updateProfile: vi.fn(),
     getComments: vi.fn().mockResolvedValue([]),
-    // ProfileEditPage now hosts the notification-preferences section.
-    getNotificationPreferences: vi.fn().mockResolvedValue({}),
-    updateNotificationPreferences: vi.fn(),
   },
 }));
 
@@ -196,7 +193,9 @@ describe("ComposeBox with photos", () => {
   });
 });
 
-describe("ProfileEditPage", () => {
+// The inline profile editor lives on your own profile page now (issue #53), but
+// its form wiring is the same one this suite has always covered.
+describe("ProfileEditForm", () => {
   const me = {
     pk: 1,
     display_name: "Old Name",
@@ -206,11 +205,11 @@ describe("ProfileEditPage", () => {
     avatar_thumb: null,
   };
 
-  it("submits name, bio and avatar, then refreshes the user", async () => {
+  it("submits name, bio and avatar, then refreshes the user and closes", async () => {
     const user = userEvent.setup();
     const refreshUser = vi.fn().mockResolvedValue({ pk: 1 });
-    renderWithAuth(<ProfileEditPage />, {
-      route: "/settings",
+    const onDone = vi.fn();
+    renderWithAuth(<ProfileEditForm onDone={onDone} />, {
       auth: { user: me, refreshUser },
     });
 
@@ -230,16 +229,29 @@ describe("ProfileEditPage", () => {
     expect(args.bio).toBe("Hello there");
     expect(args.avatar).toBeInstanceOf(File);
     expect(refreshUser).toHaveBeenCalled();
+    // A successful save flips the profile back out of edit mode.
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
   });
 
   it("blocks saving with an empty name", async () => {
     const user = userEvent.setup();
-    renderWithAuth(<ProfileEditPage />, {
-      route: "/settings",
+    renderWithAuth(<ProfileEditForm onDone={vi.fn()} />, {
       auth: { user: me, refreshUser: vi.fn() },
     });
 
     await user.clear(screen.getByLabelText("First name"));
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("closes without saving when you cancel", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    renderWithAuth(<ProfileEditForm onDone={onDone} />, {
+      auth: { user: me, refreshUser: vi.fn() },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onDone).toHaveBeenCalled();
+    expect(api.updateProfile).not.toHaveBeenCalled();
   });
 });

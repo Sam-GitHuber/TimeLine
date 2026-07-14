@@ -8,7 +8,7 @@ posts) is owned by [connections](connections.md); group posts are covered in
 Code: `Post` / `PostImage` models + feed/profile views in `backend/api/`,
 image pipeline in `backend/api/imaging.py`, profile edit rides dj-rest-auth
 (`backend/accounts/serializers.py`). Frontend: `PostCard`, `ComposeBox`,
-`Avatar`, the feed page, and `/settings`.
+`Avatar`, the feed page, and `ProfileEditForm` (inline on the profile page).
 
 ## The feed — reverse-chronological, always
 
@@ -221,8 +221,14 @@ All image handling — post photos *and* avatars — funnels through
 - **Profile editing rides dj-rest-auth's existing `PATCH /api/auth/user/`** (no
   new endpoint). `UserDetailsSerializer` writes first/last name + bio and accepts
   an `avatar` upload (processed like a post photo), with `remove_avatar` to clear
-  it. The `/settings` page PATCHes multipart, then refetches "who am I" so the new
-  name/avatar propagate everywhere immediately.
+  it. The edit PATCHes multipart, then refetches "who am I" so the new name/avatar
+  propagate everywhere immediately.
+- **You edit your profile in place, on your own profile page** (issue #53). An
+  "Edit profile" button flips the header into `ProfileEditForm` (name / bio /
+  avatar) and saves without leaving `/u/:id` — a profile is public-facing info, so
+  you edit it where you (and everyone else) see it. There's no separate
+  profile-edit route; `/settings` is now **account/security only** (notification
+  prefs, password change, account deletion — see [accounts](accounts.md)).
 
 ### Avatar reframing (client-side crop)
 
@@ -243,7 +249,7 @@ square* (`cropImage.js`), capped at 1024px and re-encoded as JPEG.
   size/format caps). The crop is *framing only*; `thumb_square` centre-crop still
   runs but is a no-op on an already-square upload.
 - **Shared by user and group avatars** — the same modal wires into both
-  `ProfileEditPage` and `GroupFormPage`, since both render the same circle.
+  `ProfileEditForm` and `GroupFormPage`, since both render the same circle.
 - **Undecodable files fail early with a message.** The modal probes whether the
   browser can decode the chosen file; if not (an unsupported type the file picker
   let through — e.g. HEIC on a browser without HEIC support — or a corrupt file),

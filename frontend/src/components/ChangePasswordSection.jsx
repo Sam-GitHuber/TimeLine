@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 
-// A "Change password" section on the profile-edit page (Phase 7 account hygiene).
+// A "Change password" section on the settings page (Phase 7 account hygiene).
 // The current password is required — both because the backend enforces it and so
 // a shoulder-surfer at an unlocked screen (or a hijacked session) can't lock the
 // owner out. It's not destructive, so — unlike DeleteAccountSection — it's an

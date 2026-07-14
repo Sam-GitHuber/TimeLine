@@ -9,7 +9,7 @@ import { api } from "../api.js";
 // prefill from the group and only admins can reach a useful result — the backend
 // enforces that; a non-admin's PATCH 403s and we surface the error.
 //
-// The avatar handling mirrors ProfileEditPage: a chosen file previews locally,
+// The avatar handling mirrors ProfileEditForm: a chosen file previews locally,
 // and in edit mode you can also remove an existing avatar.
 export default function GroupFormPage() {
   const { id } = useParams();
@@ -74,7 +74,7 @@ export default function GroupFormPage() {
     },
   });
 
-  // A chosen file is reframed in the crop modal first (mirrors ProfileEditPage);
+  // A chosen file is reframed in the crop modal first (mirrors ProfileEditForm);
   // the returned square becomes the avatar we'll upload.
   function handleAvatarChosen(event) {
     const file = event.target.files?.[0];
