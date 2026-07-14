@@ -126,13 +126,21 @@ class ReactionContextMixin:
     """Adds ``visible_reactor_ids`` to serializer context so ``PostSerializer``
     can build its pruned reaction summary. Mixed into the post-serving views.
 
-    Computed once per request (not per post), so the whole feed's reaction
-    pruning costs one extra connections query, not N.
+    Computed once per request (not per post) and **memoised**, so the whole
+    feed's reaction pruning costs one connections query — and the comment-count
+    pass (``CommentCountMixin``) reuses the very same set (it's exactly the
+    comment tree's visible-author set) rather than firing its own.
     """
+
+    def visible_reactor_ids(self):
+        """This viewer's visible-reactor set, computed once per request."""
+        if not hasattr(self, "_visible_reactor_ids"):
+            self._visible_reactor_ids = visible_reactor_ids(self.request.user)
+        return self._visible_reactor_ids
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        context["visible_reactor_ids"] = visible_reactor_ids(self.request.user)
+        context["visible_reactor_ids"] = self.visible_reactor_ids()
         return context
 
 
@@ -668,7 +676,7 @@ def build_visible_comment_tree(comments, visible_author_ids):
     return build(None)
 
 
-def comment_counts_for_posts(posts, viewer, connected_ids=None):
+def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
     """``{post_id: {"total": int, "new": int}}`` for a page of posts (issue #63).
 
     ``total`` is how many comments ``viewer`` would see if they expanded the
@@ -690,14 +698,18 @@ def comment_counts_for_posts(posts, viewer, connected_ids=None):
     (thread never opened) makes every such comment new. Your own comments never
     count as new — you've self-evidently seen them — matching how ``ConversationRead``
     excludes your own messages from an unread count.
+
+    ``visible_author_ids`` is the viewer's connections plus themselves (exactly
+    ``visible_reactor_ids``); pass it in when the caller already has it — the
+    post-serving views do, via ``ReactionContextMixin`` — to skip recomputing the
+    connections query.
     """
     post_ids = [p.id for p in posts]
     if not post_ids:
         return {}
 
-    if connected_ids is None:
-        connected_ids = connected_user_ids(viewer)
-    visible_author_ids = connected_ids | {viewer.id}
+    if visible_author_ids is None:
+        visible_author_ids = connected_user_ids(viewer) | {viewer.id}
 
     # One query for all comments on the page. Drop deactivated authors up front,
     # exactly as PostCommentsView does, so a banned author's comment takes its
@@ -747,7 +759,9 @@ class CommentCountMixin:
     Computes the counts for exactly the paginated page (not the whole queryset),
     stashes them on the instance, and hands them to the serializer via context.
     Mixed into the feed, profile, and group timelines — every list that renders
-    ``PostSerializer``.
+    ``PostSerializer``. Combine with ``ReactionContextMixin`` (all three do) so
+    the count pass reuses its memoised visible-author set instead of firing its
+    own connections query.
     """
 
     def get_serializer_context(self):
@@ -759,7 +773,14 @@ class CommentCountMixin:
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         posts = page if page is not None else list(queryset)
-        self._comment_counts = comment_counts_for_posts(posts, request.user)
+        # Reuse ReactionContextMixin's memoised set when present, so total/new
+        # counts don't recompute the connections query the reaction pruning
+        # already ran this request.
+        get_visible = getattr(self, "visible_reactor_ids", None)
+        visible_author_ids = get_visible() if get_visible else None
+        self._comment_counts = comment_counts_for_posts(
+            posts, request.user, visible_author_ids=visible_author_ids
+        )
         serializer = self.get_serializer(posts, many=True)
         if page is not None:
             return self.get_paginated_response(serializer.data)
@@ -995,7 +1016,9 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
             ),
             pk=self.kwargs["pk"],
         )
-        self._comment_counts = comment_counts_for_posts([post], self.request.user)
+        self._comment_counts = comment_counts_for_posts(
+            [post], self.request.user, visible_author_ids=self.visible_reactor_ids()
+        )
         return post
 
     def get_object(self):
@@ -1351,11 +1374,21 @@ class PostCommentsView(APIView):
         # next feed load. Consistent with how opening a conversation clears its
         # unread badge — seen is thread-level, not per-comment. Cheap upsert; the
         # GET already fires only on a deliberate open, so no extra round-trip.
-        PostCommentRead.objects.update_or_create(
-            post=post,
-            user=request.user,
-            defaults={"last_seen_at": timezone.now()},
-        )
+        now = timezone.now()
+        try:
+            PostCommentRead.objects.update_or_create(
+                post=post,
+                user=request.user,
+                defaults={"last_seen_at": now},
+            )
+        except IntegrityError:
+            # Two near-simultaneous opens (double-click / duplicate tab) can both
+            # miss the row and race to INSERT; the loser hits the unique (post,
+            # user) constraint. Fall back to a plain UPDATE of the row the winner
+            # just created — the timestamps are within milliseconds either way.
+            PostCommentRead.objects.filter(post=post, user=request.user).update(
+                last_seen_at=now
+            )
         # Drop comments by deactivated (banned) authors before building the
         # tree, so a banned member's comments vanish just like their posts do —
         # and their replies go with them (an orphaned reply is never reached).

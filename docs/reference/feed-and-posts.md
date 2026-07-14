@@ -148,9 +148,16 @@ counts exclude your own messages.
 - **When "new" clears — on opening the thread.** `GET /api/posts/<id>/comments/`
   upserts your `last_seen_at` to now, so opening the thread clears its whole
   count at once (seen is thread-level, not per-comment) — consistent with how
-  opening a conversation clears its unread badge. The frontend also hides the
-  badge locally the moment you open, rather than waiting for the next feed fetch
-  to return `new_comment_count = 0`.
+  opening a conversation clears its unread badge. The upsert is wrapped to
+  survive a concurrent-open race (two tabs both INSERT ⇒ one falls back to an
+  UPDATE, not a 500).
+- **Frontend keeps the badge honest via the cache, not a flag.** On open, the
+  client zeroes `new_comment_count` for that post in the cached feed / profile /
+  group / permalink queries (`markPostCommentsSeen`), mirroring the server's
+  reset without a refetch. The badge is then driven purely by that server-shaped
+  count — so it clears on open **and** genuinely-new later comments re-badge once
+  a refetch legitimately raises the count. (A per-card "already opened" flag
+  would suppress those later comments until the card remounted.)
 
 ## Photos
 

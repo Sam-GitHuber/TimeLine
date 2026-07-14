@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -59,20 +60,49 @@ describe("PostCard comment counts", () => {
     expect(screen.getByText(/3 new/)).toBeInTheDocument();
   });
 
-  it("clears the 'N new' badge once the thread is opened", async () => {
+  it("hides the 'N new' badge while the thread is open", async () => {
     const user = userEvent.setup();
     renderWithAuth(
       <PostCard post={makePost({ comment_count: 12, new_comment_count: 3 })} />,
     );
     expect(screen.getByText(/3 new/)).toBeInTheDocument();
 
-    // Opening the thread marks the comments seen server-side, so the stale
-    // "new" badge should disappear immediately.
+    // Opening the thread marks the comments seen server-side; the badge hides
+    // (you're looking at them now) while the total stays.
     await user.click(screen.getByRole("button", { name: /Comments/ }));
     expect(screen.queryByText(/3 new/)).not.toBeInTheDocument();
-    // The total stays.
     expect(
       screen.getByRole("button", { name: /Hide comments/ }),
     ).toHaveTextContent("· 12");
+  });
+
+  it("re-badges when new comments arrive after you've looked", async () => {
+    // The badge follows the (server-shaped) prop, with no permanent per-card
+    // "opened" flag — so a later refetch that legitimately raises the count
+    // shows the badge again. A small stateful harness stands in for the feed
+    // cache handing PostCard a fresh post object.
+    function Harness() {
+      const [post, setPost] = useState(
+        makePost({ comment_count: 12, new_comment_count: 0 }),
+      );
+      return (
+        <>
+          <button
+            onClick={() =>
+              setPost(makePost({ comment_count: 13, new_comment_count: 1 }))
+            }
+          >
+            refetch
+          </button>
+          <PostCard post={post} />
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    renderWithAuth(<Harness />);
+    expect(screen.queryByText(/new/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "refetch" }));
+    expect(screen.getByText(/1 new/)).toBeInTheDocument();
   });
 });

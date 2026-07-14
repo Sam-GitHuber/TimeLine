@@ -2,6 +2,7 @@ import importlib.util
 import os
 import shutil
 import tempfile
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -809,6 +810,23 @@ class CommentCountTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["comment_count"], 1)
         self.assertEqual(resp.data["new_comment_count"], 1)
+
+    def test_mark_seen_survives_a_concurrent_insert_race(self):
+        # A row already exists (a parallel open won the INSERT). If our
+        # update_or_create loses the race and raises IntegrityError, the view
+        # must fall back to a plain UPDATE — not 500.
+        old = timezone.now() - timedelta(hours=1)
+        PostCommentRead.objects.create(
+            post=self.post, user=self.me, last_seen_at=old
+        )
+        with mock.patch(
+            "api.views.PostCommentRead.objects.update_or_create",
+            side_effect=IntegrityError("duplicate key"),
+        ):
+            resp = self.client.get(comments_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        row = PostCommentRead.objects.get(post=self.post, user=self.me)
+        self.assertGreater(row.last_seen_at, old)  # the fallback UPDATE landed
 
 
 # --- Phase 4: photos on posts -----------------------------------------------

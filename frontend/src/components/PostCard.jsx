@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import CommentThread from "./CommentThread.jsx";
@@ -6,6 +6,7 @@ import Lightbox from "./Lightbox.jsx";
 import ReactionBar from "./ReactionBar.jsx";
 import PostMenu from "./PostMenu.jsx";
 import { api } from "../api.js";
+import { markPostCommentsSeen } from "../postCache.js";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
 // A single post as an entry on the timeline: a node on the line, its clock time
@@ -26,16 +27,22 @@ export default function PostCard({
   // scrolling the feed doesn't fire a request per post. On a permalink we start
   // open so the deep-linked comment is reachable without a click.
   const [showComments, setShowComments] = useState(defaultCommentsOpen);
-  // Whether the thread has been opened this session. Opening it fetches the
-  // comments (which marks them seen server-side), so once you've opened it the
-  // "N new" badge is stale — hide it locally rather than wait for the next feed
-  // fetch to return new_comment_count = 0. (Starts true on a permalink, which
-  // opens already-expanded.)
-  const [hasOpened, setHasOpened] = useState(defaultCommentsOpen);
   // Which photo the lightbox is showing; null = closed.
   const [lightboxIndex, setLightboxIndex] = useState(null);
   // Whether the post text is flipped into its inline editor (issue #62).
   const [editing, setEditing] = useState(false);
+  const queryClient = useQueryClient();
+
+  // Opening the thread marks its comments seen server-side (the GET), so mirror
+  // that into the cached feed/profile/group/permalink data straight away — the
+  // "N new" badge then follows the (fresh, server-shaped) count and clears,
+  // instead of waiting for the next refetch. A permalink opens already-expanded,
+  // so mark it on mount too.
+  const openComments = () => markPostCommentsSeen(queryClient, post.id);
+  useEffect(() => {
+    if (defaultCommentsOpen) openComments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultCommentsOpen, post.id]);
 
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
@@ -44,8 +51,10 @@ export default function PostCard({
 
   const commentCount = post.comment_count ?? 0;
   const newCount = post.new_comment_count ?? 0;
-  // Show the "N new" badge only until the thread is opened this session.
-  const showNew = newCount > 0 && !hasOpened;
+  // Driven purely by the server-shaped count (kept fresh via markPostCommentsSeen
+  // on open), so genuinely-new comments re-badge later. Hidden while the thread
+  // is open — you're already looking at them.
+  const showNew = newCount > 0 && !showComments;
 
   return (
     <article className="tl-entry">
@@ -175,8 +184,8 @@ export default function PostCard({
           <button
             type="button"
             onClick={() => {
+              if (!showComments) openComments();
               setShowComments((v) => !v);
-              setHasOpened(true);
             }}
             aria-expanded={showComments}
             className="rounded-lg px-2 py-1 text-sm font-medium text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
