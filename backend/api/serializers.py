@@ -133,6 +133,14 @@ class PostSerializer(serializers.ModelSerializer):
     # Pruned per viewer — see ``reactions_representation``. Read-only; reactions
     # are added/removed via the toggle endpoint, never in the post body.
     reactions = serializers.SerializerMethodField()
+    # How many comments this viewer would see if they expanded the thread, and
+    # how many of those are new since they last opened it (issue #63). Both are
+    # computed once per page by the view (``comment_counts_for_posts``) and passed
+    # in via ``context["comment_counts"]`` — so the feed carries them without a
+    # per-post query. Absent from context (e.g. the create response) ⇒ 0, which
+    # is correct for a brand-new post with no comments yet.
+    comment_count = serializers.SerializerMethodField()
+    new_comment_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -143,6 +151,8 @@ class PostSerializer(serializers.ModelSerializer):
             "images",
             "group",
             "reactions",
+            "comment_count",
+            "new_comment_count",
             "created_at",
             "edited_at",
         )
@@ -152,6 +162,8 @@ class PostSerializer(serializers.ModelSerializer):
             "images",
             "group",
             "reactions",
+            "comment_count",
+            "new_comment_count",
             "created_at",
             # Server-controlled — stamped by the update view on a real edit, never
             # written from the request body.
@@ -165,6 +177,15 @@ class PostSerializer(serializers.ModelSerializer):
 
     def get_reactions(self, obj):
         return reactions_representation(obj, self.context)
+
+    def _counts(self, obj):
+        return (self.context.get("comment_counts") or {}).get(obj.id) or {}
+
+    def get_comment_count(self, obj):
+        return self._counts(obj).get("total", 0)
+
+    def get_new_comment_count(self, obj):
+        return self._counts(obj).get("new", 0)
 
     def validate_text(self, value):
         # A photo-only post is fine, so blank text is allowed here; the view

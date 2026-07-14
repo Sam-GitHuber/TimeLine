@@ -56,6 +56,7 @@ from .models import (
     Participant,
     ParticipantInterval,
     Post,
+    PostCommentRead,
     PostImage,
     Reaction,
     Report,
@@ -667,6 +668,104 @@ def build_visible_comment_tree(comments, visible_author_ids):
     return build(None)
 
 
+def comment_counts_for_posts(posts, viewer, connected_ids=None):
+    """``{post_id: {"total": int, "new": int}}`` for a page of posts (issue #63).
+
+    ``total`` is how many comments ``viewer`` would see if they expanded the
+    thread; ``new`` is how many of those they haven't seen yet. Both honour the
+    *exact* same pruning as the comment tree itself (``build_visible_comment_tree``)
+    — a comment from a not-connected or deactivated author, and its whole subtree,
+    is excluded — so the number next to *Comments* always matches what actually
+    opens. (A plain ``COUNT`` can't do this: subtree pruning at arbitrary depth
+    isn't expressible in one SQL filter, and a naive author-filtered count would
+    over-count a connected author's reply that sits under a hidden parent.)
+
+    Cost is bounded and independent of page size: **one** query loads every
+    comment on the page's posts, one loads this viewer's last-seen markers, and
+    the trees are built in Python — no per-post query. Fine at family scale
+    (mirrors why the tree prune itself runs in Python, see the comment view).
+
+    "New" = a visible comment authored by *someone else* with ``created_at`` after
+    the viewer's ``PostCommentRead.last_seen_at`` for that post; a missing marker
+    (thread never opened) makes every such comment new. Your own comments never
+    count as new — you've self-evidently seen them — matching how ``ConversationRead``
+    excludes your own messages from an unread count.
+    """
+    post_ids = [p.id for p in posts]
+    if not post_ids:
+        return {}
+
+    if connected_ids is None:
+        connected_ids = connected_user_ids(viewer)
+    visible_author_ids = connected_ids | {viewer.id}
+
+    # One query for all comments on the page. Drop deactivated authors up front,
+    # exactly as PostCommentsView does, so a banned author's comment takes its
+    # subtree with it here too. Only the fields the tree walk needs.
+    comments_by_post = defaultdict(list)
+    for comment in (
+        Comment.objects.filter(post_id__in=post_ids, author__is_active=True)
+        .only("id", "post_id", "parent_id", "author_id", "created_at")
+    ):
+        comments_by_post[comment.post_id].append(comment)
+
+    # One query for this viewer's last-seen markers across the page.
+    last_seen = dict(
+        PostCommentRead.objects.filter(
+            user=viewer, post_id__in=post_ids
+        ).values_list("post_id", "last_seen_at")
+    )
+
+    def walk(nodes, seen_at):
+        total = new = 0
+        for node in nodes:
+            total += 1
+            if node.author_id != viewer.id and (
+                seen_at is None or node.created_at > seen_at
+            ):
+                new += 1
+            sub_total, sub_new = walk(node._visible_children, seen_at)
+            total += sub_total
+            new += sub_new
+        return total, new
+
+    counts = {}
+    for post_id in post_ids:
+        tree = build_visible_comment_tree(
+            comments_by_post.get(post_id, []), visible_author_ids
+        )
+        total, new = walk(tree, last_seen.get(post_id))
+        counts[post_id] = {"total": total, "new": new}
+    return counts
+
+
+class CommentCountMixin:
+    """Attach ``comment_count`` / ``new_comment_count`` to a *page* of posts in
+    one pass (issue #63), so a post-list endpoint carries the counts without
+    firing a query per post.
+
+    Computes the counts for exactly the paginated page (not the whole queryset),
+    stashes them on the instance, and hands them to the serializer via context.
+    Mixed into the feed, profile, and group timelines — every list that renders
+    ``PostSerializer``.
+    """
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["comment_counts"] = getattr(self, "_comment_counts", {})
+        return context
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        posts = page if page is not None else list(queryset)
+        self._comment_counts = comment_counts_for_posts(posts, request.user)
+        serializer = self.get_serializer(posts, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def hello(request):
@@ -741,7 +840,7 @@ def healthz(request):
     return Response({"status": "ok"})
 
 
-class FeedView(ReactionContextMixin, generics.ListAPIView):
+class FeedView(CommentCountMixin, ReactionContextMixin, generics.ListAPIView):
     """The home timeline: your own posts plus everyone you're connected with.
 
     Strictly newest-first (Post's default ordering) — no ranking, ever. This is
@@ -881,13 +980,23 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
 
     serializer_class = PostSerializer
 
+    def get_serializer_context(self):
+        # The permalink (and a PATCH response) render PostSerializer too, so they
+        # need the comment counts (issue #63). Both GET and PATCH/DELETE go
+        # through _fetch_post, which stashes the single post's counts here.
+        context = super().get_serializer_context()
+        context["comment_counts"] = getattr(self, "_comment_counts", {})
+        return context
+
     def _fetch_post(self):
-        return get_object_or_404(
+        post = get_object_or_404(
             Post.objects.select_related("author", "group").prefetch_related(
                 "images", "reactions"
             ),
             pk=self.kwargs["pk"],
         )
+        self._comment_counts = comment_counts_for_posts([post], self.request.user)
+        return post
 
     def get_object(self):
         post = self._fetch_post()
@@ -942,7 +1051,7 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class UserPostsView(ReactionContextMixin, generics.ListAPIView):
+class UserPostsView(CommentCountMixin, ReactionContextMixin, generics.ListAPIView):
     """One person's own posts, newest-first — drives the profile page.
 
     Private-by-default: you only see a user's posts if it's you, or you're
@@ -1237,6 +1346,16 @@ class PostCommentsView(APIView):
 
     def get(self, request, pk):
         post, connected_ids = self._get_post_or_404(request, pk)
+        # Opening the thread is the "seen" event (issue #63): stamp the viewer's
+        # last-seen marker to now, which clears the post's "N new" count on their
+        # next feed load. Consistent with how opening a conversation clears its
+        # unread badge — seen is thread-level, not per-comment. Cheap upsert; the
+        # GET already fires only on a deliberate open, so no extra round-trip.
+        PostCommentRead.objects.update_or_create(
+            post=post,
+            user=request.user,
+            defaults={"last_seen_at": timezone.now()},
+        )
         # Drop comments by deactivated (banned) authors before building the
         # tree, so a banned member's comments vanish just like their posts do —
         # and their replies go with them (an orphaned reply is never reached).
@@ -2157,7 +2276,7 @@ class GroupDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class GroupPostsView(ReactionContextMixin, generics.ListAPIView):
+class GroupPostsView(CommentCountMixin, ReactionContextMixin, generics.ListAPIView):
     """A group's timeline (``GET /groups/<pk>/posts/``): its posts, newest-first,
     paginated. Members only — a non-member (or unknown group) gets 404, so a
     private group's contents and existence stay hidden.

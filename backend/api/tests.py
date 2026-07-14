@@ -49,6 +49,7 @@ from .models import (
     Participant,
     ParticipantInterval,
     Post,
+    PostCommentRead,
     Reaction,
     Report,
 )
@@ -703,6 +704,111 @@ def _flatten_ids(tree):
         ids.add(node["id"])
         ids |= _flatten_ids(node.get("replies", []))
     return ids
+
+
+class CommentCountTests(APITestCase):
+    """The total + new comment counts the feed carries next to "Comments"
+    (issue #63). Counts must honour the same connection/active pruning as the
+    thread itself, and "new" clears once the viewer opens the thread."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        self.stranger = make_user("stranger@example.com")
+        make_connection(self.me, self.friend, ACCEPTED)
+        # My own post — it's in my feed, and I'm connected with friend, so I see
+        # my own + friend's comments but never the stranger's.
+        self.post = Post.objects.create(author=self.me, text="a post")
+        self.client.force_authenticate(self.me)
+
+    def _feed_row(self, post=None):
+        """The feed payload row for a post — proving the counts ride the feed
+        with no extra per-post request."""
+        post = post or self.post
+        resp = self.client.get(FEED_URL)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for row in resp.data["results"]:
+            if row["id"] == post.id:
+                return row
+        self.fail("post not found in feed")
+
+    def _comment(self, author, text="c", parent=None):
+        return Comment.objects.create(
+            post=self.post, author=author, text=text, parent=parent
+        )
+
+    def test_total_count_prunes_to_visible_authors(self):
+        # mine + friend's are visible; the stranger's is not.
+        self._comment(self.me)
+        self._comment(self.friend)
+        self._comment(self.stranger)
+        self.assertEqual(self._feed_row()["comment_count"], 2)
+
+    def test_total_count_includes_replies(self):
+        top = self._comment(self.friend, "top")
+        self._comment(self.me, "reply", parent=top)
+        # One top-level + one reply = 2 (replies count toward the total).
+        self.assertEqual(self._feed_row()["comment_count"], 2)
+
+    def test_hidden_subtree_excluded_from_total(self):
+        # A stranger's comment with a friend's reply under it: the whole branch
+        # is pruned, so neither counts — matching the pruned tree (issue #12).
+        stranger_top = self._comment(self.stranger, "stranger")
+        self._comment(self.friend, "reply under stranger", parent=stranger_top)
+        visible = self._comment(self.friend, "visible top")
+        row = self._feed_row()
+        self.assertEqual(row["comment_count"], 1)  # only the visible top-level
+
+    def test_deactivated_author_excluded_from_total(self):
+        self._comment(self.friend, "will vanish")
+        self.friend.is_active = False
+        self.friend.save(update_fields=["is_active"])
+        self.assertEqual(self._feed_row()["comment_count"], 0)
+
+    def test_new_count_before_opening_counts_others_comments(self):
+        self._comment(self.friend)
+        row = self._feed_row()
+        self.assertEqual(row["comment_count"], 1)
+        self.assertEqual(row["new_comment_count"], 1)  # never opened ⇒ all new
+
+    def test_new_count_excludes_your_own_comments(self):
+        # You've self-evidently seen your own comment, so it's never "new".
+        self._comment(self.me)
+        row = self._feed_row()
+        self.assertEqual(row["comment_count"], 1)
+        self.assertEqual(row["new_comment_count"], 0)
+
+    def test_opening_the_thread_clears_the_new_count(self):
+        self._comment(self.friend)
+        self.assertEqual(self._feed_row()["new_comment_count"], 1)
+        # Opening the thread (GET) stamps the last-seen marker...
+        self.assertEqual(
+            self.client.get(comments_url(self.post)).status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertTrue(
+            PostCommentRead.objects.filter(post=self.post, user=self.me).exists()
+        )
+        # ...so the count clears, while the total stays.
+        row = self._feed_row()
+        self.assertEqual(row["new_comment_count"], 0)
+        self.assertEqual(row["comment_count"], 1)
+
+    def test_only_comments_after_last_seen_are_new(self):
+        old = self._comment(self.friend, "before")  # noqa: F841
+        # Mark seen now, then a fresh comment lands after the marker.
+        self.client.get(comments_url(self.post))
+        self._comment(self.friend, "after")
+        row = self._feed_row()
+        self.assertEqual(row["comment_count"], 2)
+        self.assertEqual(row["new_comment_count"], 1)  # only the later one
+
+    def test_permalink_carries_counts(self):
+        self._comment(self.friend)
+        resp = self.client.get(f"/api/posts/{self.post.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["comment_count"], 1)
+        self.assertEqual(resp.data["new_comment_count"], 1)
 
 
 # --- Phase 4: photos on posts -----------------------------------------------

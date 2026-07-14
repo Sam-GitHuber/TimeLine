@@ -26,6 +26,12 @@ export default function PostCard({
   // scrolling the feed doesn't fire a request per post. On a permalink we start
   // open so the deep-linked comment is reachable without a click.
   const [showComments, setShowComments] = useState(defaultCommentsOpen);
+  // Whether the thread has been opened this session. Opening it fetches the
+  // comments (which marks them seen server-side), so once you've opened it the
+  // "N new" badge is stale — hide it locally rather than wait for the next feed
+  // fetch to return new_comment_count = 0. (Starts true on a permalink, which
+  // opens already-expanded.)
+  const [hasOpened, setHasOpened] = useState(defaultCommentsOpen);
   // Which photo the lightbox is showing; null = closed.
   const [lightboxIndex, setLightboxIndex] = useState(null);
   // Whether the post text is flipped into its inline editor (issue #62).
@@ -35,6 +41,11 @@ export default function PostCard({
   if (!author) return null;
 
   const { time, meridiem } = formatClockTime(post.created_at);
+
+  const commentCount = post.comment_count ?? 0;
+  const newCount = post.new_comment_count ?? 0;
+  // Show the "N new" badge only until the thread is opened this session.
+  const showNew = newCount > 0 && !hasOpened;
 
   return (
     <article className="tl-entry">
@@ -163,11 +174,27 @@ export default function PostCard({
         <div className="mt-3 -ml-2 flex items-center gap-3">
           <button
             type="button"
-            onClick={() => setShowComments((v) => !v)}
+            onClick={() => {
+              setShowComments((v) => !v);
+              setHasOpened(true);
+            }}
             aria-expanded={showComments}
             className="rounded-lg px-2 py-1 text-sm font-medium text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
           >
             {showComments ? "Hide comments" : "Comments"}
+            {/* Total visible comments (issue #63) — matches what actually expands,
+                since the count is pruned server-side to your connections. Hidden
+                when zero so an empty thread just reads "Comments". */}
+            {commentCount > 0 && (
+              <span className="ml-1.5 tabular-nums">· {commentCount}</span>
+            )}
+            {/* New (unseen) comments, in the accent colour so they stand out.
+                Only before you've opened the thread — opening it marks them seen. */}
+            {showNew && (
+              <span className="ml-1.5 font-semibold tabular-nums text-accent-deep">
+                · {newCount} new
+              </span>
+            )}
           </button>
           {/* Report has moved into the ⋯ menu in the header (issue #62), so it's
               no longer here in the footer. */}
