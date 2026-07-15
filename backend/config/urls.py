@@ -22,6 +22,8 @@ from django.urls import include, path
 
 from accounts.views import (
     InactiveRegisterView,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
     ResendVerificationView,
     ThrottledLoginView,
     ThrottledPasswordChangeView,
@@ -65,6 +67,21 @@ urlpatterns = [
         "api/auth/resend-verification/",
         ResendVerificationView.as_view(),
         name="resend_verification",
+    ),
+    # Forgotten-password reset (issue #38): our own 6-digit-code flow, mirroring
+    # verify-email above — NOT dj-rest-auth's link/token endpoints (which the
+    # include below still exposes but nothing calls). Hyphenated paths so they
+    # never collide with the library's `password/reset/`. See accounts.md for why
+    # a code over a link.
+    path(
+        "api/auth/password-reset/",
+        PasswordResetRequestView.as_view(),
+        name="password_reset_request",
+    ),
+    path(
+        "api/auth/password-reset/confirm/",
+        PasswordResetConfirmView.as_view(),
+        name="password_reset_confirm",
     ),
     # Lets the SPA obtain a CSRF cookie on load.
     path("api/auth/csrf/", csrf, name="csrf"),

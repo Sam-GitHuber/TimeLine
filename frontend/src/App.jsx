@@ -26,6 +26,7 @@ import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
 import VerifyEmailPage from "./pages/VerifyEmailPage.jsx";
+import ResetPasswordPage from "./pages/ResetPasswordPage.jsx";
 import TermsPage from "./pages/legal/TermsPage.jsx";
 import PrivacyPage from "./pages/legal/PrivacyPage.jsx";
 
@@ -90,6 +91,9 @@ export default function App() {
       {/* Email verification (issue #73) — reached after sign-up, or from login
           when an unverified account tries to log in. Public (no session yet). */}
       <Route path="/verify-email" element={<VerifyEmailPage />} />
+      {/* Forgotten-password reset (issue #38) — reached from the login page's
+          "Forgot your password?" link. Public (no session yet). */}
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       {/* Legal pages — public so they're reachable from sign-up (before login)
           as well as from the in-app footer. */}
       <Route path="/terms" element={<TermsPage />} />

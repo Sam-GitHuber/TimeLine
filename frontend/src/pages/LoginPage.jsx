@@ -81,7 +81,17 @@ export default function LoginPage() {
         </button>
       </form>
 
-      <p className="mt-6 text-center text-sm text-ink-faint">
+      <p className="mt-4 text-center text-sm">
+        <Link
+          to="/reset-password"
+          state={{ email }}
+          className="text-accent-deep hover:underline"
+        >
+          Forgot your password?
+        </Link>
+      </p>
+
+      <p className="mt-2 text-center text-sm text-ink-faint">
         No account?{" "}
         <Link to="/signup" className="font-medium text-accent-deep hover:underline">
           Sign up

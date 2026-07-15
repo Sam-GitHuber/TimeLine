@@ -154,6 +154,30 @@ export const api = {
       body: { email },
     }),
 
+  // Begin a forgotten-password reset: email a 6-digit code. Enumeration-safe —
+  // always resolves the same way whatever the address (a code is only really
+  // sent to a real account). Rate-limited server-side.
+  requestPasswordReset: (email) =>
+    request("/api/auth/password-reset/", {
+      method: "POST",
+      body: { email },
+    }),
+
+  // Complete a reset with the emailed code + a new password. A wrong/expired code
+  // and an unknown email come back as the same generic error (we don't reveal
+  // which); password-strength/mismatch errors surface normally. On success you
+  // can log in with the new password.
+  confirmPasswordReset: (email, code, newPassword, confirmPassword) =>
+    request("/api/auth/password-reset/confirm/", {
+      method: "POST",
+      body: {
+        email,
+        code,
+        new_password1: newPassword,
+        new_password2: confirmPassword,
+      },
+    }),
+
   // Update your own profile (name, bio, avatar) via dj-rest-auth's user
   // endpoint. Sent as multipart because it can carry an avatar file. Pass
   // `removeAvatar: true` to clear an existing avatar.

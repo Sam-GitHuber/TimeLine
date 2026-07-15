@@ -83,26 +83,23 @@ class User(AbstractUser):
         return full_name or self.email.split("@", 1)[0]
 
 
-class EmailVerificationCode(models.Model):
-    """A short-lived 6-digit code proving control of a sign-up email address.
+class EmailCode(models.Model):
+    """Shared machinery for the short-lived, hashed 6-digit codes we email.
 
-    Email is our sole login identifier (there is no username), so we need to know
-    a member actually controls the address they signed up with — otherwise a typo
-    means an unrecoverable account, and a deliberately wrong address points the
-    login identifier at someone else's inbox. See docs/reference/accounts.md.
+    Both concrete subclasses — sign-up email verification and forgotten-password
+    reset — want the same primitive: a single per-user row holding only a *hash*
+    of a random 6-digit code, with an expiry, a small wrong-guess budget, and a
+    resend cooldown. This abstract base holds that logic once; each subclass just
+    declares its own ``user`` relation (with its own ``related_name``).
 
-    Two deliberate choices:
+    Two deliberate choices baked in here:
 
     - **Only a hash of the code is stored** (``django.contrib.auth.hashers``),
-      never the plaintext — so a database leak can't hand out live codes. Sign-up
-      volume is tiny, so PBKDF2's cost is irrelevant here.
-    - **Verification proves address *control* only.** Admin approval
-      (``User.is_active``) remains the membership gate; *both* are required to log
-      in (enforced in ``CustomLoginSerializer``). The durable "is this address
-      verified" flag lives on allauth's ``EmailAddress.verified`` — this row is
-      just the transient challenge and is deleted once redeemed.
-
-    One row per user (``OneToOneField``); issuing a new code replaces the old one.
+      never the plaintext — so a database leak can't hand out live codes. Volumes
+      are tiny, so PBKDF2's cost is irrelevant.
+    - The code is a *transient challenge*: one row per user, replaced on reissue
+      and deleted once redeemed. The durable outcome (a verified address, a new
+      password) lives elsewhere.
     """
 
     CODE_LENGTH = 6
@@ -115,19 +112,14 @@ class EmailVerificationCode(models.Model):
     # blunts using "resend" to flood someone's inbox.
     RESEND_COOLDOWN = timedelta(seconds=60)
 
-    user = models.OneToOneField(
-        "accounts.User",
-        on_delete=models.CASCADE,
-        related_name="email_verification_code",
-    )
     code_hash = models.CharField(max_length=128)
     # Set explicitly on (re)issue rather than auto_now_add, so reissuing resets
     # the clock (auto_now_add only fires on first insert).
     created_at = models.DateTimeField(default=timezone.now)
     attempts = models.PositiveSmallIntegerField(default=0)
 
-    def __str__(self):
-        return f"email verification code for user {self.user_id}"
+    class Meta:
+        abstract = True
 
     @property
     def is_expired(self):
@@ -175,3 +167,56 @@ class EmailVerificationCode(models.Model):
         self.save(update_fields=["attempts"])
         self.refresh_from_db(fields=["attempts"])
         return False
+
+
+class EmailVerificationCode(EmailCode):
+    """A short-lived 6-digit code proving control of a sign-up email address.
+
+    Email is our sole login identifier (there is no username), so we need to know
+    a member actually controls the address they signed up with — otherwise a typo
+    means an unrecoverable account, and a deliberately wrong address points the
+    login identifier at someone else's inbox. See docs/reference/accounts.md.
+
+    **Verification proves address *control* only.** Admin approval
+    (``User.is_active``) remains the membership gate; *both* are required to log
+    in (enforced in ``CustomLoginSerializer``). The durable "is this address
+    verified" flag lives on allauth's ``EmailAddress.verified`` — this row is just
+    the transient challenge (see :class:`EmailCode`) and is deleted once redeemed.
+
+    One row per user (``OneToOneField``); issuing a new code replaces the old one.
+    """
+
+    user = models.OneToOneField(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="email_verification_code",
+    )
+
+    def __str__(self):
+        return f"email verification code for user {self.user_id}"
+
+
+class PasswordResetCode(EmailCode):
+    """A short-lived 6-digit code authorising a forgotten-password reset (#38).
+
+    Same machinery as :class:`EmailVerificationCode` — a hash of the code only, a
+    15-minute expiry, a 5-attempt budget, a 60-second resend cooldown (all from
+    :class:`EmailCode`). Kept as its own model/row so a pending reset and a
+    pending verification for the same user never collide.
+
+    The important difference is *consequence*: redeeming this code sets a **new
+    password** and thus grants account access, so the confirm endpoint is the
+    account-takeover surface. That's why the same online-guessing guards apply,
+    with a per-IP throttle on top (see ``accounts/views.py``).
+
+    One row per user (``OneToOneField``); requesting a new reset replaces the old.
+    """
+
+    user = models.OneToOneField(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="password_reset_code",
+    )
+
+    def __str__(self):
+        return f"password reset code for user {self.user_id}"

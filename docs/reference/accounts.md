@@ -136,8 +136,8 @@ maintainer sees both when approving. There's also a
 checks it back interactively — an outbound-email smoke test (e.g. over SSH on the
 box) that touches **no** account.
 
-This unblocks forgotten-password reset (#38): a reset emails a token, so the
-address must be proven first.
+The same code machinery backs forgotten-password reset — see
+[Password reset](#password-reset-forgotten-password) below.
 
 ## Consent & legal (ToS / privacy)
 
@@ -177,11 +177,78 @@ backups until they age out (~30-day window).
 ## Password change
 
 Logged-in password rotation via dj-rest-auth's `POST /api/auth/password/change/`
-(no email involved, so it's independent of the not-yet-built forgotten-password
-reset). `OLD_PASSWORD_FIELD_ENABLED = True` so the **current password is
-required** — a hijacked session (e.g. via XSS) can't silently rotate the password,
-and a shoulder-surfer at an unlocked screen can't lock the owner out. Frontend is
-an inline expanding section on `/settings`.
+(no email involved, so it's independent of the forgotten-password reset below).
+`OLD_PASSWORD_FIELD_ENABLED = True` so the **current password is required** — a
+hijacked session (e.g. via XSS) can't silently rotate the password, and a
+shoulder-surfer at an unlocked screen can't lock the owner out. Frontend is an
+inline expanding section on `/settings`.
+
+## Password reset (forgotten password)
+
+Self-service recovery for a member who's forgotten their password (#38) — without
+it, a forgotten password is a permanent lockout needing manual admin surgery, a
+poor fit for the non-technical friends/family this app is for.
+
+**A 6-digit code, not a link — the same flow as email verification.** dj-rest-auth
+ships link-based `password/reset` endpoints, but we deliberately run our own code
+flow instead, for the same reasons codes won for verification: friendlier UX
+(copy-paste, OS autofill), enumeration-safety we control end-to-end, and **no
+`FRONTEND_URL`** needed (there's no link to build). The two flows share their
+machinery — `EmailVerificationCode` and `PasswordResetCode` both subclass the
+abstract `EmailCode` (hashed code only, 15-min expiry, 5-attempt budget, 60-sec
+resend cooldown). The dj-rest-auth link endpoints remain mounted (via
+`dj_rest_auth.urls`) but nothing calls them, exactly as with verify-email.
+
+**Flow.** `/reset-password` in the SPA (reached from a "Forgot your password?"
+link on login):
+1. **Request** — `POST /api/auth/password-reset/` `{email}` emails a 6-digit code.
+2. **Confirm** — `POST /api/auth/password-reset/confirm/`
+   `{email, code, new_password1, new_password2}` verifies the code, runs the new
+   password through Django's validators, sets it, and consumes the code.
+
+**The credential is stronger than it looks.** A reset directly grants account
+access (unlike verification, which still needs admin approval), so it's the
+account-takeover surface. But a 6-digit code with a 5-attempt budget is
+5-in-a-million per issued code; getting more guesses means requesting more codes,
+each of which emails the *real* owner (noise) and is rate-limited + cooldown-
+gated. Brute-forcing is impractical and loud. The code is stored only as a hash,
+so a DB leak can't hand out live resets.
+
+**Two deliberate details:**
+- **A successful reset also marks the address verified.** Receiving the emailed
+  code proves inbox control, so a member who never finished verification but
+  forgot their password isn't then stuck behind the verify gate. (Admin approval,
+  `is_active`, still applies — a reset never bypasses membership.)
+- **Password errors (mismatch / too weak) don't consume the code.** They're only
+  reachable *after* a valid code is held, so a real user who fumbles a weak
+  password can fix it and resubmit with the same still-valid code.
+
+**Enumeration-safety** mirrors verification: the request endpoint always returns
+the identical 200 (a code is only really sent to a real account, and a send
+failure is swallowed+logged so it can't become a 500-vs-200 oracle); the confirm
+endpoint returns one generic 400 for unknown-email / missing / wrong / expired
+alike. Password-strength/mismatch messages are more specific, but only a holder of
+a valid code sees them, so they leak nothing about membership. Both are per-IP
+throttled (`password_reset`, `password_reset_confirm` scopes — see
+[Rate-limiting](#rate-limiting-auth-sensitive-endpoints)).
+
+**Response *timing* is equalised on the request too, not just the body.** Issuing
+a code runs a PBKDF2 hash; a branch that issues none (unknown address, or a real
+account inside its resend cooldown) would return hundreds of ms sooner and leak
+membership from latency alone. So the request view spends one throwaway hash on
+the no-issue branches — the same guard the [duplicate-email sign-up](#accountemail-enumeration--closed-at-sign-up)
+path uses. One residual is accepted (as at sign-up): a real account's *first*
+request in a cooldown window also sends an email, whose cost isn't equalised; the
+60-sec cooldown means repeat probes fall into the fast, no-send bucket. The
+confirm endpoint has a smaller, matching residual (an unknown email returns before
+`verify()` spends its `check_password`) shared with the verify-email endpoint —
+worth folding into a shared constant-time helper on `EmailCode` if either flow
+ever opens to the public.
+
+**Known limitation:** a reset doesn't revoke JWTs already issued to other
+sessions (our auth is stateless — the cookie token stays valid until its 1-day
+expiry). Acceptable for a private beta; revisit with token-versioning if it
+matters.
 
 ## Reporting & moderation
 
@@ -217,9 +284,14 @@ This is the layer holding real credentials, so:
 
 ### Rate-limiting (auth-sensitive endpoints)
 
-`login`, `password/change/`, and `account/delete/` are throttled via DRF's
-`ScopedRateThrottle` (login 10/min, password-change 10/min, account-delete 5/min;
-env-overridable). A tripped limit is a clean `429`. Two non-obvious decisions:
+`login`, `password/change/`, `account/delete/`, the email-verification endpoints,
+and the password-reset endpoints are throttled via DRF's `ScopedRateThrottle`
+(login 10/min, password-change 10/min, account-delete 5/min, resend-verification
+5/min, verify-email 20/min, password-reset 5/min, password-reset-confirm 20/min;
+all env-overridable). The two reset scopes mirror their verification counterparts:
+per-IP (the caller is anonymous), with the request side kept low to blunt inbox-
+spamming and the confirm side generous so a real user retrying a weak password
+isn't blocked. A tripped limit is a clean `429`. Two non-obvious decisions:
 
 - **Login is keyed on IP, not the submitted email.** An email-keyed limit would
   let an attacker lock a real member out of their *own* login by spamming wrong
@@ -241,10 +313,12 @@ A duplicate-email sign-up returns the **identical** "verify your email" 201 as a
 fresh sign-up (silent no-op in the serializer, with a throwaway password hash to
 equalise timing) **and sends no verification email**; the existing account is
 never touched. This closes the probe for whether an email is a member. The
-verification endpoints hold the same line — `verify-email` returns one generic
-error for unknown-email/wrong-code alike, and `resend-verification` always returns
-the identical 200 (see [Email verification](#email-verification-6-digit-code)
-above). (Login still returns a distinct message once an account is active but
+verification **and** password-reset endpoints hold the same line — `verify-email`
+and `password-reset/confirm` return one generic error for unknown-email/wrong-code
+alike, and `resend-verification` and `password-reset` always return the identical
+200 (see [Email verification](#email-verification-6-digit-code) and
+[Password reset](#password-reset-forgotten-password) above). (Login still returns
+a distinct message once an account is active but
 unverified — a smaller leak accepted for now, consistent with the existing
 inactive-account message; revisit if sign-ups ever open to the public.)
 

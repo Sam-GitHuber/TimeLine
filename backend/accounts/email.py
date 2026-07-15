@@ -13,7 +13,7 @@ from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 
-from .models import EmailVerificationCode
+from .models import EmailVerificationCode, PasswordResetCode
 
 
 def send_verification_code(email, code, display_name=None):
@@ -36,6 +36,34 @@ def send_verification_code(email, code, display_name=None):
     ).strip()
     text_body = render_to_string("accounts/email/verification_code.txt", context)
     html_body = render_to_string("accounts/email/verification_code.html", context)
+
+    message = EmailMultiAlternatives(
+        subject=subject,
+        body=text_body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[email],
+    )
+    message.attach_alternative(html_body, "text/html")
+    message.send()
+
+
+def send_password_reset_code(email, code, display_name=None):
+    """Email a forgotten-password reset ``code`` to ``email``.
+
+    Mirrors :func:`send_verification_code` (a plain-text part plus a branded HTML
+    alternative); only the wording and expiry source differ. ``display_name``
+    personalises the greeting when the caller has it.
+    """
+    context = {
+        "code": code,
+        "display_name": display_name,
+        "expiry_minutes": int(PasswordResetCode.EXPIRY.total_seconds() // 60),
+    }
+    subject = render_to_string(
+        "accounts/email/password_reset_code_subject.txt", context
+    ).strip()
+    text_body = render_to_string("accounts/email/password_reset_code.txt", context)
+    html_body = render_to_string("accounts/email/password_reset_code.html", context)
 
     message = EmailMultiAlternatives(
         subject=subject,
