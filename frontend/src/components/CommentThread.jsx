@@ -122,7 +122,7 @@ function CommentNode({ comment, postId, expandIds = null, highlightId = null }) 
   const isHighlighted = highlightId != null && comment.id === highlightId;
 
   return (
-    <li className="min-w-0" id={`comment-${comment.id}`}>
+    <li id={`comment-${comment.id}`}>
       <div
         className={
           isHighlighted
@@ -136,18 +136,18 @@ function CommentNode({ comment, postId, expandIds = null, highlightId = null }) 
             thin left rule instead of an avatar's width, and deep threads stay
             readable on narrow screens instead of squashing off to the right
             (issue #80). */}
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <Link to={`/u/${comment.author.id}`} tabIndex={-1} aria-hidden="true">
             <Avatar user={comment.author} size="xs" />
           </Link>
           <Link
             to={`/u/${comment.author.id}`}
-            className="text-sm font-semibold text-ink hover:text-accent-deep"
+            className="min-w-0 truncate text-sm font-semibold text-ink hover:text-accent-deep"
           >
             {comment.author.display_name}
           </Link>
           <time
-            className="font-mono text-xs text-ink-faint"
+            className="shrink-0 font-mono text-xs text-ink-faint"
             dateTime={comment.created_at}
             title={formatAbsoluteTime(comment.created_at)}
           >
