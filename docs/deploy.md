@@ -222,7 +222,18 @@ warmed, authenticated IPs — the difference between "reset link arrives" and
 docker compose -f docker-compose.prod.yml exec backend \
   python manage.py sendtestemail you@example.com
 #    Check the inbox (and spam). If it lands, delivery works end to end.
+
+# 6. Smoke-test the sign-up verification email specifically (issue #73): sends a
+#    branded 6-digit code, then waits for you to type it back and confirms the
+#    match. Exercises the real template + code round-trip; touches no account, so
+#    it's safe against production.
+docker compose -f docker-compose.prod.yml exec backend \
+  python manage.py send_test_verification you@example.com
 ```
+
+> Run these from the repo checkout on the box (`cd ~/TimeLine`) and keep the
+> `-f docker-compose.prod.yml` flag — without it Compose can't find a config file
+> ("no configuration file provided: not found"). See *Everyday operations* below.
 
 **Fail-loud in production.** With `DEBUG` off, an unset `EMAIL_HOST` makes the
 app refuse to boot — so a misconfigured deploy can't silently start printing
