@@ -1,19 +1,24 @@
 import os
+import re
 import shutil
 import tempfile
+from datetime import timedelta
 from io import BytesIO
 from unittest import mock
 
+from allauth.account.models import EmailAddress
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
+from django.utils import timezone
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
+from accounts.models import EmailVerificationCode, generate_code
 from config.settings import _email_backend, env_int
 
 User = get_user_model()
@@ -278,22 +283,46 @@ class LoginLogoutTests(APITestCase):
     def _activate(self, email):
         User.objects.filter(email=email).update(is_active=True)
 
+    def _verify(self, email):
+        # Mark the sign-up's EmailAddress as verified (as the code flow does).
+        # Login now needs BOTH this and approval — see issue #73.
+        EmailAddress.objects.filter(user__email=email).update(verified=True)
+
+    def _approve(self, email):
+        # The full happy path: approved AND verified.
+        self._activate(email)
+        self._verify(email)
+
     def _login(self, email):
         return self.client.post(
             LOGIN_URL, {"email": email, "password": PASSWORD}, format="json"
         )
 
     def test_login_is_rejected_while_inactive(self):
+        # Verified but not yet approved — the approval gate still holds.
         self._register("pending@example.com")
+        self._verify("pending@example.com")
 
         resp = self._login("pending@example.com")
 
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertNotIn(AUTH_COOKIE, resp.cookies)
 
+    def test_login_is_rejected_while_unverified(self):
+        # Approved but email not verified — the verification gate holds too, and
+        # the message points the person at verifying (issue #73).
+        self._register("unverified@example.com")
+        self._activate("unverified@example.com")
+
+        resp = self._login("unverified@example.com")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotIn(AUTH_COOKIE, resp.cookies)
+        self.assertIn("verify your email", str(resp.data).lower())
+
     def test_login_succeeds_once_approved_and_sets_httponly_cookie(self):
         self._register("member@example.com")
-        self._activate("member@example.com")
+        self._approve("member@example.com")
 
         resp = self._login("member@example.com")
 
@@ -304,7 +333,7 @@ class LoginLogoutTests(APITestCase):
 
     def test_who_am_i_returns_the_logged_in_user(self):
         self._register("me@example.com")
-        self._activate("me@example.com")
+        self._approve("me@example.com")
         self._login("me@example.com")  # sets the auth cookie on self.client
 
         resp = self.client.get(USER_URL)
@@ -321,7 +350,7 @@ class LoginLogoutTests(APITestCase):
 
     def test_logout_requires_csrf_then_clears_the_cookie(self):
         self._register("bye@example.com")
-        self._activate("bye@example.com")
+        self._approve("bye@example.com")
 
         # A CSRF-enforcing client, so the manual CSRF check in the cookie-JWT
         # auth actually runs (the default test client suppresses it). This
@@ -587,3 +616,228 @@ class ProfileEditTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.user.refresh_from_db()
         self.assertFalse(self.user.avatar)
+
+
+VERIFY_URL = "/api/auth/verify-email/"
+RESEND_URL = "/api/auth/resend-verification/"
+
+
+class EmailVerificationCodeModelTests(APITestCase):
+    """Unit-level behaviour of the code itself (hashing, expiry, attempts)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="model@example.com", password=PASSWORD
+        )
+
+    def test_generate_code_is_six_digits(self):
+        for _ in range(20):
+            code = generate_code()
+            self.assertEqual(len(code), 6)
+            self.assertTrue(code.isdigit())
+
+    def test_the_plaintext_code_is_never_stored(self):
+        code = EmailVerificationCode.issue(self.user)
+        record = EmailVerificationCode.objects.get(user=self.user)
+        self.assertNotEqual(record.code_hash, code)
+        # It's a real password-hasher hash, and it verifies.
+        self.assertTrue(record.verify(code))
+
+    def test_a_wrong_code_burns_an_attempt(self):
+        EmailVerificationCode.issue(self.user)
+        record = EmailVerificationCode.objects.get(user=self.user)
+        self.assertFalse(record.verify("000000-nope"[:6]))
+        record.refresh_from_db()
+        self.assertEqual(record.attempts, 1)
+
+    def test_too_many_attempts_locks_even_the_right_code(self):
+        code = EmailVerificationCode.issue(self.user)
+        record = EmailVerificationCode.objects.get(user=self.user)
+        wrong = "111111" if code != "111111" else "222222"
+        for _ in range(EmailVerificationCode.MAX_ATTEMPTS):
+            record.verify(wrong)
+        record.refresh_from_db()
+        # The correct code no longer works once the budget is spent.
+        self.assertFalse(record.verify(code))
+
+    def test_an_expired_code_fails(self):
+        code = EmailVerificationCode.issue(self.user)
+        record = EmailVerificationCode.objects.get(user=self.user)
+        record.created_at = timezone.now() - (EmailVerificationCode.EXPIRY + timedelta(minutes=1))
+        record.save(update_fields=["created_at"])
+        self.assertTrue(record.is_expired)
+        self.assertFalse(record.verify(code))
+
+    def test_issue_replaces_the_previous_code(self):
+        first = EmailVerificationCode.issue(self.user)
+        second = EmailVerificationCode.issue(self.user)
+        self.assertNotEqual(first, second)
+        # Only one row per user, and it's the latest.
+        self.assertEqual(EmailVerificationCode.objects.filter(user=self.user).count(), 1)
+        record = EmailVerificationCode.objects.get(user=self.user)
+        self.assertTrue(record.verify(second))
+        self.assertFalse(record.verify(first))
+
+    def test_issue_if_due_respects_the_cooldown(self):
+        EmailVerificationCode.issue(self.user)
+        # A second request straight away is suppressed (returns None, sends
+        # nothing) — the anti-inbox-flood guard.
+        self.assertIsNone(EmailVerificationCode.issue_if_due(self.user))
+        # But once the cooldown has passed it issues a fresh one.
+        record = EmailVerificationCode.objects.get(user=self.user)
+        record.created_at = timezone.now() - (EmailVerificationCode.RESEND_COOLDOWN + timedelta(seconds=1))
+        record.save(update_fields=["created_at"])
+        self.assertIsNotNone(EmailVerificationCode.issue_if_due(self.user))
+
+
+@override_settings(CACHES=LOCMEM_CACHE)
+class EmailVerificationFlowTests(APITestCase):
+    """The end-to-end sign-up → verify → login story over the API."""
+
+    def setUp(self):
+        cache.clear()  # resend is throttled — isolate the bucket
+
+    def tearDown(self):
+        cache.clear()
+
+    def _register(self, email):
+        return self.client.post(
+            REGISTER_URL,
+            {
+                "email": email,
+                "password1": PASSWORD,
+                "password2": PASSWORD,
+                "first_name": "Ver",
+                "last_name": "Ify",
+                "accept_terms": True,
+            },
+            format="json",
+        )
+
+    def _code_from_last_email(self):
+        # The plaintext code only exists in the sent message — pull it out like a
+        # recipient would read it. Both the text and HTML parts carry it.
+        body = mail.outbox[-1].body
+        match = re.search(r"\b(\d{6})\b", body)
+        self.assertIsNotNone(match, "no 6-digit code found in the email")
+        return match.group(1)
+
+    def test_signup_emails_a_branded_six_digit_code(self):
+        resp = self._register("newbie@example.com")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, ["newbie@example.com"])
+        self.assertIn("TimeLine", message.subject)
+        self.assertRegex(message.body, r"\b\d{6}\b")
+        # The branded HTML alternative is attached too.
+        self.assertTrue(
+            any("text/html" in alt[1] for alt in message.alternatives)
+        )
+        # The account starts unverified and inactive.
+        user = User.objects.get(email="newbie@example.com")
+        self.assertFalse(user.is_active)
+        self.assertFalse(
+            EmailAddress.objects.filter(user=user, verified=True).exists()
+        )
+
+    def test_a_duplicate_signup_sends_no_mail_and_looks_identical(self):
+        first = self._register("dup@example.com")
+        self.assertEqual(len(mail.outbox), 1)
+        mail.outbox.clear()
+
+        again = self._register("dup@example.com")
+        # Byte-identical body, and crucially NO second email (enumeration guard).
+        self.assertEqual(again.status_code, first.status_code)
+        self.assertEqual(again.data, first.data)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_verifying_with_the_right_code_flips_verified(self):
+        self._register("flip@example.com")
+        code = self._code_from_last_email()
+
+        resp = self.client.post(
+            VERIFY_URL, {"email": "flip@example.com", "code": code}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = User.objects.get(email="flip@example.com")
+        self.assertTrue(
+            EmailAddress.objects.filter(user=user, verified=True).exists()
+        )
+        # The code is consumed — it can't be replayed.
+        self.assertFalse(EmailVerificationCode.objects.filter(user=user).exists())
+
+    def test_a_wrong_code_is_refused_and_stays_unverified(self):
+        self._register("wrong@example.com")
+        code = self._code_from_last_email()
+        bad = "000000" if code != "000000" else "999999"
+
+        resp = self.client.post(
+            VERIFY_URL, {"email": "wrong@example.com", "code": bad}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        user = User.objects.get(email="wrong@example.com")
+        self.assertFalse(
+            EmailAddress.objects.filter(user=user, verified=True).exists()
+        )
+
+    def test_verify_is_enumeration_safe(self):
+        # An unknown email returns the SAME generic error as a wrong code, so it
+        # can't be used to probe who's a member.
+        unknown = self.client.post(
+            VERIFY_URL, {"email": "ghost@example.com", "code": "123456"}, format="json"
+        )
+        self.assertEqual(unknown.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self._register("real@example.com")
+        code = self._code_from_last_email()
+        bad = "000000" if code != "000000" else "999999"
+        wrong = self.client.post(
+            VERIFY_URL, {"email": "real@example.com", "code": bad}, format="json"
+        )
+        self.assertEqual(unknown.data, wrong.data)
+
+    def test_resend_sends_a_fresh_code_to_an_unverified_account(self):
+        self._register("resend@example.com")
+        mail.outbox.clear()
+        # Move the issued code past the cooldown so resend isn't suppressed.
+        EmailVerificationCode.objects.filter(user__email="resend@example.com").update(
+            created_at=timezone.now() - (EmailVerificationCode.RESEND_COOLDOWN + timedelta(seconds=1))
+        )
+
+        resp = self.client.post(
+            RESEND_URL, {"email": "resend@example.com"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_resend_is_enumeration_safe_for_unknown_and_verified(self):
+        # Unknown address: identical 200, no mail.
+        unknown = self.client.post(
+            RESEND_URL, {"email": "nobody@example.com"}, format="json"
+        )
+        self.assertEqual(unknown.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 0)
+
+        # Already-verified address: identical 200, still no mail.
+        self._register("done@example.com")
+        EmailAddress.objects.filter(user__email="done@example.com").update(verified=True)
+        mail.outbox.clear()
+        verified = self.client.post(
+            RESEND_URL, {"email": "done@example.com"}, format="json"
+        )
+        self.assertEqual(verified.status_code, status.HTTP_200_OK)
+        self.assertEqual(verified.data, unknown.data)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_resend_is_rate_limited(self):
+        limit = configured_throttle_limit("resend_verification")
+        for _ in range(limit):
+            resp = self.client.post(
+                RESEND_URL, {"email": "spam@example.com"}, format="json"
+            )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        blocked = self.client.post(
+            RESEND_URL, {"email": "spam@example.com"}, format="json"
+        )
+        self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)

@@ -74,6 +74,71 @@ The who-am-I payload exposes `is_staff` (read-only) so the app nav can show an
 server-side. In production `/admin/` is further restricted to the LAN — see
 [deploy.md](../deploy.md).
 
+## Email verification (6-digit code)
+
+Email is our sole login identifier, so we confirm a member actually controls the
+address they signed up with — otherwise a typo means an unrecoverable account and
+a deliberately wrong address points the login identifier at someone else's inbox.
+**Verification proves address *control*; admin approval (`is_active`) stays the
+membership gate — both are required to log in.**
+
+**Flow.** Sign-up creates the account (`is_active=False`) and emails a **6-digit
+code**. The person types/pastes it into the SPA's `/verify-email` page; on a match
+we flip allauth's `EmailAddress.verified`. The account then still waits for admin
+approval. Login is refused until **both** are true.
+
+**Why a code, not a link.** We run our own small code flow rather than allauth's
+built-in email-verification. dj-rest-auth's verify endpoint is HMAC-*key* based
+and allauth's code mode is session/stateful — neither maps cleanly onto a
+stateless "type this code" REST call, so bending them together was the fragile
+path. A code is also the friendlier UX (copy-paste, OS autofill via
+`autocomplete="one-time-code"`) and needs **no** `FRONTEND_URL` env var (there's
+no link to build). `ACCOUNT_EMAIL_VERIFICATION` stays `"none"` — allauth still
+creates the `EmailAddress` row at sign-up; we own flipping its `verified` flag,
+which remains the single source of truth the login check reads.
+
+**The code itself** (`accounts.models.EmailVerificationCode`, one row per user):
+- Only a **hash** of the code is stored (`django.contrib.auth.hashers`), never the
+  plaintext — a DB leak can't hand out live codes. `secrets` (not `random`)
+  generates it.
+- Short-lived (**15 min**), **5 attempts** then dead (online-guessing guard: 6
+  digits × 5 tries = 5-in-a-million), and a **60-second resend cooldown** so
+  "resend" can't flood an inbox even from rotating IPs.
+
+**Endpoints** (both `AllowAny`, both enumeration-safe):
+- `POST /api/auth/verify-email/` `{email, code}` → flips `verified` and consumes
+  the code. An unknown email, missing/wrong/expired code **all** return the same
+  generic `400` ("That code is invalid or has expired."), so it can't probe who's
+  a member.
+- `POST /api/auth/resend-verification/` `{email}` → **always** the identical `200`
+  whatever the address; a code is only really issued+sent for a real, not-yet-
+  verified account (and not inside the cooldown). Per-IP throttled
+  (`resend_verification` scope, env `DJANGO_THROTTLE_RESEND_VERIFICATION`).
+
+The `verify-email` endpoint isn't scope-throttled — the code's own 5-attempt
+budget is the limiter.
+
+**Login enforcement** lives in `CustomLoginSerializer` (wired via
+`REST_AUTH["LOGIN_SERIALIZER"]`): after dj-rest-auth's own checks (credentials +
+`is_active`), it blocks an account that has an `EmailAddress` row but none
+verified, with a clear "please verify" message (so the SPA can offer a resend
+path — the same small enumeration trade-off login already makes for approval
+status). Accounts with **no** `EmailAddress` row — the maintainer's
+`createsuperuser`, seeded demo users — are exempt (they never went through the
+verifiable sign-up). A one-off data migration
+(`0005_verify_existing_active_members`) grandfathered already-approved members so
+turning this on didn't lock them out; pending accounts can self-serve a fresh
+code via resend.
+
+The Django user admin shows an **Email verified** column beside **Active** so the
+maintainer sees both when approving. There's also a
+`python manage.py send_test_verification <email>` command: it emails a code and
+checks it back interactively — an outbound-email smoke test (e.g. over SSH on the
+box) that touches **no** account.
+
+This unblocks forgotten-password reset (#38): a reset emails a token, so the
+address must be proven first.
+
 ## Consent & legal (ToS / privacy)
 
 - Sign-up has a **required** "I agree to the Terms + Privacy Policy" checkbox that
@@ -172,12 +237,16 @@ env-overridable). A tripped limit is a clean `429`. Two non-obvious decisions:
 
 ### Account/email enumeration — closed at sign-up
 
-A duplicate-email sign-up returns the **identical** "pending approval" 201 as a
+A duplicate-email sign-up returns the **identical** "verify your email" 201 as a
 fresh sign-up (silent no-op in the serializer, with a throwaway password hash to
-equalise timing); the existing account is never touched. This closes the probe
-for whether an email is a member. (Login still returns allauth's distinct
-"inactive account" message — a smaller leak accepted for now; revisit if sign-ups
-ever open to the public.)
+equalise timing) **and sends no verification email**; the existing account is
+never touched. This closes the probe for whether an email is a member. The
+verification endpoints hold the same line — `verify-email` returns one generic
+error for unknown-email/wrong-code alike, and `resend-verification` always returns
+the identical 200 (see [Email verification](#email-verification-6-digit-code)
+above). (Login still returns a distinct message once an account is active but
+unverified — a smaller leak accepted for now, consistent with the existing
+inactive-account message; revisit if sign-ups ever open to the public.)
 
 ## Testing
 

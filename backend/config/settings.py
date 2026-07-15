@@ -337,6 +337,12 @@ REST_FRAMEWORK = {
         "account_delete": os.environ.get(
             "DJANGO_THROTTLE_ACCOUNT_DELETE", "5/min"
         ),
+        # resend a verification code (per-IP; the caller is anonymous). Blunts
+        # using the resend endpoint to spam an inbox / probe. A per-email cooldown
+        # (EmailVerificationCode.RESEND_COOLDOWN) guards a single address on top.
+        "resend_verification": os.environ.get(
+            "DJANGO_THROTTLE_RESEND_VERIFICATION", "5/min"
+        ),
     },
 }
 
@@ -360,6 +366,9 @@ REST_AUTH = {
     "SESSION_LOGIN": False,
     "REGISTER_SERIALIZER": "accounts.serializers.CustomRegisterSerializer",
     "USER_DETAILS_SERIALIZER": "accounts.serializers.UserDetailsSerializer",
+    # Login also requires a verified email (issue #73), on top of correct
+    # credentials + admin approval. See accounts.serializers.CustomLoginSerializer.
+    "LOGIN_SERIALIZER": "accounts.serializers.CustomLoginSerializer",
     # Require the current password to change it (dj-rest-auth leaves this off by
     # default). Account hygiene: a hijacked session (e.g. via XSS) then can't
     # silently rotate the password without also knowing the old one, and it stops
@@ -380,8 +389,11 @@ ACCOUNT_LOGIN_METHODS = {"email"}
 ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 ACCOUNT_UNIQUE_EMAIL = True
-# Gating is admin approval (is_active), not email verification — so no email
-# sending is wired up in this phase.
+# We run our own 6-digit-code email verification (issue #73) rather than
+# allauth's built-in link flow, so allauth's own verification stays off here.
+# allauth still creates an EmailAddress row at sign-up; our flow flips its
+# `verified` flag (the source of truth the login check reads), and admin approval
+# (is_active) remains the separate membership gate. See docs/reference/accounts.md.
 ACCOUNT_EMAIL_VERIFICATION = "none"
 
 # allauth needs an authentication backend alongside Django's default.

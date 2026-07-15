@@ -87,6 +87,33 @@ describe("api CSRF + fetch wiring", () => {
     });
   });
 
+  it("verifyEmail POSTs the email + code", async () => {
+    document.cookie = "csrftoken=tok-v";
+    const fetchMock = stubFetch({ body: JSON.stringify({ detail: "verified" }) });
+
+    await api.verifyEmail("new@b.com", "048213");
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/verify-email/");
+    expect(opts.method).toBe("POST");
+    expect(opts.headers["X-CSRFToken"]).toBe("tok-v");
+    expect(JSON.parse(opts.body)).toEqual({
+      email: "new@b.com",
+      code: "048213",
+    });
+  });
+
+  it("resendVerification POSTs just the email", async () => {
+    const fetchMock = stubFetch({ body: JSON.stringify({ detail: "sent" }) });
+
+    await api.resendVerification("new@b.com");
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/resend-verification/");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ email: "new@b.com" });
+  });
+
   it("createPost POSTs the text with a CSRF header", async () => {
     document.cookie = "csrftoken=tok-p";
     const fetchMock = stubFetch({ body: JSON.stringify({ id: 1 }) });
