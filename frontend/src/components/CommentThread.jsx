@@ -122,19 +122,24 @@ function CommentNode({ comment, postId, expandIds = null, highlightId = null }) 
   const isHighlighted = highlightId != null && comment.id === highlightId;
 
   return (
-    <li className="flex gap-2.5" id={`comment-${comment.id}`}>
-      <Link to={`/u/${comment.author.id}`} tabIndex={-1} aria-hidden="true">
-        <Avatar user={comment.author} size="sm" />
-      </Link>
-
+    <li className="min-w-0" id={`comment-${comment.id}`}>
       <div
-        className={`min-w-0 flex-1 ${
+        className={
           isHighlighted
             ? "-mx-2 rounded-xl bg-accent-tint px-2 py-1 ring-2 ring-accent transition"
             : ""
-        }`}
+        }
       >
-        <div className="flex items-baseline gap-x-2">
+        {/* Header: avatar sits inline with the name + time. Keeping the avatar
+            up here (rather than as a full-height left column) lets the comment
+            body flow full-width underneath — so each reply level only costs a
+            thin left rule instead of an avatar's width, and deep threads stay
+            readable on narrow screens instead of squashing off to the right
+            (issue #80). */}
+        <div className="flex items-center gap-2">
+          <Link to={`/u/${comment.author.id}`} tabIndex={-1} aria-hidden="true">
+            <Avatar user={comment.author} size="xs" />
+          </Link>
           <Link
             to={`/u/${comment.author.id}`}
             className="text-sm font-semibold text-ink hover:text-accent-deep"
@@ -150,7 +155,7 @@ function CommentNode({ comment, postId, expandIds = null, highlightId = null }) 
           </time>
         </div>
 
-        <p className="whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
+        <p className="mt-1 whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
           {comment.text}
         </p>
 
@@ -210,9 +215,11 @@ function CommentNode({ comment, postId, expandIds = null, highlightId = null }) 
           </div>
         )}
 
-        {/* Replies nest under a left rule, so depth reads at a glance. */}
+        {/* Replies nest under a thin left rule, so depth reads at a glance.
+            The rule is the *only* horizontal cost per level now (a few px),
+            which is what keeps deep threads from marching off-screen. */}
         {replies.length > 0 && !collapsed && (
-          <ul className="mt-3 space-y-4 border-l-2 border-line pl-3">
+          <ul className="mt-3 space-y-4 border-l border-line pl-3">
             {replies.map((reply) => (
               <CommentNode
                 key={reply.id}
