@@ -113,7 +113,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install Semgrep
-        run: pip install semgrep
+        # Pin the version: an unpinned install is at the mercy of whatever landed
+        # on PyPI. semgrep 1.170.0 shipped without a prebuilt manylinux wheel, so
+        # pip built it from the sdist — which omits the compiled `semgrep-core`
+        # binary — and every run died with "Failed to find semgrep-core". 1.169.0
+        # ships the working wheel; bump deliberately once a later release is known
+        # good.
+        run: pip install semgrep==1.169.0
 
       - name: Run Semgrep
         run: >-
