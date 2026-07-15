@@ -51,6 +51,10 @@ def _deliver_reset_code(user, code):
     try:
         send_password_reset_code(user.email, code, user.display_name)
     except Exception:  # pragma: no cover - defensive; provider/network failure
+        # False positive: the rule trips on "password" in the message, but we log
+        # only user.pk here — never the code/credential. (The sibling verification
+        # log doesn't trip precisely because its wording lacks that keyword.)
+        # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
         logger.exception("Failed to send password reset code to user %s", user.pk)
 
 
