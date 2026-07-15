@@ -982,6 +982,34 @@ class PasswordResetFlowTests(APITestCase):
         self.assertEqual(real.status_code, status.HTTP_200_OK)
         self.assertEqual(real.data, unknown.data)
 
+    def test_request_spends_one_hash_whether_or_not_the_account_exists(self):
+        # Timing-oracle guard: a real, not-in-cooldown account hashes in
+        # EmailCode.issue; an unknown address hashes a throwaway in the view. Both
+        # must spend exactly ONE PBKDF2 hash, so response latency can't reveal
+        # whether an account exists. We count make_password calls in both modules
+        # (each imported its own reference, so both need patching).
+        from accounts import models as models_mod
+        from accounts import views as views_mod
+
+        real_make = models_mod.make_password
+        calls = []
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return real_make(*args, **kwargs)
+
+        with mock.patch.object(
+            models_mod, "make_password", side_effect=counting
+        ), mock.patch.object(views_mod, "make_password", side_effect=counting):
+            self._request("forgot@example.com")
+            known = len(calls)
+            calls.clear()
+            self._request("ghost@example.com")
+            unknown = len(calls)
+
+        self.assertEqual(known, 1, "real account should hash exactly once")
+        self.assertEqual(unknown, 1, "unknown address should hash exactly once")
+
     # --- confirm -------------------------------------------------------------
 
     def test_confirm_with_the_right_code_sets_the_new_password(self):

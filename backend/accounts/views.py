@@ -4,6 +4,7 @@ from allauth.account.models import EmailAddress
 from dj_rest_auth.registration.views import RegisterView
 from dj_rest_auth.views import LoginView, PasswordChangeView
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.middleware.csrf import get_token
@@ -15,7 +16,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .email import send_password_reset_code, send_verification_code
-from .models import EmailVerificationCode, PasswordResetCode
+from .models import EmailVerificationCode, PasswordResetCode, generate_code
 
 User = get_user_model()
 
@@ -201,6 +202,17 @@ class PasswordResetRequestView(APIView):
     (``password_reset`` scope) on top, to blunt inbox-spamming / probing — same
     shape as the resend-verification endpoint.
 
+    **Timing is equalised too, not just the response body.** Issuing a code runs a
+    PBKDF2 hash (``EmailCode.issue``); the branches that *don't* issue one (an
+    unknown address, or a real account still inside its resend cooldown) would
+    otherwise return hundreds of milliseconds sooner and hand an attacker a
+    reliable "is this address a member?" oracle from response latency alone. So
+    every branch spends exactly one throwaway hash — the same guard the duplicate-
+    email sign-up path uses. (A residual remains: a real account's *first* request
+    in a cooldown window also sends an email; that send cost isn't equalised, the
+    same accepted trade-off the sign-up path makes, and the 60-sec cooldown means
+    repeat probes of a real address fall into the fast, no-send bucket anyway.)
+
     A pending, unapproved (``is_active=False``) account can still request a reset:
     the code just proves inbox control; it doesn't bypass the admin-approval gate,
     so there's no reason to special-case it (and doing so would add enumeration
@@ -219,10 +231,16 @@ class PasswordResetRequestView(APIView):
     def post(self, request):
         email = (request.data.get("email") or "").strip()
         user = User.objects.filter(email__iexact=email).first()
+        issued = None
         if user is not None:
-            code = PasswordResetCode.issue_if_due(user)
-            if code is not None:
-                _deliver_reset_code(user, code)
+            issued = PasswordResetCode.issue_if_due(user)
+            if issued is not None:
+                _deliver_reset_code(user, issued)
+        if issued is None:
+            # No code was issued (unknown address, or within the resend cooldown),
+            # so no PBKDF2 hash was spent above. Spend an equivalent throwaway one
+            # here so the response time can't distinguish a member from a stranger.
+            make_password(generate_code())
         return Response(self.GENERIC_OK)
 
 

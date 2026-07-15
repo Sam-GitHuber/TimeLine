@@ -223,14 +223,27 @@ so a DB leak can't hand out live resets.
   reachable *after* a valid code is held, so a real user who fumbles a weak
   password can fix it and resubmit with the same still-valid code.
 
-**Enumeration-safety** mirrors verification exactly: the request endpoint always
-returns the identical 200 (a code is only really sent to a real account, and a
-send failure is swallowed+logged so it can't become a 500-vs-200 oracle); the
-confirm endpoint returns one generic 400 for unknown-email / missing / wrong /
-expired alike. Password-strength/mismatch messages are more specific, but only a
-holder of a valid code sees them, so they leak nothing about membership. Both are
-per-IP throttled (`password_reset`, `password_reset_confirm` scopes — see
+**Enumeration-safety** mirrors verification: the request endpoint always returns
+the identical 200 (a code is only really sent to a real account, and a send
+failure is swallowed+logged so it can't become a 500-vs-200 oracle); the confirm
+endpoint returns one generic 400 for unknown-email / missing / wrong / expired
+alike. Password-strength/mismatch messages are more specific, but only a holder of
+a valid code sees them, so they leak nothing about membership. Both are per-IP
+throttled (`password_reset`, `password_reset_confirm` scopes — see
 [Rate-limiting](#rate-limiting-auth-sensitive-endpoints)).
+
+**Response *timing* is equalised on the request too, not just the body.** Issuing
+a code runs a PBKDF2 hash; a branch that issues none (unknown address, or a real
+account inside its resend cooldown) would return hundreds of ms sooner and leak
+membership from latency alone. So the request view spends one throwaway hash on
+the no-issue branches — the same guard the [duplicate-email sign-up](#accountemail-enumeration--closed-at-sign-up)
+path uses. One residual is accepted (as at sign-up): a real account's *first*
+request in a cooldown window also sends an email, whose cost isn't equalised; the
+60-sec cooldown means repeat probes fall into the fast, no-send bucket. The
+confirm endpoint has a smaller, matching residual (an unknown email returns before
+`verify()` spends its `check_password`) shared with the verify-email endpoint —
+worth folding into a shared constant-time helper on `EmailCode` if either flow
+ever opens to the public.
 
 **Known limitation:** a reset doesn't revoke JWTs already issued to other
 sessions (our auth is stateless — the cookie token stays valid until its 1-day

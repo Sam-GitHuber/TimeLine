@@ -111,11 +111,15 @@ describe("Reset password", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/invalid or has expired/i);
   });
 
-  it("prefills the email passed from the login page", async () => {
+  it("prefills the email passed in router state from the login page", async () => {
     renderWithAuth(<ResetPasswordPage />, {
-      route: "/reset-password",
+      route: { pathname: "/reset-password", state: { email: "carried@example.com" } },
     });
-    // Cold load has no state; the field is empty and focusable.
+    expect(screen.getByLabelText("Email")).toHaveValue("carried@example.com");
+  });
+
+  it("starts with an empty email on a cold load (no router state)", async () => {
+    renderWithAuth(<ResetPasswordPage />, { route: "/reset-password" });
     expect(screen.getByLabelText("Email")).toHaveValue("");
   });
 });
