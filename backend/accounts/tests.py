@@ -18,7 +18,11 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from accounts.models import EmailVerificationCode, generate_code
+from accounts.models import (
+    EmailVerificationCode,
+    PasswordResetCode,
+    generate_code,
+)
 from config.settings import _email_backend, env_int
 
 User = get_user_model()
@@ -887,3 +891,187 @@ class EmailVerificationFlowTests(APITestCase):
         )
         self.assertEqual(real.status_code, status.HTTP_200_OK)
         self.assertEqual(real.data, unknown.data)
+
+
+RESET_REQUEST_URL = "/api/auth/password-reset/"
+RESET_CONFIRM_URL = "/api/auth/password-reset/confirm/"
+NEW_PASSWORD = "fresh-horse-99-staple"
+
+
+@override_settings(CACHES=LOCMEM_CACHE)
+class PasswordResetFlowTests(APITestCase):
+    """Forgotten-password reset over the API (issue #38): request → confirm."""
+
+    def setUp(self):
+        cache.clear()  # both endpoints are throttled — isolate the bucket
+        # A real, approved+verified member who has forgotten their password.
+        self.user = User.objects.create_user(
+            email="forgot@example.com", password=PASSWORD, is_active=True
+        )
+        EmailAddress.objects.create(
+            user=self.user, email=self.user.email, verified=True, primary=True
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def _code_from_last_email(self):
+        body = mail.outbox[-1].body
+        match = re.search(r"\b(\d{6})\b", body)
+        self.assertIsNotNone(match, "no 6-digit code found in the email")
+        return match.group(1)
+
+    def _request(self, email):
+        return self.client.post(
+            RESET_REQUEST_URL, {"email": email}, format="json"
+        )
+
+    def _confirm(self, email, code, p1=NEW_PASSWORD, p2=NEW_PASSWORD):
+        return self.client.post(
+            RESET_CONFIRM_URL,
+            {"email": email, "code": code, "new_password1": p1, "new_password2": p2},
+            format="json",
+        )
+
+    # --- request -------------------------------------------------------------
+
+    def test_request_emails_a_branded_six_digit_code(self):
+        resp = self._request("forgot@example.com")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, ["forgot@example.com"])
+        self.assertIn("TimeLine", message.subject)
+        self.assertRegex(message.body, r"\b\d{6}\b")
+        self.assertTrue(
+            any("text/html" in alt[1] for alt in message.alternatives)
+        )
+        self.assertTrue(
+            PasswordResetCode.objects.filter(user=self.user).exists()
+        )
+
+    def test_request_is_enumeration_safe_for_an_unknown_email(self):
+        # Identical 200, and crucially no mail + no code row for a non-member.
+        unknown = self._request("ghost@example.com")
+        real = self._request("forgot@example.com")
+        self.assertEqual(unknown.status_code, status.HTTP_200_OK)
+        self.assertEqual(unknown.data, real.data)
+        self.assertEqual(
+            [m.to for m in mail.outbox], [["forgot@example.com"]]
+        )
+
+    def test_request_is_rate_limited(self):
+        limit = configured_throttle_limit("password_reset")
+        for _ in range(limit):
+            self.assertEqual(
+                self._request("spam@example.com").status_code,
+                status.HTTP_200_OK,
+            )
+        blocked = self._request("spam@example.com")
+        self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_request_stays_enumeration_safe_when_sending_fails(self):
+        # A send error for a real account must not leak (a 500) versus an unknown
+        # address (a 200) — both must look identical.
+        with mock.patch(
+            "accounts.views.send_password_reset_code",
+            side_effect=Exception("smtp down"),
+        ):
+            real = self._request("forgot@example.com")
+        unknown = self._request("nobody@example.com")
+        self.assertEqual(real.status_code, status.HTTP_200_OK)
+        self.assertEqual(real.data, unknown.data)
+
+    # --- confirm -------------------------------------------------------------
+
+    def test_confirm_with_the_right_code_sets_the_new_password(self):
+        self._request("forgot@example.com")
+        code = self._code_from_last_email()
+
+        resp = self._confirm("forgot@example.com", code)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(NEW_PASSWORD))
+        self.assertFalse(self.user.check_password(PASSWORD))
+        # The code is consumed — it can't be replayed.
+        self.assertFalse(
+            PasswordResetCode.objects.filter(user=self.user).exists()
+        )
+        # And the reset user can now actually log in with the new password.
+        login = self.client.post(
+            LOGIN_URL,
+            {"email": "forgot@example.com", "password": NEW_PASSWORD},
+            format="json",
+        )
+        self.assertEqual(login.status_code, status.HTTP_200_OK)
+
+    def test_confirm_marks_the_address_verified(self):
+        # An account that never verified but forgot its password shouldn't be
+        # stuck behind the verify gate after resetting — receiving the code proved
+        # inbox control.
+        EmailAddress.objects.filter(user=self.user).update(verified=False)
+        self._request("forgot@example.com")
+        code = self._code_from_last_email()
+
+        self._confirm("forgot@example.com", code)
+        self.assertTrue(
+            EmailAddress.objects.filter(user=self.user, verified=True).exists()
+        )
+
+    def test_confirm_with_a_wrong_code_is_refused_and_password_unchanged(self):
+        self._request("forgot@example.com")
+        code = self._code_from_last_email()
+        bad = "000000" if code != "000000" else "999999"
+
+        resp = self._confirm("forgot@example.com", bad)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
+
+    def test_confirm_is_enumeration_safe(self):
+        # Unknown email returns the SAME generic error as a wrong code.
+        unknown = self._confirm("ghost@example.com", "123456")
+        self.assertEqual(unknown.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self._request("forgot@example.com")
+        code = self._code_from_last_email()
+        bad = "000000" if code != "000000" else "999999"
+        wrong = self._confirm("forgot@example.com", bad)
+        self.assertEqual(unknown.data, wrong.data)
+
+    def test_confirm_rejects_mismatched_passwords_without_burning_the_code(self):
+        self._request("forgot@example.com")
+        code = self._code_from_last_email()
+
+        resp = self._confirm(
+            "forgot@example.com", code, p1=NEW_PASSWORD, p2="different-99-staple"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # The code survives, so the user can retry with matching passwords.
+        self.assertTrue(
+            PasswordResetCode.objects.filter(user=self.user).exists()
+        )
+        ok = self._confirm("forgot@example.com", code)
+        self.assertEqual(ok.status_code, status.HTTP_200_OK)
+
+    def test_confirm_rejects_a_weak_password_without_burning_the_code(self):
+        self._request("forgot@example.com")
+        code = self._code_from_last_email()
+
+        resp = self._confirm("forgot@example.com", code, p1="123", p2="123")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
+        # Still resettable with a strong password + the same code.
+        ok = self._confirm("forgot@example.com", code)
+        self.assertEqual(ok.status_code, status.HTTP_200_OK)
+
+    def test_confirm_is_rate_limited(self):
+        limit = configured_throttle_limit("password_reset_confirm")
+        payload = {"email": "probe@example.com", "code": "123456"}
+        for _ in range(limit):
+            resp = self.client.post(RESET_CONFIRM_URL, payload, format="json")
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        blocked = self.client.post(RESET_CONFIRM_URL, payload, format="json")
+        self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)

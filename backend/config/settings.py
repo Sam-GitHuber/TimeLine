@@ -347,6 +347,18 @@ REST_FRAMEWORK = {
         # guards a single known code; this stops an attacker hammering the endpoint
         # across many emails. Generous so a fat-fingered real user isn't blocked.
         "verify_email": os.environ.get("DJANGO_THROTTLE_VERIFY_EMAIL", "20/min"),
+        # request a forgotten-password reset (per-IP; caller is anonymous). Same
+        # role as resend_verification: blunts inbox-spamming / probing via the
+        # reset-request endpoint. A per-email cooldown (PasswordResetCode.
+        # RESEND_COOLDOWN) guards a single address on top.
+        "password_reset": os.environ.get("DJANGO_THROTTLE_PASSWORD_RESET", "5/min"),
+        # confirm a reset code + set a new password (per-IP). This is the
+        # account-takeover surface; the per-code 5-attempt budget only guards one
+        # known code, so this caps hammering across many emails. Generous so a real
+        # user retrying a weak password isn't blocked.
+        "password_reset_confirm": os.environ.get(
+            "DJANGO_THROTTLE_PASSWORD_RESET_CONFIRM", "20/min"
+        ),
     },
 }
 
