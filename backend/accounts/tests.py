@@ -841,3 +841,49 @@ class EmailVerificationFlowTests(APITestCase):
             RESEND_URL, {"email": "spam@example.com"}, format="json"
         )
         self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_verify_email_is_rate_limited(self):
+        # The per-code attempt budget only guards one known code; a per-IP throttle
+        # stops hammering the endpoint across many emails.
+        limit = configured_throttle_limit("verify_email")
+        payload = {"email": "probe@example.com", "code": "123456"}
+        for _ in range(limit):
+            resp = self.client.post(VERIFY_URL, payload, format="json")
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        blocked = self.client.post(VERIFY_URL, payload, format="json")
+        self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_signup_still_succeeds_if_the_email_fails_to_send(self):
+        # A transient provider failure must not 500 sign-up: the account + code
+        # exist, and the person can use resend. (Otherwise a retry would hit the
+        # silent-duplicate path and never send a code.)
+        with mock.patch(
+            "accounts.views.send_verification_code",
+            side_effect=Exception("smtp down"),
+        ):
+            resp = self._register("hiccup@example.com")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(User.objects.filter(email="hiccup@example.com").exists())
+
+    def test_resend_stays_enumeration_safe_when_sending_fails(self):
+        # A send error for a real unverified account must not leak (a 500) versus
+        # an unknown address (a 200) — both must look identical.
+        self._register("failsend@example.com")
+        EmailVerificationCode.objects.filter(
+            user__email="failsend@example.com"
+        ).update(
+            created_at=timezone.now()
+            - (EmailVerificationCode.RESEND_COOLDOWN + timedelta(seconds=1))
+        )
+        with mock.patch(
+            "accounts.views.send_verification_code",
+            side_effect=Exception("smtp down"),
+        ):
+            real = self.client.post(
+                RESEND_URL, {"email": "failsend@example.com"}, format="json"
+            )
+        unknown = self.client.post(
+            RESEND_URL, {"email": "nobody-here@example.com"}, format="json"
+        )
+        self.assertEqual(real.status_code, status.HTTP_200_OK)
+        self.assertEqual(real.data, unknown.data)

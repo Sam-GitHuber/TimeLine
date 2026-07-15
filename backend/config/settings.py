@@ -343,6 +343,10 @@ REST_FRAMEWORK = {
         "resend_verification": os.environ.get(
             "DJANGO_THROTTLE_RESEND_VERIFICATION", "5/min"
         ),
+        # redeem a verification code (per-IP). The per-code 5-attempt budget only
+        # guards a single known code; this stops an attacker hammering the endpoint
+        # across many emails. Generous so a fat-fingered real user isn't blocked.
+        "verify_email": os.environ.get("DJANGO_THROTTLE_VERIFY_EMAIL", "20/min"),
     },
 }
 

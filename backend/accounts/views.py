@@ -1,3 +1,5 @@
+import logging
+
 from allauth.account.models import EmailAddress
 from dj_rest_auth.registration.views import RegisterView
 from dj_rest_auth.views import LoginView, PasswordChangeView
@@ -14,6 +16,24 @@ from .email import send_verification_code
 from .models import EmailVerificationCode
 
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
+
+
+def _deliver_code(user, code):
+    """Email a verification ``code``, logging (never raising) on failure.
+
+    Sign-up and resend must not hard-fail on a transient email hiccup: the
+    account and code row already exist, and the person can use "resend". Swallowing
+    here also keeps the resend endpoint's response *identical* whether or not the
+    address is a real unverified member — a send error propagating would otherwise
+    be an enumeration oracle (500 for a real account vs 200 for an unknown one).
+    A logged error lets the maintainer notice a genuinely broken mail pipeline.
+    """
+    try:
+        send_verification_code(user.email, code, user.display_name)
+    except Exception:  # pragma: no cover - defensive; provider/network failure
+        logger.exception("Failed to send verification code to user %s", user.pk)
 
 
 class ThrottledLoginView(LoginView):
@@ -66,7 +86,7 @@ class InactiveRegisterView(RegisterView):
         # would reopen. See CustomRegisterSerializer.save and issue #73.
         if user is not None:
             code = EmailVerificationCode.issue(user)
-            send_verification_code(user.email, code, user.display_name)
+            _deliver_code(user, code)
         return user
 
     def get_response_data(self, user):
@@ -94,8 +114,12 @@ class VerifyEmailCodeView(APIView):
     """
 
     permission_classes = [AllowAny]
-    # Not scoped-throttled here: the code itself is the rate-limiter (5 attempts
-    # then dead, per EmailVerificationCode.MAX_ATTEMPTS).
+    # Per-IP throttle on top of the per-code 5-attempt budget: the attempt limit
+    # only guards a single known code, so it does nothing against an attacker
+    # hammering the endpoint across many emails. Keyed on IP (caller is anonymous),
+    # same rationale as login. Rate in DEFAULT_THROTTLE_RATES['verify_email'].
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "verify_email"
 
     GENERIC_ERROR = {"detail": "That code is invalid or has expired."}
 
@@ -147,7 +171,7 @@ class ResendVerificationView(APIView):
         ).exists():
             code = EmailVerificationCode.issue_if_due(user)
             if code is not None:
-                send_verification_code(user.email, code, user.display_name)
+                _deliver_code(user, code)
         return Response(self.GENERIC_OK)
 
 
