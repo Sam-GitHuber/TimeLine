@@ -2119,12 +2119,21 @@ class GroupChatViewTests(APITestCase):
         conversation via the legacy user_a/user_b pair only, which always
         404s for a group chat (null user_a/user_b) — a passive member who
         only reads, never sends, could never clear their unread badge."""
-        self.client.post(f"/api/conversations/{self.convo_id}/messages/", {"text": "hi"}, format="json")
+        # Use a dedicated chat where b is the *sole* invitee, so b is
+        # deterministically promoted to active. setUp's convo invites both b
+        # and c, who aren't connected to each other, so exactly one of them
+        # promotes — and which one is non-deterministic (the promotion sweep
+        # has no ordered tie-break). Reusing it made this test flaky: when c
+        # won the race, b stayed pending and saw an unread count of 0.
+        convo_id = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": [self.b.id], "title": "T2"}, format="json"
+        ).data["id"]
+        self.client.post(f"/api/conversations/{convo_id}/messages/", {"text": "hi"}, format="json")
         self.client.force_authenticate(self.b)
         unread_before = self.client.get(UNREAD_COUNT_URL)
         self.assertGreaterEqual(unread_before.data["count"], 1)
 
-        res = self.client.post(f"/api/conversations/{self.convo_id}/read/")
+        res = self.client.post(f"/api/conversations/{convo_id}/read/")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
 
         unread_after = self.client.get(UNREAD_COUNT_URL)
