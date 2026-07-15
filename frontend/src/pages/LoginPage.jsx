@@ -13,17 +13,26 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
+  // Set when the login failed specifically because the email isn't verified, so
+  // we can offer a link straight to the verify-email step (issue #73).
+  const [needsVerify, setNeedsVerify] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit(event) {
     event.preventDefault();
     setError(null);
+    setNeedsVerify(false);
     setSubmitting(true);
     try {
       await login(email, password);
       navigate(from, { replace: true });
     } catch (err) {
       setError(err.message || "Could not log in.");
+      // The backend's unverified-email message is distinctive; when we see it,
+      // surface a shortcut to verify rather than leaving the person stuck.
+      if (/verify your email/i.test(err.message || "")) {
+        setNeedsVerify(true);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -52,6 +61,15 @@ export default function LoginPage() {
           <p role="alert" className="text-sm text-red-600">
             {error}
           </p>
+        )}
+        {needsVerify && (
+          <Link
+            to="/verify-email"
+            state={{ email }}
+            className="block text-sm font-medium text-accent-deep hover:underline"
+          >
+            Verify your email now →
+          </Link>
         )}
 
         <button

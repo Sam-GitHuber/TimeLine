@@ -25,6 +25,7 @@ import GroupFormPage from "./pages/GroupFormPage.jsx";
 import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
+import VerifyEmailPage from "./pages/VerifyEmailPage.jsx";
 import TermsPage from "./pages/legal/TermsPage.jsx";
 import PrivacyPage from "./pages/legal/PrivacyPage.jsx";
 
@@ -86,6 +87,9 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
+      {/* Email verification (issue #73) — reached after sign-up, or from login
+          when an unverified account tries to log in. Public (no session yet). */}
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
       {/* Legal pages — public so they're reachable from sign-up (before login)
           as well as from the in-app footer. */}
       <Route path="/terms" element={<TermsPage />} />

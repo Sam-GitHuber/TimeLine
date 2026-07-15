@@ -1,5 +1,7 @@
 from allauth.account.adapter import get_adapter
+from allauth.account.models import EmailAddress
 from dj_rest_auth.registration.serializers import RegisterSerializer
+from dj_rest_auth.serializers import LoginSerializer as BaseLoginSerializer
 from dj_rest_auth.serializers import (
     UserDetailsSerializer as BaseUserDetailsSerializer,
 )
@@ -100,6 +102,39 @@ class CustomRegisterSerializer(RegisterSerializer):
         user.tos_accepted_at = timezone.now()
         user.save(update_fields=["is_active", "tos_accepted_at"])
         return user
+
+
+class CustomLoginSerializer(BaseLoginSerializer):
+    """Login that requires a **verified** email on top of the usual checks.
+
+    dj-rest-auth's base serializer already rejects bad credentials and inactive
+    (unapproved) accounts. We add the second half of issue #73's policy: an
+    account whose email address hasn't been verified can't log in either — so
+    **both** address control (verification) and membership (admin approval) are
+    required. See docs/reference/accounts.md.
+
+    We only block accounts that actually went through the verifiable sign-up flow
+    (i.e. have an allauth ``EmailAddress`` row). Accounts created out of band —
+    the maintainer's ``createsuperuser`` account, seeded demo users — have no such
+    row and are left alone. A clear (not generic) message is deliberate: it's
+    consistent with the existing "account inactive" login message, and it lets the
+    SPA offer a resend/verify path. This does mean login confirms an address is a
+    member, the same small leak login already has for approval status.
+    """
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        user = attrs.get("user")
+        if user is not None:
+            addresses = EmailAddress.objects.filter(user=user)
+            if addresses.exists() and not addresses.filter(verified=True).exists():
+                raise serializers.ValidationError(
+                    "Please verify your email address before logging in. "
+                    "Check your inbox for the 6-digit code we sent, or request a "
+                    "new one.",
+                    code="email_not_verified",
+                )
+        return attrs
 
 
 class UserDetailsSerializer(BaseUserDetailsSerializer):

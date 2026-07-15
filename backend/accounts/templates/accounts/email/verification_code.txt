@@ -1,0 +1,13 @@
+{% if display_name %}Hi {{ display_name }},{% else %}Hi,{% endif %}
+
+Welcome to TimeLine. Enter this code to verify your email address:
+
+    {{ code }}
+
+The code expires in {{ expiry_minutes }} minutes. Once your address is verified,
+your account still needs to be approved by the site owner before you can log in.
+
+If you didn't sign up for TimeLine, you can safely ignore this email — no account
+can be used until it's both verified and approved.
+
+— TimeLine

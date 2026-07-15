@@ -22,8 +22,10 @@ from django.urls import include, path
 
 from accounts.views import (
     InactiveRegisterView,
+    ResendVerificationView,
     ThrottledLoginView,
     ThrottledPasswordChangeView,
+    VerifyEmailCodeView,
     csrf,
 )
 
@@ -50,6 +52,19 @@ urlpatterns = [
         "api/auth/registration/",
         InactiveRegisterView.as_view(),
         name="rest_register",
+    ),
+    # Email verification (issue #73): redeem the 6-digit code, and resend it.
+    # Our own code-based flow, not dj-rest-auth's link/key endpoints — see
+    # docs/reference/accounts.md for why.
+    path(
+        "api/auth/verify-email/",
+        VerifyEmailCodeView.as_view(),
+        name="verify_email",
+    ),
+    path(
+        "api/auth/resend-verification/",
+        ResendVerificationView.as_view(),
+        name="resend_verification",
     ),
     # Lets the SPA obtain a CSRF cookie on load.
     path("api/auth/csrf/", csrf, name="csrf"),

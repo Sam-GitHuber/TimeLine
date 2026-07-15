@@ -1,5 +1,7 @@
+from allauth.account.models import EmailAddress
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+from django.db.models import Exists, OuterRef
 from django.utils.translation import gettext_lazy as _
 
 from .models import User
@@ -16,12 +18,35 @@ class UserAdmin(DjangoUserAdmin):
     """
 
     # Approving a sign-up is a one-toggle action: tick "Active". Surfaced in the
-    # list so pending accounts are easy to spot and approve in bulk.
-    list_display = ("email", "first_name", "last_name", "is_active", "is_staff")
+    # list so pending accounts are easy to spot and approve in bulk. `email_verified`
+    # shows whether the member has proved control of their address (issue #73) —
+    # informational alongside the approval toggle, not itself the gate.
+    list_display = (
+        "email",
+        "first_name",
+        "last_name",
+        "email_verified",
+        "is_active",
+        "is_staff",
+    )
     list_filter = ("is_active", "is_staff", "is_superuser", "groups")
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email",)
     actions = ("approve_users",)
+
+    def get_queryset(self, request):
+        # Annotate verification status in one query (an Exists subquery) so the
+        # changelist's email_verified column doesn't fire a query per row (N+1).
+        qs = super().get_queryset(request)
+        return qs.annotate(
+            _email_verified=Exists(
+                EmailAddress.objects.filter(user=OuterRef("pk"), verified=True)
+            )
+        )
+
+    @admin.display(boolean=True, description="Email verified")
+    def email_verified(self, obj):
+        return obj._email_verified
 
     fieldsets = (
         (None, {"fields": ("email", "password")}),

@@ -14,6 +14,8 @@ vi.mock("./api.js", () => ({
     login: vi.fn(),
     logout: vi.fn(),
     register: vi.fn(),
+    verifyEmail: vi.fn(),
+    resendVerification: vi.fn(),
     getFeed: vi.fn().mockResolvedValue({ results: [], next: null }),
     getPage: vi.fn().mockResolvedValue({ results: [], next: null }),
     createPost: vi.fn(),
@@ -153,12 +155,10 @@ describe("Login flow", () => {
 });
 
 describe("Sign-up flow", () => {
-  it("shows a pending-approval message and does not log you in", async () => {
+  it("sends you to verify your email and does not log you in", async () => {
     const user = userEvent.setup();
     api.getCurrentUser.mockRejectedValue(new Error("401"));
-    api.register.mockResolvedValue({
-      detail: "Account created and pending approval.",
-    });
+    api.register.mockResolvedValue({ detail: "Almost there…" });
 
     renderApp("/signup");
 
@@ -174,7 +174,11 @@ describe("Sign-up flow", () => {
     await user.click(screen.getByRole("checkbox"));
     await user.click(screen.getByRole("button", { name: "Sign up" }));
 
-    expect(await screen.findByText(/pending approval/i)).toBeInTheDocument();
+    // We land on the verify-email step, pre-addressed with the signup email.
+    expect(
+      await screen.findByRole("heading", { name: "Verify your email" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("new@example.com")).toBeInTheDocument();
     expect(api.register).toHaveBeenCalledWith(
       "new@example.com",
       "correcthorsebattery",
@@ -186,6 +190,41 @@ describe("Sign-up flow", () => {
     expect(
       screen.queryByPlaceholderText("What's happening?")
     ).not.toBeInTheDocument();
+  });
+
+  it("verifies with the 6-digit code, then points you back to log in", async () => {
+    const user = userEvent.setup();
+    api.getCurrentUser.mockRejectedValue(new Error("401"));
+    api.verifyEmail.mockResolvedValue({ detail: "Your email address is verified." });
+
+    // Arrive on the verify step as sign-up leaves us: address in router state.
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <MemoryRouter
+          initialEntries={[{ pathname: "/verify-email", state: { email: "new@example.com" } }]}
+        >
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    await user.type(
+      await screen.findByLabelText("Verification code"),
+      "048213"
+    );
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+
+    expect(api.verifyEmail).toHaveBeenCalledWith("new@example.com", "048213");
+    expect(
+      await screen.findByRole("heading", { name: "Email verified" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Back to log in" })
+    ).toBeInTheDocument();
   });
 
   it("won't submit until the terms are accepted", async () => {

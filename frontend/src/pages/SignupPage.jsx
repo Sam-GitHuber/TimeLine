@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth.jsx";
 import { AuthShell, Field } from "./LoginPage.jsx";
 
-// Sign-up form. On success the account exists but is *pending admin approval*
-// and cannot log in yet — so instead of logging the user in, we show them that
-// pending message.
+// Sign-up form. On success the account exists but must be verified (email code)
+// and then approved by the site owner before it can log in — so instead of
+// logging the user in, we send them to the verify-email step, carrying their
+// address so the code entry is pre-addressed.
 export default function SignupPage() {
   const { register } = useAuth();
+  const navigate = useNavigate();
 
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -17,7 +19,6 @@ export default function SignupPage() {
   const [acceptTerms, setAcceptTerms] = useState(false);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
-  const [pendingMessage, setPendingMessage] = useState(null);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -28,38 +29,14 @@ export default function SignupPage() {
     }
     setSubmitting(true);
     try {
-      const result = await register(
-        email,
-        password,
-        firstName,
-        lastName,
-        acceptTerms
-      );
-      setPendingMessage(
-        result?.detail ||
-          "Account created and pending approval. You'll be able to log in once the site owner approves your account."
-      );
+      await register(email, password, firstName, lastName, acceptTerms);
+      // Off to enter the 6-digit code. Pass the email so the verify page is
+      // pre-addressed (the code entry is the only thing left to do there).
+      navigate("/verify-email", { state: { email } });
     } catch (err) {
       setError(err.message || "Could not create the account.");
-    } finally {
       setSubmitting(false);
     }
-  }
-
-  if (pendingMessage) {
-    return (
-      <AuthShell title="Almost there">
-        <p role="status" className="text-sm text-ink-soft">
-          {pendingMessage}
-        </p>
-        <Link
-          to="/login"
-          className="mt-6 block text-center text-sm font-medium text-accent-deep hover:underline"
-        >
-          Back to log in
-        </Link>
-      </AuthShell>
-    );
   }
 
   return (

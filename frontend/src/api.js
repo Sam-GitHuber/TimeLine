@@ -135,6 +135,25 @@ export const api = {
       },
     }),
 
+  // Verify an email address with the 6-digit code we emailed at sign-up. On
+  // success the address is verified; the account still needs admin approval
+  // before it can log in. Errors (wrong/expired code, unknown email) all come
+  // back as the same generic message — we don't reveal which.
+  verifyEmail: (email, code) =>
+    request("/api/auth/verify-email/", {
+      method: "POST",
+      body: { email, code },
+    }),
+
+  // Ask for a fresh verification code. Always resolves the same way whatever the
+  // address (enumeration-safe) — a code is only really sent to a real, not-yet-
+  // verified account. Rate-limited server-side.
+  resendVerification: (email) =>
+    request("/api/auth/resend-verification/", {
+      method: "POST",
+      body: { email },
+    }),
+
   // Update your own profile (name, bio, avatar) via dj-rest-auth's user
   // endpoint. Sent as multipart because it can carry an avatar file. Pass
   // `removeAvatar: true` to clear an existing avatar.

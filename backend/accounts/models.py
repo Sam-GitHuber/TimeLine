@@ -1,9 +1,23 @@
+import secrets
+from datetime import timedelta
+
+from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 from api.imaging import avatar_thumb_upload_to, avatar_upload_to
 
 from .managers import UserManager
+
+
+def generate_code(length=6):
+    """A cryptographically-random, zero-padded numeric code (e.g. ``"048213"``).
+
+    ``secrets`` (not ``random``) because this is a credential — it must not be
+    predictable from a seeded/observed PRNG.
+    """
+    return f"{secrets.randbelow(10 ** length):0{length}d}"
 
 
 class User(AbstractUser):
@@ -67,3 +81,97 @@ class User(AbstractUser):
         """
         full_name = f"{self.first_name} {self.last_name}".strip()
         return full_name or self.email.split("@", 1)[0]
+
+
+class EmailVerificationCode(models.Model):
+    """A short-lived 6-digit code proving control of a sign-up email address.
+
+    Email is our sole login identifier (there is no username), so we need to know
+    a member actually controls the address they signed up with — otherwise a typo
+    means an unrecoverable account, and a deliberately wrong address points the
+    login identifier at someone else's inbox. See docs/reference/accounts.md.
+
+    Two deliberate choices:
+
+    - **Only a hash of the code is stored** (``django.contrib.auth.hashers``),
+      never the plaintext — so a database leak can't hand out live codes. Sign-up
+      volume is tiny, so PBKDF2's cost is irrelevant here.
+    - **Verification proves address *control* only.** Admin approval
+      (``User.is_active``) remains the membership gate; *both* are required to log
+      in (enforced in ``CustomLoginSerializer``). The durable "is this address
+      verified" flag lives on allauth's ``EmailAddress.verified`` — this row is
+      just the transient challenge and is deleted once redeemed.
+
+    One row per user (``OneToOneField``); issuing a new code replaces the old one.
+    """
+
+    CODE_LENGTH = 6
+    # A code is valid for this long after it's issued.
+    EXPIRY = timedelta(minutes=15)
+    # After this many wrong guesses the code is dead (online-guessing guard: with
+    # 6 digits and 5 tries the odds of a hit are 5-in-a-million).
+    MAX_ATTEMPTS = 5
+    # Don't send a fresh code more often than this, even across rotating IPs —
+    # blunts using "resend" to flood someone's inbox.
+    RESEND_COOLDOWN = timedelta(seconds=60)
+
+    user = models.OneToOneField(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="email_verification_code",
+    )
+    code_hash = models.CharField(max_length=128)
+    # Set explicitly on (re)issue rather than auto_now_add, so reissuing resets
+    # the clock (auto_now_add only fires on first insert).
+    created_at = models.DateTimeField(default=timezone.now)
+    attempts = models.PositiveSmallIntegerField(default=0)
+
+    def __str__(self):
+        return f"email verification code for user {self.user_id}"
+
+    @property
+    def is_expired(self):
+        return timezone.now() - self.created_at >= self.EXPIRY
+
+    @classmethod
+    def issue(cls, user):
+        """Replace any existing code for ``user`` with a fresh one.
+
+        Returns the **plaintext** code (the only place it exists in the clear) for
+        the caller to email; the DB keeps only its hash.
+        """
+        code = generate_code(cls.CODE_LENGTH)
+        cls.objects.update_or_create(
+            user=user,
+            defaults={
+                "code_hash": make_password(code),
+                "created_at": timezone.now(),
+                "attempts": 0,
+            },
+        )
+        return code
+
+    @classmethod
+    def issue_if_due(cls, user):
+        """Like :meth:`issue`, but returns ``None`` (issuing nothing) if a code
+        was sent within ``RESEND_COOLDOWN`` — the anti-flood guard for resend."""
+        existing = cls.objects.filter(user=user).first()
+        if existing and timezone.now() - existing.created_at < cls.RESEND_COOLDOWN:
+            return None
+        return cls.issue(user)
+
+    def verify(self, code):
+        """Return whether ``code`` matches; a wrong guess burns one attempt.
+
+        A dead code (too many attempts, or expired) always fails without leaking
+        which. The attempt counter is bumped atomically (``F``) so racing
+        submissions can't get extra tries.
+        """
+        if self.attempts >= self.MAX_ATTEMPTS or self.is_expired:
+            return False
+        if check_password(code, self.code_hash):
+            return True
+        self.attempts = models.F("attempts") + 1
+        self.save(update_fields=["attempts"])
+        self.refresh_from_db(fields=["attempts"])
+        return False
