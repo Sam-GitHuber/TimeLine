@@ -1,5 +1,6 @@
 import PostCard from "./PostCard.jsx";
 import EventCard from "./events/EventCard.jsx";
+import EventTimelineEntry from "./events/EventTimelineEntry.jsx";
 import { dayKey, dayHeading } from "../utils.js";
 
 // The feed as a literal timeline: posts hang off one continuous vertical line
@@ -11,13 +12,21 @@ import { dayKey, dayHeading } from "../utils.js";
 // walking them in order and starting a new divider whenever the calendar day
 // changes yields correctly-ordered day groups with no client-side sorting.
 //
-// On a group timeline, `pastEvents` (Phase 8b) are merged in: an event whose
-// time has passed leaves the "upcoming" region and **falls into the timeline
-// among the posts** as a quiet recap card, in the same strict reverse-
-// chronological order — so scrolling back one day you see everything that
-// happened, posts and events interwoven. It's the same living line paying off:
-// your past is a single readable record, not two parallel lists.
-export default function Timeline({ posts = [], pastEvents = [], header = null }) {
+// The line runs in both directions (Phase 8b):
+//
+// - `futureEvents` hang off the line **above** the now-node, as post-shaped
+//   entries ahead of now. The parent passes them furthest-first, so the nearest
+//   event sits just above the composer — scroll up to travel forward in time.
+// - `pastEvents` are merged **below** among the posts: an event whose time has
+//   passed leaves the upcoming region and falls into the timeline as a quiet
+//   recap card, in the same reverse-chronological order — so your past is a
+//   single readable record of posts and events interwoven, not two lists.
+export default function Timeline({
+  posts = [],
+  pastEvents = [],
+  futureEvents = [],
+  header = null,
+}) {
   const items = [
     ...posts.map((p) => ({ kind: "post", time: p.created_at, data: p })),
     ...pastEvents.map((e) => ({ kind: "event", time: e.starts_at, data: e })),
@@ -47,6 +56,9 @@ export default function Timeline({ posts = [], pastEvents = [], header = null })
 
   return (
     <div className="tl-feed">
+      {futureEvents.map((e) => (
+        <EventTimelineEntry key={`fut-${e.id}`} event={e} />
+      ))}
       {header}
       {rows}
     </div>

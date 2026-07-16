@@ -265,6 +265,23 @@
     min-width: 0;
   }
 
+  /* An upcoming event on the line, ahead of now (Phase 8b): its marker gets an
+     accent ring so a planned event reads apart from a past post's plain bead,
+     while still sitting on the one continuous spine. */
+  .tl-entry--future .tl-avatar-node > * {
+    box-shadow:
+      0 0 0 3px var(--color-surface),
+      0 0 0 4.5px var(--color-accent);
+  }
+  .tl-entry--future.tl-entry--off {
+    opacity: 0.6;
+  }
+  .tl-entry--off .tl-avatar-node > * {
+    box-shadow:
+      0 0 0 3px var(--color-surface),
+      0 0 0 4.5px var(--color-line-strong);
+  }
+
   /* day divider — a clean marked point on the line */
   .tl-day {
     position: relative;

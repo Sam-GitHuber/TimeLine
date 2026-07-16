@@ -194,17 +194,19 @@ The gate needs a *present* organiser. Two paths:
   first-step hint so the empty state invites action. Members see the same chips as
   read-only status. (The earlier build split display from a separate always-visible
   toolkit; that was replaced because a freshly-created event wasn't obvious to use.)
-- The forward region (`EventsSection`) is an agenda of event cards *above* the
-  composer, plus a "being planned" staging strip and an Agenda/Month toggle. The
-  **now-node stays at the top of the page on load** (`GroupPage` scrolls to a
-  `.tl-now-anchor` once the region's height settles), so upcoming events sit above
-  the fold and are reached by scrolling **up**; past posts + events are below.
-  Because the forward region is out of view at rest, a quiet **"↑ N upcoming
-  events ↑" cue** caps the now-view and scrolls up to it on click. A **"back to
-  now" pill** appears once the now-node scrolls off, pointing up (you're in the
-  past) or down (you're in the future). The one simplification left from the phase
-  sketch is the *animated* staging→slot transition — a finalised date just
-  re-places the card (robustness over choreography); easy to add later.
+- **Upcoming events hang off the timeline spine, above the now-node**, as
+  post-shaped entries (`EventTimelineEntry` — an avatar marker on the line with an
+  accent ring, a mono date on the rail, title/organiser/when/chips in the body).
+  `Timeline` renders them above its `header` (the composer), so it's **one
+  continuous line**: future above, now, past below. They're ordered **furthest-
+  first**, so the nearest event sits just above now (scroll up = travel forward).
+  Date-less "being planned" events sit in a small staging strip off the line just
+  above now; **`GroupPage` scrolls to a `.tl-now-anchor` on load** so the now-node
+  rests at the top with the future above the fold, a quiet **"↑ N upcoming ↑" cue**
+  points up to it, and a **"back to now" pill** returns you from either direction.
+  The one simplification left from the phase sketch is the *animated* staging→slot
+  transition (a finalised date just re-places the entry). A **Timeline/Month
+  toggle** in the sticky header swaps the spine for the month grid.
 - The **month grid** (`MonthGrid`) renders each event *in its day cell* as a small
   titled chip (mono time + title, accent when scheduled, muted when past, struck
   through when cancelled), linking to the event; a busy day shows the first few and

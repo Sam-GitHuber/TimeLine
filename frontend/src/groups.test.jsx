@@ -285,6 +285,50 @@ describe("GroupPage admin controls", () => {
     ).toBeInTheDocument();
   });
 
+  it("puts upcoming events on the line, nearest closest to now", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    const mk = (id, title, date) => ({
+      id,
+      group: { id: 7, name: "Trip" },
+      organiser: { id: 1, display_name: "You" },
+      title,
+      event_date: date,
+      starts_at: `${date}T10:00:00Z`,
+      status: "scheduled",
+      is_past: false,
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "unset" },
+        location: { state: "unset" },
+      },
+      rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+      polls: [],
+    });
+    api.getGroupEvents.mockImplementation((_gid, window) =>
+      Promise.resolve(
+        window === "upcoming"
+          ? [mk(1, "Near picnic", "2026-08-01"), mk(2, "Far trip", "2026-09-01")]
+          : []
+      )
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    const near = await screen.findByRole("link", { name: /Near picnic/ });
+    const far = screen.getByRole("link", { name: /Far trip/ });
+    // Furthest-future is higher up the page; the nearest sits lower, just above
+    // the now-node — so `near` follows `far` in document order.
+    expect(
+      far.compareDocumentPosition(near) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
   it("shows a 'not available' state on a 404 (non-member)", async () => {
     api.getGroup.mockRejectedValue({ status: 404 });
     renderGroupAt("/g/7");

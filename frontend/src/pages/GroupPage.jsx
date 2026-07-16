@@ -8,25 +8,23 @@ import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import GroupMembersPanel from "../components/GroupMembersPanel.jsx";
 import GroupInvitePicker from "../components/GroupInvitePicker.jsx";
 import GroupActionsMenu from "../components/GroupActionsMenu.jsx";
-import EventsSection from "../components/events/EventsSection.jsx";
+import EventCard from "../components/events/EventCard.jsx";
+import MonthGrid from "../components/events/MonthGrid.jsx";
+import PlanEventForm from "../components/events/PlanEventForm.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useMessaging } from "../messaging.jsx";
 
-// A single group: a compact header + its timeline. Members only — the backend
+// A single group: a pinned header + its timeline. Members only — the backend
 // 404s a non-member, and we render a friendly "not in this group" state for that.
-// The group's actions (Invite, Members, Start a chat, Leave, Edit, Delete) live
-// behind a single "⋯" menu so the page opens on the timeline, not a wall of
-// buttons.
 //
-// The header (name + ⋯ + description) is a **second sticky bar**, pinned directly
-// below the nav — the upcoming region and the timeline scroll up *behind* it, so
-// the group's identity stays put while you move through time. The timeline itself
-// is bidirectional (Phase 8b): the composer "now" node rests at the top of the
-// scroll on load, upcoming events extend the line *above* it (scroll up into the
-// planned future), past posts + events below (scroll down). A "back to now" pill
-// appears once you've wandered either way.
+// The timeline runs in both directions (Phase 8b). The composer "now" node rests
+// at the top of the scroll on load; **upcoming events hang off the line above it**
+// as post-shaped entries (furthest at the top, the nearest just above now — scroll
+// up to travel forward in time), and past posts + past events flow below (scroll
+// down into the past). The header pins under the nav, and a "Month" view swaps the
+// spine for a calendar grid. Group actions live behind a "⋯" menu.
 export default function GroupPage() {
   const { id } = useParams();
   const groupId = Number(id);
@@ -37,6 +35,8 @@ export default function GroupPage() {
 
   const [showInvite, setShowInvite] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
+  const [planning, setPlanning] = useState(false);
+  const [view, setView] = useState("agenda"); // "agenda" (the spine) | "month"
 
   const groupQuery = useQuery({
     queryKey: ["group", groupId],
@@ -48,9 +48,6 @@ export default function GroupPage() {
     api.getGroupPosts(groupId)
   );
 
-  // Upcoming events (the forward region) — fetched here rather than inside
-  // EventsSection so this page can settle its scroll-to-now once the region's
-  // height is known. Past events fall into the timeline below as recap cards.
   const upcomingQuery = useQuery({
     queryKey: ["groupEvents", groupId, "upcoming"],
     queryFn: () => api.getGroupEvents(groupId, "upcoming"),
@@ -58,6 +55,11 @@ export default function GroupPage() {
   const pastEventsQuery = useQuery({
     queryKey: ["groupEvents", groupId, "past"],
     queryFn: () => api.getGroupEvents(groupId, "past"),
+  });
+  const calendarQuery = useQuery({
+    queryKey: ["groupCalendar", groupId],
+    queryFn: () => api.getGroupCalendar(groupId),
+    enabled: view === "month",
   });
 
   const membersQuery = useQuery({
@@ -72,7 +74,6 @@ export default function GroupPage() {
       navigate("/groups");
     },
   });
-
   const remove = useMutation({
     mutationFn: () => api.deleteGroup(groupId),
     onSuccess: () => {
@@ -82,20 +83,17 @@ export default function GroupPage() {
   });
 
   // Two stacked sticky bars (nav + this group header) mean the now-node has to
-  // clear *both*. We measure the nav and header heights so the header pins right
-  // under the nav and the scroll-to-now leaves room for the pair. Measured in a
-  // layout effect (before paint, no flicker) and kept fresh on resize.
+  // clear *both*. Measure them so the header pins right under the nav and the
+  // scroll-to-now leaves room for the pair.
   const headerRef = useRef(null);
   const [navH, setNavH] = useState(0);
-  const [stickyH, setStickyH] = useState(0); // nav + header, the total pinned top
-
+  const [stickyH, setStickyH] = useState(0);
   useLayoutEffect(() => {
     function measure() {
       const nav = document.querySelector("header.sticky");
       const nH = nav?.offsetHeight || 0;
-      const hH = headerRef.current?.offsetHeight || 0;
       setNavH(nH);
-      setStickyH(nH + hH);
+      setStickyH(nH + (headerRef.current?.offsetHeight || 0));
     }
     measure();
     window.addEventListener("resize", measure);
@@ -110,10 +108,8 @@ export default function GroupPage() {
     };
   }, [groupQuery.data]);
 
-  // Rest the now-node just below the two sticky bars on load (so upcoming sits
-  // above the fold). Once per group; a no-op without a layout engine (tests).
+  // Rest the now-node just below the two sticky bars on load. Once per group.
   const nowRef = useRef(null);
-  const upcomingRef = useRef(null);
   const scrolledRef = useRef(false);
   useEffect(() => {
     scrolledRef.current = false;
@@ -132,12 +128,24 @@ export default function GroupPage() {
       try {
         el.scrollIntoView({ block: "start" });
       } catch {
-        /* no layout engine (tests) — nothing to scroll */
+        /* no layout engine (tests) */
       }
     });
   }, [groupId, groupQuery.isLoading, upcomingQuery.isLoading]);
 
-  // 404 → you're not a member (or it doesn't exist). Don't leak which.
+  // Switching views moves you somewhere sensible: the month grid to the top,
+  // the agenda back to now.
+  useEffect(() => {
+    if (!scrolledRef.current) return; // don't fight the initial load
+    if (view === "month") window.scrollTo({ top: 0, behavior: "smooth" });
+    else
+      try {
+        nowRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch {
+        /* no layout engine */
+      }
+  }, [view]);
+
   if (groupQuery.isError && groupQuery.error?.status === 404) {
     return (
       <div className="px-6 py-16 text-center">
@@ -154,7 +162,6 @@ export default function GroupPage() {
       </div>
     );
   }
-
   if (groupQuery.isError) {
     return (
       <div className="px-6 py-16 text-center">
@@ -171,7 +178,6 @@ export default function GroupPage() {
       </div>
     );
   }
-
   if (groupQuery.isLoading) {
     return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
   }
@@ -179,10 +185,19 @@ export default function GroupPage() {
   const group = groupQuery.data;
   const isAdmin = group.your_role === "admin";
   const posts = postsQuery.items;
-  const upcomingEvents = upcomingQuery.data || [];
-  const upcomingCount = upcomingEvents.filter(
-    (e) => e.status !== "cancelled"
-  ).length;
+
+  const upcoming = upcomingQuery.data || [];
+  const staging = upcoming.filter((e) => !e.event_date && e.status !== "cancelled");
+  // Furthest-first, so the nearest event ends up at the bottom of the spine's
+  // future region — right above the now-node.
+  const scheduledFuture = upcoming
+    .filter((e) => e.event_date)
+    .sort(
+      (a, b) =>
+        new Date(b.starts_at || b.event_date) -
+        new Date(a.starts_at || a.event_date)
+    );
+  const upcomingCount = upcoming.filter((e) => e.status !== "cancelled").length;
 
   function confirmLeave() {
     if (window.confirm(`Leave ${group.name}? You can be re-invited.`)) leave.mutate();
@@ -203,10 +218,29 @@ export default function GroupPage() {
     });
   }
 
+  const planBar = (
+    <div className="border-b border-line px-5 py-2 text-center">
+      {!planning && (
+        <button
+          type="button"
+          onClick={() => setPlanning(true)}
+          className="btn btn-primary btn-sm"
+        >
+          Plan an event
+        </button>
+      )}
+      {planning && (
+        <div className="pt-1 text-left">
+          <PlanEventForm groupId={group.id} onClose={() => setPlanning(false)} />
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div>
-      {/* The pinned group header — sticks directly under the nav (top: navH), so
-          the timeline and upcoming region scroll up behind it. */}
+      {/* The pinned group header — sticks under the nav, with the Agenda/Month
+          toggle so it stays reachable while the timeline scrolls behind it. */}
       <div
         ref={headerRef}
         className="sticky z-[9] border-b border-line bg-surface/90 backdrop-blur"
@@ -224,6 +258,24 @@ export default function GroupPage() {
             <p className="text-xs text-ink-faint">
               {group.member_count} {group.member_count === 1 ? "member" : "members"}
             </p>
+          </div>
+          <div className="ev-toggle" role="group" aria-label="Timeline view">
+            <button
+              type="button"
+              onClick={() => setView("agenda")}
+              aria-pressed={view === "agenda"}
+              className={view === "agenda" ? "ev-toggle--on" : ""}
+            >
+              Timeline
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("month")}
+              aria-pressed={view === "month"}
+              className={view === "month" ? "ev-toggle--on" : ""}
+            >
+              Month
+            </button>
           </div>
           <GroupActionsMenu
             groupId={group.id}
@@ -246,97 +298,113 @@ export default function GroupPage() {
 
       {(leave.isError || remove.isError) && (
         <p role="alert" className="px-5 py-2 text-sm text-red-600">
-          {leave.error?.message ||
-            remove.error?.message ||
-            "Something went wrong."}
+          {leave.error?.message || remove.error?.message || "Something went wrong."}
         </p>
       )}
 
       {showInvite && (
         <GroupInvitePicker groupId={group.id} onClose={() => setShowInvite(false)} />
       )}
-
       {showMembers && <GroupMembersPanel groupId={group.id} isAdmin={isAdmin} />}
 
-      {/* The forward region: upcoming events, above the now-node. */}
-      <div ref={upcomingRef} style={{ scrollMarginTop: stickyH + 8 }}>
-        <EventsSection
-          groupId={group.id}
-          events={upcomingEvents}
-          isLoading={upcomingQuery.isLoading}
-        />
-      </div>
+      {view === "month" ? (
+        <section className="px-5 py-5">
+          {planBar}
+          {calendarQuery.isLoading ? (
+            <p className="mt-4 text-sm text-ink-faint">Loading calendar…</p>
+          ) : (
+            <div className="mt-4">
+              <MonthGrid events={calendarQuery.data || []} />
+            </div>
+          )}
+        </section>
+      ) : (
+        <Timeline
+          posts={posts}
+          pastEvents={pastEventsQuery.data || []}
+          futureEvents={scheduledFuture}
+          header={
+            <>
+              {/* Date-less events being planned sit off the line, just above now. */}
+              {staging.length > 0 && (
+                <div className="ev-staging mx-5 my-3">
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                    Being planned
+                  </p>
+                  <div className="space-y-2">
+                    {staging.map((e) => (
+                      <EventCard key={e.id} event={e} />
+                    ))}
+                  </div>
+                </div>
+              )}
 
-      {/* The now-node anchor — where the page rests on load. Its scroll-margin
-          clears both sticky bars so the composer lands just beneath them. */}
-      <div
-        ref={nowRef}
-        className="tl-now-anchor"
-        style={{ scrollMarginTop: stickyH + 8 }}
-        aria-hidden="true"
-      />
+              {/* Where the page rests on load — the boundary between future and now. */}
+              <div
+                ref={nowRef}
+                className="tl-now-anchor"
+                style={{ scrollMarginTop: stickyH + 8 }}
+                aria-hidden="true"
+              />
 
-      {/* A quiet cue that there's a planned future above — the forward region is
-          out of view at rest, so point the way up to it. */}
-      {upcomingCount > 0 && (
-        <button
-          type="button"
-          onClick={() =>
-            upcomingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+              {upcomingCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+                  className="ev-upcoming-cue"
+                  aria-label={`Scroll up to ${upcomingCount} upcoming event${upcomingCount === 1 ? "" : "s"}`}
+                >
+                  <span aria-hidden="true">↑</span>
+                  {upcomingCount} upcoming event{upcomingCount === 1 ? "" : "s"}
+                  <span aria-hidden="true">↑</span>
+                </button>
+              )}
+
+              {planBar}
+              <ComposeBox group={group.id} />
+            </>
           }
-          className="ev-upcoming-cue"
-          aria-label={`Scroll up to ${upcomingCount} upcoming event${upcomingCount === 1 ? "" : "s"}`}
-        >
-          <span aria-hidden="true">↑</span>
-          {upcomingCount} upcoming event{upcomingCount === 1 ? "" : "s"}
-          <span aria-hidden="true">↑</span>
-        </button>
+        />
       )}
 
-      <Timeline
-        posts={posts}
-        pastEvents={pastEventsQuery.data || []}
-        header={<ComposeBox group={group.id} />}
-      />
-
-      {postsQuery.isLoading && (
-        <p className="px-6 py-10 text-center text-ink-faint">Loading posts…</p>
+      {view === "agenda" && (
+        <>
+          {postsQuery.isLoading && (
+            <p className="px-6 py-10 text-center text-ink-faint">Loading posts…</p>
+          )}
+          {!postsQuery.isLoading && posts.length === 0 && (
+            <p className="px-6 py-12 text-center text-ink-faint">
+              No posts yet. Be the first to share something with the group.
+            </p>
+          )}
+          <LoadMoreButton query={postsQuery} />
+          <BackToNowPill targetRef={nowRef} topOffset={stickyH} />
+        </>
       )}
-      {!postsQuery.isLoading && posts.length === 0 && (
-        <p className="px-6 py-12 text-center text-ink-faint">
-          No posts yet. Be the first to share something with the group.
-        </p>
-      )}
-
-      <LoadMoreButton query={postsQuery} />
-
-      <BackToNowPill targetRef={nowRef} topOffset={stickyH} />
     </div>
   );
 }
 
 // A floating pill that appears once the now-node has scrolled out of the live
 // window — up into the future or down into the past — pointing the way home.
-// A plain scroll listener (rAF-free; the check is cheap) keeps it dependency-safe
-// and degrades to hidden without a layout engine (tests).
 function BackToNowPill({ targetRef, topOffset }) {
   const [state, setState] = useState({ show: false, dir: "down" });
   useEffect(() => {
-    function update() {
+    function updatePill() {
       const el = targetRef.current;
       if (!el) return;
       const top = el.getBoundingClientRect().top;
       const vh = window.innerHeight || 0;
-      if (top < topOffset) setState({ show: true, dir: "up" }); // now is above → past
-      else if (top > vh) setState({ show: true, dir: "down" }); // now is below → future
+      if (top < topOffset) setState({ show: true, dir: "up" });
+      else if (top > vh) setState({ show: true, dir: "down" });
       else setState((s) => (s.show ? { ...s, show: false } : s));
     }
-    update();
-    window.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update);
+    updatePill();
+    window.addEventListener("scroll", updatePill, { passive: true });
+    window.addEventListener("resize", updatePill);
     return () => {
-      window.removeEventListener("scroll", update);
-      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", updatePill);
+      window.removeEventListener("resize", updatePill);
     };
   }, [targetRef, topOffset]);
 
