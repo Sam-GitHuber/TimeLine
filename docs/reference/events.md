@@ -195,8 +195,11 @@ The gate needs a *present* organiser. Two paths:
   read-only status. (The earlier build split display from a separate always-visible
   toolkit; that was replaced because a freshly-created event wasn't obvious to use.)
 - **Upcoming events hang off the timeline spine, above the now-node**, as
-  post-shaped entries (`EventTimelineEntry` — an avatar marker on the line with an
-  accent ring, a mono date on the rail, title/organiser/when/chips in the body).
+  post-shaped entries (`EventTimelineEntry` — the poster-style avatar marker on the
+  line, a mono **accent** date on the rail, title/organiser/when/chips in the
+  body). A future event reads apart from a past post by its *position* (above now)
+  and the accent date, not a permanent ring — the marker's accent ring is
+  hover-only, exactly like a post.
   `Timeline` renders them above its `header` (the composer), so it's **one
   continuous line**: future above, now, past below. They're ordered **furthest-
   first**, so the nearest event sits just above now (scroll up = travel forward).
@@ -205,7 +208,7 @@ The gate needs a *present* organiser. Two paths:
   rests at the top with the future above the fold, a quiet **"↑ N upcoming ↑" cue**
   points up to it, and a **"back to now" pill** returns you from either direction.
   The one simplification left from the phase sketch is the *animated* staging→slot
-  transition (a finalised date just re-places the entry). A **Timeline/Month
+  transition (a finalised date just re-places the entry). A **Timeline/Calendar
   toggle** in the sticky header swaps the spine for the month grid.
 - The **month grid** (`MonthGrid`) renders each event *in its day cell* as a small
   titled chip (mono time + title, accent when scheduled, muted when past, struck

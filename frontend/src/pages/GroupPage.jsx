@@ -259,7 +259,7 @@ export default function GroupPage() {
               {group.member_count} {group.member_count === 1 ? "member" : "members"}
             </p>
           </div>
-          <div className="ev-toggle" role="group" aria-label="Timeline view">
+          <div className="ev-toggle" role="group" aria-label="Group view">
             <button
               type="button"
               onClick={() => setView("agenda")}
@@ -274,7 +274,7 @@ export default function GroupPage() {
               aria-pressed={view === "month"}
               className={view === "month" ? "ev-toggle--on" : ""}
             >
-              Month
+              Calendar
             </button>
           </div>
           <GroupActionsMenu

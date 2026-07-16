@@ -265,21 +265,13 @@
     min-width: 0;
   }
 
-  /* An upcoming event on the line, ahead of now (Phase 8b): its marker gets an
-     accent ring so a planned event reads apart from a past post's plain bead,
-     while still sitting on the one continuous spine. */
-  .tl-entry--future .tl-avatar-node > * {
-    box-shadow:
-      0 0 0 3px var(--color-surface),
-      0 0 0 4.5px var(--color-accent);
-  }
+  /* An upcoming event on the line, ahead of now (Phase 8b). It reuses the post
+     marker as-is — the surface halo threading the spine, and the accent ring only
+     on hover — so a future event reads apart from a past post by its *position*
+     (above now) and its accent date on the rail, not a permanent ring that would
+     look like a stuck hover. A cancelled one is simply dimmed. */
   .tl-entry--future.tl-entry--off {
     opacity: 0.6;
-  }
-  .tl-entry--off .tl-avatar-node > * {
-    box-shadow:
-      0 0 0 3px var(--color-surface),
-      0 0 0 4.5px var(--color-line-strong);
   }
 
   /* day divider — a clean marked point on the line */
