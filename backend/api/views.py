@@ -3018,6 +3018,29 @@ def _recompute_event_status(event):
     event.status = EV_SCHEDULED if event.event_date is not None else EV_PLANNING
 
 
+def _event_is_over(event, today):
+    """Whether an event belongs in the **past** region — it has finished
+    (``is_past``), or it's a **cancelled** tombstone whose date has already gone
+    by. A cancelled *future* event stays in the upcoming region as a dimmed
+    tombstone until its date passes; a *planning* (date-less) event is never
+    over."""
+    if event.is_past:
+        return True
+    return (
+        event.status == EV_CANCELLED
+        and event.event_date is not None
+        and event.event_date < today
+    )
+
+
+def _event_sort_key(event):
+    """Chronological sort key. Date-less ("being planned") events have no slot in
+    time, so they sort **after** all dated events (the tuple's first element keeps
+    the two groups apart, so a datetime is never compared against the placeholder)."""
+    start = event.starts_at
+    return (1, "") if start is None else (0, start)
+
+
 def cancel_events_on_departure(user_id, group_id):
     """Cancel the events a departing member organises in a group (Phase 8b).
 
@@ -3049,30 +3072,41 @@ class GroupEventsView(APIView):
 
     GET — members only (404 otherwise); each event further pruned to those
     organised by someone you're connected with (``visible_events``). ``window``
-    is ``upcoming`` (default), ``past``, or ``all``, ordered by date (the
-    calendar is time-ordered, never ranked). POST — **any active member** may
-    create an event (low-friction, like posting); it starts in ``planning`` with
-    the creator as organiser, and notifies the organiser's connections in the
-    group.
+    is ``upcoming`` (default), ``past``, or ``all``. The split keys off
+    ``is_past`` (a *timed* event moves to ``past`` the moment its time passes, an
+    all-day event once its day ends — see ``_event_is_over``), **not** the raw
+    date, so an event earlier today doesn't linger in ``upcoming`` until midnight.
+    Time-ordered, never ranked. POST — **any active member** may create an event
+    (low-friction, like posting); it starts in ``planning`` with the creator as
+    organiser, and notifies the organiser's connections in the group.
     """
 
     def get(self, request, gid):
         if not is_group_member(request.user, gid):
             raise NotFound()
         connected = connected_user_ids(request.user)
-        qs = visible_events(
-            request.user, gid, connected_ids=connected
-        ).prefetch_related("polls", "rsvps__user")
+        events = list(
+            visible_events(
+                request.user, gid, connected_ids=connected
+            ).prefetch_related("polls", "rsvps__user")
+        )
         window = request.query_params.get("window", "upcoming")
         today = timezone.localdate()
+        # is_past is a per-event property (tz-aware, all-day vs timed), so the
+        # window split is done in Python. These lists are a group's events, not a
+        # firehose, and the endpoint isn't paginated — so no N+1 or paging concern.
         if window == "past":
-            qs = qs.filter(event_date__lt=today).order_by("-event_date", "-id")
+            events = sorted(
+                (e for e in events if _event_is_over(e, today)),
+                key=_event_sort_key, reverse=True,
+            )
         elif window == "all":
-            qs = qs.order_by("event_date", "id")
-        else:  # upcoming: undated (being planned) + today-or-later, soonest first
-            qs = qs.filter(
-                Q(event_date__isnull=True) | Q(event_date__gte=today)
-            ).order_by("event_date", "id")
+            events = sorted(events, key=_event_sort_key)
+        else:  # upcoming — everything not yet over (incl. date-less planning)
+            events = sorted(
+                (e for e in events if not _event_is_over(e, today)),
+                key=_event_sort_key,
+            )
         visible_ids = set(connected) | {request.user.id}
         is_admin = is_group_admin(request.user, gid)
         data = [
@@ -3080,7 +3114,7 @@ class GroupEventsView(APIView):
                 e, viewer=request.user, visible_ids=visible_ids,
                 request=request, is_group_admin=is_admin, detail=False,
             )
-            for e in qs
+            for e in events
         ]
         return Response(data)
 

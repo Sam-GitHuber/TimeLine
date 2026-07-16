@@ -1099,13 +1099,29 @@ class Event(models.Model):
     @property
     def is_past(self):
         """Derived, never stored. A cancelled event is never "past" — it's a
-        tombstone that stays visible as cancelled, not a memory."""
+        tombstone that stays visible as cancelled, not a memory.
+
+        A **timed** event is past once its start time has gone by. A **date-only
+        (all-day)** event is past only once its whole day has ended in its own
+        timezone — an all-day event happening *today* is still current, not a
+        memory (using midnight as the cutoff would wrongly age it out the instant
+        the day began)."""
         from django.utils import timezone as dj_tz
 
-        if self.status == self.Status.CANCELLED:
+        if self.status == self.Status.CANCELLED or self.event_date is None:
             return False
-        start = self.starts_at
-        return start is not None and start < dj_tz.now()
+        if self.start_time is None:
+            from zoneinfo import ZoneInfo
+
+            from django.conf import settings as dj_settings
+
+            tzname = self.timezone or dj_settings.TIME_ZONE
+            try:
+                tz = ZoneInfo(tzname)
+            except Exception:
+                tz = ZoneInfo(dj_settings.TIME_ZONE)
+            return self.event_date < dj_tz.now().astimezone(tz).date()
+        return self.starts_at < dj_tz.now()
 
     def __str__(self):
         return f"{self.title} · {self.group} ({self.status})"

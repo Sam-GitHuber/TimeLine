@@ -89,9 +89,13 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
   month grid. Date-only renders all-day; date + time renders timed.
 - **cancelled** — called off; kept as a **tombstone** (RSVP'd members are notified,
   history stays honest) rather than deleted.
-- **past** — *derived, never stored* (`Event.is_past` = `starts_at < now`, and a
-  cancelled event is never "past"). Drops out of "upcoming", falls into the group
-  timeline as a memory.
+- **past** — *derived, never stored* (`Event.is_past`; a cancelled event is never
+  "past"). A **timed** event is past once its start time passes; an **all-day**
+  event once its whole day ends in its own timezone (so a today all-day event is
+  still current, not aged out at midnight). The `upcoming`/`past` window split keys
+  off this (via `_event_is_over`), **not** the raw date — so an event earlier today
+  moves to the past region right away instead of lingering until midnight. A past
+  event drops out of "upcoming" and falls into the group timeline as a memory.
 
 "Must-have = date only" is intentional: title + date is enough to be a real event.
 

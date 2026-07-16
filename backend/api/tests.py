@@ -3944,6 +3944,60 @@ class SchedulingTests(EventsBase):
         )
 
 
+class PastBoundaryTests(EventsBase):
+    """An event moves to "past" the moment it's over — a *timed* event when its
+    time passes, an *all-day* event when its day ends — not at the next midnight."""
+
+    def _ids(self, window):
+        return [
+            e["id"]
+            for e in self.client.get(
+                f"{group_events_url(self.group)}?window={window}"
+            ).json()
+        ]
+
+    def test_all_day_today_is_current_yesterday_is_past(self):
+        today = timezone.localdate()
+        today_ev = self.make_event(event_date=today, status="scheduled")
+        yest_ev = self.make_event(
+            event_date=today - timedelta(days=1), status="scheduled"
+        )
+        # All-day today is still current (its day hasn't ended); yesterday is over.
+        self.assertFalse(today_ev.is_past)
+        self.assertTrue(yest_ev.is_past)
+
+        self.client.force_authenticate(self.me)
+        upcoming, past = self._ids("upcoming"), self._ids("past")
+        self.assertIn(today_ev.id, upcoming)
+        self.assertNotIn(today_ev.id, past)
+        self.assertIn(yest_ev.id, past)
+        self.assertNotIn(yest_ev.id, upcoming)
+
+    @mock.patch("django.utils.timezone.now")
+    def test_timed_event_earlier_today_moves_to_past(self, now_mock):
+        from datetime import datetime, timezone as pytz
+
+        now_mock.return_value = datetime(2026, 7, 17, 14, 0, tzinfo=pytz.utc)
+        day = now_mock.return_value.date()
+        over = self.make_event(
+            title="Lunch", event_date=day, start_time=time(12, 0),
+            status="scheduled", timezone="UTC",
+        )
+        soon = self.make_event(
+            title="Dinner", event_date=day, start_time=time(16, 0),
+            status="scheduled", timezone="UTC",
+        )
+        self.assertTrue(over.is_past)   # 12:00 already gone at 14:00
+        self.assertFalse(soon.is_past)  # 16:00 still ahead
+
+        self.client.force_authenticate(self.me)
+        upcoming, past = self._ids("upcoming"), self._ids("past")
+        self.assertIn(soon.id, upcoming)
+        self.assertNotIn(over.id, upcoming)
+        self.assertIn(over.id, past)
+        self.assertNotIn(soon.id, past)
+
+
 class RSVPUpsertTests(EventsBase):
     def test_upsert_changes_response(self):
         event = self.make_event()
