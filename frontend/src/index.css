@@ -629,55 +629,101 @@
   }
   .ev-day {
     position: relative;
-    aspect-ratio: 1 / 1;
     display: flex;
-    align-items: flex-start;
-    justify-content: flex-end;
-    padding: 0.25rem;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0.2rem;
     background: var(--color-surface);
-    min-height: 2.4rem;
-  }
-  button.ev-day {
-    cursor: pointer;
-  }
-  button.ev-day:hover {
-    background: var(--color-accent-tint);
+    min-height: 4.75rem;
+    overflow: hidden;
   }
   .ev-day--blank {
     background: var(--color-raised);
   }
   .ev-day-num {
-    font-size: 0.75rem;
+    align-self: flex-end;
+    font-size: 0.72rem;
     color: var(--color-ink-soft);
+    line-height: 1;
   }
   .ev-day--today {
     box-shadow: inset 0 0 0 2px var(--color-accent);
   }
-  .ev-day--past .ev-day-num {
+  /* An event sitting in its day cell — a small titled chip. */
+  .ev-day-events {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .ev-day-event {
+    display: block;
+    max-width: 100%;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.62rem;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ev-day-event-time {
+    font-family: var(--font-mono);
+    margin-right: 3px;
+    opacity: 0.85;
+  }
+  .ev-day-event--scheduled {
+    background: var(--color-accent-tint);
+    color: var(--color-accent-deep);
+  }
+  .ev-day-event--scheduled:hover {
+    background: color-mix(in srgb, var(--color-accent-tint) 75%, var(--color-accent));
+  }
+  .ev-day-event--past {
+    background: var(--color-line);
     color: var(--color-ink-faint);
   }
-  .ev-day-dot {
-    position: absolute;
-    left: 0.35rem;
-    bottom: 0.35rem;
-    width: 0.4rem;
-    height: 0.4rem;
-    border-radius: 50%;
-    background: var(--color-accent);
+  .ev-day-event--off {
+    color: var(--color-ink-faint);
+    text-decoration: line-through;
   }
-  .ev-day--past .ev-day-dot {
-    background: var(--color-spine);
+  .ev-day-more {
+    padding: 0 4px;
+    text-align: left;
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: var(--color-ink-faint);
+    cursor: pointer;
   }
-  /* A candidate date while a date poll is open — a hollow ring. */
-  .ev-day--candidate .ev-day-dot {
-    background: transparent;
-    border: 1.5px solid var(--color-accent);
+  .ev-day-more:hover {
+    color: var(--color-accent-deep);
   }
 
   /* The now-node anchor: scrolling to it leaves room for the sticky nav so the
      composer rests just below it (with the future above, out of view). */
   .tl-now-anchor {
     scroll-margin-top: 64px;
+  }
+
+  /* A quiet full-width cue, capping the "now" view, that points up to the
+     upcoming events sitting above the fold. */
+  .ev-upcoming-cue {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--color-line);
+    background: var(--color-accent-tint);
+    color: var(--color-accent-deep);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .ev-upcoming-cue:hover {
+    background: color-mix(in srgb, var(--color-accent-tint) 80%, var(--color-accent));
   }
 
   /* "Back to now" — a floating pill that appears once you've scrolled away from

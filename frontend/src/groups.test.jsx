@@ -245,6 +245,46 @@ describe("GroupPage admin controls", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a cue pointing up to upcoming events", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    api.getGroupEvents.mockImplementation((_gid, window) =>
+      Promise.resolve(
+        window === "upcoming"
+          ? [
+              {
+                id: 1,
+                group: { id: 7, name: "Trip" },
+                organiser: { id: 1, display_name: "You" },
+                title: "Picnic",
+                event_date: "2026-08-01",
+                status: "scheduled",
+                is_past: false,
+                dimensions: {
+                  date: { state: "set" },
+                  time: { state: "unset" },
+                  location: { state: "unset" },
+                },
+                rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+                polls: [],
+              },
+            ]
+          : []
+      )
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    expect(
+      await screen.findByRole("button", { name: /1 upcoming event/ })
+    ).toBeInTheDocument();
+  });
+
   it("shows a 'not available' state on a 404 (non-member)", async () => {
     api.getGroup.mockRejectedValue({ status: 404 });
     renderGroupAt("/g/7");

@@ -5,6 +5,7 @@ import { Routes, Route } from "react-router-dom";
 import EventPage from "./pages/EventPage.jsx";
 import CalendarPage from "./pages/CalendarPage.jsx";
 import EventCard from "./components/events/EventCard.jsx";
+import MonthGrid from "./components/events/MonthGrid.jsx";
 import PlanEventForm from "./components/events/PlanEventForm.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
 import { api } from "./api.js";
@@ -288,6 +289,34 @@ describe("EventCard", () => {
     );
     expect(screen.getByText("Event · happened")).toBeInTheDocument();
     expect(screen.getByText("6 went")).toBeInTheDocument();
+  });
+});
+
+describe("MonthGrid", () => {
+  it("renders each event inside its day cell, linking to the event", () => {
+    renderWithAuth(
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <MonthGrid
+              events={[
+                makeEvent({
+                  id: 5,
+                  title: "Book club",
+                  event_date: "2026-08-15",
+                  start_time: "14:00:00",
+                  status: "scheduled",
+                  polls: [],
+                }),
+              ]}
+            />
+          }
+        />
+      </Routes>
+    );
+    const link = screen.getByRole("link", { name: /Book club/ });
+    expect(link).toHaveAttribute("href", "/g/3/events/5");
   });
 });
 

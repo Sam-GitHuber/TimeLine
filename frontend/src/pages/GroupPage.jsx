@@ -113,6 +113,7 @@ export default function GroupPage() {
   // Rest the now-node just below the two sticky bars on load (so upcoming sits
   // above the fold). Once per group; a no-op without a layout engine (tests).
   const nowRef = useRef(null);
+  const upcomingRef = useRef(null);
   const scrolledRef = useRef(false);
   useEffect(() => {
     scrolledRef.current = false;
@@ -178,6 +179,10 @@ export default function GroupPage() {
   const group = groupQuery.data;
   const isAdmin = group.your_role === "admin";
   const posts = postsQuery.items;
+  const upcomingEvents = upcomingQuery.data || [];
+  const upcomingCount = upcomingEvents.filter(
+    (e) => e.status !== "cancelled"
+  ).length;
 
   function confirmLeave() {
     if (window.confirm(`Leave ${group.name}? You can be re-invited.`)) leave.mutate();
@@ -254,11 +259,13 @@ export default function GroupPage() {
       {showMembers && <GroupMembersPanel groupId={group.id} isAdmin={isAdmin} />}
 
       {/* The forward region: upcoming events, above the now-node. */}
-      <EventsSection
-        groupId={group.id}
-        events={upcomingQuery.data || []}
-        isLoading={upcomingQuery.isLoading}
-      />
+      <div ref={upcomingRef} style={{ scrollMarginTop: stickyH + 8 }}>
+        <EventsSection
+          groupId={group.id}
+          events={upcomingEvents}
+          isLoading={upcomingQuery.isLoading}
+        />
+      </div>
 
       {/* The now-node anchor — where the page rests on load. Its scroll-margin
           clears both sticky bars so the composer lands just beneath them. */}
@@ -268,6 +275,23 @@ export default function GroupPage() {
         style={{ scrollMarginTop: stickyH + 8 }}
         aria-hidden="true"
       />
+
+      {/* A quiet cue that there's a planned future above — the forward region is
+          out of view at rest, so point the way up to it. */}
+      {upcomingCount > 0 && (
+        <button
+          type="button"
+          onClick={() =>
+            upcomingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+          }
+          className="ev-upcoming-cue"
+          aria-label={`Scroll up to ${upcomingCount} upcoming event${upcomingCount === 1 ? "" : "s"}`}
+        >
+          <span aria-hidden="true">↑</span>
+          {upcomingCount} upcoming event{upcomingCount === 1 ? "" : "s"}
+          <span aria-hidden="true">↑</span>
+        </button>
+      )}
 
       <Timeline
         posts={posts}

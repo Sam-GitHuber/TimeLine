@@ -199,11 +199,16 @@ The gate needs a *present* organiser. Two paths:
   **now-node stays at the top of the page on load** (`GroupPage` scrolls to a
   `.tl-now-anchor` once the region's height settles), so upcoming events sit above
   the fold and are reached by scrolling **up**; past posts + events are below.
-  A **"back to now" pill** appears (via `IntersectionObserver`) once the now-node
-  scrolls off, pointing up (you're in the past) or down (you're in the future).
-  The one simplification left from the phase sketch is the *animated* staging→slot
-  transition — a finalised date just re-places the card (robustness over
-  choreography); easy to add later.
+  Because the forward region is out of view at rest, a quiet **"↑ N upcoming
+  events ↑" cue** caps the now-view and scrolls up to it on click. A **"back to
+  now" pill** appears once the now-node scrolls off, pointing up (you're in the
+  past) or down (you're in the future). The one simplification left from the phase
+  sketch is the *animated* staging→slot transition — a finalised date just
+  re-places the card (robustness over choreography); easy to add later.
+- The **month grid** (`MonthGrid`) renders each event *in its day cell* as a small
+  titled chip (mono time + title, accent when scheduled, muted when past, struck
+  through when cancelled), linking to the event; a busy day shows the first few and
+  a "+N more" that expands the full day list beneath the grid.
 - The group page's actions (Invite, Members, Start a chat, Leave, and — for
   admins — Edit, Delete) live behind a single **`GroupActionsMenu`** ("⋯"). The
   header (name · ⋯ · description) is a **second sticky bar pinned directly under

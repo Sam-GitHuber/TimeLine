@@ -3,20 +3,20 @@ import { Link } from "react-router-dom";
 import { parseEventDate, formatEventTime } from "../../utils.js";
 
 // The practical planner: a conventional month grid in the design tokens (line
-// hairlines, warm surface, mono numerals, a Bricolage month label). Day dots
-// encode state — filled accent = scheduled, hollow ring = a poll's candidate
-// date, spine-grey = already happened; today is ringed. Tapping a day reveals
-// its events. Best for spotting date clusters while a date poll is open.
+// hairlines, warm surface, mono numerals, a Bricolage month label). Each event
+// sits **in its day cell** as a small titled chip — accent when scheduled, muted
+// when it's already happened, struck through when cancelled; today is ringed. A
+// busy day shows the first few and a "+N more" that expands the full list below.
 //
 // `events` is the group/personal calendar window (dated events only). It fetches
-// nothing itself — the page hands it the events and (optionally) candidate poll
-// dates to ring.
-export default function MonthGrid({ events = [], candidateDates = [] }) {
+// nothing itself — the page hands it the events.
+const MAX_PER_DAY = 3;
+
+export default function MonthGrid({ events = [] }) {
   const [cursor, setCursor] = useState(() => startOfMonth(firstEventDate(events)));
   const [openDay, setOpenDay] = useState(null);
 
   const byDay = useMemo(() => groupByDay(events), [events]);
-  const candidates = useMemo(() => new Set(candidateDates), [candidateDates]);
   const todayKey = dayKeyLocal(new Date());
 
   const weeks = useMemo(() => monthMatrix(cursor), [cursor]);
@@ -58,30 +58,44 @@ export default function MonthGrid({ events = [], candidateDates = [] }) {
           if (!day) return <div key={i} className="ev-day ev-day--blank" />;
           const key = dayKeyLocal(day);
           const dayEvents = byDay.get(key) || [];
-          const scheduled = dayEvents.some((e) => !e.is_past && e.status !== "cancelled");
-          const past = dayEvents.length > 0 && dayEvents.every((e) => e.is_past);
-          const isCandidate = candidates.has(isoDate(day));
+          const shown = dayEvents.slice(0, MAX_PER_DAY);
+          const extra = dayEvents.length - shown.length;
           const isToday = key === todayKey;
-          const cls = [
-            "ev-day",
-            isToday ? "ev-day--today" : "",
-            scheduled ? "ev-day--scheduled" : "",
-            past ? "ev-day--past" : "",
-            isCandidate ? "ev-day--candidate" : "",
-          ]
-            .filter(Boolean)
-            .join(" ");
           return (
-            <button
+            <div
               key={i}
-              type="button"
-              className={cls}
-              onClick={() => setOpenDay(openDay === key ? null : key)}
-              aria-label={`${day.getDate()} — ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}`}
+              className={`ev-day ${isToday ? "ev-day--today" : ""}`}
             >
               <span className="ev-day-num font-mono">{day.getDate()}</span>
-              {dayEvents.length > 0 && <span className="ev-day-dot" aria-hidden="true" />}
-            </button>
+              {dayEvents.length > 0 && (
+                <div className="ev-day-events">
+                  {shown.map((e) => (
+                    <Link
+                      key={e.id}
+                      to={`/g/${e.group.id}/events/${e.id}`}
+                      className={`ev-day-event ${eventChipClass(e)}`}
+                      title={eventTitle(e)}
+                    >
+                      {formatEventTime(e.start_time) && (
+                        <span className="ev-day-event-time">
+                          {formatEventTime(e.start_time)}
+                        </span>
+                      )}
+                      <span className="ev-day-event-title">{e.title}</span>
+                    </Link>
+                  ))}
+                  {extra > 0 && (
+                    <button
+                      type="button"
+                      className="ev-day-more"
+                      onClick={() => setOpenDay(openDay === key ? null : key)}
+                    >
+                      +{extra} more
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
@@ -106,6 +120,17 @@ export default function MonthGrid({ events = [], candidateDates = [] }) {
       )}
     </div>
   );
+}
+
+function eventChipClass(e) {
+  if (e.status === "cancelled") return "ev-day-event--off";
+  if (e.is_past) return "ev-day-event--past";
+  return "ev-day-event--scheduled";
+}
+
+function eventTitle(e) {
+  const t = formatEventTime(e.start_time);
+  return t ? `${t} · ${e.title}` : e.title;
 }
 
 function groupByDay(events) {
@@ -152,10 +177,4 @@ function monthMatrix(monthStart) {
 
 function dayKeyLocal(d) {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-}
-
-function isoDate(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
 }
