@@ -1,5 +1,4 @@
 import PostCard from "./PostCard.jsx";
-import EventCard from "./events/EventCard.jsx";
 import EventTimelineEntry from "./events/EventTimelineEntry.jsx";
 import { dayKey, dayHeading } from "../utils.js";
 
@@ -44,10 +43,15 @@ export default function Timeline({
       lastDay = key;
     }
     if (item.kind === "event") {
+      // A past event is a spine entry too — the same shape as its future self and
+      // the posts around it — in a quiet "recap" variant, so a memory reads as
+      // part of the one line, not a boxed card wedged into it.
       rows.push(
-        <div key={`ev-${item.data.id}`} className="px-5 py-2">
-          <EventCard event={item.data} />
-        </div>
+        <EventTimelineEntry
+          key={`ev-${item.data.id}`}
+          event={item.data}
+          variant="past"
+        />
       );
     } else {
       rows.push(<PostCard key={item.data.id} post={item.data} />);

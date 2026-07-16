@@ -265,12 +265,13 @@
     min-width: 0;
   }
 
-  /* An upcoming event on the line, ahead of now (Phase 8b). It reuses the post
-     marker as-is — the surface halo threading the spine, and the accent ring only
-     on hover — so a future event reads apart from a past post by its *position*
-     (above now) and its accent date on the rail, not a permanent ring that would
-     look like a stuck hover. A cancelled one is simply dimmed. */
-  .tl-entry--future.tl-entry--off {
+  /* An event on the line (Phase 8b), future or past, reuses the post marker as-is
+     — the surface halo threading the spine, the accent ring only on hover. So an
+     event reads apart from a post by its rail (an accent *date* when it's ahead of
+     now, the clock *time* like a post when it's a past recap) and its body, not by
+     a permanent ring that would look like a stuck hover. A cancelled one is dimmed
+     wherever it sits. */
+  .tl-entry--off {
     opacity: 0.6;
   }
 
@@ -547,6 +548,11 @@
   .ev-tag--off {
     background: #f3e7e4;
     color: #9a4a3a;
+  }
+  /* A quiet "Happened" marker on a past-event recap — grey, not accent. */
+  .ev-tag--muted {
+    background: var(--color-line);
+    color: var(--color-ink-faint);
   }
 
   /* The poll tally — a bar that fills as votes arrive, count on the right. */

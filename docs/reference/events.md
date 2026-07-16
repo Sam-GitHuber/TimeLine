@@ -224,9 +224,14 @@ The gate needs a *present* organiser. Two paths:
   the nav** (`GroupPage` measures the nav height so it stacks correctly), so the
   group's identity stays put while the upcoming region and timeline scroll up
   behind it — and the now-node's scroll-margin clears *both* sticky bars.
-- Past events are merged into the group `Timeline` as recap cards (a render branch
-  on `is_past`, not a new endpoint) but render as a plain memory card rather than a
-  spine-bead node.
+- Past events are merged into the group `Timeline` **on the spine** among the
+  posts — the *same* `EventTimelineEntry` as a future event, in its `variant="past"`
+  recap form: the rail shows the clock time like a post (the day divider carries the
+  date), and the body drops the planning chips for a one-line mono recap + turnout
+  ("6 went"). So an event looks the same threading the line whether it's ahead of
+  now or behind it — not a boxed card wedged into the spine. (`EventCard`, the boxed
+  form, is still used *off* the line — the staging strip, month day-lists, the
+  personal calendar agenda.)
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).

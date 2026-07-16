@@ -7,6 +7,7 @@ import CalendarPage from "./pages/CalendarPage.jsx";
 import EventCard from "./components/events/EventCard.jsx";
 import MonthGrid from "./components/events/MonthGrid.jsx";
 import PlanEventForm from "./components/events/PlanEventForm.jsx";
+import Timeline from "./components/Timeline.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
 import { api } from "./api.js";
 
@@ -289,6 +290,59 @@ describe("EventCard", () => {
     );
     expect(screen.getByText("Event · happened")).toBeInTheDocument();
     expect(screen.getByText("6 went")).toBeInTheDocument();
+  });
+});
+
+describe("event timeline entries", () => {
+  it("renders a past event as a quiet recap on the spine (not a boxed card)", () => {
+    const past = makeEvent({
+      id: 9,
+      title: "Reunion",
+      status: "scheduled",
+      is_past: true,
+      event_date: "2026-06-01",
+      start_time: "13:00:00",
+      starts_at: "2026-06-01T13:00:00Z",
+      polls: [],
+      rsvp: { counts: { going: 6, maybe: 0, declined: 0, guests: 0 } },
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={[past]} />} />
+      </Routes>
+    );
+    expect(screen.getByText("Happened")).toBeInTheDocument();
+    expect(screen.getByText("6 went")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Reunion/ })).toHaveAttribute(
+      "href",
+      "/g/3/events/9"
+    );
+    // The recap is a spine entry, sharing the post entry's structure.
+    expect(document.querySelector(".tl-entry--event-past")).toBeTruthy();
+  });
+
+  it("renders a future event on the spine with its RSVP counts", () => {
+    const fut = makeEvent({
+      id: 10,
+      title: "Camping",
+      status: "scheduled",
+      event_date: "2026-08-20",
+      starts_at: "2026-08-20T00:00:00Z",
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "unset" },
+        location: { state: "unset" },
+      },
+      polls: [],
+      rsvp: { counts: { going: 2, maybe: 1, declined: 0, guests: 0 } },
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline futureEvents={[fut]} />} />
+      </Routes>
+    );
+    expect(screen.getByRole("link", { name: /Camping/ })).toBeInTheDocument();
+    expect(screen.getByText(/2 going/)).toBeInTheDocument();
   });
 });
 
