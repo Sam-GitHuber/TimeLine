@@ -834,13 +834,33 @@ class Notification(models.Model):
         CONNECTION_REQUEST = "connection_request", "Connection request"
         CONNECTION_ACCEPTED = "connection_accepted", "Connection accepted"
         GROUP_INVITE = "group_invite", "Group invitation"
+        # Group events (Phase 8b). The actor is always the event's organiser, so
+        # these ride the same connection gate as the content kinds — a member not
+        # connected to the organiser gets no row (see notifications.py). All five
+        # target the ``event`` FK and deep-link to /g/<gid>/events/<eid>.
+        EVENT_CREATED = "event_created", "New group event"
+        POLL_OPENED = "poll_opened", "Poll opened on an event"
+        EVENT_SCHEDULED = "event_scheduled", "Event date set"
+        EVENT_UPDATED = "event_updated", "Event changed"
+        EVENT_CANCELLED = "event_cancelled", "Event cancelled"
 
     # Kinds a user is allowed to mute in preferences. The request/invite kinds
     # are deliberately *always-on*: muting "someone wants to connect" or "you've
     # been invited" would hide something you genuinely need to act on, and with
     # the badges now unified into the activity centre it'd be the only signal.
+    # The event kinds *are* mutable (a busy group's event chatter is exactly what
+    # a user might mute) and default-on, exactly like the content kinds.
     MUTABLE_KINDS = frozenset(
-        {Kind.POST_REPLY, Kind.COMMENT_REPLY, Kind.REACTION}
+        {
+            Kind.POST_REPLY,
+            Kind.COMMENT_REPLY,
+            Kind.REACTION,
+            Kind.EVENT_CREATED,
+            Kind.POLL_OPENED,
+            Kind.EVENT_SCHEDULED,
+            Kind.EVENT_UPDATED,
+            Kind.EVENT_CANCELLED,
+        }
     )
 
     recipient = models.ForeignKey(
@@ -880,6 +900,15 @@ class Notification(models.Model):
         Connection, on_delete=models.CASCADE, related_name="notifications",
         null=True, blank=True,
     )
+    # Group-event target (Phase 8b) — the fifth concrete FK. CASCADE like the
+    # others: if the event is deleted the notification has nothing to point at
+    # and goes with it. The activity centre was built to grow this way (the
+    # constraint already allowed a zero-target row), so this adds a column and a
+    # constraint branch, not new machinery.
+    event = models.ForeignKey(
+        "Event", on_delete=models.CASCADE, related_name="notifications",
+        null=True, blank=True,
+    )
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     seen_at = models.DateTimeField(null=True, blank=True)
@@ -889,20 +918,28 @@ class Notification(models.Model):
         ordering = ["-created_at", "-id"]
         constraints = [
             # At most one concrete target set (zero allowed — a future
-            # system/system-wide notice may point at nothing).
+            # system/system-wide notice may point at nothing). Now five targets.
             models.CheckConstraint(
                 name="notification_at_most_one_target",
                 condition=(
                     models.Q(post__isnull=True, comment__isnull=True,
-                             group__isnull=True, connection__isnull=True)
+                             group__isnull=True, connection__isnull=True,
+                             event__isnull=True)
                     | models.Q(post__isnull=False, comment__isnull=True,
-                               group__isnull=True, connection__isnull=True)
+                               group__isnull=True, connection__isnull=True,
+                               event__isnull=True)
                     | models.Q(post__isnull=True, comment__isnull=False,
-                               group__isnull=True, connection__isnull=True)
+                               group__isnull=True, connection__isnull=True,
+                               event__isnull=True)
                     | models.Q(post__isnull=True, comment__isnull=True,
-                               group__isnull=False, connection__isnull=True)
+                               group__isnull=False, connection__isnull=True,
+                               event__isnull=True)
                     | models.Q(post__isnull=True, comment__isnull=True,
-                               group__isnull=True, connection__isnull=False)
+                               group__isnull=True, connection__isnull=False,
+                               event__isnull=True)
+                    | models.Q(post__isnull=True, comment__isnull=True,
+                               group__isnull=True, connection__isnull=True,
+                               event__isnull=False)
                 ),
             ),
         ]
@@ -948,3 +985,293 @@ class NotificationPreference(models.Model):
     def __str__(self):
         state = "on" if self.enabled else "off"
         return f"{self.user} · {self.kind} · {state}"
+
+
+class Event(models.Model):
+    """A plannable group event — a birthday, a book-club night, a trip (8b).
+
+    An event is a *bundle of decisions* (title, date, time, location, plus any
+    custom questions). Each decision is a **dimension** that can be unset, being
+    polled, or set — the organiser drives them in any order (poll the date, settle
+    it, then poll the time, or just set a value outright). This is why the
+    when-fields are all nullable: an event can exist as "title + a date poll" long
+    before it has a fixed slot.
+
+    **Visibility** is the app's single connection gate, applied to the
+    ``organiser`` exactly as a post's gate keys on its author: you see an event
+    iff you're an active member of its group **and** connected to its organiser
+    (see ``visible_events`` in the views). An event you're not connected to the
+    organiser of does not exist for you — a 404, like their posts never reaching
+    your feed. That's why ``organiser`` is **CASCADE**, not SET_NULL like
+    ``Group.creator``: the gate needs a *living, present* organiser, so if they
+    delete their account (or leave the group) the event is removed unless a group
+    admin **adopts** it first (re-anchoring the gate on themselves).
+
+    **Lifecycle** — ``status`` is derived from the dimensions on write:
+
+    - ``planning`` — created; the must-have dimensions (at minimum a **date**)
+      aren't all set. It lives in a "being planned" staging area, off the
+      timeline (no slot in time yet).
+    - ``scheduled`` — a **date** is set (time optional). Now it has a slot on the
+      spine and the month grid. Date-only renders all-day; date + time renders
+      timed.
+    - ``cancelled`` — called off; kept as a tombstone so RSVP'd members are
+      notified and the history stays honest (never silently deleted).
+
+    ``past`` is **derived, not stored** (``starts_at < now``): a past event drops
+    out of "upcoming" surfaces and falls into the group timeline among the posts
+    as a memory. One row, shown two ways — never a separate model.
+    """
+
+    class Status(models.TextChoices):
+        PLANNING = "planning", "Planning"
+        SCHEDULED = "scheduled", "Scheduled"
+        CANCELLED = "cancelled", "Cancelled"
+
+    group = models.ForeignKey(
+        Group,
+        on_delete=models.CASCADE,
+        related_name="events",
+        db_index=True,
+    )
+    organiser = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="events_organised",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    # The calendar key. NULL until a date is set/finalised — an event in
+    # ``planning`` has no position in time. Indexed for the per-group window query.
+    event_date = models.DateField(null=True, blank=True, db_index=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    # One IANA timezone per event (e.g. "Europe/London"). DST / cross-tz nuance
+    # is a documented simplification — fine at family scale. Defaults from
+    # settings.TIME_ZONE at create time.
+    timezone = models.CharField(max_length=64, blank=True)
+    location_name = models.CharField(max_length=200, blank=True)
+    # An organiser-pasted link (a maps URL, a venue page). Rendered as a plain
+    # anchor — **no geocoding, no embedded map tiles** (those would leak every
+    # viewer's IP to a third party, breaking the no-trackers principle).
+    location_url = models.URLField(blank=True)
+    location_note = models.CharField(max_length=200, blank=True)
+    status = models.CharField(
+        max_length=9,
+        choices=Status.choices,
+        default=Status.PLANNING,
+        db_index=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Upcoming-first isn't meaningful across planning (date-less) events, so
+        # order by the date. Rows without a date sort last; ``-id`` is a stable
+        # tiebreaker. Views apply their own window ordering on top of this.
+        ordering = ["event_date", "id"]
+        indexes = [
+            # The per-group calendar window query filters (group, event_date).
+            models.Index(fields=["group", "event_date"]),
+        ]
+
+    @property
+    def starts_at(self):
+        """A tz-aware datetime for ordering / the personal-calendar union, or
+        ``None`` while no date is set. A date-only event starts at midnight in
+        its own timezone (it's all-day); date + time uses the time."""
+        if self.event_date is None:
+            return None
+        from datetime import datetime, time
+        from zoneinfo import ZoneInfo
+
+        from django.conf import settings as dj_settings
+
+        tzname = self.timezone or dj_settings.TIME_ZONE
+        try:
+            tz = ZoneInfo(tzname)
+        except Exception:
+            tz = ZoneInfo(dj_settings.TIME_ZONE)
+        return datetime.combine(
+            self.event_date, self.start_time or time.min, tzinfo=tz
+        )
+
+    @property
+    def is_past(self):
+        """Derived, never stored. A cancelled event is never "past" — it's a
+        tombstone that stays visible as cancelled, not a memory."""
+        from django.utils import timezone as dj_tz
+
+        if self.status == self.Status.CANCELLED:
+            return False
+        start = self.starts_at
+        return start is not None and start < dj_tz.now()
+
+    def __str__(self):
+        return f"{self.title} · {self.group} ({self.status})"
+
+
+class Poll(models.Model):
+    """An advisory poll on one dimension of an ``Event`` (8b).
+
+    A poll **never auto-decides** — closing it and finalising the dimension are
+    two distinct organiser actions, and finalising accepts *any* value, not just a
+    winning option (see ``Event.finalise`` in the views). The tally *informs*; the
+    organiser *decides*. Built-in dimensions (``date``/``time``/``location``) feed
+    the event's structured fields on finalise; ``custom`` polls are informational
+    ("What should we bring?") and pin a winning option as a recorded decision
+    without writing a structured field.
+
+    **At most one open poll per built-in dimension per event** (you can't have two
+    open date polls) — enforced in the view, not the DB, since it's conditional on
+    ``status='open'``. ``custom`` polls have no such cap.
+    """
+
+    class Dimension(models.TextChoices):
+        DATE = "date", "Date"
+        TIME = "time", "Time"
+        LOCATION = "location", "Location"
+        CUSTOM = "custom", "Custom"
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        CLOSED = "closed", "Closed"
+
+    event = models.ForeignKey(
+        Event, on_delete=models.CASCADE, related_name="polls"
+    )
+    dimension = models.CharField(max_length=8, choices=Dimension.choices)
+    question = models.CharField(max_length=200)
+    # Default True for date/time ("pick every option you can do" — the when2meet
+    # behaviour), False for a single-choice location/custom. Set by the view from
+    # the dimension when the organiser doesn't specify.
+    allow_multiple = models.BooleanField(default=False)
+    status = models.CharField(
+        max_length=6, choices=Status.choices, default=Status.OPEN, db_index=True
+    )
+    # A *soft* deadline: the view stops accepting new votes past it and nudges the
+    # organiser, but it does **not** auto-finalise (polls are advisory).
+    closes_at = models.DateTimeField(null=True, blank=True)
+    # For a **custom** poll, the option the organiser pinned as the recorded
+    # decision on finalise ("we'll bring the cake"). Built-in polls write their
+    # outcome onto the event's structured fields instead, so this stays null for
+    # them. SET_NULL so deleting the option doesn't erase the whole poll.
+    decided_option = models.ForeignKey(
+        "PollOption",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="polls_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        return f"{self.get_dimension_display()} poll · {self.event} ({self.status})"
+
+
+class PollOption(models.Model):
+    """One candidate option in a ``Poll`` (8b).
+
+    Organiser-authored in v1 (member-suggested options are a future extension).
+    One typed column carries the value per dimension — ``date_value`` for a date
+    poll, ``time_value`` for time, ``text_value`` for location/custom — so
+    finalising a built-in poll can copy a structured value straight onto the
+    event. ``label`` is the display text shown in the tally.
+    """
+
+    poll = models.ForeignKey(
+        Poll, on_delete=models.CASCADE, related_name="options"
+    )
+    label = models.CharField(max_length=200)
+    date_value = models.DateField(null=True, blank=True)
+    time_value = models.TimeField(null=True, blank=True)
+    text_value = models.CharField(max_length=200, blank=True)
+    order = models.SmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ["order", "id"]
+
+    def __str__(self):
+        return f"{self.label} · {self.poll_id}"
+
+
+class PollVote(models.Model):
+    """One person's vote for one ``PollOption`` (8b).
+
+    A ``UniqueConstraint(option, voter)`` stops a double-vote for the same option.
+    Multi-choice polls let a voter hold several rows across a poll's options;
+    single-choice polls additionally enforce one row per ``(poll, voter)`` in the
+    view (a new vote replaces the old). Votes are pruned per-viewer when tallied:
+    the **count** includes everyone in the event's audience (a shared coordination
+    number must be honest), but the **names** shown are gated to your connections
+    — see the poll serializer. Both FKs CASCADE.
+    """
+
+    option = models.ForeignKey(
+        PollOption, on_delete=models.CASCADE, related_name="votes"
+    )
+    voter = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="poll_votes",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["option", "voter"], name="unique_poll_vote"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.voter} → {self.option_id}"
+
+
+class EventRSVP(models.Model):
+    """One person's RSVP to an ``Event`` (8b).
+
+    ``UniqueConstraint(event, user)`` — one RSVP per person, upserted (a new
+    response replaces the old). Like poll votes, RSVP tallies are honest across
+    the whole audience (the ``going`` count includes people you can't see) while
+    the **named** lists are connection-gated — see the RSVP serializer.
+    ``guests`` is an optional "+N" headcount; ``note`` an optional short message.
+    """
+
+    class Response(models.TextChoices):
+        GOING = "going", "Going"
+        MAYBE = "maybe", "Maybe"
+        DECLINED = "declined", "Declined"
+
+    event = models.ForeignKey(
+        Event, on_delete=models.CASCADE, related_name="rsvps"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="event_rsvps",
+    )
+    response = models.CharField(max_length=8, choices=Response.choices)
+    guests = models.SmallIntegerField(default=0)
+    note = models.CharField(max_length=200, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event", "user"], name="unique_event_rsvp"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} · {self.event} ({self.response})"

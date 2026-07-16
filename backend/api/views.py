@@ -1,7 +1,9 @@
 from collections import defaultdict
 
+from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.utils.dateparse import parse_date, parse_time
 from django.db.models import (
     Case,
     Count,
@@ -48,6 +50,8 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    Event,
+    EventRSVP,
     Group,
     GroupMembership,
     Message,
@@ -55,6 +59,9 @@ from .models import (
     NotificationPreference,
     Participant,
     ParticipantInterval,
+    Poll,
+    PollOption,
+    PollVote,
     Post,
     PostCommentRead,
     PostImage,
@@ -67,6 +74,8 @@ from .serializers import (
     CommentSerializer,
     ConnectionRequestSerializer,
     ConversationSerializer,
+    EventWriteSerializer,
+    FinaliseSerializer,
     GroupInviteSerializer,
     GroupMemberSerializer,
     GroupSerializer,
@@ -74,9 +83,14 @@ from .serializers import (
     MessageSerializer,
     NotificationPreferencesSerializer,
     NotificationSerializer,
+    PollCreateSerializer,
     PostSerializer,
     ReportCreateSerializer,
+    RSVPWriteSerializer,
     UserListSerializer,
+    build_rsvp_summary,
+    serialize_event,
+    serialize_poll,
     summarise_reactions,
 )
 
@@ -609,6 +623,53 @@ def can_view_comment(user, comment, connected_ids=None):
     if comment.author_id != user.id and comment.author_id not in connected_ids:
         return False
     return can_view_post(user, comment.post, connected_ids=connected_ids)
+
+
+def visible_events(user, group, connected_ids=None):
+    """The events in ``group`` that ``user`` is allowed to see (Phase 8b).
+
+    The app's one connection gate applied to events — the *same* rule as
+    ``visible_posts``, but keyed on the event's ``organiser`` instead of a post's
+    author: you see an event iff its organiser is you or one of your connections,
+    and the organiser is still active. Group **membership** is gated by the caller
+    (as with ``visible_posts``); this applies only the connection prune, so each
+    member sees a *partial* set of a group's events — their connections' events
+    under a shared label — exactly as they see a partial set of its posts.
+
+    A block deletes the ``Connection`` row (see ``BlockView``), so a blocked
+    organiser's events fall out of ``connected_ids`` for free — no separate block
+    check needed. Cancelled events stay visible (RSVP'd members need the
+    tombstone); the caller's ``window`` decides upcoming/past/all.
+    """
+    if connected_ids is None:
+        connected_ids = connected_user_ids(user)
+    visible_organiser_ids = set(connected_ids) | {user.id}
+    return (
+        Event.objects.filter(
+            group=group,
+            organiser_id__in=visible_organiser_ids,
+            organiser__is_active=True,
+        )
+        .select_related("organiser", "group")
+    )
+
+
+def can_view_event(user, event, connected_ids=None):
+    """Whether ``user`` may see ``event`` — the yes/no form of ``visible_events``,
+    in one place so the detail/vote/RSVP views can't drift from the list.
+
+    Two gates, mirroring the group timeline: active **membership** of the event's
+    group, **and** a connection to its (active) organiser (or being the organiser).
+    A member not connected to the organiser gets a 404 — the event doesn't exist
+    for them, exactly like one of the organiser's posts.
+    """
+    if not is_group_member(user, event.group_id):
+        return False
+    if not event.organiser.is_active:
+        return False
+    if connected_ids is None:
+        connected_ids = connected_user_ids(user)
+    return event.organiser_id == user.id or event.organiser_id in connected_ids
 
 
 def connection_status_annotation(user):
@@ -2465,6 +2526,9 @@ class GroupMemberDetailView(APIView):
                     p.left_at = now
                     p.save(update_fields=["left_at"])
                     promote_participants(convo, now)
+            # An event's visibility gate hangs off a *present* organiser (Phase
+            # 8b), so a departing member's events can't linger — cancel them.
+            cancel_events_on_departure(user_id, group.id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -2558,7 +2622,8 @@ def _notifications_for(user):
     return (
         Notification.objects.filter(recipient=user)
         .select_related(
-            "actor", "post", "post__author", "comment", "comment__post", "group"
+            "actor", "post", "post__author", "comment", "comment__post", "group",
+            "event",
         )
         .order_by("-created_at", "-id")
     )
@@ -2825,3 +2890,629 @@ class DeleteAccountView(APIView):
             )
         delete_account(request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8b — group events, polls, RSVPs, calendars
+#
+# Two gates apply throughout, mirroring the group timeline: **membership** gates
+# the group's event endpoints (a non-member 404s), and each **individual event is
+# connection-gated to its organiser** (``can_view_event`` / ``visible_events``) —
+# an event you're not connected to the organiser of is a 404, exactly like one of
+# their posts. Managing an event (polls, edits, finalise) is the organiser's;
+# cancel/hard-delete is the organiser or a group admin.
+# ---------------------------------------------------------------------------
+
+# Aliases so call sites read as names, not string literals (like ACTIVE/ADMIN).
+EV_PLANNING = Event.Status.PLANNING
+EV_SCHEDULED = Event.Status.SCHEDULED
+EV_CANCELLED = Event.Status.CANCELLED
+POLL_OPEN = Poll.Status.OPEN
+POLL_CLOSED = Poll.Status.CLOSED
+DIM_DATE = Poll.Dimension.DATE
+DIM_TIME = Poll.Dimension.TIME
+DIM_LOCATION = Poll.Dimension.LOCATION
+DIM_CUSTOM = Poll.Dimension.CUSTOM
+GOING = EventRSVP.Response.GOING
+MAYBE = EventRSVP.Response.MAYBE
+DECLINED = EventRSVP.Response.DECLINED
+
+_DEFAULT_POLL_QUESTION = {
+    DIM_DATE: "Which date works?",
+    DIM_TIME: "What time?",
+    DIM_LOCATION: "Where should we meet?",
+}
+
+
+def _event_or_404(user, pk):
+    """Fetch an event the user may see, or 404 (membership + organiser-connection
+    gate via ``can_view_event``). Light fetch — used for permission checks and
+    mutations; the response is re-serialised from a prefetched query afterwards."""
+    event = get_object_or_404(
+        Event.objects.select_related("organiser", "group"), pk=pk
+    )
+    if not can_view_event(user, event):
+        raise NotFound()
+    return event
+
+
+def _event_detail_qs():
+    """Everything ``serialize_event(detail=True)`` reads, prefetched — no N+1 over
+    an event's polls, options, votes, or RSVPs."""
+    return Event.objects.select_related("organiser", "group").prefetch_related(
+        "polls__options__votes__voter", "rsvps__user"
+    )
+
+
+def _event_response(event_id, request, status_code=status.HTTP_200_OK):
+    """Serialise an event freshly (post-mutation) into a detail Response."""
+    event = _event_detail_qs().get(pk=event_id)
+    visible_ids = visible_reactor_ids(request.user)
+    is_admin = is_group_admin(request.user, event.group_id)
+    data = serialize_event(
+        event, viewer=request.user, visible_ids=visible_ids, request=request,
+        is_group_admin=is_admin,
+    )
+    return Response(data, status=status_code)
+
+
+def _poll_response(poll_id, request, status_code=status.HTTP_200_OK):
+    poll = (
+        Poll.objects.select_related("event", "event__group")
+        .prefetch_related("options__votes__voter")
+        .get(pk=poll_id)
+    )
+    data = serialize_poll(
+        poll, visible_ids=visible_reactor_ids(request.user),
+        me_id=request.user.id, request=request,
+    )
+    return Response(data, status=status_code)
+
+
+def _event_audience(event):
+    """Active members of the event's group other than the organiser — the
+    superset the notification choke-point then prunes to *organiser-connections*.
+    We don't gate here: ``create_notification`` already drops anyone not connected
+    to the actor (the organiser), so this stays "no new gating code"."""
+    return (
+        User.objects.filter(
+            group_memberships__group_id=event.group_id,
+            group_memberships__status=ACTIVE,
+            is_active=True,
+        )
+        .exclude(id=event.organiser_id)
+        .distinct()
+    )
+
+
+def _event_rsvp_audience(event, responses):
+    """Members who RSVP'd with one of ``responses`` (going/maybe), other than the
+    organiser — the recipients of ``event_updated`` / ``event_cancelled``."""
+    return (
+        User.objects.filter(
+            event_rsvps__event=event,
+            event_rsvps__response__in=responses,
+            is_active=True,
+        )
+        .exclude(id=event.organiser_id)
+        .distinct()
+    )
+
+
+def _notify_event(event, kind, recipients):
+    """Fire one event notification per recipient with the organiser as actor.
+    The choke-point suppresses self-notifications, muted kinds, and (crucially)
+    any recipient not connected to the organiser — so the row only reaches the
+    audience that can see the event."""
+    for recipient in recipients:
+        notifications.create_notification(
+            recipient, event.organiser, kind, event=event
+        )
+
+
+def _recompute_event_status(event):
+    """An event is ``scheduled`` once it has a date, else ``planning``. Never
+    touches a cancelled event (cancel is terminal in v1)."""
+    if event.status == EV_CANCELLED:
+        return
+    event.status = EV_SCHEDULED if event.event_date is not None else EV_PLANNING
+
+
+def cancel_events_on_departure(user_id, group_id):
+    """Cancel the events a departing member organises in a group (Phase 8b).
+
+    Called when someone **leaves or is removed from** a group: an event's
+    visibility hangs off a present organiser, so it can't linger anchored to a
+    non-member. Soft-cancel (tombstone + notify going/maybe RSVPs) rather than
+    delete, so anyone who'd RSVP'd learns the plan is off — the same courtesy as
+    an explicit cancel. (Account **deletion** doesn't come through here: the
+    ``organiser`` FK is CASCADE, so the events simply go with the account. An
+    admin "adopting" an orphaned event onto themselves is a future extension.)
+    """
+    events = list(
+        Event.objects.filter(group_id=group_id, organiser_id=user_id)
+        .exclude(status=EV_CANCELLED)
+        .select_related("organiser", "group")
+    )
+    for event in events:
+        event.status = EV_CANCELLED
+        event.save(update_fields=["status", "updated_at"])
+        _notify_event(
+            event, Notification.Kind.EVENT_CANCELLED,
+            _event_rsvp_audience(event, [GOING, MAYBE]),
+        )
+
+
+class GroupEventsView(APIView):
+    """List a group's events you can see (GET) or plan one (POST) at
+    ``/groups/<gid>/events/``.
+
+    GET — members only (404 otherwise); each event further pruned to those
+    organised by someone you're connected with (``visible_events``). ``window``
+    is ``upcoming`` (default), ``past``, or ``all``, ordered by date (the
+    calendar is time-ordered, never ranked). POST — **any active member** may
+    create an event (low-friction, like posting); it starts in ``planning`` with
+    the creator as organiser, and notifies the organiser's connections in the
+    group.
+    """
+
+    def get(self, request, gid):
+        if not is_group_member(request.user, gid):
+            raise NotFound()
+        connected = connected_user_ids(request.user)
+        qs = visible_events(
+            request.user, gid, connected_ids=connected
+        ).prefetch_related("polls", "rsvps__user")
+        window = request.query_params.get("window", "upcoming")
+        today = timezone.localdate()
+        if window == "past":
+            qs = qs.filter(event_date__lt=today).order_by("-event_date", "-id")
+        elif window == "all":
+            qs = qs.order_by("event_date", "id")
+        else:  # upcoming: undated (being planned) + today-or-later, soonest first
+            qs = qs.filter(
+                Q(event_date__isnull=True) | Q(event_date__gte=today)
+            ).order_by("event_date", "id")
+        visible_ids = set(connected) | {request.user.id}
+        is_admin = is_group_admin(request.user, gid)
+        data = [
+            serialize_event(
+                e, viewer=request.user, visible_ids=visible_ids,
+                request=request, is_group_admin=is_admin, detail=False,
+            )
+            for e in qs
+        ]
+        return Response(data)
+
+    def post(self, request, gid):
+        if not is_group_member(request.user, gid):
+            raise NotFound()
+        s = EventWriteSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        event = Event.objects.create(
+            group_id=gid,
+            organiser=request.user,
+            title=data["title"],
+            description=data.get("description", ""),
+            location_url=data.get("location_url", ""),
+            location_note=data.get("location_note", ""),
+            end_time=data.get("end_time"),
+            timezone=data.get("timezone") or dj_settings.TIME_ZONE,
+            status=EV_PLANNING,
+        )
+        _notify_event(event, Notification.Kind.EVENT_CREATED, _event_audience(event))
+        return _event_response(event.id, request, status.HTTP_201_CREATED)
+
+
+class EventDetailView(APIView):
+    """A single event: read (GET), edit fields (PATCH, organiser), hard-delete
+    (DELETE, organiser or group admin) at ``/events/<pk>/``.
+
+    404 for anyone who can't see the event (non-member, or not connected to the
+    organiser). PATCH covers the organiser-authored *non-scheduling* fields
+    (title, description, location link/note, timezone, end time); the date, start
+    time, and location name are set through ``finalise`` so the advisory-poll rule
+    and the status recompute stay in one place.
+    """
+
+    def get(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        return _event_response(event.id, request)
+
+    def patch(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can edit this event.")
+        s = EventWriteSerializer(event, data=request.data, partial=True)
+        s.is_valid(raise_exception=True)
+        for field, value in s.validated_data.items():
+            setattr(event, field, value)
+        event.save()
+        return _event_response(event.id, request)
+
+    def delete(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if not (
+            event.organiser_id == request.user.id
+            or is_group_admin(request.user, event.group_id)
+        ):
+            raise PermissionDenied(
+                "Only the organiser or a group admin can delete this event."
+            )
+        event.delete()  # cascades to polls, options, votes, RSVPs, notifications
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EventCancelView(APIView):
+    """Soft-cancel an event (``POST /events/<pk>/cancel/``) — organiser or a group
+    admin. Keeps the row as a tombstone (honest history, and RSVP'd members are
+    notified) rather than deleting it. Notifies everyone who RSVP'd going/maybe."""
+
+    def post(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if not (
+            event.organiser_id == request.user.id
+            or is_group_admin(request.user, event.group_id)
+        ):
+            raise PermissionDenied(
+                "Only the organiser or a group admin can cancel this event."
+            )
+        if event.status != EV_CANCELLED:
+            event.status = EV_CANCELLED
+            event.save()
+            _notify_event(
+                event, Notification.Kind.EVENT_CANCELLED,
+                _event_rsvp_audience(event, [GOING, MAYBE]),
+            )
+        return _event_response(event.id, request)
+
+
+class EventRSVPView(APIView):
+    """Upsert your RSVP (``PUT /events/<pk>/rsvp/``) — any member who can see the
+    event. One RSVP per person; a new response replaces the old."""
+
+    def put(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        s = RSVPWriteSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        EventRSVP.objects.update_or_create(
+            event=event,
+            user=request.user,
+            defaults={
+                "response": data["response"],
+                "guests": data.get("guests", 0),
+                "note": data.get("note", ""),
+            },
+        )
+        return _event_response(event.id, request)
+
+
+class EventRSVPListView(APIView):
+    """The event's RSVPs (``GET /events/<pk>/rsvps/``): **complete counts** plus
+    **connection-gated named lists** (decision 2 — the tally is honest, the names
+    are only those you're connected with)."""
+
+    def get(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        event = _event_detail_qs().get(pk=event.id)
+        summary = build_rsvp_summary(
+            event, visible_ids=visible_reactor_ids(request.user),
+            me_id=request.user.id, request=request, named=True,
+        )
+        return Response(summary)
+
+
+def _build_option_kwargs(dimension, opt, order):
+    """Turn one validated poll-option dict into ``PollOption`` kwargs for the
+    dimension, filling a sensible ``label`` from the value when blank. Raises a
+    ``ValidationError`` if the typed value the dimension needs is missing."""
+    label = (opt.get("label") or "").strip()
+    if dimension == DIM_DATE:
+        value = opt.get("date_value")
+        if value is None:
+            raise ValidationError("Each date option needs a date.")
+        return {"date_value": value, "label": label or value.isoformat(), "order": order}
+    if dimension == DIM_TIME:
+        value = opt.get("time_value")
+        if value is None:
+            raise ValidationError("Each time option needs a time.")
+        return {"time_value": value, "label": label or value.strftime("%H:%M"), "order": order}
+    # location / custom — free text
+    text = (opt.get("text_value") or "").strip() or label
+    if not text:
+        raise ValidationError("Each option needs a label.")
+    return {"text_value": text, "label": label or text, "order": order}
+
+
+class EventPollsView(APIView):
+    """Open a poll on an event (``POST /events/<pk>/polls/``) — organiser only.
+
+    Enforces **at most one open poll per built-in dimension** (you can't run two
+    date polls at once); ``custom`` polls have no such cap. ``allow_multiple``
+    defaults to true for date/time ("pick every option you can do") and false for
+    a single-choice location/custom. Notifies the organiser's connections."""
+
+    def post(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can open a poll.")
+        s = PollCreateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        dimension = data["dimension"]
+        question = (data.get("question") or "").strip()
+        if dimension == DIM_CUSTOM:
+            if not question:
+                raise ValidationError("A custom poll needs a question.")
+        else:
+            if event.polls.filter(dimension=dimension, status=POLL_OPEN).exists():
+                raise ValidationError(
+                    "There's already an open poll for that. Close it first."
+                )
+            question = question or _DEFAULT_POLL_QUESTION[dimension]
+        allow_multiple = data.get("allow_multiple")
+        if allow_multiple is None:
+            allow_multiple = dimension in (DIM_DATE, DIM_TIME)
+
+        option_kwargs = [
+            _build_option_kwargs(dimension, opt, i)
+            for i, opt in enumerate(data["options"])
+        ]
+        with transaction.atomic():
+            poll = Poll.objects.create(
+                event=event,
+                dimension=dimension,
+                question=question,
+                allow_multiple=allow_multiple,
+                closes_at=data.get("closes_at"),
+                created_by=request.user,
+            )
+            PollOption.objects.bulk_create(
+                [PollOption(poll=poll, **kw) for kw in option_kwargs]
+            )
+        _notify_event(event, Notification.Kind.POLL_OPENED, _event_audience(event))
+        return _poll_response(poll.id, request, status.HTTP_201_CREATED)
+
+
+def _poll_or_404(user, pk):
+    """Fetch a poll whose event the user may see, or 404."""
+    poll = get_object_or_404(
+        Poll.objects.select_related("event", "event__organiser", "event__group"),
+        pk=pk,
+    )
+    if not can_view_event(user, poll.event):
+        raise NotFound()
+    return poll
+
+
+class PollDetailView(APIView):
+    """A poll's detail (``GET /polls/<pk>/``) or removal (``DELETE``, organiser)."""
+
+    def get(self, request, pk):
+        poll = _poll_or_404(request.user, pk)
+        return _poll_response(poll.id, request)
+
+    def delete(self, request, pk):
+        poll = _poll_or_404(request.user, pk)
+        if poll.event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can remove a poll.")
+        poll.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PollVoteView(APIView):
+    """Cast/replace your votes on a poll (``PUT /polls/<pk>/vote/``).
+
+    Any member who can see the event may vote, but only while the poll is
+    ``open`` (a closed poll 403s) and before any ``closes_at`` soft deadline. The
+    body is ``{option_ids: [...]}`` — your full selection: it **replaces** your
+    previous votes on this poll (so a single-choice poll swaps, a multi-choice
+    poll re-sets). An empty list clears your vote.
+    """
+
+    def put(self, request, pk):
+        poll = _poll_or_404(request.user, pk)
+        if poll.status != POLL_OPEN:
+            raise PermissionDenied("This poll is closed.")
+        if poll.closes_at is not None and poll.closes_at < timezone.now():
+            raise PermissionDenied("Voting has closed for this poll.")
+        option_ids = request.data.get("option_ids", [])
+        if not isinstance(option_ids, list):
+            raise ValidationError({"option_ids": "Expected a list of option ids."})
+        valid_ids = set(
+            poll.options.values_list("id", flat=True)
+        )
+        chosen = []
+        for oid in option_ids:
+            if oid not in valid_ids:
+                raise ValidationError(
+                    {"option_ids": "An option doesn't belong to this poll."}
+                )
+            chosen.append(oid)
+        if not poll.allow_multiple and len(chosen) > 1:
+            raise ValidationError(
+                {"option_ids": "This poll only allows one choice."}
+            )
+        with transaction.atomic():
+            PollVote.objects.filter(
+                option__poll=poll, voter=request.user
+            ).delete()
+            PollVote.objects.bulk_create(
+                [PollVote(option_id=oid, voter=request.user) for oid in chosen]
+            )
+        return _poll_response(poll.id, request)
+
+
+class PollCloseView(APIView):
+    """Close a poll without deciding (``POST /polls/<pk>/close/``) — organiser.
+    Closing freezes the tally; it does **not** finalise (polls are advisory —
+    ``finalise`` is the separate, explicit decision)."""
+
+    def post(self, request, pk):
+        poll = _poll_or_404(request.user, pk)
+        if poll.event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can close a poll.")
+        if poll.status != POLL_CLOSED:
+            poll.status = POLL_CLOSED
+            poll.save(update_fields=["status"])
+        return _poll_response(poll.id, request)
+
+
+class EventFinaliseView(APIView):
+    """Finalise a dimension (``POST /events/<pk>/finalise/``) — organiser only.
+
+    **The decision, not the poll.** The organiser sets a value on a dimension —
+    for a built-in this writes the structured field (``event_date`` /
+    ``start_time`` / ``location_name``), recomputes ``status``, and (by default)
+    closes the related open poll; for ``custom`` it pins a winning option. The
+    written value **need not** be a poll option (decision 3 — "actually, let's do
+    Friday"). Setting a date for the first time flips the event to ``scheduled``
+    and notifies the organiser's connections; a later change to an
+    already-scheduled event notifies those who RSVP'd going/maybe.
+    """
+
+    def post(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can finalise a decision.")
+        s = FinaliseSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        dimension = data["dimension"]
+        raw_value = (data.get("value") or "").strip()
+        close_poll = data.get("close_poll", True)
+        was_scheduled = event.status == EV_SCHEDULED
+
+        with transaction.atomic():
+            if dimension == DIM_CUSTOM:
+                self._finalise_custom(event, data, close_poll)
+                # A pinned custom outcome is informational — no status change,
+                # no structured notification (matches the notifications table,
+                # which only covers date/time/location changes).
+                return _event_response(event.id, request)
+
+            self._finalise_builtin(event, dimension, raw_value)
+            _recompute_event_status(event)
+            event.save()
+            if close_poll:
+                event.polls.filter(
+                    dimension=dimension, status=POLL_OPEN
+                ).update(status=POLL_CLOSED)
+
+        newly_scheduled = event.status == EV_SCHEDULED and not was_scheduled
+        if newly_scheduled:
+            _notify_event(
+                event, Notification.Kind.EVENT_SCHEDULED, _event_audience(event)
+            )
+        elif was_scheduled:
+            _notify_event(
+                event, Notification.Kind.EVENT_UPDATED,
+                _event_rsvp_audience(event, [GOING, MAYBE]),
+            )
+        return _event_response(event.id, request)
+
+    def _finalise_builtin(self, event, dimension, raw_value):
+        if dimension == DIM_DATE:
+            value = parse_date(raw_value)
+            if value is None:
+                raise ValidationError({"value": "Expected a date (YYYY-MM-DD)."})
+            event.event_date = value
+        elif dimension == DIM_TIME:
+            if raw_value:
+                value = parse_time(raw_value)
+                if value is None:
+                    raise ValidationError({"value": "Expected a time (HH:MM)."})
+                event.start_time = value
+            else:
+                # An explicit empty value clears the time (back to all-day).
+                event.start_time = None
+        elif dimension == DIM_LOCATION:
+            event.location_name = raw_value
+
+    def _finalise_custom(self, event, data, close_poll):
+        option_id = data.get("option_id")
+        if option_id is None:
+            raise ValidationError(
+                {"option_id": "Pick an option to pin as the decision."}
+            )
+        option = get_object_or_404(
+            PollOption, pk=option_id, poll__event=event,
+            poll__dimension=DIM_CUSTOM,
+        )
+        poll = option.poll
+        poll.decided_option = option
+        if close_poll:
+            poll.status = POLL_CLOSED
+        poll.save(update_fields=["decided_option", "status"])
+
+
+class GroupCalendarView(APIView):
+    """One group's dated events in a window (``GET /groups/<gid>/calendar/?from=&to=``)
+    for the month grid — members only, connection-gated, chronological."""
+
+    def get(self, request, gid):
+        if not is_group_member(request.user, gid):
+            raise NotFound()
+        connected = connected_user_ids(request.user)
+        qs = (
+            visible_events(request.user, gid, connected_ids=connected)
+            .filter(event_date__isnull=False)
+            .prefetch_related("polls", "rsvps__user")
+        )
+        qs = _apply_calendar_window(qs, request)
+        visible_ids = set(connected) | {request.user.id}
+        is_admin = is_group_admin(request.user, gid)
+        data = [
+            serialize_event(
+                e, viewer=request.user, visible_ids=visible_ids,
+                request=request, is_group_admin=is_admin, detail=False,
+            )
+            for e in qs.order_by("event_date", "start_time", "id")
+        ]
+        return Response(data)
+
+
+class PersonalCalendarView(APIView):
+    """The personal calendar (``GET /calendar/?from=&to=``): a **pure time-merge**
+    of the dated events you can see across **every group you're an active member
+    of** — connected to the organiser, no ranking (the same discipline as the
+    ``include_groups`` feed toggle). Each event carries its group label."""
+
+    def get(self, request):
+        connected = connected_user_ids(request.user)
+        group_ids = GroupMembership.objects.filter(
+            user=request.user, status=ACTIVE
+        ).values_list("group_id", flat=True)
+        visible_organisers = set(connected) | {request.user.id}
+        qs = (
+            Event.objects.filter(
+                group_id__in=list(group_ids),
+                organiser_id__in=visible_organisers,
+                organiser__is_active=True,
+                event_date__isnull=False,
+            )
+            .select_related("organiser", "group")
+            .prefetch_related("polls", "rsvps__user")
+        )
+        qs = _apply_calendar_window(qs, request)
+        data = [
+            serialize_event(
+                e, viewer=request.user, visible_ids=visible_organisers,
+                request=request, detail=False,
+            )
+            for e in qs.order_by("event_date", "start_time", "id")
+        ]
+        return Response(data)
+
+
+def _apply_calendar_window(qs, request):
+    """Clamp a calendar queryset to the optional ``from``/``to`` date params."""
+    frm = parse_date(request.query_params.get("from", "") or "")
+    to = parse_date(request.query_params.get("to", "") or "")
+    if frm is not None:
+        qs = qs.filter(event_date__gte=frm)
+    if to is not None:
+        qs = qs.filter(event_date__lte=to)
+    return qs

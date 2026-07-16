@@ -120,6 +120,12 @@ export default function Layout() {
                 <GroupsIcon className="h-5 w-5 sm:hidden" />
                 <span className="hidden sm:inline">Groups</span>
               </button>
+              {/* Calendar (Phase 8b): the opt-in aggregate of upcoming events
+                  across your groups. Its own route, not merged into the feed. */}
+              <NavLink to="/calendar" aria-label="Calendar" className={navLinkClass}>
+                <CalendarIcon className="h-5 w-5 sm:hidden" />
+                <span className="hidden sm:inline">Calendar</span>
+              </NavLink>
               {/* Messages is a companion panel, not a page — the button toggles
                   the drawer so you keep your place in the feed. */}
               <button
@@ -270,6 +276,24 @@ function MessagesIcon(props) {
       {...props}
     >
       <path d="M20.5 11.5a7.5 7.5 0 0 1-7.5 7.5 7.9 7.9 0 0 1-3.5-.8L4 20l1.3-4.2A7.5 7.5 0 0 1 4.5 11.5 7.5 7.5 0 0 1 12 4a7.5 7.5 0 0 1 8.5 7.5Z" />
+    </svg>
+  );
+}
+
+function CalendarIcon(props) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <rect x="3.5" y="5" width="17" height="16" rx="2" />
+      <path d="M3.5 9.5h17M8 3.5v3M16 3.5v3" />
     </svg>
   );
 }

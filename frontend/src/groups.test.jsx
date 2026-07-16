@@ -51,6 +51,8 @@ vi.mock("./api.js", () => ({
     getGroupPosts: vi.fn(),
     getGroupMembers: vi.fn(),
     getGroupInvites: vi.fn(),
+    getGroupEvents: vi.fn(),
+    getGroupCalendar: vi.fn(),
     createGroup: vi.fn(),
     listUsers: vi.fn(),
     inviteToGroup: vi.fn(),
@@ -75,6 +77,8 @@ beforeEach(() => {
   api.getGroupPosts.mockResolvedValue(emptyPage);
   api.getGroupMembers.mockResolvedValue([]);
   api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
+  api.getGroupEvents.mockResolvedValue([]);
+  api.getGroupCalendar.mockResolvedValue([]);
   api.getUnreadNotificationCount.mockResolvedValue({ count: 0 });
   api.getNotifications.mockResolvedValue(emptyPage);
   api.markNotificationsSeen.mockResolvedValue({ updated: 0 });
@@ -193,9 +197,11 @@ describe("GroupPage admin controls", () => {
     });
     renderGroupAt("/g/7");
     expect(await screen.findByText("Trip")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Edit" })).toBeInTheDocument();
+    // The group actions live behind the "⋯" menu now.
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    expect(screen.getByRole("menuitem", { name: "Edit group" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Delete group" })
+      screen.getByRole("menuitem", { name: "Delete group" })
     ).toBeInTheDocument();
   });
 
@@ -210,13 +216,33 @@ describe("GroupPage admin controls", () => {
     });
     renderGroupAt("/g/7");
     expect(await screen.findByText("Trip")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Edit" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    // A plain member's menu has no Edit or Delete…
+    expect(screen.queryByRole("menuitem", { name: "Edit group" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Delete group" })).toBeNull();
+    // …but can still invite and leave.
+    expect(screen.getByRole("menuitem", { name: "Invite" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Delete group" })
-    ).toBeNull();
-    // But a member can still invite and leave.
-    expect(screen.getByRole("button", { name: "Invite" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Leave" })).toBeInTheDocument();
+      screen.getByRole("menuitem", { name: "Leave group" })
+    ).toBeInTheDocument();
+  });
+
+  it("opens the members panel from the menu", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Members" }));
+    expect(
+      await screen.findByRole("heading", { name: /Members/ })
+    ).toBeInTheDocument();
   });
 
   it("shows a 'not available' state on a 404 (non-member)", async () => {
@@ -248,8 +274,9 @@ describe("GroupPage start a chat", () => {
 
     renderGroupAt("/g/7");
     await screen.findByText("Trip");
+    await user.click(screen.getByRole("button", { name: "Group actions" }));
     await user.click(
-      await screen.findByRole("button", { name: "Start a chat" })
+      await screen.findByRole("menuitem", { name: "Start a chat" })
     );
 
     expect(openNew).toHaveBeenCalledWith({

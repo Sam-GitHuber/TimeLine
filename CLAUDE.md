@@ -4,27 +4,30 @@ Instructions for Claude Code when working in this repo.
 
 ## Current status
 
-**Phases 0–8 are done** (0–7b are live on the box; Phase 8 is code-complete —
-merge + continuous-deploy carries it to the box). The app is deployed on a wiped
-home PC and reachable on public HTTPS at https://your-timeline.net — real
-friends/family can be invited. Shipped: accounts/auth, the reverse-chronological
-feed, photos + profiles, the symmetric connection graph + pruned comment trees,
-direct + group messaging, groups, emoji reactions, the unified **notifications /
-activity centre**, and full home-server productionisation (backups, continuous
-deploy, security hardening, uptime monitoring, ToS/privacy + account deletion). A
-site-wide **design system** underpins the frontend (warm-modern "living line"
-look — see `docs/design-system.md`).
+**Phases 0–8b are done** (0–7b are live on the box; Phase 8 and 8b are
+code-complete — merge + continuous-deploy carries them to the box). The app is
+deployed on a wiped home PC and reachable on public HTTPS at
+https://your-timeline.net — real friends/family can be invited. Shipped:
+accounts/auth, the reverse-chronological feed, photos + profiles, the symmetric
+connection graph + pruned comment trees, direct + group messaging, groups, emoji
+reactions, the unified **notifications / activity centre**, **group events + a
+planning calendar** (advisory polls, month grid, personal `/calendar`), and full
+home-server productionisation (backups, continuous deploy, security hardening,
+uptime monitoring, ToS/privacy + account deletion). A site-wide **design system**
+underpins the frontend (warm-modern "living line" look — see
+`docs/design-system.md`).
 
 **How each shipped feature works lives in `docs/reference/`** — one topic doc each
 (accounts, feed-and-posts, connections, messaging, groups, reactions,
-notifications), plus the ops runbooks `docs/deploy.md` and `docs/backup-restore.md`.
-Read the relevant one before changing a feature; it has the data model, endpoints,
-and the *why*.
+notifications, events), plus the ops runbooks `docs/deploy.md` and
+`docs/backup-restore.md`. Read the relevant one before changing a feature; it has
+the data model, endpoints, and the *why*.
 
 **Next up: Phase 9 (iPhone app).** Remaining planned work (9 iPhone → 12
 open-source/funding) lives as forward-looking plans in `docs/phases/`. The Phase 8
-notification API was built push-ready, so the app phases add only the delivery
-channel (APNs/FCM), not a new notification concept.
+notification API was built push-ready (and the Phase 8b event kinds reuse it), so
+the app phases add only the delivery channel (APNs/FCM), not a new notification
+concept.
 
 ## Before doing any work
 

@@ -14,6 +14,12 @@ const LABELS = {
   post_reply: "Replies to your posts",
   comment_reply: "Replies to your comments",
   reaction: "Reactions to your posts and comments",
+  // Group events (Phase 8b) — mutable, default-on.
+  event_created: "New events in your groups",
+  poll_opened: "Polls opened on events",
+  event_scheduled: "When an event's date is set",
+  event_updated: "Changes to events you're going to",
+  event_cancelled: "Events being cancelled",
 };
 
 export default function NotificationPreferencesSection() {

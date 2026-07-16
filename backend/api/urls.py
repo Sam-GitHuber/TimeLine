@@ -194,6 +194,58 @@ urlpatterns = [
         views.NotificationPreferencesView.as_view(),
         name="notification-preferences",
     ),
+    # Group events & planning calendar (Phase 8b). A group's events (list/create),
+    # a single event (detail/edit/delete + cancel), RSVPs, advisory polls
+    # (create/detail/vote/close/delete) and the organiser's finalise decision, the
+    # per-group month-grid window, and the personal cross-group calendar union.
+    path(
+        "groups/<int:gid>/events/",
+        views.GroupEventsView.as_view(),
+        name="group-events",
+    ),
+    path(
+        "groups/<int:gid>/calendar/",
+        views.GroupCalendarView.as_view(),
+        name="group-calendar",
+    ),
+    path("events/<int:pk>/", views.EventDetailView.as_view(), name="event-detail"),
+    path(
+        "events/<int:pk>/cancel/",
+        views.EventCancelView.as_view(),
+        name="event-cancel",
+    ),
+    path(
+        "events/<int:pk>/rsvp/",
+        views.EventRSVPView.as_view(),
+        name="event-rsvp",
+    ),
+    path(
+        "events/<int:pk>/rsvps/",
+        views.EventRSVPListView.as_view(),
+        name="event-rsvps",
+    ),
+    path(
+        "events/<int:pk>/polls/",
+        views.EventPollsView.as_view(),
+        name="event-polls",
+    ),
+    path(
+        "events/<int:pk>/finalise/",
+        views.EventFinaliseView.as_view(),
+        name="event-finalise",
+    ),
+    path("polls/<int:pk>/", views.PollDetailView.as_view(), name="poll-detail"),
+    path(
+        "polls/<int:pk>/vote/",
+        views.PollVoteView.as_view(),
+        name="poll-vote",
+    ),
+    path(
+        "polls/<int:pk>/close/",
+        views.PollCloseView.as_view(),
+        name="poll-close",
+    ),
+    path("calendar/", views.PersonalCalendarView.as_view(), name="personal-calendar"),
     # Report a post/comment for the maintainer to review (Phase 7 takedown path).
     path("reports/", views.ReportCreateView.as_view(), name="report-create"),
     # Delete your own account + all your data (Phase 7 delete-my-data path).

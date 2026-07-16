@@ -82,3 +82,54 @@ export function dayHeading(isoString, now = new Date()) {
   }
   return { label: full, sub: null };
 }
+
+// --- Event date/time formatting (Phase 8b) --------------------------------
+//
+// Events carry a plain calendar `event_date` ("YYYY-MM-DD") and `start_time`
+// ("HH:MM:SS"), *not* an ISO datetime — so we parse them as local wall-clock
+// values, never through `new Date("2026-07-19")` (which is UTC midnight and can
+// slip a day in a western timezone). These are the "voice of time" the card
+// renders in IBM Plex Mono.
+
+// Parse an "YYYY-MM-DD" string into a local Date at midnight, or null.
+export function parseEventDate(dateStr) {
+  if (!dateStr) return null;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+
+// "Sat 19 Jul" (adds the year only when it isn't the current one). The value
+// shown on a set Date chip and the recap line.
+export function formatEventDate(dateStr, now = new Date()) {
+  const d = parseEventDate(dateStr);
+  if (!d) return "";
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+// "7:00pm" / "7pm" from an "HH:MM[:SS]" time string.
+export function formatEventTime(timeStr) {
+  if (!timeStr) return "";
+  const [h, min] = timeStr.split(":").map(Number);
+  if (Number.isNaN(h)) return "";
+  const meridiem = h < 12 ? "am" : "pm";
+  const hour = h % 12 || 12;
+  return min
+    ? `${hour}:${String(min).padStart(2, "0")}${meridiem}`
+    : `${hour}${meridiem}`;
+}
+
+// The one-line "when" recap: "Sat 19 Jul · 7:00pm" (time part omitted when a
+// date-only, all-day event). Used on the card summary and the past recap card.
+export function formatEventWhen(event, now = new Date()) {
+  const date = formatEventDate(event.event_date, now);
+  const time = formatEventTime(event.start_time);
+  if (!date) return "";
+  return time ? `${date} · ${time}` : date;
+}
