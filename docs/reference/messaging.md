@@ -174,6 +174,17 @@ new-message:
 - **Thread** — group header (title, participants, **Add people**, **Leave**). A
   `pending` viewer sees a **locked panel**: "Connect with C & D to join", inline
   connection-request buttons, and a **Decline / Leave** button.
+- **Sender attribution (group threads only).** An incoming message in a *group*
+  carries its sender's avatar + name on one line above the bubble; a **run** of
+  consecutive messages from the same person shares a single label, so a burst
+  doesn't repeat the name on every line. Three deliberate exclusions: **1:1
+  threads** show none (there's only one person it could be, so it's pure noise),
+  **your own** messages show none in either flavour (right-alignment + the accent
+  fill already say they're yours), and a run's *later* bubbles show none. The
+  label needs no API support — messages already carry a full `sender` object and
+  the thread already knows `kind === "group"`. A deleted message still starts a
+  run if it's first, so its tombstone stays attributed and you can tell whose
+  message went.
 - **Disconnect / Block** on a profile opens a confirm modal listing the chats it
   will remove you from (from `disconnect-impact`).
 - Legacy `/messages[/:id]` URLs still open the drawer (a catch-all route avoids a

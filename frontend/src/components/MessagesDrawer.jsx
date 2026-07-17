@@ -375,15 +375,25 @@ function ConversationThreadView() {
               </p>
             ) : (
               <ul className="space-y-2">
-                {messages.map((message) => (
-                  <MessageBubble
-                    key={message.id}
-                    message={message}
-                    mine={message.sender.id === me?.pk}
-                    onDelete={() => deleteMutation.mutate(message.id)}
-                    deleting={deleteMutation.isPending}
-                  />
-                ))}
+                {messages.map((message, index) => {
+                  const mine = message.sender.id === me?.pk;
+                  // A run = consecutive messages from one sender. Only the
+                  // run's first bubble is attributed, so a burst of messages
+                  // reads as one block instead of repeating the name on every
+                  // line.
+                  const startsRun =
+                    messages[index - 1]?.sender.id !== message.sender.id;
+                  return (
+                    <MessageBubble
+                      key={message.id}
+                      message={message}
+                      mine={mine}
+                      showSender={isGroup && !mine && startsRun}
+                      onDelete={() => deleteMutation.mutate(message.id)}
+                      deleting={deleteMutation.isPending}
+                    />
+                  );
+                })}
               </ul>
             )}
             <div ref={bottomRef} />
@@ -452,53 +462,68 @@ function AvatarStack({ participants, max = 4 }) {
 }
 
 // One message row — yours align right (filled accent), theirs left. A deleted
-// message leaves a muted placeholder in its original spot.
-function MessageBubble({ message, mine, onDelete, deleting }) {
-  if (message.is_deleted) {
-    return (
-      <li className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-        <span className="rounded-2xl bg-ink/[0.03] px-3.5 py-2 text-sm italic text-ink-faint">
-          Message deleted
-        </span>
-      </li>
-    );
-  }
-
+// message leaves a muted placeholder in its original spot (and skips the
+// arrival animation: it replaces a message in place, it doesn't arrive).
+//
+// In a group, an incoming message also says *who* sent it — without that, three
+// people's bubbles are indistinguishable left-aligned rectangles. Face and name
+// sit together on one line above the run they label (`showSender` — see the
+// caller), so the bubbles themselves stay flush left and keep their full width
+// on a narrow drawer. 1:1 threads pass `showSender` false throughout: there's
+// only one person it could be.
+function MessageBubble({ message, mine, showSender, onDelete, deleting }) {
   return (
-    <li
-      className={`msg-bubble group flex items-end gap-1.5 ${
-        mine ? "justify-end" : "justify-start"
-      }`}
-    >
-      {mine && (
-        <button
-          type="button"
-          onClick={onDelete}
-          disabled={deleting}
-          aria-label="Delete message"
-          className="mb-1 text-xs text-ink-faint opacity-0 transition group-hover:opacity-100 hover:text-red-600"
-        >
-          Delete
-        </button>
+    <li className={`${message.is_deleted ? "" : "msg-bubble"} group flex flex-col`}>
+      {showSender && (
+        <span className="mb-1 flex items-center gap-1.5">
+          <Avatar user={message.sender} size="xs" />
+          <span className="truncate text-xs font-medium text-ink-soft">
+            {message.sender.display_name}
+          </span>
+        </span>
       )}
+
       <div
-        className={`max-w-[78%] rounded-2xl px-3.5 py-2 ${
-          mine
-            ? "bg-accent text-white"
-            : "bg-raised text-ink ring-1 ring-line"
+        className={`flex items-end gap-1.5 ${
+          mine ? "justify-end" : "justify-start"
         }`}
       >
-        <p className="whitespace-pre-wrap break-words text-[0.95rem]">
-          {message.text}
-        </p>
-        <span
-          className={`mt-0.5 block font-mono text-[0.65rem] ${
-            mine ? "text-white/70" : "text-ink-faint"
-          }`}
-          title={message.created_at}
-        >
-          {formatRelativeTime(message.created_at)}
-        </span>
+        {mine && !message.is_deleted && (
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={deleting}
+            aria-label="Delete message"
+            className="mb-1 text-xs text-ink-faint opacity-0 transition group-hover:opacity-100 hover:text-red-600"
+          >
+            Delete
+          </button>
+        )}
+        {message.is_deleted ? (
+          <span className="rounded-2xl bg-ink/[0.03] px-3.5 py-2 text-sm italic text-ink-faint">
+            Message deleted
+          </span>
+        ) : (
+          <div
+            className={`max-w-[78%] rounded-2xl px-3.5 py-2 ${
+              mine
+                ? "bg-accent text-white"
+                : "bg-raised text-ink ring-1 ring-line"
+            }`}
+          >
+            <p className="whitespace-pre-wrap break-words text-[0.95rem]">
+              {message.text}
+            </p>
+            <span
+              className={`mt-0.5 block font-mono text-[0.65rem] ${
+                mine ? "text-white/70" : "text-ink-faint"
+              }`}
+              title={message.created_at}
+            >
+              {formatRelativeTime(message.created_at)}
+            </span>
+          </div>
+        )}
       </div>
     </li>
   );

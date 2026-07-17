@@ -413,6 +413,31 @@ describe("Messages drawer — thread", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("leaves a 1:1 thread unattributed — there's only one person it could be", async () => {
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 1,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "hey there",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
+
+    renderAt("/messages/7");
+
+    expect(await screen.findByText("hey there")).toBeInTheDocument();
+    const drawer = screen.getByRole("dialog", { name: "Messages" });
+    // The only "Priya" is the header's profile link — no per-message label.
+    expect(within(drawer).getAllByText("Priya")).toHaveLength(1);
+    expect(
+      within(drawer).getByRole("link", { name: /Priya/ })
+    ).toBeInTheDocument();
+  });
+
   it("renders a placeholder for a deleted message", async () => {
     const user = userEvent.setup();
     api.getConversations.mockResolvedValue(page([convoRow()]));
@@ -478,6 +503,57 @@ describe("Messages drawer — group thread", () => {
       screen.getByRole("button", { name: /add people/i })
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /leave/i })).toBeInTheDocument();
+  });
+
+  it("attributes each incoming sender, collapsing runs and leaving your own bubbles unlabelled", async () => {
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 1,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "hey there",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: 2,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "did you read chapter 3?",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: 3,
+          sender: { id: 3, display_name: "Sanjay", avatar_thumb: null },
+          text: "just finished it",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: 4,
+          sender: { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
+          text: "loved the ending",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
+
+    renderAt("/messages/11");
+
+    expect(await screen.findByText("hey there")).toBeInTheDocument();
+    const drawer = screen.getByRole("dialog", { name: "Messages" });
+
+    // Priya sent two in a row: both render, but the label appears once —
+    // the run collapses rather than repeating her name on every bubble.
+    expect(within(drawer).getByText("did you read chapter 3?")).toBeInTheDocument();
+    expect(within(drawer).getAllByText("Priya")).toHaveLength(1);
+    // Sanjay breaking the run starts a new one, so he gets his own label.
+    expect(within(drawer).getAllByText("Sanjay")).toHaveLength(1);
+    // Your own messages are already right-aligned — labelling them is noise.
+    expect(within(drawer).getByText("loved the ending")).toBeInTheDocument();
+    expect(within(drawer).queryByText("you")).not.toBeInTheDocument();
   });
 
   it("leaves a group chat and returns to the list", async () => {
