@@ -2,6 +2,15 @@
 // PollBuilder + PollEditForm). Kept out of the component file so that stays
 // component-only (React Fast Refresh).
 
+// The everyday word for one option of a dimension — used in prompts ("a few
+// dates") and the "+ Add place" affordance.
+export const OPTION_NOUN = {
+  date: "date",
+  time: "time",
+  location: "place",
+  custom: "question",
+};
+
 // The <input> type for a dimension's option values.
 export function pollInputType(dimension) {
   return dimension === "date" ? "date" : dimension === "time" ? "time" : "text";

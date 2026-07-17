@@ -3405,6 +3405,13 @@ class PollDetailView(APIView):
                     raise ValidationError(
                         {"options": "An option doesn't belong to this poll."}
                     )
+                if oid in seen_ids:
+                    # The same option twice would collapse into one row while the
+                    # min-two check (on submitted length) still passed — leaving
+                    # the poll with fewer real options than it should have.
+                    raise ValidationError(
+                        {"options": "An option is listed more than once."}
+                    )
                 for field, value in kwargs.items():
                     setattr(existing, field, value)
                 to_update.append(existing)

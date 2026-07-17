@@ -9,9 +9,7 @@
 // React key, `id` is present only for options that already exist on the server
 // (so an edit can rewrite vs. add), and `value` is the raw input string. The
 // parent owns validation and submission. Pure helpers live in ./pollOptions.js.
-import { pollInputType, blankOption } from "./pollOptions.js";
-
-const NOUN = { date: "date", time: "time", location: "place", custom: "question" };
+import { pollInputType, blankOption, OPTION_NOUN } from "./pollOptions.js";
 
 export default function PollOptionFields({
   dimension,
@@ -22,7 +20,7 @@ export default function PollOptionFields({
   autoFocusFirst = false,
 }) {
   const type = pollInputType(dimension);
-  const noun = NOUN[dimension];
+  const noun = OPTION_NOUN[dimension];
 
   function setValue(i, value) {
     const next = options.slice();

@@ -1,13 +1,12 @@
 import { useRef, useState } from "react";
 import PollOptionFields from "./PollOptionFields.jsx";
-import { blankOption, optionValuePayload } from "./pollOptions.js";
+import { blankOption, optionValuePayload, OPTION_NOUN } from "./pollOptions.js";
 
 // The one contextual editor that opens beneath the chip row when the organiser
 // clicks Set or Poll on a chip. It already knows *which* dimension — the chip
 // said so — so there's no dimension picker to wade through: you clicked "Date",
 // you're setting or polling a date. `mode` is "set" (write a value directly) or
 // "poll" (open an advisory poll the group votes on).
-const NOUN = { date: "date", time: "time", location: "place", custom: "question" };
 const SET_VERB = { date: "Set the date", time: "Set the time", location: "Set the place" };
 const PLACEHOLDER = { location: "e.g. The Oakhouse" };
 
@@ -258,7 +257,7 @@ function PollBuilder({ dimension, onPoll, onCancel, busy }) {
   return (
     <form onSubmit={submit}>
       <p className="mb-2 text-sm text-ink-soft">
-        Give the group a few {dimension === "custom" ? "options" : `${NOUN[dimension]}s`}{" "}
+        Give the group a few {dimension === "custom" ? "options" : `${OPTION_NOUN[dimension]}s`}{" "}
         to choose from — you make the final call.
       </p>
       {dimension === "custom" && (

@@ -3967,6 +3967,22 @@ class PollEditReopenTests(EventsBase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(PollOption.objects.filter(poll_id=poll["id"]).count(), 2)
 
+    def test_edit_rejects_the_same_option_listed_twice(self):
+        # Two entries for one id would pass the length check yet collapse to a
+        # single row (dropping the other option) — must be refused.
+        poll = self._open_custom_poll()
+        opt0 = poll["options"][0]["id"]
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"options": [
+                {"id": opt0, "text_value": "Cake"},
+                {"id": opt0, "text_value": "Cake again"},
+            ]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(PollOption.objects.filter(poll_id=poll["id"]).count(), 2)
+
     def test_edit_rejects_fewer_than_two_options(self):
         poll = self._open_custom_poll()
         opt0 = poll["options"][0]
