@@ -11,6 +11,7 @@ export default function GroupActionsMenu({
   isAdmin,
   membersOpen,
   membersBusy,
+  onPlanEvent,
   onInvite,
   onMembers,
   onStartChat,
@@ -102,6 +103,10 @@ export default function GroupActionsMenu({
           onKeyDown={onMenuKeyDown}
           className="absolute right-0 top-full z-20 mt-2 w-52 overflow-hidden rounded-xl border border-line bg-raised p-1 shadow-lg"
         >
+          <button type="button" role="menuitem" onClick={() => run(onPlanEvent)} className={itemClass}>
+            Plan an event
+          </button>
+          <div className="my-1 border-t border-line" />
           {isAdmin && (
             <Link
               to={`/g/${groupId}/edit`}

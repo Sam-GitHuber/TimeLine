@@ -218,8 +218,10 @@ The gate needs a *present* organiser. Two paths:
   titled chip (mono time + title, accent when scheduled, muted when past, struck
   through when cancelled), linking to the event; a busy day shows the first few and
   a "+N more" that expands the full day list beneath the grid.
-- The group page's actions (Invite, Members, Start a chat, Leave, and — for
-  admins — Edit, Delete) live behind a single **`GroupActionsMenu`** ("⋯"). The
+- The group page's actions (**Plan an event**, Invite, Members, Start a chat,
+  Leave, and — for admins — Edit, Delete) live behind a single
+  **`GroupActionsMenu`** ("⋯"); choosing "Plan an event" reveals the plan form at
+  the now boundary (inset via `.tl-inset` so its inputs clear the spine). The
   header (name · ⋯ · description) is a **second sticky bar pinned directly under
   the nav** (`GroupPage` measures the nav height so it stacks correctly), so the
   group's identity stays put while the upcoming region and timeline scroll up

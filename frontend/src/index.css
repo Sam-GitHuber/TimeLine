@@ -264,6 +264,13 @@
     padding-left: 20px;
     min-width: 0;
   }
+  /* Non-entry content that still lives inside the spine feed (the plan form, the
+     staging strip): inset it to the same column as a post body — past the gutter
+     the spine runs down — so boxes sit to the *right* of the line, not behind it. */
+  .tl-inset {
+    padding-left: calc(var(--tl-gutter) + 20px);
+    padding-right: 22px;
+  }
 
   /* An event on the line (Phase 8b), future or past, reuses the post marker as-is
      — the surface halo threading the spine, the accent ring only on hover. So an

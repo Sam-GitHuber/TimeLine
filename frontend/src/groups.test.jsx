@@ -245,6 +245,26 @@ describe("GroupPage admin controls", () => {
     ).toBeInTheDocument();
   });
 
+  it("opens the plan-event form from the menu", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: "Plan an event" })
+    );
+    expect(
+      await screen.findByPlaceholderText(/Grandma's 80th/)
+    ).toBeInTheDocument();
+  });
+
   it("shows a cue pointing up to upcoming events", async () => {
     api.getGroup.mockResolvedValue({
       id: 7,

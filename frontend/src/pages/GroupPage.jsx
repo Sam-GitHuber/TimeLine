@@ -218,23 +218,26 @@ export default function GroupPage() {
     });
   }
 
-  const planBar = (
-    <div className="border-b border-line px-5 py-2 text-center">
-      {!planning && (
-        <button
-          type="button"
-          onClick={() => setPlanning(true)}
-          className="btn btn-primary btn-sm"
-        >
-          Plan an event
-        </button>
-      )}
-      {planning && (
-        <div className="pt-1 text-left">
-          <PlanEventForm groupId={group.id} onClose={() => setPlanning(false)} />
-        </div>
-      )}
-    </div>
+  // "Plan an event" lives in the ⋯ menu; opening it reveals the form at the now
+  // boundary, so scroll there (in the spine view) to bring it into view.
+  function startPlanning() {
+    setPlanning(true);
+    if (view === "agenda") {
+      const raf =
+        typeof requestAnimationFrame === "function"
+          ? requestAnimationFrame
+          : (cb) => cb();
+      raf(() => {
+        try {
+          nowRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        } catch {
+          /* no layout engine */
+        }
+      });
+    }
+  }
+  const planForm = (
+    <PlanEventForm groupId={group.id} onClose={() => setPlanning(false)} />
   );
 
   return (
@@ -282,6 +285,7 @@ export default function GroupPage() {
             isAdmin={isAdmin}
             membersOpen={showMembers}
             membersBusy={membersQuery.isLoading}
+            onPlanEvent={startPlanning}
             onInvite={() => setShowInvite((v) => !v)}
             onMembers={() => setShowMembers((v) => !v)}
             onStartChat={startChat}
@@ -309,7 +313,8 @@ export default function GroupPage() {
 
       {view === "month" ? (
         <section className="px-5 py-5">
-          {planBar}
+          {/* No spine in the month view, so the plan form isn't inset. */}
+          {planning && <div className="mb-4">{planForm}</div>}
           {calendarQuery.isLoading ? (
             <p className="mt-4 text-sm text-ink-faint">Loading calendar…</p>
           ) : (
@@ -325,9 +330,10 @@ export default function GroupPage() {
           futureEvents={scheduledFuture}
           header={
             <>
-              {/* Date-less events being planned sit off the line, just above now. */}
+              {/* Date-less events being planned sit off the line, just above now
+                  — inset to the body column so they clear the spine. */}
               {staging.length > 0 && (
-                <div className="ev-staging mx-5 my-3">
+                <div className="tl-inset my-3">
                   <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
                     Being planned
                   </p>
@@ -360,7 +366,11 @@ export default function GroupPage() {
                 </button>
               )}
 
-              {planBar}
+              {/* The plan form (opened from the ⋯ menu) appears at the now
+                  boundary, inset so its inputs sit to the right of the spine. */}
+              {planning && (
+                <div className="tl-inset border-b border-line py-3">{planForm}</div>
+              )}
               <ComposeBox group={group.id} />
             </>
           }
