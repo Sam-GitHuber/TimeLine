@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Routes, Route } from "react-router-dom";
+import DimensionEditor from "./components/events/DimensionEditor.jsx";
 import EventPage from "./pages/EventPage.jsx";
 import CalendarPage from "./pages/CalendarPage.jsx";
 import EventCard from "./components/events/EventCard.jsx";
@@ -267,10 +268,92 @@ describe("EventPage", () => {
     );
   });
 
+  it("offers Change and Poll on a dimension that's already set", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({
+        event_date: "2026-08-01",
+        dimensions: {
+          date: { state: "set" },
+          time: { state: "unset" },
+          location: { state: "unset" },
+        },
+      })
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+    // The set Date chip carries a Poll option alongside Change, so you can still
+    // put the decision to the group after setting a value.
+    const change = screen.getByRole("button", { name: "Change" });
+    const chip = change.closest("li");
+    expect(within(chip).getByRole("button", { name: "Poll" })).toBeInTheDocument();
+  });
+
   it("shows a friendly not-available state on a 404", async () => {
     api.getEvent.mockRejectedValue({ status: 404 });
     renderEventPage();
     expect(await screen.findByText("Event not available")).toBeInTheDocument();
+  });
+});
+
+describe("date & time entry", () => {
+  it("hops from hour to minute after two digits", async () => {
+    const onSet = vi.fn();
+    renderWithAuth(
+      <DimensionEditor
+        dimension="time"
+        mode="set"
+        onSet={onSet}
+        onPoll={() => {}}
+        onCancel={() => {}}
+      />
+    );
+    const hour = screen.getByLabelText("Hour");
+    const minute = screen.getByLabelText("Minute");
+    await userEvent.type(hour, "10");
+    expect(minute).toHaveFocus(); // auto-advanced, no Tab
+    await userEvent.type(minute, "00");
+    await userEvent.click(screen.getByRole("button", { name: "Set the time" }));
+    expect(onSet).toHaveBeenCalledWith("time", "10:00");
+  });
+
+  it("hops day → month → year when typing a date", async () => {
+    const onSet = vi.fn();
+    renderWithAuth(
+      <DimensionEditor
+        dimension="date"
+        mode="set"
+        onSet={onSet}
+        onPoll={() => {}}
+        onCancel={() => {}}
+      />
+    );
+    const day = screen.getByLabelText("Day");
+    const month = screen.getByLabelText("Month");
+    const year = screen.getByLabelText("Year");
+    await userEvent.type(day, "19");
+    expect(month).toHaveFocus();
+    await userEvent.type(month, "07");
+    expect(year).toHaveFocus();
+    await userEvent.type(year, "2026");
+    await userEvent.click(screen.getByRole("button", { name: "Set the date" }));
+    expect(onSet).toHaveBeenCalledWith("date", "2026-07-19");
+  });
+
+  it("keeps the button disabled for an impossible date", async () => {
+    const onSet = vi.fn();
+    renderWithAuth(
+      <DimensionEditor
+        dimension="date"
+        mode="set"
+        onSet={onSet}
+        onPoll={() => {}}
+        onCancel={() => {}}
+      />
+    );
+    await userEvent.type(screen.getByLabelText("Day"), "31");
+    await userEvent.type(screen.getByLabelText("Month"), "02");
+    await userEvent.type(screen.getByLabelText("Year"), "2026");
+    expect(screen.getByRole("button", { name: "Set the date" })).toBeDisabled();
   });
 });
 

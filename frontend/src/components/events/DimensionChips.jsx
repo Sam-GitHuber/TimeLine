@@ -81,9 +81,15 @@ function Chip({ chip, canManage, onAction }) {
         <span className="ev-chip-label">{label}</span>
         {value && <span className="ev-chip-value font-mono">{value}</span>}
         {canManage && dim && (
-          <button type="button" className="ev-chip-btn" onClick={() => act("set")}>
-            Change
-          </button>
+          <span className="ev-chip-actions">
+            <button type="button" className="ev-chip-btn" onClick={() => act("set")}>
+              Change
+            </button>
+            <span className="ev-chip-sep" aria-hidden="true">·</span>
+            <button type="button" className="ev-chip-btn" onClick={() => act("poll")}>
+              Poll
+            </button>
+          </span>
         )}
       </li>
     );

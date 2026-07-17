@@ -192,12 +192,16 @@ The gate needs a *present* organiser. Two paths:
 
 - **The chip row is the organiser's control surface** (the plan's "lights chips up
   in any order"), not just a status display. On `EventPage`, an unset built-in chip
-  carries inline **Set · Poll** affordances; clicking opens *one* contextual
-  `DimensionEditor` beneath the row (scoped to that dimension — no picker), and a
-  set value flips the chip ghost→filled. A brand-new, undecided event shows a
-  first-step hint so the empty state invites action. Members see the same chips as
-  read-only status. (The earlier build split display from a separate always-visible
-  toolkit; that was replaced because a freshly-created event wasn't obvious to use.)
+  carries inline **Set · Poll** affordances (and a *set* chip carries **Change ·
+  Poll**, so a decided dimension can still be re-opened to the group); clicking
+  opens *one* contextual `DimensionEditor` beneath the row (scoped to that
+  dimension — no picker), and a set value flips the chip ghost→filled. The date and
+  time set-inputs are **segmented, auto-advancing** boxes (type `19` `07` `2026`,
+  or `10` `00` — focus hops to the next box, no Tab; date is `DD/MM/YYYY`, labelled;
+  both hand the API ISO/`HH:MM`). A brand-new, undecided event shows a first-step
+  hint so the empty state invites action. Members see the same chips as read-only
+  status. (The earlier build split display from a separate always-visible toolkit;
+  that was replaced because a freshly-created event wasn't obvious to use.)
 - **Upcoming events hang off the timeline spine, above the now-node**, as
   post-shaped entries (`EventTimelineEntry` — the poster-style avatar marker on the
   line, a mono **accent** date on the rail, title/organiser/when/chips in the
