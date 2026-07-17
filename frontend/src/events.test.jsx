@@ -303,6 +303,12 @@ describe("event timeline entries", () => {
       event_date: "2026-06-01",
       start_time: "13:00:00",
       starts_at: "2026-06-01T13:00:00Z",
+      location_name: "The Oakhouse",
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "set" },
+        location: { state: "set" },
+      },
       polls: [],
       rsvp: { counts: { going: 6, maybe: 0, declined: 0, guests: 0 } },
     });
@@ -319,6 +325,9 @@ describe("event timeline entries", () => {
     );
     // The recap is a spine entry, sharing the post entry's structure.
     expect(document.querySelector(".tl-entry--event-past")).toBeTruthy();
+    // It keeps the Date · Time · Where pills, like its future self.
+    expect(screen.getByText("Date")).toBeInTheDocument();
+    expect(screen.getByText("Where")).toBeInTheDocument();
   });
 
   it("renders a future event on the spine with its RSVP counts", () => {

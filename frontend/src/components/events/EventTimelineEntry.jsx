@@ -66,11 +66,11 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           </p>
         )}
 
-        {!past && (
-          <div className="mt-2">
-            <DimensionChips event={event} />
-          </div>
-        )}
+        {/* The Date · Time · Where pills stay on a past event too — the recap
+            shows what it settled on, just as the future entry shows what's set. */}
+        <div className="mt-2">
+          <DimensionChips event={event} />
+        </div>
 
         {past
           ? going > 0 && (
