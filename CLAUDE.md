@@ -23,8 +23,8 @@ notifications, events), plus the ops runbooks `docs/deploy.md` and
 `docs/backup-restore.md`. Read the relevant one before changing a feature; it has
 the data model, endpoints, and the *why*.
 
-**Next up: Phase 9 (iPhone app).** Remaining planned work (9 iPhone → 12
-open-source/funding) lives as forward-looking plans in `docs/phases/`. The Phase 8
+**Next up: Phase 9 (iPhone app).** Remaining planned work (9 iPhone → 13 short
+video clips) lives as forward-looking plans in `docs/phases/`. The Phase 8
 notification API was built push-ready (and the Phase 8b event kinds reuse it), so
 the app phases add only the delivery channel (APNs/FCM), not a new notification
 concept.
@@ -50,8 +50,8 @@ concept.
   `docs/reference/` topic doc** (data model, endpoints, and the *why* of any
   non-obvious decision) — that's the durable reference. Don't reintroduce
   per-phase status logs; git history is the changelog.
-- **Future phases (8–12) each have a plan in `docs/phases/`.** Notifications (8)
-  is fleshed out; 9–12 are sketches — flesh a sketch into a full plan (definition
+- **Future phases (9–13) each have a plan in `docs/phases/`.** They're all
+  sketches — flesh a sketch into a full plan (definition
   of done, steps) and confirm it with the user *before* starting. When a phase
   ships, distil its plan into a `docs/reference/` doc and delete the phase file.
 - When a feature spans topics, cross-link the reference docs rather than
