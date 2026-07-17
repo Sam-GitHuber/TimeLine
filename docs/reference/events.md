@@ -164,17 +164,19 @@ recompute stay in one place. The event PATCH covers title, description, location
 link/note, timezone, end time.
 
 **Editing a poll (`PATCH /api/polls/<id>/`).** The organiser can fix a poll's
-`question` and rewrite its `options` (each option's typed value — a date/time/text
-per the dimension — reusing the create-time normalisation so labels re-derive),
-but **only while the poll has zero votes**. The first `PollVote` freezes the
-wording permanently: rewriting an option someone already voted for would silently
-redefine their vote, which decision 2's honest-coordination-number principle
-forbids. The guard is server-side (a **409** if any vote exists), never trusting
-the hidden UI; a `vote_count` on the poll payload lets the client hide the affordance
-too. Changing the *set* of options (add/remove) is out of scope — this rewrites the
-existing ones. An edit never re-notifies (`poll_opened` already fired). Closing
-freezes the tally without deciding; `reopen` resumes voting, re-checking the
-one-open-poll-per-built-in-dimension rule so it can't create a second live date poll.
+`question`, its `allow_multiple` (pick-one vs pick-any), and its `options`, but
+**only while the poll has zero votes**. When `options` is given it is the **full
+desired set** (the edit form is the create form pre-filled): an entry with an
+`id` rewrites that option, an id-less entry is new, and any existing option the
+set omits is deleted — the same "at least two" and the same create-time
+normalisation (so labels re-derive). The first `PollVote` freezes everything: no
+vote can be redefined *or orphaned*, which decision 2's honest-coordination-number
+principle demands. The guard is server-side (a **409** if any vote exists), never
+trusting the hidden UI; a `vote_count` on the poll payload lets the client hide
+the affordance too. An edit never re-notifies (`poll_opened` already fired).
+Closing freezes the tally without deciding; `reopen` resumes voting, re-checking
+the one-open-poll-per-built-in-dimension rule so it can't create a second live
+date poll.
 
 ## Notifications
 

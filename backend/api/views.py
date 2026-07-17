@@ -3346,14 +3346,17 @@ class PollDetailView(APIView):
         """Fix a poll's mistakes (``PATCH /polls/<pk>/``) — organiser only.
 
         Editable: the ``question``, ``allow_multiple`` (pick-one vs pick-any),
-        and each option's value/label (the same typed fields as poll creation,
-        per the dimension). **A poll locks the moment its first vote lands** —
-        editing a voted poll is refused with a 409,
-        because rewriting an option someone already voted for would silently
-        redefine their vote (the integrity guard behind the honest-coordination-
-        number rule). Rewriting *values* is only offered here because that guard
-        makes it safe. Never re-notifies: a fix isn't a new poll. Adding/removing
-        options (changing the *set* of choices) is still out of scope."""
+        and the ``options`` — the same fields, and the same "at least two", as
+        opening a poll. When ``options`` is given it's the **full desired set**:
+        an entry with an ``id`` rewrites that existing option, an entry without
+        one is a new option, and any existing option missing from the set is
+        removed — so the edit form is the create form pre-filled. **A poll locks
+        the moment its first vote lands** — editing a voted poll is refused with
+        a 409, because rewriting or dropping an option someone already voted for
+        would silently redefine their vote (the integrity guard behind the
+        honest-coordination-number rule); reconciling the set is only safe
+        *because* of that zero-votes guard. Never re-notifies: a fix isn't a new
+        poll."""
         poll = _poll_or_404(request.user, pk)
         if poll.event.organiser_id != request.user.id:
             raise PermissionDenied("Only the organiser can edit a poll.")
@@ -3365,14 +3368,6 @@ class PollDetailView(APIView):
         s = PollEditSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data
-        edits = data.get("options") or []
-        by_id = {o.id: o for o in poll.options.all()}
-        # Every edited option must belong to this poll (no cross-poll edits).
-        for edit in edits:
-            if edit["id"] not in by_id:
-                raise ValidationError(
-                    {"options": "An option doesn't belong to this poll."}
-                )
         with transaction.atomic():
             poll_fields = []
             if "question" in data:
@@ -3383,22 +3378,49 @@ class PollDetailView(APIView):
                 poll_fields.append("allow_multiple")
             if poll_fields:
                 poll.save(update_fields=poll_fields)
-            to_update = []
-            for edit in edits:
-                opt = by_id[edit["id"]]
-                # Reuse the create-time normalisation: it validates the value the
-                # dimension needs and re-derives the label from it, keeping the
-                # label in sync exactly as on create.
-                kwargs = _build_option_kwargs(poll.dimension, edit, opt.order)
-                for field, value in kwargs.items():
-                    setattr(opt, field, value)
-                to_update.append(opt)
-            if to_update:
-                PollOption.objects.bulk_update(
-                    to_update,
-                    ["label", "date_value", "time_value", "text_value", "order"],
-                )
+            if "options" in data:
+                self._reconcile_options(poll, data["options"])
         return _poll_response(poll.id, request)
+
+    @staticmethod
+    def _reconcile_options(poll, submitted):
+        """Make the poll's options match ``submitted`` (the full desired set):
+        rewrite entries carrying an ``id``, create id-less ones, and delete any
+        existing option the set dropped. Safe only under the zero-votes guard the
+        caller has already checked (no cast vote can be redefined or orphaned)."""
+        if len(submitted) < 2:
+            raise ValidationError({"options": "A poll needs at least two options."})
+        by_id = {o.id: o for o in poll.options.all()}
+        seen_ids = set()
+        to_update, to_create = [], []
+        for order, opt in enumerate(submitted):
+            # Reuse the create-time normalisation: it validates the value the
+            # dimension needs and re-derives the label, keeping labels in sync
+            # exactly as on create.
+            kwargs = _build_option_kwargs(poll.dimension, opt, order)
+            oid = opt.get("id")
+            if oid is not None:
+                existing = by_id.get(oid)
+                if existing is None:
+                    raise ValidationError(
+                        {"options": "An option doesn't belong to this poll."}
+                    )
+                for field, value in kwargs.items():
+                    setattr(existing, field, value)
+                to_update.append(existing)
+                seen_ids.add(oid)
+            else:
+                to_create.append(PollOption(poll=poll, **kwargs))
+        stale_ids = [oid for oid in by_id if oid not in seen_ids]
+        if stale_ids:
+            PollOption.objects.filter(id__in=stale_ids).delete()
+        if to_update:
+            PollOption.objects.bulk_update(
+                to_update,
+                ["label", "date_value", "time_value", "text_value", "order"],
+            )
+        if to_create:
+            PollOption.objects.bulk_create(to_create)
 
     def delete(self, request, pk):
         poll = _poll_or_404(request.user, pk)

@@ -3876,12 +3876,15 @@ class PollEditReopenTests(EventsBase):
 
     def test_organiser_edits_question_and_labels_while_unvoted(self):
         poll = self._open_custom_poll()
-        opt0 = poll["options"][0]["id"]
+        opt0, opt1 = poll["options"][0]["id"], poll["options"][1]["id"]
         resp = self.client.patch(
             poll_detail_url_by_id(poll["id"]),
             {
                 "question": "What should you bring?",
-                "options": [{"id": opt0, "label": "Cake"}],
+                "options": [
+                    {"id": opt0, "text_value": "Cake"},
+                    {"id": opt1, "text_value": "Drinks"},
+                ],
             },
             format="json",
         )
@@ -3903,10 +3906,13 @@ class PollEditReopenTests(EventsBase):
                          {"date_value": self.future(6).isoformat()}]},
             format="json",
         ).json()
-        opt0 = poll["options"][0]["id"]
+        opt0, opt1 = poll["options"][0]["id"], poll["options"][1]["id"]
         resp = self.client.patch(
             poll_detail_url_by_id(poll["id"]),
-            {"options": [{"id": opt0, "date_value": right.isoformat()}]},
+            {"options": [
+                {"id": opt0, "date_value": right.isoformat()},
+                {"id": opt1, "date_value": self.future(6).isoformat()},
+            ]},
             format="json",
         )
         self.assertEqual(resp.status_code, 200, resp.content)
@@ -3927,6 +3933,50 @@ class PollEditReopenTests(EventsBase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertTrue(resp.json()["allow_multiple"])
         self.assertTrue(Poll.objects.get(pk=poll["id"]).allow_multiple)
+
+    def test_edit_can_add_a_new_option(self):
+        # The edit body is the full desired set: two existing (by id) plus a new
+        # id-less one → the poll grows to three options.
+        poll = self._open_custom_poll()
+        keep = [{"id": o["id"], "text_value": o["label"]} for o in poll["options"]]
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"options": keep + [{"text_value": "Fruit"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        labels = sorted(o["label"] for o in resp.json()["options"])
+        self.assertEqual(labels, ["Cak", "Drinks", "Fruit"])
+
+    def test_edit_can_drop_an_option(self):
+        # Open a three-option poll, then submit only two → the third is removed.
+        self.client.force_authenticate(self.org)
+        poll = self.client.post(
+            event_polls_url(self.event),
+            {"dimension": "custom", "question": "Bring?",
+             "options": [{"text_value": "A"}, {"text_value": "B"},
+                         {"text_value": "C"}]},
+            format="json",
+        ).json()
+        keep = poll["options"][:2]
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"options": [{"id": o["id"], "text_value": o["label"]} for o in keep]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(PollOption.objects.filter(poll_id=poll["id"]).count(), 2)
+
+    def test_edit_rejects_fewer_than_two_options(self):
+        poll = self._open_custom_poll()
+        opt0 = poll["options"][0]
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"options": [{"id": opt0["id"], "text_value": opt0["label"]}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(PollOption.objects.filter(poll_id=poll["id"]).count(), 2)
 
     def test_edit_refused_once_a_vote_exists(self):
         poll = self._open_custom_poll()
@@ -3960,9 +4010,14 @@ class PollEditReopenTests(EventsBase):
         poll = self._open_custom_poll()
         other = self._open_custom_poll()
         stray = other["options"][0]["id"]
+        # A valid option plus one belonging to a different poll — the stray id is
+        # refused (not silently created or ignored).
         resp = self.client.patch(
             poll_detail_url_by_id(poll["id"]),
-            {"options": [{"id": stray, "label": "nope"}]},
+            {"options": [
+                {"id": poll["options"][0]["id"], "text_value": "Cake"},
+                {"id": stray, "text_value": "nope"},
+            ]},
             format="json",
         )
         self.assertEqual(resp.status_code, 400, resp.content)

@@ -997,12 +997,13 @@ class PollCreateSerializer(serializers.Serializer):
 class PollOptionEditSerializer(PollOptionWriteSerializer):
     """One option in a poll-**edit** body: the same typed value fields as a
     created option (``date_value`` / ``time_value`` / ``text_value`` / ``label``,
-    interpreted per the poll's dimension), plus the ``id`` identifying which
-    existing option to rewrite. Editing an option's *value* is only safe because
-    the whole edit is gated on the poll having zero votes — no cast vote can be
-    silently redefined."""
+    interpreted per the poll's dimension), plus an **optional** ``id``. An entry
+    with an ``id`` rewrites that existing option; without one it's a brand-new
+    option. Reconciling the set (add/rewrite/drop) is only safe because the whole
+    edit is gated on the poll having zero votes — no cast vote can be redefined
+    or orphaned."""
 
-    id = serializers.IntegerField()
+    id = serializers.IntegerField(required=False)
 
 
 class PollEditSerializer(serializers.Serializer):

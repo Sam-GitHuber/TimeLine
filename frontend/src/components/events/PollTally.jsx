@@ -5,6 +5,8 @@ import {
   menuItemClass,
   menuDangerItemClass,
 } from "../useDropdownMenu.js";
+import PollOptionFields from "./PollOptionFields.jsx";
+import { optionValuePayload } from "./pollOptions.js";
 import { formatEventDate, formatEventTime } from "../../utils.js";
 
 // A poll's tally — a Doodle/when2meet feel without the coldness: each candidate
@@ -244,28 +246,24 @@ function PollMenu({ open, canEdit, busy, onEdit, onClose, onReopen, onDelete }) 
   );
 }
 
-// Fix a poll's mistakes (issue #87): edit the question and each option's value —
-// a date/time picker for date/time polls, free text for location/custom — the
-// same inputs used to create the poll. Only reachable while the poll has no
-// votes (the wording is frozen the moment someone votes). Adding or removing
-// options isn't offered; this rewrites the existing set.
+// Fix a poll's mistakes (issue #87): edit the question, the options (change a
+// value, add one, or drop one by clearing it), and pick-one vs pick-any. It's
+// literally the create form pre-filled — the option list and its "+ Add" come
+// from the shared PollOptionFields. Only reachable while the poll has no votes,
+// so reconciling the option set can never redefine or orphan a cast vote.
 function PollEditForm({ poll, onSave, onDone }) {
-  const [question, setQuestion] = useState(poll.question || "");
   const dim = poll.dimension;
-  const [opts, setOpts] = useState(() =>
-    (poll.options || []).map((o) => ({ id: o.id, value: optionEditValue(dim, o) }))
+  const [question, setQuestion] = useState(poll.question || "");
+  const [options, setOptions] = useState(() =>
+    (poll.options || []).map((o) => ({
+      key: String(o.id),
+      id: o.id,
+      value: optionEditValue(dim, o),
+    }))
   );
   const [allowMultiple, setAllowMultiple] = useState(!!poll.allow_multiple);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-
-  const inputType = dim === "date" ? "date" : dim === "time" ? "time" : "text";
-
-  function setOpt(i, value) {
-    const next = opts.slice();
-    next[i] = { ...next[i], value };
-    setOpts(next);
-  }
 
   async function submit(e) {
     e.preventDefault();
@@ -274,14 +272,21 @@ function PollEditForm({ poll, onSave, onDone }) {
       setError("A poll needs a question.");
       return;
     }
-    if (opts.some((o) => !String(o.value).trim())) {
-      setError("Every option needs a value.");
+    const filled = options.filter((o) => String(o.value).trim());
+    if (filled.length < 2) {
+      setError("A poll needs at least two options.");
       return;
     }
     const payload = {
       question: q,
       allowMultiple,
-      options: opts.map((o) => optionEditPayload(dim, o)),
+      // Keep the id on options that already exist (rewrite); a new option has
+      // none (create). Anything the maker cleared falls out here and the server
+      // drops it.
+      options: filled.map((o) => ({
+        ...(o.id ? { id: o.id } : {}),
+        ...optionValuePayload(dim, o.value),
+      })),
     };
     setSaving(true);
     setError(null);
@@ -304,33 +309,17 @@ function PollEditForm({ poll, onSave, onDone }) {
         type="text"
         value={question}
         onChange={(e) => setQuestion(e.target.value)}
-        className="mt-1 w-full rounded-md border border-line-strong bg-raised px-2 py-1 text-sm"
+        className="mb-3 mt-1 w-full rounded-md border border-line-strong bg-raised px-2 py-1 text-sm"
         aria-label="Poll question"
       />
 
-      <div className="mt-3 space-y-2">
-        <span className="block text-xs font-medium text-ink-faint">Options</span>
-        {opts.map((o, i) => (
-          <input
-            key={o.id}
-            type={inputType}
-            value={o.value}
-            onChange={(e) => setOpt(i, e.target.value)}
-            className="w-full rounded-md border border-line-strong bg-raised px-2 py-1 font-mono text-sm"
-            aria-label={`Option ${i + 1}`}
-          />
-        ))}
-      </div>
-
-      <label className="mt-3 flex items-center gap-2 text-sm text-ink-soft">
-        <input
-          type="checkbox"
-          checked={allowMultiple}
-          onChange={(e) => setAllowMultiple(e.target.checked)}
-          className="h-4 w-4 rounded border-line-strong text-accent-deep focus:ring-accent"
-        />
-        Let people pick more than one
-      </label>
+      <PollOptionFields
+        dimension={dim}
+        options={options}
+        onChange={setOptions}
+        allowMultiple={allowMultiple}
+        onAllowMultiple={setAllowMultiple}
+      />
 
       {error && (
         <p role="alert" className="mt-2 text-sm text-red-600">
@@ -361,14 +350,6 @@ function optionEditValue(dim, opt) {
   if (dim === "date") return opt.date_value || "";
   if (dim === "time") return (opt.time_value || "").slice(0, 5);
   return opt.text_value || opt.label || "";
-}
-
-// Turn an edited option back into the API's typed field for the dimension.
-function optionEditPayload(dim, o) {
-  const value = String(o.value).trim();
-  if (dim === "date") return { id: o.id, date_value: value };
-  if (dim === "time") return { id: o.id, time_value: value };
-  return { id: o.id, text_value: value };
 }
 
 // The organiser can set a value no one voted for (decision 3) — a small typed
