@@ -245,6 +245,11 @@ urlpatterns = [
         views.PollCloseView.as_view(),
         name="poll-close",
     ),
+    path(
+        "polls/<int:pk>/reopen/",
+        views.PollReopenView.as_view(),
+        name="poll-reopen",
+    ),
     path("calendar/", views.PersonalCalendarView.as_view(), name="personal-calendar"),
     # Report a post/comment for the maintainer to review (Phase 7 takedown path).
     path("reports/", views.ReportCreateView.as_view(), name="report-create"),

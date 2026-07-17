@@ -84,6 +84,7 @@ from .serializers import (
     NotificationPreferencesSerializer,
     NotificationSerializer,
     PollCreateSerializer,
+    PollEditSerializer,
     PostSerializer,
     ReportCreateSerializer,
     RSVPWriteSerializer,
@@ -3334,10 +3335,62 @@ def _poll_or_404(user, pk):
 
 
 class PollDetailView(APIView):
-    """A poll's detail (``GET /polls/<pk>/``) or removal (``DELETE``, organiser)."""
+    """A poll's detail (``GET``), typo-fix edit (``PATCH``), or removal
+    (``DELETE``) — the last two organiser-only."""
 
     def get(self, request, pk):
         poll = _poll_or_404(request.user, pk)
+        return _poll_response(poll.id, request)
+
+    def patch(self, request, pk):
+        """Fix a poll's mistakes (``PATCH /polls/<pk>/``) — organiser only.
+
+        Editable: the ``question`` and each option's value/label (the same typed
+        fields as poll creation, per the dimension). **A poll locks the moment
+        its first vote lands** — editing a voted poll is refused with a 409,
+        because rewriting an option someone already voted for would silently
+        redefine their vote (the integrity guard behind the honest-coordination-
+        number rule). Rewriting *values* is only offered here because that guard
+        makes it safe. Never re-notifies: a fix isn't a new poll. Adding/removing
+        options (changing the *set* of choices) is still out of scope."""
+        poll = _poll_or_404(request.user, pk)
+        if poll.event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can edit a poll.")
+        if PollVote.objects.filter(option__poll=poll).exists():
+            return Response(
+                {"detail": "This poll has votes and can no longer be edited."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        s = PollEditSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        edits = data.get("options") or []
+        by_id = {o.id: o for o in poll.options.all()}
+        # Every edited option must belong to this poll (no cross-poll edits).
+        for edit in edits:
+            if edit["id"] not in by_id:
+                raise ValidationError(
+                    {"options": "An option doesn't belong to this poll."}
+                )
+        with transaction.atomic():
+            if "question" in data:
+                poll.question = data["question"]
+                poll.save(update_fields=["question"])
+            to_update = []
+            for edit in edits:
+                opt = by_id[edit["id"]]
+                # Reuse the create-time normalisation: it validates the value the
+                # dimension needs and re-derives the label from it, keeping the
+                # label in sync exactly as on create.
+                kwargs = _build_option_kwargs(poll.dimension, edit, opt.order)
+                for field, value in kwargs.items():
+                    setattr(opt, field, value)
+                to_update.append(opt)
+            if to_update:
+                PollOption.objects.bulk_update(
+                    to_update,
+                    ["label", "date_value", "time_value", "text_value", "order"],
+                )
         return _poll_response(poll.id, request)
 
     def delete(self, request, pk):
@@ -3408,6 +3461,31 @@ class PollCloseView(APIView):
             raise PermissionDenied("Only the organiser can close a poll.")
         if poll.status != POLL_CLOSED:
             poll.status = POLL_CLOSED
+            poll.save(update_fields=["status"])
+        return _poll_response(poll.id, request)
+
+
+class PollReopenView(APIView):
+    """Re-open a closed poll (``POST /polls/<pk>/reopen/``) — organiser only.
+
+    The inverse of close, for when a poll was shut early. Re-opening a built-in
+    poll re-checks the **one-open-poll-per-built-in-dimension** rule (you can't
+    have two live date polls) — even if the dimension itself is already set, a
+    second *open* poll for it is refused. It does not un-finalise anything;
+    voting simply resumes on the tally."""
+
+    def post(self, request, pk):
+        poll = _poll_or_404(request.user, pk)
+        if poll.event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can re-open a poll.")
+        if poll.status != POLL_OPEN:
+            if poll.dimension != DIM_CUSTOM and poll.event.polls.filter(
+                dimension=poll.dimension, status=POLL_OPEN
+            ).exclude(pk=poll.pk).exists():
+                raise ValidationError(
+                    "There's already an open poll for that. Close it first."
+                )
+            poll.status = POLL_OPEN
             poll.save(update_fields=["status"])
         return _poll_response(poll.id, request)
 

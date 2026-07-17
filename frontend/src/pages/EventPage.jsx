@@ -64,8 +64,17 @@ export default function EventPage() {
     mutationFn: ({ pollId, optionIds }) => api.votePoll(pollId, optionIds),
     onSuccess: invalidate,
   });
+  const editPoll = useMutation({
+    mutationFn: ({ pollId, question, options }) =>
+      api.editPoll(pollId, { question, options }),
+    onSuccess: invalidate,
+  });
   const closePoll = useMutation({
     mutationFn: (pollId) => api.closePoll(pollId),
+    onSuccess: invalidate,
+  });
+  const reopenPoll = useMutation({
+    mutationFn: (pollId) => api.reopenPoll(pollId),
     onSuccess: invalidate,
   });
   const deletePoll = useMutation({
@@ -111,7 +120,9 @@ export default function EventPage() {
     finalise.isPending ||
     createPoll.isPending ||
     vote.isPending ||
+    editPoll.isPending ||
     closePoll.isPending ||
+    reopenPoll.isPending ||
     deletePoll.isPending;
 
   // A brand-new event with nothing decided yet: guide the organiser's first move.
@@ -240,7 +251,9 @@ export default function EventPage() {
                 busy={busy}
                 onVote={(optionIds) => vote.mutate({ pollId: poll.id, optionIds })}
                 onFinalise={(dimension, opts) => finalise.mutate({ dimension, ...opts })}
+                onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, ...payload })}
                 onClose={() => closePoll.mutate(poll.id)}
+                onReopen={() => reopenPoll.mutate(poll.id)}
                 onDelete={() => deletePoll.mutate(poll.id)}
               />
             </div>

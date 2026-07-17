@@ -584,6 +584,14 @@ export const api = {
   // A poll + its options + results (counts complete, voter names gated).
   getPoll: (pollId) => request(`/api/polls/${pollId}/`),
 
+  // Fix a poll's wording (organiser). `question` and/or `options`
+  // (`[{ id, label }]`) — text only. Refused (409) once the poll has any votes.
+  editPoll: (pollId, { question, options }) =>
+    request(`/api/polls/${pollId}/`, {
+      method: "PATCH",
+      body: { question, options },
+    }),
+
   // Cast/replace your votes — `optionIds` is your full selection (an empty list
   // clears your vote). Only while the poll is open.
   votePoll: (pollId, optionIds) =>
@@ -595,6 +603,10 @@ export const api = {
   // Close a poll without deciding (organiser) — freezes the tally.
   closePoll: (pollId) =>
     request(`/api/polls/${pollId}/close/`, { method: "POST" }),
+
+  // Re-open a closed poll (organiser) — voting resumes on the tally.
+  reopenPoll: (pollId) =>
+    request(`/api/polls/${pollId}/reopen/`, { method: "POST" }),
 
   // Remove a poll (organiser).
   deletePoll: (pollId) =>

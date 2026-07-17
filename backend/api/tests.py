@@ -3844,6 +3844,161 @@ def poll_close_url_by_id(pk):
     return f"/api/polls/{pk}/close/"
 
 
+def poll_detail_url_by_id(pk):
+    return f"/api/polls/{pk}/"
+
+
+def poll_reopen_url_by_id(pk):
+    return f"/api/polls/{pk}/reopen/"
+
+
+class PollEditReopenTests(EventsBase):
+    """Issue #87: the organiser can fix a poll's wording — but only before any
+    vote — and can re-open a poll they closed early."""
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+
+    def _open_custom_poll(self):
+        self.client.force_authenticate(self.org)
+        resp = self.client.post(
+            event_polls_url(self.event),
+            {
+                "dimension": "custom",
+                "question": "What to bring?",
+                "options": [{"text_value": "Cak"}, {"text_value": "Drinks"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return resp.json()
+
+    def test_organiser_edits_question_and_labels_while_unvoted(self):
+        poll = self._open_custom_poll()
+        opt0 = poll["options"][0]["id"]
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {
+                "question": "What should you bring?",
+                "options": [{"id": opt0, "label": "Cake"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual(body["question"], "What should you bring?")
+        labels = {o["id"]: o["label"] for o in body["options"]}
+        self.assertEqual(labels[opt0], "Cake")
+
+    def test_organiser_edits_a_date_option_value(self):
+        # A fat-fingered date poll: the organiser corrects an option's date, and
+        # its label re-derives from the new value (same as on create).
+        self.client.force_authenticate(self.org)
+        wrong, right = self.future(5), self.future(12)
+        poll = self.client.post(
+            event_polls_url(self.event),
+            {"dimension": "date",
+             "options": [{"date_value": wrong.isoformat()},
+                         {"date_value": self.future(6).isoformat()}]},
+            format="json",
+        ).json()
+        opt0 = poll["options"][0]["id"]
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"options": [{"id": opt0, "date_value": right.isoformat()}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        opt = PollOption.objects.get(pk=opt0)
+        self.assertEqual(opt.date_value, right)
+        self.assertEqual(opt.label, right.isoformat())
+
+    def test_edit_refused_once_a_vote_exists(self):
+        poll = self._open_custom_poll()
+        opt0 = poll["options"][0]["id"]
+        # A member votes, freezing the wording.
+        self.client.force_authenticate(self.me)
+        self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [opt0]}, format="json"
+        )
+        self.client.force_authenticate(self.org)
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"question": "Sneaky rename"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 409, resp.content)
+        # Wording is untouched.
+        self.assertEqual(Poll.objects.get(pk=poll["id"]).question, "What to bring?")
+
+    def test_non_organiser_cannot_edit(self):
+        poll = self._open_custom_poll()
+        self.client.force_authenticate(self.me)  # a member, not the organiser
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"question": "Hijack"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403, resp.content)
+
+    def test_edit_rejects_option_from_another_poll(self):
+        poll = self._open_custom_poll()
+        other = self._open_custom_poll()
+        stray = other["options"][0]["id"]
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"options": [{"id": stray, "label": "nope"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_reopen_closed_poll_allows_voting_again(self):
+        poll = self._open_custom_poll()
+        self.client.post(poll_close_url_by_id(poll["id"]))
+        self.assertEqual(Poll.objects.get(pk=poll["id"]).status, "closed")
+        resp = self.client.post(poll_reopen_url_by_id(poll["id"]))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["status"], "open")
+        # A member can now vote.
+        opt0 = poll["options"][0]["id"]
+        self.client.force_authenticate(self.me)
+        v = self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [opt0]}, format="json"
+        )
+        self.assertEqual(v.status_code, 200, v.content)
+
+    def test_reopen_blocked_when_another_open_poll_for_dimension(self):
+        # Open, then close, a date poll; open a second date poll; re-opening the
+        # first must fail — you can't have two live date polls (the create rule).
+        self.client.force_authenticate(self.org)
+        d1, d2 = self.future(5), self.future(6)
+        first = self.client.post(
+            event_polls_url(self.event),
+            {"dimension": "date",
+             "options": [{"date_value": d1.isoformat()},
+                         {"date_value": d2.isoformat()}]},
+            format="json",
+        ).json()
+        self.client.post(poll_close_url_by_id(first["id"]))
+        self.client.post(
+            event_polls_url(self.event),
+            {"dimension": "date",
+             "options": [{"date_value": self.future(8).isoformat()},
+                         {"date_value": self.future(9).isoformat()}]},
+            format="json",
+        )
+        resp = self.client.post(poll_reopen_url_by_id(first["id"]))
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_non_organiser_cannot_reopen(self):
+        poll = self._open_custom_poll()
+        self.client.post(poll_close_url_by_id(poll["id"]))
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(poll_reopen_url_by_id(poll["id"]))
+        self.assertEqual(resp.status_code, 403, resp.content)
+
+
 class EventPermissionTests(EventsBase):
     def test_any_member_can_create(self):
         self.client.force_authenticate(self.me)

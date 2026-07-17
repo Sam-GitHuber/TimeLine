@@ -142,10 +142,11 @@ the organiser's; cancel/hard-delete is the organiser **or a group admin**.
 **RSVP** — `PUT /api/events/<id>/rsvp/` (upsert); `GET /api/events/<id>/rsvps/`
 (full counts + gated named lists).
 
-**Polls** — `POST /api/events/<id>/polls/` (open, organiser); `GET/DELETE
+**Polls** — `POST /api/events/<id>/polls/` (open, organiser); `GET/PATCH/DELETE
 /api/polls/<id>/`; `PUT /api/polls/<id>/vote/` (`{option_ids}` — your full
 selection, replaces prior votes; open polls only); `POST /api/polls/<id>/close/`
-(organiser, no decision). `POST /api/events/<id>/finalise/`
+and `POST /api/polls/<id>/reopen/` (organiser, no decision — the tally just
+freezes / resumes). `POST /api/events/<id>/finalise/`
 (`{dimension, value?, option_id?, close_poll?}`, organiser) — writes the built-in
 field or pins a custom outcome, recomputes status, notifies.
 
@@ -155,9 +156,22 @@ every group you're an active member of — a pure time-merge, the same disciplin
 the `include_groups` feed toggle).
 
 The scheduling fields (`event_date` / `start_time` / `location_name`) are written
-**only** through `finalise`, never PATCH — so decision 3 and the status recompute
-stay in one place. PATCH covers title, description, location link/note, timezone,
-end time.
+**only** through `finalise`, never the event PATCH — so decision 3 and the status
+recompute stay in one place. The event PATCH covers title, description, location
+link/note, timezone, end time.
+
+**Editing a poll (`PATCH /api/polls/<id>/`).** The organiser can fix a poll's
+`question` and rewrite its `options` (each option's typed value — a date/time/text
+per the dimension — reusing the create-time normalisation so labels re-derive),
+but **only while the poll has zero votes**. The first `PollVote` freezes the
+wording permanently: rewriting an option someone already voted for would silently
+redefine their vote, which decision 2's honest-coordination-number principle
+forbids. The guard is server-side (a **409** if any vote exists), never trusting
+the hidden UI; a `vote_count` on the poll payload lets the client hide the affordance
+too. Changing the *set* of options (add/remove) is out of scope — this rewrites the
+existing ones. An edit never re-notifies (`poll_opened` already fired). Closing
+freezes the tally without deciding; `reopen` resumes voting, re-checking the
+one-open-poll-per-built-in-dimension rule so it can't create a second live date poll.
 
 ## Notifications
 

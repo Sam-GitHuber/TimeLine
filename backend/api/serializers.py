@@ -798,6 +798,10 @@ def serialize_poll(poll, *, visible_ids, me_id, request):
     options, your_votes = build_poll_results(
         poll, visible_ids=visible_ids, me_id=me_id, request=request
     )
+    # Total votes across every option (complete, not gated). The frontend gates
+    # the "edit poll" affordance on this being 0 — a poll locks its wording the
+    # moment the first vote lands (see the PATCH guard in the poll view).
+    vote_count = sum(o["count"] for o in options)
     return {
         "id": poll.id,
         "event": poll.event_id,
@@ -808,6 +812,7 @@ def serialize_poll(poll, *, visible_ids, me_id, request):
         "closes_at": poll.closes_at,
         "created_at": poll.created_at,
         "options": options,
+        "vote_count": vote_count,
         "your_votes": your_votes,
         # For a finalised custom poll, the option the organiser pinned (else null).
         "decided_option": poll.decided_option_id,
@@ -986,6 +991,33 @@ class PollCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 "A poll needs at least two options."
             )
+        return value
+
+
+class PollOptionEditSerializer(PollOptionWriteSerializer):
+    """One option in a poll-**edit** body: the same typed value fields as a
+    created option (``date_value`` / ``time_value`` / ``text_value`` / ``label``,
+    interpreted per the poll's dimension), plus the ``id`` identifying which
+    existing option to rewrite. Editing an option's *value* is only safe because
+    the whole edit is gated on the poll having zero votes — no cast vote can be
+    silently redefined."""
+
+    id = serializers.IntegerField()
+
+
+class PollEditSerializer(serializers.Serializer):
+    """Validate a poll-**edit** body (organiser fixing mistakes): a new
+    ``question`` and/or rewritten ``options``. Both are optional so a caller can
+    touch just one; the view rejects the edit entirely if the poll already has
+    any votes."""
+
+    question = serializers.CharField(max_length=EVENT_TEXT_FIELD_MAX, required=False)
+    options = PollOptionEditSerializer(many=True, required=False)
+
+    def validate_question(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("A poll needs a question.")
         return value
 
 
