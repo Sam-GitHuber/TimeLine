@@ -109,7 +109,10 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
   link, **no geocoding**) / `location_note`, `status`. `starts_at` and `is_past`
   are computed properties. Index `(group, event_date)`.
 - **`Poll`** — `event` (CASCADE), `dimension`, `question`, `allow_multiple`
-  (default true for date/time, false for location/custom), `status` (`open` /
+  (pick-one vs pick-any; **seeded** from the per-dimension default — true for
+  date/time, false for location/custom — but the organiser can choose it when
+  opening a poll and change it later via the edit while unvoted), `status`
+  (`open` /
   `closed`), `closes_at` (a **soft** deadline — stops new votes, does *not*
   auto-finalise), `decided_option` (the pinned option for a finalised **custom**
   poll; built-ins write the event's fields instead). **At most one open poll per
@@ -142,10 +145,11 @@ the organiser's; cancel/hard-delete is the organiser **or a group admin**.
 **RSVP** — `PUT /api/events/<id>/rsvp/` (upsert); `GET /api/events/<id>/rsvps/`
 (full counts + gated named lists).
 
-**Polls** — `POST /api/events/<id>/polls/` (open, organiser); `GET/DELETE
+**Polls** — `POST /api/events/<id>/polls/` (open, organiser); `GET/PATCH/DELETE
 /api/polls/<id>/`; `PUT /api/polls/<id>/vote/` (`{option_ids}` — your full
 selection, replaces prior votes; open polls only); `POST /api/polls/<id>/close/`
-(organiser, no decision). `POST /api/events/<id>/finalise/`
+and `POST /api/polls/<id>/reopen/` (organiser, no decision — the tally just
+freezes / resumes). `POST /api/events/<id>/finalise/`
 (`{dimension, value?, option_id?, close_poll?}`, organiser) — writes the built-in
 field or pins a custom outcome, recomputes status, notifies.
 
@@ -155,9 +159,24 @@ every group you're an active member of — a pure time-merge, the same disciplin
 the `include_groups` feed toggle).
 
 The scheduling fields (`event_date` / `start_time` / `location_name`) are written
-**only** through `finalise`, never PATCH — so decision 3 and the status recompute
-stay in one place. PATCH covers title, description, location link/note, timezone,
-end time.
+**only** through `finalise`, never the event PATCH — so decision 3 and the status
+recompute stay in one place. The event PATCH covers title, description, location
+link/note, timezone, end time.
+
+**Editing a poll (`PATCH /api/polls/<id>/`).** The organiser can fix a poll's
+`question`, its `allow_multiple` (pick-one vs pick-any), and its `options`, but
+**only while the poll has zero votes**. When `options` is given it is the **full
+desired set** (the edit form is the create form pre-filled): an entry with an
+`id` rewrites that option, an id-less entry is new, and any existing option the
+set omits is deleted — the same "at least two" and the same create-time
+normalisation (so labels re-derive). The first `PollVote` freezes everything: no
+vote can be redefined *or orphaned*, which decision 2's honest-coordination-number
+principle demands. The guard is server-side (a **409** if any vote exists), never
+trusting the hidden UI; a `vote_count` on the poll payload lets the client hide
+the affordance too. An edit never re-notifies (`poll_opened` already fired).
+Closing freezes the tally without deciding; `reopen` resumes voting, re-checking
+the one-open-poll-per-built-in-dimension rule so it can't create a second live
+date poll.
 
 ## Notifications
 
