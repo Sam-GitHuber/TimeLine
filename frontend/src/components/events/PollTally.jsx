@@ -1,5 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import Avatar from "../Avatar.jsx";
+import {
+  useDropdownMenu,
+  menuItemClass,
+  menuDangerItemClass,
+} from "../useDropdownMenu.js";
 import { formatEventDate, formatEventTime } from "../../utils.js";
 
 // A poll's tally — a Doodle/when2meet feel without the coldness: each candidate
@@ -146,72 +151,24 @@ export default function PollTally({
 // The poll's lifecycle actions behind a single ⋯ (issue #87). Edit only appears
 // while the poll has no votes — once voting starts the wording is locked, and we
 // say so in place. Close/Re-open mirror the poll's open state; Remove is last.
-// Self-contained absolute dropdown (no portal): the poll card doesn't clip, and
-// this matches the GroupActionsMenu convention — click-outside / Escape close,
-// arrow keys to move between items.
+// Self-contained absolute dropdown (no portal): the poll card doesn't clip. The
+// open/close/keyboard wiring is the shared `useDropdownMenu` (same behaviour as
+// the nav and group menus).
 function PollMenu({ open, canEdit, busy, onEdit, onClose, onReopen, onDelete }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef(null);
-  const triggerRef = useRef(null);
-  const listRef = useRef(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onPointerDown(e) {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
-    }
-    function onKeyDown(e) {
-      if (e.key === "Escape") {
-        setMenuOpen(false);
-        triggerRef.current?.focus();
-      }
-    }
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [menuOpen]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const items = listRef.current?.querySelectorAll('[role="menuitem"]');
-    items?.[0]?.focus();
-  }, [menuOpen]);
-
-  function onMenuKeyDown(e) {
-    const items = Array.from(
-      listRef.current?.querySelectorAll('[role="menuitem"]') ?? []
-    );
-    if (items.length === 0) return;
-    const i = items.indexOf(document.activeElement);
-    let next = null;
-    if (e.key === "ArrowDown") next = items[(i + 1) % items.length];
-    else if (e.key === "ArrowUp") next = items[(i - 1 + items.length) % items.length];
-    else if (e.key === "Home") next = items[0];
-    else if (e.key === "End") next = items[items.length - 1];
-    if (!next) return;
-    e.preventDefault();
-    next.focus();
-  }
+  const { open: menuOpen, setOpen, menuRef, triggerRef, listRef, onMenuKeyDown } =
+    useDropdownMenu();
 
   function run(action) {
-    setMenuOpen(false);
+    setOpen(false);
     action?.();
   }
-
-  const itemClass =
-    "block w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep disabled:opacity-50";
-  const dangerClass =
-    "block w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-50";
 
   return (
     <div className="relative" ref={menuRef}>
       <button
         type="button"
         ref={triggerRef}
-        onClick={() => setMenuOpen((v) => !v)}
+        onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-label="Poll options"
@@ -239,12 +196,14 @@ function PollMenu({ open, canEdit, busy, onEdit, onClose, onReopen, onDelete }) 
               role="menuitem"
               disabled={busy}
               onClick={() => run(onEdit)}
-              className={itemClass}
+              className={menuItemClass}
             >
               Edit poll
             </button>
           ) : (
-            <p className="px-3 py-2 text-xs text-ink-faint">
+            // A hint, not a choice — role="none" keeps it out of the menu's
+            // item semantics (a role="menu" should contain only menuitems).
+            <p role="none" className="px-3 py-2 text-xs text-ink-faint">
               Wording locks once voting starts.
             </p>
           )}
@@ -254,7 +213,7 @@ function PollMenu({ open, canEdit, busy, onEdit, onClose, onReopen, onDelete }) 
               role="menuitem"
               disabled={busy}
               onClick={() => run(onClose)}
-              className={itemClass}
+              className={menuItemClass}
             >
               Close poll
             </button>
@@ -264,7 +223,7 @@ function PollMenu({ open, canEdit, busy, onEdit, onClose, onReopen, onDelete }) 
               role="menuitem"
               disabled={busy}
               onClick={() => run(onReopen)}
-              className={itemClass}
+              className={menuItemClass}
             >
               Re-open poll
             </button>
@@ -275,7 +234,7 @@ function PollMenu({ open, canEdit, busy, onEdit, onClose, onReopen, onDelete }) 
             role="menuitem"
             disabled={busy}
             onClick={() => run(onDelete)}
-            className={dangerClass}
+            className={menuDangerItemClass}
           >
             Remove poll
           </button>

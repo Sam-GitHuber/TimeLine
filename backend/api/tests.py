@@ -3968,6 +3968,34 @@ class PollEditReopenTests(EventsBase):
         )
         self.assertEqual(v.status_code, 200, v.content)
 
+    def test_reopen_clears_an_elapsed_closes_at_so_voting_resumes(self):
+        # A poll with a soft deadline that has passed, then manually closed.
+        poll = self._open_custom_poll()
+        Poll.objects.filter(pk=poll["id"]).update(
+            closes_at=timezone.now() - timedelta(hours=1)
+        )
+        self.client.post(poll_close_url_by_id(poll["id"]))
+        # Re-open: the stale deadline must be cleared, or votes would still 403.
+        resp = self.client.post(poll_reopen_url_by_id(poll["id"]))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(Poll.objects.get(pk=poll["id"]).closes_at)
+        # A member can actually vote now.
+        opt0 = poll["options"][0]["id"]
+        self.client.force_authenticate(self.me)
+        v = self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [opt0]}, format="json"
+        )
+        self.assertEqual(v.status_code, 200, v.content)
+
+    def test_reopen_keeps_a_future_closes_at(self):
+        # A still-valid deadline is left intact — re-open only clears stale ones.
+        poll = self._open_custom_poll()
+        future = timezone.now() + timedelta(days=2)
+        Poll.objects.filter(pk=poll["id"]).update(closes_at=future)
+        self.client.post(poll_close_url_by_id(poll["id"]))
+        self.client.post(poll_reopen_url_by_id(poll["id"]))
+        self.assertIsNotNone(Poll.objects.get(pk=poll["id"]).closes_at)
+
     def test_reopen_blocked_when_another_open_poll_for_dimension(self):
         # Open, then close, a date poll; open a second date poll; re-opening the
         # first must fail — you can't have two live date polls (the create rule).

@@ -584,8 +584,10 @@ export const api = {
   // A poll + its options + results (counts complete, voter names gated).
   getPoll: (pollId) => request(`/api/polls/${pollId}/`),
 
-  // Fix a poll's wording (organiser). `question` and/or `options`
-  // (`[{ id, label }]`) — text only. Refused (409) once the poll has any votes.
+  // Fix a poll's mistakes (organiser). `question` and/or `options` — each entry
+  // `{ id, ...value }` carries the typed field for the poll's dimension
+  // (`date_value` / `time_value` / `text_value`); the label re-derives server-
+  // side. Refused (409) once the poll has any votes.
   editPoll: (pollId, { question, options }) =>
     request(`/api/polls/${pollId}/`, {
       method: "PATCH",

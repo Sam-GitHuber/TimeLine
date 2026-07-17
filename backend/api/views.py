@@ -3472,7 +3472,12 @@ class PollReopenView(APIView):
     poll re-checks the **one-open-poll-per-built-in-dimension** rule (you can't
     have two live date polls) — even if the dimension itself is already set, a
     second *open* poll for it is refused. It does not un-finalise anything;
-    voting simply resumes on the tally."""
+    voting simply resumes on the tally.
+
+    Any elapsed ``closes_at`` soft deadline is **cleared** on re-open: otherwise
+    the poll would read ``open`` yet ``PollVoteView`` would keep 403-ing every
+    vote (it independently refuses votes past ``closes_at``), so re-opening would
+    silently fail to restore voting."""
 
     def post(self, request, pk):
         poll = _poll_or_404(request.user, pk)
@@ -3486,7 +3491,11 @@ class PollReopenView(APIView):
                     "There's already an open poll for that. Close it first."
                 )
             poll.status = POLL_OPEN
-            poll.save(update_fields=["status"])
+            update_fields = ["status"]
+            if poll.closes_at is not None and poll.closes_at < timezone.now():
+                poll.closes_at = None
+                update_fields.append("closes_at")
+            poll.save(update_fields=update_fields)
         return _poll_response(poll.id, request)
 
 
