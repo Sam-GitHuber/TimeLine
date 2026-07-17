@@ -23,7 +23,9 @@ vi.mock("./api.js", () => ({
     rsvpEvent: vi.fn().mockResolvedValue({}),
     finaliseEvent: vi.fn().mockResolvedValue({}),
     votePoll: vi.fn().mockResolvedValue({}),
+    editPoll: vi.fn().mockResolvedValue({}),
     closePoll: vi.fn().mockResolvedValue({}),
+    reopenPoll: vi.fn().mockResolvedValue({}),
     deletePoll: vi.fn().mockResolvedValue({}),
     createPoll: vi.fn().mockResolvedValue({}),
     cancelEvent: vi.fn().mockResolvedValue({}),
@@ -278,6 +280,32 @@ describe("EventPage", () => {
       expect(api.createPoll).toHaveBeenCalledWith(
         7,
         expect.objectContaining({ dimension: "custom", allowMultiple: true })
+      )
+    );
+  });
+
+  it("saves the pick-one/pick-any change when editing a poll", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    // The custom poll (id 12) is single-choice; open its ⋯ menu and edit it.
+    const customPoll = screen
+      .getByRole("heading", { name: "What to bring?" })
+      .closest(".ev-tally");
+    await userEvent.click(
+      within(customPoll).getByRole("button", { name: "Poll options" })
+    );
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit poll" }));
+    // Flip it to pick-any and save.
+    await userEvent.click(
+      screen.getByLabelText(/Let people pick more than one/)
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(api.editPoll).toHaveBeenCalledWith(
+        12,
+        expect.objectContaining({ allowMultiple: true })
       )
     );
   });

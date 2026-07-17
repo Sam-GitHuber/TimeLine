@@ -65,8 +65,8 @@ export default function EventPage() {
     onSuccess: invalidate,
   });
   const editPoll = useMutation({
-    mutationFn: ({ pollId, question, options }) =>
-      api.editPoll(pollId, { question, options }),
+    mutationFn: ({ pollId, question, allowMultiple, options }) =>
+      api.editPoll(pollId, { question, allowMultiple, options }),
     onSuccess: invalidate,
   });
   const closePoll = useMutation({
