@@ -2917,6 +2917,12 @@ GOING = EventRSVP.Response.GOING
 MAYBE = EventRSVP.Response.MAYBE
 DECLINED = EventRSVP.Response.DECLINED
 
+# A generous cap on how many events one window of the group-events list returns,
+# so the (unpaginated) endpoint can't grow unbounded with a group's whole history.
+# Upcoming/planning events are naturally few; the cap mainly bounds the "past"
+# window, whose recap cards interleave with the (separately-paginated) posts feed.
+EVENTS_LIST_CAP = 200
+
 _DEFAULT_POLL_QUESTION = {
     DIM_DATE: "Which date works?",
     DIM_TIME: "What time?",
@@ -3085,26 +3091,32 @@ class GroupEventsView(APIView):
         if not is_group_member(request.user, gid):
             raise NotFound()
         connected = connected_user_ids(request.user)
-        events = list(
-            visible_events(
-                request.user, gid, connected_ids=connected
-            ).prefetch_related("polls", "rsvps__user")
-        )
         window = request.query_params.get("window", "upcoming")
         today = timezone.localdate()
-        # is_past is a per-event property (tz-aware, all-day vs timed), so the
-        # window split is done in Python. These lists are a group's events, not a
-        # firehose, and the endpoint isn't paginated — so no N+1 or paging concern.
+        base = visible_events(
+            request.user, gid, connected_ids=connected
+        ).prefetch_related("polls__options__votes__voter", "rsvps__user")
+        # Narrow to a DB superset of the window and **cap** it, so the response
+        # can't grow with a group's whole event history. is_past is a per-event
+        # property (tz-aware, all-day vs timed), so the exact prune then happens
+        # in Python over the capped rows, and the final ordering respects the time.
         if window == "past":
+            rows = base.filter(event_date__lte=today).order_by(
+                "-event_date", "-id"
+            )[:EVENTS_LIST_CAP]
             events = sorted(
-                (e for e in events if _event_is_over(e, today)),
+                (e for e in rows if _event_is_over(e, today)),
                 key=_event_sort_key, reverse=True,
             )
         elif window == "all":
-            events = sorted(events, key=_event_sort_key)
+            rows = base.order_by("-event_date", "-id")[:EVENTS_LIST_CAP]
+            events = sorted(rows, key=_event_sort_key)
         else:  # upcoming — everything not yet over (incl. date-less planning)
+            rows = base.filter(
+                Q(event_date__isnull=True) | Q(event_date__gte=today)
+            ).order_by("event_date", "id")[:EVENTS_LIST_CAP]
             events = sorted(
-                (e for e in events if not _event_is_over(e, today)),
+                (e for e in rows if not _event_is_over(e, today)),
                 key=_event_sort_key,
             )
         visible_ids = set(connected) | {request.user.id}
@@ -3358,13 +3370,19 @@ class PollVoteView(APIView):
         valid_ids = set(
             poll.options.values_list("id", flat=True)
         )
+        # De-dupe while preserving order: a client that repeats an id ("[5, 5]")
+        # would otherwise create two identical votes and trip the (option, voter)
+        # unique constraint — a 500 instead of a harmless single vote.
         chosen = []
+        seen = set()
         for oid in option_ids:
             if oid not in valid_ids:
                 raise ValidationError(
                     {"option_ids": "An option doesn't belong to this poll."}
                 )
-            chosen.append(oid)
+            if oid not in seen:
+                seen.add(oid)
+                chosen.append(oid)
         if not poll.allow_multiple and len(chosen) > 1:
             raise ValidationError(
                 {"option_ids": "This poll only allows one choice."}
@@ -3493,7 +3511,7 @@ class GroupCalendarView(APIView):
         qs = (
             visible_events(request.user, gid, connected_ids=connected)
             .filter(event_date__isnull=False)
-            .prefetch_related("polls", "rsvps__user")
+            .prefetch_related("polls__options__votes__voter", "rsvps__user")
         )
         qs = _apply_calendar_window(qs, request)
         visible_ids = set(connected) | {request.user.id}
@@ -3528,7 +3546,7 @@ class PersonalCalendarView(APIView):
                 event_date__isnull=False,
             )
             .select_related("organiser", "group")
-            .prefetch_related("polls", "rsvps__user")
+            .prefetch_related("polls__options__votes__voter", "rsvps__user")
         )
         qs = _apply_calendar_window(qs, request)
         data = [

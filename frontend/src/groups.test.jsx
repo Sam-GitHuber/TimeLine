@@ -349,6 +349,49 @@ describe("GroupPage admin controls", () => {
     ).toBeTruthy();
   });
 
+  it("keeps cancelled events off the upcoming spine and the cue count", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    const mk = (id, title, status) => ({
+      id,
+      group: { id: 7, name: "Trip" },
+      organiser: { id: 1, display_name: "You" },
+      title,
+      event_date: "2026-08-01",
+      starts_at: "2026-08-01T10:00:00Z",
+      status,
+      is_past: false,
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "unset" },
+        location: { state: "unset" },
+      },
+      rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+      polls: [],
+    });
+    api.getGroupEvents.mockImplementation((_gid, window) =>
+      Promise.resolve(
+        window === "upcoming"
+          ? [mk(1, "Real picnic", "scheduled"), mk(2, "Scrapped trip", "cancelled")]
+          : []
+      )
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    // Cue counts only the live event, and the cancelled one isn't on the spine.
+    expect(
+      await screen.findByRole("button", { name: /1 upcoming event/ })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Real picnic/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Scrapped trip/ })).toBeNull();
+  });
+
   it("shows a 'not available' state on a 404 (non-member)", async () => {
     api.getGroup.mockRejectedValue({ status: 404 });
     renderGroupAt("/g/7");

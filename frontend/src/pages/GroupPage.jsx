@@ -186,18 +186,23 @@ export default function GroupPage() {
   const isAdmin = group.your_role === "admin";
   const posts = postsQuery.items;
 
+  // Cancelled events are tombstones, not upcoming plans — leave them off the
+  // upcoming spine/staging (they resurface as a past recap once their date
+  // passes, and the detail page keeps them). This also keeps the "N upcoming"
+  // cue count equal to the number of entries actually shown above now.
   const upcoming = upcomingQuery.data || [];
-  const staging = upcoming.filter((e) => !e.event_date && e.status !== "cancelled");
+  const live = upcoming.filter((e) => e.status !== "cancelled");
+  const staging = live.filter((e) => !e.event_date);
   // Furthest-first, so the nearest event ends up at the bottom of the spine's
   // future region — right above the now-node.
-  const scheduledFuture = upcoming
+  const scheduledFuture = live
     .filter((e) => e.event_date)
     .sort(
       (a, b) =>
         new Date(b.starts_at || b.event_date) -
         new Date(a.starts_at || a.event_date)
     );
-  const upcomingCount = upcoming.filter((e) => e.status !== "cancelled").length;
+  const upcomingCount = live.length;
 
   function confirmLeave() {
     if (window.confirm(`Leave ${group.name}? You can be re-invited.`)) leave.mutate();

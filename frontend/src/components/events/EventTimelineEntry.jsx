@@ -4,7 +4,7 @@ import DimensionChips from "./DimensionChips.jsx";
 import {
   parseEventDate,
   formatEventWhen,
-  formatClockTime,
+  formatEventTimeParts,
 } from "../../utils.js";
 
 // An event as an entry on the timeline spine — the same shape as a post (a marker
@@ -91,16 +91,16 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
 // dividers above now) in accent.
 function Rail({ event, past }) {
   if (past) {
-    if (event.start_time && event.starts_at) {
-      const { time, meridiem } = formatClockTime(event.starts_at);
+    const parts = formatEventTimeParts(event.start_time);
+    if (parts) {
       return (
         <time
           className="font-mono text-xs tabular-nums text-ink-faint"
           dateTime={event.starts_at}
         >
-          {time}
+          {parts.time}
           <br />
-          {meridiem}
+          {parts.meridiem}
         </time>
       );
     }

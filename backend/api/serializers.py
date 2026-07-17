@@ -906,12 +906,15 @@ def serialize_event(event, *, viewer, visible_ids, request,
         "can_moderate": can_manage or is_group_admin,
         "created_at": event.created_at,
         "updated_at": event.updated_at,
-    }
-    if detail:
-        data["polls"] = [
+        # Polls are included even in list/summary payloads — the dimension chips
+        # need each poll's option tallies (a "polling" chip shows the live count)
+        # and the custom-poll chips. Voter names ride along already connection-
+        # gated. Only the heavier RSVP *named* lists are held back to ``detail``.
+        "polls": [
             serialize_poll(p, visible_ids=visible_ids, me_id=me_id, request=request)
             for p in polls
-        ]
+        ],
+    }
     return data
 
 

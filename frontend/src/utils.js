@@ -125,6 +125,19 @@ export function formatEventTime(timeStr) {
     : `${hour}${meridiem}`;
 }
 
+// The same wall-clock time, split so the meridiem can sit on its own line on the
+// timeline rail (like `formatClockTime`, but from an event's "HH:MM" *wall clock*
+// rather than an instant — so a past event's rail matches the time in its body,
+// both in the event's own timezone). Returns null when there's no time.
+export function formatEventTimeParts(timeStr) {
+  if (!timeStr) return null;
+  const [h, min] = timeStr.split(":").map(Number);
+  if (Number.isNaN(h)) return null;
+  const meridiem = h < 12 ? "am" : "pm";
+  const hour = h % 12 || 12;
+  return { time: min ? `${hour}:${String(min).padStart(2, "0")}` : `${hour}`, meridiem };
+}
+
 // The one-line "when" recap: "Sat 19 Jul · 7:00pm" (time part omitted when a
 // date-only, all-day event). Used on the card summary and the past recap card.
 export function formatEventWhen(event, now = new Date()) {

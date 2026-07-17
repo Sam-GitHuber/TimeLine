@@ -3635,6 +3635,25 @@ class EventVisibilityTests(EventsBase):
         self.assertEqual([e["id"] for e in listing], [event.id])
         self.assertEqual(self.client.get(event_url(event)).status_code, 200)
 
+    def test_events_list_includes_poll_tallies(self):
+        # A list/summary payload must carry poll tallies so the dimension chips
+        # can show a "polling" count (regression: polls were detail-only).
+        event = self.make_event(event_date=self.future(), status="scheduled")
+        poll = Poll.objects.create(
+            event=event, dimension="location", question="Where?",
+            allow_multiple=False, created_by=self.org,
+        )
+        opt = PollOption.objects.create(poll=poll, label="Park", text_value="Park")
+        PollVote.objects.create(option=opt, voter=self.me)
+
+        self.client.force_authenticate(self.me)
+        data = self.client.get(
+            f"{group_events_url(self.group)}?window=upcoming"
+        ).json()
+        ev = next(e for e in data if e["id"] == event.id)
+        loc_poll = next(p for p in ev["polls"] if p["dimension"] == "location")
+        self.assertEqual(loc_poll["options"][0]["count"], 1)
+
     def test_rsvp_count_complete_but_names_gated(self):
         event = self.make_event()
         # me and ana both RSVP going. me is not connected to ana.
@@ -3784,6 +3803,18 @@ class PollLifecycleTests(EventsBase):
             format="json",
         )
         self.assertEqual(v.status_code, 403)
+
+    def test_duplicate_option_ids_are_deduped_not_500(self):
+        poll, d1, d2 = self._open_date_poll()  # multi-choice date poll
+        o1 = poll["options"][0]["id"]
+        self.client.force_authenticate(self.me)
+        resp = self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [o1, o1]}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            PollVote.objects.filter(option_id=o1, voter=self.me).count(), 1
+        )
 
     def test_custom_finalise_pins_option(self):
         poll = self.client.post(
