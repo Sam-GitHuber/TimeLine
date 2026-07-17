@@ -2,7 +2,7 @@ import importlib.util
 import os
 import shutil
 import tempfile
-from datetime import date, time, timedelta
+from datetime import UTC, time, timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -4006,9 +4006,9 @@ class PastBoundaryTests(EventsBase):
 
     @mock.patch("django.utils.timezone.now")
     def test_timed_event_earlier_today_moves_to_past(self, now_mock):
-        from datetime import datetime, timezone as pytz
+        from datetime import datetime
 
-        now_mock.return_value = datetime(2026, 7, 17, 14, 0, tzinfo=pytz.utc)
+        now_mock.return_value = datetime(2026, 7, 17, 14, 0, tzinfo=UTC)
         day = now_mock.return_value.date()
         over = self.make_event(
             title="Lunch", event_date=day, start_time=time(12, 0),
