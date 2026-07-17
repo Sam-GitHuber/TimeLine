@@ -14,6 +14,7 @@ content was distilled into these files; the phase-by-phase history lives in git.
 | [groups.md](groups.md) | Private invite-only group timelines, membership/roles, and connection-gated in-group visibility |
 | [reactions.md](reactions.md) | Emoji reactions on posts/comments/replies and their per-viewer pruning |
 | [notifications.md](notifications.md) | The unified activity centre: the `Notification` model, three read-states, per-type preferences, event generation, and the push-ready payload |
+| [events.md](events.md) | Group events + planning calendar: advisory date/time/location/custom polls, the organiser-anchored connection gate (complete counts, gated names), RSVPs, the forward-mirror calendar + month grid, and the five event notification kinds |
 
 **Not here (kept as their own topic docs):**
 

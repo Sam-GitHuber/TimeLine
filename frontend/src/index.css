@@ -264,6 +264,23 @@
     padding-left: 20px;
     min-width: 0;
   }
+  /* Non-entry content that still lives inside the spine feed (the plan form, the
+     staging strip): inset it to the same column as a post body — past the gutter
+     the spine runs down — so boxes sit to the *right* of the line, not behind it. */
+  .tl-inset {
+    padding-left: calc(var(--tl-gutter) + 20px);
+    padding-right: 22px;
+  }
+
+  /* An event on the line (Phase 8b), future or past, reuses the post marker as-is
+     — the surface halo threading the spine, the accent ring only on hover. So an
+     event reads apart from a post by its rail (an accent *date* when it's ahead of
+     now, the clock *time* like a post when it's a past recap) and its body, not by
+     a permanent ring that would look like a stuck hover. A cancelled one is dimmed
+     wherever it sits. */
+  .tl-entry--off {
+    opacity: 0.6;
+  }
 
   /* day divider — a clean marked point on the line */
   .tl-day {
@@ -375,6 +392,386 @@
   .msg-bubble {
     animation: tl-rise 0.4s ease both;
   }
+
+  /* ---- Group events & planning calendar (Phase 8b) ----
+     The calendar lives in the same warm world as the timeline: one accent, the
+     three type voices, IBM Plex Mono for every exact "when". */
+
+  /* The signature dimension chips — Date · Time · Where, each showing its state. */
+  .ev-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .ev-chip-label {
+    font-weight: 600;
+    color: var(--color-ink-soft);
+  }
+  /* set → filled, the value in mono (the decision is made) */
+  .ev-chip--set {
+    background: var(--color-accent-tint);
+    border-color: var(--color-accent-tint);
+  }
+  .ev-chip--set .ev-chip-label {
+    color: var(--color-accent-deep);
+  }
+  .ev-chip--set .ev-chip-value {
+    color: var(--color-ink);
+  }
+  /* polling → pulsing outline + a live tally */
+  .ev-chip--polling {
+    border-color: var(--color-accent);
+    background: var(--color-raised);
+    animation: ev-chip-pulse 2.4s ease-in-out infinite;
+  }
+  .ev-chip--polling .ev-chip-value {
+    color: var(--color-accent-deep);
+    font-weight: 600;
+  }
+  /* unset → quiet ghost */
+  .ev-chip--unset {
+    border-color: var(--color-line-strong);
+    border-style: dashed;
+    color: var(--color-ink-faint);
+  }
+  .ev-chip--unset .ev-chip-value {
+    color: var(--color-ink-faint);
+  }
+  @keyframes ev-chip-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 var(--color-accent-tint);
+    }
+    50% {
+      box-shadow: 0 0 0 4px var(--color-accent-tint);
+    }
+  }
+  .ev-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  /* The whole chip is a hit target when it's a polling chip (jump to the tally). */
+  .ev-chip-hit {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    background: none;
+    cursor: pointer;
+  }
+  .ev-chip-arrow {
+    color: var(--color-accent-deep);
+    font-weight: 600;
+  }
+  /* The Set · Poll / Change affordances that live inside a chip — quiet until
+     hovered, so the chip reads as a status first and a control second. */
+  .ev-chip-actions {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
+  }
+  .ev-chip-sep {
+    color: var(--color-ink-faint);
+  }
+  .ev-chip-btn {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--color-accent-deep);
+    background: none;
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 0 0.1rem;
+  }
+  .ev-chip-btn:hover {
+    text-decoration: underline;
+  }
+  .ev-chip--set .ev-chip-btn {
+    color: var(--color-ink-faint);
+    font-weight: 500;
+  }
+
+  /* The contextual editor that opens beneath the chip row. */
+  .ev-editor {
+    border: 1px solid var(--color-line);
+    border-left: 3px solid var(--color-accent);
+    border-radius: 0.6rem;
+    background: var(--color-raised);
+    padding: 0.9rem;
+  }
+
+  /* The first-step nudge on a brand-new, undecided event. */
+  .ev-hint {
+    margin-bottom: 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: 0.55rem;
+    background: var(--color-accent-tint);
+    color: var(--color-accent-deep);
+    font-size: 0.9rem;
+  }
+
+  /* The event summary card. */
+  .ev-card {
+    border: 1px solid var(--color-line);
+    border-radius: 0.9rem;
+    background: var(--color-raised);
+    padding: 1rem;
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  a.ev-card:hover {
+    border-color: var(--color-accent);
+    box-shadow: 0 1px 0 0 var(--color-accent-tint);
+  }
+  .ev-cancelled {
+    opacity: 0.7;
+  }
+  .ev-cancelled h3 {
+    text-decoration: line-through;
+    text-decoration-color: var(--color-ink-faint);
+  }
+  /* The past-event recap — a quiet memory, reusing the muted past-post feel. */
+  .ev-recap {
+    background: transparent;
+    border-color: var(--color-line);
+    border-style: dashed;
+  }
+
+  .ev-tag {
+    display: inline-block;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    background: var(--color-accent-tint);
+    color: var(--color-accent-deep);
+  }
+  .ev-tag--off {
+    background: #f3e7e4;
+    color: #9a4a3a;
+  }
+  /* A quiet "Happened" marker on a past-event recap — grey, not accent. */
+  .ev-tag--muted {
+    background: var(--color-line);
+    color: var(--color-ink-faint);
+  }
+
+  /* The poll tally — a bar that fills as votes arrive, count on the right. */
+  .ev-tally-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.45rem 0.7rem;
+    border-radius: 0.55rem;
+    border: 1px solid var(--color-line);
+    background: var(--color-surface);
+    overflow: hidden;
+    text-align: left;
+    cursor: pointer;
+  }
+  .ev-tally-row:disabled {
+    cursor: default;
+  }
+  .ev-tally-row--chosen {
+    border-color: var(--color-accent);
+  }
+  .ev-tally-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--color-accent-tint);
+    transition: width 0.4s ease;
+    z-index: 0;
+  }
+  .ev-tally-label,
+  .ev-tally-count {
+    position: relative;
+    z-index: 1;
+  }
+  .ev-tally-label {
+    color: var(--color-ink);
+    font-size: 0.85rem;
+  }
+  .ev-tally-count {
+    color: var(--color-ink-soft);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+
+  /* The agenda/month segmented toggle. */
+  .ev-toggle {
+    display: inline-flex;
+    border: 1px solid var(--color-line-strong);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .ev-toggle button {
+    padding: 0.25rem 0.8rem;
+    font-size: 0.85rem;
+    color: var(--color-ink-soft);
+    background: var(--color-raised);
+  }
+  .ev-toggle button.ev-toggle--on {
+    background: var(--color-accent);
+    color: #fff;
+  }
+
+  /* The being-planned staging strip — off the line, above the now-node. */
+  .ev-staging {
+    border-left: 2px dashed var(--color-spine);
+    padding-left: 0.75rem;
+  }
+
+  /* The month grid. */
+  .ev-month-head,
+  .ev-month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+  }
+  .ev-month-head {
+    font-size: 0.7rem;
+    color: var(--color-ink-faint);
+    text-align: center;
+    padding-bottom: 0.35rem;
+  }
+  .ev-month-grid {
+    gap: 2px;
+    background: var(--color-line);
+    border: 1px solid var(--color-line);
+    border-radius: 0.6rem;
+    overflow: hidden;
+  }
+  .ev-day {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0.2rem;
+    background: var(--color-surface);
+    min-height: 4.75rem;
+    overflow: hidden;
+  }
+  .ev-day--blank {
+    background: var(--color-raised);
+  }
+  .ev-day-num {
+    align-self: flex-end;
+    font-size: 0.72rem;
+    color: var(--color-ink-soft);
+    line-height: 1;
+  }
+  .ev-day--today {
+    box-shadow: inset 0 0 0 2px var(--color-accent);
+  }
+  /* An event sitting in its day cell — a small titled chip. */
+  .ev-day-events {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .ev-day-event {
+    display: block;
+    max-width: 100%;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.62rem;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ev-day-event-time {
+    font-family: var(--font-mono);
+    margin-right: 3px;
+    opacity: 0.85;
+  }
+  .ev-day-event--scheduled {
+    background: var(--color-accent-tint);
+    color: var(--color-accent-deep);
+  }
+  .ev-day-event--scheduled:hover {
+    background: color-mix(in srgb, var(--color-accent-tint) 75%, var(--color-accent));
+  }
+  .ev-day-event--past {
+    background: var(--color-line);
+    color: var(--color-ink-faint);
+  }
+  .ev-day-event--off {
+    color: var(--color-ink-faint);
+    text-decoration: line-through;
+  }
+  .ev-day-more {
+    padding: 0 4px;
+    text-align: left;
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: var(--color-ink-faint);
+    cursor: pointer;
+  }
+  .ev-day-more:hover {
+    color: var(--color-accent-deep);
+  }
+
+  /* The now-node anchor: scrolling to it leaves room for the sticky nav so the
+     composer rests just below it (with the future above, out of view). */
+  .tl-now-anchor {
+    scroll-margin-top: 64px;
+  }
+
+  /* A quiet full-width cue, capping the "now" view, that points up to the
+     upcoming events sitting above the fold. */
+  .ev-upcoming-cue {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--color-line);
+    background: var(--color-accent-tint);
+    color: var(--color-accent-deep);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .ev-upcoming-cue:hover {
+    background: color-mix(in srgb, var(--color-accent-tint) 80%, var(--color-accent));
+  }
+
+  /* "Back to now" — a floating pill that appears once you've scrolled away from
+     the now-node into the future (up) or the past (down). */
+  .tl-back-to-now {
+    position: fixed;
+    left: 50%;
+    bottom: 1.25rem;
+    transform: translateX(-50%);
+    z-index: 30;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.9rem;
+    border-radius: 999px;
+    background: var(--color-accent);
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    box-shadow: 0 4px 14px rgba(28, 138, 106, 0.35);
+    cursor: pointer;
+    animation: tl-rise 0.3s ease both;
+  }
+  .tl-back-to-now:hover {
+    background: var(--color-accent-deep);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -382,7 +779,9 @@
   .tl-entry,
   .tl-compose .tl-node::after,
   .msg-drawer,
-  .msg-bubble {
+  .msg-bubble,
+  .ev-chip--polling,
+  .tl-back-to-now {
     animation: none !important;
   }
 }

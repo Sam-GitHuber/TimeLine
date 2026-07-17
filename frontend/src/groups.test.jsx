@@ -51,6 +51,8 @@ vi.mock("./api.js", () => ({
     getGroupPosts: vi.fn(),
     getGroupMembers: vi.fn(),
     getGroupInvites: vi.fn(),
+    getGroupEvents: vi.fn(),
+    getGroupCalendar: vi.fn(),
     createGroup: vi.fn(),
     listUsers: vi.fn(),
     inviteToGroup: vi.fn(),
@@ -75,6 +77,8 @@ beforeEach(() => {
   api.getGroupPosts.mockResolvedValue(emptyPage);
   api.getGroupMembers.mockResolvedValue([]);
   api.getGroupInvites.mockResolvedValue({ count: 0, results: [] });
+  api.getGroupEvents.mockResolvedValue([]);
+  api.getGroupCalendar.mockResolvedValue([]);
   api.getUnreadNotificationCount.mockResolvedValue({ count: 0 });
   api.getNotifications.mockResolvedValue(emptyPage);
   api.markNotificationsSeen.mockResolvedValue({ updated: 0 });
@@ -193,9 +197,11 @@ describe("GroupPage admin controls", () => {
     });
     renderGroupAt("/g/7");
     expect(await screen.findByText("Trip")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Edit" })).toBeInTheDocument();
+    // The group actions live behind the "⋯" menu now.
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    expect(screen.getByRole("menuitem", { name: "Edit group" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Delete group" })
+      screen.getByRole("menuitem", { name: "Delete group" })
     ).toBeInTheDocument();
   });
 
@@ -210,13 +216,180 @@ describe("GroupPage admin controls", () => {
     });
     renderGroupAt("/g/7");
     expect(await screen.findByText("Trip")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Edit" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    // A plain member's menu has no Edit or Delete…
+    expect(screen.queryByRole("menuitem", { name: "Edit group" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Delete group" })).toBeNull();
+    // …but can still invite and leave.
+    expect(screen.getByRole("menuitem", { name: "Invite" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Delete group" })
-    ).toBeNull();
-    // But a member can still invite and leave.
-    expect(screen.getByRole("button", { name: "Invite" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Leave" })).toBeInTheDocument();
+      screen.getByRole("menuitem", { name: "Leave group" })
+    ).toBeInTheDocument();
+  });
+
+  it("opens the members panel from the menu", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Members" }));
+    expect(
+      await screen.findByRole("heading", { name: /Members/ })
+    ).toBeInTheDocument();
+  });
+
+  it("opens the plan-event form from the menu", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: "Plan an event" })
+    );
+    expect(
+      await screen.findByPlaceholderText(/Grandma's 80th/)
+    ).toBeInTheDocument();
+  });
+
+  it("shows a cue pointing up to upcoming events", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    api.getGroupEvents.mockImplementation((_gid, window) =>
+      Promise.resolve(
+        window === "upcoming"
+          ? [
+              {
+                id: 1,
+                group: { id: 7, name: "Trip" },
+                organiser: { id: 1, display_name: "You" },
+                title: "Picnic",
+                event_date: "2026-08-01",
+                status: "scheduled",
+                is_past: false,
+                dimensions: {
+                  date: { state: "set" },
+                  time: { state: "unset" },
+                  location: { state: "unset" },
+                },
+                rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+                polls: [],
+              },
+            ]
+          : []
+      )
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    expect(
+      await screen.findByRole("button", { name: /1 upcoming event/ })
+    ).toBeInTheDocument();
+  });
+
+  it("puts upcoming events on the line, nearest closest to now", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    const mk = (id, title, date) => ({
+      id,
+      group: { id: 7, name: "Trip" },
+      organiser: { id: 1, display_name: "You" },
+      title,
+      event_date: date,
+      starts_at: `${date}T10:00:00Z`,
+      status: "scheduled",
+      is_past: false,
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "unset" },
+        location: { state: "unset" },
+      },
+      rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+      polls: [],
+    });
+    api.getGroupEvents.mockImplementation((_gid, window) =>
+      Promise.resolve(
+        window === "upcoming"
+          ? [mk(1, "Near picnic", "2026-08-01"), mk(2, "Far trip", "2026-09-01")]
+          : []
+      )
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    const near = await screen.findByRole("link", { name: /Near picnic/ });
+    const far = screen.getByRole("link", { name: /Far trip/ });
+    // Furthest-future is higher up the page; the nearest sits lower, just above
+    // the now-node — so `near` follows `far` in document order.
+    expect(
+      far.compareDocumentPosition(near) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
+  it("keeps cancelled events off the upcoming spine and the cue count", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    const mk = (id, title, status) => ({
+      id,
+      group: { id: 7, name: "Trip" },
+      organiser: { id: 1, display_name: "You" },
+      title,
+      event_date: "2026-08-01",
+      starts_at: "2026-08-01T10:00:00Z",
+      status,
+      is_past: false,
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "unset" },
+        location: { state: "unset" },
+      },
+      rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+      polls: [],
+    });
+    api.getGroupEvents.mockImplementation((_gid, window) =>
+      Promise.resolve(
+        window === "upcoming"
+          ? [mk(1, "Real picnic", "scheduled"), mk(2, "Scrapped trip", "cancelled")]
+          : []
+      )
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    // Cue counts only the live event, and the cancelled one isn't on the spine.
+    expect(
+      await screen.findByRole("button", { name: /1 upcoming event/ })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Real picnic/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Scrapped trip/ })).toBeNull();
   });
 
   it("shows a 'not available' state on a 404 (non-member)", async () => {
@@ -248,8 +421,9 @@ describe("GroupPage start a chat", () => {
 
     renderGroupAt("/g/7");
     await screen.findByText("Trip");
+    await user.click(screen.getByRole("button", { name: "Group actions" }));
     await user.click(
-      await screen.findByRole("button", { name: "Start a chat" })
+      await screen.findByRole("menuitem", { name: "Start a chat" })
     );
 
     expect(openNew).toHaveBeenCalledWith({

@@ -2,7 +2,7 @@ import importlib.util
 import os
 import shutil
 import tempfile
-from datetime import timedelta
+from datetime import UTC, time, timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -42,6 +42,8 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    Event,
+    EventRSVP,
     Group,
     GroupMembership,
     Message,
@@ -49,6 +51,9 @@ from .models import (
     NotificationPreference,
     Participant,
     ParticipantInterval,
+    Poll,
+    PollOption,
+    PollVote,
     Post,
     PostCommentRead,
     Reaction,
@@ -3500,4 +3505,636 @@ class NotificationPermalinkUrlTests(APITestCase):
         )
         self.assertEqual(
             self._url_of(n), f"/p/{self.post.id}?comment={comment.id}"
+        )
+
+
+# ===========================================================================
+# Phase 8b — group events, polls, RSVPs, calendars
+# ===========================================================================
+
+def group_events_url(g):
+    return f"/api/groups/{g.pk}/events/"
+
+
+def group_calendar_url(g):
+    return f"/api/groups/{g.pk}/calendar/"
+
+
+def event_url(e):
+    return f"/api/events/{e.pk}/"
+
+
+def event_cancel_url(e):
+    return f"/api/events/{e.pk}/cancel/"
+
+
+def event_rsvp_url(e):
+    return f"/api/events/{e.pk}/rsvp/"
+
+
+def event_rsvps_url(e):
+    return f"/api/events/{e.pk}/rsvps/"
+
+
+def event_polls_url(e):
+    return f"/api/events/{e.pk}/polls/"
+
+
+def event_finalise_url(e):
+    return f"/api/events/{e.pk}/finalise/"
+
+
+def poll_url(p):
+    return f"/api/polls/{p.pk}/"
+
+
+def poll_vote_url(p):
+    return f"/api/polls/{p.pk}/vote/"
+
+
+def poll_close_url(p):
+    return f"/api/polls/{p.pk}/close/"
+
+
+PERSONAL_CALENDAR_URL = "/api/calendar/"
+
+
+class EventsBase(APITestCase):
+    """A group with an organiser and an audience wired for the two-gate visibility
+    tests:
+
+    - ``admin`` — group creator/admin (for cancel/delete-by-admin), connected to org
+    - ``org``   — the organiser (a plain member), connected to admin/me/ana/outside_pal
+    - ``me``    — the viewer: a member connected to org, **not** to ana
+    - ``ana``   — a member connected to org, **not** to me (the co-participant whose
+      name must stay hidden from me but who still counts)
+    - ``outsider`` — a member **not** connected to org (can't see org's events)
+    - ``nonmember`` — connected to org but **not** in the group
+    """
+
+    def setUp(self):
+        self.admin = make_user("admin@x.com", first_name="Ad", last_name="Min")
+        self.org = make_user("org@x.com", first_name="Or", last_name="Ganiser")
+        self.me = make_user("me@x.com", first_name="Me", last_name="Viewer")
+        self.ana = make_user("ana@x.com", first_name="An", last_name="A")
+        self.outsider = make_user("out@x.com", first_name="Out", last_name="Sider")
+        self.nonmember = make_user("non@x.com", first_name="Non", last_name="Member")
+
+        self.group = make_group(self.admin, name="Planners")
+        add_member(self.group, self.org)
+        add_member(self.group, self.me)
+        add_member(self.group, self.ana)
+        add_member(self.group, self.outsider)
+
+        # Everyone in the audience is connected to the organiser (the anchor),
+        # except the outsider. me and ana are deliberately NOT connected.
+        make_connection(self.org, self.admin)
+        make_connection(self.org, self.me)
+        make_connection(self.org, self.ana)
+        make_connection(self.org, self.nonmember)
+
+    def make_event(self, organiser=None, title="Picnic", **kwargs):
+        return Event.objects.create(
+            group=self.group,
+            organiser=organiser or self.org,
+            title=title,
+            **kwargs,
+        )
+
+    def future(self, days=7):
+        return timezone.localdate() + timedelta(days=days)
+
+
+class EventVisibilityTests(EventsBase):
+    def test_nonmember_404s_every_endpoint(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.nonmember)
+        self.assertEqual(
+            self.client.get(group_events_url(self.group)).status_code, 404
+        )
+        self.assertEqual(self.client.get(event_url(event)).status_code, 404)
+        self.assertEqual(self.client.get(event_rsvps_url(event)).status_code, 404)
+        self.assertEqual(
+            self.client.get(group_calendar_url(self.group)).status_code, 404
+        )
+
+    def test_member_not_connected_to_organiser_cannot_see_event(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.outsider)
+        # Not listed…
+        listing = self.client.get(group_events_url(self.group))
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(listing.json(), [])
+        # …and a 404 on detail (the event doesn't exist for them).
+        self.assertEqual(self.client.get(event_url(event)).status_code, 404)
+
+    def test_connected_member_sees_event(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        listing = self.client.get(group_events_url(self.group)).json()
+        self.assertEqual([e["id"] for e in listing], [event.id])
+        self.assertEqual(self.client.get(event_url(event)).status_code, 200)
+
+    def test_events_list_includes_poll_tallies(self):
+        # A list/summary payload must carry poll tallies so the dimension chips
+        # can show a "polling" count (regression: polls were detail-only).
+        event = self.make_event(event_date=self.future(), status="scheduled")
+        poll = Poll.objects.create(
+            event=event, dimension="location", question="Where?",
+            allow_multiple=False, created_by=self.org,
+        )
+        opt = PollOption.objects.create(poll=poll, label="Park", text_value="Park")
+        PollVote.objects.create(option=opt, voter=self.me)
+
+        self.client.force_authenticate(self.me)
+        data = self.client.get(
+            f"{group_events_url(self.group)}?window=upcoming"
+        ).json()
+        ev = next(e for e in data if e["id"] == event.id)
+        loc_poll = next(p for p in ev["polls"] if p["dimension"] == "location")
+        self.assertEqual(loc_poll["options"][0]["count"], 1)
+
+    def test_rsvp_count_complete_but_names_gated(self):
+        event = self.make_event()
+        # me and ana both RSVP going. me is not connected to ana.
+        EventRSVP.objects.create(event=event, user=self.me, response="going")
+        EventRSVP.objects.create(event=event, user=self.ana, response="going")
+
+        self.client.force_authenticate(self.me)
+        summary = self.client.get(event_rsvps_url(event)).json()
+        self.assertEqual(summary["counts"]["going"], 2)  # complete
+        names = {a["id"] for a in summary["going_list"]}
+        self.assertEqual(names, {self.me.id})  # ana counted but hidden
+
+        # The organiser is connected to everyone in the audience → sees all names.
+        self.client.force_authenticate(self.org)
+        summary = self.client.get(event_rsvps_url(event)).json()
+        self.assertEqual(summary["counts"]["going"], 2)
+        names = {a["id"] for a in summary["going_list"]}
+        self.assertEqual(names, {self.me.id, self.ana.id})
+
+    def test_poll_count_complete_but_voter_names_gated(self):
+        event = self.make_event()
+        poll = Poll.objects.create(
+            event=event, dimension="custom", question="Cake?",
+            allow_multiple=False, created_by=self.org,
+        )
+        opt = PollOption.objects.create(poll=poll, label="Yes", text_value="Yes")
+        PollVote.objects.create(option=opt, voter=self.me)
+        PollVote.objects.create(option=opt, voter=self.ana)
+
+        self.client.force_authenticate(self.me)
+        data = self.client.get(poll_url(poll)).json()
+        opt_data = data["options"][0]
+        self.assertEqual(opt_data["count"], 2)  # complete
+        self.assertEqual({v["id"] for v in opt_data["voters"]}, {self.me.id})
+
+
+class PollLifecycleTests(EventsBase):
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        self.client.force_authenticate(self.org)
+
+    def _open_date_poll(self):
+        d1, d2 = self.future(5), self.future(6)
+        resp = self.client.post(
+            event_polls_url(self.event),
+            {
+                "dimension": "date",
+                "options": [
+                    {"date_value": d1.isoformat()},
+                    {"date_value": d2.isoformat()},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return resp.json(), d1, d2
+
+    def test_open_vote_close_finalise_sets_field(self):
+        poll, d1, d2 = self._open_date_poll()
+        opt1 = poll["options"][0]["id"]
+
+        # A member who can see the event votes.
+        self.client.force_authenticate(self.me)
+        v = self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [opt1]}, format="json"
+        )
+        self.assertEqual(v.status_code, 200, v.content)
+
+        # Organiser closes, then finalises the date (advisory → decision).
+        self.client.force_authenticate(self.org)
+        self.client.post(poll_close_url_by_id(poll["id"]))
+        fin = self.client.post(
+            event_finalise_url(self.event),
+            {"dimension": "date", "value": d1.isoformat()},
+            format="json",
+        )
+        self.assertEqual(fin.status_code, 200, fin.content)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.event_date, d1)
+        self.assertEqual(self.event.status, "scheduled")
+
+    def test_finalise_with_value_no_one_voted_for(self):
+        poll, d1, d2 = self._open_date_poll()
+        friday = self.future(9)  # not an option
+        fin = self.client.post(
+            event_finalise_url(self.event),
+            {"dimension": "date", "value": friday.isoformat()},
+            format="json",
+        )
+        self.assertEqual(fin.status_code, 200, fin.content)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.event_date, friday)
+
+    def test_second_open_date_poll_rejected(self):
+        self._open_date_poll()
+        resp = self.client.post(
+            event_polls_url(self.event),
+            {
+                "dimension": "date",
+                "options": [
+                    {"date_value": self.future(1).isoformat()},
+                    {"date_value": self.future(2).isoformat()},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_single_choice_replaces_multi_accumulates(self):
+        # Single-choice location poll: a second vote replaces the first.
+        loc = self.client.post(
+            event_polls_url(self.event),
+            {
+                "dimension": "location",
+                "options": [{"text_value": "Park"}, {"text_value": "Cafe"}],
+            },
+            format="json",
+        ).json()
+        o1, o2 = loc["options"][0]["id"], loc["options"][1]["id"]
+        self.client.force_authenticate(self.me)
+        self.client.put(poll_vote_url_by_id(loc["id"]), {"option_ids": [o1]}, format="json")
+        self.client.put(poll_vote_url_by_id(loc["id"]), {"option_ids": [o2]}, format="json")
+        self.assertEqual(
+            PollVote.objects.filter(option__poll_id=loc["id"], voter=self.me).count(), 1
+        )
+
+        # Multi-choice date poll: two options accumulate.
+        self.client.force_authenticate(self.org)
+        poll, d1, d2 = self._open_date_poll()
+        o1, o2 = poll["options"][0]["id"], poll["options"][1]["id"]
+        self.client.force_authenticate(self.me)
+        self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [o1, o2]}, format="json"
+        )
+        self.assertEqual(
+            PollVote.objects.filter(option__poll_id=poll["id"], voter=self.me).count(), 2
+        )
+
+    def test_vote_in_closed_poll_403(self):
+        poll, d1, d2 = self._open_date_poll()
+        self.client.post(poll_close_url_by_id(poll["id"]))
+        self.client.force_authenticate(self.me)
+        v = self.client.put(
+            poll_vote_url_by_id(poll["id"]),
+            {"option_ids": [poll["options"][0]["id"]]},
+            format="json",
+        )
+        self.assertEqual(v.status_code, 403)
+
+    def test_duplicate_option_ids_are_deduped_not_500(self):
+        poll, d1, d2 = self._open_date_poll()  # multi-choice date poll
+        o1 = poll["options"][0]["id"]
+        self.client.force_authenticate(self.me)
+        resp = self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [o1, o1]}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            PollVote.objects.filter(option_id=o1, voter=self.me).count(), 1
+        )
+
+    def test_custom_finalise_pins_option(self):
+        poll = self.client.post(
+            event_polls_url(self.event),
+            {
+                "dimension": "custom",
+                "question": "What to bring?",
+                "options": [{"text_value": "Cake"}, {"text_value": "Drinks"}],
+            },
+            format="json",
+        ).json()
+        opt = poll["options"][0]["id"]
+        fin = self.client.post(
+            event_finalise_url(self.event),
+            {"dimension": "custom", "option_id": opt},
+            format="json",
+        )
+        self.assertEqual(fin.status_code, 200, fin.content)
+        self.assertEqual(Poll.objects.get(pk=poll["id"]).decided_option_id, opt)
+
+
+def poll_vote_url_by_id(pk):
+    return f"/api/polls/{pk}/vote/"
+
+
+def poll_close_url_by_id(pk):
+    return f"/api/polls/{pk}/close/"
+
+
+class EventPermissionTests(EventsBase):
+    def test_any_member_can_create(self):
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            group_events_url(self.group), {"title": "Movie night"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["organiser"]["id"], self.me.id)
+
+    def test_plain_member_cannot_finalise_or_cancel_or_poll(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)  # a member, not the organiser
+        self.assertEqual(
+            self.client.post(
+                event_finalise_url(event),
+                {"dimension": "date", "value": self.future().isoformat()},
+                format="json",
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                event_polls_url(event),
+                {"dimension": "location",
+                 "options": [{"text_value": "A"}, {"text_value": "B"}]},
+                format="json",
+            ).status_code,
+            403,
+        )
+        self.assertEqual(self.client.post(event_cancel_url(event)).status_code, 403)
+
+    def test_admin_can_cancel_others_event(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.admin)  # admin, not the organiser
+        resp = self.client.post(event_cancel_url(event))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        event.refresh_from_db()
+        self.assertEqual(event.status, "cancelled")
+
+    def test_member_who_can_see_can_rsvp(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.put(
+            event_rsvp_url(event), {"response": "going", "guests": 2}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["rsvp"]["your_response"]["response"], "going")
+
+    def test_outsider_cannot_rsvp(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.outsider)
+        resp = self.client.put(
+            event_rsvp_url(event), {"response": "going"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+
+class OrganiserDepartureTests(EventsBase):
+    def test_deleting_organiser_account_removes_event(self):
+        event = self.make_event()
+        self.org.delete()
+        self.assertFalse(Event.objects.filter(pk=event.pk).exists())
+
+    def test_leaving_group_cancels_event_and_notifies(self):
+        event = self.make_event(event_date=self.future(), status="scheduled")
+        EventRSVP.objects.create(event=event, user=self.me, response="going")
+        # The organiser leaves the group (self-removal).
+        self.client.force_authenticate(self.org)
+        resp = self.client.delete(
+            f"/api/groups/{self.group.pk}/members/{self.org.pk}/"
+        )
+        self.assertEqual(resp.status_code, 204, resp.content)
+        event.refresh_from_db()
+        self.assertEqual(event.status, "cancelled")
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=self.me, kind="event_cancelled", event=event
+            ).exists()
+        )
+
+
+class SchedulingTests(EventsBase):
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        self.client.force_authenticate(self.org)
+
+    def test_date_only_is_scheduled_all_day(self):
+        d = self.future()
+        self.client.post(
+            event_finalise_url(self.event),
+            {"dimension": "date", "value": d.isoformat()},
+            format="json",
+        )
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, "scheduled")
+        self.assertIsNone(self.event.start_time)
+
+    def test_date_and_time_is_timed(self):
+        d = self.future()
+        self.client.post(
+            event_finalise_url(self.event),
+            {"dimension": "date", "value": d.isoformat()},
+            format="json",
+        )
+        self.client.post(
+            event_finalise_url(self.event),
+            {"dimension": "time", "value": "19:30"},
+            format="json",
+        )
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.start_time, time(19, 30))
+
+    def test_cancel_tombstones_and_notifies_going(self):
+        self.event.event_date = self.future()
+        self.event.status = "scheduled"
+        self.event.save()
+        EventRSVP.objects.create(event=self.event, user=self.me, response="going")
+        EventRSVP.objects.create(event=self.event, user=self.ana, response="declined")
+        self.client.post(event_cancel_url(self.event))
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, "cancelled")
+        # going/maybe RSVPs notified; a declined RSVP is not.
+        self.assertTrue(
+            Notification.objects.filter(recipient=self.me, kind="event_cancelled").exists()
+        )
+        self.assertFalse(
+            Notification.objects.filter(recipient=self.ana, kind="event_cancelled").exists()
+        )
+
+
+class PastBoundaryTests(EventsBase):
+    """An event moves to "past" the moment it's over — a *timed* event when its
+    time passes, an *all-day* event when its day ends — not at the next midnight."""
+
+    def _ids(self, window):
+        return [
+            e["id"]
+            for e in self.client.get(
+                f"{group_events_url(self.group)}?window={window}"
+            ).json()
+        ]
+
+    def test_all_day_today_is_current_yesterday_is_past(self):
+        today = timezone.localdate()
+        today_ev = self.make_event(event_date=today, status="scheduled")
+        yest_ev = self.make_event(
+            event_date=today - timedelta(days=1), status="scheduled"
+        )
+        # All-day today is still current (its day hasn't ended); yesterday is over.
+        self.assertFalse(today_ev.is_past)
+        self.assertTrue(yest_ev.is_past)
+
+        self.client.force_authenticate(self.me)
+        upcoming, past = self._ids("upcoming"), self._ids("past")
+        self.assertIn(today_ev.id, upcoming)
+        self.assertNotIn(today_ev.id, past)
+        self.assertIn(yest_ev.id, past)
+        self.assertNotIn(yest_ev.id, upcoming)
+
+    @mock.patch("django.utils.timezone.now")
+    def test_timed_event_earlier_today_moves_to_past(self, now_mock):
+        from datetime import datetime
+
+        now_mock.return_value = datetime(2026, 7, 17, 14, 0, tzinfo=UTC)
+        day = now_mock.return_value.date()
+        over = self.make_event(
+            title="Lunch", event_date=day, start_time=time(12, 0),
+            status="scheduled", timezone="UTC",
+        )
+        soon = self.make_event(
+            title="Dinner", event_date=day, start_time=time(16, 0),
+            status="scheduled", timezone="UTC",
+        )
+        self.assertTrue(over.is_past)   # 12:00 already gone at 14:00
+        self.assertFalse(soon.is_past)  # 16:00 still ahead
+
+        self.client.force_authenticate(self.me)
+        upcoming, past = self._ids("upcoming"), self._ids("past")
+        self.assertIn(soon.id, upcoming)
+        self.assertNotIn(over.id, upcoming)
+        self.assertIn(over.id, past)
+        self.assertNotIn(soon.id, past)
+
+
+class RSVPUpsertTests(EventsBase):
+    def test_upsert_changes_response(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        self.client.put(event_rsvp_url(event), {"response": "going"}, format="json")
+        self.client.put(event_rsvp_url(event), {"response": "maybe"}, format="json")
+        self.assertEqual(EventRSVP.objects.filter(event=event, user=self.me).count(), 1)
+        self.assertEqual(
+            EventRSVP.objects.get(event=event, user=self.me).response, "maybe"
+        )
+
+
+class CalendarTests(EventsBase):
+    def test_group_calendar_window(self):
+        near = self.make_event(title="Near", event_date=self.future(3), status="scheduled")
+        far = self.make_event(title="Far", event_date=self.future(60), status="scheduled")
+        undated = self.make_event(title="Undated")  # no date → not on the calendar
+        self.client.force_authenticate(self.me)
+        frm = self.future(1).isoformat()
+        to = self.future(30).isoformat()
+        data = self.client.get(
+            f"{group_calendar_url(self.group)}?from={frm}&to={to}"
+        ).json()
+        ids = [e["id"] for e in data]
+        self.assertIn(near.id, ids)
+        self.assertNotIn(far.id, ids)
+        self.assertNotIn(undated.id, ids)
+
+    def test_personal_calendar_unions_and_excludes_left_groups(self):
+        # A second group me is in, with a connected organiser there.
+        other = make_group(self.me, name="Other")
+        add_member(other, self.org)
+        e1 = Event.objects.create(
+            group=self.group, organiser=self.org, title="G1",
+            event_date=self.future(4), status="scheduled",
+        )
+        e2 = Event.objects.create(
+            group=other, organiser=self.org, title="G2",
+            event_date=self.future(5), status="scheduled",
+        )
+        self.client.force_authenticate(self.me)
+        ids = {e["id"] for e in self.client.get(PERSONAL_CALENDAR_URL).json()}
+        self.assertEqual(ids, {e1.id, e2.id})
+
+        # Leaving the second group drops its events from the personal union.
+        GroupMembership.objects.filter(group=other, user=self.me).delete()
+        ids = {e["id"] for e in self.client.get(PERSONAL_CALENDAR_URL).json()}
+        self.assertEqual(ids, {e1.id})
+
+
+class EventNotificationTests(EventsBase):
+    def test_event_created_notifies_connected_members_only(self):
+        self.client.force_authenticate(self.org)
+        self.client.post(
+            group_events_url(self.group), {"title": "Reunion"}, format="json"
+        )
+        # Connected members get a row…
+        self.assertTrue(
+            Notification.objects.filter(recipient=self.me, kind="event_created").exists()
+        )
+        self.assertTrue(
+            Notification.objects.filter(recipient=self.admin, kind="event_created").exists()
+        )
+        # …the outsider (member, not connected to org) does not (connection gate)…
+        self.assertFalse(
+            Notification.objects.filter(recipient=self.outsider, kind="event_created").exists()
+        )
+        # …and the organiser never notifies themselves.
+        self.assertFalse(
+            Notification.objects.filter(recipient=self.org, kind="event_created").exists()
+        )
+
+    def test_poll_opened_and_event_scheduled_generated(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.org)
+        self.client.post(
+            event_polls_url(event),
+            {"dimension": "date",
+             "options": [{"date_value": self.future(1).isoformat()},
+                         {"date_value": self.future(2).isoformat()}]},
+            format="json",
+        )
+        self.assertTrue(
+            Notification.objects.filter(recipient=self.me, kind="poll_opened").exists()
+        )
+        self.client.post(
+            event_finalise_url(event),
+            {"dimension": "date", "value": self.future(1).isoformat()},
+            format="json",
+        )
+        self.assertTrue(
+            Notification.objects.filter(recipient=self.me, kind="event_scheduled").exists()
+        )
+
+    def test_muting_event_kind_suppresses_row(self):
+        NotificationPreference.objects.create(
+            user=self.me, kind="event_created", enabled=False
+        )
+        self.client.force_authenticate(self.org)
+        self.client.post(
+            group_events_url(self.group), {"title": "Muted"}, format="json"
+        )
+        self.assertFalse(
+            Notification.objects.filter(recipient=self.me, kind="event_created").exists()
+        )
+        # A non-muter still gets it.
+        self.assertTrue(
+            Notification.objects.filter(recipient=self.admin, kind="event_created").exists()
         )

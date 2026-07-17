@@ -28,12 +28,30 @@ from .models import Connection, Notification, NotificationPreference
 # The content kinds whose actor must be visible to (connected with) the recipient
 # before we notify — so a not-connected replier/reactor on a group post never
 # surfaces second-hand, exactly as the pruned comment/reaction views hide them.
+# The event kinds (Phase 8b) belong here too: the actor is always the event's
+# organiser, and an event is authored content visible only to the organiser's
+# connections, so the "never leak an action from someone you can't see" rule
+# lands the notification on precisely the audience that can see the event — no
+# event-specific gating code needed. (Contrast ``group_invite``, exempt because
+# it necessarily comes from a non-connection.)
 _CONNECTION_GATED_KINDS = frozenset(
     {
         Notification.Kind.POST_REPLY,
         Notification.Kind.COMMENT_REPLY,
         Notification.Kind.REACTION,
+        Notification.Kind.EVENT_CREATED,
+        Notification.Kind.POLL_OPENED,
+        Notification.Kind.EVENT_SCHEDULED,
+        Notification.Kind.EVENT_UPDATED,
+        Notification.Kind.EVENT_CANCELLED,
     }
+)
+
+# Kinds that refresh an existing *unread* row rather than stacking a duplicate:
+# a react/un-react/re-react, or repeated edits to one event within a short
+# window, bump a single line to the top instead of filling the centre.
+_DEDUP_KINDS = frozenset(
+    {Notification.Kind.REACTION, Notification.Kind.EVENT_UPDATED}
 )
 
 
@@ -53,16 +71,16 @@ def _are_connected(a_id, b_id):
 
 
 def create_notification(recipient, actor, kind, *, post=None, comment=None,
-                        group=None, connection=None):
+                        group=None, connection=None, event=None):
     """Create (and return) a notification, or return ``None`` if it's suppressed.
 
     Suppressed when: the recipient is the actor (no self-notifications); the
     recipient has muted this (mutable) kind; or it's a connection-gated content
     kind and the actor isn't someone the recipient may see. For the ``reaction``
-    kind an existing *unread* notification for the same (recipient, actor, target)
-    is refreshed instead of stacking a duplicate — a react/un-react/re-react (or
-    a second emoji on the same post) bumps one row to the top rather than filling
-    the centre with near-identical lines.
+    and ``event_updated`` kinds an existing *unread* notification for the same
+    (recipient, actor, target) is refreshed instead of stacking a duplicate — a
+    react/un-react/re-react, or repeated edits to one event, bumps one row to the
+    top rather than filling the centre with near-identical lines.
     """
     if actor is not None and actor.id == recipient.id:
         return None
@@ -80,13 +98,14 @@ def create_notification(recipient, actor, kind, *, post=None, comment=None,
         if actor is None or not _are_connected(recipient.id, actor.id):
             return None
 
-    if kind == Notification.Kind.REACTION:
+    if kind in _DEDUP_KINDS:
         existing = Notification.objects.filter(
             recipient=recipient,
             actor=actor,
             kind=kind,
             post=post,
             comment=comment,
+            event=event,
             seen_at__isnull=True,
         ).first()
         if existing is not None:
@@ -104,6 +123,7 @@ def create_notification(recipient, actor, kind, *, post=None, comment=None,
         comment=comment,
         group=group,
         connection=connection,
+        event=event,
     )
 
 

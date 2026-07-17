@@ -7,10 +7,13 @@ from .models import (
     Comment,
     Connection,
     Conversation,
+    Event,
+    EventRSVP,
     Group,
     GroupMembership,
     Message,
     Notification,
+    Poll,
     Post,
     PostImage,
     Report,
@@ -640,6 +643,19 @@ class NotificationSerializer(serializers.ModelSerializer):
         if obj.kind == K.GROUP_INVITE:
             group_name = obj.group.name if obj.group_id else "a group"
             return f"{name} invited you to {group_name}"
+        # Event kinds (Phase 8b) — the actor is the organiser; name the event so
+        # the line is meaningful in a push payload with no surrounding context.
+        title = obj.event.title if obj.event_id else "an event"
+        if obj.kind == K.EVENT_CREATED:
+            return f"{name} planned {title}"
+        if obj.kind == K.POLL_OPENED:
+            return f"{name} opened a poll on {title}"
+        if obj.kind == K.EVENT_SCHEDULED:
+            return f"{name} set a date for {title}"
+        if obj.kind == K.EVENT_UPDATED:
+            return f"{name} updated {title}"
+        if obj.kind == K.EVENT_CANCELLED:
+            return f"{name} cancelled {title}"
         return f"{name} did something"
 
     def get_target(self, obj):
@@ -653,6 +669,8 @@ class NotificationSerializer(serializers.ModelSerializer):
             return {"type": "group", "id": obj.group_id}
         if obj.connection_id:
             return {"type": "connection", "id": obj.connection_id}
+        if obj.event_id:
+            return {"type": "event", "id": obj.event_id}
         return None
 
     def get_url(self, obj):
@@ -674,6 +692,9 @@ class NotificationSerializer(serializers.ModelSerializer):
             return f"/u/{obj.actor_id}"
         if obj.kind == K.GROUP_INVITE:
             return "/group-invites"
+        # Event kinds deep-link to the event on its group page.
+        if obj.event_id:
+            return f"/g/{obj.event.group_id}/events/{obj.event_id}"
         return "/"
 
 
@@ -714,3 +735,285 @@ class NotificationPreferencesSerializer(serializers.Serializer):
                 )
             cleaned[kind] = enabled
         return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Phase 8b — group events, polls, RSVPs
+#
+# The delicate rule (decision 2 in the phase doc): within an event a viewer can
+# already see, **poll/RSVP counts are complete** (every participant in the
+# audience — a shared coordination number must be honest) but **names are
+# connection-gated** (you only see *who* voted / who's going among your own
+# connections). This is the deliberate inverse of ``summarise_reactions`` above,
+# where a non-connection's reaction doesn't even count. ``visible_ids`` here is
+# the same set as ``visible_reactor_ids`` (you + your connections); the count is
+# over *all* rows, the names filtered to that set.
+# ---------------------------------------------------------------------------
+
+EVENT_TITLE_MAX = 200
+EVENT_DESCRIPTION_MAX = 5000
+EVENT_TEXT_FIELD_MAX = 200  # location fields, poll option label/question, notes
+MAX_GUESTS = 50  # a sane cap on a "+N" headcount
+
+
+def _author_dict(user, request):
+    return AuthorSerializer(user, context={"request": request}).data
+
+
+def build_poll_results(poll, *, visible_ids, me_id, request):
+    """A poll's options with **complete counts** + **connection-gated voter
+    names** + the viewer's own selections.
+
+    ``poll.options`` and each option's ``votes`` (with ``voter``) must be
+    prefetched. ``count`` is every vote for the option; ``voters`` lists only
+    those in ``visible_ids`` (you + your connections) — everyone else folds into
+    the count as an anonymous +1. ``you_voted`` flags the viewer's own picks.
+    """
+    options = []
+    your_votes = []
+    for opt in poll.options.all():
+        votes = list(opt.votes.all())
+        voter_ids = {v.voter_id for v in votes}
+        options.append({
+            "id": opt.id,
+            "label": opt.label,
+            "date_value": opt.date_value,
+            "time_value": opt.time_value,
+            "text_value": opt.text_value,
+            "order": opt.order,
+            "count": len(votes),
+            "voters": [
+                _author_dict(v.voter, request)
+                for v in votes if v.voter_id in visible_ids
+            ],
+            "you_voted": me_id in voter_ids,
+        })
+        if me_id in voter_ids:
+            your_votes.append(opt.id)
+    return options, your_votes
+
+
+def serialize_poll(poll, *, visible_ids, me_id, request):
+    """One poll as a dict: metadata + results (counts full, names gated)."""
+    options, your_votes = build_poll_results(
+        poll, visible_ids=visible_ids, me_id=me_id, request=request
+    )
+    return {
+        "id": poll.id,
+        "event": poll.event_id,
+        "dimension": poll.dimension,
+        "question": poll.question,
+        "allow_multiple": poll.allow_multiple,
+        "status": poll.status,
+        "closes_at": poll.closes_at,
+        "created_at": poll.created_at,
+        "options": options,
+        "your_votes": your_votes,
+        # For a finalised custom poll, the option the organiser pinned (else null).
+        "decided_option": poll.decided_option_id,
+    }
+
+
+def _dimension_states(event, open_builtin_polls):
+    """Per built-in dimension (date/time/location): ``set`` if its field is
+    populated, else ``polling`` if an open poll targets it, else ``unset``. The
+    open poll id is surfaced regardless so a re-poll on an already-set dimension
+    still shows a live tally on the chip."""
+    populated = {
+        "date": event.event_date is not None,
+        "time": event.start_time is not None,
+        "location": bool(event.location_name),
+    }
+    states = {}
+    for dim in ("date", "time", "location"):
+        poll = open_builtin_polls.get(dim)
+        if populated[dim]:
+            state = "set"
+        elif poll is not None:
+            state = "polling"
+        else:
+            state = "unset"
+        states[dim] = {"state": state, "poll": poll.id if poll else None}
+    return states
+
+
+def build_rsvp_summary(event, *, visible_ids, me_id, request, named=True):
+    """RSVP tallies for an event: **complete counts** + the viewer's own RSVP,
+    and (when ``named``) **connection-gated** named lists per response.
+
+    ``event.rsvps`` (with ``user``) must be prefetched. ``counts.guests`` is the
+    summed "+N" headcount of the *going* responses only.
+    """
+    counts = {"going": 0, "maybe": 0, "declined": 0, "guests": 0}
+    your = None
+    lists = {"going": [], "maybe": [], "declined": []}
+    for r in event.rsvps.all():
+        counts[r.response] = counts.get(r.response, 0) + 1
+        if r.response == EventRSVP.Response.GOING:
+            counts["guests"] += max(r.guests or 0, 0)
+        if r.user_id == me_id:
+            your = {"response": r.response, "guests": r.guests, "note": r.note}
+        if named and r.user_id in visible_ids:
+            lists[r.response].append(_author_dict(r.user, request))
+    out = {"counts": counts, "your_response": your}
+    if named:
+        out["going_list"] = lists["going"]
+        out["maybe_list"] = lists["maybe"]
+        out["declined_list"] = lists["declined"]
+    return out
+
+
+def serialize_event(event, *, viewer, visible_ids, request,
+                    is_group_admin=False, detail=True):
+    """The full event payload — scalar fields, dimension states, RSVP summary,
+    and (in ``detail``) the polls.
+
+    Built as a dict rather than a ``ModelSerializer`` because the gated
+    aggregates (poll/RSVP names) don't map onto plain fields. Push-ready: a client
+    (web now, a phone later) has everything to render the card and deep-link. The
+    view must prefetch ``polls__options__votes__voter`` and ``rsvps__user``.
+    """
+    me_id = viewer.id
+    can_manage = event.organiser_id == me_id
+    polls = list(event.polls.all())
+    open_builtin = {
+        p.dimension: p
+        for p in polls
+        if p.status == Poll.Status.OPEN and p.dimension != Poll.Dimension.CUSTOM
+    }
+    data = {
+        "id": event.id,
+        "group": {"id": event.group_id, "name": event.group.name},
+        "organiser": _author_dict(event.organiser, request),
+        "title": event.title,
+        "description": event.description,
+        "event_date": event.event_date,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "timezone": event.timezone,
+        "location_name": event.location_name,
+        "location_url": event.location_url,
+        "location_note": event.location_note,
+        "status": event.status,
+        "is_past": event.is_past,
+        "starts_at": event.starts_at,
+        "dimensions": _dimension_states(event, open_builtin),
+        "rsvp": build_rsvp_summary(
+            event, visible_ids=visible_ids, me_id=me_id, request=request,
+            named=detail,
+        ),
+        "can_manage": can_manage,
+        "can_moderate": can_manage or is_group_admin,
+        "created_at": event.created_at,
+        "updated_at": event.updated_at,
+        # Polls are included even in list/summary payloads — the dimension chips
+        # need each poll's option tallies (a "polling" chip shows the live count)
+        # and the custom-poll chips. Voter names ride along already connection-
+        # gated. Only the heavier RSVP *named* lists are held back to ``detail``.
+        "polls": [
+            serialize_poll(p, visible_ids=visible_ids, me_id=me_id, request=request)
+            for p in polls
+        ],
+    }
+    return data
+
+
+class EventWriteSerializer(serializers.ModelSerializer):
+    """Validate an event **create** or **edit** body (organiser-authored fields).
+
+    The scheduling dimensions (``event_date``/``start_time``/``location_name``)
+    are deliberately **not** here — they're written only through ``finalise`` so
+    the advisory-poll rule (decision 3) and the ``status`` recompute live in one
+    place. This serializer covers the title, description, the auxiliary location
+    detail (link/note), the timezone, and the optional end time.
+    """
+
+    title = serializers.CharField(max_length=EVENT_TITLE_MAX)
+    description = serializers.CharField(
+        max_length=EVENT_DESCRIPTION_MAX, required=False, allow_blank=True,
+        default="",
+    )
+
+    class Meta:
+        model = Event
+        fields = (
+            "title", "description", "location_url", "location_note",
+            "timezone", "end_time",
+        )
+
+    def validate_title(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("An event needs a title.")
+        return value
+
+
+class PollOptionWriteSerializer(serializers.Serializer):
+    """One candidate option in a poll-create body. The typed value used depends
+    on the poll's dimension (validated in the view, which knows the dimension):
+    ``date_value`` for date, ``time_value`` for time, ``text_value`` for
+    location/custom. ``label`` is optional — the view fills a sensible default
+    from the value when it's blank."""
+
+    label = serializers.CharField(
+        max_length=EVENT_TEXT_FIELD_MAX, required=False, allow_blank=True,
+        default="",
+    )
+    date_value = serializers.DateField(required=False, allow_null=True)
+    time_value = serializers.TimeField(required=False, allow_null=True)
+    text_value = serializers.CharField(
+        max_length=EVENT_TEXT_FIELD_MAX, required=False, allow_blank=True,
+        default="",
+    )
+
+
+class PollCreateSerializer(serializers.Serializer):
+    """Validate a poll-create body: a dimension, an optional question (auto-phrased
+    for built-ins when omitted), at least two options, and the poll knobs."""
+
+    dimension = serializers.ChoiceField(choices=Poll.Dimension.choices)
+    question = serializers.CharField(
+        max_length=EVENT_TEXT_FIELD_MAX, required=False, allow_blank=True,
+        default="",
+    )
+    allow_multiple = serializers.BooleanField(required=False, allow_null=True,
+                                              default=None)
+    closes_at = serializers.DateTimeField(required=False, allow_null=True)
+    options = PollOptionWriteSerializer(many=True)
+
+    def validate_options(self, value):
+        if len(value) < 2:
+            raise serializers.ValidationError(
+                "A poll needs at least two options."
+            )
+        return value
+
+
+class RSVPWriteSerializer(serializers.Serializer):
+    """Validate an RSVP upsert body: a response, optional +guests, optional note."""
+
+    response = serializers.ChoiceField(choices=EventRSVP.Response.choices)
+    guests = serializers.IntegerField(
+        required=False, min_value=0, max_value=MAX_GUESTS, default=0
+    )
+    note = serializers.CharField(
+        max_length=EVENT_TEXT_FIELD_MAX, required=False, allow_blank=True,
+        default="",
+    )
+
+
+class FinaliseSerializer(serializers.Serializer):
+    """Validate a ``finalise`` body — the organiser's *decision* on a dimension.
+
+    ``value`` is a raw string interpreted per dimension in the view (a date, a
+    time, or free text), and it need **not** match any poll option (decision 3 —
+    the organiser can set a value no one voted for). For a ``custom`` poll,
+    ``option_id`` pins a winning option instead. ``close_poll`` (default true)
+    closes the related open poll as part of finalising.
+    """
+
+    dimension = serializers.ChoiceField(choices=Poll.Dimension.choices)
+    value = serializers.CharField(required=False, allow_blank=True,
+                                  allow_null=True, default="")
+    option_id = serializers.IntegerField(required=False, allow_null=True)
+    close_poll = serializers.BooleanField(required=False, default=True)

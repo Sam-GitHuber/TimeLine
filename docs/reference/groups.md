@@ -4,8 +4,10 @@ Private, invite-only shared timelines — a family group, a friend circle, a
 shared-interest group — each with its own reverse-chronological timeline you can
 post into, with comments, exactly like personal posts. Still no algorithm: a group
 timeline is just its members' posts newest-first, scoped to the group. Group
-*chat* is a separate feature — see [messaging](messaging.md). This doc is the
-current-state reference.
+*chat* is a separate feature — see [messaging](messaging.md); planning **events**
+in a group is another — see [events](events.md), which reuses this doc's
+membership + the connection gate below, keyed on the event's organiser. This doc
+is the current-state reference.
 
 Code: `Group` / `GroupMembership` models + `Post.group` FK + membership helpers
 (`group_role` / `is_group_member` / `is_group_admin` / `can_add_to_group`) in

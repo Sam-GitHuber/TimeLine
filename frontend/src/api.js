@@ -516,4 +516,120 @@ export const api = {
       method: "PATCH",
       body: prefs,
     }),
+
+  // --- Group events & planning calendar (Phase 8b) -------------------------
+
+  // A group's events you can see (members only; each pruned to those organised
+  // by someone you're connected with). `window` is "upcoming" (default), "past",
+  // or "all". Returns a plain array (not paginated) — bounded by the window.
+  getGroupEvents: (groupId, window = "upcoming") =>
+    request(`/api/groups/${groupId}/events/?window=${window}`),
+
+  // Plan an event in a group (any active member). Body is the organiser-authored
+  // fields; the date/time/location are set later via finalise. Returns the new
+  // event (in `planning`, with the creator as organiser).
+  createEvent: (groupId, { title, description = "", timezone } = {}) =>
+    request(`/api/groups/${groupId}/events/`, {
+      method: "POST",
+      body: {
+        title,
+        description,
+        ...(timezone ? { timezone } : {}),
+      },
+    }),
+
+  // A single event: dimensions + their states, your RSVP/votes, poll tallies
+  // (counts complete, names connection-gated), and can_manage/can_moderate.
+  // 404 if you're not connected to the organiser.
+  getEvent: (eventId) => request(`/api/events/${eventId}/`),
+
+  // Edit an event's non-scheduling fields (organiser only): title, description,
+  // location link/note, timezone, end time.
+  updateEvent: (eventId, fields) =>
+    request(`/api/events/${eventId}/`, { method: "PATCH", body: fields }),
+
+  // Soft-cancel an event (organiser or a group admin) — a tombstone that
+  // notifies going/maybe RSVPs, not a delete.
+  cancelEvent: (eventId) =>
+    request(`/api/events/${eventId}/cancel/`, { method: "POST" }),
+
+  // Hard-delete an event (organiser or a group admin). Cascades. Returns 204.
+  deleteEvent: (eventId) =>
+    request(`/api/events/${eventId}/`, { method: "DELETE" }),
+
+  // Upsert your RSVP (any member who can see the event). One RSVP per person.
+  rsvpEvent: (eventId, { response, guests = 0, note = "" }) =>
+    request(`/api/events/${eventId}/rsvp/`, {
+      method: "PUT",
+      body: { response, guests, note },
+    }),
+
+  // The event's RSVPs: complete counts + connection-gated named lists.
+  getEventRsvps: (eventId) => request(`/api/events/${eventId}/rsvps/`),
+
+  // Open a poll on a dimension (organiser). `options` is an array of
+  // { label?, date_value?/time_value?/text_value? } depending on the dimension.
+  createPoll: (eventId, { dimension, question, allowMultiple, closesAt, options }) =>
+    request(`/api/events/${eventId}/polls/`, {
+      method: "POST",
+      body: {
+        dimension,
+        ...(question !== undefined ? { question } : {}),
+        ...(allowMultiple !== undefined ? { allow_multiple: allowMultiple } : {}),
+        ...(closesAt ? { closes_at: closesAt } : {}),
+        options,
+      },
+    }),
+
+  // A poll + its options + results (counts complete, voter names gated).
+  getPoll: (pollId) => request(`/api/polls/${pollId}/`),
+
+  // Cast/replace your votes — `optionIds` is your full selection (an empty list
+  // clears your vote). Only while the poll is open.
+  votePoll: (pollId, optionIds) =>
+    request(`/api/polls/${pollId}/vote/`, {
+      method: "PUT",
+      body: { option_ids: optionIds },
+    }),
+
+  // Close a poll without deciding (organiser) — freezes the tally.
+  closePoll: (pollId) =>
+    request(`/api/polls/${pollId}/close/`, { method: "POST" }),
+
+  // Remove a poll (organiser).
+  deletePoll: (pollId) =>
+    request(`/api/polls/${pollId}/`, { method: "DELETE" }),
+
+  // The organiser's *decision* on a dimension (advisory poll → set value). For a
+  // built-in, `value` writes the field (need not be a poll option); for custom,
+  // `optionId` pins a winning option. Recomputes status, notifies.
+  finaliseEvent: (eventId, { dimension, value, optionId, closePoll = true }) =>
+    request(`/api/events/${eventId}/finalise/`, {
+      method: "POST",
+      body: {
+        dimension,
+        ...(value !== undefined ? { value } : {}),
+        ...(optionId !== undefined ? { option_id: optionId } : {}),
+        close_poll: closePoll,
+      },
+    }),
+
+  // One group's dated events in a window, for the month grid.
+  getGroupCalendar: (groupId, { from, to } = {}) => {
+    const params = new URLSearchParams();
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    const qs = params.toString();
+    return request(`/api/groups/${groupId}/calendar/${qs ? `?${qs}` : ""}`);
+  },
+
+  // The personal calendar: a time-merge of the dated events you can see across
+  // every group you're a member of. Each event carries its group label.
+  getPersonalCalendar: ({ from, to } = {}) => {
+    const params = new URLSearchParams();
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    const qs = params.toString();
+    return request(`/api/calendar/${qs ? `?${qs}` : ""}`);
+  },
 };

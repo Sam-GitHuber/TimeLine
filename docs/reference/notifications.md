@@ -95,6 +95,14 @@ cross-cutting rules, so no call site can forget one.
 | `connection_request` | `ConnectView` (new pending request) | the addressee | **always-on** |
 | `connection_accepted` | `ConnectView` / `ConnectionRequestActionView` (approve) | the requester | **always-on** |
 | `group_invite` | `GroupMembersView` (POST) | the invitee | **always-on** |
+| `event_created` / `poll_opened` / `event_scheduled` / `event_updated` / `event_cancelled` | the [group-event](events.md) views | members connected to the organiser (going/maybe RSVPs for updated/cancelled) | yes |
+
+The five **event** kinds (Phase 8b) added a fifth concrete target FK
+(`Notification.event`) and widened the "at most one target" `CheckConstraint`
+accordingly — the model was built to grow this way. Their actor is always the
+event's **organiser**, so rule 3 below lands them on exactly the audience that can
+see the event, with no event-specific gating. `event_updated` is de-duped while
+unread, like `reaction`. See [events](events.md).
 
 ### The three rules `create_notification` enforces
 
@@ -120,9 +128,10 @@ DB-unique, and adding a kind later is data, not a migration of everyone's blob).
 **Absence means enabled** (opt-out): new kinds notify by default; users mute what
 they don't want.
 
-Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`) are ever
-written here and exposed in the API. The connection/invite kinds are
-**always-on**: muting "someone wants to connect" would hide something you must act
+Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, and the five
+[event](events.md) kinds) are ever written here and exposed in the API. The
+connection/invite kinds are **always-on**: muting "someone wants to connect" would
+hide something you must act
 on — and with the badges unified, the bell is the only signal. A `PATCH` that tries
 to mute an always-on kind is a 400.
 

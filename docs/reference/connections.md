@@ -81,9 +81,11 @@ from a not-connected author — *and its entire subtree* — is invisible to you
   [groups](groups.md)).
 - **Consequence (intended):** two viewers can legitimately see different comment
   trees on the same post. That's the privacy-correct behaviour, not a bug — and the
-  same rule governs [reactions](reactions.md) and
-  [notification gating](notifications.md) (you're never notified of a reply or
-  reaction from someone you can't see).
+  same rule governs [reactions](reactions.md), [notification gating](notifications.md)
+  (you're never notified of a reply or reaction from someone you can't see), and
+  [group events](events.md) (`visible_events` applies this exact gate keyed on the
+  event's organiser — with the deliberate **inversion** that a poll/RSVP *count*
+  includes people you can't see, while their *names* stay gated).
 
 ### Frontend
 

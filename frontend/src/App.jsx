@@ -22,6 +22,8 @@ import SettingsPage from "./pages/SettingsPage.jsx";
 import PeoplePage from "./pages/PeoplePage.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
+import EventPage from "./pages/EventPage.jsx";
+import CalendarPage from "./pages/CalendarPage.jsx";
 import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
@@ -132,6 +134,11 @@ export default function App() {
           <Route path="group-invites" element={<GroupInvitesPage />} />
           <Route path="g/:id" element={<GroupPage />} />
           <Route path="g/:id/edit" element={<GroupFormPage />} />
+          {/* Group events (Phase 8b). The event detail is where a group-event
+              notification deep-links; the personal calendar unions upcoming
+              events across your groups. */}
+          <Route path="g/:id/events/:eid" element={<EventPage />} />
+          <Route path="calendar" element={<CalendarPage />} />
           {/* Legacy/deep-link messaging URLs → open the drawer over the feed. */}
           <Route path="messages" element={<MessagesRoute />} />
           <Route path="messages/:id" element={<MessagesRoute thread />} />
