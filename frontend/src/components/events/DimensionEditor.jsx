@@ -234,6 +234,12 @@ function TimeSetField({ onSet, onCancel, busy }) {
 function PollBuilder({ dimension, onPoll, onCancel, busy }) {
   const [question, setQuestion] = useState("");
   const [options, setOptions] = useState(["", ""]);
+  // Seed the pick-one/pick-many choice from the same per-dimension default the
+  // server would apply (date/time → pick any, location/custom → pick one), so
+  // leaving it untouched keeps the familiar behaviour; the maker can override.
+  const [allowMultiple, setAllowMultiple] = useState(
+    dimension === "date" || dimension === "time"
+  );
   const type = INPUT_TYPE[dimension] || "text";
   const filled = options.filter((v) => v.trim());
   const canOpen = filled.length >= 2 && (dimension !== "custom" || question.trim());
@@ -251,6 +257,7 @@ function PollBuilder({ dimension, onPoll, onCancel, busy }) {
     onPoll({
       dimension,
       question: dimension === "custom" ? question.trim() : undefined,
+      allowMultiple,
       options: built,
     });
   }
@@ -295,6 +302,15 @@ function PollBuilder({ dimension, onPoll, onCancel, busy }) {
       >
         + Add {NOUN[dimension] === "question" ? "option" : NOUN[dimension]}
       </button>
+      <label className="mt-3 flex items-center gap-2 text-sm text-ink-soft">
+        <input
+          type="checkbox"
+          checked={allowMultiple}
+          onChange={(e) => setAllowMultiple(e.target.checked)}
+          className="h-4 w-4 rounded border-line-strong text-accent-deep focus:ring-accent"
+        />
+        Let people pick more than one
+      </label>
       <div className="mt-3 flex gap-2">
         <button type="submit" disabled={!canOpen || busy} className="btn btn-primary btn-sm">
           Open poll

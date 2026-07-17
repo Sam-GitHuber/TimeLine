@@ -69,7 +69,7 @@ export default function PollTally({
         <div className="flex shrink-0 items-center gap-1">
           <span className="text-xs text-ink-faint">
             {open ? "open" : "closed"}
-            {poll.allow_multiple && open ? " · pick any" : ""}
+            {open ? (poll.allow_multiple ? " · pick any" : " · pick one") : ""}
           </span>
           {canManage && (
             <PollMenu
@@ -204,7 +204,7 @@ function PollMenu({ open, canEdit, busy, onEdit, onClose, onReopen, onDelete }) 
             // A hint, not a choice — role="none" keeps it out of the menu's
             // item semantics (a role="menu" should contain only menuitems).
             <p role="none" className="px-3 py-2 text-xs text-ink-faint">
-              Wording locks once voting starts.
+              Editing locks once voting starts.
             </p>
           )}
           {open ? (
@@ -255,6 +255,7 @@ function PollEditForm({ poll, onSave, onDone }) {
   const [opts, setOpts] = useState(() =>
     (poll.options || []).map((o) => ({ id: o.id, value: optionEditValue(dim, o) }))
   );
+  const [allowMultiple, setAllowMultiple] = useState(!!poll.allow_multiple);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -277,7 +278,11 @@ function PollEditForm({ poll, onSave, onDone }) {
       setError("Every option needs a value.");
       return;
     }
-    const payload = { question: q, options: opts.map((o) => optionEditPayload(dim, o)) };
+    const payload = {
+      question: q,
+      allowMultiple,
+      options: opts.map((o) => optionEditPayload(dim, o)),
+    };
     setSaving(true);
     setError(null);
     try {
@@ -316,6 +321,16 @@ function PollEditForm({ poll, onSave, onDone }) {
           />
         ))}
       </div>
+
+      <label className="mt-3 flex items-center gap-2 text-sm text-ink-soft">
+        <input
+          type="checkbox"
+          checked={allowMultiple}
+          onChange={(e) => setAllowMultiple(e.target.checked)}
+          className="h-4 w-4 rounded border-line-strong text-accent-deep focus:ring-accent"
+        />
+        Let people pick more than one
+      </label>
 
       {error && (
         <p role="alert" className="mt-2 text-sm text-red-600">

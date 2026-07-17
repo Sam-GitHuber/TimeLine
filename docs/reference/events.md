@@ -109,7 +109,10 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
   link, **no geocoding**) / `location_note`, `status`. `starts_at` and `is_past`
   are computed properties. Index `(group, event_date)`.
 - **`Poll`** — `event` (CASCADE), `dimension`, `question`, `allow_multiple`
-  (default true for date/time, false for location/custom), `status` (`open` /
+  (pick-one vs pick-any; **seeded** from the per-dimension default — true for
+  date/time, false for location/custom — but the organiser can choose it when
+  opening a poll and change it later via the edit while unvoted), `status`
+  (`open` /
   `closed`), `closes_at` (a **soft** deadline — stops new votes, does *not*
   auto-finalise), `decided_option` (the pinned option for a finalised **custom**
   poll; built-ins write the event's fields instead). **At most one open poll per

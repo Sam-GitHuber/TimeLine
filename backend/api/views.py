@@ -3345,9 +3345,10 @@ class PollDetailView(APIView):
     def patch(self, request, pk):
         """Fix a poll's mistakes (``PATCH /polls/<pk>/``) — organiser only.
 
-        Editable: the ``question`` and each option's value/label (the same typed
-        fields as poll creation, per the dimension). **A poll locks the moment
-        its first vote lands** — editing a voted poll is refused with a 409,
+        Editable: the ``question``, ``allow_multiple`` (pick-one vs pick-any),
+        and each option's value/label (the same typed fields as poll creation,
+        per the dimension). **A poll locks the moment its first vote lands** —
+        editing a voted poll is refused with a 409,
         because rewriting an option someone already voted for would silently
         redefine their vote (the integrity guard behind the honest-coordination-
         number rule). Rewriting *values* is only offered here because that guard
@@ -3373,9 +3374,15 @@ class PollDetailView(APIView):
                     {"options": "An option doesn't belong to this poll."}
                 )
         with transaction.atomic():
+            poll_fields = []
             if "question" in data:
                 poll.question = data["question"]
-                poll.save(update_fields=["question"])
+                poll_fields.append("question")
+            if "allow_multiple" in data:
+                poll.allow_multiple = data["allow_multiple"]
+                poll_fields.append("allow_multiple")
+            if poll_fields:
+                poll.save(update_fields=poll_fields)
             to_update = []
             for edit in edits:
                 opt = by_id[edit["id"]]

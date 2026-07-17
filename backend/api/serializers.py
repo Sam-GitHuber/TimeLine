@@ -1012,6 +1012,7 @@ class PollEditSerializer(serializers.Serializer):
     any votes."""
 
     question = serializers.CharField(max_length=EVENT_TEXT_FIELD_MAX, required=False)
+    allow_multiple = serializers.BooleanField(required=False)
     options = PollOptionEditSerializer(many=True, required=False)
 
     def validate_question(self, value):

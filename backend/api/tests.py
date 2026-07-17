@@ -3914,6 +3914,20 @@ class PollEditReopenTests(EventsBase):
         self.assertEqual(opt.date_value, right)
         self.assertEqual(opt.label, right.isoformat())
 
+    def test_organiser_edits_allow_multiple(self):
+        # A custom poll opens single-choice by default; the organiser flips it to
+        # pick-any while it's still unvoted.
+        poll = self._open_custom_poll()
+        self.assertFalse(Poll.objects.get(pk=poll["id"]).allow_multiple)
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"allow_multiple": True},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.json()["allow_multiple"])
+        self.assertTrue(Poll.objects.get(pk=poll["id"]).allow_multiple)
+
     def test_edit_refused_once_a_vote_exists(self):
         poll = self._open_custom_poll()
         opt0 = poll["options"][0]["id"]

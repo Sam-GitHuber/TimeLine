@@ -56,8 +56,8 @@ export default function EventPage() {
     onSuccess: closeAndRefresh,
   });
   const createPoll = useMutation({
-    mutationFn: ({ dimension, question, options }) =>
-      api.createPoll(eventId, { dimension, question, options }),
+    mutationFn: ({ dimension, question, allowMultiple, options }) =>
+      api.createPoll(eventId, { dimension, question, allowMultiple, options }),
     onSuccess: closeAndRefresh,
   });
   const vote = useMutation({

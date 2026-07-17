@@ -254,6 +254,34 @@ describe("EventPage", () => {
     );
   });
 
+  it("lets the maker open a multi-choice custom poll", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /Ask the group something else/ })
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText(/What should we bring/),
+      "What to bring?"
+    );
+    const opts = screen.getAllByPlaceholderText(/Option/);
+    await userEvent.type(opts[0], "Cake");
+    await userEvent.type(opts[1], "Drinks");
+    // A custom poll defaults to single-choice; the maker opts into multiple.
+    await userEvent.click(
+      screen.getByLabelText(/Let people pick more than one/)
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Open poll" }));
+    await waitFor(() =>
+      expect(api.createPoll).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({ dimension: "custom", allowMultiple: true })
+      )
+    );
+  });
+
   it("finalises a decision when the organiser pins an option", async () => {
     api.getEvent.mockResolvedValue(makeEvent());
     renderEventPage();
