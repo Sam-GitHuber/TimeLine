@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, NOTIFICATIONS_POLL_MS } from "../api.js";
 import { formatRelativeTime } from "../utils.js";
 import Avatar from "./Avatar.jsx";
+import NavBadge from "./NavBadge.jsx";
 
 // The nav "Activity" bell + dropdown — the single, unified place "something
 // happened to you" shows up (Phase 8). It absorbs what used to be separate
@@ -117,20 +118,7 @@ export default function ActivityCenter() {
       >
         <BellIcon className="h-5 w-5 sm:hidden" />
         <span className="hidden sm:inline">Activity</span>
-        {unread > 0 && (
-          <>
-            <span
-              aria-hidden="true"
-              className="absolute right-1 top-1 h-2 w-2 rounded-full bg-accent ring-2 ring-surface sm:hidden"
-            />
-            <span
-              aria-hidden="true"
-              className="ml-1.5 hidden min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white sm:inline-flex"
-            >
-              {unread}
-            </span>
-          </>
-        )}
+        {unread > 0 && <NavBadge count={unread} />}
       </button>
 
       {open && (
