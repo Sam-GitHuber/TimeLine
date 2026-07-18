@@ -1,10 +1,22 @@
 # Phase 9 — iPhone App
 
-**Status:** not started — **plan ready, refine at kickoff**
+**Status:** not started — **plan complete, ready to start**
 
-This is a full execution plan, not a sketch. The two scope decisions that were
-open are now locked (see **Decisions locked** below). Re-confirm the "Open
-questions still to resolve" list at kickoff, then work the milestones in order.
+This is a full execution plan. All scope decisions are locked (see **Decisions
+locked** below); the questions that were open at kickoff have been resolved and
+folded into the plan. Do the **Prerequisite** below on day one, then work the
+milestones in order.
+
+## Prerequisite — enrol in the Apple Developer Program *before* Milestone A
+
+Enrolment is **not instant** — approval commonly takes 24–48 hours and can run
+longer if Apple asks for identity verification. It hard-blocks Milestone D (push
+cannot be tested without it) and Milestone F (TestFlight).
+
+Start the enrolment **on day one**, before writing any code, so the wait overlaps
+with Milestones A–C instead of stalling the phase at D. It is not a milestone
+because there is nothing to build — it is a form to submit and then forget about
+until D.
 
 ## Costs to be aware of (before starting)
 
@@ -60,6 +72,100 @@ events to land in the phone's notification centre. Today notification delivery i
   runnable, demoable app, and so the auth + push spine lands early.
 - **Bearer-token auth on mobile** (see "Backend change" below).
 - **Dev on Simulator + Emulator; real iPhone via a dev build for push.**
+- **One `mobile/` folder at the repo root** — not `apps/ios` + `apps/android`,
+  and no shared web/mobile package. See **Repo layout** below for the reasoning.
+- **Refresh-token rotation ships in Milestone A** (changed from the earlier
+  "defer" default). A phone app is expected to stay logged in indefinitely, and a
+  logged-out app receives **no push notifications** — which would undercut the
+  main goal of the phase. `simplejwt` has rotation built in, so this is
+  configuration plus a refresh call in the fetch wrapper, done once while we're
+  already in the auth code rather than retrofitted mid-phase.
+- **Tests: Jest + React Native Testing Library, unit + component only.** Mirrors
+  the web app's Vitest + RTL approach, so the mental model carries over and CI
+  stays fast. **No Maestro/Detox E2E** — a second tool, simulator infrastructure
+  in CI, and a well-known flakiness tax that isn't worth it at this scale.
+- **Online-only for v1.** No offline mode; TanStack Query's cache gives basic
+  re-view of already-fetched screens and that's enough. Revisit only if testers
+  complain.
+- **Expo Go for Milestones B–C, dev build from D onward.** Expo Go is the fastest
+  loop while there's no native module to worry about; push notifications require a
+  real dev build, so D is the switching point. Don't switch earlier "to be safe" —
+  the slower rebuild cycle isn't worth paying before it's needed.
+
+## Repo layout
+
+**Decision: one `mobile/` folder at the repo root, sibling to `backend/` and
+`frontend/`.**
+
+```
+TimeLine/
+├── backend/          # Django + DRF — serves all three clients
+├── frontend/         # React + Vite web app
+├── mobile/           # ← this phase: Expo app, iOS + Android from one source
+│   ├── app/          # Expo Router routes (file-based)
+│   ├── src/
+│   │   ├── api.js       # fetch wrapper — Bearer token, not cookies
+│   │   ├── components/  # RN components (View/Text, not div/span)
+│   │   └── theme.js     # design tokens translated from the Tailwind @theme
+│   ├── app.json
+│   └── package.json  # its own deps; does NOT merge with frontend's
+└── docs/
+```
+
+**Why not `apps/ios/` + `apps/android/`.** That layout is for two separately
+written native apps (Swift + Kotlin). We chose React Native precisely so there is
+*one* codebase; Phase 10 (Android) adds no new screens, only FCM credentials,
+back-button handling, notification channels, and layout fixes — all edits inside
+`mobile/`. Two folders would imply a split that doesn't exist.
+
+Expo *does* generate `mobile/ios/` and `mobile/android/` subfolders (the real
+Xcode/Gradle projects), but in the managed workflow those are **generated and
+gitignored** — recreated by `npx expo prebuild` or on EAS's build servers, never
+hand-edited. They exist on disk without being part of the source.
+
+**Why no shared web/mobile package.** iOS and Android share ~95% of the mobile
+code — that's the whole point of Expo, and it comes free. **Web and mobile share
+far less than it first appears:** the web app's components are built on `<div>`,
+`<button>`, and Tailwind classes, none of which exist in React Native. `PostCard`
+gets rewritten, not imported. What could genuinely be shared is `utils.js`,
+`postCache.js`, some query hooks, and the design tokens — roughly **1–1.5k lines
+out of an 11k-line web app** — and `api.js` only partially, since the auth layer
+differs (cookie + CSRF vs Bearer).
+
+Extracting that into a workspace package would mean npm workspaces, a build step,
+and Metro bundler configuration: real, permanent complexity for two consumers and
+~1k shared lines. That's the "clever over boring" trade `docs/SHARED.md` tells us
+to avoid. **So: copy `utils.js` and the token values into `mobile/`, write
+`mobile/src/api.js` fresh for Bearer auth.** The genuinely shared layer is the
+JSON API itself — that's where the logic that matters already lives. Revisit
+extraction only if the same bug gets fixed twice in two places.
+
+**Note:** once `mobile/` exists, the name `frontend/` is arguably misleading —
+there are then two frontends. Renaming it to `web/` would touch Docker Compose,
+both CI workflows, the deploy scripts, and most docs. **Not worth the churn;
+leave it.**
+
+### Running the stack in development
+
+Three processes instead of two:
+
+```bash
+docker compose up --build        # backend + db + web app, as today
+cd mobile && npx expo start      # Metro bundler → press 'i' for iOS Simulator
+```
+
+The Simulator can't reach `localhost:8000` the way a desktop browser can. Rather
+than working around that with LAN IPs, **point the app at
+`https://your-timeline.net`** (the Phase 7 home server) from Milestone B — which
+is what we want to be testing against anyway. Use a `mobile/.env` with
+`EXPO_PUBLIC_API_URL` so a local backend stays possible when debugging API work.
+
+### CI
+
+Add a third job, `mobile-test`, to `.github/workflows/main.yml` alongside the
+existing `backend` and `frontend` jobs: `npm ci` then `npm test` in `mobile/`.
+Actual app *builds* happen on **EAS** (Expo's cloud build service), not in GitHub
+Actions — don't try to build an IPA in CI.
 
 ## Backend change — mobile auth flow (do this first, Milestone A)
 
@@ -84,13 +190,35 @@ a second way**, not a rewrite:
 3. **Token storage on device:** store the access token in **`expo-secure-store`**
    (Keychain-backed), never `AsyncStorage`. Attach it in a single fetch/axios
    wrapper.
-4. **Refresh:** access-token lifetime is 1 day and there is no silent refresh yet
-   (see accounts.md). For v1, on a `401` clear the token and route to login
-   (same "you were logged out" UX the web has). Add refresh-token rotation later
-   if the 1-day expiry annoys testers — note it, don't build it now.
-5. **Tests:** add a backend test asserting a `Bearer` token authenticates a
-   protected endpoint and a bad/expired one 401s. (Every phase ships real tests —
-   see the project memory.)
+4. **Refresh-token rotation — build it now.** Today `SIMPLE_JWT` is
+   `ACCESS_TOKEN_LIFETIME` 1 day / `REFRESH_TOKEN_LIFETIME` 7 days with no silent
+   refresh (`config/settings.py`), so a client is simply logged out when the
+   access token expires. That's tolerable on the web and wrong on a phone: an app
+   that logs you out weekly stops receiving **push notifications**, which defeats
+   the phase.
+
+   - Enable `ROTATE_REFRESH_TOKENS` and `BLACKLIST_AFTER_ROTATION`, and add
+     `rest_framework_simplejwt.token_blacklist` to `INSTALLED_APPS` (it ships
+     migrations — run them). Rotation means each refresh returns a *new* refresh
+     token and invalidates the old one, so a stolen token has a short useful life.
+   - **Lengthen `REFRESH_TOKEN_LIFETIME` to ~90 days** so the app stays logged in
+     across normal use. **Leave `ACCESS_TOKEN_LIFETIME` at 1 day** — do *not*
+     shorten it as a "security improvement" here: the web app has no refresh
+     logic, so a shorter access token would start logging family members out of
+     the website. Changing that is a separate, later piece of work.
+   - Store **both** tokens in `expo-secure-store`. The fetch wrapper retries once
+     through refresh on a `401`, then falls back to clearing tokens and routing to
+     login. Guard against a refresh stampede — several parallel 401s must share
+     one in-flight refresh, not fire five.
+   - **On logout, blacklist the refresh token server-side.** Deleting it from the
+     device only is not enough; a copy lifted from a backup would still work.
+5. **Privacy/security note.** A Bearer token in `expo-secure-store` is
+   Keychain-backed and does not leave the device, but unlike the web's httpOnly
+   cookie it *is* readable by our own JS. Never log it, never put it in an error
+   report, and never append it to a URL query string (URLs land in server logs).
+6. **Tests:** a `Bearer` token authenticates a protected endpoint; a bad/expired
+   one 401s; a refresh returns a new pair; a rotated-away refresh token is
+   rejected; logout blacklists. (Every phase ships real tests.)
 
 This change is small and backend-only; keep it in its own PR so the app work
 rebases on a stable API.
@@ -137,9 +265,42 @@ where it reads better).
   so a push failure never blocks the request; a management command / lightweight
   task is fine at this scale (no Celery yet — see SHARED.md "add later").
 - **Payload → deep link:** the `NotificationSerializer` is already push-ready
-  (`kind` + one target FK). Map `kind` to an Expo Router path so tapping opens the
-  right post/comment/group/connection and marks it seen, keeping the in-app
-  activity centre in sync.
+  (`kind` + one target FK). Map each `kind` to an Expo Router path so tapping
+  opens the right target and marks it **addressed** (which implies seen), keeping
+  the in-app activity centre in sync — the same click-through semantics the web
+  dropdown already has (see [notifications.md](../reference/notifications.md)).
+
+  All eleven kinds, with their target FK and destination route:
+
+  | `kind` | Target FK | Route |
+  |---|---|---|
+  | `post_reply` | `post` | `/post/[postId]` |
+  | `comment_reply` | `comment` | `/post/[postId]` → scroll to comment |
+  | `reaction` | `post` *or* `comment` | `/post/[postId]` |
+  | `connection_request` | `connection` | `/people` (requests) |
+  | `connection_accepted` | `connection` | `/profile/[actorId]` |
+  | `group_invite` | `group` | `/groups/invites` |
+  | `event_created` | `event` | `/events/[eventId]` |
+  | `poll_opened` | `event` | `/events/[eventId]` |
+  | `event_scheduled` | `event` | `/events/[eventId]` |
+  | `event_updated` | `event` | `/events/[eventId]` |
+  | `event_cancelled` | `event` | `/events/[eventId]` |
+
+  **Gap to check in Milestone D:** the `comment_reply` and comment-targeted
+  `reaction` rows carry a `comment` FK, but the route needs the **parent post's
+  id**. Confirm `NotificationSerializer` exposes it; if not, add it there rather
+  than making the app fetch the comment first to find its post — one extra field
+  beats a round-trip on every notification tap.
+
+  Because all target FKs `CASCADE`, a notification never outlives its target, so
+  there are **no dangling deep-links** to defend against. A tap on a
+  notification for since-deleted content can't happen — the row is gone too.
+
+- **Cold start vs. warm tap.** Handle both: a tap that *launches* the app
+  (initial notification response) and one that arrives while it's foregrounded or
+  backgrounded. These are different Expo APIs and the cold-start path is the one
+  that's easy to miss and easy to get wrong — test it explicitly by force-quitting
+  the app before sending.
 - **Constraint:** iOS push needs a **real device + Apple Developer Program** — it
   cannot be tested in the Simulator. Plan a real-device pass for Milestone D.
 
@@ -158,25 +319,69 @@ identity; runs on the maintainer's iPhone via Expo Go.
 photo, profiles. Ends: you can scroll, open, react, comment, and post from the
 Simulator against the real backend.
 
-**D. Push notifications.** Apple Developer enrolment, dev build (not Expo Go —
-push needs a real build), device registration, backend send + preference gating,
-deep-link handling. Ends: a Phase 8 event lands in the iPhone's notification
-centre, tapping it opens the target, activity centre stays in sync, a muted type
-sends nothing.
+**D. Push notifications.** Switch to a dev build (Expo Go can't do push), device
+registration, backend send + preference gating, the deep-link map above, cold-start
+handling. Requires the Apple Developer enrolment from the **Prerequisite** to be
+live by now. Ends: a Phase 8 event lands in the iPhone's notification centre,
+tapping it opens the target, activity centre stays in sync, a muted type sends
+nothing.
 
-**E. Parity fill-in.** Connections/People, messaging (DM + group), groups +
-invites, settings (notification prefs, account, account deletion), ToS/privacy,
-and the report/block surfaces. Ends: no web feature is missing from the app.
+**E. Parity fill-in.** The long tail — **budget roughly 40% of the phase here**.
+It's four independent chunks, each its own PR, in this order (most-used first, so
+if you pause the phase you've built the things people actually open):
+
+- **E1. Connections / People.** Request, accept, decline, the symmetric graph.
+  Gates real multi-user testing, so it comes first.
+- **E2. Messaging.** DM + group threads, unread badge, 4s open-thread polling.
+  The largest single chunk — the web app's `messaging.jsx` is its own module.
+- **E3. Groups + events.** Group list/detail/invites, group timelines, and the
+  Phase 8b event surfaces (event detail, RSVP, polls, calendar).
+- **E4. Settings + safety.** Per-type notification prefs, account settings,
+  account deletion, ToS/privacy, and **report + block**. Small in code, but
+  **App Review will reject a social app without working report and block** —
+  don't leave it to the end of E4.
+
+Ends: no web feature is missing from the app.
 
 **F. Distribution.** Build with EAS, upload to **TestFlight**, add real testers.
 Ends: friends/family install via TestFlight; sign-ups remain admin-approved.
+
+### PR strategy
+
+Per the project's branching rule (branch + PR, never commit to `main`):
+
+- **A lands alone, before any app code.** It changes how *every* request
+  authenticates, so if the web app breaks there must be no ambiguity about why.
+  Verify the web app is still green before opening B.
+- **B lands alone too** — it's the scaffold everything else imports (routing,
+  fetch wrapper, theme, token storage). Churning it underneath in-flight feature
+  PRs would be painful.
+- **C onward: one PR per screen area**, roughly the rows of the screen inventory.
+  Keeps reviews readable and means a broken screen never blocks the others.
+- **Add the `mobile-test` CI job in B**, not later, so every subsequent PR is
+  covered from the start.
+
+### Rough sizing
+
+Measured against the web app (11,074 lines of non-test source, 4,670 of tests,
+36 components, 15 pages), full parity puts `mobile/` in the same ballpark:
+**~8–12k lines of source, ~2–3k of tests**, i.e. roughly doubling the repo's
+source. On disk it adds ~1.5 GB of `node_modules` and build artifacts, all
+gitignored; committed source growth is a few MB. This is the largest phase so
+far by a clear margin — a direct consequence of the locked full-parity decision.
 
 ## Definition of done
 
 - [ ] Backend accepts `Authorization: Bearer` alongside the cookie-JWT (web
       unaffected), login returns the token in the body, tests cover both, PR merged.
-- [ ] Expo (Expo Router) app logs in/out against the real backend, token in
-      `expo-secure-store`, 401 → re-login.
+- [ ] **Refresh-token rotation works**: rotation + blacklist-after-rotation on,
+      ~90-day refresh lifetime, the app silently refreshes on a `401` without the
+      user noticing, logout blacklists server-side, and the **web app's login
+      lifetime is unchanged**.
+- [ ] Expo (Expo Router) app logs in/out against the real backend, both tokens in
+      `expo-secure-store`, failed refresh → re-login.
+- [ ] Lives in a single `mobile/` folder; no `apps/ios`/`apps/android` split, no
+      shared web/mobile package; `mobile-test` job green in CI.
 - [ ] **Full parity**: feed, compose (text+photo), post detail with comments +
       reactions, profiles (view/edit/avatar), connections/requests, messaging (DM
       + group), groups + invites, activity centre, settings (per-type notification
@@ -187,22 +392,65 @@ Ends: friends/family install via TestFlight; sign-ups remain admin-approved.
       the push.
 - [ ] Runs in the iOS Simulator and on a real iPhone via a dev build.
 - [ ] Follows the design system (translated RN theme), native-feeling nav.
-- [ ] Real tests for the app's critical paths (auth flow, feed render, compose) —
-      every phase ships tests.
+- [ ] Real tests for the app's critical paths (auth flow incl. refresh, feed
+      render, compose) via **Jest + React Native Testing Library** — every phase
+      ships tests.
 - [ ] **TestFlight** path documented and working; a **demo account** exists for
       App Review; beta stays invite-only / admin-approved.
 
-## Open questions still to resolve (at kickoff)
+## Resolved at kickoff
 
-- **Refresh tokens:** ship v1 with 1-day access token + re-login on 401, or add
-  refresh rotation now? (Default: defer, note it.)
-- **Expo Go vs dev build for daily work:** Expo Go is fastest for A–C, but push
-  (D) needs a dev/EAS build — decide when to switch.
-- **Offline behaviour:** how much should work with no connection? (Default:
-  online-only for v1; TanStack Query cache gives basic re-view.)
-- App Review specifics: confirm the demo account + report/block flows are
-  demonstrable end-to-end before submitting.
+The four questions that were open are now decided and folded into the plan above:
+
+- **Refresh tokens** → build rotation now, in Milestone A (not deferred).
+- **Expo Go vs dev build** → Expo Go for B–C, dev build from D.
+- **Offline behaviour** → online-only for v1.
+- **App Review** → the demo account and report/block flows are checklist items in
+  Milestone F and E4 respectively, not open questions.
+
+## Things to verify while building (not blockers)
+
+- Does `NotificationSerializer` expose the parent post id for comment-targeted
+  notifications? (Deep-link map above — check in D.)
+- Confirm dj-rest-auth's login response actually contains the access token in the
+  body, as expected in Milestone A step 1.
+- How much genuinely-Android-specific work is left for Phase 10 — re-scope that
+  plan once this one ships.
 
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-18 — Apple Developer Program enrolled.** £79 (the UK price of the $99
+tier), status *pending approval*. Started on day one per the Prerequisite above,
+so the wait overlaps Milestones A–C.
+
+**2026-07-18 — two findings while starting Milestone A, from reading the
+installed `dj_rest_auth` source.**
+
+1. **Bearer auth already works; no settings change needed.**
+   `JWTCookieAuthentication` (`dj_rest_auth/jwt_auth.py`) subclasses
+   `JWTAuthentication` and checks the `Authorization` header *first* — when a
+   header is present it uses it and never reads the cookie or runs the CSRF
+   check. So the plan's original step 2 ("add `JWTAuthentication` alongside") was
+   unnecessary. The outcome the plan predicted was right, the mechanism was not:
+   it isn't DRF trying two classes in turn, it's one class preferring the header.
+   Step 2 became "write a test that pins this behaviour" instead.
+
+2. **The refresh token is blanked out of the login response body.**
+   `dj_rest_auth/views.py` sets `data['refresh'] = ""` whenever
+   `JWT_AUTH_HTTPONLY` is on — which it is, deliberately, as the web app's XSS
+   mitigation. So `/api/auth/login/` cannot give mobile a refresh token, which
+   blocked the rotation decision. **We did not turn `JWT_AUTH_HTTPONLY` off** —
+   weakening the website to serve the app is the wrong trade.
+
+   **Decision: dedicated mobile endpoints** — `/api/auth/mobile/login/`,
+   `/api/auth/mobile/refresh/`, `/api/auth/mobile/logout/`. They return both
+   tokens in the body and set no cookies; the web path is untouched. Rejected
+   varying the existing endpoint on a client header (same URL, two behaviours —
+   implicit and easy to misread later).
+
+   **Trap worth remembering:** building these on simplejwt's stock
+   `TokenObtainPairView` would skip `CustomLoginSerializer` and with it the
+   **email-verification check** and the **per-IP login throttle** — a mobile login
+   bypassing controls the web enforces. They must subclass `ThrottledLoginView`.
