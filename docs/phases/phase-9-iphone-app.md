@@ -1,6 +1,8 @@
 # Phase 9 — iPhone App
 
-**Status:** not started — **plan complete, ready to start**
+**Status:** in progress — **Milestone A done** (PR #91), **Milestone B done**
+(Expo spine: auth, token storage, silent refresh, login/logout, CI). Next up:
+**Milestone C — read + write core** (feed, post detail, compose, profiles).
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
 locked** below); the questions that were open at kickoff have been resolved and
@@ -100,17 +102,25 @@ events to land in the phone's notification centre. Today notification delivery i
 ```
 TimeLine/
 ├── backend/          # Django + DRF — serves all three clients
-├── frontend/         # React + Vite web app
+├── frontend/         # React + Vite web app (JavaScript)
 ├── mobile/           # ← this phase: Expo app, iOS + Android from one source
-│   ├── app/          # Expo Router routes (file-based)
 │   ├── src/
-│   │   ├── api.js       # fetch wrapper — Bearer token, not cookies
+│   │   ├── app/         # Expo Router routes (file-based)
+│   │   ├── api.ts       # fetch wrapper — Bearer token, not cookies
+│   │   ├── auth.tsx     # AuthProvider: who is logged in
+│   │   ├── tokens.ts    # expo-secure-store wrapper
+│   │   ├── types.ts     # hand-written types for the API's JSON
 │   │   ├── components/  # RN components (View/Text, not div/span)
-│   │   └── theme.js     # design tokens translated from the Tailwind @theme
+│   │   └── theme.ts     # design tokens translated from the Tailwind @theme
 │   ├── app.json
 │   └── package.json  # its own deps; does NOT merge with frontend's
 └── docs/
 ```
+
+Two corrections to the original sketch, both settled in Milestone B: **the app is
+TypeScript** (see the decisions log), and **routes live in `src/app/`, not a
+top-level `app/`** — that's where the current Expo template puts them, and
+fighting the template's default buys nothing.
 
 **Why not `apps/ios/` + `apps/android/`.** That layout is for two separately
 written native apps (Swift + Kotlin). We chose React Native precisely so there is
@@ -154,11 +164,17 @@ docker compose up --build        # backend + db + web app, as today
 cd mobile && npx expo start      # Metro bundler → press 'i' for iOS Simulator
 ```
 
-The Simulator can't reach `localhost:8000` the way a desktop browser can. Rather
-than working around that with LAN IPs, **point the app at
-`https://your-timeline.net`** (the Phase 7 home server) from Milestone B — which
-is what we want to be testing against anyway. Use a `mobile/.env` with
-`EXPO_PUBLIC_API_URL` so a local backend stays possible when debugging API work.
+The app defaults to `https://your-timeline.net` (the Phase 7 home server), which
+is what we normally want to be testing against. Use a `mobile/.env` with
+`EXPO_PUBLIC_API_URL` to aim at a local Django when debugging API work — see
+`mobile/.env.example`.
+
+**Correction to the original plan:** it claimed the iOS Simulator can't reach
+`localhost:8000`. It can — the Simulator shares the host's network stack, so
+`EXPO_PUBLIC_API_URL=http://localhost:8000` works fine and that's how Milestone B
+was verified. The restriction is real for the **Android emulator** (which needs
+`10.0.2.2` or a LAN IP) and for a **real device** (LAN IP) — so it'll matter
+again in Phase 10 and at the Milestone D device pass.
 
 ### CI
 
@@ -454,3 +470,42 @@ installed `dj_rest_auth` source.**
    `TokenObtainPairView` would skip `CustomLoginSerializer` and with it the
    **email-verification check** and the **per-IP login throttle** — a mobile login
    bypassing controls the web enforces. They must subclass `ThrottledLoginView`.
+
+**2026-07-18 — Milestone B: the app is TypeScript, not JavaScript.** The plan
+specced `.js` to match the web app, but the current Expo template ships
+TypeScript only, and stripping the types back out would have put us off the
+documented path for every Expo example we'll copy from. Decided with the user in
+favour of TS: on a phone, a mistyped API field is a crash on a device rather than
+a visible error in a browser console, and the types catch that at build time. The
+web app stays JavaScript — the two frontends now differ, which is accepted.
+`npm run typecheck` runs in CI so a type error fails the build.
+
+**2026-07-18 — RNTL v14 made `render` and `fireEvent` async.** Every component
+test must `await` them. Without the await, `screen` throws "`render` function has
+not been called" and events silently don't land — a confusing failure, and most
+tutorials still show the synchronous v13 form. Cost about twenty minutes.
+
+**2026-07-18 — the live server is still on pre-#91 code.**
+`https://your-timeline.net/api/auth/mobile/login/` 404s, so Milestone A's
+endpoints aren't deployed yet. Milestone B was therefore verified against a local
+`docker compose` backend. **Before the Milestone D device pass, the box needs the
+release that carries #91** — and that release also needs the one-time manual
+`token-flush` systemd timer install (see `docs/deploy.md`).
+
+**2026-07-18 — Milestone B verification.** The app boots in the iOS Simulator,
+the auth gate redirects a tokenless launch to `/login`, and the login screen
+renders in the design system's palette. The *interactive* login tap could not be
+automated (macOS blocks synthetic keystrokes without an accessibility grant), so
+that specific step is a manual check. The backend contract was verified
+separately by `curl`: mobile login returns `access` + `refresh` + `user` in the
+body, matching `src/types.ts`.
+
+**Simulator setup gotcha:** a fresh Xcode 26 install had *no* iOS simulator
+devices and no matching runtime, so `expo start --ios` failed with "No iOS
+devices available". Fix: `xcrun simctl create "iPhone 16 Pro" <device-type>
+<runtime>` against the installed iOS 18.4 runtime. Expo Go also had to be
+sideloaded by hand (`xcrun simctl install`) — its auto-download died when the CLI
+process exited.
+
+**CI:** the new `mobile` job must be added to the **required status checks** in
+the repo's branch-protection settings, or it can't block a merge.

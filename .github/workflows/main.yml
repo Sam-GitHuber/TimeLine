@@ -1,11 +1,12 @@
 # CI — runs the automated test suites on every push and pull request.
 #
-# Two independent jobs, matching the two apps in the repo:
+# Three independent jobs, matching the three apps in the repo:
 #   backend  — Django tests against a real Postgres (same engine as prod, so we
 #              don't get surprised by SQLite-only behaviour).
 #   frontend — Vitest (React Testing Library).
+#   mobile   — Jest + React Native Testing Library (the Expo app).
 #
-# The job names here ("backend", "frontend", "semgrep") plus CodeQL's
+# The job names here ("backend", "frontend", "mobile", "semgrep") plus CodeQL's
 # "Analyze (…)" jobs are the required status checks for branch protection on
 # main — all must pass before a PR can merge.
 name: CI
@@ -97,6 +98,43 @@ jobs:
       - name: Run tests
         run: npm test
 
+  # mobile — the Expo (React Native) iOS/Android app. Jest + React Native
+  # Testing Library, unit and component tests only.
+  #
+  # This job deliberately does NOT build an app binary. Real iOS/Android builds
+  # happen on EAS (Expo's cloud build service), which needs signing credentials
+  # and a macOS runner — don't try to produce an IPA here.
+  mobile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (eslint)
+        run: npx expo lint
+
+      # The app is TypeScript (the web frontend is not), so a type error is a
+      # real build failure here — worth catching before the tests run.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
   # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
   # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't
   # ship. Its own job so a finding here is easy to tell apart from a test
@@ -128,4 +166,4 @@ jobs:
           --config p/javascript --config p/react --config p/secrets
           --exclude migrations --exclude node_modules
           --exclude dist --exclude .venv
-          backend frontend/src
+          backend frontend/src mobile/src
