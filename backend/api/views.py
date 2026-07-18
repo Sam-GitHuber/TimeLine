@@ -50,6 +50,7 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    DevicePushToken,
     Event,
     EventRSVP,
     Group,
@@ -74,6 +75,7 @@ from .serializers import (
     CommentSerializer,
     ConnectionRequestSerializer,
     ConversationSerializer,
+    DevicePushTokenSerializer,
     EventWriteSerializer,
     FinaliseSerializer,
     GroupInviteSerializer,
@@ -3691,3 +3693,51 @@ def _apply_calendar_window(qs, request):
     if to is not None:
         qs = qs.filter(event_date__lte=to)
     return qs
+
+
+# --- Push device registration (Phase 9, Milestone A) ---------------------------
+
+
+class DevicePushTokenView(APIView):
+    """Register (POST) or unregister (DELETE) this device for push at
+    ``/push-tokens/``.
+
+    The app POSTs on login and on every launch thereafter — Expo can rotate a
+    device's token, so re-registering keeps it current and bumps ``last_seen``.
+    It DELETEs on logout, so a shared or handed-on phone stops receiving the
+    previous user's notifications.
+
+    POST **upserts on ``expo_token``**, deliberately overwriting ``user``: an
+    Expo token identifies a *device*, so if someone logs out and another family
+    member logs in on that phone, the row must move rather than leaving the
+    previous owner's notifications going somewhere they no longer control.
+
+    Nothing sends push here — that's Milestone D. This exists now so the app has
+    somewhere to register from the moment it can log in.
+    """
+
+    def post(self, request):
+        serializer = DevicePushTokenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        DevicePushToken.objects.update_or_create(
+            expo_token=serializer.validated_data["expo_token"],
+            defaults={
+                "user": request.user,
+                "platform": serializer.validated_data["platform"],
+            },
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def delete(self, request):
+        expo_token = request.data.get("expo_token")
+        if not expo_token:
+            # Bandit reads the message below as a hardcoded credential purely
+            # because the field name contains "token". It's a validation string.
+            raise ValidationError({"expo_token": "This field is required."})  # nosec B105
+        # Scoped to the caller on purpose: you can only unregister your *own*
+        # device. Filtering on user as well as token means a leaked token value
+        # can't be used to silence someone else's phone.
+        DevicePushToken.objects.filter(
+            user=request.user, expo_token=expo_token
+        ).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

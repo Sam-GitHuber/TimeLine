@@ -7,6 +7,7 @@ from .models import (
     Comment,
     Connection,
     Conversation,
+    DevicePushToken,
     Event,
     EventRSVP,
     Group,
@@ -1051,3 +1052,17 @@ class FinaliseSerializer(serializers.Serializer):
                                   allow_null=True, default="")
     option_id = serializers.IntegerField(required=False, allow_null=True)
     close_poll = serializers.BooleanField(required=False, default=True)
+
+
+class DevicePushTokenSerializer(serializers.ModelSerializer):
+    """Register/refresh one device's Expo push token (Phase 9, Milestone A)."""
+
+    class Meta:
+        model = DevicePushToken
+        fields = ["expo_token", "platform"]
+        # `expo_token` is globally unique on the model, which would normally make
+        # DRF reject a re-registration as a duplicate. Registration is an upsert
+        # by design (the same device re-registers on every launch, and may move
+        # to a different user), so the uniqueness is resolved in the view's
+        # update_or_create rather than as a validation error here.
+        extra_kwargs = {"expo_token": {"validators": []}}

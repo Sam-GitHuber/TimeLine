@@ -19,9 +19,11 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
+from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
 
 from accounts.views import (
     InactiveRegisterView,
+    MobileLoginView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
     ResendVerificationView,
@@ -46,6 +48,33 @@ urlpatterns = [
         "api/auth/password/change/",
         ThrottledPasswordChangeView.as_view(),
         name="rest_password_change",
+    ),
+    # Native-app auth (Phase 9). Deliberately separate from the web endpoints
+    # above: these return both tokens in the response body and set no cookies,
+    # because JWT_AUTH_HTTPONLY (the web app's XSS mitigation) blanks the refresh
+    # token out of the standard login response. See MobileLoginView's docstring
+    # and docs/reference/accounts.md.
+    path(
+        "api/auth/mobile/login/",
+        MobileLoginView.as_view(),
+        name="mobile_login",
+    ),
+    # Refresh and logout are simplejwt's stock views, used directly: unlike
+    # login they take a *token*, not credentials, so there are no email
+    # verification / approval / throttle checks to inherit and nothing to
+    # subclass. Refresh rotates (SIMPLE_JWT.ROTATE_REFRESH_TOKENS) so the
+    # response carries a fresh pair; logout blacklists the refresh token
+    # server-side, which matters because deleting it from the device alone
+    # wouldn't stop a copy lifted from a backup.
+    path(
+        "api/auth/mobile/refresh/",
+        TokenRefreshView.as_view(),
+        name="mobile_token_refresh",
+    ),
+    path(
+        "api/auth/mobile/logout/",
+        TokenBlacklistView.as_view(),
+        name="mobile_logout",
     ),
     # Auth API (dj-rest-auth): logout/, user/, password/reset*, token/*.
     path("api/auth/", include("dj_rest_auth.urls")),

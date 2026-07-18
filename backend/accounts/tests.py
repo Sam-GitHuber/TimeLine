@@ -17,6 +17,7 @@ from django.utils import timezone
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
+from rest_framework_simplejwt.tokens import AccessToken
 
 from accounts.models import (
     EmailVerificationCode,
@@ -1103,3 +1104,202 @@ class PasswordResetFlowTests(APITestCase):
             self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         blocked = self.client.post(RESET_CONFIRM_URL, payload, format="json")
         self.assertEqual(blocked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+MOBILE_LOGIN_URL = "/api/auth/mobile/login/"
+MOBILE_REFRESH_URL = "/api/auth/mobile/refresh/"
+MOBILE_LOGOUT_URL = "/api/auth/mobile/logout/"
+
+
+@override_settings(CACHES=LOCMEM_CACHE)
+class MobileAuthTests(APITestCase):
+    """The Phase 9 native-app auth path: Bearer tokens, no cookies, rotation.
+
+    These pin behaviour the iOS app depends on *and* guard the web app against
+    regressing — several of these tests exist specifically because the two
+    clients share one backend and it would be easy to "fix" one by breaking the
+    other.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(
+            email="mobile@example.com",
+            password=PASSWORD,
+            first_name="Mo",
+            last_name="Bile",
+        )
+        self.user.is_active = True
+        self.user.save()
+        EmailAddress.objects.create(
+            user=self.user, email=self.user.email, verified=True, primary=True
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def _login(self):
+        return self.client.post(
+            MOBILE_LOGIN_URL,
+            {"email": self.user.email, "password": PASSWORD},
+            format="json",
+        )
+
+    # --- login -----------------------------------------------------------
+
+    def test_login_returns_both_tokens_in_the_body(self):
+        # The whole reason this endpoint exists: JWT_AUTH_HTTPONLY blanks
+        # `refresh` out of the web login response, and the app needs it.
+        resp = self._login()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["access"])
+        self.assertTrue(resp.data["refresh"])
+        self.assertEqual(resp.data["user"]["email"], self.user.email)
+
+    def test_login_sets_no_cookies(self):
+        # A native client has no cookie jar we want to lean on; a Set-Cookie here
+        # would be a confusing no-op.
+        resp = self._login()
+
+        self.assertNotIn(AUTH_COOKIE, resp.cookies)
+        self.assertNotIn("timeline-refresh", resp.cookies)
+
+    def test_login_still_requires_admin_approval(self):
+        # The mobile path must not be a way around the membership gate.
+        self.user.is_active = False
+        self.user.save()
+
+        resp = self._login()
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_login_still_requires_a_verified_email(self):
+        # Guards against anyone rebuilding this view on simplejwt's stock
+        # TokenObtainPairView, which would skip CustomLoginSerializer entirely.
+        EmailAddress.objects.filter(user=self.user).update(verified=False)
+
+        resp = self._login()
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("verify your email", str(resp.data).lower())
+
+    def test_web_login_still_withholds_the_refresh_token(self):
+        # Regression guard the other way: adding the mobile endpoint must not
+        # have loosened the browser's cookie-based flow.
+        resp = self.client.post(
+            LOGIN_URL,
+            {"email": self.user.email, "password": PASSWORD},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["refresh"], "")
+        self.assertIn(AUTH_COOKIE, resp.cookies)
+        self.assertTrue(resp.cookies[AUTH_COOKIE]["httponly"])
+
+    # --- Bearer authentication -------------------------------------------
+
+    def test_bearer_token_authenticates_a_protected_endpoint(self):
+        access = self._login().data["access"]
+        client = APIClient()
+
+        resp = client.get(USER_URL, HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["email"], self.user.email)
+
+    def test_bearer_token_needs_no_csrf_on_a_mutating_request(self):
+        # JWT_AUTH_COOKIE_USE_CSRF is on, but CSRF is a cookie concern:
+        # JWTCookieAuthentication only enforces it on the cookie path, so a
+        # header-authenticated write must succeed without a CSRF token.
+        access = self._login().data["access"]
+        client = APIClient(enforce_csrf_checks=True)
+
+        resp = client.patch(
+            USER_URL,
+            {"first_name": "Renamed"},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {access}",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_garbage_bearer_token_is_rejected(self):
+        client = APIClient()
+
+        resp = client.get(USER_URL, HTTP_AUTHORIZATION="Bearer not-a-real-token")
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_expired_bearer_token_is_rejected(self):
+        token = AccessToken.for_user(self.user)
+        token.set_exp(lifetime=timedelta(seconds=-1))
+        client = APIClient()
+
+        resp = client.get(USER_URL, HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_deactivated_user_is_locked_out_despite_a_valid_token(self):
+        # Matters because the refresh token now lives for 90 days: if the
+        # maintainer deactivates someone, their existing tokens must stop working
+        # rather than staying good until expiry.
+        access = self._login().data["access"]
+        self.user.is_active = False
+        self.user.save()
+        client = APIClient()
+
+        resp = client.get(USER_URL, HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # --- refresh + rotation ----------------------------------------------
+
+    def test_refresh_returns_a_new_working_pair(self):
+        refresh = self._login().data["refresh"]
+
+        resp = self.client.post(
+            MOBILE_REFRESH_URL, {"refresh": refresh}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["access"])
+        # ROTATE_REFRESH_TOKENS means a *new* refresh token comes back too.
+        self.assertTrue(resp.data["refresh"])
+        self.assertNotEqual(resp.data["refresh"], refresh)
+
+        client = APIClient()
+        whoami = client.get(
+            USER_URL, HTTP_AUTHORIZATION=f"Bearer {resp.data['access']}"
+        )
+        self.assertEqual(whoami.status_code, status.HTTP_200_OK)
+
+    def test_rotated_away_refresh_token_is_rejected(self):
+        # The point of BLACKLIST_AFTER_ROTATION: a captured refresh token is
+        # useful only until its owner next refreshes, not for the full 90 days.
+        original = self._login().data["refresh"]
+        self.client.post(MOBILE_REFRESH_URL, {"refresh": original}, format="json")
+
+        resp = self.client.post(
+            MOBILE_REFRESH_URL, {"refresh": original}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # --- logout ----------------------------------------------------------
+
+    def test_logout_blacklists_the_refresh_token(self):
+        # Deleting the token from the device isn't enough on its own — a copy
+        # lifted from a backup would still mint access tokens.
+        refresh = self._login().data["refresh"]
+
+        logout = self.client.post(
+            MOBILE_LOGOUT_URL, {"refresh": refresh}, format="json"
+        )
+        self.assertEqual(logout.status_code, status.HTTP_200_OK)
+
+        resp = self.client.post(
+            MOBILE_REFRESH_URL, {"refresh": refresh}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)

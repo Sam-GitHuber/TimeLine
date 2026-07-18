@@ -107,6 +107,10 @@ INSTALLED_APPS = [
     "allauth.socialaccount",
     "dj_rest_auth",
     "dj_rest_auth.registration",
+    # Stores refresh tokens that have been rotated away or explicitly logged out
+    # (Phase 9). Required by SIMPLE_JWT's BLACKLIST_AFTER_ROTATION below —
+    # without it, an "old" refresh token would keep working after rotation.
+    "rest_framework_simplejwt.token_blacklist",
     # Local apps
     "accounts",
     "api",
@@ -393,11 +397,22 @@ REST_AUTH = {
 }
 
 SIMPLE_JWT = {
-    # Longer-lived access token: the frontend doesn't do silent refresh yet, so
-    # a short access lifetime would log family members out constantly. Revisit
-    # (add refresh-on-401) if/when that matters.
+    # Longer-lived access token: the *web* frontend doesn't do silent refresh, so
+    # a short access lifetime would log family members out constantly. Phase 9's
+    # mobile client DOES refresh silently, but this setting is shared by both —
+    # deliberately left at a day so shortening it for the app can't quietly start
+    # logging people out of the website. Revisit only alongside web refresh.
     "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    # 90 days (was 7): a phone app is expected to stay logged in indefinitely, and
+    # a logged-out app receives no push notifications — which would defeat the
+    # point of Phase 9. Safe to lengthen only *because* of the rotation below:
+    # each refresh invalidates the token that bought it, so a stolen refresh token
+    # is useful until its owner next opens the app, not for 90 days.
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=90),
+    # Every refresh returns a NEW refresh token and blacklists the old one.
+    # Without rotation, one captured refresh token would be a 90-day skeleton key.
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
 
 # allauth: email is the login identifier; there is no username field.

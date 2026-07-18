@@ -1291,3 +1291,54 @@ class EventRSVP(models.Model):
 
     def __str__(self):
         return f"{self.user} · {self.event} ({self.response})"
+
+
+class DevicePushToken(models.Model):
+    """One device that can receive push notifications for a user (Phase 9).
+
+    Registered when the app logs in (and refreshed on later launches, since Expo
+    can rotate a token), deleted on logout. **One user can have several rows** —
+    a phone and a tablet are separate devices and both should buzz.
+
+    ``expo_token`` is an Expo push token, not a raw APNs/FCM one: the backend
+    sends to Expo's push service and Expo fans out to Apple or Google. That's why
+    a single model covers both platforms and why Phase 10 (Android) needs no
+    schema change — only a different value in ``platform``.
+
+    The token is **globally unique**, not unique per user: a physical device maps
+    to one Expo token, so if someone logs out and a housemate logs in on the same
+    phone, the row must move to the new user rather than leaving the previous
+    owner's notifications going to a device they no longer control. Registration
+    therefore upserts on ``expo_token`` and overwrites ``user``.
+
+    No sending logic lives here — that arrives in Milestone D. This model and its
+    endpoints ship in Milestone A so the app has somewhere to register from the
+    moment it can log in. See docs/phases/phase-9-iphone-app.md.
+    """
+
+    class Platform(models.TextChoices):
+        IOS = "ios", "iOS"
+        ANDROID = "android", "Android"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="push_tokens",
+    )
+    expo_token = models.CharField(max_length=255, unique=True)
+    platform = models.CharField(max_length=16, choices=Platform.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Bumped every time the app re-registers, so a device that hasn't been seen
+    # for a long time can be pruned later rather than us pushing into the void
+    # forever. Expo also reports permanently-dead tokens on send (Milestone D).
+    last_seen = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            # The send path (Milestone D) always asks "which devices does this
+            # user have?", so index that lookup.
+            models.Index(fields=["user"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} · {self.platform} · {self.expo_token[:16]}…"
