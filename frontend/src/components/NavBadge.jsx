@@ -12,6 +12,11 @@
 //
 // The count itself reaches screen readers via each item's aria-label, so both
 // forms here are decorative (aria-hidden). Callers must be `relative`.
+//
+// Counts are capped at "99+": because the pill is pinned to the item's right
+// edge it grows *leftwards*, over the item's own label, so an uncapped
+// three-digit count would bury the word it's badging. Screen readers still get
+// the exact number from the aria-label.
 export default function NavBadge({ count }) {
   return (
     <>
@@ -23,7 +28,7 @@ export default function NavBadge({ count }) {
         aria-hidden="true"
         className="absolute -right-1 -top-1 hidden min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white ring-2 ring-surface sm:inline-flex"
       >
-        {count}
+        {count > 99 ? "99+" : count}
       </span>
     </>
   );
