@@ -58,6 +58,48 @@ well-trodden libraries:
   assume, and `CustomRegisterSerializer.save()` is where `is_active=False` and the
   ToS consent stamp are set.
 
+### A cookie for a deleted user is anonymous, not a 401
+
+The configured auth class is `accounts.authentication.ResilientJWTCookieAuthentication`
+— dj-rest-auth's `JWTCookieAuthentication` with one behaviour changed.
+
+DRF authenticates *before* it consults permissions, and a browser resends the
+`timeline-auth` cookie on **every** request, login included. So a validly-signed
+token whose `user_id` no longer has a row used to 401 the login POST itself:
+the person couldn't log in, sign up, or log into a *different* account, and the
+error ("User not found") suggested nothing actionable. It went further than
+login — even `/api/auth/csrf/`, the `AllowAny` primer the SPA calls on load,
+401'd, so the app couldn't obtain a CSRF token to *attempt* a login with. The
+only escape was clearing cookies by hand. That state is genuinely reachable — deleting your
+account on your phone while still logged in on a laptop, an admin hard-delete, a
+restore from a snapshot older than your account ([backup-restore](../backup-restore.md)),
+or locally, any `seed_demo` run.
+
+So when the **cookie** path fails *only* because the user has vanished, the class
+returns `None` (anonymous) instead of raising. Login then proceeds and its fresh
+cookie overwrites the stale one.
+
+This isn't a weakening: the token is validly signed but its subject no longer
+exists, so there is no identity to assume — anonymous is the accurate reading.
+Protected endpoints still refuse the request, just as "not logged in".
+
+Deliberately narrow — everything else still 401s:
+
+- **Bearer tokens.** A native client sends the header on purpose and re-auths on
+  401; there's no automatic-resend trap to escape.
+- **`is_active=False`.** That's the admin-approval / ban gate doing its job.
+- Expired, tampered, or wrong-signature tokens.
+
+One trap for future edits: simplejwt's `AuthenticationFailed` subclasses DRF's
+but mixes in `DetailDictMixin`, so `exc.detail` is a `{"detail": ..., "code": ...}`
+**dict**, not the `ErrorDetail` string DRF normally produces. Reading the code
+off the wrong shape fails closed (a 401), which silently restores the lockout
+behind a plausible-looking error — so `_failure_code()` tolerates both shapes.
+Only the dict branch actually runs today; the other is an unreached guard
+against a future simplejwt dropping the mixin.
+
+Issue #93.
+
 ## Mobile auth (Bearer tokens) — Phase 9
 
 The native app authenticates with `Authorization: Bearer <access-token>` instead
