@@ -1066,3 +1066,10 @@ class DevicePushTokenSerializer(serializers.ModelSerializer):
         # to a different user), so the uniqueness is resolved in the view's
         # update_or_create rather than as a validation error here.
         extra_kwargs = {"expo_token": {"validators": []}}
+
+
+class DevicePushTokenDeleteSerializer(serializers.Serializer):
+    """Unregister one device. Separate from the register serializer because
+    DELETE identifies a device without re-stating its platform."""
+
+    expo_token = serializers.CharField(max_length=255)

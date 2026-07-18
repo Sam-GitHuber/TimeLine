@@ -75,6 +75,7 @@ from .serializers import (
     CommentSerializer,
     ConnectionRequestSerializer,
     ConversationSerializer,
+    DevicePushTokenDeleteSerializer,
     DevicePushTokenSerializer,
     EventWriteSerializer,
     FinaliseSerializer,
@@ -3714,7 +3715,14 @@ class DevicePushTokenView(APIView):
 
     Nothing sends push here — that's Milestone D. This exists now so the app has
     somewhere to register from the moment it can log in.
+
+    Throttled per user (``push_register`` scope): registration upserts, so a
+    device re-registering is free, but each *distinct* token value creates a row
+    and nothing else caps how many a single account can accumulate.
     """
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "push_register"
 
     def post(self, request):
         serializer = DevicePushTokenSerializer(data=request.data)
@@ -3729,15 +3737,12 @@ class DevicePushTokenView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def delete(self, request):
-        expo_token = request.data.get("expo_token")
-        if not expo_token:
-            # Bandit reads the message below as a hardcoded credential purely
-            # because the field name contains "token". It's a validation string.
-            raise ValidationError({"expo_token": "This field is required."})  # nosec B105
+        serializer = DevicePushTokenDeleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         # Scoped to the caller on purpose: you can only unregister your *own*
         # device. Filtering on user as well as token means a leaked token value
         # can't be used to silence someone else's phone.
         DevicePushToken.objects.filter(
-            user=request.user, expo_token=expo_token
+            user=request.user, expo_token=serializer.validated_data["expo_token"]
         ).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

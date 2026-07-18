@@ -4421,9 +4421,15 @@ class DevicePushTokenTests(APITestCase):
     """
 
     def setUp(self):
+        # Registration is throttled (per user), so clear the shared counter —
+        # otherwise these tests inherit or leave state for each other.
+        cache.clear()
         self.me = make_user("device-owner@example.com")
         self.other = make_user("someone-else@example.com")
         self.client.force_authenticate(self.me)
+
+    def tearDown(self):
+        cache.clear()
 
     def test_register_creates_a_token_for_the_caller(self):
         resp = self.client.post(

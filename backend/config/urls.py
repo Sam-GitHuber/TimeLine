@@ -19,11 +19,12 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
-from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
+from rest_framework_simplejwt.views import TokenBlacklistView
 
 from accounts.views import (
     InactiveRegisterView,
     MobileLoginView,
+    MobileTokenRefreshView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
     ResendVerificationView,
@@ -59,18 +60,19 @@ urlpatterns = [
         MobileLoginView.as_view(),
         name="mobile_login",
     ),
-    # Refresh and logout are simplejwt's stock views, used directly: unlike
-    # login they take a *token*, not credentials, so there are no email
-    # verification / approval / throttle checks to inherit and nothing to
-    # subclass. Refresh rotates (SIMPLE_JWT.ROTATE_REFRESH_TOKENS) so the
-    # response carries a fresh pair; logout blacklists the refresh token
-    # server-side, which matters because deleting it from the device alone
-    # wouldn't stop a copy lifted from a backup.
+    # Refresh rotates (SIMPLE_JWT.ROTATE_REFRESH_TOKENS) and re-issues at the
+    # app's long lifetime — but only for tokens carrying the `client: "mobile"`
+    # claim, so a short-lived web refresh cookie can't be POSTed here to upgrade
+    # itself. See accounts/tokens.py.
     path(
         "api/auth/mobile/refresh/",
-        TokenRefreshView.as_view(),
+        MobileTokenRefreshView.as_view(),
         name="mobile_token_refresh",
     ),
+    # Logout is simplejwt's stock view: it takes a *token*, not credentials, so
+    # there are no verification / approval / throttle checks to inherit. It
+    # blacklists the refresh token server-side, which matters because deleting it
+    # from the device alone wouldn't stop a copy lifted from a backup.
     path(
         "api/auth/mobile/logout/",
         TokenBlacklistView.as_view(),

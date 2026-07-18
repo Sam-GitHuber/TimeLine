@@ -14,9 +14,12 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.utils import datetime_from_epoch
+from rest_framework_simplejwt.views import TokenRefreshView
 
 from .email import send_password_reset_code, send_verification_code
 from .models import EmailVerificationCode, PasswordResetCode, generate_code
+from .tokens import MobileRefreshToken, MobileTokenRefreshSerializer
 
 User = get_user_model()
 
@@ -96,6 +99,14 @@ class MobileLoginView(ThrottledLoginView):
     See docs/reference/accounts.md.
     """
 
+    def login(self):
+        # Issue a MobileRefreshToken rather than the default one, so the app gets
+        # the long lifetime and the `client: "mobile"` claim that authorises
+        # rotating at that lifetime. See accounts/tokens.py.
+        self.user = self.serializer.validated_data["user"]
+        self.refresh_token = MobileRefreshToken.for_user(self.user)
+        self.access_token = self.refresh_token.access_token
+
     def get_response(self):
         # Mirrors LoginView.get_response with exactly two deliberate changes: the
         # real refresh token goes into the body, and set_jwt_cookies is NOT
@@ -106,11 +117,31 @@ class MobileLoginView(ThrottledLoginView):
             "user": self.user,
             "access": str(self.access_token),
             "refresh": str(self.refresh_token),
+            # Read back off the tokens themselves rather than recomputing from
+            # settings, so these can't drift from the real `exp` — and included
+            # unconditionally because get_response_serializer() switches to a
+            # serializer *requiring* them when JWT_AUTH_RETURN_EXPIRATION is on.
+            # JWTSerializer ignores the extra keys when it's off, so supplying
+            # them always is simpler than branching, and means enabling that
+            # setting can't 500 mobile login while leaving web login fine.
+            "access_expiration": datetime_from_epoch(self.access_token["exp"]),
+            "refresh_expiration": datetime_from_epoch(self.refresh_token["exp"]),
         }
         serializer = serializer_class(
             instance=data, context=self.get_serializer_context()
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MobileTokenRefreshView(TokenRefreshView):
+    """Rotate a mobile refresh token (Phase 9).
+
+    Stock ``TokenRefreshView`` with our serializer swapped in, so the rotated
+    token keeps the app's long lifetime and a web token can't be laundered into
+    one. See ``accounts.tokens``.
+    """
+
+    serializer_class = MobileTokenRefreshSerializer
 
 
 class ThrottledPasswordChangeView(PasswordChangeView):

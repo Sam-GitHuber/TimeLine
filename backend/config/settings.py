@@ -341,6 +341,11 @@ REST_FRAMEWORK = {
         "account_delete": os.environ.get(
             "DJANGO_THROTTLE_ACCOUNT_DELETE", "5/min"
         ),
+        # register a device for push (per-user; the caller is logged in). The
+        # app registers once per launch, so a real client never approaches this;
+        # it caps how fast one account can accumulate DevicePushToken rows by
+        # POSTing distinct fabricated token values.
+        "push_register": os.environ.get("DJANGO_THROTTLE_PUSH_REGISTER", "20/min"),
         # resend a verification code (per-IP; the caller is anonymous). Blunts
         # using the resend endpoint to spam an inbox / probe. A per-email cooldown
         # (EmailVerificationCode.RESEND_COOLDOWN) guards a single address on top.
@@ -403,17 +408,31 @@ SIMPLE_JWT = {
     # deliberately left at a day so shortening it for the app can't quietly start
     # logging people out of the website. Revisit only alongside web refresh.
     "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
-    # 90 days (was 7): a phone app is expected to stay logged in indefinitely, and
-    # a logged-out app receives no push notifications — which would defeat the
-    # point of Phase 9. Safe to lengthen only *because* of the rotation below:
-    # each refresh invalidates the token that bought it, so a stolen refresh token
-    # is useful until its owner next opens the app, not for 90 days.
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=90),
+    # This is the *web* refresh lifetime, and it also sets the max-age of the
+    # `timeline-refresh` cookie dj-rest-auth hands browsers. Kept short (1 day,
+    # matching the access token) because the website has no silent refresh, so a
+    # longer-lived refresh cookie would be extra exposure on a shared or borrowed
+    # machine for no benefit. The native app's much longer lifetime lives in
+    # MOBILE_REFRESH_TOKEN_LIFETIME below, NOT here — see accounts/tokens.py.
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
     # Every refresh returns a NEW refresh token and blacklists the old one.
     # Without rotation, one captured refresh token would be a 90-day skeleton key.
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
 }
+
+# The native app's refresh lifetime — deliberately NOT inside SIMPLE_JWT, because
+# that dict is global and the web must stay short (see REFRESH_TOKEN_LIFETIME
+# above). `accounts.tokens.MobileRefreshToken` reads this; only tokens carrying
+# the `client: "mobile"` claim can ever be rotated at this lifetime, so a stolen
+# browser cookie can't be upgraded into a 90-day one.
+#
+# 90 days is defensible only because rotation is on: each refresh invalidates the
+# token that bought it, so a stolen mobile token is useful until its owner next
+# opens the app, not for three months.
+MOBILE_REFRESH_TOKEN_LIFETIME = timedelta(
+    days=env_int("DJANGO_MOBILE_REFRESH_DAYS", default=90)
+)
 
 # allauth: email is the login identifier; there is no username field.
 ACCOUNT_LOGIN_METHODS = {"email"}

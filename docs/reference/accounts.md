@@ -100,18 +100,49 @@ header-authenticated request skips it correctly, and a test pins that too.
 
 ### Refresh-token rotation
 
-Mobile needs to stay logged in indefinitely — a logged-out app receives no push
-notifications, which would defeat Phase 9. So:
+The two clients want opposite things. Mobile needs to stay logged in
+indefinitely — a logged-out app receives no push notifications, which would
+defeat Phase 9. The web wants the opposite: the site has no silent refresh, so a
+long-lived refresh cookie on a shared or borrowed machine is pure extra exposure
+for no benefit.
 
-- `REFRESH_TOKEN_LIFETIME` is **90 days** (was 7).
+`SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"]` is a single global, so honouring both
+takes a **second token class** (`accounts/tokens.py`):
+
+| | Lifetime | Set by |
+|---|---|---|
+| Web refresh (`timeline-refresh` cookie) | **1 day** | `SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"]` |
+| Mobile refresh | **90 days** | `MOBILE_REFRESH_TOKEN_LIFETIME` (own setting) |
+| Access (both) | 1 day | `SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"]` |
+
+**The `client` claim is the security-critical part.** `MobileRefreshToken` stamps
+`client: "mobile"` into the payload, and `MobileTokenRefreshSerializer` rejects
+any token without it. Without that check, `/api/auth/mobile/refresh/` would
+happily accept a *web* refresh token and rotate it into a 90-day one — anyone who
+stole a 1-day browser cookie could upgrade it to three months just by POSTing it
+to a different URL. The claim is what makes the long lifetime unreachable from
+the short-lived path, and rotation preserves it because it mutates the decoded
+payload in place. A test pins the rejection.
+
+Watch for this whenever `SIMPLE_JWT` is edited: **`REFRESH_TOKEN_LIFETIME` sets
+the web cookie's max-age**, so lengthening it "for the app" silently widens the
+browser's credential window. That's exactly the mistake this split exists to
+prevent, and a test asserts the web cookie stays under two days.
+
+Other pieces:
+
 - `ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION` are on, backed by the
   `rest_framework_simplejwt.token_blacklist` app. Every refresh returns a new
   refresh token and invalidates the one that bought it, so a **stolen refresh
   token is useful only until its owner next opens the app**, not for 90 days.
   The 90-day lifetime is only defensible *because* of this.
-- `ACCESS_TOKEN_LIFETIME` stays at **1 day**. It's shared with the web app, which
-  has no refresh logic — shortening it "for security" would start logging family
-  members out of the website. Change it only alongside web refresh.
+- **The blacklist tables need periodic flushing.** simplejwt writes an
+  `OutstandingToken` row for every refresh token it issues (every login on either
+  client, plus every rotation) and never removes expired ones.
+  `deploy/token-flush.{service,timer}` runs `flushexpiredtokens` weekly — see
+  [deploy.md](../deploy.md). It only deletes already-expired rows, so it can
+  never log anyone out.
+- `ACCESS_TOKEN_LIFETIME` stays at **1 day** for both clients.
 - **Logout blacklists server-side.** Deleting the token from the device isn't
   enough on its own: a copy lifted from a backup would still mint access tokens.
 - A **deactivated user is locked out immediately** despite holding valid tokens —

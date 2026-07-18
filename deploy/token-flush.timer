@@ -1,0 +1,20 @@
+# systemd timer: flush expired JWT refresh tokens once a week.
+# Enable: sudo systemctl enable --now token-flush.timer
+#
+# Weekly rather than nightly: these tables grow slowly (a handful of rows per
+# person per day at this scale) and the rows are harmless until they accumulate,
+# so there's no reason to add another daily job to a home server.
+[Unit]
+Description=Flush expired JWT refresh tokens weekly
+
+[Timer]
+# 04:15 Sunday — after the nightly backup's 03:30 window, so the two don't
+# overlap on the database.
+OnCalendar=Sun *-*-* 04:15:00
+# Spread the exact start a little (avoids every scheduled job firing at once).
+RandomizedDelaySec=15min
+# If the machine was off/asleep when a run was due, run once on the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

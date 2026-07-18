@@ -13,6 +13,12 @@ connection / group-invite views; the list/seen/addressed/preferences endpoints i
 `ActivityCenter` (bell + dropdown) in the nav, `NotificationPreferencesSection` on
 `/settings`, API + poll constant in `frontend/src/api.js`.
 
+**Push delivery is being added in Phase 9.** The device registry
+(`DevicePushToken` + `/api/push-tokens/`) already exists — see
+[accounts.md](accounts.md#push-device-registration) — but nothing *sends* yet;
+that lands in Milestone D, gated by the same per-type preferences described
+below. In-app polling stays as the fallback either way.
+
 Delivery is **polling** (TanStack Query `refetchInterval`, `NOTIFICATIONS_POLL_MS`
 = 12s), the same model as [messaging](messaging.md) — a later swap to Django
 Channels is non-breaking. No WebSockets.

@@ -3,10 +3,12 @@ import re
 import shutil
 import tempfile
 from datetime import timedelta
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 from unittest import mock
 
 from allauth.account.models import EmailAddress
+from dj_rest_auth.app_settings import api_settings as dj_rest_auth_settings
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
@@ -17,13 +19,15 @@ from django.utils import timezone
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from rest_framework_simplejwt.tokens import AccessToken
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
+from rest_framework_simplejwt.utils import datetime_from_epoch
 
 from accounts.models import (
     EmailVerificationCode,
     PasswordResetCode,
     generate_code,
 )
+from accounts.tokens import MobileRefreshToken
 from config.settings import _email_backend, env_int
 
 User = get_user_model()
@@ -1288,6 +1292,69 @@ class MobileAuthTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     # --- logout ----------------------------------------------------------
+
+    def test_mobile_refresh_token_is_long_lived(self):
+        # The app must stay logged in; a logged-out app gets no push.
+        refresh = self._login().data["refresh"]
+
+        token = MobileRefreshToken(refresh)
+        remaining = datetime_from_epoch(token["exp"]) - timezone.now()
+
+        self.assertGreater(remaining, timedelta(days=80))
+
+    def test_web_refresh_cookie_stays_short_lived(self):
+        # The web cookie must NOT inherit the app's long lifetime — both clients
+        # share SIMPLE_JWT, so this is the regression guard for that.
+        resp = self.client.post(
+            LOGIN_URL,
+            {"email": self.user.email, "password": PASSWORD},
+            format="json",
+        )
+
+        expires = parsedate_to_datetime(resp.cookies["timeline-refresh"]["expires"])
+
+        self.assertLess(expires - timezone.now(), timedelta(days=2))
+
+    def test_web_refresh_token_cannot_be_upgraded_at_the_mobile_endpoint(self):
+        # The attack the `client` claim exists to stop: without it, a stolen
+        # 1-day browser token could be POSTed here and rotated into a 90-day one.
+        web_refresh = str(RefreshToken.for_user(self.user))
+
+        resp = self.client.post(
+            MOBILE_REFRESH_URL, {"refresh": web_refresh}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_rotation_preserves_the_long_lifetime_and_the_claim(self):
+        # A rotated token must still be a *mobile* token, or the app would
+        # silently drop to the web's 1-day lifetime on its first refresh.
+        refresh = self._login().data["refresh"]
+
+        rotated = self.client.post(
+            MOBILE_REFRESH_URL, {"refresh": refresh}, format="json"
+        ).data["refresh"]
+
+        token = MobileRefreshToken(rotated)
+        self.assertEqual(token.get("client"), "mobile")
+        remaining = datetime_from_epoch(token["exp"]) - timezone.now()
+        self.assertGreater(remaining, timedelta(days=80))
+
+    def test_login_survives_enabling_return_expiration(self):
+        # With JWT_AUTH_RETURN_EXPIRATION on, get_response_serializer() switches
+        # to a serializer that REQUIRES access_expiration/refresh_expiration. We
+        # supply them unconditionally so flipping that setting can't 500 mobile
+        # login while leaving web login working — a split-client trap.
+        # (dj-rest-auth binds REST_AUTH at import, so override_settings can't
+        # reach it; patch the settings object itself.)
+        with mock.patch.object(
+            dj_rest_auth_settings, "JWT_AUTH_RETURN_EXPIRATION", True
+        ):
+            resp = self._login()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("access_expiration", resp.data)
+        self.assertIn("refresh_expiration", resp.data)
 
     def test_logout_blacklists_the_refresh_token(self):
         # Deleting the token from the device isn't enough on its own — a copy
