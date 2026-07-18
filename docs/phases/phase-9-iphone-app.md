@@ -420,3 +420,37 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-18 — Apple Developer Program enrolled.** £79 (the UK price of the $99
+tier), status *pending approval*. Started on day one per the Prerequisite above,
+so the wait overlaps Milestones A–C.
+
+**2026-07-18 — two findings while starting Milestone A, from reading the
+installed `dj_rest_auth` source.**
+
+1. **Bearer auth already works; no settings change needed.**
+   `JWTCookieAuthentication` (`dj_rest_auth/jwt_auth.py`) subclasses
+   `JWTAuthentication` and checks the `Authorization` header *first* — when a
+   header is present it uses it and never reads the cookie or runs the CSRF
+   check. So the plan's original step 2 ("add `JWTAuthentication` alongside") was
+   unnecessary. The outcome the plan predicted was right, the mechanism was not:
+   it isn't DRF trying two classes in turn, it's one class preferring the header.
+   Step 2 became "write a test that pins this behaviour" instead.
+
+2. **The refresh token is blanked out of the login response body.**
+   `dj_rest_auth/views.py` sets `data['refresh'] = ""` whenever
+   `JWT_AUTH_HTTPONLY` is on — which it is, deliberately, as the web app's XSS
+   mitigation. So `/api/auth/login/` cannot give mobile a refresh token, which
+   blocked the rotation decision. **We did not turn `JWT_AUTH_HTTPONLY` off** —
+   weakening the website to serve the app is the wrong trade.
+
+   **Decision: dedicated mobile endpoints** — `/api/auth/mobile/login/`,
+   `/api/auth/mobile/refresh/`, `/api/auth/mobile/logout/`. They return both
+   tokens in the body and set no cookies; the web path is untouched. Rejected
+   varying the existing endpoint on a client header (same URL, two behaviours —
+   implicit and easy to misread later).
+
+   **Trap worth remembering:** building these on simplejwt's stock
+   `TokenObtainPairView` would skip `CustomLoginSerializer` and with it the
+   **email-verification check** and the **per-IP login throttle** — a mobile login
+   bypassing controls the web enforces. They must subclass `ThrottledLoginView`.
