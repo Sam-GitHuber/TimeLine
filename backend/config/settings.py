@@ -300,7 +300,10 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.BrowsableAPIRenderer",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "dj_rest_auth.jwt_auth.JWTCookieAuthentication",
+        # Subclass of dj_rest_auth's JWTCookieAuthentication: identical, except a
+        # cookie whose user has been deleted is treated as anonymous instead of
+        # 401-ing every request including login itself. See the module docstring.
+        "accounts.authentication.ResilientJWTCookieAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",

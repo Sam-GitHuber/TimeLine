@@ -1370,3 +1370,96 @@ class MobileAuthTests(APITestCase):
             MOBILE_REFRESH_URL, {"refresh": refresh}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class StaleAuthCookieTests(APITestCase):
+    """A cookie for a user who no longer exists must not lock login out (#93).
+
+    The browser resends `timeline-auth` on every request, so before the fix a
+    validly-signed token pointing at a deleted row 401'd the login POST itself
+    — leaving no in-app way to recover. See accounts/authentication.py.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(
+            email="survivor@example.com",
+            password=PASSWORD,
+            first_name="Still",
+            last_name="Here",
+            is_active=True,
+        )
+        EmailAddress.objects.create(
+            user=self.user, email=self.user.email, verified=True, primary=True
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def _cookie_for_deleted_user(self):
+        """A signed access token whose user id has no row behind it."""
+        doomed = User.objects.create_user(
+            email="deleted@example.com", password=PASSWORD, is_active=True
+        )
+        token = str(AccessToken.for_user(doomed))
+        doomed.delete()
+        return token
+
+    def test_login_succeeds_despite_a_cookie_for_a_deleted_user(self):
+        # The regression this issue is about.
+        self.client.cookies[AUTH_COOKIE] = self._cookie_for_deleted_user()
+
+        resp = self.client.post(
+            LOGIN_URL,
+            {"email": self.user.email, "password": PASSWORD},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # The fresh cookie replaces the stale one, so the trap doesn't persist.
+        self.assertIn(AUTH_COOKIE, resp.cookies)
+        self.assertNotEqual(resp.cookies[AUTH_COOKIE].value, "")
+
+    def test_protected_endpoint_still_401s_for_a_deleted_user(self):
+        # Anonymous, not authenticated — we relaxed the auth layer, not access.
+        self.client.cookies[AUTH_COOKIE] = self._cookie_for_deleted_user()
+
+        resp = self.client.get(USER_URL)
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_bearer_token_for_a_deleted_user_still_401s(self):
+        # Mobile sends the header deliberately and re-auths on 401; there's no
+        # automatic-resend trap, so the hard failure stays.
+        token = self._cookie_for_deleted_user()
+
+        resp = self.client.get(USER_URL, HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_expired_cookie_still_401s(self):
+        token = AccessToken.for_user(self.user)
+        token.set_exp(from_time=timezone.now() - timedelta(days=2))
+        self.client.cookies[AUTH_COOKIE] = str(token)
+
+        resp = self.client.get(USER_URL)
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_tampered_cookie_still_401s(self):
+        self.client.cookies[AUTH_COOKIE] = str(AccessToken.for_user(self.user)) + "x"
+
+        resp = self.client.get(USER_URL)
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_cookie_for_a_deactivated_user_still_401s(self):
+        # is_active=False is the admin-approval / ban gate. It must keep
+        # failing hard rather than degrading to anonymous.
+        token = str(AccessToken.for_user(self.user))
+        User.objects.filter(pk=self.user.pk).update(is_active=False)
+        self.client.cookies[AUTH_COOKIE] = token
+
+        resp = self.client.get(USER_URL)
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)

@@ -58,6 +58,44 @@ well-trodden libraries:
   assume, and `CustomRegisterSerializer.save()` is where `is_active=False` and the
   ToS consent stamp are set.
 
+### A cookie for a deleted user is anonymous, not a 401
+
+The configured auth class is `accounts.authentication.ResilientJWTCookieAuthentication`
+— dj-rest-auth's `JWTCookieAuthentication` with one behaviour changed.
+
+DRF authenticates *before* it consults permissions, and a browser resends the
+`timeline-auth` cookie on **every** request, login included. So a validly-signed
+token whose `user_id` no longer has a row used to 401 the login POST itself:
+the person couldn't log in, sign up, or log into a *different* account, and the
+error ("User not found") suggested nothing actionable. The only escape was
+clearing cookies by hand. That state is genuinely reachable — deleting your
+account on your phone while still logged in on a laptop, an admin hard-delete, a
+restore from a snapshot older than your account ([backup-restore](../backup-restore.md)),
+or locally, any `seed_demo` run.
+
+So when the **cookie** path fails *only* because the user has vanished, the class
+returns `None` (anonymous) instead of raising. Login then proceeds and its fresh
+cookie overwrites the stale one.
+
+This isn't a weakening: the token is validly signed but its subject no longer
+exists, so there is no identity to assume — anonymous is the accurate reading.
+Protected endpoints still refuse the request, just as "not logged in".
+
+Deliberately narrow — everything else still 401s:
+
+- **Bearer tokens.** A native client sends the header on purpose and re-auths on
+  401; there's no automatic-resend trap to escape.
+- **`is_active=False`.** That's the admin-approval / ban gate doing its job.
+- Expired, tampered, or wrong-signature tokens.
+
+One trap for future edits: simplejwt's `AuthenticationFailed` subclasses DRF's
+but mixes in `DetailDictMixin`, so `exc.detail` is a `{"detail": ..., "code": ...}`
+**dict**, not the `ErrorDetail` string DRF normally produces. Reading the code
+off the wrong shape fails closed (a 401), silently restoring the lockout —
+hence `_failure_code()` handles both and `StaleAuthCookieTests` pins it.
+
+Issue #93.
+
 ## Mobile auth (Bearer tokens) — Phase 9
 
 The native app authenticates with `Authorization: Bearer <access-token>` instead
