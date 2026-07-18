@@ -135,7 +135,11 @@ privacy-first principle.
 ## Repo conventions
 
 - `/backend` — Django + Django REST Framework app (managed with `uv`)
-- `/frontend` — React (Vite + Tailwind) app
+- `/frontend` — React (Vite + Tailwind) web app (JavaScript)
+- `/mobile` — Expo (React Native) iOS + Android app, **TypeScript** (Phase 9).
+  One folder serves both platforms; `mobile/ios` and `mobile/android` are
+  generated and gitignored. Its `node_modules` and deps are entirely separate
+  from `frontend`'s — the two are not a workspace.
 - `/docs` — this file + `design-system.md` + the ops runbooks (`deploy.md`,
   `backup-restore.md`); **`docs/reference/`** = how each shipped feature works and
   why (start there for a feature question); **`docs/phases/`** = forward-looking
