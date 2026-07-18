@@ -2447,6 +2447,47 @@ class SeedDemoAliceViewpointTests(APITestCase):
             rows.filter(addressed_at__isnull=False).exists(), "no addressed row"
         )
 
+    def test_no_notification_predates_the_thing_it_announces(self):
+        """A notification reports something that already happened, so a row
+        dated before its own target renders as visible nonsense: "Carol reacted
+        to your post" sitting days *above* the post it links to. The seed dates
+        rows from their target for exactly this reason.
+        """
+        rows = Notification.objects.filter(recipient=self.alice).select_related(
+            "post", "comment", "group", "connection", "event"
+        )
+
+        self.assertTrue(rows.exists(), "alice has no notifications at all")
+        for n in rows:
+            target = n.post or n.comment or n.connection or n.group or n.event
+            created = getattr(target, "created_at", None)
+            if created is None:
+                continue
+            self.assertGreaterEqual(
+                n.created_at, created,
+                f"{n.kind} notification predates the {type(target).__name__} "
+                f"it announces",
+            )
+
+    def test_a_still_pending_request_is_not_shown_as_addressed(self):
+        """``addressed`` means acted on, or resolved elsewhere (see the
+        Notification model). Frank's request is still pending in Alice's requests
+        inbox, so dulling its activity row would show her a state the app itself
+        can never produce — dealt with and awaiting her at the same time.
+        """
+        rows = Notification.objects.filter(
+            recipient=self.alice,
+            kind=Notification.Kind.CONNECTION_REQUEST,
+            connection__status=Connection.Status.PENDING,
+        )
+
+        self.assertTrue(rows.exists(), "no pending connection request seeded")
+        for n in rows:
+            self.assertIsNone(
+                n.addressed_at,
+                "a connection request still awaiting an answer is marked addressed",
+            )
+
     def test_back_dated_messages_stay_visible_to_their_participants(self):
         """A guard with teeth. Participation is stored as **intervals**, so
         back-dating a message without also back-dating its conversation clips it

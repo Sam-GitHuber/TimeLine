@@ -714,29 +714,75 @@ class Command(BaseCommand):
         unread rows would leave two thirds of that UI unexercised — and leave the
         badge with a two-digit count that says nothing useful.
 
-        The rows are back-dated to match the content they point at, so the centre
-        reads as a history rather than a pile of "just now".
+        Each row is dated from **its own target**, not from its position in the
+        list. A notification announces something that already happened, so dating
+        it independently of the thing it points at is what produces the visible
+        nonsense of "Carol reacted to your post" sitting four days *above* the
+        post it links to. Anchoring to the target keeps the centre readable as a
+        history and keeps every relative timestamp agreeing with its subject.
+
+        States then follow from relative age, with one exception: a request or
+        invite is only ``addressed`` once the underlying thing is actually
+        resolved. The model defines addressed as "acted on, or resolved
+        elsewhere" — so dulling Frank's request while it still sits pending in
+        the requests inbox would show a state the app itself can never produce.
         """
         alice = u[ALICE]
-        now = timezone.now()
-        rows = list(
-            Notification.objects.filter(recipient=alice).order_by("id")
+        rows = sorted(
+            Notification.objects.filter(recipient=alice).select_related(
+                "post", "comment", "group", "connection", "event"
+            ),
+            key=self._notification_anchor,
         )
-        # The oldest third is long dealt with, the next third glanced at, and the
-        # newest left unread — which is what the bell badge counts.
-        addressed = rows[: len(rows) // 3]
-        seen = rows[len(rows) // 3: (2 * len(rows)) // 3]
-        for i, n in enumerate(addressed):
-            when = now - timedelta(days=11, hours=i)
-            Notification.objects.filter(pk=n.pk).update(
-                created_at=when, seen_at=when, addressed_at=when
-            )
-        for i, n in enumerate(seen):
-            when = now - timedelta(days=5, hours=i)
-            Notification.objects.filter(pk=n.pk).update(
-                created_at=when, seen_at=when
-            )
+
+        # Pending requests are held out of the buckets entirely: they stay unread
+        # however old they are, because that's the only honest rendering of
+        # "still waiting for you". The rest split into thirds by age — oldest
+        # long dealt with, newest still unread. Thirds rather than absolute age
+        # cutoffs so all three states are populated whatever dates the content
+        # above happens to carry; the point of this function is to put the whole
+        # of the centre's UI on screen.
+        pending = [n for n in rows if self._is_unresolved_request(n)]
+        rest = [n for n in rows if n not in pending]
+        third = len(rest) // 3
+        state_of = {id(n): "addressed" for n in rest[:third]}
+        state_of.update({id(n): "seen" for n in rest[third: 2 * third]})
+
+        counts = {"addressed": 0, "seen": 0, "unread": 0}
+        for n in rows:
+            when = self._notification_anchor(n)
+            state = state_of.get(id(n), "unread")
+            fields = {"created_at": when}
+            if state in ("seen", "addressed"):
+                # Glanced at a little after it arrived, not at the same instant.
+                fields["seen_at"] = when + timedelta(hours=1)
+            if state == "addressed":
+                fields["addressed_at"] = when + timedelta(hours=2)
+            Notification.objects.filter(pk=n.pk).update(**fields)
+            counts[state] += 1
+
         self._say(
-            f"  aged alice's activity centre: {len(addressed)} addressed, "
-            f"{len(seen)} seen, {len(rows) - len(addressed) - len(seen)} unread"
+            f"  aged alice's activity centre: {counts['addressed']} addressed, "
+            f"{counts['seen']} seen, {counts['unread']} unread"
         )
+
+    def _notification_anchor(self, n):
+        """When a notification should claim to have arrived: just after whatever
+        it points at was created. Events are the one target created "now" by this
+        seed (they're dated by ``event_date``, not ``created_at``), so those rows
+        land at the top of the centre — which is where new group activity belongs.
+        """
+        target = n.post or n.comment or n.connection or n.group or n.event
+        created = getattr(target, "created_at", None) if target else None
+        return (created or timezone.now()) + timedelta(minutes=5)
+
+    def _is_unresolved_request(self, n):
+        """A request/invite whose underlying row is still awaiting an answer."""
+        if n.kind == Notification.Kind.CONNECTION_REQUEST and n.connection:
+            return n.connection.status == Connection.Status.PENDING
+        if n.kind == Notification.Kind.GROUP_INVITE and n.group:
+            return GroupMembership.objects.filter(
+                group=n.group, user_id=n.recipient_id,
+                status=GroupMembership.Status.INVITED,
+            ).exists()
+        return False
