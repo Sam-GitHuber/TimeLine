@@ -1,8 +1,15 @@
 # Phase 9 — iPhone App
 
 **Status:** in progress — **Milestone A done** (PR #91), **Milestone B done**
-(Expo spine: auth, token storage, silent refresh, login/logout, CI). Next up:
-**Milestone C — read + write core** (feed, post detail, compose, profiles).
+(PR #97: Expo spine — auth, token storage, silent refresh, login/logout, CI).
+**Milestone C in progress**, split one PR per screen area as the PR strategy
+below calls for:
+
+- **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
+  spine, photos, reaction counts, infinite scroll, pull-to-refresh.
+- **C2 — post detail** (comments + reactions, made interactive). Next.
+- **C3 — compose** (text + photo).
+- **C4 — profiles** (view / edit / avatar).
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
 locked** below); the questions that were open at kickoff have been resolved and
@@ -436,6 +443,55 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-18 — Milestone C1: media is auth-gated, so images need a header.**
+The biggest surprise of the milestone. In production Caddy `forward_auth`s every
+`/media/*` request to `/api/media-auth/`, and the web app satisfies that for free
+because a browser attaches its auth cookie to image requests. **A native app gets
+no such help** — a bare `<Image source={{uri}}>` sends no credentials, so every
+photo and avatar would 401 and render blank. Hence `src/components/AuthedImage.tsx`,
+which attaches the Bearer header (and only to our own host, so a token can't leak
+to a third party if a URL field ever changes).
+
+**This is a trap with a delayed fuse:** Django serves `/media/` openly when
+`DEBUG` is on, so a plain `<Image>` works perfectly in development and breaks only
+in production. **Use `AuthedImage` for anything under `/media/`.** It is also the
+one part of C1 that could not be verified locally — dev has no gate to test
+against, and the live server doesn't have the mobile endpoints yet. **Confirm
+photos actually load on the box** as soon as the release carrying #91 is deployed.
+
+**2026-07-18 — TanStack Query needed AppState wiring.** Query's refetch-on-focus
+listens for the browser's `visibilitychange`, which doesn't exist in React
+Native, so *nothing ever counted as a refocus*: a post made while the app was
+backgrounded stayed missing after reopening it. Fixed by driving `focusManager`
+from `AppState` in `_layout.tsx`. The sibling case — refetch on network
+reconnect — needs `onlineManager` + NetInfo and is deferred (another dependency,
+and v1 is online-only).
+
+**2026-07-18 — don't use `new URL()` in the app.** React Native ships a partial
+`URL` implementation (the reason `react-native-url-polyfill` exists). Paging
+follows the paginator's `next` URL, and parsing it with `new URL()` would have
+passed every test under Node — whose `URL` is complete — while silently breaking
+infinite scroll on device. `api.getPage` slices the string by hand instead.
+
+**2026-07-18 — Jest hung after the feed tests.** All green in ~1s, then the run
+never exited, which would hang the CI job. Not an open handle: TanStack Query's
+default five-minute `gcTime` timer keeps Node's event loop alive. Test
+`QueryClient`s set `gcTime: 0`.
+
+**2026-07-18 — post cards have no background, deliberately.** First cut rendered
+each post as a raised white card, which read as objects floating *above* the
+timeline rather than entries hanging *off* it — the maintainer flagged it
+immediately. Posts now sit straight on the surface with spacing and day dividers
+doing the separating, so the spine stays the thing holding the feed together.
+Reaction chips went white to compensate, since they're the one element that
+should read as pressable.
+
+Related: the clock time, avatar bead and author name are aligned by giving each
+an explicit line box of exactly the bead's height (`BEAD` in `PostCard.tsx`)
+rather than by nudging paddings — the eye reads the bead and name as one unit, so
+drift there is very visible, and hard-coded paddings would break at a different
+text size.
 
 **2026-07-18 — Apple Developer Program enrolled.** £79 (the UK price of the $99
 tier), status *pending approval*. Started on day one per the Prerequisite above,

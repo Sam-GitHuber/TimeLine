@@ -17,7 +17,13 @@
  */
 
 import { clearTokens, getAccessToken, getRefreshToken, saveTokens } from './tokens';
-import type { LoginResponse, RefreshResponse, User } from './types';
+import type {
+  LoginResponse,
+  Paginated,
+  Post,
+  RefreshResponse,
+  User,
+} from './types';
 
 /**
  * Point at the Phase 7 home server by default.
@@ -203,6 +209,42 @@ export const api = {
 
   /** "Who am I" — resolves to the user, or throws 401 when logged out. */
   getCurrentUser: () => request<User>('/api/auth/user/'),
+
+  /**
+   * The reverse-chronological feed: your posts plus those of everyone you're
+   * connected with, newest first.
+   *
+   * **The ordering is the product's one promise and it is enforced server-side**
+   * (`Post.Meta.ordering`). Never sort, re-rank, or filter this list on the
+   * client — render it exactly as it arrives. See feed-and-posts.md.
+   *
+   * Group posts are excluded by default, so the feed keeps its meaning of "the
+   * people I'm connected with".
+   */
+  getFeed: () => request<Paginated<Post>>('/api/feed/'),
+
+  /**
+   * Follow a paginator's `next` URL.
+   *
+   * The server returns an absolute URL built from the request it saw, which
+   * behind Caddy is not necessarily the host the app is talking to. Keeping only
+   * the path + query and re-basing on `BASE_URL` makes paging work regardless —
+   * the same thing `api.getPage` does on the web.
+   *
+   * **Parsed by hand rather than with `new URL()` on purpose.** React Native's
+   * `URL` is a partial implementation and has historically returned empty or
+   * wrong components (it's why `react-native-url-polyfill` exists). A silent
+   * failure here would break infinite scroll on device while every test passed
+   * under Node, whose `URL` is complete — so string-slicing it is.
+   */
+  getPage: <T>(url: string) => {
+    const afterScheme = url.indexOf('://');
+    const pathStart =
+      afterScheme === -1 ? 0 : url.indexOf('/', afterScheme + 3);
+    // A URL with no path at all ("https://host") — nothing sensible to follow.
+    const relative = pathStart === -1 ? '/' : url.slice(pathStart);
+    return request<Paginated<T>>(relative);
+  },
 
   /**
    * Log in and persist both tokens.

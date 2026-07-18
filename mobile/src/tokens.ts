@@ -26,7 +26,23 @@ export type TokenPair = {
   refresh: string;
 };
 
+/**
+ * In-memory mirror of the access token, for callers that can't await.
+ *
+ * `<Image>` is the reason this exists. Uploaded media is auth-gated in
+ * production (Caddy `forward_auth`s every `/media/*` request — see
+ * feed-and-posts.md), so an image request has to carry the Bearer header, and a
+ * render function can't await SecureStore. Reading the Keychain on every image
+ * in a scrolling feed would also be needless work.
+ *
+ * Kept in sync by `saveTokens` / `clearTokens` / `getAccessToken` below, and
+ * primed on launch by `AuthProvider`'s cold-start check. Never persisted — it
+ * dies with the process, which is the point.
+ */
+let cachedAccess: string | null = null;
+
 export async function saveTokens({ access, refresh }: TokenPair): Promise<void> {
+  cachedAccess = access;
   await Promise.all([
     SecureStore.setItemAsync(ACCESS_KEY, access),
     SecureStore.setItemAsync(REFRESH_KEY, refresh),
@@ -34,7 +50,17 @@ export async function saveTokens({ access, refresh }: TokenPair): Promise<void> 
 }
 
 export async function getAccessToken(): Promise<string | null> {
-  return SecureStore.getItemAsync(ACCESS_KEY);
+  cachedAccess = await SecureStore.getItemAsync(ACCESS_KEY);
+  return cachedAccess;
+}
+
+/**
+ * The access token if one is already in memory, without touching the Keychain.
+ * May be `null` before the first read even when the user is logged in — callers
+ * must tolerate that rather than treating it as "logged out".
+ */
+export function getCachedAccessToken(): string | null {
+  return cachedAccess;
 }
 
 export async function getRefreshToken(): Promise<string | null> {
@@ -42,6 +68,7 @@ export async function getRefreshToken(): Promise<string | null> {
 }
 
 export async function clearTokens(): Promise<void> {
+  cachedAccess = null;
   await Promise.all([
     SecureStore.deleteItemAsync(ACCESS_KEY),
     SecureStore.deleteItemAsync(REFRESH_KEY),
