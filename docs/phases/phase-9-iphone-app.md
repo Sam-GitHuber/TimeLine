@@ -7,8 +7,11 @@ below calls for:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
-- **C2 — post detail** (comments + reactions, made interactive). Next.
-- **C3 — compose** (text + photo).
+- **C2 — compose.** Done: the pulsing "now" tip capping the line, your avatar on
+  the spine, text + photo posting. *Brought forward ahead of post detail* — the
+  live tip caps the timeline, so without it the feed looks cut off at the top
+  rather than open-ended at the present.
+- **C3 — post detail** (comments + reactions, made interactive). Next.
 - **C4 — profiles** (view / edit / avatar).
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
@@ -443,6 +446,46 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-19 — Milestone C2 (compose): three React-Native-specific traps.**
+
+1. **`FormData` takes `{uri, name, type}`, not a `Blob`.** The runtime reads the
+   file off disk itself. A browser-style Blob uploads *nothing* while still
+   returning a cheerful 201 — a silent failure, hence a test pinning it. The part
+   must also carry a filename: camera-roll assets often have none, so one is
+   synthesised (the server validates by decoding bytes, not by extension).
+2. **Built-in `Animated`, not Reanimated, for the "now" pulse.** Reanimated needs
+   a native worklets module that doesn't exist under Jest, and *its own published
+   mock still imports that module*, so every test touching the component died on
+   a cryptic `loadUnpackers` error. Built-in `Animated` needs no native module
+   and is plenty for a two-property loop. Reach for Reanimated only when
+   something is genuinely gesture-driven.
+3. **The React Compiler forbids `useRef(...).current` during render.** The
+   familiar `useRef(new Animated.Value(0)).current` idiom fails
+   `react-hooks/refs` and breaks the build (`reactCompiler` is on in `app.json`).
+   Use `useState(() => new Animated.Value(0))` instead.
+
+Also: `Animated.loop` registers as an InteractionManager *interaction* by
+default, so an infinite decorative loop holds a handle forever and defers
+anything scheduled with `runAfterInteractions`. Pass `isInteraction: false`.
+
+**2026-07-19 — Jest hung again, and it was NOT the animation.** Chased the
+looping animation first and was wrong. The cause was TanStack Query's **mutation**
+cache: `gcTime: 0` had been set on `queries` only, and mutations have a separate
+cache with its own five-minute timer. Any test rendering a component that posts
+will hang the CI job until `defaultOptions.mutations.gcTime` is zeroed too.
+Isolating one suite at a time found it in a minute after guessing had burned far
+longer.
+
+**2026-07-19 — spine continuity is per-row, by necessity.** `FlatList`
+virtualises rows, so a single line drawn behind the whole list would scroll out
+of step with them. Every row therefore draws its own segment, which only looks
+continuous if all rows agree exactly where the line is — hence the shared
+geometry in `components/timeline.tsx`. The visible bug that prompted it: day
+dividers had no segment, so the line broke at every change of day. **A new row
+type must draw a `<Spine />` or it will punch a hole in the feed.** Note also
+that a row's *margin* can't be painted over (margins sit outside the padding
+box), so vertical gaps between rows must come from padding.
 
 **2026-07-18 — Milestone C1: media is auth-gated, so images need a header.**
 The biggest surprise of the milestone. In production Caddy `forward_auth`s every

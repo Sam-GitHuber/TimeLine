@@ -19,18 +19,10 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
+import { RAIL, SPINE_COLUMN, Spine } from './timeline';
 import type { Post } from '@/types';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import { formatClockTime } from '@/utils';
-
-/**
- * Width of the clock-time rail.
- *
- * Sized to fit the widest time it must render — "11:10" at `fontSize.sm` — with
- * a little slack. Too narrow and the time wraps mid-number ("11:1" / "0"), which
- * looks broken precisely on the element the whole design is built around.
- */
-const RAIL = 48;
 
 /**
  * The alignment band for a post's first line: clock time, avatar bead and author
@@ -67,8 +59,9 @@ export function PostCard({ post }: { post: Post }) {
         </Text>
       </View>
 
+      <Spine />
+
       <View style={styles.spineColumn}>
-        <View style={styles.spine} />
         <View style={styles.bead}>
           <Avatar user={post.author} size="xs" />
         </View>
@@ -152,14 +145,7 @@ const styles = StyleSheet.create({
     lineHeight: BEAD,
   },
   meridiem: { fontSize: 11, color: colors.inkFaint, lineHeight: 13 },
-  spineColumn: { width: 40, alignItems: 'center' },
-  spine: {
-    position: 'absolute',
-    top: 0,
-    bottom: -spacing.lg,
-    width: 2,
-    backgroundColor: colors.spine,
-  },
+  spineColumn: { width: SPINE_COLUMN, alignItems: 'center' },
   bead: {
     // A surface-coloured halo separates the bead from the line behind it.
     borderWidth: BEAD_BORDER,

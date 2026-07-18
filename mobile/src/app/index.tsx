@@ -28,8 +28,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
+import { ComposeBox } from '@/components/ComposeBox';
 import { PostCard } from '@/components/PostCard';
 import { toRows } from '@/feed';
+import { RAIL, SPINE_COLUMN, Spine } from '@/components/timeline';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
 
@@ -99,15 +101,25 @@ export default function FeedScreen() {
         keyExtractor={(row) => row.key}
         renderItem={({ item }) =>
           item.kind === 'day' ? (
+            // The divider carries its own spine segment: without one the line
+            // visibly breaks at every change of day.
             <View style={styles.day}>
+              <Spine />
               <Text style={styles.dayLabel}>{item.label}</Text>
               {item.sub ? <Text style={styles.daySub}>{item.sub}</Text> : null}
+              {/* A hairline finishing the row, kept inside the content column
+                  so it separates the days without cutting across the spine. */}
+              <View style={styles.dayRule} />
             </View>
           ) : (
             <PostCard post={item.post} />
           )
         }
         contentContainerStyle={styles.list}
+        // The compose box is the live tip of the timeline, so it belongs *in*
+        // the list rather than pinned above it — it scrolls away with the feed
+        // exactly as the top entry should.
+        ListHeaderComponent={<ComposeBox user={user} />}
         refreshControl={
           <RefreshControl
             refreshing={isRefetching && !isFetchingNextPage}
@@ -172,14 +184,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'baseline',
     gap: spacing.sm,
-    // Indented to line up with the left edge of the cards (rail 48 + spine
-    // column 40), so the label sits in the content column instead of cutting
-    // across the spine.
-    paddingLeft: 88,
+    // Indented to sit in the content column rather than cutting across the
+    // spine. Derived from the shared geometry so it can't drift out of step.
+    paddingLeft: RAIL + SPINE_COLUMN,
+    paddingTop: spacing.sm,
     paddingBottom: spacing.sm,
   },
   dayLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.inkSoft },
   daySub: { fontSize: 11, color: colors.inkFaint },
+  dayRule: {
+    flex: 1,
+    height: 1,
+    marginLeft: spacing.sm,
+    marginRight: spacing.md,
+    backgroundColor: colors.line,
+  },
   emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
   emptyBody: {
     fontSize: fontSize.sm,

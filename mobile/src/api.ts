@@ -42,6 +42,16 @@ import type {
 export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://your-timeline.net';
 
+/**
+ * A photo chosen from the library, ready to upload. React Native's `FormData`
+ * wants the file's location, not its bytes.
+ */
+export type PhotoUpload = {
+  uri: string;
+  name: string;
+  type: string;
+};
+
 export class ApiError extends Error {
   status: number;
   data: unknown;
@@ -244,6 +254,31 @@ export const api = {
     // A URL with no path at all ("https://host") — nothing sensible to follow.
     const relative = pathStart === -1 ? '/' : url.slice(pathStart);
     return request<Paginated<T>>(relative);
+  },
+
+  /**
+   * Create a post: text, photos, or both.
+   *
+   * Multipart because photos ride along in the same request, as repeated
+   * `images` parts — the shape `PostCreateView` expects. The author is **never**
+   * sent: the server sets it from the authenticated user and ignores anything in
+   * the body, so a client can't post as someone else.
+   *
+   * React Native's `FormData` takes a `{uri, name, type}` object for a file
+   * rather than a `Blob` — the runtime reads the file off disk itself. Passing a
+   * browser-style Blob here silently uploads nothing.
+   */
+  createPost: (text: string, photos: PhotoUpload[] = []) => {
+    const form = new FormData();
+    form.append('text', text);
+    for (const photo of photos) {
+      form.append('images', {
+        uri: photo.uri,
+        name: photo.name,
+        type: photo.type,
+      } as unknown as Blob);
+    }
+    return request<Post>('/api/posts/', { method: 'POST', body: form });
   },
 
   /**
