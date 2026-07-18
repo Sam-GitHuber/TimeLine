@@ -2378,6 +2378,143 @@ class SeedDemoCommandTests(APITestCase):
         self.assertTrue(alice.check_password("s3cret-demo-pw"))
 
 
+class SeedDemoAliceViewpointTests(APITestCase):
+    """What the demo world looks like *through Alice's eyes*.
+
+    Not product behaviour — the fixture itself. A broken demo world is silently
+    misleading: you log in, find an empty thread or a missing badge, and start
+    debugging the app instead of the seed. These pin the properties the demo
+    exists to give you.
+
+    The load-bearing one is her badges. The nav row is a tight fit inside the
+    640px column, and a count badge once widened its item enough to shove the
+    avatar out of the frame — so Alice deliberately carries at least one unread
+    item behind *every* badge, putting that layout case on screen at every login
+    rather than only when someone happens to have mail.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.core.management import call_command
+
+        call_command("seed_demo", verbosity=0)
+        cls.alice = User.objects.get(email="alice@example.com")
+
+    def setUp(self):
+        self.client.force_authenticate(self.alice)
+
+    def test_alice_has_an_unread_item_behind_every_nav_badge(self):
+        messages = self.client.get("/api/messages/unread-count/")
+        activity = self.client.get("/api/notifications/unread-count/")
+
+        self.assertGreater(messages.data["count"], 0, "no unread-messages badge")
+        self.assertGreater(activity.data["count"], 0, "no activity-centre badge")
+
+    def test_alice_sees_every_event_lifecycle_state_from_both_viewpoints(self):
+        visible = Event.objects.filter(
+            group__memberships__user=self.alice,
+            group__memberships__status="active",
+        ).distinct()
+
+        self.assertEqual(
+            set(visible.values_list("status", flat=True)),
+            {"scheduled", "planning", "cancelled"},
+        )
+        organisers = set(visible.values_list("organiser__email", flat=True))
+        # Both sides of the feature: events she runs (organiser controls) and
+        # events someone else runs (vote / RSVP as a member).
+        self.assertIn("alice@example.com", organisers)
+        self.assertTrue(organisers - {"alice@example.com"})
+        # A past event, so the "falls into the group timeline as a memory" path
+        # has something to show.
+        self.assertTrue(visible.filter(event_date__lt=timezone.localdate()).exists())
+
+    def test_seeds_open_and_closed_polls_with_votes_and_rsvps(self):
+        self.assertTrue(Poll.objects.filter(status="open").exists(), "no open poll")
+        self.assertTrue(Poll.objects.filter(status="closed").exists(), "no closed poll")
+        self.assertTrue(PollVote.objects.exists(), "no votes to tally")
+        self.assertTrue(EventRSVP.objects.exists(), "no RSVPs")
+
+    def test_alice_activity_centre_covers_all_three_states(self):
+        rows = Notification.objects.filter(recipient=self.alice)
+
+        self.assertTrue(rows.filter(seen_at__isnull=True).exists(), "no unread row")
+        self.assertTrue(
+            rows.filter(seen_at__isnull=False, addressed_at__isnull=True).exists(),
+            "no seen-but-unaddressed row",
+        )
+        self.assertTrue(
+            rows.filter(addressed_at__isnull=False).exists(), "no addressed row"
+        )
+
+    def test_no_notification_predates_the_thing_it_announces(self):
+        """A notification reports something that already happened, so a row
+        dated before its own target renders as visible nonsense: "Carol reacted
+        to your post" sitting days *above* the post it links to. The seed dates
+        rows from their target for exactly this reason.
+        """
+        rows = Notification.objects.filter(recipient=self.alice).select_related(
+            "post", "comment", "group", "connection", "event"
+        )
+
+        self.assertTrue(rows.exists(), "alice has no notifications at all")
+        for n in rows:
+            target = n.post or n.comment or n.connection or n.group or n.event
+            created = getattr(target, "created_at", None)
+            if created is None:
+                continue
+            self.assertGreaterEqual(
+                n.created_at, created,
+                f"{n.kind} notification predates the {type(target).__name__} "
+                f"it announces",
+            )
+
+    def test_a_still_pending_request_is_not_shown_as_addressed(self):
+        """``addressed`` means acted on, or resolved elsewhere (see the
+        Notification model). Frank's request is still pending in Alice's requests
+        inbox, so dulling its activity row would show her a state the app itself
+        can never produce — dealt with and awaiting her at the same time.
+        """
+        rows = Notification.objects.filter(
+            recipient=self.alice,
+            kind=Notification.Kind.CONNECTION_REQUEST,
+            connection__status=Connection.Status.PENDING,
+        )
+
+        self.assertTrue(rows.exists(), "no pending connection request seeded")
+        for n in rows:
+            self.assertIsNone(
+                n.addressed_at,
+                "a connection request still awaiting an answer is marked addressed",
+            )
+
+    def test_back_dated_messages_stay_visible_to_their_participants(self):
+        """A guard with teeth. Participation is stored as **intervals**, so
+        back-dating a message without also back-dating its conversation clips it
+        out of every participant's visible set and the thread renders empty —
+        which is exactly what happened the first time the seed was back-dated.
+        """
+        convos = self.client.get("/api/conversations/").data
+        convos = convos.get("results", convos)
+
+        self.assertTrue(convos, "alice has no conversations at all")
+        for convo in convos:
+            body = self.client.get(f"/api/conversations/{convo['id']}/messages/").data
+            self.assertTrue(
+                body.get("results", body), f"conversation {convo['id']} renders empty"
+            )
+
+    def test_her_feed_is_back_dated_not_all_at_once(self):
+        """Distinct timestamps are what make the reverse-chronological line
+        legible at a glance — six posts at the same instant prove nothing."""
+        posts = self.client.get("/api/feed/").data
+        posts = posts.get("results", posts)
+
+        stamps = {p["created_at"] for p in posts}
+        self.assertGreater(len(posts), 1)
+        self.assertEqual(len(stamps), len(posts))
+
+
 class MediaAuthTests(APITestCase):
     """The forward_auth gate Caddy calls before serving any /media/ file in
     production (Phase 7 hardening). Uploaded photos aren't world-readable: Caddy
