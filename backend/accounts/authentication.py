@@ -43,18 +43,18 @@ def _failure_code(exc):
 
     simplejwt's ``AuthenticationFailed`` subclasses DRF's but mixes in
     ``DetailDictMixin``, so ``exc.detail`` is a ``{"detail": ..., "code": ...}``
-    dict rather than the ``ErrorDetail`` string DRF normally produces. We can be
-    handed either — DRF's plain form if some other layer raises — so read the
-    dict key when there is one and fall back to ``ErrorDetail.code``.
+    dict rather than the ``ErrorDetail`` string DRF normally produces. **Every**
+    exception that currently reaches here is a simplejwt one, so in practice only
+    the dict branch runs; the ``ErrorDetail`` branch is an untested guard against
+    a future simplejwt dropping the mixin, not covered behaviour.
 
-    Getting this wrong fails *closed* (an unrecognised code re-raises, i.e. a
-    401), which is the safe direction but silently restores the lockout, so the
-    tests in StaleAuthCookieTests pin both branches.
+    It's worth the extra line because the failure is silent: an unrecognised code
+    re-raises, so a shape change restores the exact lockout this module exists to
+    prevent, with a plausible-looking 401 and a green test suite.
     """
     detail = exc.detail
     if isinstance(detail, dict):
-        code = detail.get("code")
-        return str(code) if code is not None else None
+        return detail.get("code")
     return getattr(detail, "code", None)
 
 

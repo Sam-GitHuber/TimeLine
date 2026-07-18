@@ -67,8 +67,10 @@ DRF authenticates *before* it consults permissions, and a browser resends the
 `timeline-auth` cookie on **every** request, login included. So a validly-signed
 token whose `user_id` no longer has a row used to 401 the login POST itself:
 the person couldn't log in, sign up, or log into a *different* account, and the
-error ("User not found") suggested nothing actionable. The only escape was
-clearing cookies by hand. That state is genuinely reachable — deleting your
+error ("User not found") suggested nothing actionable. It went further than
+login — even `/api/auth/csrf/`, the `AllowAny` primer the SPA calls on load,
+401'd, so the app couldn't obtain a CSRF token to *attempt* a login with. The
+only escape was clearing cookies by hand. That state is genuinely reachable — deleting your
 account on your phone while still logged in on a laptop, an admin hard-delete, a
 restore from a snapshot older than your account ([backup-restore](../backup-restore.md)),
 or locally, any `seed_demo` run.
@@ -91,8 +93,10 @@ Deliberately narrow — everything else still 401s:
 One trap for future edits: simplejwt's `AuthenticationFailed` subclasses DRF's
 but mixes in `DetailDictMixin`, so `exc.detail` is a `{"detail": ..., "code": ...}`
 **dict**, not the `ErrorDetail` string DRF normally produces. Reading the code
-off the wrong shape fails closed (a 401), silently restoring the lockout —
-hence `_failure_code()` handles both and `StaleAuthCookieTests` pins it.
+off the wrong shape fails closed (a 401), which silently restores the lockout
+behind a plausible-looking error — so `_failure_code()` tolerates both shapes.
+Only the dict branch actually runs today; the other is an unreached guard
+against a future simplejwt dropping the mixin.
 
 Issue #93.
 
