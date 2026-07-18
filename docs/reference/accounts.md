@@ -47,15 +47,127 @@ well-trodden libraries:
 - Passwords are hashed by Django (never stored plaintext).
 - DRF default authentication = the cookie-JWT class; default permission =
   `IsAuthenticated` (specific endpoints opt out with `AllowAny`).
-- **Access-token lifetime is 1 day** (`SIMPLE_JWT`) because there's no silent
-  refresh yet — a 5-minute default would log people out constantly. Add
-  refresh-on-401 when it matters.
+- **Access-token lifetime is 1 day** (`SIMPLE_JWT`) because the *web* app has no
+  silent refresh — a 5-minute default would log people out constantly. The mobile
+  client does refresh silently, but this setting is shared, so it stays at a day
+  (see "Mobile auth" below).
 - **allauth ≥65 settings API:** `ACCOUNT_LOGIN_METHODS = {"email"}`,
   `ACCOUNT_SIGNUP_FIELDS = [...]`, and `ACCOUNT_USER_MODEL_USERNAME_FIELD = None`
   (stops allauth trying to set a username). Custom serializers in
   `accounts/serializers.py` drop the `username` field dj-rest-auth's defaults
   assume, and `CustomRegisterSerializer.save()` is where `is_active=False` and the
   ToS consent stamp are set.
+
+## Mobile auth (Bearer tokens) — Phase 9
+
+The native app authenticates with `Authorization: Bearer <access-token>` instead
+of the cookie. Both clients hit the **same backend and the same API endpoints**;
+only the login/refresh/logout handshake differs.
+
+### Why separate endpoints exist
+
+`JWT_AUTH_HTTPONLY` is on, which is what stops page JavaScript reading the web
+app's tokens. dj-rest-auth implements it by **blanking the refresh token out of
+the login response body** (`data['refresh'] = ""` in `dj_rest_auth/views.py`), so
+`/api/auth/login/` can't give a native app what it needs. Turning
+`JWT_AUTH_HTTPONLY` off would have weakened the *website* to serve the app — the
+wrong trade — so the app gets its own endpoints instead:
+
+| Endpoint | View | Returns |
+|---|---|---|
+| `POST /api/auth/mobile/login/` | `accounts.views.MobileLoginView` | `access` + `refresh` + `user` in the body, **no cookies** |
+| `POST /api/auth/mobile/refresh/` | simplejwt `TokenRefreshView` | a rotated `access` + `refresh` pair |
+| `POST /api/auth/mobile/logout/` | simplejwt `TokenBlacklistView` | 200; blacklists the refresh token |
+
+`MobileLoginView` **subclasses `ThrottledLoginView`**, so the app inherits every
+control the browser login has: the per-IP rate limit, `CustomLoginSerializer`'s
+verified-email requirement, and the admin-approval (`is_active`) gate. Building
+it on simplejwt's stock `TokenObtainPairView` would have skipped all three and
+given mobile a quietly weaker login path — **if this view is ever rewritten, keep
+that inheritance.** A test pins each of the three.
+
+Refresh and logout *are* stock simplejwt views, which is safe for the opposite
+reason: they take a token rather than credentials, so there are no credential
+checks to inherit.
+
+### Bearer works with no settings change
+
+`JWTCookieAuthentication` (the configured auth class) subclasses
+`JWTAuthentication` and checks the `Authorization` header **first** — when a
+header is present it never reads the cookie and never runs the CSRF check. So
+Bearer authentication needed no new auth class. CSRF is a cookie concern; a
+header-authenticated request skips it correctly, and a test pins that too.
+
+### Refresh-token rotation
+
+The two clients want opposite things. Mobile needs to stay logged in
+indefinitely — a logged-out app receives no push notifications, which would
+defeat Phase 9. The web wants the opposite: the site has no silent refresh, so a
+long-lived refresh cookie on a shared or borrowed machine is pure extra exposure
+for no benefit.
+
+`SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"]` is a single global, so honouring both
+takes a **second token class** (`accounts/tokens.py`):
+
+| | Lifetime | Set by |
+|---|---|---|
+| Web refresh (`timeline-refresh` cookie) | **1 day** | `SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"]` |
+| Mobile refresh | **90 days** | `MOBILE_REFRESH_TOKEN_LIFETIME` (own setting) |
+| Access (both) | 1 day | `SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"]` |
+
+**The `client` claim is the security-critical part.** `MobileRefreshToken` stamps
+`client: "mobile"` into the payload, and `MobileTokenRefreshSerializer` rejects
+any token without it. Without that check, `/api/auth/mobile/refresh/` would
+happily accept a *web* refresh token and rotate it into a 90-day one — anyone who
+stole a 1-day browser cookie could upgrade it to three months just by POSTing it
+to a different URL. The claim is what makes the long lifetime unreachable from
+the short-lived path, and rotation preserves it because it mutates the decoded
+payload in place. A test pins the rejection.
+
+Watch for this whenever `SIMPLE_JWT` is edited: **`REFRESH_TOKEN_LIFETIME` sets
+the web cookie's max-age**, so lengthening it "for the app" silently widens the
+browser's credential window. That's exactly the mistake this split exists to
+prevent, and a test asserts the web cookie stays under two days.
+
+Other pieces:
+
+- `ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION` are on, backed by the
+  `rest_framework_simplejwt.token_blacklist` app. Every refresh returns a new
+  refresh token and invalidates the one that bought it, so a **stolen refresh
+  token is useful only until its owner next opens the app**, not for 90 days.
+  The 90-day lifetime is only defensible *because* of this.
+- **The blacklist tables need periodic flushing.** simplejwt writes an
+  `OutstandingToken` row for every refresh token it issues (every login on either
+  client, plus every rotation) and never removes expired ones.
+  `deploy/token-flush.{service,timer}` runs `flushexpiredtokens` weekly — see
+  [deploy.md](../deploy.md). It only deletes already-expired rows, so it can
+  never log anyone out.
+- `ACCESS_TOKEN_LIFETIME` stays at **1 day** for both clients.
+- **Logout blacklists server-side.** Deleting the token from the device isn't
+  enough on its own: a copy lifted from a backup would still mint access tokens.
+- A **deactivated user is locked out immediately** despite holding valid tokens —
+  simplejwt's `get_user` rejects `is_active=False`. This matters precisely
+  *because* refresh tokens now live 90 days; admin approval stays the real gate.
+
+On the device the tokens live in **`expo-secure-store`** (Keychain-backed), never
+`AsyncStorage`. Unlike the web's httpOnly cookie they *are* readable by our own
+JS, so: never log them, never put them in an error report, never append them to a
+URL query string.
+
+### Push device registration
+
+`POST`/`DELETE /api/push-tokens/` registers or removes one device's **Expo push
+token** (`api.models.DevicePushToken`: `user`, `expo_token`, `platform`,
+`created_at`, `last_seen`). One user can have several devices.
+
+`expo_token` is unique **globally**, not per user, and POST upserts on it —
+overwriting `user`. An Expo token identifies a *device*, so when a phone changes
+hands the row must move rather than leave the previous owner's notifications
+going somewhere they no longer control. DELETE is scoped to the caller, so a
+leaked token value can't be used to silence someone else's phone.
+
+Nothing sends push yet — that's Phase 9 Milestone D. See
+[notifications.md](notifications.md) and `docs/phases/phase-9-iphone-app.md`.
 
 ## Sign-up is gated by admin approval
 

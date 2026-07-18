@@ -1,0 +1,32 @@
+# systemd service: delete expired JWT refresh tokens from the blacklist tables.
+# Paired with token-flush.timer, which triggers it weekly.
+#
+# Install:
+#   sudo cp deploy/token-flush.{service,timer} /etc/systemd/system/
+#   # then edit User= and ExecStart= below to your deploy user + checkout path
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now token-flush.timer
+#
+# WHY THIS EXISTS (Phase 9): with SIMPLE_JWT's BLACKLIST_AFTER_ROTATION on,
+# simplejwt writes an `OutstandingToken` row for every refresh token it ever
+# issues — every web login, every mobile login, and every rotation — plus a
+# `BlacklistedToken` row for each rotation. Nothing deletes them when they
+# expire, so without this the two tables grow forever and drag the nightly
+# backup up with them. `flushexpiredtokens` removes only rows whose token has
+# already expired, so it can never log anyone out.
+#
+# Runs as the DEPLOY USER (not root): it needs docker-group access to exec into
+# the running backend container.
+[Unit]
+Description=TimeLine expired-JWT flush (simplejwt blacklist tables)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Set these to your actual deploy user and repo checkout path.
+User=<user>
+WorkingDirectory=/home/<user>/TimeLine
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml exec -T backend python manage.py flushexpiredtokens
+# Housekeeping should never hang holding things up; cap the run.
+TimeoutStartSec=600

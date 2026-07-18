@@ -383,6 +383,32 @@ Nightly encrypted off-site backups (Postgres dump + media) to Cloudflare R2, plu
 the tested restore procedure, live in their own runbook: **`docs/backup-restore.md`**.
 Take an ad-hoc backup before a risky change with `./deploy/backup.sh`.
 
+## Expired-token housekeeping (weekly)
+
+With JWT refresh-token rotation on (Phase 9 — see
+[`reference/accounts.md`](reference/accounts.md#refresh-token-rotation)),
+`simplejwt` writes an `OutstandingToken` row for **every refresh token it ever
+issues** — every web login, every mobile login, and every rotation — plus a
+`BlacklistedToken` row per rotation. Nothing removes them when they expire, so
+left alone the two tables grow forever and drag the nightly backup up with them.
+
+`flushexpiredtokens` deletes only rows whose token has **already expired**, so it
+can never log anyone out. Install the weekly timer:
+
+```bash
+sudo cp deploy/token-flush.{service,timer} /etc/systemd/system/
+sudo nano /etc/systemd/system/token-flush.service   # set User= and paths
+sudo systemctl daemon-reload
+sudo systemctl enable --now token-flush.timer
+
+# check it's scheduled
+systemctl list-timers token-flush.timer
+```
+
+It runs Sunday 04:15, after the 03:30 backup window so the two don't overlap on
+the database. Weekly rather than nightly because at this scale the tables grow by
+a handful of rows per person per day.
+
 ## Uptime monitoring
 
 You want to hear about an outage from a robot, not from a friend texting "is the

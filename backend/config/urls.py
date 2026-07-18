@@ -19,9 +19,12 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
+from rest_framework_simplejwt.views import TokenBlacklistView
 
 from accounts.views import (
     InactiveRegisterView,
+    MobileLoginView,
+    MobileTokenRefreshView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
     ResendVerificationView,
@@ -46,6 +49,34 @@ urlpatterns = [
         "api/auth/password/change/",
         ThrottledPasswordChangeView.as_view(),
         name="rest_password_change",
+    ),
+    # Native-app auth (Phase 9). Deliberately separate from the web endpoints
+    # above: these return both tokens in the response body and set no cookies,
+    # because JWT_AUTH_HTTPONLY (the web app's XSS mitigation) blanks the refresh
+    # token out of the standard login response. See MobileLoginView's docstring
+    # and docs/reference/accounts.md.
+    path(
+        "api/auth/mobile/login/",
+        MobileLoginView.as_view(),
+        name="mobile_login",
+    ),
+    # Refresh rotates (SIMPLE_JWT.ROTATE_REFRESH_TOKENS) and re-issues at the
+    # app's long lifetime — but only for tokens carrying the `client: "mobile"`
+    # claim, so a short-lived web refresh cookie can't be POSTed here to upgrade
+    # itself. See accounts/tokens.py.
+    path(
+        "api/auth/mobile/refresh/",
+        MobileTokenRefreshView.as_view(),
+        name="mobile_token_refresh",
+    ),
+    # Logout is simplejwt's stock view: it takes a *token*, not credentials, so
+    # there are no verification / approval / throttle checks to inherit. It
+    # blacklists the refresh token server-side, which matters because deleting it
+    # from the device alone wouldn't stop a copy lifted from a backup.
+    path(
+        "api/auth/mobile/logout/",
+        TokenBlacklistView.as_view(),
+        name="mobile_logout",
     ),
     # Auth API (dj-rest-auth): logout/, user/, password/reset*, token/*.
     path("api/auth/", include("dj_rest_auth.urls")),

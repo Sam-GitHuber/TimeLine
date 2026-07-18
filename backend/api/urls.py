@@ -251,6 +251,14 @@ urlpatterns = [
         name="poll-reopen",
     ),
     path("calendar/", views.PersonalCalendarView.as_view(), name="personal-calendar"),
+    # Register/unregister this device for push notifications (Phase 9). The app
+    # POSTs on login + each launch and DELETEs on logout; sending arrives in
+    # Milestone D.
+    path(
+        "push-tokens/",
+        views.DevicePushTokenView.as_view(),
+        name="push-token",
+    ),
     # Report a post/comment for the maintainer to review (Phase 7 takedown path).
     path("reports/", views.ReportCreateView.as_view(), name="report-create"),
     # Delete your own account + all your data (Phase 7 delete-my-data path).

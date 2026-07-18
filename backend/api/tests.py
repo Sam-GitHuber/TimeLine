@@ -42,6 +42,7 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    DevicePushToken,
     Event,
     EventRSVP,
     Group,
@@ -4406,3 +4407,118 @@ class EventNotificationTests(EventsBase):
         self.assertTrue(
             Notification.objects.filter(recipient=self.admin, kind="event_created").exists()
         )
+
+
+PUSH_TOKENS_URL = "/api/push-tokens/"
+
+
+class DevicePushTokenTests(APITestCase):
+    """Registering a device for push (Phase 9, Milestone A).
+
+    No sending happens yet — Milestone D adds that. These pin the registration
+    contract the app builds against, and the ownership rules that stop one
+    person's phone receiving another's notifications.
+    """
+
+    def setUp(self):
+        # Registration is throttled (per user), so clear the shared counter —
+        # otherwise these tests inherit or leave state for each other.
+        cache.clear()
+        self.me = make_user("device-owner@example.com")
+        self.other = make_user("someone-else@example.com")
+        self.client.force_authenticate(self.me)
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_register_creates_a_token_for_the_caller(self):
+        resp = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[abc123]", "platform": "ios"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        token = DevicePushToken.objects.get()
+        self.assertEqual(token.user, self.me)
+        self.assertEqual(token.platform, "ios")
+
+    def test_re_registering_the_same_device_updates_rather_than_duplicates(self):
+        # The app re-registers on every launch; that must not pile up rows.
+        for _ in range(3):
+            self.client.post(
+                PUSH_TOKENS_URL,
+                {"expo_token": "ExponentPushToken[abc123]", "platform": "ios"},
+                format="json",
+            )
+
+        self.assertEqual(DevicePushToken.objects.count(), 1)
+
+    def test_registering_a_device_moves_it_to_the_new_user(self):
+        # A handed-on or shared phone must stop notifying its previous owner.
+        DevicePushToken.objects.create(
+            user=self.other,
+            expo_token="ExponentPushToken[shared]",
+            platform="ios",
+        )
+
+        resp = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[shared]", "platform": "ios"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(DevicePushToken.objects.count(), 1)
+        self.assertEqual(DevicePushToken.objects.get().user, self.me)
+
+    def test_unregister_deletes_the_token(self):
+        DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[mine]", platform="ios"
+        )
+
+        resp = self.client.delete(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[mine]"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(DevicePushToken.objects.exists())
+
+    def test_cannot_unregister_someone_elses_device(self):
+        # A leaked token value must not let anyone silence another user's phone.
+        DevicePushToken.objects.create(
+            user=self.other,
+            expo_token="ExponentPushToken[theirs]",
+            platform="ios",
+        )
+
+        resp = self.client.delete(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[theirs]"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertTrue(DevicePushToken.objects.filter(user=self.other).exists())
+
+    def test_registration_requires_authentication(self):
+        self.client.force_authenticate(None)
+
+        resp = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[anon]", "platform": "ios"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_platform_must_be_a_known_value(self):
+        resp = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[x]", "platform": "blackberry"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
