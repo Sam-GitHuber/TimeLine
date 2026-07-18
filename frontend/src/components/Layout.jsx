@@ -8,6 +8,7 @@ import MessagesDrawer from "./MessagesDrawer.jsx";
 import GroupsDrawer from "./GroupsDrawer.jsx";
 import NavUserMenu from "./NavUserMenu.jsx";
 import ActivityCenter from "./ActivityCenter.jsx";
+import NavBadge from "./NavBadge.jsx";
 
 // The app shell: a top nav plus whichever page is active (<Outlet />).
 //
@@ -177,28 +178,6 @@ export default function Layout() {
       <GroupsDrawer />
       <MessagesDrawer />
     </div>
-  );
-}
-
-// The nav "you have something waiting" indicator. On a phone the item is just an
-// icon, so the count wouldn't have room — we show a small accent dot pinned to
-// the icon's corner instead. From `sm` up (labels visible) it becomes the count
-// pill sitting after the label. The count itself is conveyed to screen readers
-// via each item's aria-label, so both forms here are decorative (aria-hidden).
-function NavBadge({ count }) {
-  return (
-    <>
-      <span
-        aria-hidden="true"
-        className="absolute right-1 top-1 h-2 w-2 rounded-full bg-accent ring-2 ring-surface sm:hidden"
-      />
-      <span
-        aria-hidden="true"
-        className="ml-1.5 hidden min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[0.68rem] font-bold tabular-nums text-white sm:inline-flex"
-      >
-        {count}
-      </span>
-    </>
   );
 }
 
