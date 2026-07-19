@@ -1,107 +1,269 @@
 /**
- * The "who am I" screen — Milestone B's end state.
+ * The feed — the product's core screen.
  *
- * This is scaffolding, not a product screen: it proves the whole spine works
- * (token stored → Bearer attached → server recognises us → identity rendered)
- * and gives somewhere to test logout from. **Milestone C replaces this with the
- * real feed** (see docs/phases/phase-9-iphone-app.md).
+ * Reverse-chronological, always. The ordering is enforced server-side
+ * (`Post.Meta.ordering`), and this screen renders `results` exactly as they
+ * arrive: **no sorting, no re-ranking, no filtering on the client**. That's a
+ * non-negotiable product principle, not a default (docs/SHARED.md).
+ *
+ * Paging uses TanStack Query's `useInfiniteQuery` following the paginator's
+ * `next` URL — every list endpoint in this API is paginated, so this is the same
+ * contract the web app's `useInfiniteList` hook uses.
  */
 
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { BASE_URL } from '@/api';
+import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { Avatar } from '@/components/Avatar';
+import { ComposeBox } from '@/components/ComposeBox';
+import { PostCard } from '@/components/PostCard';
+import { toRows, trimToFirstPage, type FeedPages, type FeedRow } from '@/feed';
+import { RAIL, SPINE_COLUMN, Spine } from '@/components/timeline';
 import { colors, fontSize, radius, spacing } from '@/theme';
+import type { Post } from '@/types';
+import { useDayBoundary } from '@/useDayBoundary';
 
-export default function HomeScreen() {
+export default function FeedScreen() {
   const { user, signOut } = useAuth();
 
-  return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.content}>
-        <Text style={styles.eyebrow}>Signed in as</Text>
-        <Text style={styles.name}>{user?.display_name}</Text>
-        <Text style={styles.email}>{user?.email}</Text>
+  function confirmSignOut() {
+    Alert.alert('Log out?', 'You’ll need your password to log back in.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Log out', style: 'destructive', onPress: signOut },
+    ]);
+  }
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Milestone B</Text>
-          <Text style={styles.cardBody}>
-            The auth spine works: tokens are in the Keychain, the Bearer header is
-            attached, and the server recognises this device. The feed lands in
-            Milestone C.
-          </Text>
-          <Text style={styles.server}>{BASE_URL}</Text>
+  const {
+    data,
+    error,
+    isLoading,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['feed'],
+    queryFn: ({ pageParam }) =>
+      pageParam ? api.getPage<Post>(pageParam) : api.getFeed(),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) => lastPage.next ?? undefined,
+  });
+
+  /**
+   * Whether to show the pull-to-refresh spinner.
+   *
+   * Deliberately **not** `isRefetching`. That is true for *any* refetch,
+   * including the one `ComposeBox` triggers by invalidating ['feed'] after a
+   * successful post — and setting `refreshing` programmatically makes the
+   * RefreshControl slide in and shove the whole list (compose box and "now" tip
+   * included) downwards. Posting a post therefore made the app lurch.
+   *
+   * Tracking the user's own pull separately keeps the spinner for the gesture
+   * that asked for it, and lets background refetches update the list in place.
+   */
+  const [pulled, setPulled] = useState(false);
+
+  const queryClient = useQueryClient();
+
+  /**
+   * Pull-to-refresh: drop back to a single page, then fetch it.
+   *
+   * `refetch()` on its own would refetch every page currently loaded — see
+   * `trimToFirstPage`. Discarding pages 2+ is invisible here: you have to be at
+   * the top of the list to pull, and they re-fetch as you scroll back down.
+   */
+  const onPullToRefresh = useCallback(async () => {
+    setPulled(true);
+    try {
+      queryClient.setQueryData<FeedPages>(['feed'], trimToFirstPage);
+      await refetch();
+    } finally {
+      setPulled(false);
+    }
+  }, [refetch, queryClient]);
+
+  /**
+   * Held so a new post can be scrolled into view.
+   *
+   * A ref rather than state: it's a handle for imperative calls, never something
+   * render reads, so it must not trigger re-renders.
+   */
+  const listRef = useRef<FlatList<FeedRow>>(null);
+
+  const scrollToTop = useCallback(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, []);
+
+  // `today` is a dependency, not a value used directly: it changes at midnight
+  // and is what re-derives the "Today" / "Yesterday" divider labels.
+  const today = useDayBoundary();
+  const rows = useMemo(
+    () => toRows(data?.pages.flatMap((page) => page.results) ?? []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    [data, today]
+  );
+
+  if (isLoading) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.centre}>
+          <ActivityIndicator color={colors.accent} />
         </View>
+      </SafeAreaView>
+    );
+  }
 
+  return (
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <View style={styles.header}>
+        <Text style={styles.title}>TimeLine</Text>
+        {/* Temporary home for logout until the profile screen lands in C4 —
+            without it there's no way back out of the app during testing.
+            Confirmed first: this is where the profile button will live, so the
+            obvious tap must not silently end a session and force someone to
+            retype their password on a phone keyboard. */}
         <Pressable
-          style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
-          onPress={signOut}
+          onPress={confirmSignOut}
           accessibilityRole="button"
+          accessibilityLabel="Log out"
+          hitSlop={8}
         >
-          <Text style={styles.buttonText}>Log out</Text>
+          <Avatar user={user} size="sm" />
         </Pressable>
       </View>
+
+      <FlatList
+        ref={listRef}
+        data={rows}
+        keyExtractor={(row) => row.key}
+        renderItem={({ item }) =>
+          item.kind === 'day' ? (
+            // The divider carries its own spine segment: without one the line
+            // visibly breaks at every change of day.
+            <View style={styles.day}>
+              <Spine />
+              <Text style={styles.dayLabel}>{item.label}</Text>
+              {item.sub ? <Text style={styles.daySub}>{item.sub}</Text> : null}
+              {/* A hairline finishing the row, kept inside the content column
+                  so it separates the days without cutting across the spine. */}
+              <View style={styles.dayRule} />
+            </View>
+          ) : (
+            <PostCard post={item.post} />
+          )
+        }
+        contentContainerStyle={styles.list}
+        // The compose box is the live tip of the timeline, so it belongs *in*
+        // the list rather than pinned above it — it scrolls away with the feed
+        // exactly as the top entry should.
+        ListHeaderComponent={<ComposeBox user={user} onPosted={scrollToTop} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={pulled}
+            onRefresh={onPullToRefresh}
+            tintColor={colors.accent}
+          />
+        }
+        onEndReached={() => {
+          if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+        }}
+        onEndReachedThreshold={0.4}
+        ListEmptyComponent={
+          error ? (
+            <View style={styles.centre}>
+              <Text style={styles.emptyTitle}>Couldn&rsquo;t load your feed</Text>
+              <Text style={styles.emptyBody}>
+                {error instanceof Error ? error.message : 'Something went wrong.'}
+              </Text>
+              <Pressable style={styles.retry} onPress={() => refetch()}>
+                <Text style={styles.retryText}>Try again</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.centre}>
+              <Text style={styles.emptyTitle}>Nothing here yet</Text>
+              <Text style={styles.emptyBody}>
+                Posts from you and the people you&rsquo;re connected with will
+                appear here, newest first.
+              </Text>
+            </View>
+          )
+        }
+        ListFooterComponent={
+          isFetchingNextPage ? (
+            <ActivityIndicator style={styles.footer} color={colors.accent} />
+          ) : null
+        }
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.surface },
-  content: { flex: 1, padding: spacing.lg, justifyContent: 'center' },
-  eyebrow: {
+  centre: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.xl,
+    gap: spacing.sm,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  title: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink },
+  list: { paddingTop: spacing.sm, flexGrow: 1 },
+  day: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: spacing.sm,
+    // Indented to sit in the content column rather than cutting across the
+    // spine. Derived from the shared geometry so it can't drift out of step.
+    paddingLeft: RAIL + SPINE_COLUMN,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.sm,
+  },
+  dayLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.inkSoft },
+  daySub: { fontSize: 11, color: colors.inkFaint },
+  dayRule: {
+    flex: 1,
+    height: 1,
+    marginLeft: spacing.sm,
+    marginRight: spacing.md,
+    backgroundColor: colors.line,
+  },
+  emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
+  emptyBody: {
     fontSize: fontSize.sm,
-    color: colors.inkFaint,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: spacing.xs,
-  },
-  name: {
-    fontSize: fontSize.xl,
-    fontWeight: '700',
-    color: colors.ink,
-  },
-  email: {
-    fontSize: fontSize.base,
     color: colors.inkSoft,
-    marginTop: spacing.xs,
-  },
-  card: {
-    backgroundColor: colors.raised,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    marginTop: spacing.xl,
-  },
-  cardTitle: {
-    fontSize: fontSize.base,
-    fontWeight: '600',
-    color: colors.ink,
-    marginBottom: spacing.xs,
-  },
-  cardBody: {
-    fontSize: fontSize.sm,
-    color: colors.inkSoft,
+    textAlign: 'center',
     lineHeight: 20,
   },
-  server: {
-    fontSize: fontSize.sm,
-    color: colors.inkFaint,
+  retry: {
     marginTop: spacing.sm,
-  },
-  button: {
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.lineStrong,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-    marginTop: spacing.xl,
   },
-  buttonPressed: { backgroundColor: colors.accentTint },
-  buttonText: {
-    color: colors.ink,
-    fontSize: fontSize.base,
-    fontWeight: '600',
-  },
+  retryText: { color: colors.ink, fontWeight: '600' },
+  footer: { marginVertical: spacing.lg },
 });

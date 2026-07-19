@@ -16,8 +16,20 @@
  * Authorization header is present (see docs/reference/accounts.md).
  */
 
-import { clearTokens, getAccessToken, getRefreshToken, saveTokens } from './tokens';
-import type { LoginResponse, RefreshResponse, User } from './types';
+import {
+  clearTokens,
+  getAccessToken,
+  getCachedAccessToken,
+  getRefreshToken,
+  saveTokens,
+} from './tokens';
+import type {
+  LoginResponse,
+  Paginated,
+  Post,
+  RefreshResponse,
+  User,
+} from './types';
 
 /**
  * Point at the Phase 7 home server by default.
@@ -35,6 +47,16 @@ import type { LoginResponse, RefreshResponse, User } from './types';
 // request into a relative URL that goes nowhere.
 export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://your-timeline.net';
+
+/**
+ * A photo chosen from the library, ready to upload. React Native's `FormData`
+ * wants the file's location, not its bytes.
+ */
+export type PhotoUpload = {
+  uri: string;
+  name: string;
+  type: string;
+};
 
 export class ApiError extends Error {
   status: number;
@@ -146,7 +168,13 @@ async function request<T>(
   if (body !== undefined && !isFormData) {
     headers['Content-Type'] = 'application/json';
   }
-  const access = await getAccessToken();
+  // Prefer the in-memory copy and only fall back to the Keychain when there
+  // isn't one. `saveTokens` / `clearTokens` are the only writers and both update
+  // the cache synchronously, so the two can't disagree — but a Keychain read is
+  // an async native round-trip, and doing one before *every* request puts it on
+  // the critical path of the whole app. The fallback still covers the cold-start
+  // window before `AuthProvider` has primed the cache.
+  const access = getCachedAccessToken() ?? (await getAccessToken());
   if (access) headers.Authorization = `Bearer ${access}`;
 
   const response = await fetch(BASE_URL + path, {
@@ -203,6 +231,67 @@ export const api = {
 
   /** "Who am I" — resolves to the user, or throws 401 when logged out. */
   getCurrentUser: () => request<User>('/api/auth/user/'),
+
+  /**
+   * The reverse-chronological feed: your posts plus those of everyone you're
+   * connected with, newest first.
+   *
+   * **The ordering is the product's one promise and it is enforced server-side**
+   * (`Post.Meta.ordering`). Never sort, re-rank, or filter this list on the
+   * client — render it exactly as it arrives. See feed-and-posts.md.
+   *
+   * Group posts are excluded by default, so the feed keeps its meaning of "the
+   * people I'm connected with".
+   */
+  getFeed: () => request<Paginated<Post>>('/api/feed/'),
+
+  /**
+   * Follow a paginator's `next` URL.
+   *
+   * The server returns an absolute URL built from the request it saw, which
+   * behind Caddy is not necessarily the host the app is talking to. Keeping only
+   * the path + query and re-basing on `BASE_URL` makes paging work regardless —
+   * the same thing `api.getPage` does on the web.
+   *
+   * **Parsed by hand rather than with `new URL()` on purpose.** React Native's
+   * `URL` is a partial implementation and has historically returned empty or
+   * wrong components (it's why `react-native-url-polyfill` exists). A silent
+   * failure here would break infinite scroll on device while every test passed
+   * under Node, whose `URL` is complete — so string-slicing it is.
+   */
+  getPage: <T>(url: string) => {
+    const afterScheme = url.indexOf('://');
+    const pathStart =
+      afterScheme === -1 ? 0 : url.indexOf('/', afterScheme + 3);
+    // A URL with no path at all ("https://host") — nothing sensible to follow.
+    const relative = pathStart === -1 ? '/' : url.slice(pathStart);
+    return request<Paginated<T>>(relative);
+  },
+
+  /**
+   * Create a post: text, photos, or both.
+   *
+   * Multipart because photos ride along in the same request, as repeated
+   * `images` parts — the shape `PostCreateView` expects. The author is **never**
+   * sent: the server sets it from the authenticated user and ignores anything in
+   * the body, so a client can't post as someone else.
+   *
+   * React Native's `FormData` takes a `{uri, name, type}` object for a file
+   * rather than a `Blob` — the runtime reads the file off disk itself. Passing a
+   * browser-style Blob here silently uploads nothing.
+   */
+  createPost: (text: string, photos: PhotoUpload[] = []) => {
+    const form = new FormData();
+    form.append('text', text);
+    for (const photo of photos) {
+      form.append('images', {
+        uri: photo.uri,
+        name: photo.name,
+        type: photo.type,
+      } as unknown as Blob);
+    }
+    return request<Post>('/api/posts/', { method: 'POST', body: form });
+  },
 
   /**
    * Log in and persist both tokens.

@@ -1,8 +1,18 @@
 # Phase 9 — iPhone App
 
 **Status:** in progress — **Milestone A done** (PR #91), **Milestone B done**
-(Expo spine: auth, token storage, silent refresh, login/logout, CI). Next up:
-**Milestone C — read + write core** (feed, post detail, compose, profiles).
+(PR #97: Expo spine — auth, token storage, silent refresh, login/logout, CI).
+**Milestone C in progress**, split one PR per screen area as the PR strategy
+below calls for:
+
+- **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
+  spine, photos, reaction counts, infinite scroll, pull-to-refresh.
+- **C2 — compose.** Done: the pulsing "now" tip capping the line, your avatar on
+  the spine, text + photo posting. *Brought forward ahead of post detail* — the
+  live tip caps the timeline, so without it the feed looks cut off at the top
+  rather than open-ended at the present.
+- **C3 — post detail** (comments + reactions, made interactive). Next.
+- **C4 — profiles** (view / edit / avatar).
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
 locked** below); the questions that were open at kickoff have been resolved and
@@ -436,6 +446,138 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-19 — review of the C1+C2 PR, and the delayed fuse it found.**
+
+**A native module's config plugin must go in `app.json`, not just
+`package.json`.** `expo-image-picker` was installed and working, but never added
+to the `plugins` array — so nothing injected `NSPhotoLibraryUsageDescription`
+into `Info.plist`. It worked anyway because **Expo Go's prebuilt binary carries
+every permission string**, which is exactly what makes this class of bug
+dangerous: it would have surfaced at Milestone D, when we switch to a dev build,
+as an app that dies the moment you tap "Add photos" — and as an App Review
+rejection. Same shape as the `AuthedImage` media trap below: fine in the
+development harness, broken in the real one. **When adding any Expo package,
+check whether it ships a config plugin.**
+
+Verify without a full build: `npx expo config --type introspect` prints the
+resolved `Info.plist` / Android permissions.
+
+The permissions are also narrowed deliberately — `cameraPermission: false` and
+`microphonePermission: false`. The plugin adds *both* by default (plus Android's
+`RECORD_AUDIO`), and we only ever open the photo library. Shipping an unexplained
+microphone permission on a privacy-first app is a bad look, and Phase 10 would
+have inherited it on the Play listing.
+
+Three testing gotchas, all in the same family (the harness lies about what it
+supports):
+
+1. **RNTL v14 + fake timers needs `await act(async () => …)`.** A bare `act()`
+   runs the timer but React never flushes the re-render, so the hook's value
+   silently doesn't change and the failure looks exactly like a broken hook.
+2. **`UNSAFE_getByType` is gone in v14**, and **`FlatList` doesn't virtualise
+   under test**, so `fireEvent.scroll` never triggers `onEndReached`. Reaching
+   into a list's props to drive paging isn't available — extract the logic
+   (`trimToFirstPage`) and test it directly instead of fighting the component.
+3. **Module state outlives a test, mocked native state doesn't.** The
+   `expo-secure-store` mock resets per test but `tokens.ts`'s in-memory token
+   cache does not, so two `api.test.ts` cases were quietly passing on residue
+   rather than their own setup. `api.test.ts` now clears tokens in `beforeEach`.
+
+Also fixed in review: `refetch()` on a `useInfiniteQuery` refetches **every
+loaded page** sequentially (v5 removed `refetchPage`; trim the cache to page one
+first), and page-number pagination **re-sends a post across the page boundary**
+when someone posts mid-scroll, producing duplicate `FlatList` keys — `toRows`
+now drops repeats by id without touching order.
+
+**2026-07-19 — Milestone C2 (compose): three React-Native-specific traps.**
+
+1. **`FormData` takes `{uri, name, type}`, not a `Blob`.** The runtime reads the
+   file off disk itself. A browser-style Blob uploads *nothing* while still
+   returning a cheerful 201 — a silent failure, hence a test pinning it. The part
+   must also carry a filename: camera-roll assets often have none, so one is
+   synthesised (the server validates by decoding bytes, not by extension).
+2. **Built-in `Animated`, not Reanimated, for the "now" pulse.** Reanimated needs
+   a native worklets module that doesn't exist under Jest, and *its own published
+   mock still imports that module*, so every test touching the component died on
+   a cryptic `loadUnpackers` error. Built-in `Animated` needs no native module
+   and is plenty for a two-property loop. Reach for Reanimated only when
+   something is genuinely gesture-driven.
+3. **The React Compiler forbids `useRef(...).current` during render.** The
+   familiar `useRef(new Animated.Value(0)).current` idiom fails
+   `react-hooks/refs` and breaks the build (`reactCompiler` is on in `app.json`).
+   Use `useState(() => new Animated.Value(0))` instead.
+
+Also: `Animated.loop` registers as an InteractionManager *interaction* by
+default, so an infinite decorative loop holds a handle forever and defers
+anything scheduled with `runAfterInteractions`. Pass `isInteraction: false`.
+
+**2026-07-19 — Jest hung again, and it was NOT the animation.** Chased the
+looping animation first and was wrong. The cause was TanStack Query's **mutation**
+cache: `gcTime: 0` had been set on `queries` only, and mutations have a separate
+cache with its own five-minute timer. Any test rendering a component that posts
+will hang the CI job until `defaultOptions.mutations.gcTime` is zeroed too.
+Isolating one suite at a time found it in a minute after guessing had burned far
+longer.
+
+**2026-07-19 — spine continuity is per-row, by necessity.** `FlatList`
+virtualises rows, so a single line drawn behind the whole list would scroll out
+of step with them. Every row therefore draws its own segment, which only looks
+continuous if all rows agree exactly where the line is — hence the shared
+geometry in `components/timeline.tsx`. The visible bug that prompted it: day
+dividers had no segment, so the line broke at every change of day. **A new row
+type must draw a `<Spine />` or it will punch a hole in the feed.** Note also
+that a row's *margin* can't be painted over (margins sit outside the padding
+box), so vertical gaps between rows must come from padding.
+
+**2026-07-18 — Milestone C1: media is auth-gated, so images need a header.**
+The biggest surprise of the milestone. In production Caddy `forward_auth`s every
+`/media/*` request to `/api/media-auth/`, and the web app satisfies that for free
+because a browser attaches its auth cookie to image requests. **A native app gets
+no such help** — a bare `<Image source={{uri}}>` sends no credentials, so every
+photo and avatar would 401 and render blank. Hence `src/components/AuthedImage.tsx`,
+which attaches the Bearer header (and only to our own host, so a token can't leak
+to a third party if a URL field ever changes).
+
+**This is a trap with a delayed fuse:** Django serves `/media/` openly when
+`DEBUG` is on, so a plain `<Image>` works perfectly in development and breaks only
+in production. **Use `AuthedImage` for anything under `/media/`.** It is also the
+one part of C1 that could not be verified locally — dev has no gate to test
+against, and the live server doesn't have the mobile endpoints yet. **Confirm
+photos actually load on the box** as soon as the release carrying #91 is deployed.
+
+**2026-07-18 — TanStack Query needed AppState wiring.** Query's refetch-on-focus
+listens for the browser's `visibilitychange`, which doesn't exist in React
+Native, so *nothing ever counted as a refocus*: a post made while the app was
+backgrounded stayed missing after reopening it. Fixed by driving `focusManager`
+from `AppState` in `_layout.tsx`. The sibling case — refetch on network
+reconnect — needs `onlineManager` + NetInfo and is deferred (another dependency,
+and v1 is online-only).
+
+**2026-07-18 — don't use `new URL()` in the app.** React Native ships a partial
+`URL` implementation (the reason `react-native-url-polyfill` exists). Paging
+follows the paginator's `next` URL, and parsing it with `new URL()` would have
+passed every test under Node — whose `URL` is complete — while silently breaking
+infinite scroll on device. `api.getPage` slices the string by hand instead.
+
+**2026-07-18 — Jest hung after the feed tests.** All green in ~1s, then the run
+never exited, which would hang the CI job. Not an open handle: TanStack Query's
+default five-minute `gcTime` timer keeps Node's event loop alive. Test
+`QueryClient`s set `gcTime: 0`.
+
+**2026-07-18 — post cards have no background, deliberately.** First cut rendered
+each post as a raised white card, which read as objects floating *above* the
+timeline rather than entries hanging *off* it — the maintainer flagged it
+immediately. Posts now sit straight on the surface with spacing and day dividers
+doing the separating, so the spine stays the thing holding the feed together.
+Reaction chips went white to compensate, since they're the one element that
+should read as pressable.
+
+Related: the clock time, avatar bead and author name are aligned by giving each
+an explicit line box of exactly the bead's height (`BEAD` in `PostCard.tsx`)
+rather than by nudging paddings — the eye reads the bead and name as one unit, so
+drift there is very visible, and hard-coded paddings would break at a different
+text size.
 
 **2026-07-18 — Apple Developer Program enrolled.** £79 (the UK price of the $99
 tier), status *pending approval*. Started on day one per the Prerequisite above,

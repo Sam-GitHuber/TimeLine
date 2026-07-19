@@ -5,11 +5,21 @@
  * point — the equivalent of `main.jsx` + `App.jsx` in the web app.
  */
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  QueryClient,
+  QueryClientProvider,
+  focusManager,
+} from '@tanstack/react-query';
 import { Stack, router, useRootNavigationState, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import {
+  ActivityIndicator,
+  AppState,
+  type AppStateStatus,
+  StyleSheet,
+  View,
+} from 'react-native';
 
 import { AuthProvider, useAuth } from '@/auth';
 import { colors } from '@/theme';
@@ -77,7 +87,35 @@ function AuthGate() {
   );
 }
 
+/**
+ * Tell TanStack Query when the app comes back to the foreground.
+ *
+ * Query's built-in refetch-on-focus listens for the browser's `visibilitychange`
+ * event, which does not exist in React Native — so without this, **nothing ever
+ * counts as a refocus** and a backgrounded app shows whatever it last fetched
+ * until the user pulls to refresh.
+ *
+ * That matters more on a phone than on the web: people background an app for
+ * hours and expect the feed to be current when they come back. It was visible
+ * in testing — a post made while the app was backgrounded stayed missing after
+ * reopening it.
+ *
+ * (Network reconnection is the sibling case, and needs `onlineManager` wired to
+ * NetInfo. Deferred: it's another dependency, and v1 is deliberately online-only.)
+ */
+function useRefetchOnForeground() {
+  useEffect(() => {
+    const subscription = AppState.addEventListener(
+      'change',
+      (status: AppStateStatus) => focusManager.setFocused(status === 'active')
+    );
+    return () => subscription.remove();
+  }, []);
+}
+
 export default function RootLayout() {
+  useRefetchOnForeground();
+
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>

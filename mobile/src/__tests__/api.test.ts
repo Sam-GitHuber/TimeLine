@@ -23,10 +23,18 @@ function jsonResponse(body: unknown, status = 200) {
 
 const mockFetch = jest.fn();
 
-beforeEach(() => {
+beforeEach(async () => {
   mockFetch.mockReset();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
   setSessionExpiredHandler(() => {});
+  // Start every test logged out, explicitly.
+  //
+  // `tokens.ts` keeps the access token in a module-level cache (so the fetch
+  // wrapper and every image in the feed don't each pay a Keychain round-trip),
+  // and module state outlives an individual test. Without this, a test that
+  // saves a token silently arms the next one, and a test asserting "no token"
+  // would be passing on residue rather than on its own setup.
+  await clearTokens();
 });
 
 describe('authenticated requests', () => {
@@ -233,6 +241,84 @@ describe('logout', () => {
 
     expect(await getAccessToken()).toBeNull();
     expect(await getRefreshToken()).toBeNull();
+  });
+});
+
+describe('createPost multipart body', () => {
+  /**
+   * A stand-in for `FormData` that keeps what was appended.
+   *
+   * Needed because the *shape of the parts* is the thing worth pinning here, and
+   * neither real implementation lets us see it: React Native's `FormData` takes
+   * a `{uri, name, type}` object and reads the file off disk itself, while the
+   * spec `FormData` that Jest runs against stringifies any non-Blob value to
+   * "[object Object]". Recording the appends is the only way to assert the
+   * difference — and the difference is exactly the bug this guards against,
+   * since uploading a browser-style `Blob` from React Native sends **no file**
+   * while the server still answers 201.
+   */
+  class RecordingFormData {
+    parts: [string, unknown][] = [];
+    append(name: string, value: unknown) {
+      this.parts.push([name, value]);
+    }
+  }
+
+  const realFormData = globalThis.FormData;
+
+  beforeEach(() => {
+    globalThis.FormData = RecordingFormData as unknown as typeof FormData;
+  });
+
+  afterEach(() => {
+    globalThis.FormData = realFormData;
+  });
+
+  function partsOf(body: unknown): [string, unknown][] {
+    return (body as RecordingFormData).parts;
+  }
+
+  it('appends each photo as a {uri, name, type} file object, never a Blob', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
+
+    await api.createPost('A day out', [
+      { uri: 'file:///tmp/a.jpg', name: 'a.jpg', type: 'image/jpeg' },
+      { uri: 'file:///tmp/b.png', name: 'b.png', type: 'image/png' },
+    ]);
+
+    const parts = partsOf(mockFetch.mock.calls[0][1].body);
+    // Repeated `images` parts is the shape `PostCreateView` expects.
+    expect(parts).toEqual([
+      ['text', 'A day out'],
+      ['images', { uri: 'file:///tmp/a.jpg', name: 'a.jpg', type: 'image/jpeg' }],
+      ['images', { uri: 'file:///tmp/b.png', name: 'b.png', type: 'image/png' }],
+    ]);
+    // A Blob here would upload nothing at all, silently.
+    for (const [, value] of parts.slice(1)) {
+      expect(typeof value).toBe('object');
+      expect(value).toHaveProperty('uri');
+      expect(value).toHaveProperty('name');
+    }
+  });
+
+  it('posts text with no images when there are no photos', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
+
+    await api.createPost('Just words');
+
+    expect(partsOf(mockFetch.mock.calls[0][1].body)).toEqual([
+      ['text', 'Just words'],
+    ]);
+  });
+
+  it('lets the runtime set the multipart Content-Type, boundary and all', async () => {
+    // Setting it by hand omits the boundary, and the server can then parse none
+    // of the parts.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
+
+    await api.createPost('Hello');
+
+    expect(mockFetch.mock.calls[0][1].headers['Content-Type']).toBeUndefined();
   });
 });
 
