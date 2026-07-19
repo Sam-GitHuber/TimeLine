@@ -12,7 +12,7 @@
  */
 
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -49,7 +49,6 @@ export default function FeedScreen() {
     data,
     error,
     isLoading,
-    isRefetching,
     refetch,
     fetchNextPage,
     hasNextPage,
@@ -61,6 +60,29 @@ export default function FeedScreen() {
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
+
+  /**
+   * Whether to show the pull-to-refresh spinner.
+   *
+   * Deliberately **not** `isRefetching`. That is true for *any* refetch,
+   * including the one `ComposeBox` triggers by invalidating ['feed'] after a
+   * successful post — and setting `refreshing` programmatically makes the
+   * RefreshControl slide in and shove the whole list (compose box and "now" tip
+   * included) downwards. Posting a post therefore made the app lurch.
+   *
+   * Tracking the user's own pull separately keeps the spinner for the gesture
+   * that asked for it, and lets background refetches update the list in place.
+   */
+  const [pulled, setPulled] = useState(false);
+
+  const onPullToRefresh = useCallback(async () => {
+    setPulled(true);
+    try {
+      await refetch();
+    } finally {
+      setPulled(false);
+    }
+  }, [refetch]);
 
   const rows = useMemo(
     () => toRows(data?.pages.flatMap((page) => page.results) ?? []),
@@ -122,8 +144,8 @@ export default function FeedScreen() {
         ListHeaderComponent={<ComposeBox user={user} />}
         refreshControl={
           <RefreshControl
-            refreshing={isRefetching && !isFetchingNextPage}
-            onRefresh={refetch}
+            refreshing={pulled}
+            onRefresh={onPullToRefresh}
             tintColor={colors.accent}
           />
         }

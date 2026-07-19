@@ -42,6 +42,22 @@ import type { User } from '@/types';
 const NODE_SIZE = 12;
 const NODE_TOP = 10;
 
+/**
+ * Where your avatar sits, and therefore where the text box has to line up.
+ *
+ * The bead hangs below the "now" tip, so the input can't just start at the top
+ * of the row — it would float above the avatar and read as unrelated to it.
+ * Everything below is derived rather than hard-coded so the two stay locked
+ * together if any of the spacing changes.
+ */
+const BEAD = 24; // Avatar size="xs"
+const BEAD_BORDER = 3; // surface-coloured halo
+const BEAD_GAP = 8; // gap between the tip and the bead (spacing.sm)
+const BEAD_CENTRE = NODE_TOP + NODE_SIZE + BEAD_GAP + BEAD_BORDER + BEAD / 2;
+
+/** Collapsed height of the text box; its centre is what we align. */
+const INPUT_HEIGHT = 44;
+
 /** Mirrors `POST_MAX_LENGTH` / `MAX_IMAGES_PER_POST` in the backend. */
 const MAX_LENGTH = 5000;
 const MAX_PHOTOS = 10;
@@ -208,7 +224,7 @@ const styles = StyleSheet.create({
     // shows up as a break in the line right under the compose box.
     paddingBottom: spacing.lg,
   },
-  rail: { width: RAIL, alignItems: 'flex-end' },
+  rail: { width: RAIL, alignItems: 'flex-end', paddingTop: NODE_TOP - 2 },
   now: {
     fontSize: fontSize.sm,
     color: colors.accent,
@@ -217,14 +233,20 @@ const styles = StyleSheet.create({
   },
   spineColumn: { width: SPINE_COLUMN, alignItems: 'center', paddingTop: NODE_TOP },
   bead: {
-    marginTop: spacing.sm,
-    borderWidth: 3,
+    marginTop: BEAD_GAP,
+    borderWidth: BEAD_BORDER,
     borderColor: colors.surface,
     borderRadius: radius.pill,
   },
-  body: { flex: 1, paddingLeft: spacing.xs },
+  body: {
+    flex: 1,
+    paddingLeft: spacing.xs,
+    // Drop the text box so its centre sits on the avatar's, the same way a
+    // post's author name lines up with its bead.
+    paddingTop: BEAD_CENTRE - INPUT_HEIGHT / 2,
+  },
   input: {
-    minHeight: 44,
+    minHeight: INPUT_HEIGHT,
     backgroundColor: colors.raised,
     borderWidth: 1,
     borderColor: colors.lineStrong,
