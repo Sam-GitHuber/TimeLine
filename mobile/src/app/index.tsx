@@ -12,7 +12,7 @@
  */
 
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -30,7 +30,7 @@ import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { ComposeBox } from '@/components/ComposeBox';
 import { PostCard } from '@/components/PostCard';
-import { toRows } from '@/feed';
+import { toRows, type FeedRow } from '@/feed';
 import { RAIL, SPINE_COLUMN, Spine } from '@/components/timeline';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
@@ -84,6 +84,18 @@ export default function FeedScreen() {
     }
   }, [refetch]);
 
+  /**
+   * Held so a new post can be scrolled into view.
+   *
+   * A ref rather than state: it's a handle for imperative calls, never something
+   * render reads, so it must not trigger re-renders.
+   */
+  const listRef = useRef<FlatList<FeedRow>>(null);
+
+  const scrollToTop = useCallback(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, []);
+
   const rows = useMemo(
     () => toRows(data?.pages.flatMap((page) => page.results) ?? []),
     [data]
@@ -119,6 +131,7 @@ export default function FeedScreen() {
       </View>
 
       <FlatList
+        ref={listRef}
         data={rows}
         keyExtractor={(row) => row.key}
         renderItem={({ item }) =>
@@ -141,7 +154,7 @@ export default function FeedScreen() {
         // The compose box is the live tip of the timeline, so it belongs *in*
         // the list rather than pinned above it — it scrolls away with the feed
         // exactly as the top entry should.
-        ListHeaderComponent={<ComposeBox user={user} />}
+        ListHeaderComponent={<ComposeBox user={user} onPosted={scrollToTop} />}
         refreshControl={
           <RefreshControl
             refreshing={pulled}

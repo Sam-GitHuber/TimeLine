@@ -18,6 +18,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Keyboard,
   Pressable,
   StyleSheet,
   Text,
@@ -62,7 +63,14 @@ const INPUT_HEIGHT = 44;
 const MAX_LENGTH = 5000;
 const MAX_PHOTOS = 10;
 
-export function ComposeBox({ user }: { user: User | null }) {
+export function ComposeBox({
+  user,
+  onPosted,
+}: {
+  user: User | null;
+  /** Called after a post lands, so the feed can bring it into view. */
+  onPosted?: () => void;
+}) {
   const [text, setText] = useState('');
   const [photos, setPhotos] = useState<PhotoUpload[]>([]);
   const queryClient = useQueryClient();
@@ -72,10 +80,17 @@ export function ComposeBox({ user }: { user: User | null }) {
     onSuccess: () => {
       setText('');
       setPhotos([]);
+      // Put the keyboard away: the thought is finished, and leaving it up means
+      // the list resizes under the user a moment later, which reads as a jolt.
+      Keyboard.dismiss();
       // Refetch the feed so the new post appears at the top. Invalidating rather
       // than optimistically inserting keeps the client from having to guess the
       // server's shape (ids, timestamps, counts) for a brand-new post.
       queryClient.invalidateQueries({ queryKey: ['feed'] });
+      // Inserting a post above whatever you were looking at shifts everything
+      // down. Scrolling to the top turns that from an unexplained lurch into a
+      // deliberate move that shows you the thing you just wrote.
+      onPosted?.();
     },
     onError: (error) => {
       // Keep the text and photos on failure — losing what someone just typed
