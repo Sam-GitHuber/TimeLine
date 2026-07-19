@@ -186,7 +186,9 @@ export function ReactionBar({
         {inlineTrailing ? trailing : null}
       </View>
 
-      {inlineTrailing ? null : <View style={styles.trailing}>{trailing}</View>}
+      {trailing && !inlineTrailing ? (
+        <View style={styles.trailing}>{trailing}</View>
+      ) : null}
 
       <ReactionTray
         visible={trayOpen}

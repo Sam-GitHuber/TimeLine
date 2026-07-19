@@ -473,6 +473,38 @@ indent from those constants rather than hard-coding one, or it will drift.
 Verified in the Simulator with a throwaway fixture-data route, since layout is
 the one thing Jest genuinely cannot check.
 
+**2026-07-19 — Milestone C3 review: `onLayout` is parent-relative, and children
+lay out first.** Both halves of the deep-link scroll were wrong on the first cut,
+and neither showed up in a test that only checked the comment had rendered.
+
+`onLayout` reports a view's offset **within its immediate parent**, not within
+the screen. A reply nested under a comment therefore reports a number like `20` —
+its offset inside its parent's replies block — and scrolling to that lands at the
+top of the thread rather than at the reply. Every ancestor has to add its own
+offset (including the replies container itself, which sits between a node and its
+children) as the report passes up.
+
+The second half is the ordering: **React Native lays children out before their
+parents**, so the target's offset almost always arrives while the ancestors — and
+the screen — still don't know their own positions. Summing eagerly bakes in
+zeroes. Each level buffers a report it can't yet resolve and flushes it when its
+own `onLayout` lands. The screen's "only scroll once" guard has to respect the
+same rule: latching it on the early call made the miss permanent.
+
+This matters more than it looks, because **this route is what every post and
+comment push notification opens in Milestone D**. Covered now by tests that fire
+layout events in RN's real order and assert the arithmetic
+(`comments.test.tsx`, `postDetail.test.tsx`), rather than only asserting the
+target rendered.
+
+Two smaller things from the same review: the "seen" marker was being mirrored
+into the cache when the *post* loaded, but the server stamps it as a side effect
+of the *comments* GET — so a failed comments request cleared the badge while the
+server still had the thread unseen. It now hangs off the comments query, matching
+the web, which marks seen on the open-comments action. And `reactionPath` throws
+rather than building `/api/comments/undefined/react/` when neither target id is
+passed.
+
 **2026-07-19 — Milestone C3: the emoji picker doesn't cross to React Native.**
 
 The web's full picker is `emoji-picker-element`, a **DOM web component**, so it

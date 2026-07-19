@@ -14,7 +14,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -28,6 +28,7 @@ import {
 import { api } from '@/api';
 import { Avatar } from './Avatar';
 import { ReactionBar } from './ReactionBar';
+import { markPostCommentsSeen } from '@/postCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Comment } from '@/types';
 import { formatRelativeTime } from '@/utils';
@@ -70,6 +71,8 @@ export function CommentThread({
   /** Reports where the highlighted comment landed, so the screen can scroll. */
   onHighlightLayout?: (y: number) => void;
 }) {
+  const queryClient = useQueryClient();
+
   const {
     data: comments,
     isLoading,
@@ -79,10 +82,31 @@ export function CommentThread({
     queryFn: () => api.getComments(postId),
   });
 
-  const expandIds =
-    highlightCommentId != null && comments
-      ? ancestorIdsOf(comments, highlightCommentId)
-      : null;
+  /**
+   * Mirror the server's "seen" stamp into the cache — but only once the GET that
+   * *does* the stamping has actually succeeded.
+   *
+   * This lives here rather than on the screen for that reason: the stamp is a
+   * side effect of this request, so anything else keying off it can get out of
+   * step. Clearing the badge when the *post* loaded meant a failed comments
+   * request left the feed showing nothing new while the server still had the
+   * thread unseen — the comments were then invisible until something else
+   * refetched. Same rule as the web, which marks seen on the open-comments
+   * action rather than on the post render (frontend/src/components/PostCard.jsx).
+   */
+  useEffect(() => {
+    if (comments) markPostCommentsSeen(queryClient, postId);
+  }, [comments, postId, queryClient]);
+
+  // Memoised because it walks the whole tree: without this, every keystroke in
+  // the composer below re-walks it and hands every node a fresh Set.
+  const expandIds = useMemo(
+    () =>
+      highlightCommentId != null && comments
+        ? ancestorIdsOf(comments, highlightCommentId)
+        : null,
+    [comments, highlightCommentId]
+  );
 
   if (isLoading) {
     return <ActivityIndicator color={colors.accent} style={styles.loading} />;
@@ -141,15 +165,61 @@ function CommentNode({
   );
   const isHighlighted = highlightId != null && comment.id === highlightId;
 
+  /**
+   * Where the deep-link target sits, summed on the way up the tree.
+   *
+   * `onLayout` reports a view's offset **within its immediate parent**, so a
+   * nested reply's own `y` is a few points inside its parent's replies block —
+   * useless on its own. Each ancestor therefore adds its own offset as the
+   * report passes through, and the total that reaches the screen is the target's
+   * offset within the whole thread.
+   *
+   * The buffering is what makes that work: React Native lays children out
+   * *before* their parents, so a report almost always arrives while this node
+   * still doesn't know its own position. Holding it until our own `onLayout`
+   * lands, then flushing, is the difference between a correct offset and one
+   * short by every ancestor above it.
+   */
+  const ownY = useRef<number | null>(null);
+  /** The replies block's own offset inside this node — it sits below the text. */
+  const repliesY = useRef(0);
+  const pendingChildY = useRef<number | null>(null);
+
+  /** A reply's offset within our replies block, lifted to be relative to us. */
+  const report = useCallback(
+    (childY: number) => {
+      if (ownY.current == null) {
+        // Raw, not pre-summed: `repliesY` is very likely still unknown at this
+        // point, so the arithmetic has to wait for the flush below.
+        pendingChildY.current = childY;
+        return;
+      }
+      onHighlightLayout?.(ownY.current + repliesY.current + childY);
+    },
+    [onHighlightLayout]
+  );
+
   function handleLayout(event: LayoutChangeEvent) {
-    // Only the deep-link target reports its position, and only to its own
-    // parent — the screen adds up the offsets as they bubble, which is the only
-    // way to locate a nested view without measuring the whole tree.
-    if (isHighlighted) onHighlightLayout?.(event.nativeEvent.layout.y);
+    ownY.current = event.nativeEvent.layout.y;
+
+    // The target reports itself; everyone else only forwards what came from
+    // below, so a thread with no deep link stays silent.
+    if (isHighlighted) {
+      onHighlightLayout?.(ownY.current);
+      return;
+    }
+    if (pendingChildY.current != null) {
+      const buffered = pendingChildY.current;
+      pendingChildY.current = null;
+      // Safe to sum now: we lay out after our replies block, so `repliesY` has
+      // landed by the time we get here.
+      onHighlightLayout?.(ownY.current + repliesY.current + buffered);
+    }
   }
 
   return (
     <View
+      testID={`comment-${comment.id}`}
       onLayout={onHighlightLayout ? handleLayout : undefined}
       style={[styles.node, isHighlighted && styles.highlighted]}
     >
@@ -208,7 +278,17 @@ function CommentNode({
       {replies.length > 0 && !collapsed ? (
         // A thin rule is the *only* horizontal cost per level. An avatar-width
         // indent per level marches deep threads off the side of a phone.
-        <View style={styles.replies}>
+        <View
+          testID={`replies-${comment.id}`}
+          style={styles.replies}
+          onLayout={
+            onHighlightLayout
+              ? (event) => {
+                  repliesY.current = event.nativeEvent.layout.y;
+                }
+              : undefined
+          }
+        >
           {replies.map((reply) => (
             <CommentNode
               key={reply.id}
@@ -216,7 +296,9 @@ function CommentNode({
               postId={postId}
               expandIds={expandIds}
               highlightId={highlightId}
-              onHighlightLayout={onHighlightLayout}
+              // `report`, not the raw callback: a reply's offset is relative to
+              // us, so it has to pass through here to have our own added.
+              onHighlightLayout={onHighlightLayout ? report : undefined}
               depth={depth + 1}
             />
           ))}

@@ -229,6 +229,23 @@ async function request<T>(
   return data as T;
 }
 
+/**
+ * The URL for a reaction action on whichever target was named.
+ *
+ * Both ids are optional at the type level because the components holding them
+ * carry them that way, so "neither was passed" is reachable. Left alone it
+ * builds `/api/comments/undefined/react/`, which 404s and surfaces to the user
+ * as a mystery "Couldn't react" — so it fails loudly here instead.
+ */
+function reactionPath(
+  { postId, commentId }: { postId?: number; commentId?: number },
+  action: 'react' | 'reactions'
+): string {
+  if (postId != null) return `/api/posts/${postId}/${action}/`;
+  if (commentId != null) return `/api/comments/${commentId}/${action}/`;
+  throw new Error('reactionPath needs either a postId or a commentId');
+}
+
 export const api = {
   ApiError,
 
@@ -353,20 +370,14 @@ export const api = {
     commentId?: number;
     emoji: string;
   }) =>
-    request<ReactionSummary>(
-      postId != null
-        ? `/api/posts/${postId}/react/`
-        : `/api/comments/${commentId}/react/`,
-      { method: 'POST', body: { emoji } }
-    ),
+    request<ReactionSummary>(reactionPath({ postId, commentId }, 'react'), {
+      method: 'POST',
+      body: { emoji },
+    }),
 
   /** Who reacted, grouped by emoji. Pass exactly one target. */
   getReactors: ({ postId, commentId }: { postId?: number; commentId?: number }) =>
-    request<ReactorGroup[]>(
-      postId != null
-        ? `/api/posts/${postId}/reactions/`
-        : `/api/comments/${commentId}/reactions/`
-    ),
+    request<ReactorGroup[]>(reactionPath({ postId, commentId }, 'reactions')),
 
   /**
    * Log in and persist both tokens.

@@ -12,9 +12,9 @@
  * not 403** — the app must not become a way to discover that a post exists.
  */
 
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -24,6 +24,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type LayoutChangeEvent,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -31,7 +32,6 @@ import { api, ApiError } from '@/api';
 import { CommentThread } from '@/components/CommentThread';
 import { PostCard } from '@/components/PostCard';
 import { SPINE_COLUMN } from '@/components/timeline';
-import { markPostCommentsSeen } from '@/postCache';
 import { colors, fontSize, spacing } from '@/theme';
 
 export default function PostScreen() {
@@ -43,11 +43,13 @@ export default function PostScreen() {
   const id = Number(postId);
   const highlightCommentId = comment ? Number(comment) : null;
 
-  const queryClient = useQueryClient();
   const scrollRef = useRef<ScrollView>(null);
   // Where the post itself ends, so a comment's offset within the thread can be
-  // turned into an offset within the page.
-  const [threadTop, setThreadTop] = useState(0);
+  // turned into an offset within the page. A ref, not state: it feeds an
+  // imperative scroll, nothing renders from it, and keeping it out of the
+  // dependency graph is what lets the callback below stay stable.
+  const threadTop = useRef<number | null>(null);
+  const pendingY = useRef<number | null>(null);
   const scrolled = useRef(false);
 
   const {
@@ -63,33 +65,45 @@ export default function PostScreen() {
   });
 
   /**
-   * Opening the thread is the "seen" event.
-   *
-   * The comments GET stamps the server-side marker, so the "N new" badge the
-   * feed is still showing for this post is already stale. Mirror that reset into
-   * the cache instead of refetching the feed to be told what we know.
-   */
-  useEffect(() => {
-    if (post) markPostCommentsSeen(queryClient, id);
-  }, [post, id, queryClient]);
-
-  /**
    * Scroll a deep-linked comment into view, once.
    *
    * `scrolled` guards against re-running when the thread re-renders (a reply
    * posted, a reaction toggled) — yanking someone back to the notification's
    * target while they're reading further down would be maddening.
+   *
+   * **The guard must not latch before we can actually aim.** The thread reports
+   * the target's offset from its own top, which is only useful once we know
+   * where the thread starts — and React Native lays the thread's children out
+   * before the thread itself, so the offset almost always arrives first. Marking
+   * the scroll done on that early call left it short by the whole height of the
+   * post, permanently. So an offset that arrives too early is parked, and the
+   * thread's own layout flushes it.
    */
-  const onHighlightLayout = useCallback(
-    (y: number) => {
-      if (scrolled.current) return;
-      scrolled.current = true;
-      scrollRef.current?.scrollTo({
-        y: Math.max(0, threadTop + y - 80),
-        animated: true,
-      });
+  const scrollToThreadOffset = useCallback((y: number) => {
+    if (scrolled.current) return;
+    if (threadTop.current == null) {
+      pendingY.current = y;
+      return;
+    }
+    scrolled.current = true;
+    scrollRef.current?.scrollTo({
+      // A little headroom above the target, so it reads as part of a
+      // conversation rather than jammed against the top of the screen.
+      y: Math.max(0, threadTop.current + y - 80),
+      animated: true,
+    });
+  }, []);
+
+  const handleThreadLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      threadTop.current = event.nativeEvent.layout.y;
+      if (pendingY.current != null) {
+        const buffered = pendingY.current;
+        pendingY.current = null;
+        scrollToThreadOffset(buffered);
+      }
     },
-    [threadTop]
+    [scrollToThreadOffset]
   );
 
   const notFound = error instanceof ApiError && error.status === 404;
@@ -138,13 +152,14 @@ export default function PostScreen() {
             <>
               <PostCard post={post} interactive={false} />
               <View
+                testID="thread"
                 style={styles.thread}
-                onLayout={(event) => setThreadTop(event.nativeEvent.layout.y)}
+                onLayout={handleThreadLayout}
               >
                 <CommentThread
                   postId={id}
                   highlightCommentId={highlightCommentId}
-                  onHighlightLayout={onHighlightLayout}
+                  onHighlightLayout={scrollToThreadOffset}
                 />
               </View>
             </>

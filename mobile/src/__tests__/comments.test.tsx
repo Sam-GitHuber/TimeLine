@@ -222,3 +222,73 @@ describe('writing', () => {
     expect(await screen.findByText('That post is gone.')).toBeTruthy();
   });
 });
+
+/**
+ * Where a deep-linked comment actually *is* on screen.
+ *
+ * `onLayout` reports an offset within a view's immediate parent, so the number
+ * that reaches the screen is only useful if every ancestor has added its own on
+ * the way up. Getting this wrong doesn't break anything visibly in a test that
+ * only checks the comment rendered — which is exactly how it shipped broken —
+ * so these assert the arithmetic directly.
+ *
+ * Layout events are fired in the order React Native delivers them: children
+ * before their parents.
+ */
+describe('locating a deep-linked comment', () => {
+  function layout(testID: string, y: number) {
+    return fireEvent(screen.getByTestId(testID), 'layout', {
+      nativeEvent: { layout: { x: 0, y, width: 300, height: 40 } },
+    });
+  }
+
+  it('reports a top-level comment’s own offset', async () => {
+    mockFetch.mockResolvedValue(jsonResponse([comment({ id: 1 })]));
+    const onHighlightLayout = jest.fn();
+
+    await renderThread({ highlightCommentId: 1, onHighlightLayout });
+    await screen.findByText('Comment 1');
+
+    await layout('comment-1', 100);
+
+    expect(onHighlightLayout).toHaveBeenCalledWith(100);
+  });
+
+  it('sums a nested reply’s offset with every ancestor above it', async () => {
+    mockFetch.mockResolvedValue(
+      jsonResponse([
+        comment({ id: 1, replies: [comment({ id: 3, parent: 1 })] }),
+      ])
+    );
+    const onHighlightLayout = jest.fn();
+
+    await renderThread({ highlightCommentId: 3, onHighlightLayout });
+    await screen.findByText('Comment 3');
+
+    // The reply sits 20 into its replies block, which sits 60 into comment 1,
+    // which sits 100 into the thread — so the thread should hear 180, not 20.
+    await layout('comment-3', 20);
+    await layout('replies-1', 60);
+    await layout('comment-1', 100);
+
+    expect(onHighlightLayout).toHaveBeenCalledWith(180);
+  });
+
+  it('stays silent when nothing is deep-linked', async () => {
+    mockFetch.mockResolvedValue(
+      jsonResponse([
+        comment({ id: 1, replies: [comment({ id: 3, parent: 1 })] }),
+      ])
+    );
+    const onHighlightLayout = jest.fn();
+
+    await renderThread({ onHighlightLayout });
+    // No highlight means nothing is auto-expanded, so the reply stays collapsed
+    // behind its toggle — only the top-level comment is on screen to lay out.
+    await screen.findByText('Comment 1');
+
+    await layout('comment-1', 100);
+
+    expect(onHighlightLayout).not.toHaveBeenCalled();
+  });
+});
