@@ -142,7 +142,9 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
         aria-expanded={menu !== null}
         className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-line text-ink-faint transition hover:border-line-strong hover:bg-raised hover:text-accent-deep"
       >
-        {/* A smiley with a small plus — the near-universal "add reaction" glyph. */}
+        {/* A smiley with a small plus — the near-universal "add reaction" glyph.
+            These paths are duplicated in `mobile/src/components/ReactionBar.tsx`
+            so both clients draw the same icon — change them together. */}
         <svg
           viewBox="0 0 24 24"
           fill="none"
