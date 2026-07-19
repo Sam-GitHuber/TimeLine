@@ -11,7 +11,7 @@
  * contract the web app's `useInfiniteList` hook uses.
  */
 
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -30,10 +30,11 @@ import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { ComposeBox } from '@/components/ComposeBox';
 import { PostCard } from '@/components/PostCard';
-import { toRows, type FeedRow } from '@/feed';
+import { toRows, trimToFirstPage, type FeedPages, type FeedRow } from '@/feed';
 import { RAIL, SPINE_COLUMN, Spine } from '@/components/timeline';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
+import { useDayBoundary } from '@/useDayBoundary';
 
 export default function FeedScreen() {
   const { user, signOut } = useAuth();
@@ -75,14 +76,24 @@ export default function FeedScreen() {
    */
   const [pulled, setPulled] = useState(false);
 
+  const queryClient = useQueryClient();
+
+  /**
+   * Pull-to-refresh: drop back to a single page, then fetch it.
+   *
+   * `refetch()` on its own would refetch every page currently loaded — see
+   * `trimToFirstPage`. Discarding pages 2+ is invisible here: you have to be at
+   * the top of the list to pull, and they re-fetch as you scroll back down.
+   */
   const onPullToRefresh = useCallback(async () => {
     setPulled(true);
     try {
+      queryClient.setQueryData<FeedPages>(['feed'], trimToFirstPage);
       await refetch();
     } finally {
       setPulled(false);
     }
-  }, [refetch]);
+  }, [refetch, queryClient]);
 
   /**
    * Held so a new post can be scrolled into view.
@@ -96,9 +107,13 @@ export default function FeedScreen() {
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   }, []);
 
+  // `today` is a dependency, not a value used directly: it changes at midnight
+  // and is what re-derives the "Today" / "Yesterday" divider labels.
+  const today = useDayBoundary();
   const rows = useMemo(
     () => toRows(data?.pages.flatMap((page) => page.results) ?? []),
-    [data]
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    [data, today]
   );
 
   if (isLoading) {

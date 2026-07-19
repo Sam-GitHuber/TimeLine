@@ -447,6 +447,49 @@ The four questions that were open are now decided and folded into the plan above
 
 (Record deviations/gotchas here as we build.)
 
+**2026-07-19 — review of the C1+C2 PR, and the delayed fuse it found.**
+
+**A native module's config plugin must go in `app.json`, not just
+`package.json`.** `expo-image-picker` was installed and working, but never added
+to the `plugins` array — so nothing injected `NSPhotoLibraryUsageDescription`
+into `Info.plist`. It worked anyway because **Expo Go's prebuilt binary carries
+every permission string**, which is exactly what makes this class of bug
+dangerous: it would have surfaced at Milestone D, when we switch to a dev build,
+as an app that dies the moment you tap "Add photos" — and as an App Review
+rejection. Same shape as the `AuthedImage` media trap below: fine in the
+development harness, broken in the real one. **When adding any Expo package,
+check whether it ships a config plugin.**
+
+Verify without a full build: `npx expo config --type introspect` prints the
+resolved `Info.plist` / Android permissions.
+
+The permissions are also narrowed deliberately — `cameraPermission: false` and
+`microphonePermission: false`. The plugin adds *both* by default (plus Android's
+`RECORD_AUDIO`), and we only ever open the photo library. Shipping an unexplained
+microphone permission on a privacy-first app is a bad look, and Phase 10 would
+have inherited it on the Play listing.
+
+Three testing gotchas, all in the same family (the harness lies about what it
+supports):
+
+1. **RNTL v14 + fake timers needs `await act(async () => …)`.** A bare `act()`
+   runs the timer but React never flushes the re-render, so the hook's value
+   silently doesn't change and the failure looks exactly like a broken hook.
+2. **`UNSAFE_getByType` is gone in v14**, and **`FlatList` doesn't virtualise
+   under test**, so `fireEvent.scroll` never triggers `onEndReached`. Reaching
+   into a list's props to drive paging isn't available — extract the logic
+   (`trimToFirstPage`) and test it directly instead of fighting the component.
+3. **Module state outlives a test, mocked native state doesn't.** The
+   `expo-secure-store` mock resets per test but `tokens.ts`'s in-memory token
+   cache does not, so two `api.test.ts` cases were quietly passing on residue
+   rather than their own setup. `api.test.ts` now clears tokens in `beforeEach`.
+
+Also fixed in review: `refetch()` on a `useInfiniteQuery` refetches **every
+loaded page** sequentially (v5 removed `refetchPage`; trim the cache to page one
+first), and page-number pagination **re-sends a post across the page boundary**
+when someone posts mid-scroll, producing duplicate `FlatList` keys — `toRows`
+now drops repeats by id without touching order.
+
 **2026-07-19 — Milestone C2 (compose): three React-Native-specific traps.**
 
 1. **`FormData` takes `{uri, name, type}`, not a `Blob`.** The runtime reads the

@@ -57,7 +57,12 @@ export async function getAccessToken(): Promise<string | null> {
 /**
  * The access token if one is already in memory, without touching the Keychain.
  * May be `null` before the first read even when the user is logged in — callers
- * must tolerate that rather than treating it as "logged out".
+ * must tolerate that rather than treating it as "logged out", and fall back to
+ * `getAccessToken` if they need a definitive answer.
+ *
+ * This is the normal read path for both `api.ts` (every request) and
+ * `AuthedImage` (every photo in a scrolling feed); `getAccessToken` below is
+ * reserved for the cold start, where the cache is genuinely empty.
  */
 export function getCachedAccessToken(): string | null {
   return cachedAccess;

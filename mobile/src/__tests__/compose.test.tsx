@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
 
+import { api } from '@/api';
 import { ComposeBox } from '@/components/ComposeBox';
 import type { User } from '@/types';
 
@@ -60,10 +61,25 @@ function renderCompose() {
   );
 }
 
+/**
+ * Watch what the composer hands to the API, while still calling through.
+ *
+ * `api.createPost` is the right seam for a component test: the multipart body it
+ * builds is pinned in `api.test.ts`, so what's left to check here is that the
+ * composer passes the *right arguments* — trimmed text, and every chosen photo
+ * with a filename attached.
+ */
+let createPost: jest.SpiedFunction<typeof api.createPost>;
+
 beforeEach(() => {
   mockFetch.mockReset();
   pick.mockReset();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
+  createPost = jest.spyOn(api, 'createPost');
+});
+
+afterEach(() => {
+  createPost.mockRestore();
 });
 
 it('will not post an empty composer', async () => {
@@ -93,6 +109,9 @@ it('posts trimmed text as multipart', async () => {
     '  Hello from the phone  '
   );
   await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
+
+  // The surrounding whitespace is gone, and nothing else about the text is.
+  expect(createPost).toHaveBeenCalledWith('Hello from the phone', []);
 
   const [url, init] = mockFetch.mock.calls[0];
   expect(url).toContain('/api/posts/');
@@ -142,20 +161,36 @@ describe('photos', () => {
     // A photo-only post is allowed.
     expect(await screen.findByText('1 photo')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Post' })).not.toBeDisabled();
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
+
+    expect(createPost).toHaveBeenCalledWith('', [
+      { uri: 'file:///tmp/a.jpg', name: 'a.jpg', type: 'image/jpeg' },
+    ]);
   });
 
   it('synthesises a filename when the picker does not supply one', async () => {
     // A camera-roll asset often has no filename. The part must still carry one
-    // or it's silently dropped from the multipart body.
+    // or it's silently dropped from the multipart body — so this has to assert
+    // on what gets *sent*, not just on the thumbnail appearing.
     pick.mockResolvedValue({
       canceled: false,
       assets: [{ uri: 'file:///tmp/b.jpg', fileName: null, mimeType: null }],
     });
+    mockFetch.mockResolvedValue(jsonResponse({ id: 1 }, 201));
     await renderCompose();
 
     await fireEvent.press(screen.getByLabelText('Add photos'));
-
     expect(await screen.findByText('1 photo')).toBeTruthy();
+    await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
+
+    const [, photos] = createPost.mock.calls[0];
+    expect(photos).toHaveLength(1);
+    expect(photos![0].name).toEqual(expect.stringMatching(/\.jpg$/));
+    expect(photos![0].name).not.toBe('');
+    // The server validates by decoding the bytes, so the fallback type only has
+    // to be *a* raster type, but it must not be undefined.
+    expect(photos![0].type).toBe('image/jpeg');
   });
 
   it('adds nothing when the picker is cancelled', async () => {

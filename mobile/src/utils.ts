@@ -8,44 +8,19 @@
  * bulk of what's genuinely shareable.
  *
  * **If you fix a bug here, fix it in `frontend/src/utils.js` too.** The two
- * clients must agree about what "2h" and "Yesterday" mean, or the same post
- * reads differently on phone and web. Only the helpers the app actually uses are
- * ported — the event ones land with Milestone E3.
+ * clients must agree about what "Yesterday" means, or the same post reads
+ * differently on phone and web.
+ *
+ * **Only port a helper when a screen actually needs it.** The sync obligation
+ * above is the reason: an unused copy is pure maintenance cost, so
+ * `formatRelativeTime` / `formatAbsoluteTime` were removed again after C1 turned
+ * out to use neither (the timeline rail shows a clock time, not "2h ago"). The
+ * event helpers land with Milestone E3, when there's a screen calling them.
  *
  * Kept dependency-free (no date library), same as the web app: we don't need one
  * yet, and it's a good habit not to reach for a package until a problem demands
  * it.
  */
-
-/**
- * "just now", "5m", "3h", "2d" — the short relative style next to a post.
- * Falls back to an absolute date for anything older than a week.
- */
-export function formatRelativeTime(isoString: string, now: Date = new Date()): string {
-  const then = new Date(isoString);
-  const seconds = Math.round((now.getTime() - then.getTime()) / 1000);
-
-  if (seconds < 45) return 'just now';
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.round(hours / 24);
-  if (days < 7) return `${days}d`;
-
-  return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-}
-
-/** A full, unambiguous timestamp — used where the exact time is the point. */
-export function formatAbsoluteTime(isoString: string): string {
-  return new Date(isoString).toLocaleString(undefined, {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
 
 /**
  * The clock time shown on the timeline rail, split so the meridiem can sit on

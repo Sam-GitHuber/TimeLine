@@ -10,7 +10,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react-native';
 
 import FeedScreen from '@/app/index';
-import { toRows } from '@/feed';
+import { toRows, trimToFirstPage, type FeedPages } from '@/feed';
 import { AuthProvider } from '@/auth';
 import type { Post } from '@/types';
 
@@ -44,7 +44,14 @@ function feedPage(results: Post[], next: string | null = null) {
   return { count: results.length, next, previous: null, results };
 }
 
+function makeQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+}
+
 function renderFeed() {
+  const queryClient = makeQueryClient();
   // A fresh QueryClient per test, or one test's cache answers the next one's
   // query and the fetch mock never fires.
   //
@@ -52,9 +59,6 @@ function renderFeed() {
   // `gcTime: 0` because the default five-minute garbage-collection timer keeps
   // Node's event loop alive long after the assertions finish — the tests pass,
   // then Jest sits there refusing to exit and the CI job hangs.
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  });
   return render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
@@ -103,6 +107,29 @@ describe('day grouping', () => {
 
   it('returns nothing for an empty feed', () => {
     expect(toRows([])).toEqual([]);
+  });
+
+  it('drops a post the paginator sent twice, keeping the first', () => {
+    // Page-number pagination: a post created while you're scrolling shifts the
+    // window, so page 2 re-sends what page 1 already showed. Two rows keyed
+    // `post-<id>` make React warn and let FlatList recycle the wrong row.
+    const rows = toRows([
+      makePost({ id: 20, created_at: '2026-07-18T15:00:00Z' }),
+      makePost({ id: 19, created_at: '2026-07-18T14:00:00Z' }),
+      // …page 2 begins, repeating the post that slid down into it.
+      makePost({ id: 19, created_at: '2026-07-18T14:00:00Z' }),
+      makePost({ id: 18, created_at: '2026-07-18T13:00:00Z' }),
+    ]);
+
+    const keys = rows.map((r) => r.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys.filter((k) => k === 'post-19')).toHaveLength(1);
+    // Order is still exactly the server's, minus the repeat.
+    expect(
+      rows
+        .filter((r): r is Extract<typeof r, { kind: 'post' }> => r.kind === 'post')
+        .map((r) => r.post.id)
+    ).toEqual([20, 19, 18]);
   });
 });
 
@@ -178,5 +205,37 @@ describe('feed screen', () => {
     expect(await screen.findByText('3')).toBeTruthy();
     expect(screen.getByText(/12 comments/)).toBeTruthy();
     expect(screen.getByText(/3 new/)).toBeTruthy();
+  });
+});
+
+describe('pull-to-refresh trimming', () => {
+  // `refetch()` on an infinite query refetches *every* loaded page, one after
+  // another. Ten pages deep that's ten sequential requests over a phone
+  // connection, for news that can only be on page one.
+  function pages(count: number): FeedPages {
+    return {
+      pages: Array.from({ length: count }, (_, i) =>
+        feedPage([makePost({ id: i + 1 })], i === count - 1 ? null : `?page=${i + 2}`)
+      ),
+      pageParams: Array.from({ length: count }, (_, i) => (i === 0 ? '' : `?page=${i + 1}`)),
+    };
+  }
+
+  it('keeps only the first page and its param', () => {
+    const trimmed = trimToFirstPage(pages(4));
+
+    expect(trimmed!.pages).toHaveLength(1);
+    expect(trimmed!.pageParams).toEqual(['']);
+    // The page kept is the newest one, which is the only one that can have
+    // gained posts.
+    expect(trimmed!.pages[0].results[0].id).toBe(1);
+  });
+
+  it('returns the same object when there is nothing to trim', () => {
+    // Identity matters: a new object here would re-render the whole feed for no
+    // reason on every pull.
+    const one = pages(1);
+    expect(trimToFirstPage(one)).toBe(one);
+    expect(trimToFirstPage(undefined)).toBeUndefined();
   });
 });

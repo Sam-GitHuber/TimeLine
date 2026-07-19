@@ -16,7 +16,13 @@
  * Authorization header is present (see docs/reference/accounts.md).
  */
 
-import { clearTokens, getAccessToken, getRefreshToken, saveTokens } from './tokens';
+import {
+  clearTokens,
+  getAccessToken,
+  getCachedAccessToken,
+  getRefreshToken,
+  saveTokens,
+} from './tokens';
 import type {
   LoginResponse,
   Paginated,
@@ -162,7 +168,13 @@ async function request<T>(
   if (body !== undefined && !isFormData) {
     headers['Content-Type'] = 'application/json';
   }
-  const access = await getAccessToken();
+  // Prefer the in-memory copy and only fall back to the Keychain when there
+  // isn't one. `saveTokens` / `clearTokens` are the only writers and both update
+  // the cache synchronously, so the two can't disagree — but a Keychain read is
+  // an async native round-trip, and doing one before *every* request puts it on
+  // the critical path of the whole app. The fallback still covers the cold-start
+  // window before `AuthProvider` has primed the cache.
+  const access = getCachedAccessToken() ?? (await getAccessToken());
   if (access) headers.Authorization = `Bearer ${access}`;
 
   const response = await fetch(BASE_URL + path, {
