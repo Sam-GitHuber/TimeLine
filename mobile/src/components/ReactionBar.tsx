@@ -14,11 +14,11 @@
  */
 
 import { useMutation } from '@tanstack/react-query';
-import { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useRef, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { api, ApiError } from '@/api';
-import { EmojiSheet } from './EmojiSheet';
+import { api } from '@/api';
+import { ReactionTray, type Anchor } from './ReactionTray';
 import { ReactorsSheet } from './ReactorsSheet';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Reaction } from '@/types';
@@ -45,8 +45,37 @@ export function ReactionBar({
   const target = postId != null ? { postId } : { commentId };
 
   const [items, setItems] = useState<Reaction[]>(incoming);
-  const [picking, setPicking] = useState(false);
   const [whoOpen, setWhoOpen] = useState(false);
+
+  /**
+   * Whether the tray is open, and where the `+` button sits on screen.
+   *
+   * The tray is drawn in a full-screen Modal (React Native has no portal), so it
+   * needs the trigger's *window* coordinates to sit beside it — hence measuring
+   * on press rather than tracking layout continuously.
+   *
+   * **Open and position are deliberately separate state.** Keying "is it open"
+   * off the measurement would mean a tray that silently never appears whenever
+   * `measureInWindow` doesn't call back — a dead button, and the hardest kind of
+   * bug to reproduce. Opening first and refining the position on measurement
+   * degrades to a sensibly-placed tray instead of no tray.
+   */
+  const addRef = useRef<View>(null);
+  const [trayOpen, setTrayOpen] = useState(false);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+
+  function openTray() {
+    setTrayOpen(true);
+    addRef.current?.measureInWindow((x, y, width, height) => {
+      // A zero-sized measurement means the view isn't laid out yet; keep
+      // whatever we had rather than pinning the tray to the top-left corner.
+      if (width || height) setAnchor({ x, y, width, height });
+    });
+  }
+
+  function closeTray() {
+    setTrayOpen(false);
+  }
 
   /**
    * Re-sync when the server's summary changes underneath us — a feed refetch, or
@@ -66,19 +95,22 @@ export function ReactionBar({
 
   const toggle = useMutation({
     mutationFn: (emoji: string) => api.toggleReaction({ ...target, emoji }),
-    onSuccess: (data) => {
-      setItems(data.reactions ?? []);
-      setPicking(false);
-    },
+    onSuccess: (data) => setItems(data.reactions ?? []),
+    // Reacting is a small, cheap gesture, so a failure needs to say so rather
+    // than leave a tap looking like it worked. The server owns the rules that
+    // can reject one (per-target cap, emoji validation), so its message is what
+    // gets shown.
+    onError: (error) =>
+      Alert.alert(
+        'Couldn’t react',
+        error instanceof Error ? error.message : 'Something went wrong.'
+      ),
   });
 
-  // Only surface a rejected *emoji* in the sheet — that's the case the person
-  // can do something about (they typed something that isn't one). Any other
-  // failure leaves the row as it was rather than shouting about it.
-  const pickError =
-    toggle.error instanceof ApiError && toggle.error.status === 400
-      ? toggle.error.message
-      : null;
+  function react(emoji: string) {
+    closeTray();
+    toggle.mutate(emoji);
+  }
 
   const reactedEmojis = new Set(
     items.filter((item) => item.reacted).map((item) => item.emoji)
@@ -109,15 +141,19 @@ export function ReactionBar({
         </Pressable>
       ))}
 
-      <Pressable
-        onPress={() => setPicking(true)}
-        style={({ pressed }) => [styles.add, pressed && styles.chipPressed]}
-        accessibilityRole="button"
-        accessibilityLabel="Add a reaction"
-        hitSlop={6}
-      >
-        <Text style={styles.addText}>+</Text>
-      </Pressable>
+      {/* The View wrapper carries the ref: `measureInWindow` needs a host view,
+          and a Pressable's ref isn't one to measure reliably. */}
+      <View ref={addRef} collapsable={false}>
+        <Pressable
+          onPress={openTray}
+          style={({ pressed }) => [styles.add, pressed && styles.chipPressed]}
+          accessibilityRole="button"
+          accessibilityLabel="Add a reaction"
+          hitSlop={6}
+        >
+          <Text style={styles.addText}>+</Text>
+        </Pressable>
+      </View>
 
       {items.length > 0 ? (
         <Pressable
@@ -130,15 +166,12 @@ export function ReactionBar({
         </Pressable>
       ) : null}
 
-      <EmojiSheet
-        visible={picking}
-        onPick={(emoji) => toggle.mutate(emoji)}
-        onClose={() => {
-          setPicking(false);
-          toggle.reset();
-        }}
+      <ReactionTray
+        visible={trayOpen}
+        anchor={anchor}
+        onPick={react}
+        onClose={closeTray}
         reactedEmojis={reactedEmojis}
-        error={pickError}
       />
 
       <ReactorsSheet

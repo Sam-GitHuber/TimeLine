@@ -453,25 +453,42 @@ The four questions that were open are now decided and folded into the plan above
 
 **2026-07-19 — Milestone C3: the emoji picker doesn't cross to React Native.**
 
-The web's full picker is `emoji-picker-element`, a **DOM web component**. There
-is no React Native equivalent, and the obvious move — adding an RN emoji-grid
-library — was raised with the user and rejected: a new dependency to vet and
-maintain, for something the phone already does better.
+The web's full picker is `emoji-picker-element`, a **DOM web component**, so it
+cannot run here at all. Two attempts:
 
-**Decision: keep the web's two-tier *shape*, replace the second tier with the
-system emoji keyboard.** Four one-tap positive reactions (👍 ❤️ 😂 🎉, kept
-positive on purpose), plus an input the OS fills. That holds the product promise
-of "any emoji from your keyboard" (reactions.md) with **zero dependencies**, and
-uses the picker people already have muscle memory for.
+**First cut (wrong, and worth recording why).** A bottom sheet with the four
+quick reactions plus a text input, on the theory that the *system* emoji
+keyboard could serve as the full picker with zero dependencies. The maintainer
+rejected it on sight, correctly. The flaw is a platform fact I should have
+checked first: **iOS has no way to open the keyboard in emoji mode** — no
+`keyboardType`, no API. So the input opened the ABC keyboard and the user had to
+know to tap 🙂 themselves. WhatsApp doesn't do this either; its `+` opens
+WhatsApp's *own* emoji grid. "Use the system keyboard" was never the shape a
+phone user expects.
 
-**The one honest cost:** iOS has no `keyboardType` for emoji, so we can't open
-the emoji keyboard directly — the sheet tells you to tap 🙂 on your keyboard.
-Worth revisiting if testers trip on it.
+**Shipped: an in-place tray, WhatsApp-style.** Tapping `+` opens a small
+anchored row of the four positive quick reactions (kept positive on purpose),
+whose own `+` opens a real emoji grid — **`rn-emoji-keyboard`**, agreed with the
+user. Pure JS (no native module, so Expo Go and Jest are untouched), MIT, zero
+runtime dependencies, and about **+200 KB** of bundle for the emoji data.
+Verified it bundles under Metro with React 19 + the React Compiler, since its
+last release (May 2024) predates both.
+
+**Anchoring an in-place popover in RN** takes the same shape as the web's
+portal, for the same reason: there is no portal and no `position: fixed`, so
+`measureInWindow` the trigger and draw the tray at those window coordinates
+inside a full-screen `Modal`. In-flow it would be clipped by the post's bounds
+and painted over by later rows — the exact bug the web hit.
+
+**Open state and measured position must be separate state.** Keying "is the tray
+open" off the measurement means a tray that silently never appears if
+`measureInWindow` doesn't call back — a dead button, and near-impossible to
+reproduce. It opens first and refines position on measurement, degrading to a
+centred tray rather than nothing.
 
 Emoji **validation stays server-side only** (`api/emoji.py` — single grapheme,
-length cap, per-target cap). The sheet surfaces the server's message rather than
-reimplementing the rule; a second copy of "what counts as an emoji" in JS would
-drift from the one that actually decides.
+length cap, per-target cap). A second copy of "what counts as an emoji" in JS
+would drift from the one that actually decides.
 
 Two smaller notes:
 
