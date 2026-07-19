@@ -128,34 +128,40 @@ export function PostCard({
           ))}
         </Body>
 
-        <ReactionBar postId={post.id} reactions={post.reactions} />
-
-        {/* In the feed this is the way into the thread. On the permalink the
-            thread is already below, so a link to it would go nowhere. */}
-        {interactive ? (
-          <Pressable
-            onPress={openPost}
-            accessibilityRole="button"
-            accessibilityLabel={
-              post.comment_count > 0
-                ? `${post.comment_count} comments, open the thread`
-                : 'Add a comment'
-            }
-            hitSlop={6}
-          >
-            <Text style={styles.comments}>
-              {post.comment_count > 0
-                ? `${post.comment_count} ${post.comment_count === 1 ? 'comment' : 'comments'}`
-                : 'Comment'}
-              {post.new_comment_count > 0 ? (
-                <Text style={styles.newComments}>
-                  {' '}
-                  · {post.new_comment_count} new
+        {/* The comments link is handed to `ReactionBar` rather than rendered
+            here, because where it belongs depends on whether there are any
+            reaction chips — and only `ReactionBar` knows that live. On the
+            permalink there's no link at all: the thread is already below it. */}
+        <ReactionBar
+          postId={post.id}
+          reactions={post.reactions}
+          trailing={
+            interactive ? (
+              <Pressable
+                onPress={openPost}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  post.comment_count > 0
+                    ? `${post.comment_count} comments, open the thread`
+                    : 'Add a comment'
+                }
+                hitSlop={6}
+              >
+                <Text style={styles.comments}>
+                  {post.comment_count > 0
+                    ? `${post.comment_count} ${post.comment_count === 1 ? 'comment' : 'comments'}`
+                    : 'Comment'}
+                  {post.new_comment_count > 0 ? (
+                    <Text style={styles.newComments}>
+                      {' '}
+                      · {post.new_comment_count} new
+                    </Text>
+                  ) : null}
                 </Text>
-              ) : null}
-            </Text>
-          </Pressable>
-        ) : null}
+              </Pressable>
+            ) : null
+          }
+        />
       </View>
     </View>
   );
@@ -220,10 +226,8 @@ const styles = StyleSheet.create({
   },
   // The reaction chips' styles moved to `ReactionBar` with the rest of them —
   // one owner, so the feed and the comment thread can't drift apart.
-  comments: {
-    fontSize: fontSize.sm,
-    color: colors.inkFaint,
-    marginTop: spacing.sm,
-  },
+  // No margin of its own: inline it must sit on the reaction row's centre line,
+  // and on its own line `ReactionBar`'s `trailing` wrapper provides the spacing.
+  comments: { fontSize: fontSize.sm, color: colors.inkFaint },
   newComments: { color: colors.accent, fontWeight: '600' },
 });

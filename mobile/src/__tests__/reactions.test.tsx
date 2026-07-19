@@ -8,7 +8,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { Alert } from 'react-native';
+import { Alert, Text } from 'react-native';
 
 import { ReactionBar } from '@/components/ReactionBar';
 import { trayPosition } from '@/components/ReactionTray';
@@ -258,3 +258,89 @@ describe('trayPosition', () => {
     expect(top).toBeGreaterThan(0);
   });
 });
+
+describe('the trailing slot', () => {
+  // Where the post's "N comments" link belongs depends on whether the row
+  // already has chips in it, and only this component knows that live.
+  function renderWithTrailing(reactions: Reaction[]) {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <ReactionBar
+          postId={5}
+          reactions={reactions}
+          trailing={<Text>12 comments</Text>}
+        />
+      </QueryClientProvider>
+    );
+  }
+
+  it('folds it onto the reaction row when there is nothing to react with', async () => {
+    // A lone `+` with an orphaned link beneath it burns two near-empty lines.
+    const view = await renderWithTrailing([]);
+
+    const link = screen.getByText('12 comments');
+    const addButton = screen.getByLabelText('Add a reaction');
+    expect(sharesRowWith(view, link, addButton)).toBe(true);
+  });
+
+  it('drops it to its own line once there are chips to share with', async () => {
+    // The row is busy by then, and sharing crowds both.
+    const view = await renderWithTrailing([{ emoji: '👍', count: 3, reacted: true }]);
+
+    const link = screen.getByText('12 comments');
+    const addButton = screen.getByLabelText('Add a reaction');
+    expect(sharesRowWith(view, link, addButton)).toBe(false);
+  });
+
+  it('moves it down the moment you add the first reaction', async () => {
+    // The whole reason placement lives in this component: the caller only has
+    // the server's list, which is still empty at this point.
+    mockFetch.mockResolvedValue(
+      jsonResponse({ reactions: [{ emoji: '👍', count: 1, reacted: true }] })
+    );
+    const view = await renderWithTrailing([]);
+
+    const addButton = screen.getByLabelText('Add a reaction');
+    expect(sharesRowWith(view, screen.getByText('12 comments'), addButton)).toBe(true);
+
+    await fireEvent.press(addButton);
+    await fireEvent.press(await screen.findByLabelText('React with 👍'));
+    await screen.findByText('1');
+
+    expect(
+      sharesRowWith(
+        view,
+        screen.getByText('12 comments'),
+        screen.getByLabelText('Add a reaction')
+      )
+    ).toBe(false);
+  });
+});
+
+/** Whether `a` and `b` share a nearest common ancestor that is the flex row. */
+function sharesRowWith(
+  _view: unknown,
+  a: { parent: unknown },
+  b: { parent: unknown }
+): boolean {
+  const ancestors = new Set();
+  for (let node = a as { parent: unknown } | null; node; node = node.parent as never) {
+    ancestors.add(node);
+  }
+  for (let node = b as { parent: unknown } | null; node; node = node.parent as never) {
+    if (ancestors.has(node)) {
+      // The nearest shared ancestor is the reaction row itself when they are
+      // siblings in it, and the outer fragment's wrapper when they are not.
+      const style = (node as { props?: { style?: { flexDirection?: string } } })
+        .props?.style;
+      return style?.flexDirection === 'row';
+    }
+  }
+  return false;
+}
