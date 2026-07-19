@@ -31,7 +31,7 @@ import { Avatar } from '@/components/Avatar';
 import { ComposeBox } from '@/components/ComposeBox';
 import { PostCard } from '@/components/PostCard';
 import { toRows, trimToFirstPage, type FeedPages, type FeedRow } from '@/feed';
-import { RAIL, SPINE_COLUMN, Spine } from '@/components/timeline';
+import { SPINE_COLUMN, Spine } from '@/components/timeline';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
 import { useDayBoundary } from '@/useDayBoundary';
@@ -236,7 +236,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     // Indented to sit in the content column rather than cutting across the
     // spine. Derived from the shared geometry so it can't drift out of step.
-    paddingLeft: RAIL + SPINE_COLUMN,
+    paddingLeft: SPINE_COLUMN + spacing.sm,
     paddingTop: spacing.sm,
     paddingBottom: spacing.sm,
   },

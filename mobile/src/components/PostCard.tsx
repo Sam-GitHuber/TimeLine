@@ -1,18 +1,19 @@
 /**
- * One post in the feed.
+ * One post in the feed, and on the permalink screen.
  *
  * Follows the design system's "living line" idea (docs/design-system.md): posts
  * hang off a continuous vertical spine, with the poster's avatar as the bead
- * marking each one and the clock time promoted onto the rail — the product's one
+ * marking each one, and the clock time leading the entry — the product's one
  * promise, made visible.
  *
- * It is **not** a pixel copy of the web card. The plan calls for native-feeling
- * over identical, so this drops the web's hover affordances (meaningless on
- * touch) and leans on the system font.
+ * It is **not** a pixel copy of the web card, and the layout deliberately
+ * diverges from it. The web puts the clock time in its own rail to the *left* of
+ * the spine; here the time sits inline beside the author's name so the spine can
+ * hug the screen edge. On a 390pt phone that rail cost ~48pt of every line of
+ * every post, which is a lot of a caption — see `timeline.tsx`.
  *
- * Read-only in Milestone C1: reactions render as counts but don't toggle yet,
- * and comments show a count without opening. Both become interactive with the
- * post-detail screen in C2.
+ * The plan calls for native-feeling over identical, so this also drops the web's
+ * hover affordances (meaningless on touch) and leans on the system font.
  */
 
 import { router } from 'expo-router';
@@ -22,7 +23,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
 import { ReactionBar } from './ReactionBar';
-import { RAIL, SPINE_COLUMN, Spine } from './timeline';
+import { SPINE_COLUMN, Spine } from './timeline';
 import type { Post } from '@/types';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import { formatClockTime } from '@/utils';
@@ -44,15 +45,15 @@ function Body({ onPress, children }: { onPress?: () => void; children: ReactNode
 }
 
 /**
- * The alignment band for a post's first line: clock time, avatar bead and author
- * name all share one horizontal centre line.
+ * The alignment band for a post's first line: the avatar bead on the spine, and
+ * beside it the clock time and the author's name.
  *
- * These three sit in separate columns with different content, so nothing lines
- * them up automatically — and getting it wrong is very visible, because the eye
- * reads the bead and the name as a single unit. Rather than nudging magic
- * paddings until it looks right (which then drifts at a different text size),
- * every element is given an explicit box of exactly `BEAD` height and the same
- * top offset, so their centres coincide by construction.
+ * The bead sits in its own column and the text in another, so nothing lines them
+ * up automatically — and getting it wrong is very visible, because the eye reads
+ * the bead and the name as a single unit. Rather than nudging magic paddings
+ * until it looks right (which then drifts at a different text size), each is
+ * given an explicit box of exactly `BEAD` height, so their centres coincide by
+ * construction.
  *
  * `BEAD_BORDER` is the surface-coloured halo that separates the bead from the
  * spine behind it; it sits outside the avatar, so the content column has to be
@@ -75,18 +76,6 @@ export function PostCard({
 
   return (
     <View style={styles.row}>
-      {/* The rail: clock time, then the spine with the author's avatar as bead. */}
-      <View style={styles.rail}>
-        {/* numberOfLines guards the same failure the width does: never let the
-            time break across lines, whatever the font scale. */}
-        <Text style={styles.time} numberOfLines={1}>
-          {time}
-        </Text>
-        <Text style={styles.meridiem} numberOfLines={1}>
-          {meridiem}
-        </Text>
-      </View>
-
       <Spine />
 
       <View style={styles.spineColumn}>
@@ -101,6 +90,13 @@ export function PostCard({
             for a chip can never be swallowed by the card behind it. */}
         <Body onPress={interactive ? openPost : undefined}>
           <View style={styles.header}>
+            {/* The time leads the line — it's still the voice of the timeline,
+                just inline now rather than out in its own rail.
+                `numberOfLines` so it can never wrap, whatever the font scale. */}
+            <Text style={styles.time} numberOfLines={1}>
+              {time}
+              <Text style={styles.meridiem}>{meridiem}</Text>
+            </Text>
             <Text style={styles.author} numberOfLines={1}>
               {post.author.display_name}
             </Text>
@@ -167,22 +163,17 @@ export function PostCard({
 
 const styles = StyleSheet.create({
   row: { flexDirection: 'row', paddingRight: spacing.md },
-  rail: {
-    width: RAIL,
-    alignItems: 'flex-end',
-    // Offset by the bead's halo so the time's line box starts level with the
-    // avatar rather than with the halo around it.
-    paddingTop: BEAD_BORDER,
-  },
   time: {
     fontSize: fontSize.sm,
     color: colors.inkSoft,
+    // Tabular figures so the times down a column don't shuffle left and right
+    // as the digits change — the one place that jitter would be obvious.
     fontVariant: ['tabular-nums'],
-    // An explicit line box of exactly the bead's height: the time's centre then
+    // An explicit line box of exactly the bead's height: the text's centre then
     // lands on the bead's centre with no fudging.
     lineHeight: BEAD,
   },
-  meridiem: { fontSize: 11, color: colors.inkFaint, lineHeight: 13 },
+  meridiem: { fontSize: 11, color: colors.inkFaint },
   spineColumn: { width: SPINE_COLUMN, alignItems: 'center' },
   bead: {
     // A surface-coloured halo separates the bead from the line behind it.
@@ -199,9 +190,11 @@ const styles = StyleSheet.create({
     // together. Spacing and the day dividers do the separating instead.
     paddingTop: BEAD_BORDER,
     paddingBottom: spacing.lg,
-    paddingLeft: spacing.xs,
+    // A little air off the spine column, not a full indent — the point of
+    // moving the line to the edge was to give this column the width back.
+    paddingLeft: spacing.sm,
   },
-  header: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  header: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   author: {
     fontSize: fontSize.base,
     fontWeight: '600',

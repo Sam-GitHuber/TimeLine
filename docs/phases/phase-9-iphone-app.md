@@ -451,6 +451,28 @@ The four questions that were open are now decided and folded into the plan above
 
 (Record deviations/gotchas here as we build.)
 
+**2026-07-19 — the mobile feed layout deliberately diverges from the web's.**
+
+The web puts the clock time in its own rail to the **left** of the spine, which
+pushes the line about a third of the way into a phone screen and squeezes every
+post into what's left. On mobile the spine now **hugs the left edge** with the
+avatar beads on it, and the time sits **inline at the head of each entry**, just
+before the author's name.
+
+That returns ~48pt of a 390pt screen to the content on every line of every post
+— a long post drops from five lines to three. The time is still the first thing
+you read on an entry, so it keeps its role as the voice of the timeline; it just
+no longer buys that with a permanent column.
+
+**The two clients now differ here on purpose.** `timeline.tsx` owns the geometry
+(`SPINE_COLUMN`, `SPINE_CENTRE`) and everything derives from it — post rows, the
+compose box, the day dividers, and the permalink's comment thread, which indents
+to line up with the post's own text column. A new row type must derive its
+indent from those constants rather than hard-coding one, or it will drift.
+
+Verified in the Simulator with a throwaway fixture-data route, since layout is
+the one thing Jest genuinely cannot check.
+
 **2026-07-19 — Milestone C3: the emoji picker doesn't cross to React Native.**
 
 The web's full picker is `emoji-picker-element`, a **DOM web component**, so it

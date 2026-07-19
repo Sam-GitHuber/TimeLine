@@ -30,6 +30,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { CommentThread } from '@/components/CommentThread';
 import { PostCard } from '@/components/PostCard';
+import { SPINE_COLUMN } from '@/components/timeline';
 import { markPostCommentsSeen } from '@/postCache';
 import { colors, fontSize, spacing } from '@/theme';
 
@@ -161,7 +162,14 @@ const styles = StyleSheet.create({
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
   content: { paddingBottom: spacing.xxl },
   spinner: { marginTop: spacing.xl },
-  thread: { paddingHorizontal: spacing.md, marginTop: spacing.sm },
+  thread: {
+    // Line the thread up with the post's own text column rather than with the
+    // screen edge, so a comment reads as hanging off the same entry. Derived
+    // from the shared geometry — PostCard indents its content by exactly this.
+    paddingLeft: SPINE_COLUMN + spacing.sm,
+    paddingRight: spacing.md,
+    marginTop: spacing.sm,
+  },
   centre: { padding: spacing.xl, alignItems: 'center', gap: spacing.sm },
   emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
   emptyBody: {

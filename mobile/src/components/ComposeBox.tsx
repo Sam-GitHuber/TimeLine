@@ -29,7 +29,7 @@ import {
 import { api, type PhotoUpload } from '@/api';
 import { Avatar } from './Avatar';
 import { NowNode } from './NowNode';
-import { RAIL, SPINE_COLUMN, Spine } from './timeline';
+import { SPINE_COLUMN, Spine } from './timeline';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { User } from '@/types';
 
@@ -44,19 +44,20 @@ const NODE_SIZE = 12;
 const NODE_TOP = 10;
 
 /**
- * Where your avatar sits, and therefore where the text box has to line up.
+ * Where your avatar sits, and therefore where the "now" label has to line up.
  *
- * The bead hangs below the "now" tip, so the input can't just start at the top
- * of the row — it would float above the avatar and read as unrelated to it.
- * Everything below is derived rather than hard-coded so the two stay locked
- * together if any of the spacing changes.
+ * The bead hangs below the "now" tip, so the body can't just start at the top of
+ * the row — its first line would float above the avatar and read as unrelated to
+ * it. Derived rather than hard-coded so the two stay locked together if any of
+ * the spacing changes.
  */
 const BEAD = 24; // Avatar size="xs"
 const BEAD_BORDER = 3; // surface-coloured halo
 const BEAD_GAP = 8; // gap between the tip and the bead (spacing.sm)
-const BEAD_CENTRE = NODE_TOP + NODE_SIZE + BEAD_GAP + BEAD_BORDER + BEAD / 2;
+/** Top of the body's first line box, so its centre lands on the bead's. */
+const BODY_TOP = NODE_TOP + NODE_SIZE + BEAD_GAP + BEAD_BORDER;
 
-/** Collapsed height of the text box; its centre is what we align. */
+/** Collapsed height of the text box. */
 const INPUT_HEIGHT = 44;
 
 /** Mirrors `POST_MAX_LENGTH` / `MAX_IMAGES_PER_POST` in the backend. */
@@ -137,11 +138,6 @@ export function ComposeBox({
 
   return (
     <View style={styles.row}>
-      {/* The rail: the live tip, then your avatar on the spine below it. */}
-      <View style={styles.rail}>
-        <Text style={styles.now}>now</Text>
-      </View>
-
       {/* The spine starts below the "now" tip so the node caps the line rather
           than sitting on an already-drawn stroke, and runs to the bottom of the
           row to meet the first day divider's segment with no seam. */}
@@ -155,6 +151,11 @@ export function ComposeBox({
       </View>
 
       <View style={styles.body}>
+        {/* Where a post shows its clock time, the composer says "now" — the
+            live end of the timeline, labelled the same way as every entry
+            below it. */}
+        <Text style={styles.now}>now</Text>
+
         <TextInput
           accessibilityLabel="What's happening?"
           style={styles.input}
@@ -239,12 +240,13 @@ const styles = StyleSheet.create({
     // shows up as a break in the line right under the compose box.
     paddingBottom: spacing.lg,
   },
-  rail: { width: RAIL, alignItems: 'flex-end', paddingTop: NODE_TOP - 2 },
   now: {
     fontSize: fontSize.sm,
     color: colors.accent,
     fontWeight: '600',
-    lineHeight: 16,
+    // The same bead-height line box the post header uses, so "now" sits level
+    // with your avatar exactly as a post's time sits level with the author's.
+    lineHeight: BEAD,
   },
   spineColumn: { width: SPINE_COLUMN, alignItems: 'center', paddingTop: NODE_TOP },
   bead: {
@@ -255,12 +257,13 @@ const styles = StyleSheet.create({
   },
   body: {
     flex: 1,
-    paddingLeft: spacing.xs,
-    // Drop the text box so its centre sits on the avatar's, the same way a
-    // post's author name lines up with its bead.
-    paddingTop: BEAD_CENTRE - INPUT_HEIGHT / 2,
+    paddingLeft: spacing.sm,
+    // Drop the body so its first line sits level with your avatar, the same way
+    // a post's time and author name line up with their bead.
+    paddingTop: BODY_TOP,
   },
   input: {
+    marginTop: spacing.xs,
     minHeight: INPUT_HEIGHT,
     backgroundColor: colors.raised,
     borderWidth: 1,
