@@ -24,9 +24,12 @@ import {
   saveTokens,
 } from './tokens';
 import type {
+  Comment,
   LoginResponse,
   Paginated,
   Post,
+  ReactionSummary,
+  ReactorGroup,
   RefreshResponse,
   User,
 } from './types';
@@ -226,6 +229,23 @@ async function request<T>(
   return data as T;
 }
 
+/**
+ * The URL for a reaction action on whichever target was named.
+ *
+ * Both ids are optional at the type level because the components holding them
+ * carry them that way, so "neither was passed" is reachable. Left alone it
+ * builds `/api/comments/undefined/react/`, which 404s and surfaces to the user
+ * as a mystery "Couldn't react" — so it fails loudly here instead.
+ */
+function reactionPath(
+  { postId, commentId }: { postId?: number; commentId?: number },
+  action: 'react' | 'reactions'
+): string {
+  if (postId != null) return `/api/posts/${postId}/${action}/`;
+  if (commentId != null) return `/api/comments/${commentId}/${action}/`;
+  throw new Error('reactionPath needs either a postId or a commentId');
+}
+
 export const api = {
   ApiError,
 
@@ -292,6 +312,72 @@ export const api = {
     }
     return request<Post>('/api/posts/', { method: 'POST', body: form });
   },
+
+  /**
+   * One post by id — the permalink behind `/post/[postId]`.
+   *
+   * **Fetched by id rather than reused from a feed row on purpose.** Push
+   * notifications deep-link here (Milestone D), and the target post may be
+   * nowhere near the first page of any feed, so this is the only reliable way to
+   * open an old thread. Gated by the same wall as the feed: a post you can't see
+   * **404s rather than 403s**, so the app can't be used to probe whether a post
+   * exists.
+   */
+  getPost: (postId: number | string) => request<Post>(`/api/posts/${postId}/`),
+
+  /**
+   * A post's comment tree, already pruned to what you may see.
+   *
+   * **This GET has a side effect, deliberately:** it stamps your "last seen"
+   * marker for the thread, which is what clears the post's "N new" badge. Seen
+   * is thread-level, exactly like opening a conversation clears its unread
+   * count (see feed-and-posts.md). So don't call it to prefetch — only call it
+   * when someone has actually opened the thread.
+   *
+   * Not paginated: `PostCommentsView` is a plain `APIView` returning the whole
+   * nested tree, so there's no `next` to follow here.
+   */
+  getComments: (postId: number | string) =>
+    request<Comment[]>(`/api/posts/${postId}/comments/`),
+
+  /**
+   * Add a comment, or a reply when `parent` is given.
+   *
+   * The author comes from the token, never the body — same rule as posting.
+   */
+  addComment: (
+    postId: number | string,
+    { text, parent = null }: { text: string; parent?: number | null }
+  ) =>
+    request<Comment>(`/api/posts/${postId}/comments/`, {
+      method: 'POST',
+      body: { text, parent },
+    }),
+
+  /**
+   * Toggle your emoji reaction on a post or a comment. Pass exactly one target.
+   *
+   * **It's a toggle, not an add:** sending an emoji you've already used removes
+   * it. Returns the target's updated pruned summary, so the caller can render
+   * the result instead of guessing at it or refetching the feed.
+   */
+  toggleReaction: ({
+    postId,
+    commentId,
+    emoji,
+  }: {
+    postId?: number;
+    commentId?: number;
+    emoji: string;
+  }) =>
+    request<ReactionSummary>(reactionPath({ postId, commentId }, 'react'), {
+      method: 'POST',
+      body: { emoji },
+    }),
+
+  /** Who reacted, grouped by emoji. Pass exactly one target. */
+  getReactors: ({ postId, commentId }: { postId?: number; commentId?: number }) =>
+    request<ReactorGroup[]>(reactionPath({ postId, commentId }, 'reactions')),
 
   /**
    * Log in and persist both tokens.

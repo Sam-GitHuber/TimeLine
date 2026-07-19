@@ -11,8 +11,12 @@ below calls for:
   the spine, text + photo posting. *Brought forward ahead of post detail* — the
   live tip caps the timeline, so without it the feed looks cut off at the top
   rather than open-ended at the present.
-- **C3 — post detail** (comments + reactions, made interactive). Next.
-- **C4 — profiles** (view / edit / avatar).
+- **C3 — post detail.** Done: the `/post/[postId]` permalink, the pruned comment
+  tree with collapsible replies, writing comments and replies, and reactions made
+  interactive on posts *and* comments (plus "who reacted"). Deep-link support
+  (`?comment=`) is built now rather than in D, since the route exists to be
+  opened by a notification.
+- **C4 — profiles** (view / edit / avatar). Next.
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
 locked** below); the questions that were open at kickoff have been resolved and
@@ -446,6 +450,115 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-19 — the mobile feed layout deliberately diverges from the web's.**
+
+The web puts the clock time in its own rail to the **left** of the spine, which
+pushes the line about a third of the way into a phone screen and squeezes every
+post into what's left. On mobile the spine now **hugs the left edge** with the
+avatar beads on it, and the time sits **inline at the head of each entry**, just
+before the author's name.
+
+That returns ~48pt of a 390pt screen to the content on every line of every post
+— a long post drops from five lines to three. The time is still the first thing
+you read on an entry, so it keeps its role as the voice of the timeline; it just
+no longer buys that with a permanent column.
+
+**The two clients now differ here on purpose.** `timeline.tsx` owns the geometry
+(`SPINE_COLUMN`, `SPINE_CENTRE`) and everything derives from it — post rows, the
+compose box, the day dividers, and the permalink's comment thread, which indents
+to line up with the post's own text column. A new row type must derive its
+indent from those constants rather than hard-coding one, or it will drift.
+
+Verified in the Simulator with a throwaway fixture-data route, since layout is
+the one thing Jest genuinely cannot check.
+
+**2026-07-19 — Milestone C3 review: `onLayout` is parent-relative, and children
+lay out first.** Both halves of the deep-link scroll were wrong on the first cut,
+and neither showed up in a test that only checked the comment had rendered.
+
+`onLayout` reports a view's offset **within its immediate parent**, not within
+the screen. A reply nested under a comment therefore reports a number like `20` —
+its offset inside its parent's replies block — and scrolling to that lands at the
+top of the thread rather than at the reply. Every ancestor has to add its own
+offset (including the replies container itself, which sits between a node and its
+children) as the report passes up.
+
+The second half is the ordering: **React Native lays children out before their
+parents**, so the target's offset almost always arrives while the ancestors — and
+the screen — still don't know their own positions. Summing eagerly bakes in
+zeroes. Each level buffers a report it can't yet resolve and flushes it when its
+own `onLayout` lands. The screen's "only scroll once" guard has to respect the
+same rule: latching it on the early call made the miss permanent.
+
+This matters more than it looks, because **this route is what every post and
+comment push notification opens in Milestone D**. Covered now by tests that fire
+layout events in RN's real order and assert the arithmetic
+(`comments.test.tsx`, `postDetail.test.tsx`), rather than only asserting the
+target rendered.
+
+Two smaller things from the same review: the "seen" marker was being mirrored
+into the cache when the *post* loaded, but the server stamps it as a side effect
+of the *comments* GET — so a failed comments request cleared the badge while the
+server still had the thread unseen. It now hangs off the comments query, matching
+the web, which marks seen on the open-comments action. And `reactionPath` throws
+rather than building `/api/comments/undefined/react/` when neither target id is
+passed.
+
+**2026-07-19 — Milestone C3: the emoji picker doesn't cross to React Native.**
+
+The web's full picker is `emoji-picker-element`, a **DOM web component**, so it
+cannot run here at all. Two attempts:
+
+**First cut (wrong, and worth recording why).** A bottom sheet with the four
+quick reactions plus a text input, on the theory that the *system* emoji
+keyboard could serve as the full picker with zero dependencies. The maintainer
+rejected it on sight, correctly. The flaw is a platform fact I should have
+checked first: **iOS has no way to open the keyboard in emoji mode** — no
+`keyboardType`, no API. So the input opened the ABC keyboard and the user had to
+know to tap 🙂 themselves. WhatsApp doesn't do this either; its `+` opens
+WhatsApp's *own* emoji grid. "Use the system keyboard" was never the shape a
+phone user expects.
+
+**Shipped: an in-place tray, WhatsApp-style.** Tapping `+` opens a small
+anchored row of the four positive quick reactions (kept positive on purpose),
+whose own `+` opens a real emoji grid — **`rn-emoji-keyboard`**, agreed with the
+user. Pure JS (no native module, so Expo Go and Jest are untouched), MIT, zero
+runtime dependencies, and about **+200 KB** of bundle for the emoji data.
+Verified it bundles under Metro with React 19 + the React Compiler, since its
+last release (May 2024) predates both.
+
+**Anchoring an in-place popover in RN** takes the same shape as the web's
+portal, for the same reason: there is no portal and no `position: fixed`, so
+`measureInWindow` the trigger and draw the tray at those window coordinates
+inside a full-screen `Modal`. In-flow it would be clipped by the post's bounds
+and painted over by later rows — the exact bug the web hit.
+
+**Open state and measured position must be separate state.** Keying "is the tray
+open" off the measurement means a tray that silently never appears if
+`measureInWindow` doesn't call back — a dead button, and near-impossible to
+reproduce. It opens first and refines position on measurement, degrading to a
+centred tray rather than nothing.
+
+Emoji **validation stays server-side only** (`api/emoji.py` — single grapheme,
+length cap, per-target cap). A second copy of "what counts as an emoji" in JS
+would drift from the one that actually decides.
+
+Two smaller notes:
+
+- **`formatRelativeTime` came back**, one PR after being deleted for being
+  unused. That's the "port a helper when a screen needs it" rule working, not
+  churn: C1 didn't need it (the rail shows an exact clock time), C3's comment
+  timestamps do. `formatAbsoluteTime` stays out — it fills a *hover* tooltip on
+  the web, and a phone has no hover.
+- **`gcTime: 0` collects a hand-seeded cache entry immediately** when nothing is
+  observing it, so a test that seeds `['feed']` and then asserts on it reads
+  `undefined`. Assert on a query the screen actually subscribes to, and test
+  cache fan-out directly against `postCache` instead.
+- **The RNTL v14 async-`render` trap bit again**, this time hidden inside a
+  helper: `{...render(...)}` spreads a *promise*, silently yielding nothing, and
+  every later query fails with "`render` function has not been called". Await
+  the render inside the helper.
 
 **2026-07-19 — review of the C1+C2 PR, and the delayed fuse it found.**
 

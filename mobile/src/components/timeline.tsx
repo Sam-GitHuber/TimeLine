@@ -16,14 +16,22 @@ import { StyleSheet, View } from 'react-native';
 
 import { colors } from '@/theme';
 
-/** Width of the clock-time rail, sized to fit "11:10" without wrapping. */
-export const RAIL = 48;
-
-/** The column the spine runs down, between the rail and the content. */
-export const SPINE_COLUMN = 40;
+/**
+ * The column the spine runs down, at the very left of the screen.
+ *
+ * **The clock time used to sit in a 48px rail to the left of this**, which put
+ * the line a third of the way into a phone screen and left every post squeezed
+ * into what remained. The time now sits inline at the head of each entry, beside
+ * the author's name, so the spine can hug the edge and the content gets the
+ * width back — about 48px of a 390px screen, which is a lot of a photo caption.
+ *
+ * Wide enough for the avatar bead (24) plus its halo (3 each side) plus a little
+ * air, so the bead never touches the screen edge.
+ */
+export const SPINE_COLUMN = 36;
 
 /** Distance from a row's left edge to the centre of the line. */
-export const SPINE_CENTRE = RAIL + SPINE_COLUMN / 2;
+export const SPINE_CENTRE = SPINE_COLUMN / 2;
 
 const SPINE_WIDTH = 2;
 
