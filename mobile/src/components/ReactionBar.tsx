@@ -16,6 +16,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useRef, useState, type ReactNode } from "react";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import Svg, { Path } from "react-native-svg";
 
 import { api } from "@/api";
 import { ReactionTray, type Anchor } from "./ReactionTray";
@@ -32,6 +33,41 @@ import type { Reaction } from "@/types";
  */
 const NO_REACTIONS: Reaction[] = [];
 
+/**
+ * The "add a reaction" glyph: a smiley whose ring breaks at the top right to
+ * make room for a small plus. The near-universal icon for this action, and a
+ * great deal clearer than the bare `+` this replaces.
+ *
+ * **The path data is copied verbatim from the web's `ReactionBar.jsx`** so the
+ * two clients draw precisely the same icon — change one, change the other. It's
+ * the same trick as the avatar palette: the shared thing is small enough that
+ * duplicating it beats building a way to share it (see `theme.ts`).
+ *
+ * `currentColor` has no meaning here — React Native doesn't inherit colour into
+ * a child component — so the stroke is passed explicitly.
+ */
+function AddReactionIcon({ color = colors.inkFaint }: { color?: string }) {
+  return (
+    <Svg
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* Eyes and mouth. */}
+      <Path d="M9.5 9.5h.01M14.5 9.5h.01M9 14a3.5 3.5 0 0 0 5 0" />
+      {/* The face's ring, stopping short of the top right. */}
+      <Path d="M20.9 12.5a9 9 0 1 1-9.4-9.4" />
+      {/* The plus, sitting in the gap. */}
+      <Path d="M19 3v4M21 5h-4" />
+    </Svg>
+  );
+}
+
 export function ReactionBar({
   postId,
   commentId,
@@ -42,16 +78,17 @@ export function ReactionBar({
   commentId?: number;
   reactions: Reaction[] | undefined;
   /**
-   * Extra footer content — the post's "N comments" link.
+   * The target's own actions, to sit with this row: a post's "N comments" link
+   * (`PostCard`), or a comment's Reply and replies toggle (`CommentThread`).
    *
    * **Placed here rather than by the caller because the placement depends on
-   * live state this component owns.** With no reactions the row is just the `+`
-   * button, so a lone link below it wastes a whole line and reads as orphaned;
-   * it goes inline instead. Once there are chips the row is busy enough that
-   * sharing it crowds both, so the link drops to its own line.
+   * live state this component owns.** With no reactions the row is just the add
+   * button, so actions below it waste a whole line and read as orphaned; they go
+   * inline instead. Once there are chips the row is busy enough that sharing it
+   * crowds both, so they drop to their own line beneath.
    *
-   * The caller can't make that call: it only has the *server's* reaction list,
-   * so adding your first reaction would leave the link crammed alongside the new
+   * No caller can make that call: each only has the *server's* reaction list, so
+   * adding your first reaction would leave the actions crammed alongside the new
    * chip until the next refetch.
    */
   trailing?: ReactNode;
@@ -168,7 +205,7 @@ export function ReactionBar({
             accessibilityLabel="Add a reaction"
             hitSlop={6}
           >
-            <Text style={styles.addText}>+</Text>
+            <AddReactionIcon />
           </Pressable>
         </View>
 
@@ -242,7 +279,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: colors.raised,
   },
-  addText: { fontSize: fontSize.base, color: colors.inkFaint, lineHeight: 20 },
   who: { fontSize: fontSize.sm, color: colors.inkFaint },
   trailing: { marginTop: spacing.sm },
 });

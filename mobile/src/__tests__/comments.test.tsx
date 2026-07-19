@@ -9,6 +9,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 
 import { CommentThread, ancestorIdsOf } from '@/components/CommentThread';
 import type { Comment } from '@/types';
@@ -220,6 +221,134 @@ describe('writing', () => {
     await fireEvent.press(screen.getByLabelText('Post comment'));
 
     expect(await screen.findByText('That post is gone.')).toBeTruthy();
+  });
+});
+
+/**
+ * The lines that make the thread a tree.
+ *
+ * These assert *structure*, not pixels: which pieces of line each comment draws.
+ * That's where the fragility is — `indent` and `isLast` are threaded down a
+ * recursive component, and getting either wrong (passing a node's own indent to
+ * its children, dropping the `isLast` guard) misplaces or duplicates the line at
+ * every level while every other test stays green, because nothing else here
+ * renders differently.
+ *
+ * The three pieces, per `CommentThread`'s geometry notes: `branch-N` hooks a
+ * comment onto its parent's line, `past-N` carries the parent's line on to the
+ * next sibling, `stem-N` runs from a comment's own face down to its replies.
+ */
+describe('the lines', () => {
+  /**
+   * A line that is *rendered* but has no height is invisible, and that is not a
+   * hypothetical: removing a style entry once left every vertical measuring
+   * zero while the elbows carried on drawing, so the thread still looked
+   * plausible in a screenshot and every presence-only assertion still passed.
+   * Check the geometry, not just the element.
+   */
+  function expectDrawsALine(testID: string) {
+    const style = StyleSheet.flatten(screen.getByTestId(testID).props.style);
+    expect(style.width).toBeGreaterThan(0);
+    // Anchored top *and* bottom is what gives it height; `top` alone measures 0.
+    expect(style.bottom).toBe(0);
+    expect(style.top).toBeGreaterThanOrEqual(0);
+  }
+
+  it('hooks every comment onto its parent, and stops the run at the last one', async () => {
+    mockFetch.mockResolvedValue(
+      jsonResponse([comment({ id: 1 }), comment({ id: 2 }), comment({ id: 3 })])
+    );
+
+    await renderThread();
+    await screen.findByText('Comment 1');
+
+    // Every comment reaches out to the line above it — top-level ones included,
+    // whose parent line is the post's spine.
+    expect(screen.getByTestId('branch-1')).toBeTruthy();
+    expect(screen.getByTestId('branch-3')).toBeTruthy();
+
+    // The run carries on past the comments that have a sibling below...
+    expectDrawsALine('past-1');
+    expectDrawsALine('past-2');
+    // ...and stops at the last, so the line ends on a face rather than
+    // trailing off into the composer.
+    expect(screen.queryByTestId('past-3')).toBeNull();
+  });
+
+  it('grows a stem only while a comment’s replies are showing', async () => {
+    mockFetch.mockResolvedValue(
+      jsonResponse([
+        comment({ id: 1, replies: [comment({ id: 2, parent: 1 })] }),
+      ])
+    );
+
+    await renderThread();
+    await screen.findByText('Comment 1');
+
+    // Collapsed: there is nothing below to hold up, so no stem.
+    expect(screen.queryByTestId('stem-1')).toBeNull();
+
+    await fireEvent.press(screen.getByText('Show 1 reply'));
+    await screen.findByText('Comment 2');
+
+    expectDrawsALine('stem-1');
+    // The reply hangs off that stem, and is alone, so the run ends on it.
+    expect(screen.getByTestId('branch-2')).toBeTruthy();
+    expect(screen.queryByTestId('past-2')).toBeNull();
+  });
+
+  it('keeps every elbow reaching the line it hangs from, however deep', async () => {
+    // The `indent` / `childIndent` mix-up — handing a node its own indent rather
+    // than its parent's — leaves elbows reaching for a line that isn't there.
+    //
+    // **The chain has to be this deep to catch it.** Above the level where the
+    // step shrinks, a node's indent and its children's are the same number, so
+    // the two are interchangeable and the bug is invisible. Only past that
+    // point do they differ. A shallower version of this test passed against a
+    // deliberately broken build.
+    const chain = comment({
+      id: 1,
+      replies: [
+        comment({
+          id: 2,
+          parent: 1,
+          replies: [
+            comment({
+              id: 3,
+              parent: 2,
+              replies: [
+                comment({
+                  id: 4,
+                  parent: 3,
+                  replies: [comment({ id: 5, parent: 4 })],
+                }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+    mockFetch.mockResolvedValue(jsonResponse([chain]));
+
+    // Deep-linking the leaf opens the whole trail down to it.
+    await renderThread({ highlightCommentId: 5 });
+    await screen.findByText('Comment 5');
+
+    const styleOf = (testID: string) =>
+      StyleSheet.flatten(screen.getByTestId(testID).props.style);
+
+    // Each comment's step right is its own `paddingLeft`, and its elbow spans
+    // exactly that — from its parent's line to its own.
+    for (const id of [1, 2, 3, 4, 5]) {
+      expect(styleOf(`branch-${id}`).width).toBe(styleOf(`comment-${id}`).paddingLeft);
+    }
+
+    // The step shrinks past the third level. This is the assertion that catches
+    // the mix-up: handed its parent's own indent instead of the one meant for
+    // it, the deepest comment keeps the wider step and these come out equal.
+    expect(styleOf('comment-5').paddingLeft).toBeLessThan(
+      styleOf('comment-4').paddingLeft
+    );
   });
 });
 

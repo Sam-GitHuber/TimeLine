@@ -11,6 +11,11 @@
  * list of top-level comments and you drill into the one sub-thread you want,
  * rather than facing a wall of nesting. Opening the reply box, or having just
  * replied, reveals the sub-thread so your own reply is never hidden.
+ *
+ * **The thread is drawn as a timeline of its own** — the same "living line" idea
+ * the feed uses (docs/design-system.md), one level down. A spine runs through the
+ * conversation, each comment's avatar is a bead on it, and a sub-thread *branches*
+ * off with a curved elbow onto a spine of its own. See "the geometry" below.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -28,10 +33,167 @@ import {
 import { api } from '@/api';
 import { Avatar } from './Avatar';
 import { ReactionBar } from './ReactionBar';
+import { SPINE_CENTRE } from './timeline';
 import { markPostCommentsSeen } from '@/postCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Comment } from '@/types';
 import { formatRelativeTime } from '@/utils';
+
+/*
+ * ---------------------------------------------------------------------------
+ * The geometry
+ * ---------------------------------------------------------------------------
+ *
+ * **Every comment branches off its parent's line individually.** Siblings do not
+ * share a spine of their own — that was the first attempt, and it read wrong:
+ * with one line threaded through all the top-level comments, a second top-level
+ * comment looked like a reply to the first rather than a reply to the post. Who
+ * you are replying to is the single most important thing a comment thread has to
+ * communicate, so the line has to say it.
+ *
+ * So a parent's line runs straight down past all of its children, and each child
+ * reaches out to it with its own elbow, landing on that child's face. Reply depth
+ * is then read off *which* vertical line you hang from, not off indentation
+ * alone. Same shape as a file tree, for the same reason.
+ *
+ * Like the feed (`timeline.tsx`), each comment draws its own piece of that rather
+ * than the thread drawing one long line behind everything — a `FlatList`-style
+ * constraint that also happens to be what lets any node be collapsed. Each node
+ * draws up to three things:
+ *
+ *   1. its **elbow** — out from the parent's line, curving down into its own
+ *      face. Every comment has one, including top-level ones, whose parent line
+ *      is the *post's* spine.
+ *   2. the parent's line **carried past it**, when it isn't the last sibling, so
+ *      the run reaches the sibling below. The last sibling omits this, which is
+ *      what makes the line terminate on a face instead of trailing off.
+ *   3. its own **stem**, from its face down to where its replies begin — only
+ *      when it has replies showing.
+ *
+ * Those must butt exactly against each other, so **the gaps between comments are
+ * padding *inside* a node, never a `gap` between them** — a flex gap is empty
+ * space no segment covers, and it shows up as a break in the line.
+ *
+ * **Each comment carries its own step right as `paddingLeft`, and its replies
+ * block adds nothing.** That's what keeps every line *inside* the node that
+ * draws it: the parent's line lands at `COLUMN_CENTRE` from the node's left
+ * edge, and the node's own line one step further in. The obvious alternative —
+ * indenting the replies block and letting each child reach back out — puts the
+ * elbow and the carried-past line at a negative offset, outside the node's
+ * bounds. That renders on iOS, where overflow is visible by default, but is
+ * exactly the kind of thing Android clips. Nothing here draws outside its own
+ * box, so the question never arises.
+ */
+
+/** The bead column: avatar (24) plus its halo (3 each side), and no more. */
+const BEAD = 24; // Avatar size="xs"
+const BEAD_HALO = 3;
+const COLUMN = BEAD + BEAD_HALO * 2;
+const COLUMN_CENTRE = COLUMN / 2;
+/** A bead's centre, measured from the top of its comment. */
+const BEAD_CENTRE = BEAD_HALO + BEAD / 2;
+
+const LINE = 2;
+
+/**
+ * How far a comment's line sits right of its parent's.
+ *
+ * It has to clear the beads: the parent's line now runs *past* its children, so
+ * an indent much under half a bead width would have that line grazing the edge
+ * of every face it passes. 22 leaves a comfortable 7pt.
+ *
+ * A full column per level would still march deep threads off the side of a
+ * phone, so past the third level the step shrinks. Replies start collapsed, so
+ * in practice you rarely see more than a couple of levels at once anyway.
+ */
+const INDENT = 22;
+const DEEP_INDENT = 16;
+const indentFor = (depth: number) => (depth < 3 ? INDENT : DEEP_INDENT);
+
+/**
+ * How far the whole thread sits right of the *post's* spine.
+ *
+ * A comment is a reply to the post, so it gets exactly what a reply gets: one
+ * step right, hanging off the line above by its own elbow. The post, its
+ * comments and their replies are then a single tree under one rule, rather than
+ * a post with a separate comments widget bolted underneath.
+ *
+ * The thread owns this padding (rather than the screen) so that the post's spine
+ * lands at `COLUMN_CENTRE` inside a top-level comment, exactly where any other
+ * comment finds its parent's line. A top-level comment then needs no special
+ * case: it takes its step right from the same `paddingLeft` as everyone else.
+ */
+const THREAD_INDENT = INDENT;
+const THREAD_LEFT = SPINE_CENTRE - COLUMN_CENTRE;
+
+/**
+ * A vertical run of spine, centred on `left`, from `top` to the bottom of
+ * whatever contains it.
+ *
+ * There's deliberately no way to make it stop short: a run that has to *end*
+ * somewhere ends by not being rendered at all (the last sibling omits its
+ * carried-past line). Keeping one mechanism means a line can't be terminated
+ * two different ways in two different places.
+ */
+function ThreadLine({
+  left,
+  top = 0,
+  testID,
+}: {
+  left: number;
+  top?: number;
+  testID?: string;
+}) {
+  return (
+    <View
+      testID={testID}
+      pointerEvents="none"
+      style={[styles.line, { left: left - LINE / 2, top }]}
+    />
+  );
+}
+
+/**
+ * A comment's elbow: out from its parent's line at `from`, curving down to land
+ * on its own face at `to`.
+ *
+ * Two borders and one rounded corner — no SVG dependency for what is, in the
+ * end, a quarter circle. It's drawn before the bead, so the halo'd face paints
+ * over the end of it and the line appears to run *into* the face rather than
+ * under it.
+ *
+ * Its height is fixed at the bead's centre, which is what makes it land level
+ * with the eye of the avatar whatever the comment's own height turns out to be.
+ */
+function Branch({
+  from,
+  to,
+  testID,
+}: {
+  from: number;
+  to: number;
+  testID?: string;
+}) {
+  const width = to - from;
+  return (
+    <View
+      testID={testID}
+      pointerEvents="none"
+      style={[
+        styles.branch,
+        {
+          // Its left border sits on the line it leaves; its bottom border ends
+          // on the face it joins.
+          left: from - LINE / 2,
+          width,
+          // Never more curve than there is room for, in either direction —
+          // a deep indent step is narrower than the drop.
+          borderBottomLeftRadius: Math.min(10, width - LINE, BEAD_CENTRE - LINE),
+        },
+      ]}
+    />
+  );
+}
 
 /**
  * The ids of every comment *above* `targetId` in the tree.
@@ -123,7 +285,7 @@ export function CommentThread({
   return (
     <View style={styles.thread}>
       {comments && comments.length > 0 ? (
-        comments.map((comment) => (
+        comments.map((comment, index) => (
           <CommentNode
             key={comment.id}
             comment={comment}
@@ -131,18 +293,24 @@ export function CommentThread({
             expandIds={expandIds}
             highlightId={highlightCommentId}
             onHighlightLayout={onHighlightLayout}
+            // The post's spine is the line these hang off — the thread's own
+            // padding is set so that `SPINE_CENTRE` still points at it in here.
+            indent={THREAD_INDENT}
+            isLast={index === comments.length - 1}
           />
         ))
       ) : (
         <Text style={styles.empty}>No comments yet. Start the conversation.</Text>
       )}
 
-      <CommentComposer postId={postId} placeholder="Write a comment…" />
+      <View style={styles.threadComposer}>
+        <CommentComposer postId={postId} placeholder="Write a comment…" />
+      </View>
     </View>
   );
 }
 
-/** One comment, its reactions, and its replies nested under a thin left rule. */
+/** One comment: a bead on the spine, its reactions, and its branched replies. */
 function CommentNode({
   comment,
   postId,
@@ -150,6 +318,8 @@ function CommentNode({
   highlightId,
   onHighlightLayout,
   depth = 0,
+  indent,
+  isLast,
 }: {
   comment: Comment;
   postId: number;
@@ -157,6 +327,11 @@ function CommentNode({
   highlightId: number | null;
   onHighlightLayout?: (y: number) => void;
   depth?: number;
+  /** How far our parent's line sits to our left — where our elbow reaches to. */
+  indent: number;
+  /** Last of its siblings, so the parent's line stops here rather than carrying
+   *  on to a comment that isn't there. */
+  isLast: boolean;
 }) {
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
@@ -217,70 +392,132 @@ function CommentNode({
     }
   }
 
+  const showReplies = replies.length > 0 && !collapsed;
+  const childIndent = indentFor(depth);
+
   return (
     <View
       testID={`comment-${comment.id}`}
       onLayout={onHighlightLayout ? handleLayout : undefined}
-      style={[styles.node, isHighlighted && styles.highlighted]}
+      // Our step right of the line we hang from. Our own content starts here;
+      // our parent's line stays at `COLUMN_CENTRE`, inside our bounds.
+      style={{ paddingLeft: indent }}
     >
-      <View style={styles.header}>
-        <Avatar user={comment.author} size="xs" />
-        <Text style={styles.author} numberOfLines={1}>
-          {comment.author.display_name}
-        </Text>
-        <Text style={styles.time}>{formatRelativeTime(comment.created_at)}</Text>
-      </View>
+      {/* (1) Out from the parent's line and down onto our own face. Absolute
+          children measure from the padding box, so these two are in the node's
+          own coordinates — where the parent's line is `COLUMN_CENTRE` and ours
+          is one step further in. Inside `row` below, the padding is already
+          spent, so our line is `COLUMN_CENTRE` again there. */}
+      <Branch
+        from={COLUMN_CENTRE}
+        to={indent + COLUMN_CENTRE}
+        testID={`branch-${comment.id}`}
+      />
 
-      <Text style={styles.text}>{comment.text}</Text>
-
-      <View style={styles.actions}>
-        <Pressable
-          onPress={() => {
-            setShowReply((open) => !open);
-            // Engaging with a sub-thread should reveal it — for context, and so
-            // the reply you're about to write lands somewhere visible.
-            setCollapsed(false);
-          }}
-          accessibilityRole="button"
-          hitSlop={6}
-        >
-          <Text style={styles.action}>Reply</Text>
-        </Pressable>
-
-        {replies.length > 0 ? (
-          <Pressable
-            onPress={() => setCollapsed((value) => !value)}
-            accessibilityRole="button"
-            accessibilityState={{ expanded: !collapsed }}
-            hitSlop={6}
-          >
-            <Text style={styles.toggle}>
-              {collapsed
-                ? `Show ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`
-                : 'Hide replies'}
-            </Text>
-          </Pressable>
-        ) : null}
-      </View>
-
-      <ReactionBar commentId={comment.id} reactions={comment.reactions} />
-
-      {showReply ? (
-        <CommentComposer
-          postId={postId}
-          parentId={comment.id}
-          autoFocus
-          placeholder={`Reply to ${comment.author.display_name}…`}
-          onDone={() => setShowReply(false)}
-        />
+      {/* (2) The parent's line carried past us — the *whole* node, replies and
+          all, so it reaches the sibling below rather than stopping at our text.
+          Omitted when we're last: that's what ends the run on a face. */}
+      {!isLast ? (
+        <ThreadLine left={COLUMN_CENTRE} testID={`past-${comment.id}`} />
       ) : null}
 
-      {replies.length > 0 && !collapsed ? (
-        // A thin rule is the *only* horizontal cost per level. An avatar-width
-        // indent per level marches deep threads off the side of a phone.
+      <View style={styles.row}>
+        {/* (3) Our own stem, from our face down to where our replies start. It
+            spans the row only — the replies block below picks it up from there.
+            Nothing to hold up if there are no replies showing. */}
+        {showReplies ? (
+          <ThreadLine
+            left={COLUMN_CENTRE}
+            top={BEAD_CENTRE}
+            testID={`stem-${comment.id}`}
+          />
+        ) : null}
+
+        <View style={styles.beadColumn}>
+          <View style={styles.bead}>
+            <Avatar user={comment.author} size="xs" />
+          </View>
+        </View>
+
+        <View style={styles.body}>
+          <View style={[styles.content, isHighlighted && styles.highlighted]}>
+            <View style={styles.header}>
+              <Text style={styles.author} numberOfLines={1}>
+                {comment.author.display_name}
+              </Text>
+              <Text style={styles.time}>
+                {formatRelativeTime(comment.created_at)}
+              </Text>
+            </View>
+
+            <Text style={styles.text}>{comment.text}</Text>
+
+            {/* Reply and the replies toggle are handed to `ReactionBar` rather
+                than rendered as a row of their own — exactly as `PostCard`
+                hands over its comments link. On a comment with no reactions
+                the reaction row is just the add button, so these share that
+                line instead of spending a second one; once there are chips to
+                read they drop below. Only `ReactionBar` knows which it is,
+                because it owns the reaction state after a tap. */}
+            <ReactionBar
+              commentId={comment.id}
+              reactions={comment.reactions}
+              trailing={
+                <View style={styles.actions}>
+                  <Pressable
+                    onPress={() => {
+                      setShowReply((open) => !open);
+                      // Engaging with a sub-thread should reveal it — for
+                      // context, and so the reply you're about to write lands
+                      // somewhere visible.
+                      setCollapsed(false);
+                    }}
+                    accessibilityRole="button"
+                    hitSlop={6}
+                  >
+                    <Text style={styles.action}>Reply</Text>
+                  </Pressable>
+
+                  {replies.length > 0 ? (
+                    <Pressable
+                      onPress={() => setCollapsed((value) => !value)}
+                      accessibilityRole="button"
+                      accessibilityState={{ expanded: !collapsed }}
+                      hitSlop={6}
+                    >
+                      <Text style={styles.toggle}>
+                        {collapsed
+                          ? `Show ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`
+                          : 'Hide replies'}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              }
+            />
+
+            {showReply ? (
+              <CommentComposer
+                postId={postId}
+                parentId={comment.id}
+                autoFocus
+                placeholder={`Reply to ${comment.author.display_name}…`}
+                onDone={() => setShowReply(false)}
+              />
+            ) : null}
+          </View>
+        </View>
+      </View>
+
+      {showReplies ? (
         <View
           testID={`replies-${comment.id}`}
-          style={styles.replies}
+          // **No style at all**, deliberately. The step right is the replies'
+          // own `paddingLeft`, not an indent applied here — that's what keeps
+          // their elbows inside their own bounds. And no top padding: our stem
+          // ends at this block's top edge and the first reply's elbow starts
+          // there, so anything between them is a break in the line. The air
+          // above comes from our own `body` padding.
           onLayout={
             onHighlightLayout
               ? (event) => {
@@ -289,7 +526,9 @@ function CommentNode({
               : undefined
           }
         >
-          {replies.map((reply) => (
+          {/* No line of its own: our stem hands off to the replies' elbows,
+              each of which draws the run past itself. */}
+          {replies.map((reply, index) => (
             <CommentNode
               key={reply.id}
               comment={reply}
@@ -300,6 +539,8 @@ function CommentNode({
               // us, so it has to pass through here to have our own added.
               onHighlightLayout={onHighlightLayout ? report : undefined}
               depth={depth + 1}
+              indent={childIndent}
+              isLast={index === replies.length - 1}
             />
           ))}
         </View>
@@ -394,10 +635,71 @@ function CommentComposer({
 }
 
 const styles = StyleSheet.create({
-  thread: { gap: spacing.lg },
+  // The one step right of the post's spine that every comment hangs off; the
+  // elbows are positioned against `SPINE_CENTRE` inside this padding box.
+  //
+  // Deliberately nothing else. No `gap` and no `paddingTop`: both would be
+  // stretches of thread that no segment covers, so both show up as breaks in
+  // the line — above the first comment, and between every pair after it. The
+  // spacing comes from inside each comment (`body`) and, above the first, from
+  // the post card's own bottom padding.
+  thread: { paddingLeft: THREAD_LEFT },
+  // These two aren't comments, so they don't carry a comment's `paddingLeft` —
+  // they'd otherwise sit flush against the screen edge, a step left of every
+  // comment above them. Line them up with where a comment's own box starts.
+  threadComposer: { marginTop: spacing.sm, marginLeft: THREAD_INDENT },
   loading: { marginVertical: spacing.lg },
-  node: { gap: spacing.xs },
+
+  line: {
+    position: 'absolute',
+    width: LINE,
+    backgroundColor: colors.spine,
+    // Runs to the bottom of whatever contains it. **Without this the view has
+    // no height and the line silently vanishes** — an absolutely positioned
+    // View with only `top` set measures zero, so every vertical disappeared
+    // while the elbows carried on rendering and the thread still *looked*
+    // plausible. `the lines` tests assert this style is present for that
+    // reason: presence of the element is not presence of a line.
+    bottom: 0,
+  },
+  branch: {
+    position: 'absolute',
+    top: 0,
+    // Down to the face's centre line, and no further.
+    height: BEAD_CENTRE,
+    borderLeftWidth: LINE,
+    borderBottomWidth: LINE,
+    borderLeftColor: colors.spine,
+    borderBottomColor: colors.spine,
+  },
+
+  row: { flexDirection: 'row' },
+  beadColumn: { width: COLUMN, alignItems: 'center' },
+  bead: {
+    // A surface-coloured halo lifts the face off the line behind it.
+    borderWidth: BEAD_HALO,
+    borderColor: colors.surface,
+    borderRadius: radius.pill,
+  },
+  body: {
+    flex: 1,
+    paddingLeft: spacing.sm,
+    // The halo sits outside the avatar, so the text column drops by that much
+    // to sit level with the face rather than with the halo's edge.
+    paddingTop: BEAD_HALO,
+    // The breathing room between comments lives here, inside the node, so the
+    // spine segment above covers it.
+    paddingBottom: spacing.lg,
+  },
+  // No `gap`: `ReactionBar` and the composer bring their own top margins, and a
+  // gap on top of those spaced a comment's reaction row further from its text
+  // than a post's is from its own — same component, two different looks.
+  content: {},
   highlighted: {
+    // Both sides, cancelling the padding below, so a highlighted comment's text
+    // column is exactly as wide as its neighbours'. With the negative margin on
+    // one side only, a comment reached from a notification wrapped differently
+    // from the same comment a moment earlier in the feed.
     marginHorizontal: -spacing.sm,
     paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
@@ -411,20 +713,18 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     fontWeight: '600',
     color: colors.ink,
+    // An explicit line box of exactly the bead's height, so the name's centre
+    // lands on the face's centre without any nudging (as in PostCard).
+    lineHeight: BEAD,
     flexShrink: 1,
   },
-  time: { fontSize: 11, color: colors.inkFaint },
-  text: { fontSize: 15, color: colors.ink, lineHeight: 21 },
+  time: { fontSize: 11, color: colors.inkFaint, lineHeight: BEAD },
+  // Its own top margin now `content` has no gap — matching `PostCard`, where
+  // the post's text sits the same distance under its header.
+  text: { fontSize: 15, color: colors.ink, lineHeight: 21, marginTop: spacing.xs },
   actions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   action: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
   toggle: { fontSize: fontSize.sm, color: colors.accentDeep, fontWeight: '600' },
-  replies: {
-    marginTop: spacing.sm,
-    paddingLeft: spacing.md,
-    borderLeftWidth: 1,
-    borderLeftColor: colors.line,
-    gap: spacing.lg,
-  },
   composer: { marginTop: spacing.sm, gap: spacing.sm },
   input: {
     minHeight: 40,
@@ -454,6 +754,10 @@ const styles = StyleSheet.create({
   submitPressed: { backgroundColor: colors.accentDeep },
   submitDisabled: { opacity: 0.4 },
   submitText: { color: colors.raised, fontWeight: '600', fontSize: fontSize.sm },
-  empty: { fontSize: fontSize.sm, color: colors.inkFaint },
+  empty: {
+    fontSize: fontSize.sm,
+    color: colors.inkFaint,
+    marginLeft: THREAD_INDENT, // see `threadComposer`
+  },
   error: { fontSize: fontSize.sm, color: colors.danger },
 });

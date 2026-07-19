@@ -25,6 +25,77 @@ Implemented by `components/Timeline.jsx` (groups posts by calendar day and draws
 the spine) + the `.tl-*` classes in `index.css`. `PostCard` renders one entry;
 `ComposeBox` renders the `.tl-compose` "now" node.
 
+## The line, one level down — comment threads
+
+A comment thread is drawn as the same living line, branching. The post's spine
+runs on down below the entry; each comment reaches out to it with a **curved
+elbow** that lands on that comment's avatar; and a comment with replies grows a
+spine of its own for them to hang off. Post, comments and replies are one tree
+under one rule, rather than a timeline with a comments widget bolted underneath.
+
+**The rule that matters: every comment branches off its parent's line
+individually.** Siblings must not share a spine of their own. This is not a
+stylistic preference — it's the thing that makes the thread readable:
+
+> With one line threaded down through all the top-level comments, the second
+> top-level comment reads as a *reply to the first*, because they sit on the
+> same line and that line's only visible origin is the first comment's avatar.
+
+Who you are replying to is the single most important thing a comment thread has
+to communicate, so the line has to carry it. Reply depth is read off **which
+vertical line you hang from**, not off indentation alone — the same shape, and
+the same reasoning, as a file tree. So a parent's line runs straight down past
+all of its children, and each child hooks onto it where it belongs.
+
+Each comment therefore draws up to three pieces of line:
+
+1. its **elbow** — out from the parent's line, curving down onto its own face.
+   Every comment has one; for a top-level comment the parent line is the *post's*
+   spine.
+2. the parent's line **carried past it**, when it isn't the last sibling. The
+   last sibling omits this, which is what makes a run terminate on a face rather
+   than trail off into the composer.
+3. its own **stem**, from its face down to where its replies start — only when it
+   has replies showing.
+
+Two constraints fall out of drawing it per-comment rather than as one background
+line, and both are easy to reintroduce by accident:
+
+- **Never space comments with a flex `gap`** (or a `space-y-*` utility). A gap is
+  empty space no segment covers, so it shows up as a break in the line. Spacing
+  goes *inside* a comment, as bottom padding, where the segment above covers it.
+  Same trap the feed's day dividers hit.
+- **No top padding on a thread or a replies block.** The line above ends exactly
+  at the block's top edge and the first elbow starts exactly there; padding
+  between them is a visible break. The air comes from the *parent's* bottom
+  padding instead.
+- **Each comment carries its own step right as left padding; the replies block
+  adds none.** The tempting alternative — indent the replies block, and let each
+  child reach back out to its parent's line — puts the elbow and the carried-past
+  line at a *negative* offset, outside the element that draws them. Browsers and
+  iOS both render that; Android is liable to clip it. Paying the indent inside
+  each comment keeps every line within its own box, so the question never comes
+  up. The parent's line then sits half a bead in from the comment's left edge,
+  and the comment's own line one step further.
+
+The indent per level has to clear the avatars, since a parent's line now passes
+them: keep it above half a bead width (22pt against a 30pt bead on mobile) or the
+line grazes every face it goes by. It shrinks past the third level so deep
+threads don't march off the side of a phone; replies start collapsed, so more
+than a couple of visible levels is rare.
+
+The elbow is two borders and one rounded corner (`border-left` + `border-bottom`
++ a bottom-left radius) — no SVG needed for what is, in the end, a quarter
+circle. Draw it *before* the avatar so the avatar's surface-coloured halo paints
+over the end of it and the line appears to run into the face, not under it.
+
+**Implemented on mobile** (`mobile/src/components/CommentThread.tsx`, which has
+the geometry constants and the full derivation in its header comment).
+**The web still uses the old flat treatment** — `frontend/src/components/
+CommentThread.jsx` nests replies under a plain `border-l` rule with
+`space-y-4` — and should be brought over to this. Note the `space-y-4` is exactly
+the gap problem above, so that port is a real change in structure, not a restyle.
+
 ## Tokens (see `frontend/src/index.css`)
 
 All tokens live in Tailwind v4's `@theme`, so they're available as utilities
