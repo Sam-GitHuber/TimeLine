@@ -15,14 +15,33 @@
  * post-detail screen in C2.
  */
 
-import { StyleSheet, Text, View } from 'react-native';
+import { router } from 'expo-router';
+import type { ReactNode } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
+import { ReactionBar } from './ReactionBar';
 import { RAIL, SPINE_COLUMN, Spine } from './timeline';
 import type { Post } from '@/types';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import { formatClockTime } from '@/utils';
+
+/**
+ * The post's content, made tappable only when there's somewhere to go.
+ *
+ * A `Pressable` that does nothing still swallows touches and reports itself as a
+ * button to a screen reader, so the permalink screen — where tapping the post
+ * would just reopen the screen you're on — gets a plain `View` instead.
+ */
+function Body({ onPress, children }: { onPress?: () => void; children: ReactNode }) {
+  if (!onPress) return <>{children}</>;
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button">
+      {children}
+    </Pressable>
+  );
+}
 
 /**
  * The alignment band for a post's first line: clock time, avatar bead and author
@@ -42,8 +61,17 @@ import { formatClockTime } from '@/utils';
 const BEAD = 24; // matches Avatar size="xs"
 const BEAD_BORDER = 3;
 
-export function PostCard({ post }: { post: Post }) {
+export function PostCard({
+  post,
+  /** False on the permalink screen, where there's nowhere further to go. */
+  interactive = true,
+}: {
+  post: Post;
+  interactive?: boolean;
+}) {
   const { time, meridiem } = formatClockTime(post.created_at);
+
+  const openPost = () => router.push(`/post/${post.id}`);
 
   return (
     <View style={styles.row}>
@@ -68,51 +96,61 @@ export function PostCard({ post }: { post: Post }) {
       </View>
 
       <View style={styles.card}>
-        <View style={styles.header}>
-          <Text style={styles.author} numberOfLines={1}>
-            {post.author.display_name}
-          </Text>
-          {/* Silently altering content others have read is a trust problem, so
-              the marker is not optional — see feed-and-posts.md. */}
-          {post.edited_at ? <Text style={styles.edited}>· edited</Text> : null}
-        </View>
+        {/* Only the post's *content* opens the permalink, not the whole row.
+            Keeping the reaction chips outside this Pressable means a tap meant
+            for a chip can never be swallowed by the card behind it. */}
+        <Body onPress={interactive ? openPost : undefined}>
+          <View style={styles.header}>
+            <Text style={styles.author} numberOfLines={1}>
+              {post.author.display_name}
+            </Text>
+            {/* Silently altering content others have read is a trust problem, so
+                the marker is not optional — see feed-and-posts.md. */}
+            {post.edited_at ? <Text style={styles.edited}>· edited</Text> : null}
+          </View>
 
-        {post.group ? (
-          <Text style={styles.group}>in {post.group.name}</Text>
-        ) : null}
+          {post.group ? (
+            <Text style={styles.group}>in {post.group.name}</Text>
+          ) : null}
 
-        {post.text ? <Text style={styles.text}>{post.text}</Text> : null}
+          {post.text ? <Text style={styles.text}>{post.text}</Text> : null}
 
-        {post.images.map((image) => (
-          <AuthedImage
-            key={image.id}
-            uri={image.thumbnail}
-            style={[
-              styles.photo,
-              // Reserve the right height from the dimensions the API sends, so
-              // the feed doesn't reflow as photos load in.
-              { aspectRatio: image.width && image.height ? image.width / image.height : 1 },
-            ]}
-            contentFit="cover"
-            transition={150}
-            accessibilityLabel={`Photo from ${post.author.display_name}`}
-          />
-        ))}
-
-        <View style={styles.footer}>
-          {post.reactions.map((reaction) => (
-            <View
-              key={reaction.emoji}
-              style={[styles.chip, reaction.reacted && styles.chipMine]}
-            >
-              <Text style={styles.chipEmoji}>{reaction.emoji}</Text>
-              <Text style={styles.chipCount}>{reaction.count}</Text>
-            </View>
+          {post.images.map((image) => (
+            <AuthedImage
+              key={image.id}
+              uri={image.thumbnail}
+              style={[
+                styles.photo,
+                // Reserve the right height from the dimensions the API sends, so
+                // the feed doesn't reflow as photos load in.
+                { aspectRatio: image.width && image.height ? image.width / image.height : 1 },
+              ]}
+              contentFit="cover"
+              transition={150}
+              accessibilityLabel={`Photo from ${post.author.display_name}`}
+            />
           ))}
-          {post.comment_count > 0 ? (
+        </Body>
+
+        <ReactionBar postId={post.id} reactions={post.reactions} />
+
+        {/* In the feed this is the way into the thread. On the permalink the
+            thread is already below, so a link to it would go nowhere. */}
+        {interactive ? (
+          <Pressable
+            onPress={openPost}
+            accessibilityRole="button"
+            accessibilityLabel={
+              post.comment_count > 0
+                ? `${post.comment_count} comments, open the thread`
+                : 'Add a comment'
+            }
+            hitSlop={6}
+          >
             <Text style={styles.comments}>
-              {post.comment_count}{' '}
-              {post.comment_count === 1 ? 'comment' : 'comments'}
+              {post.comment_count > 0
+                ? `${post.comment_count} ${post.comment_count === 1 ? 'comment' : 'comments'}`
+                : 'Comment'}
               {post.new_comment_count > 0 ? (
                 <Text style={styles.newComments}>
                   {' '}
@@ -120,8 +158,8 @@ export function PostCard({ post }: { post: Post }) {
                 </Text>
               ) : null}
             </Text>
-          ) : null}
-        </View>
+          </Pressable>
+        ) : null}
       </View>
     </View>
   );
@@ -187,29 +225,12 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     backgroundColor: colors.line,
   },
-  footer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
+  // The reaction chips' styles moved to `ReactionBar` with the rest of them —
+  // one owner, so the feed and the comment thread can't drift apart.
+  comments: {
+    fontSize: fontSize.sm,
+    color: colors.inkFaint,
     marginTop: spacing.sm,
   },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-    borderRadius: radius.pill,
-    // Raised (white) against the surface now that the post itself has no card —
-    // the chips are the one thing here that should read as a pressable object.
-    backgroundColor: colors.raised,
-    borderWidth: 1,
-    borderColor: colors.lineStrong,
-  },
-  chipMine: { backgroundColor: colors.accentTint, borderColor: colors.accent },
-  chipEmoji: { fontSize: 13 },
-  chipCount: { fontSize: fontSize.sm, color: colors.inkSoft },
-  comments: { fontSize: fontSize.sm, color: colors.inkFaint },
   newComments: { color: colors.accent, fontWeight: '600' },
 });

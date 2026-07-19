@@ -12,15 +12,39 @@
  * differently on phone and web.
  *
  * **Only port a helper when a screen actually needs it.** The sync obligation
- * above is the reason: an unused copy is pure maintenance cost, so
- * `formatRelativeTime` / `formatAbsoluteTime` were removed again after C1 turned
- * out to use neither (the timeline rail shows a clock time, not "2h ago"). The
- * event helpers land with Milestone E3, when there's a screen calling them.
+ * above is the reason: an unused copy is pure maintenance cost. C1 shipped
+ * `formatRelativeTime` and `formatAbsoluteTime` before anything called them and
+ * both were removed; C3's comment timestamps then genuinely needed the first, so
+ * it came back. `formatAbsoluteTime` stays out — on the web it fills a hover
+ * tooltip, and a phone has no hover. The event helpers land with Milestone E3.
  *
  * Kept dependency-free (no date library), same as the web app: we don't need one
  * yet, and it's a good habit not to reach for a package until a problem demands
  * it.
  */
+
+/**
+ * "just now", "5m", "3h", "2d" — the short relative style next to a comment.
+ * Falls back to an absolute date for anything older than a week.
+ *
+ * Posts don't use this (the timeline rail shows their exact clock time, which is
+ * the whole point of the design); comments do, where the precise minute matters
+ * less than the sense of how recent the exchange is.
+ */
+export function formatRelativeTime(isoString: string, now: Date = new Date()): string {
+  const then = new Date(isoString);
+  const seconds = Math.round((now.getTime() - then.getTime()) / 1000);
+
+  if (seconds < 45) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d`;
+
+  return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
 
 /**
  * The clock time shown on the timeline rail, split so the meridiem can sit on

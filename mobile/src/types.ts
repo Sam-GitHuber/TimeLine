@@ -76,6 +76,44 @@ export type Reaction = {
   reacted: boolean;
 };
 
+/**
+ * A node in a post's comment tree — `CommentSerializer`.
+ *
+ * **`replies` is already pruned server-side.** The tree you receive contains
+ * only comments from people you're connected with; a not-connected author's
+ * comment *and its whole subtree* are dropped before serialising (see
+ * connections.md). So there is no hidden content here to filter — render what
+ * arrives. Two viewers legitimately see different trees on the same post.
+ */
+export type Comment = {
+  id: number;
+  author: Author;
+  /** `null` for a top-level comment; otherwise the comment this replies to. */
+  parent: number | null;
+  text: string;
+  created_at: string;
+  replies: Comment[];
+  reactions: Reaction[];
+};
+
+/**
+ * What the toggle endpoints return: the target's freshly aggregated, viewer-
+ * pruned reaction summary, so the client can update in place without refetching.
+ */
+export type ReactionSummary = {
+  reactions: Reaction[];
+};
+
+/**
+ * One row of "who reacted", grouped by emoji and pruned to people you may see —
+ * a reactor you aren't connected with never appears. Ordered by count desc.
+ */
+export type ReactorGroup = {
+  emoji: string;
+  count: number;
+  users: Author[];
+};
+
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */
 export type Post = {
   id: number;

@@ -11,8 +11,12 @@ below calls for:
   the spine, text + photo posting. *Brought forward ahead of post detail* — the
   live tip caps the timeline, so without it the feed looks cut off at the top
   rather than open-ended at the present.
-- **C3 — post detail** (comments + reactions, made interactive). Next.
-- **C4 — profiles** (view / edit / avatar).
+- **C3 — post detail.** Done: the `/post/[postId]` permalink, the pruned comment
+  tree with collapsible replies, writing comments and replies, and reactions made
+  interactive on posts *and* comments (plus "who reacted"). Deep-link support
+  (`?comment=`) is built now rather than in D, since the route exists to be
+  opened by a notification.
+- **C4 — profiles** (view / edit / avatar). Next.
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
 locked** below); the questions that were open at kickoff have been resolved and
@@ -446,6 +450,44 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-19 — Milestone C3: the emoji picker doesn't cross to React Native.**
+
+The web's full picker is `emoji-picker-element`, a **DOM web component**. There
+is no React Native equivalent, and the obvious move — adding an RN emoji-grid
+library — was raised with the user and rejected: a new dependency to vet and
+maintain, for something the phone already does better.
+
+**Decision: keep the web's two-tier *shape*, replace the second tier with the
+system emoji keyboard.** Four one-tap positive reactions (👍 ❤️ 😂 🎉, kept
+positive on purpose), plus an input the OS fills. That holds the product promise
+of "any emoji from your keyboard" (reactions.md) with **zero dependencies**, and
+uses the picker people already have muscle memory for.
+
+**The one honest cost:** iOS has no `keyboardType` for emoji, so we can't open
+the emoji keyboard directly — the sheet tells you to tap 🙂 on your keyboard.
+Worth revisiting if testers trip on it.
+
+Emoji **validation stays server-side only** (`api/emoji.py` — single grapheme,
+length cap, per-target cap). The sheet surfaces the server's message rather than
+reimplementing the rule; a second copy of "what counts as an emoji" in JS would
+drift from the one that actually decides.
+
+Two smaller notes:
+
+- **`formatRelativeTime` came back**, one PR after being deleted for being
+  unused. That's the "port a helper when a screen needs it" rule working, not
+  churn: C1 didn't need it (the rail shows an exact clock time), C3's comment
+  timestamps do. `formatAbsoluteTime` stays out — it fills a *hover* tooltip on
+  the web, and a phone has no hover.
+- **`gcTime: 0` collects a hand-seeded cache entry immediately** when nothing is
+  observing it, so a test that seeds `['feed']` and then asserts on it reads
+  `undefined`. Assert on a query the screen actually subscribes to, and test
+  cache fan-out directly against `postCache` instead.
+- **The RNTL v14 async-`render` trap bit again**, this time hidden inside a
+  helper: `{...render(...)}` spreads a *promise*, silently yielding nothing, and
+  every later query fails with "`render` function has not been called". Await
+  the render inside the helper.
 
 **2026-07-19 — review of the C1+C2 PR, and the delayed fuse it found.**
 
