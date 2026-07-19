@@ -16,7 +16,16 @@ below calls for:
   interactive on posts *and* comments (plus "who reacted"). Deep-link support
   (`?comment=`) is built now rather than in D, since the route exists to be
   opened by a notification.
-- **C4 — profiles** (view / edit / avatar). Next.
+- **C4 — profiles.** Done: the `/u/[userId]` screen (self or anyone), the inline
+  editor for your own name/bio/avatar with a native square crop, and navigation
+  into it — your bead in the feed header (which now also hosts logout) and every
+  post author's bead/name. Connection/message/block actions on *other* people's
+  profiles are deferred to Milestone E, as planned; C4 reads `connection_status`
+  only to show the private-posts locked state.
+
+With C4 done, **Milestone C is complete** — the read + write core (feed, compose,
+post detail, profiles) all run against the real backend. Next: **Milestone D
+(push notifications)**, which needs the Apple Developer enrolment live.
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
 locked** below); the questions that were open at kickoff have been resolved and
@@ -450,6 +459,46 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-19 — Milestone C4 (profiles): four decisions worth keeping.**
+
+- **Native square crop, not a ported crop modal.** The web hands a chosen file
+  to a canvas cropper (`AvatarCropModal`); the app uses the OS picker's own crop
+  via `allowsEditing: true` + `aspect: [1, 1]`. One fewer dependency, no geometry
+  to keep in step with the web, and a crop UI users already know. The picker
+  returns an already-square image, so there's nothing left to reframe.
+
+- **`refreshUser` is the one genuinely new bit of spine.** After a profile save
+  the web calls `refreshUser()` so the new name/avatar repaint everywhere they're
+  read from auth (the nav bead, the compose box). Mobile's `AuthProvider` had no
+  such method — it only had `signIn`/`signOut` — so C4 adds it. It's best-effort:
+  the save has already landed server-side by the time it runs, so a blip
+  re-fetching "who am I" must never surface as a save failure; the editor's query
+  invalidations still pull the fresh copy onto the screen.
+
+- **The feed's day-divider + post rendering was extracted to `TimelineList`**, now
+  shared by the feed and the profile. The alternative — the profile re-deriving
+  `SPINE_COLUMN` and the divider indent — is exactly the drift the C1 layout note
+  warns about; one renderer makes it impossible. `TimelineList` is dumb about
+  data (it takes already-built `toRows` output, never a raw post array), so the
+  server's reverse-chronological order is never re-touched.
+
+- **Logout moved off the feed header onto the profile screen.** The feed bead was
+  a stopgap logout until this screen existed; it now opens your own profile,
+  where logout lives. Post authors' beads/names navigate to `/u/[id]` too — the
+  app's main way into a profile.
+
+*Test gotcha (RN + Jest):* a `jest.mock('expo-router')` factory that closes over
+a `const mockPush` captures `undefined`, because the factory runs while the
+hoisted imports load expo-router — *before* the `const` line executes. Reading
+the spy lazily inside an arrow (`push: (...a) => mockPush(...a)`) defers the read
+to call time. `useLocalSearchParams: () => mockParams` already dodged this by
+being an arrow; a direct `push: mockPush` did not.
+
+*Deferred, as planned:* Connect / Message / Block on other people's profiles are
+Milestone E (connections/block). C4 reads `connection_status` only to choose the
+private-posts locked message. Comment-author beads don't link to profiles yet
+either — only post authors do; a small follow-up if it's wanted.
 
 **2026-07-19 — the mobile feed layout deliberately diverges from the web's.**
 

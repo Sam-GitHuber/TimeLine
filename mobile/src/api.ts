@@ -28,6 +28,7 @@ import type {
   LoginResponse,
   Paginated,
   Post,
+  ProfileUser,
   ReactionSummary,
   ReactorGroup,
   RefreshResponse,
@@ -251,6 +252,72 @@ export const api = {
 
   /** "Who am I" — resolves to the user, or throws 401 when logged out. */
   getCurrentUser: () => request<User>('/api/auth/user/'),
+
+  /**
+   * Update your own profile — real name, bio, avatar — via dj-rest-auth's user
+   * endpoint (the same `PATCH /api/auth/user/` the web app uses).
+   *
+   * Multipart because it can carry an avatar file, and PATCH not PUT so an
+   * unsent field is left untouched rather than blanked — we only append the
+   * fields the form actually holds.
+   *
+   * `avatar` is a picked-and-cropped photo (`{uri,name,type}`, the RN FormData
+   * file shape — a browser `Blob` would silently upload nothing, same trap as
+   * `createPost`). `removeAvatar: true` clears an existing avatar; the two are
+   * mutually exclusive and the caller must never send both.
+   *
+   * Returns the refreshed `User`, which is also what `refreshUser()` in
+   * `auth.tsx` reads back to repaint the nav avatar/name everywhere.
+   */
+  updateProfile: ({
+    first_name,
+    last_name,
+    bio,
+    avatar,
+    removeAvatar,
+  }: {
+    first_name?: string;
+    last_name?: string;
+    bio?: string;
+    avatar?: PhotoUpload;
+    removeAvatar?: boolean;
+  }) => {
+    const form = new FormData();
+    if (first_name !== undefined) form.append('first_name', first_name);
+    if (last_name !== undefined) form.append('last_name', last_name);
+    if (bio !== undefined) form.append('bio', bio);
+    if (avatar) {
+      form.append('avatar', {
+        uri: avatar.uri,
+        name: avatar.name,
+        type: avatar.type,
+      } as unknown as Blob);
+    }
+    if (removeAvatar) form.append('remove_avatar', 'true');
+    return request<User>('/api/auth/user/', { method: 'PATCH', body: form });
+  },
+
+  /**
+   * A single person's public profile by numeric id — the header for `/u/[id]`.
+   *
+   * Returns `connection_status` and `is_blocked` relative to you, so the screen
+   * can decide whether their posts are visible. Like the feed, a profile you
+   * genuinely can't see still returns its header (the wall is on the *posts*,
+   * which come back empty) — the id itself isn't a secret, a real person is.
+   */
+  getUser: (userId: number | string) =>
+    request<ProfileUser>(`/api/users/${userId}/`),
+
+  /**
+   * One person's own posts, newest-first — the body of their profile.
+   *
+   * **Private by default:** unless it's you or a connection, the backend returns
+   * an empty page, and the screen shows a locked state rather than their posts.
+   * Paginated like every list here, so the profile pages with the same
+   * `getPage` contract the feed uses.
+   */
+  getUserPosts: (userId: number | string) =>
+    request<Paginated<Post>>(`/api/users/${userId}/posts/`),
 
   /**
    * The reverse-chronological feed: your posts plus those of everyone you're

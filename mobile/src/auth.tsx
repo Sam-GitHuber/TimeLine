@@ -35,6 +35,12 @@ type AuthContextValue = {
   user: User | null;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /**
+   * Re-fetch "who am I" and update the held user. Called after editing your own
+   * profile so the new name/avatar repaint everywhere they're read from auth —
+   * the nav bead, the compose box — not just on the profile screen.
+   */
+  refreshUser: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -111,9 +117,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStatus('signedOut');
   }, []);
 
+  // Best-effort by design: the caller (the profile editor) has *already* saved
+  // server-side by the time it asks for this, so a blip re-fetching "who am I"
+  // must not surface as a save failure. It throws on a real error so the caller
+  // can choose to log it, but the profile is safe either way — the editor's
+  // query invalidations still pull the fresh copy onto the screen.
+  const refreshUser = useCallback(async () => {
+    const me = await api.getCurrentUser();
+    setUser(me);
+  }, []);
+
   const value = useMemo(
-    () => ({ status, user, signIn, signOut }),
-    [status, user, signIn, signOut]
+    () => ({ status, user, signIn, signOut, refreshUser }),
+    [status, user, signIn, signOut, refreshUser]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

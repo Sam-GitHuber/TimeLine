@@ -73,15 +73,25 @@ export function PostCard({
   const { time, meridiem } = formatClockTime(post.created_at);
 
   const openPost = () => router.push(`/post/${post.id}`);
+  // The author's bead and name go to their profile — a separate destination
+  // from the post body, and reachable even on the permalink where the body
+  // itself is inert. This is the app's main way into `/u/[id]` (C4).
+  const openAuthor = () => router.push(`/u/${post.author.id}`);
 
   return (
     <View style={styles.row}>
       <Spine />
 
       <View style={styles.spineColumn}>
-        <View style={styles.bead}>
+        <Pressable
+          onPress={openAuthor}
+          accessibilityRole="button"
+          accessibilityLabel={`${post.author.display_name}’s profile`}
+          hitSlop={6}
+          style={styles.bead}
+        >
           <Avatar user={post.author} size="xs" />
-        </View>
+        </Pressable>
       </View>
 
       <View style={styles.card}>
@@ -97,7 +107,16 @@ export function PostCard({
               {time}
               <Text style={styles.meridiem}>{meridiem}</Text>
             </Text>
-            <Text style={styles.author} numberOfLines={1}>
+            {/* `onPress` on the Text itself, not a wrapping Pressable, so it
+                stays inline and keeps its shrink/line-height without disturbing
+                the band's alignment. It wins the touch over the body behind it,
+                so tapping the name opens the profile, not the post. */}
+            <Text
+              style={styles.author}
+              numberOfLines={1}
+              onPress={openAuthor}
+              accessibilityRole="button"
+            >
               {post.author.display_name}
             </Text>
             {/* Silently altering content others have read is a trust problem, so
