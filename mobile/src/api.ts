@@ -65,22 +65,37 @@ export type PhotoUpload = {
 };
 
 /**
- * Turn a picked file into a multipart part the runtime will actually send.
+ * A multipart file part the winter fetch runtime will actually serialise:
+ * raw bytes behind a `.bytes()` method, plus a filename and content-type.
+ */
+type FilePart = { bytes: () => Uint8Array; name: string; type: string };
+
+/**
+ * Turn a picked file into an uploadable multipart part.
  *
- * **Why not the React Native `{uri, name, type}` convention.** Expo SDK 54+
- * replaced the global `fetch` with its "winter" runtime, whose FormData
- * serializer **rejects** that legacy shape — it throws `Unsupported FormDataPart
- * implementation` (verified in expo's own `convertFormData` test). It accepts a
- * real `Blob`, so we read the file's bytes off disk with expo-file-system's
- * `File` (bundled in Expo Go) and wrap them. The filename rides along as the
- * third `append` argument; the content-type is the `Blob`'s own `type`.
+ * **Two dead ends this had to route around**, both from Expo SDK 54+ replacing
+ * the global `fetch` with its "winter" runtime:
+ *
+ *   1. The old React Native `{uri, name, type}` part throws `Unsupported
+ *      FormDataPart implementation` — the winter FormData serializer doesn't
+ *      handle it (asserted in expo's own `convertFormData` test).
+ *   2. A real `Blob` is one shape it *does* accept — but React Native's `Blob`
+ *      can't be constructed from an `ArrayBuffer` ("Creating blobs from
+ *      'ArrayBuffer' … are not supported"), so `new Blob([bytes])` is out too.
+ *
+ * The serializer's other accepted shape is an object exposing `.bytes()` (its
+ * "FileBlob" case). So we read the file's bytes with expo-file-system's `File`
+ * (`arrayBuffer()` is a native read, not a Blob build — bundled in Expo Go, no
+ * dev build needed) and hand back that shape. `name`/`type` become the multipart
+ * filename and content-type.
  *
  * This reads the whole file into memory. Fine for avatars and phone photos;
  * revisit only if we ever allow large attachments.
  */
-async function toBlob(upload: PhotoUpload): Promise<Blob> {
-  const bytes = await new File(upload.uri).arrayBuffer();
-  return new Blob([bytes], { type: upload.type });
+async function toFilePart(upload: PhotoUpload): Promise<FilePart> {
+  const buffer = await new File(upload.uri).arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  return { bytes: () => bytes, name: upload.name, type: upload.type };
 }
 
 export class ApiError extends Error {
@@ -307,7 +322,9 @@ export const api = {
     if (first_name !== undefined) form.append('first_name', first_name);
     if (last_name !== undefined) form.append('last_name', last_name);
     if (bio !== undefined) form.append('bio', bio);
-    if (avatar) form.append('avatar', await toBlob(avatar), avatar.name);
+    if (avatar) {
+      form.append('avatar', (await toFilePart(avatar)) as unknown as Blob);
+    }
     if (removeAvatar) form.append('remove_avatar', 'true');
     return request<User>('/api/auth/user/', { method: 'PATCH', body: form });
   },
@@ -378,14 +395,14 @@ export const api = {
    * sent: the server sets it from the authenticated user and ignores anything in
    * the body, so a client can't post as someone else.
    *
-   * Each photo is uploaded as a real `Blob` (see `toBlob`) — the winter fetch
-   * runtime rejects the old React Native `{uri, name, type}` part.
+   * Each photo is uploaded via `toFilePart` — the winter fetch runtime rejects
+   * the old React Native `{uri, name, type}` part.
    */
   createPost: async (text: string, photos: PhotoUpload[] = []) => {
     const form = new FormData();
     form.append('text', text);
     for (const photo of photos) {
-      form.append('images', await toBlob(photo), photo.name);
+      form.append('images', (await toFilePart(photo)) as unknown as Blob);
     }
     return request<Post>('/api/posts/', { method: 'POST', body: form });
   },

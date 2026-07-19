@@ -460,27 +460,32 @@ The four questions that were open are now decided and folded into the plan above
 
 (Record deviations/gotchas here as we build.)
 
-**2026-07-19 — uploads must send a real `Blob`, not RN's `{uri,name,type}` part.**
+**2026-07-19 — uploads must send a `.bytes()`-shaped part, not RN's `{uri}`.**
 
-Adding a profile photo failed on device with `Unsupported FormDataPart
-implementation`. Cause: **Expo SDK 54+ replaces the global `fetch` with its
-"winter" runtime** (`expo/src/winter/runtime.native.ts` installs it), and that
-fetch's FormData serializer **rejects React Native's legacy
-`{uri, name, type}` file part** — expo's own `convertFormData` test asserts that
-exact shape throws. It accepts a real `Blob` (or an object with `.bytes()`).
+Adding a profile photo failed on device, in two stages. Cause: **Expo SDK 54+
+replaces the global `fetch` with its "winter" runtime**
+(`expo/src/winter/runtime.native.ts` installs it), and that fetch's FormData
+serializer is picky about file parts. Two shapes are dead ends:
 
-Fix lives in `api.ts`: a `toBlob()` helper reads the picked file's bytes with
-expo-file-system's `File` (`new File(uri).arrayBuffer()`, bundled in Expo Go, so
-no dev build needed yet) and wraps them in a `Blob`; the filename rides as the
-third `append` arg, the content-type as the Blob's `type`. Both `createPost` and
-`updateProfile` now go through it.
+1. React Native's legacy `{uri, name, type}` part → `Unsupported FormDataPart
+   implementation` (expo's own `convertFormData` test asserts it throws).
+2. A real `Blob` is accepted by the serializer — **but React Native's `Blob`
+   can't be built from an `ArrayBuffer`** (`Creating blobs from 'ArrayBuffer' …
+   are not supported`), so `new Blob([bytes])` throws before you even get there.
+
+What works is the serializer's *other* branch: an object exposing `.bytes()`
+(its "FileBlob" case). So `api.ts`'s `toFilePart()` reads the picked file's
+bytes with expo-file-system's `File` (`arrayBuffer()` is a native read, not a
+Blob build — bundled in Expo Go, no dev build needed) and returns
+`{ bytes, name, type }`; `name`/`type` become the multipart filename and
+content-type. Both `createPost` and `updateProfile` go through it.
 
 **This was a latent bug in compose too**, not just avatars — photo posting used
 the same `{uri}` part and would have thrown the moment it ran against the winter
 runtime. It never surfaced because the Jest tests mock `fetch` (so the real
 serializer never runs) and the C2 device pass predates the SDK bump. The api
-tests now assert the Blob shape (filename + content-type) for both paths, and
-`expo-file-system`'s `File` is mocked in `jest.setup.js`.
+tests now assert the FileBlob shape (`.bytes()` + filename + content-type) for
+both paths, and `expo-file-system`'s `File` is mocked in `jest.setup.js`.
 
 **2026-07-19 — Milestone C4 (profiles): four decisions worth keeping.**
 
