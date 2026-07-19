@@ -16,6 +16,8 @@
  * Authorization header is present (see docs/reference/accounts.md).
  */
 
+import { File } from 'expo-file-system';
+
 import {
   clearTokens,
   getAccessToken,
@@ -53,14 +55,33 @@ export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://your-timeline.net';
 
 /**
- * A photo chosen from the library, ready to upload. React Native's `FormData`
- * wants the file's location, not its bytes.
+ * A photo chosen from the library, ready to upload. The picker hands us the
+ * file's location, its (best-effort) filename, and its MIME type.
  */
 export type PhotoUpload = {
   uri: string;
   name: string;
   type: string;
 };
+
+/**
+ * Turn a picked file into a multipart part the runtime will actually send.
+ *
+ * **Why not the React Native `{uri, name, type}` convention.** Expo SDK 54+
+ * replaced the global `fetch` with its "winter" runtime, whose FormData
+ * serializer **rejects** that legacy shape — it throws `Unsupported FormDataPart
+ * implementation` (verified in expo's own `convertFormData` test). It accepts a
+ * real `Blob`, so we read the file's bytes off disk with expo-file-system's
+ * `File` (bundled in Expo Go) and wrap them. The filename rides along as the
+ * third `append` argument; the content-type is the `Blob`'s own `type`.
+ *
+ * This reads the whole file into memory. Fine for avatars and phone photos;
+ * revisit only if we ever allow large attachments.
+ */
+async function toBlob(upload: PhotoUpload): Promise<Blob> {
+  const bytes = await new File(upload.uri).arrayBuffer();
+  return new Blob([bytes], { type: upload.type });
+}
 
 export class ApiError extends Error {
   status: number;
@@ -269,7 +290,7 @@ export const api = {
    * Returns the refreshed `User`, which is also what `refreshUser()` in
    * `auth.tsx` reads back to repaint the nav avatar/name everywhere.
    */
-  updateProfile: ({
+  updateProfile: async ({
     first_name,
     last_name,
     bio,
@@ -286,13 +307,7 @@ export const api = {
     if (first_name !== undefined) form.append('first_name', first_name);
     if (last_name !== undefined) form.append('last_name', last_name);
     if (bio !== undefined) form.append('bio', bio);
-    if (avatar) {
-      form.append('avatar', {
-        uri: avatar.uri,
-        name: avatar.name,
-        type: avatar.type,
-      } as unknown as Blob);
-    }
+    if (avatar) form.append('avatar', await toBlob(avatar), avatar.name);
     if (removeAvatar) form.append('remove_avatar', 'true');
     return request<User>('/api/auth/user/', { method: 'PATCH', body: form });
   },
@@ -363,19 +378,14 @@ export const api = {
    * sent: the server sets it from the authenticated user and ignores anything in
    * the body, so a client can't post as someone else.
    *
-   * React Native's `FormData` takes a `{uri, name, type}` object for a file
-   * rather than a `Blob` — the runtime reads the file off disk itself. Passing a
-   * browser-style Blob here silently uploads nothing.
+   * Each photo is uploaded as a real `Blob` (see `toBlob`) — the winter fetch
+   * runtime rejects the old React Native `{uri, name, type}` part.
    */
-  createPost: (text: string, photos: PhotoUpload[] = []) => {
+  createPost: async (text: string, photos: PhotoUpload[] = []) => {
     const form = new FormData();
     form.append('text', text);
     for (const photo of photos) {
-      form.append('images', {
-        uri: photo.uri,
-        name: photo.name,
-        type: photo.type,
-      } as unknown as Blob);
+      form.append('images', await toBlob(photo), photo.name);
     }
     return request<Post>('/api/posts/', { method: 'POST', body: form });
   },
