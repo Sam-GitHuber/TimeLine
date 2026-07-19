@@ -69,6 +69,14 @@ line, and both are easy to reintroduce by accident:
   at the block's top edge and the first elbow starts exactly there; padding
   between them is a visible break. The air comes from the *parent's* bottom
   padding instead.
+- **Each comment carries its own step right as left padding; the replies block
+  adds none.** The tempting alternative — indent the replies block, and let each
+  child reach back out to its parent's line — puts the elbow and the carried-past
+  line at a *negative* offset, outside the element that draws them. Browsers and
+  iOS both render that; Android is liable to clip it. Paying the indent inside
+  each comment keeps every line within its own box, so the question never comes
+  up. The parent's line then sits half a bead in from the comment's left edge,
+  and the comment's own line one step further.
 
 The indent per level has to clear the avatars, since a parent's line now passes
 them: keep it above half a bead width (22pt against a 30pt bead on mobile) or the

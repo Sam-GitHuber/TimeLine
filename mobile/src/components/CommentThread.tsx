@@ -73,6 +73,16 @@ import { formatRelativeTime } from '@/utils';
  * Those must butt exactly against each other, so **the gaps between comments are
  * padding *inside* a node, never a `gap` between them** — a flex gap is empty
  * space no segment covers, and it shows up as a break in the line.
+ *
+ * **Each comment carries its own step right as `paddingLeft`, and its replies
+ * block adds nothing.** That's what keeps every line *inside* the node that
+ * draws it: the parent's line lands at `COLUMN_CENTRE` from the node's left
+ * edge, and the node's own line one step further in. The obvious alternative —
+ * indenting the replies block and letting each child reach back out — puts the
+ * elbow and the carried-past line at a negative offset, outside the node's
+ * bounds. That renders on iOS, where overflow is visible by default, but is
+ * exactly the kind of thing Android clips. Nothing here draws outside its own
+ * box, so the question never arises.
  */
 
 /** The bead column: avatar (24) plus its halo (3 each side), and no more. */
@@ -108,36 +118,37 @@ const indentFor = (depth: number) => (depth < 3 ? INDENT : DEEP_INDENT);
  * comments and their replies are then a single tree under one rule, rather than
  * a post with a separate comments widget bolted underneath.
  *
- * The thread owns this padding (rather than the screen) so the elbows can be
- * positioned against the post's spine — absolute children sit in the padding
- * box, so `SPINE_CENTRE` still means the post's line in here.
+ * The thread owns this padding (rather than the screen) so that the post's spine
+ * lands at `COLUMN_CENTRE` inside a top-level comment, exactly where any other
+ * comment finds its parent's line. A top-level comment then needs no special
+ * case: it takes its step right from the same `paddingLeft` as everyone else.
  */
 const THREAD_INDENT = INDENT;
-const THREAD_LEFT = SPINE_CENTRE + THREAD_INDENT - COLUMN_CENTRE;
+const THREAD_LEFT = SPINE_CENTRE - COLUMN_CENTRE;
 
 /**
- * A vertical run of spine, centred on `left` within its parent.
+ * A vertical run of spine, centred on `left`, from `top` to the bottom of
+ * whatever contains it.
  *
- * `stopAt` ends the line at that offset (used to finish on the last bead);
- * omitting it runs the line to the bottom of whatever contains it.
+ * There's deliberately no way to make it stop short: a run that has to *end*
+ * somewhere ends by not being rendered at all (the last sibling omits its
+ * carried-past line). Keeping one mechanism means a line can't be terminated
+ * two different ways in two different places.
  */
 function ThreadLine({
   left,
   top = 0,
-  stopAt = null,
+  testID,
 }: {
   left: number;
   top?: number;
-  stopAt?: number | null;
+  testID?: string;
 }) {
   return (
     <View
+      testID={testID}
       pointerEvents="none"
-      style={[
-        styles.line,
-        { left: left - LINE / 2, top },
-        stopAt == null ? { bottom: 0 } : { height: Math.max(0, stopAt - top) },
-      ]}
+      style={[styles.line, { left: left - LINE / 2, top }]}
     />
   );
 }
@@ -154,10 +165,19 @@ function ThreadLine({
  * Its height is fixed at the bead's centre, which is what makes it land level
  * with the eye of the avatar whatever the comment's own height turns out to be.
  */
-function Branch({ from, to }: { from: number; to: number }) {
+function Branch({
+  from,
+  to,
+  testID,
+}: {
+  from: number;
+  to: number;
+  testID?: string;
+}) {
   const width = to - from;
   return (
     <View
+      testID={testID}
       pointerEvents="none"
       style={[
         styles.branch,
@@ -374,27 +394,44 @@ function CommentNode({
 
   const showReplies = replies.length > 0 && !collapsed;
   const childIndent = indentFor(depth);
-  /** Our parent's line, in our own coordinates. */
-  const parentLine = COLUMN_CENTRE - indent;
 
   return (
     <View
       testID={`comment-${comment.id}`}
       onLayout={onHighlightLayout ? handleLayout : undefined}
+      // Our step right of the line we hang from. Our own content starts here;
+      // our parent's line stays at `COLUMN_CENTRE`, inside our bounds.
+      style={{ paddingLeft: indent }}
     >
-      {/* (1) Out from the parent's line and down onto our own face. */}
-      <Branch from={parentLine} to={COLUMN_CENTRE} />
+      {/* (1) Out from the parent's line and down onto our own face. Absolute
+          children measure from the padding box, so these two are in the node's
+          own coordinates — where the parent's line is `COLUMN_CENTRE` and ours
+          is one step further in. Inside `row` below, the padding is already
+          spent, so our line is `COLUMN_CENTRE` again there. */}
+      <Branch
+        from={COLUMN_CENTRE}
+        to={indent + COLUMN_CENTRE}
+        testID={`branch-${comment.id}`}
+      />
 
       {/* (2) The parent's line carried past us — the *whole* node, replies and
           all, so it reaches the sibling below rather than stopping at our text.
           Omitted when we're last: that's what ends the run on a face. */}
-      {!isLast ? <ThreadLine left={parentLine} /> : null}
+      {!isLast ? (
+        <ThreadLine left={COLUMN_CENTRE} testID={`past-${comment.id}`} />
+      ) : null}
 
       <View style={styles.row}>
         {/* (3) Our own stem, from our face down to where our replies start. It
             spans the row only — the replies block below picks it up from there.
             Nothing to hold up if there are no replies showing. */}
-        {showReplies ? <ThreadLine left={COLUMN_CENTRE} top={BEAD_CENTRE} /> : null}
+        {showReplies ? (
+          <ThreadLine
+            left={COLUMN_CENTRE}
+            top={BEAD_CENTRE}
+            testID={`stem-${comment.id}`}
+          />
+        ) : null}
 
         <View style={styles.beadColumn}>
           <View style={styles.bead}>
@@ -475,7 +512,12 @@ function CommentNode({
       {showReplies ? (
         <View
           testID={`replies-${comment.id}`}
-          style={[styles.replies, { marginLeft: childIndent }]}
+          // **No style at all**, deliberately. The step right is the replies'
+          // own `paddingLeft`, not an indent applied here — that's what keeps
+          // their elbows inside their own bounds. And no top padding: our stem
+          // ends at this block's top edge and the first reply's elbow starts
+          // there, so anything between them is a break in the line. The air
+          // above comes from our own `body` padding.
           onLayout={
             onHighlightLayout
               ? (event) => {
@@ -593,21 +635,32 @@ function CommentComposer({
 }
 
 const styles = StyleSheet.create({
-  // No `gap` here on purpose: the spine is drawn per comment, and a flex gap is
-  // a stretch of thread no segment covers — i.e. a visible break in the line.
-  // Comments space themselves from the inside instead (`body`).
-  // **No padding on top.** The post's spine ends exactly at the bottom of the
-  // post row, and the first comment's elbow starts exactly at the top of this
-  // one — any gap here is a break in the line between them. The air above the
-  // first comment comes from the post card's own bottom padding instead.
+  // The one step right of the post's spine that every comment hangs off; the
+  // elbows are positioned against `SPINE_CENTRE` inside this padding box.
+  //
+  // Deliberately nothing else. No `gap` and no `paddingTop`: both would be
+  // stretches of thread that no segment covers, so both show up as breaks in
+  // the line — above the first comment, and between every pair after it. The
+  // spacing comes from inside each comment (`body`) and, above the first, from
+  // the post card's own bottom padding.
   thread: { paddingLeft: THREAD_LEFT },
-  threadComposer: { marginTop: spacing.sm },
+  // These two aren't comments, so they don't carry a comment's `paddingLeft` —
+  // they'd otherwise sit flush against the screen edge, a step left of every
+  // comment above them. Line them up with where a comment's own box starts.
+  threadComposer: { marginTop: spacing.sm, marginLeft: THREAD_INDENT },
   loading: { marginVertical: spacing.lg },
 
   line: {
     position: 'absolute',
     width: LINE,
     backgroundColor: colors.spine,
+    // Runs to the bottom of whatever contains it. **Without this the view has
+    // no height and the line silently vanishes** — an absolutely positioned
+    // View with only `top` set measures zero, so every vertical disappeared
+    // while the elbows carried on rendering and the thread still *looked*
+    // plausible. `the lines` tests assert this style is present for that
+    // reason: presence of the element is not presence of a line.
+    bottom: 0,
   },
   branch: {
     position: 'absolute',
@@ -638,9 +691,16 @@ const styles = StyleSheet.create({
     // spine segment above covers it.
     paddingBottom: spacing.lg,
   },
-  content: { gap: spacing.xs },
+  // No `gap`: `ReactionBar` and the composer bring their own top margins, and a
+  // gap on top of those spaced a comment's reaction row further from its text
+  // than a post's is from its own — same component, two different looks.
+  content: {},
   highlighted: {
-    marginLeft: -spacing.sm,
+    // Both sides, cancelling the padding below, so a highlighted comment's text
+    // column is exactly as wide as its neighbours'. With the negative margin on
+    // one side only, a comment reached from a notification wrapped differently
+    // from the same comment a moment earlier in the feed.
+    marginHorizontal: -spacing.sm,
     paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
     borderRadius: radius.md,
@@ -659,13 +719,12 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   time: { fontSize: 11, color: colors.inkFaint, lineHeight: BEAD },
-  text: { fontSize: 15, color: colors.ink, lineHeight: 21 },
+  // Its own top margin now `content` has no gap — matching `PostCard`, where
+  // the post's text sits the same distance under its header.
+  text: { fontSize: 15, color: colors.ink, lineHeight: 21, marginTop: spacing.xs },
   actions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   action: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
   toggle: { fontSize: fontSize.sm, color: colors.accentDeep, fontWeight: '600' },
-  // Same rule as `thread`: no top padding, or the parent's stem and the first
-  // reply's elbow don't meet. The air comes from the parent's `body` padding.
-  replies: {},
   composer: { marginTop: spacing.sm, gap: spacing.sm },
   input: {
     minHeight: 40,
@@ -695,6 +754,10 @@ const styles = StyleSheet.create({
   submitPressed: { backgroundColor: colors.accentDeep },
   submitDisabled: { opacity: 0.4 },
   submitText: { color: colors.raised, fontWeight: '600', fontSize: fontSize.sm },
-  empty: { fontSize: fontSize.sm, color: colors.inkFaint },
+  empty: {
+    fontSize: fontSize.sm,
+    color: colors.inkFaint,
+    marginLeft: THREAD_INDENT, // see `threadComposer`
+  },
   error: { fontSize: fontSize.sm, color: colors.danger },
 });

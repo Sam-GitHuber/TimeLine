@@ -78,16 +78,17 @@ export function ReactionBar({
   commentId?: number;
   reactions: Reaction[] | undefined;
   /**
-   * Extra footer content — the post's "N comments" link.
+   * The target's own actions, to sit with this row: a post's "N comments" link
+   * (`PostCard`), or a comment's Reply and replies toggle (`CommentThread`).
    *
    * **Placed here rather than by the caller because the placement depends on
-   * live state this component owns.** With no reactions the row is just the `+`
-   * button, so a lone link below it wastes a whole line and reads as orphaned;
-   * it goes inline instead. Once there are chips the row is busy enough that
-   * sharing it crowds both, so the link drops to its own line.
+   * live state this component owns.** With no reactions the row is just the add
+   * button, so actions below it waste a whole line and read as orphaned; they go
+   * inline instead. Once there are chips the row is busy enough that sharing it
+   * crowds both, so they drop to their own line beneath.
    *
-   * The caller can't make that call: it only has the *server's* reaction list,
-   * so adding your first reaction would leave the link crammed alongside the new
+   * No caller can make that call: each only has the *server's* reaction list, so
+   * adding your first reaction would leave the actions crammed alongside the new
    * chip until the next refetch.
    */
   trailing?: ReactNode;
