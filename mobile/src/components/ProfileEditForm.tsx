@@ -53,7 +53,10 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
         last_name: lastName.trim(),
         bio,
         avatar: avatarFile ?? undefined,
-        removeAvatar: removeAvatar && !avatarFile,
+        // `removeAvatar` and `avatarFile` are mutually exclusive by
+        // construction — picking a photo clears the removal flag, removing
+        // clears the picked file — so this needs no `&& !avatarFile` guard.
+        removeAvatar,
       }),
     onSuccess: async () => {
       // The profile is already saved server-side here. Refreshing "who am I" is

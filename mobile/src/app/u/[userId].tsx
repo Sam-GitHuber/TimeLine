@@ -50,10 +50,20 @@ export default function ProfileScreen() {
 
   const [editing, setEditing] = useState(false);
 
+  // Only *other* people's profiles need this fetch — your own header renders
+  // from the auth `me` (kept fresh by refreshUser), and `canSeePosts` below
+  // short-circuits on `isSelf`, so getUser(you) would be a round-trip whose
+  // result is never read. Skip it.
   const userQuery = useQuery({
     queryKey: ['user', id],
     queryFn: () => api.getUser(id),
+    enabled: !isSelf,
   });
+
+  const user = userQuery.data;
+  // Private-by-default: your own posts are always visible to you; everyone
+  // else's only once you're mutually connected.
+  const canSeePosts = isSelf || user?.connection_status === 'connected';
 
   const postsQuery = useInfiniteQuery({
     queryKey: ['userPosts', id],
@@ -61,10 +71,11 @@ export default function ProfileScreen() {
       pageParam ? api.getPage<Post>(pageParam) : api.getUserPosts(id),
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
-    // Don't fetch someone's posts until we know we're allowed to see them —
-    // the backend returns empty for a stranger anyway, but skipping the call
-    // keeps the locked state from flickering a spinner first.
-    enabled: userQuery.isSuccess,
+    // Fetch posts only once we know we may see them: your own always, someone
+    // else's not until `connection_status` comes back `connected`. A stranger's
+    // posts are never requested — the backend would return them empty, and
+    // skipping the call keeps the locked state from flashing a spinner first.
+    enabled: canSeePosts,
   });
 
   // `today` changes at midnight and is what re-derives the day-divider labels.
@@ -90,11 +101,6 @@ export default function ProfileScreen() {
   // exists doesn't.
   const notFound =
     userQuery.error instanceof ApiError && userQuery.error.status === 404;
-
-  const user = userQuery.data;
-  // Private-by-default: your own posts are always visible to you; everyone
-  // else's only once you're mutually connected.
-  const canSeePosts = isSelf || user?.connection_status === 'connected';
 
   const header = (
     <View style={styles.profileHeader}>
@@ -178,6 +184,9 @@ export default function ProfileScreen() {
         >
           <TimelineList
             rows={canSeePosts ? rows : []}
+            // The editor's inputs and Save/Cancel live in the header; `handled`
+            // is what lets a tap on those buttons land while the keyboard is up.
+            keyboardShouldPersistTaps="handled"
             ListHeaderComponent={header}
             onEndReached={() => {
               if (postsQuery.hasNextPage && !postsQuery.isFetchingNextPage) {

@@ -176,6 +176,9 @@ describe('viewing a profile', () => {
     expect(await screen.findByText('Bob Brown’s posts are private.')).toBeTruthy();
     // No edit/logout on someone else's profile.
     expect(screen.queryByRole('button', { name: 'Edit profile' })).toBeNull();
+    // And their posts were never requested — you're not allowed to see them, so
+    // the query stays disabled rather than firing a call the backend empties.
+    expect(mockFetch.mock.calls.some(([url]) => url.includes('/posts/'))).toBe(false);
   });
 });
 
@@ -230,6 +233,10 @@ describe('reaching a profile', () => {
 
     await fireEvent.press(screen.getByText('Carol Clark'));
 
+    // Exactly one navigation, to the profile — not also the post. (The name's
+    // onPress sits inside the body's open-post Pressable; RN's responder system
+    // gives the deeper Text the tap, but a device pass confirms it for real.)
+    expect(mockPush).toHaveBeenCalledTimes(1);
     expect(mockPush).toHaveBeenCalledWith('/u/42');
   });
 });

@@ -481,7 +481,12 @@ The four questions that were open are now decided and folded into the plan above
   `SPINE_COLUMN` and the divider indent — is exactly the drift the C1 layout note
   warns about; one renderer makes it impossible. `TimelineList` is dumb about
   data (it takes already-built `toRows` output, never a raw post array), so the
-  server's reverse-chronological order is never re-touched.
+  server's reverse-chronological order is never re-touched. It defaults
+  `keyboardShouldPersistTaps` to `handled` (not the FlatList default `never`):
+  any header carrying an input *and* a button — the compose box's Post, the
+  editor's Save — otherwise loses the first tap to dismissing the keyboard. That
+  also closes a latent papercut on the feed, whose compose button had the same
+  exposure.
 
 - **Logout moved off the feed header onto the profile screen.** The feed bead was
   a stopgap logout until this screen existed; it now opens your own profile,

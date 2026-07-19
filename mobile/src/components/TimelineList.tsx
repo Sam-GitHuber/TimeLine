@@ -44,6 +44,7 @@ type Props = {
   refreshControl?: FlatListProps<FeedRow>['refreshControl'];
   onEndReached?: () => void;
   contentContainerStyle?: FlatListProps<FeedRow>['contentContainerStyle'];
+  keyboardShouldPersistTaps?: FlatListProps<FeedRow>['keyboardShouldPersistTaps'];
 };
 
 function renderRow({ item }: { item: FeedRow }) {
@@ -78,6 +79,14 @@ export const TimelineList = forwardRef<FlatList<FeedRow>, Props>(
       refreshControl,
       onEndReached,
       contentContainerStyle,
+      // `handled` by default, not the FlatList default of `never`: any header
+      // that carries an input *and* a button (the compose box's Post, the
+      // profile editor's Save/Cancel) otherwise loses the first tap while the
+      // keyboard is up — the tap is spent dismissing the keyboard instead of
+      // pressing the button, the classic "this form is broken" papercut. With
+      // `handled` a child that handles the tap keeps it; the keyboard only
+      // dismisses on a tap nothing else caught.
+      keyboardShouldPersistTaps = 'handled',
     },
     ref
   ) {
@@ -94,6 +103,7 @@ export const TimelineList = forwardRef<FlatList<FeedRow>, Props>(
         refreshControl={refreshControl}
         onEndReached={onEndReached}
         onEndReachedThreshold={0.4}
+        keyboardShouldPersistTaps={keyboardShouldPersistTaps}
       />
     );
   }
