@@ -8,11 +8,11 @@
  * everywhere they're read from auth (the nav bead, the compose box), and
  * invalidates the cached profile/feed so this screen and others repaint.
  *
- * **Avatar cropping is the native picker's, not a ported crop modal.** The web
- * hands a chosen file to a canvas cropper; here `allowsEditing: true` with a
- * square `aspect` gives the OS's own crop UI for free — one fewer dependency and
- * no geometry to keep in step. The picker returns an already-square image, so
- * there's nothing left to reframe.
+ * **Avatar cropping is a round cropper matching the web** (`AvatarCropModal`):
+ * a chosen photo is handed to it to pinch/pan-reframe under a circular guide,
+ * and it returns the cropped square. We deliberately *don't* use the OS picker's
+ * `allowsEditing` crop — that only ever shows a square guide, so you can't see
+ * the circle you're framing for.
  *
  * `onDone` closes the editor (used by Cancel and after a successful save).
  */
@@ -30,8 +30,12 @@ import {
 
 import { api, type PhotoUpload } from '@/api';
 import { useAuth } from '@/auth';
+import { AvatarCropModal } from './AvatarCropModal';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
+
+/** A just-picked photo waiting to be reframed in the crop modal. */
+type PendingCrop = { uri: string; width: number; height: number };
 
 export function ProfileEditForm({ onDone }: { onDone: () => void }) {
   const { user, refreshUser } = useAuth();
@@ -45,6 +49,8 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
   // removal, and removing clears any picked photo.
   const [avatarFile, setAvatarFile] = useState<PhotoUpload | null>(null);
   const [removeAvatar, setRemoveAvatar] = useState(false);
+  // A just-chosen photo waiting to be reframed in the crop modal.
+  const [pendingCrop, setPendingCrop] = useState<PendingCrop | null>(null);
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -79,26 +85,23 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
 
   async function pickAvatar() {
     // No explicit permission request: the modern iOS picker runs out of process
-    // and returns only what the user picked. `allowsEditing` + a 1:1 aspect is
-    // the native square crop.
+    // and returns only what the user picked. No `allowsEditing` — we want the
+    // *full* image so our round cropper can reframe it, not the OS square crop.
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.9,
+      quality: 1,
     });
     if (result.canceled) return;
 
     const asset = result.assets[0];
-    setAvatarFile({
-      uri: asset.uri,
-      // The picker often has no filename; a synthesised one is fine because the
-      // server validates by decoding the bytes, but it must be *present* or the
-      // multipart part is silently dropped (same trap as the compose box).
-      name: asset.fileName ?? `avatar-${Date.now()}.jpg`,
-      type: asset.mimeType ?? 'image/jpeg',
-    });
+    setPendingCrop({ uri: asset.uri, width: asset.width, height: asset.height });
+  }
+
+  // The crop modal hands back the reframed square, ready to upload.
+  function handleCropped(upload: PhotoUpload) {
+    setAvatarFile(upload);
     setRemoveAvatar(false);
+    setPendingCrop(null);
   }
 
   function handleRemove() {
@@ -212,6 +215,14 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
           </Text>
         </Pressable>
       </View>
+
+      {pendingCrop ? (
+        <AvatarCropModal
+          photo={pendingCrop}
+          onCropped={handleCropped}
+          onCancel={() => setPendingCrop(null)}
+        />
+      ) : null}
     </View>
   );
 }

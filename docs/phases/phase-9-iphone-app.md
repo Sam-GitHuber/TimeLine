@@ -17,7 +17,7 @@ below calls for:
   (`?comment=`) is built now rather than in D, since the route exists to be
   opened by a notification.
 - **C4 — profiles.** Done: the `/u/[userId]` screen (self or anyone), the inline
-  editor for your own name/bio/avatar with a native square crop, and navigation
+  editor for your own name/bio/avatar with a round pinch-to-zoom cropper, and navigation
   into it — your bead in the feed header (which now also hosts logout) and every
   post author's bead/name. Connection/message/block actions on *other* people's
   profiles are deferred to Milestone E, as planned; C4 reads `connection_status`
@@ -489,11 +489,20 @@ both paths, and `expo-file-system`'s `File` is mocked in `jest.setup.js`.
 
 **2026-07-19 — Milestone C4 (profiles): four decisions worth keeping.**
 
-- **Native square crop, not a ported crop modal.** The web hands a chosen file
-  to a canvas cropper (`AvatarCropModal`); the app uses the OS picker's own crop
-  via `allowsEditing: true` + `aspect: [1, 1]`. One fewer dependency, no geometry
-  to keep in step with the web, and a crop UI users already know. The picker
-  returns an already-square image, so there's nothing left to reframe.
+- **Round cropper matching the web, after a false start on the native crop.**
+  First cut used the OS picker's `allowsEditing` crop — simplest, but it only
+  ever shows a *square* guide, so you can't see the circle you're framing for.
+  That's the whole point of the web's `AvatarCropModal`, so it was rebuilt
+  natively (`components/AvatarCropModal.tsx`): the photo under a round cutout,
+  pinch to zoom, drag to recentre, exporting the framed square (the `Avatar`
+  masks it to a circle, as on the web). The gesture libraries it needs
+  (`react-native-gesture-handler` + `react-native-reanimated`) were already in
+  the app — `GestureHandlerRootView` now wraps the root, and re-roots inside the
+  cropper's own `Modal` (gestures don't cross an RN Modal's separate view tree).
+  Only `expo-image-manipulator` (bundled in Expo Go) was added, for the crop
+  itself. The crop **geometry** lives in `avatarCrop.ts`, pure and unit-tested;
+  the gesture component is left to the device, and `AvatarCropModal` is mocked in
+  `profile.test.tsx` so the pick→reframe→attach wiring is still covered.
 
 - **`refreshUser` is the one genuinely new bit of spine.** After a profile save
   the web calls `refreshUser()` so the new name/avatar repaint everywhere they're

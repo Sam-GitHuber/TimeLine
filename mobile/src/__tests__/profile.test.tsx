@@ -42,6 +42,39 @@ jest.mock('expo-image-picker', () => ({
   launchImageLibraryAsync: jest.fn(),
 }));
 
+// The real crop modal pulls in reanimated + gesture-handler + native image
+// work, none of which run under Jest — and its gestures/geometry are covered by
+// `avatarCrop.test.ts`. Here it stands in for a sheet that immediately hands
+// back a cropped file, so the pick → reframe → attach *wiring* is what's tested.
+jest.mock('@/components/AvatarCropModal', () => {
+  // require, not import: a jest.mock factory is hoisted above the imports, so it
+  // can't reference module-scope bindings and must pull its deps in itself.
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const React = require('react');
+  const { Text } = require('react-native');
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  return {
+    AvatarCropModal: ({
+      onCropped,
+    }: {
+      onCropped: (u: { uri: string; name: string; type: string }) => void;
+    }) =>
+      React.createElement(
+        Text,
+        {
+          accessibilityRole: 'button',
+          onPress: () =>
+            onCropped({
+              uri: 'file:///tmp/cropped.jpg',
+              name: 'avatar.jpg',
+              type: 'image/jpeg',
+            }),
+        },
+        'Use photo (test)'
+      ),
+  };
+});
+
 const pick = ImagePicker.launchImageLibraryAsync as jest.Mock;
 const mockFetch = jest.fn();
 
@@ -209,6 +242,26 @@ describe('editing your profile', () => {
     // the editor has closed.
     expect(await screen.findByText('Alicia Anderson')).toBeTruthy();
     expect(screen.queryByLabelText('First name')).toBeNull();
+  });
+
+  it('reframes a picked photo through the crop modal, then attaches it', async () => {
+    pick.mockResolvedValue({
+      canceled: false,
+      assets: [{ uri: 'file:///tmp/orig.jpg', width: 1000, height: 800 }],
+    });
+    serve({ user: profile({ id: 1 }), posts: [] });
+
+    await renderScreen();
+
+    await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
+    // No avatar yet, so the button offers to add one.
+    await fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    // The picked photo goes to the crop modal, which returns the reframed square.
+    await fireEvent.press(await screen.findByText('Use photo (test)'));
+
+    // A cropped avatar is now staged: the editor lets you change or remove it.
+    expect(await screen.findByRole('button', { name: 'Remove' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Change photo' })).toBeTruthy();
   });
 
   it('will not save with an empty name', async () => {
