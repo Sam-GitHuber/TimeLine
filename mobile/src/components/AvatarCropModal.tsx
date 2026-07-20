@@ -81,9 +81,11 @@ export function AvatarCropModal({
   // Clamp helpers, kept as **self-contained worklets**: the gesture callbacks
   // below run on the UI thread, and a worklet may not call an ordinary JS
   // function there (doing so crashes the app the instant a gesture starts). So
-  // the pan-clamp maths from `avatarCrop.ts` is inlined here rather than called
-  // across the bridge; `avatarCrop.ts` keeps the same logic (unit-tested, and
-  // used by the JS-thread crop below) as the single source of truth to mirror.
+  // the body of `clampTranslation`/`maxTranslation` from `avatarCrop.ts` is
+  // inlined here rather than called across the bridge; that module keeps the
+  // same logic (unit-tested, and used by the JS-thread crop below) as the single
+  // source of truth. **If you change the clamp maths there, change it here too**
+  // — nothing fails automatically when the two drift.
   const clampX = (value: number) => {
     'worklet';
     const max = Math.max(0, (photo.width * fitScale * scale.value - crop) / 2);

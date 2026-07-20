@@ -151,6 +151,9 @@ function serve({
       }
       return jsonResponse(me);
     }
+    // Order matters: the posts URL (`/api/users/<id>/posts/`) contains *both*
+    // substrings, so it must be matched before the bare `/api/users/` header
+    // route or every posts request would be answered with the profile header.
     if (url.includes('/posts/')) return jsonResponse({ count: posts.length, next: null, previous: null, results: posts });
     if (url.includes('/api/users/')) return jsonResponse(user);
     return jsonResponse(null, 404);
@@ -264,13 +267,27 @@ describe('editing your profile', () => {
     expect(screen.getByRole('button', { name: 'Change photo' })).toBeTruthy();
   });
 
-  it('will not save with an empty name', async () => {
+  it('will not save with an empty first name', async () => {
     serve({ user: profile({ id: 1 }), posts: [] });
 
     await renderScreen();
 
     await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
     await fireEvent.changeText(await screen.findByLabelText('First name'), '');
+
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  it('will not save with an empty last name', async () => {
+    // The display name is first + last, so *both* are required — a guard that's
+    // easy to write for only one field. Clearing the surname must disable Save
+    // just as clearing the given name does.
+    serve({ user: profile({ id: 1 }), posts: [] });
+
+    await renderScreen();
+
+    await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
+    await fireEvent.changeText(await screen.findByLabelText('Last name'), '');
 
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   });
