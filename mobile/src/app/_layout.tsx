@@ -10,9 +10,10 @@ import {
   QueryClientProvider,
   focusManager,
 } from '@tanstack/react-query';
+import * as Notifications from 'expo-notifications';
 import { Stack, router, useRootNavigationState, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -22,8 +23,15 @@ import {
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
+import { api } from '@/api';
 import { AuthProvider, useAuth } from '@/auth';
+import { configureNotificationHandler, routeForNotification } from '@/push';
 import { colors } from '@/theme';
+
+// Module scope, not an effect: the handler decides whether a notification that
+// arrives while the app is foregrounded is shown at all, and it has to be set
+// before any notification can be delivered.
+configureNotificationHandler();
 
 /**
  * Created once at module scope, not inside the component: a QueryClient holds
@@ -53,6 +61,9 @@ const queryClient = new QueryClient({
 function AuthGate() {
   const { status } = useAuth();
   const segments = useSegments();
+  // Lives here rather than in RootLayout because it reads auth state, and so
+  // must be inside AuthProvider.
+  usePushNotificationTaps();
   // The router isn't ready to navigate on the very first render; navigating
   // before it is silently does nothing.
   const navigationState = useRootNavigationState();
@@ -112,6 +123,54 @@ function useRefetchOnForeground() {
     );
     return () => subscription.remove();
   }, []);
+}
+
+/**
+ * Open the right screen when a push notification is tapped.
+ *
+ * `useLastNotificationResponse` covers **both** cases in one API: a tap that
+ * launched the app from cold, and one that arrives while it's already running.
+ * The listener-only approach (`addNotificationResponseReceivedListener`) misses
+ * the cold start entirely — the response fires before any listener is
+ * mounted — which is the classic way this ships broken.
+ *
+ * Two guards matter:
+ *
+ * - **Dedupe by identifier.** The hook returns the *last* response, and keeps
+ *   returning it on later re-renders; without the ref it would re-navigate
+ *   every time something else changed.
+ * - **Wait for auth.** A cold-start tap resolves before the token check does,
+ *   and navigating then would race the auth gate's redirect to `/login`, so we
+ *   hold the response until the user is known to be signed in.
+ */
+function usePushNotificationTaps() {
+  const { status } = useAuth();
+  const response = Notifications.useLastNotificationResponse();
+  const navigationState = useRootNavigationState();
+  const handled = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!response || status !== 'signedIn' || !navigationState?.key) return;
+
+    const { identifier } = response.notification.request;
+    if (handled.current === identifier) return;
+    handled.current = identifier;
+
+    const data = response.notification.request.content.data as {
+      url?: string;
+      notificationId?: number;
+    };
+
+    router.push(routeForNotification(data?.url));
+
+    // Tapping a push counts as dealing with it, exactly as clicking a row in
+    // the web dropdown does — so the activity centre and the badge stay in
+    // step across devices. Best-effort: a failure here must not stop the
+    // navigation that the user actually asked for.
+    if (data?.notificationId) {
+      api.markNotificationAddressed(data.notificationId).catch(() => {});
+    }
+  }, [response, status, navigationState?.key]);
 }
 
 export default function RootLayout() {

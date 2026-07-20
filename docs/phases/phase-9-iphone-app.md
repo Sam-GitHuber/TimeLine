@@ -366,10 +366,12 @@ Simulator against the real backend.
 
 **D. Push notifications.** Switch to a dev build (Expo Go can't do push), device
 registration, backend send + preference gating, the deep-link map above, cold-start
-handling. The Apple Developer enrolment this requires is **live** (confirmed
-2026-07-20). The *other* still-open blocker before the device pass is the box
-carrying the #91 release + the one-time `token-flush` timer (see the two notes-log
-entries dated 2026-07-18). Ends: a Phase 8 event lands in the iPhone's notification centre,
+handling. **All blockers cleared as of 2026-07-20**: the Apple Developer enrolment
+is live, the box carries the #91 release (mobile-auth endpoints answer on the
+public domain), and the one-time `token-flush` timer is installed. One *new*
+one-time install lands with D: `deploy/send-pushes.{service,timer}`, without which
+notifications reach the activity centre but no phone buzzes.
+Ends: a Phase 8 event lands in the iPhone's notification centre,
 tapping it opens the target, activity centre stays in sync, a muted type sends
 nothing.
 
@@ -882,6 +884,17 @@ endpoints aren't deployed yet. Milestone B was therefore verified against a loca
 `docker compose` backend. **Before the Milestone D device pass, the box needs the
 release that carries #91** — and that release also needs the one-time manual
 `token-flush` systemd timer install (see `docs/deploy.md`).
+
+**Resolved 2026-07-20.** Both are done: `/api/auth/mobile/login/` now answers 400
+(not 404) on the public domain, so #91 is deployed, and the `token-flush` timer is
+installed. The dev build on a real iPhone runs against `https://your-timeline.net`.
+
+**Device-pass gotcha worth keeping:** `mobile/.env` was still
+`EXPO_PUBLIC_API_URL=http://localhost:8000` from the Milestone B/C Simulator work.
+That is fine in the Simulator, which shares the host's network, but on a physical
+iPhone `localhost` is *the phone*, so every request fails. The `.env.example`
+already warns about this; the working `.env` had drifted from it. Point it at
+`https://your-timeline.net` (or the Mac's LAN IP) for any on-device run.
 
 **2026-07-18 — Milestone B verification.** The app boots in the iOS Simulator,
 the auth gate redirects a tokenless launch to `/login`, and the login screen

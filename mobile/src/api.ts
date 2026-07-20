@@ -17,6 +17,7 @@
  */
 
 import { File } from 'expo-file-system';
+import { Platform } from 'react-native';
 
 import {
   clearTokens,
@@ -472,6 +473,39 @@ export const api = {
   /** Who reacted, grouped by emoji. Pass exactly one target. */
   getReactors: ({ postId, commentId }: { postId?: number; commentId?: number }) =>
     request<ReactorGroup[]>(reactionPath({ postId, commentId }, 'reactions')),
+
+  /**
+   * Register this device for push (Phase 9, Milestone D).
+   *
+   * Upserts server-side on the Expo token, so calling it on every launch is
+   * both safe and wanted — Expo can rotate a device's token.
+   */
+  registerPushToken: (expoToken: string) =>
+    request<void>('/api/push-tokens/', {
+      method: 'POST',
+      // Platform.OS rather than a literal 'ios': the backend already accepts
+      // both values, so Phase 10 (Android) needs no change here.
+      body: { expo_token: expoToken, platform: Platform.OS },
+    }),
+
+  /** Unregister this device. Must run while still authenticated. */
+  unregisterPushToken: (expoToken: string) =>
+    request<void>('/api/push-tokens/', {
+      method: 'DELETE',
+      body: { expo_token: expoToken },
+    }),
+
+  /**
+   * Mark a notification addressed (which implies seen).
+   *
+   * Fired when a push is tapped, so the in-app activity centre and the web
+   * dropdown agree that it's been dealt with — the same click-through
+   * semantics the web app already has.
+   */
+  markNotificationAddressed: (notificationId: number) =>
+    request<void>(`/api/notifications/${notificationId}/addressed/`, {
+      method: 'POST',
+    }),
 
   /**
    * Log in and persist both tokens.

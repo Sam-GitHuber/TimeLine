@@ -262,6 +262,43 @@ Delivered rows are kept ~14 days as a delivery log, then pruned.
 *rejects* sends that don't carry it, which stops anyone who learns one of your
 users' push tokens from pushing to them under your app's name.
 
+### App side (`mobile/src/push.ts`)
+
+**Registration** runs on sign-in *and* on every launch that restores a session —
+Expo can rotate a device's token, and the backend upserts, so re-registering is
+cheap and keeps `last_seen` honest. A user permanently logged in would otherwise
+register exactly once, ever. It is fire-and-forget on the login path and
+**never throws**: no push failure may stop someone signing in. It no-ops on a
+simulator (`Device.isDevice`), where `getExpoPushTokenAsync` throws.
+
+**Unregistration runs *before* `api.logout()`**, not after — the endpoint is
+authenticated, so once logout has cleared the tokens the DELETE would 401 and
+the row would survive, leaving the phone buzzing with the previous user's
+notifications. The Expo token is kept in SecureStore precisely so logout can
+name *this* device without re-deriving it, which would fail exactly when the
+network is flaky. This is the other half of the upsert-on-token rule above.
+
+**Taps** are handled with `useLastNotificationResponse`, which covers a
+cold-start launch *and* a tap while running in one API. The listener-only
+approach (`addNotificationResponseReceivedListener`) misses the cold start —
+the response fires before any listener mounts — which is the classic way this
+ships broken. Two guards: dedupe by notification identifier (the hook keeps
+returning the same response on re-renders), and wait for `signedIn` so a
+cold-start tap doesn't race the auth gate's redirect to `/login`. Tapping marks
+the notification **addressed**, matching the web dropdown's click-through.
+
+**Route mapping** (`routeForNotification`) translates the server's one `url`
+into a mobile route: `/p/42` → `/post/42`, `?comment=` preserved, `/u/3`
+unchanged. Targets whose screens don't exist yet — `/requests` (E1),
+`/group-invites` and `/g/…/events/…` (E3) — fall back to the feed, so a
+notification always opens the app rather than crashing it. Add cases as those
+milestones land.
+
+A foreground `setNotificationHandler` shows banners while the app is open,
+which iOS otherwise suppresses: there's no in-app activity centre on mobile
+until Milestone E, so a suppressed notification would be lost, not merely
+redundant.
+
 ## Frontend
 
 - **`ActivityCenter`** — the nav bell. Polls `unread-count` for the badge (reusing
