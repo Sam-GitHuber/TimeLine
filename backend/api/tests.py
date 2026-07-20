@@ -5115,6 +5115,19 @@ class SendPushesCommandTests(APITestCase):
         # *reads* must not. Three extra rows may add at most three writes.
         self.assertLessEqual(several, one + 3)
 
+    @override_settings(EXPO_PUSH_URL="file:///etc/passwd")
+    def test_a_non_https_push_url_is_refused(self):
+        # EXPO_PUSH_URL is env-configurable and urlopen honours file:// and
+        # custom schemes, so a typo'd or hostile value could read a local file
+        # and feed it to the ticket parser. Fail loudly instead.
+        self._queue()
+
+        self._run()
+
+        row = PushOutbox.objects.get()
+        self.assertIsNone(row.sent_at)
+        self.assertIn("https", row.last_error)
+
     def test_recently_delivered_rows_are_kept(self):
         self._queue()
 

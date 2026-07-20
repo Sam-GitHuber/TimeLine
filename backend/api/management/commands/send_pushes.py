@@ -24,6 +24,7 @@ centre renders, so a push and the in-app row can never drift apart.
 """
 
 import json
+import urllib.parse
 import urllib.request
 from datetime import timedelta
 
@@ -246,10 +247,24 @@ class Command(BaseCommand):
         if settings.EXPO_ACCESS_TOKEN:
             headers["Authorization"] = f"Bearer {settings.EXPO_ACCESS_TOKEN}"
 
+        # Check the scheme before opening. EXPO_PUSH_URL comes from the
+        # environment, and urlopen honours file:// and custom schemes — so
+        # without this a typo'd or hostile value could make this read a local
+        # file and feed its contents to the ticket parser instead of making an
+        # HTTPS request. Expo is https-only, so anything else is a
+        # misconfiguration worth failing loudly on. (This is bandit's B310.)
+        if urllib.parse.urlparse(settings.EXPO_PUSH_URL).scheme != "https":
+            raise ValueError(
+                f"EXPO_PUSH_URL must be an https:// URL, got "
+                f"{settings.EXPO_PUSH_URL!r}"
+            )
+
         request = urllib.request.Request(
             settings.EXPO_PUSH_URL, data=body, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(  # nosec B310 — scheme pinned to https above
+            request, timeout=30
+        ) as response:
             parsed = json.loads(response.read().decode())
 
         tickets = parsed.get("data")
