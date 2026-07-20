@@ -12,10 +12,10 @@
  */
 
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { router } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -29,22 +29,14 @@ import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { ComposeBox } from '@/components/ComposeBox';
-import { PostCard } from '@/components/PostCard';
+import { TimelineList } from '@/components/TimelineList';
 import { toRows, trimToFirstPage, type FeedPages, type FeedRow } from '@/feed';
-import { SPINE_COLUMN, Spine } from '@/components/timeline';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
 import { useDayBoundary } from '@/useDayBoundary';
 
 export default function FeedScreen() {
-  const { user, signOut } = useAuth();
-
-  function confirmSignOut() {
-    Alert.alert('Log out?', 'You’ll need your password to log back in.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Log out', style: 'destructive', onPress: signOut },
-    ]);
-  }
+  const { user } = useAuth();
 
   const {
     data,
@@ -130,42 +122,22 @@ export default function FeedScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <Text style={styles.title}>TimeLine</Text>
-        {/* Temporary home for logout until the profile screen lands in C4 —
-            without it there's no way back out of the app during testing.
-            Confirmed first: this is where the profile button will live, so the
-            obvious tap must not silently end a session and force someone to
-            retype their password on a phone keyboard. */}
+        {/* Your bead opens your own profile — where logout now lives. It used to
+            be a shortcut to logout itself; a tap that silently ended the session
+            was only ever a stopgap until this screen existed (C4). */}
         <Pressable
-          onPress={confirmSignOut}
+          onPress={() => user && router.push(`/u/${user.pk}`)}
           accessibilityRole="button"
-          accessibilityLabel="Log out"
+          accessibilityLabel="Your profile"
           hitSlop={8}
         >
           <Avatar user={user} size="sm" />
         </Pressable>
       </View>
 
-      <FlatList
+      <TimelineList
         ref={listRef}
-        data={rows}
-        keyExtractor={(row) => row.key}
-        renderItem={({ item }) =>
-          item.kind === 'day' ? (
-            // The divider carries its own spine segment: without one the line
-            // visibly breaks at every change of day.
-            <View style={styles.day}>
-              <Spine />
-              <Text style={styles.dayLabel}>{item.label}</Text>
-              {item.sub ? <Text style={styles.daySub}>{item.sub}</Text> : null}
-              {/* A hairline finishing the row, kept inside the content column
-                  so it separates the days without cutting across the spine. */}
-              <View style={styles.dayRule} />
-            </View>
-          ) : (
-            <PostCard post={item.post} />
-          )
-        }
-        contentContainerStyle={styles.list}
+        rows={rows}
         // The compose box is the live tip of the timeline, so it belongs *in*
         // the list rather than pinned above it — it scrolls away with the feed
         // exactly as the top entry should.
@@ -180,7 +152,6 @@ export default function FeedScreen() {
         onEndReached={() => {
           if (hasNextPage && !isFetchingNextPage) fetchNextPage();
         }}
-        onEndReachedThreshold={0.4}
         ListEmptyComponent={
           error ? (
             <View style={styles.centre}>
@@ -229,26 +200,6 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.sm,
   },
   title: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink },
-  list: { paddingTop: spacing.sm, flexGrow: 1 },
-  day: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    gap: spacing.sm,
-    // Indented to sit in the content column rather than cutting across the
-    // spine. Derived from the shared geometry so it can't drift out of step.
-    paddingLeft: SPINE_COLUMN + spacing.sm,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.sm,
-  },
-  dayLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.inkSoft },
-  daySub: { fontSize: 11, color: colors.inkFaint },
-  dayRule: {
-    flex: 1,
-    height: 1,
-    marginLeft: spacing.sm,
-    marginRight: spacing.md,
-    backgroundColor: colors.line,
-  },
   emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
   emptyBody: {
     fontSize: fontSize.sm,

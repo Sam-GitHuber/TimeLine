@@ -246,16 +246,17 @@ describe('logout', () => {
 
 describe('createPost multipart body', () => {
   /**
-   * A stand-in for `FormData` that keeps what was appended.
+   * A stand-in for `FormData` that keeps what was appended — name, value, and
+   * the optional filename third argument.
    *
    * Needed because the *shape of the parts* is the thing worth pinning here, and
-   * neither real implementation lets us see it: React Native's `FormData` takes
-   * a `{uri, name, type}` object and reads the file off disk itself, while the
-   * spec `FormData` that Jest runs against stringifies any non-Blob value to
-   * "[object Object]". Recording the appends is the only way to assert the
-   * difference — and the difference is exactly the bug this guards against,
-   * since uploading a browser-style `Blob` from React Native sends **no file**
-   * while the server still answers 201.
+   * the spec `FormData` Jest runs against doesn't expose its parts. And the
+   * shape matters: Expo SDK 54+ swapped the global `fetch` for its winter
+   * runtime, whose serializer **rejects** the old React Native `{uri,name,type}`
+   * part with `Unsupported FormDataPart implementation`, and also can't build a
+   * React Native `Blob` from bytes. The shape it *does* serialise is an object
+   * exposing `.bytes()` (its "FileBlob" case), carrying `name` (→ filename) and
+   * `type` (→ content-type). So each file part must arrive in that shape.
    */
   class RecordingFormData {
     parts: [string, unknown][] = [];
@@ -278,7 +279,16 @@ describe('createPost multipart body', () => {
     return (body as RecordingFormData).parts;
   }
 
-  it('appends each photo as a {uri, name, type} file object, never a Blob', async () => {
+  /** The winter "FileBlob" contract: `.bytes()` for the payload, name + type. */
+  function expectFilePart(part: unknown, name: string, type: string) {
+    const filePart = part as { bytes: () => Uint8Array; name: string; type: string };
+    expect(typeof filePart.bytes).toBe('function');
+    expect(filePart.bytes()).toBeInstanceOf(Uint8Array);
+    expect(filePart.name).toBe(name);
+    expect(filePart.type).toBe(type);
+  }
+
+  it('appends each photo as a bytes()-shaped part with filename and content-type', async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
 
     await api.createPost('A day out', [
@@ -287,18 +297,15 @@ describe('createPost multipart body', () => {
     ]);
 
     const parts = partsOf(mockFetch.mock.calls[0][1].body);
-    // Repeated `images` parts is the shape `PostCreateView` expects.
-    expect(parts).toEqual([
-      ['text', 'A day out'],
-      ['images', { uri: 'file:///tmp/a.jpg', name: 'a.jpg', type: 'image/jpeg' }],
-      ['images', { uri: 'file:///tmp/b.png', name: 'b.png', type: 'image/png' }],
-    ]);
-    // A Blob here would upload nothing at all, silently.
-    for (const [, value] of parts.slice(1)) {
-      expect(typeof value).toBe('object');
-      expect(value).toHaveProperty('uri');
-      expect(value).toHaveProperty('name');
-    }
+    expect(parts[0]).toEqual(['text', 'A day out']);
+
+    // Repeated `images` parts is the shape `PostCreateView` expects, and each
+    // one is a FileBlob — the winter fetch runtime would throw on the old
+    // {uri,name,type} object.
+    const images = parts.filter(([name]) => name === 'images');
+    expect(images).toHaveLength(2);
+    expectFilePart(images[0][1], 'a.jpg', 'image/jpeg');
+    expectFilePart(images[1][1], 'b.png', 'image/png');
   });
 
   it('posts text with no images when there are no photos', async () => {
@@ -309,6 +316,22 @@ describe('createPost multipart body', () => {
     expect(partsOf(mockFetch.mock.calls[0][1].body)).toEqual([
       ['text', 'Just words'],
     ]);
+  });
+
+  it('uploads a profile avatar as a FileBlob, not a {uri} object', async () => {
+    // The reported failure: a {uri,name,type} avatar part made the winter fetch
+    // runtime throw `Unsupported FormDataPart implementation`.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ pk: 1 }));
+
+    await api.updateProfile({
+      first_name: 'Alice',
+      avatar: { uri: 'file:///tmp/av.jpg', name: 'av.jpg', type: 'image/jpeg' },
+    });
+
+    const parts = partsOf(mockFetch.mock.calls[0][1].body);
+    expect(parts).toContainEqual(['first_name', 'Alice']);
+    const avatar = parts.find(([name]) => name === 'avatar');
+    expectFilePart(avatar?.[1], 'av.jpg', 'image/jpeg');
   });
 
   it('lets the runtime set the multipart Content-Type, boundary and all', async () => {

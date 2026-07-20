@@ -16,6 +16,8 @@
  * Authorization header is present (see docs/reference/accounts.md).
  */
 
+import { File } from 'expo-file-system';
+
 import {
   clearTokens,
   getAccessToken,
@@ -28,6 +30,7 @@ import type {
   LoginResponse,
   Paginated,
   Post,
+  ProfileUser,
   ReactionSummary,
   ReactorGroup,
   RefreshResponse,
@@ -52,14 +55,48 @@ export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://your-timeline.net';
 
 /**
- * A photo chosen from the library, ready to upload. React Native's `FormData`
- * wants the file's location, not its bytes.
+ * A photo chosen from the library, ready to upload. The picker hands us the
+ * file's location, its (best-effort) filename, and its MIME type.
  */
 export type PhotoUpload = {
   uri: string;
   name: string;
   type: string;
 };
+
+/**
+ * A multipart file part the winter fetch runtime will actually serialise:
+ * raw bytes behind a `.bytes()` method, plus a filename and content-type.
+ */
+type FilePart = { bytes: () => Uint8Array; name: string; type: string };
+
+/**
+ * Turn a picked file into an uploadable multipart part.
+ *
+ * **Two dead ends this had to route around**, both from Expo SDK 54+ replacing
+ * the global `fetch` with its "winter" runtime:
+ *
+ *   1. The old React Native `{uri, name, type}` part throws `Unsupported
+ *      FormDataPart implementation` — the winter FormData serializer doesn't
+ *      handle it (asserted in expo's own `convertFormData` test).
+ *   2. A real `Blob` is one shape it *does* accept — but React Native's `Blob`
+ *      can't be constructed from an `ArrayBuffer` ("Creating blobs from
+ *      'ArrayBuffer' … are not supported"), so `new Blob([bytes])` is out too.
+ *
+ * The serializer's other accepted shape is an object exposing `.bytes()` (its
+ * "FileBlob" case). So we read the file's bytes with expo-file-system's `File`
+ * (`arrayBuffer()` is a native read, not a Blob build — bundled in Expo Go, no
+ * dev build needed) and hand back that shape. `name`/`type` become the multipart
+ * filename and content-type.
+ *
+ * This reads the whole file into memory. Fine for avatars and phone photos;
+ * revisit only if we ever allow large attachments.
+ */
+async function toFilePart(upload: PhotoUpload): Promise<FilePart> {
+  const buffer = await new File(upload.uri).arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  return { bytes: () => bytes, name: upload.name, type: upload.type };
+}
 
 export class ApiError extends Error {
   status: number;
@@ -253,6 +290,68 @@ export const api = {
   getCurrentUser: () => request<User>('/api/auth/user/'),
 
   /**
+   * Update your own profile — real name, bio, avatar — via dj-rest-auth's user
+   * endpoint (the same `PATCH /api/auth/user/` the web app uses).
+   *
+   * Multipart because it can carry an avatar file, and PATCH not PUT so an
+   * unsent field is left untouched rather than blanked — we only append the
+   * fields the form actually holds.
+   *
+   * `avatar` is a picked-and-cropped photo (`{uri,name,type}`, the RN FormData
+   * file shape — a browser `Blob` would silently upload nothing, same trap as
+   * `createPost`). `removeAvatar: true` clears an existing avatar; the two are
+   * mutually exclusive and the caller must never send both.
+   *
+   * Returns the refreshed `User`, which is also what `refreshUser()` in
+   * `auth.tsx` reads back to repaint the nav avatar/name everywhere.
+   */
+  updateProfile: async ({
+    first_name,
+    last_name,
+    bio,
+    avatar,
+    removeAvatar,
+  }: {
+    first_name?: string;
+    last_name?: string;
+    bio?: string;
+    avatar?: PhotoUpload;
+    removeAvatar?: boolean;
+  }) => {
+    const form = new FormData();
+    if (first_name !== undefined) form.append('first_name', first_name);
+    if (last_name !== undefined) form.append('last_name', last_name);
+    if (bio !== undefined) form.append('bio', bio);
+    if (avatar) {
+      form.append('avatar', (await toFilePart(avatar)) as unknown as Blob);
+    }
+    if (removeAvatar) form.append('remove_avatar', 'true');
+    return request<User>('/api/auth/user/', { method: 'PATCH', body: form });
+  },
+
+  /**
+   * A single person's public profile by numeric id — the header for `/u/[id]`.
+   *
+   * Returns `connection_status` and `is_blocked` relative to you, so the screen
+   * can decide whether their posts are visible. Like the feed, a profile you
+   * genuinely can't see still returns its header (the wall is on the *posts*,
+   * which come back empty) — the id itself isn't a secret, a real person is.
+   */
+  getUser: (userId: number | string) =>
+    request<ProfileUser>(`/api/users/${userId}/`),
+
+  /**
+   * One person's own posts, newest-first — the body of their profile.
+   *
+   * **Private by default:** unless it's you or a connection, the backend returns
+   * an empty page, and the screen shows a locked state rather than their posts.
+   * Paginated like every list here, so the profile pages with the same
+   * `getPage` contract the feed uses.
+   */
+  getUserPosts: (userId: number | string) =>
+    request<Paginated<Post>>(`/api/users/${userId}/posts/`),
+
+  /**
    * The reverse-chronological feed: your posts plus those of everyone you're
    * connected with, newest first.
    *
@@ -296,19 +395,14 @@ export const api = {
    * sent: the server sets it from the authenticated user and ignores anything in
    * the body, so a client can't post as someone else.
    *
-   * React Native's `FormData` takes a `{uri, name, type}` object for a file
-   * rather than a `Blob` — the runtime reads the file off disk itself. Passing a
-   * browser-style Blob here silently uploads nothing.
+   * Each photo is uploaded via `toFilePart` — the winter fetch runtime rejects
+   * the old React Native `{uri, name, type}` part.
    */
-  createPost: (text: string, photos: PhotoUpload[] = []) => {
+  createPost: async (text: string, photos: PhotoUpload[] = []) => {
     const form = new FormData();
     form.append('text', text);
     for (const photo of photos) {
-      form.append('images', {
-        uri: photo.uri,
-        name: photo.name,
-        type: photo.type,
-      } as unknown as Blob);
+      form.append('images', (await toFilePart(photo)) as unknown as Blob);
     }
     return request<Post>('/api/posts/', { method: 'POST', body: form });
   },

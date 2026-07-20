@@ -16,7 +16,16 @@ below calls for:
   interactive on posts *and* comments (plus "who reacted"). Deep-link support
   (`?comment=`) is built now rather than in D, since the route exists to be
   opened by a notification.
-- **C4 — profiles** (view / edit / avatar). Next.
+- **C4 — profiles.** Done: the `/u/[userId]` screen (self or anyone), the inline
+  editor for your own name/bio/avatar with a round pinch-to-zoom cropper, and navigation
+  into it — your bead in the feed header (which now also hosts logout) and every
+  post author's bead/name. Connection/message/block actions on *other* people's
+  profiles are deferred to Milestone E, as planned; C4 reads `connection_status`
+  only to show the private-posts locked state.
+
+With C4 done, **Milestone C is complete** — the read + write core (feed, compose,
+post detail, profiles) all run against the real backend. Next: **Milestone D
+(push notifications)**, which needs the Apple Developer enrolment live.
 
 This is a full execution plan. All scope decisions are locked (see **Decisions
 locked** below); the questions that were open at kickoff have been resolved and
@@ -450,6 +459,98 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-19 — uploads must send a `.bytes()`-shaped part, not RN's `{uri}`.**
+
+Adding a profile photo failed on device, in two stages. Cause: **Expo SDK 54+
+replaces the global `fetch` with its "winter" runtime**
+(`expo/src/winter/runtime.native.ts` installs it), and that fetch's FormData
+serializer is picky about file parts. Two shapes are dead ends:
+
+1. React Native's legacy `{uri, name, type}` part → `Unsupported FormDataPart
+   implementation` (expo's own `convertFormData` test asserts it throws).
+2. A real `Blob` is accepted by the serializer — **but React Native's `Blob`
+   can't be built from an `ArrayBuffer`** (`Creating blobs from 'ArrayBuffer' …
+   are not supported`), so `new Blob([bytes])` throws before you even get there.
+
+What works is the serializer's *other* branch: an object exposing `.bytes()`
+(its "FileBlob" case). So `api.ts`'s `toFilePart()` reads the picked file's
+bytes with expo-file-system's `File` (`arrayBuffer()` is a native read, not a
+Blob build — bundled in Expo Go, no dev build needed) and returns
+`{ bytes, name, type }`; `name`/`type` become the multipart filename and
+content-type. Both `createPost` and `updateProfile` go through it.
+
+**This was a latent bug in compose too**, not just avatars — photo posting used
+the same `{uri}` part and would have thrown the moment it ran against the winter
+runtime. It never surfaced because the Jest tests mock `fetch` (so the real
+serializer never runs) and the C2 device pass predates the SDK bump. The api
+tests now assert the FileBlob shape (`.bytes()` + filename + content-type) for
+both paths, and `expo-file-system`'s `File` is mocked in `jest.setup.js`.
+
+**2026-07-19 — Milestone C4 (profiles): four decisions worth keeping.**
+
+- **Round cropper matching the web, after a false start on the native crop.**
+  First cut used the OS picker's `allowsEditing` crop — simplest, but it only
+  ever shows a *square* guide, so you can't see the circle you're framing for.
+  That's the whole point of the web's `AvatarCropModal`, so it was rebuilt
+  natively (`components/AvatarCropModal.tsx`): the photo under a round cutout,
+  pinch to zoom, drag to recentre, exporting the framed square (the `Avatar`
+  masks it to a circle, as on the web). The gesture libraries it needs
+  (`react-native-gesture-handler` + `react-native-reanimated`) were already in
+  the app — `GestureHandlerRootView` now wraps the root, and re-roots inside the
+  cropper's own `Modal` (gestures don't cross an RN Modal's separate view tree).
+  Only `expo-image-manipulator` (bundled in Expo Go) was added, for the crop
+  itself. The crop **geometry** lives in `avatarCrop.ts`, pure and unit-tested;
+  the gesture component is left to the device, and `AvatarCropModal` is mocked in
+  `profile.test.tsx` so the pick→reframe→attach wiring is still covered.
+
+  *Worklet gotcha (crashed Expo Go the instant you touched the photo):* RNGH
+  gesture callbacks run on the UI thread as reanimated worklets, and a worklet
+  **may not call an ordinary JS function** there — the pan-clamp callbacks
+  originally called `clampTranslation` imported from `avatarCrop.ts`, which
+  hard-crashed on the first drag. The modal itself rendered fine because
+  `useAnimatedStyle` is self-contained; only the gesture path reached across the
+  bridge. Fix: inline the clamp maths into the worklets (`avatarCrop.ts` stays
+  the tested source of truth, still used by the JS-thread crop). Reads of
+  `sharedValue.value` in `usePhoto` are fine — that runs on the JS thread, off a
+  plain `onPress`.
+
+- **`refreshUser` is the one genuinely new bit of spine.** After a profile save
+  the web calls `refreshUser()` so the new name/avatar repaint everywhere they're
+  read from auth (the nav bead, the compose box). Mobile's `AuthProvider` had no
+  such method — it only had `signIn`/`signOut` — so C4 adds it. It's best-effort:
+  the save has already landed server-side by the time it runs, so a blip
+  re-fetching "who am I" must never surface as a save failure; the editor's query
+  invalidations still pull the fresh copy onto the screen.
+
+- **The feed's day-divider + post rendering was extracted to `TimelineList`**, now
+  shared by the feed and the profile. The alternative — the profile re-deriving
+  `SPINE_COLUMN` and the divider indent — is exactly the drift the C1 layout note
+  warns about; one renderer makes it impossible. `TimelineList` is dumb about
+  data (it takes already-built `toRows` output, never a raw post array), so the
+  server's reverse-chronological order is never re-touched. It defaults
+  `keyboardShouldPersistTaps` to `handled` (not the FlatList default `never`):
+  any header carrying an input *and* a button — the compose box's Post, the
+  editor's Save — otherwise loses the first tap to dismissing the keyboard. That
+  also closes a latent papercut on the feed, whose compose button had the same
+  exposure.
+
+- **Logout moved off the feed header onto the profile screen.** The feed bead was
+  a stopgap logout until this screen existed; it now opens your own profile,
+  where logout lives. Post authors' beads/names navigate to `/u/[id]` too — the
+  app's main way into a profile.
+
+*Test gotcha (RN + Jest):* a `jest.mock('expo-router')` factory that closes over
+a `const mockPush` captures `undefined`, because the factory runs while the
+hoisted imports load expo-router — *before* the `const` line executes. Reading
+the spy lazily inside an arrow (`push: (...a) => mockPush(...a)`) defers the read
+to call time. `useLocalSearchParams: () => mockParams` already dodged this by
+being an arrow; a direct `push: mockPush` did not.
+
+*Deferred, as planned:* Connect / Message / Block on other people's profiles are
+Milestone E (connections/block). C4 reads `connection_status` only to choose the
+private-posts locked message. Comment-author beads don't link to profiles yet
+either — only post authors do; a small follow-up if it's wanted.
 
 **2026-07-19 — the mobile feed layout deliberately diverges from the web's.**
 

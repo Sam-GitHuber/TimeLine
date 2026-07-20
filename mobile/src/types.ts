@@ -23,6 +23,33 @@ export type User = {
   is_staff: boolean;
 };
 
+/**
+ * `GET /api/users/<id>/` — `api.serializers.UserListSerializer`.
+ *
+ * The public view of *someone else's* profile, distinct from the `User` above:
+ * no email, no first/last name split, no `pk` (it's `id` here, matching every
+ * other embedded user in the API). It carries the viewer-relative fields the
+ * profile header needs — `connection_status` and `is_blocked` — which the
+ * self-only `User` type has no reason to.
+ *
+ * `connection_status` is *your* relationship to this person:
+ *   - `"none"`      — no link (Connect)
+ *   - `"requested"` — you asked, awaiting them
+ *   - `"incoming"`  — they asked, awaiting you
+ *   - `"connected"` — mutual; you can see each other's posts
+ *
+ * The Connect / Message / Block actions this status drives are Milestone E
+ * (connections/block); C4 only reads it to decide whether posts are visible.
+ */
+export type ProfileUser = {
+  id: number;
+  display_name: string;
+  bio: string;
+  avatar_thumb: string | null;
+  connection_status: 'none' | 'requested' | 'incoming' | 'connected';
+  is_blocked: boolean;
+};
+
 /** `POST /api/auth/mobile/login/` — see `accounts.views.MobileLoginView`. */
 export type LoginResponse = {
   access: string;

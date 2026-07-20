@@ -20,6 +20,7 @@ import {
   StyleSheet,
   View,
 } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AuthProvider, useAuth } from '@/auth';
 import { colors } from '@/theme';
@@ -117,16 +118,23 @@ export default function RootLayout() {
   useRefetchOnForeground();
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <StatusBar style="dark" />
-        <AuthGate />
-      </AuthProvider>
-    </QueryClientProvider>
+    // GestureHandlerRootView must wrap the app for react-native-gesture-handler
+    // to work (the avatar cropper's pinch/pan). It also re-roots inside its own
+    // Modal, but wrapping here is the documented baseline and covers any future
+    // gesture surface.
+    <GestureHandlerRootView style={styles.root}>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <StatusBar style="dark" />
+          <AuthGate />
+        </AuthProvider>
+      </QueryClientProvider>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
+  root: { flex: 1 },
   loading: {
     flex: 1,
     alignItems: 'center',
