@@ -5,12 +5,17 @@ see ``PushOutbox`` for why the send is out-of-band.
 
 The flow per drain:
 
-1. Take the oldest unsent rows that haven't exhausted their retries.
+1. Take the oldest unsent rows that haven't exhausted their retries, locking
+   them so a hand-run and a timer tick can't send the same push twice.
 2. Resolve each recipient's *current* device tokens (looked up now, not at
-   enqueue time, so a rotated token still gets the push).
-3. Build one Expo message per (notification × device) and POST in batches.
-4. Read the reply's per-message tickets: mark sent, record errors, and delete
-   tokens Expo reports as ``DeviceNotRegistered``.
+   enqueue time, so a rotated token still gets the push), skipping any device
+   this row has already reached.
+3. Build one Expo message per (notification × outstanding device) and POST in
+   batches.
+4. Read the reply's per-message tickets, then settle each row: delivered
+   everywhere → mark sent; anything still outstanding → record the error and
+   leave it queued for the next tick. Tokens Expo reports as
+   ``DeviceNotRegistered`` are deleted.
 5. Prune delivered rows older than the retention window.
 
 The notification's wording and deep-link come straight from
@@ -24,6 +29,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -39,10 +45,10 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--limit",
+            "--max-rows",
             type=int,
-            default=settings.EXPO_PUSH_BATCH_SIZE,
-            help="Maximum messages to send in this run.",
+            default=settings.EXPO_PUSH_MAX_ROWS,
+            help="Maximum outbox rows to drain in this run (not messages).",
         )
         parser.add_argument(
             "--dry-run",
@@ -51,46 +57,75 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        limit = options["limit"]
+        max_rows = options["max_rows"]
         dry_run = options["dry_run"]
 
-        pending = list(
-            PushOutbox.objects.filter(
-                sent_at__isnull=True,
-                attempts__lt=PushOutbox.MAX_ATTEMPTS,
-            )
-            .select_related("notification", "notification__actor")
-            .order_by("created_at")[:limit]
+        if dry_run:
+            self._drain(max_rows, dry_run=True)
+        else:
+            # One transaction around the select-and-claim so concurrent runs
+            # can't pick up the same rows. The Expo calls happen inside it,
+            # which is acceptable here: this is a background job with a capped
+            # batch, and the alternative (claim, commit, send) needs a separate
+            # in-flight state to avoid losing rows if the process dies.
+            with transaction.atomic():
+                self._drain(max_rows, dry_run=False)
+        self._prune(dry_run)
+
+    def _drain(self, max_rows, *, dry_run):
+        rows = PushOutbox.objects.filter(
+            sent_at__isnull=True,
+            attempts__lt=PushOutbox.MAX_ATTEMPTS,
+        ).select_related(
+            "notification",
+            "notification__actor",
+            # The serializer reads through these for the text and deep-link
+            # (comment → parent post, event → group, group → name). Without
+            # them each comment/event/group notification costs extra queries.
+            "notification__comment",
+            "notification__event",
+            "notification__group",
         )
+        if not dry_run:
+            # skip_locked: a concurrent run takes different rows rather than
+            # blocking on ours.
+            rows = rows.select_for_update(skip_locked=True, of=("self",))
+
+        pending = list(rows.order_by("created_at")[:max_rows])
         if not pending:
             self.stdout.write("Nothing queued.")
-            self._prune(dry_run)
             return
 
         # One query for every recipient's devices, rather than one per row.
         recipient_ids = {row.notification.recipient_id for row in pending}
-        tokens_by_user = {}
+        devices_by_user = {}
         for device in DevicePushToken.objects.filter(user_id__in=recipient_ids):
-            tokens_by_user.setdefault(device.user_id, []).append(device)
+            devices_by_user.setdefault(device.user_id, []).append(device)
 
         messages = []
         for row in pending:
-            devices = tokens_by_user.get(row.notification.recipient_id, [])
-            if not devices:
-                # Nobody to push to — a web-only user. Mark it done rather than
-                # retrying every tick forever; the in-app notification still
-                # exists and is unaffected.
+            # Skip devices this row already reached on an earlier attempt, so a
+            # retry never re-buzzes a phone that got it the first time.
+            delivered = set(row.delivered_tokens or [])
+            outstanding = [
+                device
+                for device in devices_by_user.get(row.notification.recipient_id, [])
+                if device.expo_token not in delivered
+            ]
+            if not outstanding:
+                # Either a web-only user with no devices at all, or every device
+                # was reached earlier. Settle it rather than retrying forever;
+                # the in-app notification exists and is unaffected either way.
                 if not dry_run:
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
                 continue
             data = NotificationSerializer(row.notification).data
-            for device in devices:
+            for device in outstanding:
                 messages.append((row, device, self._message(device, data)))
 
         if not messages:
-            self.stdout.write(f"{len(pending)} queued, no registered devices.")
-            self._prune(dry_run)
+            self.stdout.write(f"{len(pending)} queued, nothing outstanding to send.")
             return
 
         if dry_run:
@@ -100,10 +135,13 @@ class Command(BaseCommand):
             return
 
         self._send(messages)
-        self._prune(dry_run)
 
     def _message(self, device, data):
         """One Expo push message from a serialized notification.
+
+        Deliberately carries **no post or comment content** — only the
+        server-phrased line ("Ada replied to your post"). The body transits
+        Expo's servers and Apple's, so it names people but never quotes them.
 
         ``data`` is what the app reads on tap to deep-link: ``url`` is the same
         route string the web app uses (e.g. ``/p/12?comment=34``), which the app
@@ -122,18 +160,29 @@ class Command(BaseCommand):
         }
 
     def _send(self, messages):
-        sent = failed = 0
+        """POST every message, then settle each row by what happened to it.
+
+        Results are accumulated across chunks before any row is written,
+        because one row's devices can straddle a chunk boundary — settling
+        mid-loop would mark a row sent while some of its devices were still
+        unsent.
+        """
+        # row.pk → {"row", "delivered": [...], "errors": [...]}
+        outcomes = {}
+
+        def outcome(row):
+            return outcomes.setdefault(
+                row.pk, {"row": row, "delivered": [], "errors": []}
+            )
+
         batch_size = settings.EXPO_PUSH_BATCH_SIZE
         for start in range(0, len(messages), batch_size):
             chunk = messages[start : start + batch_size]
             try:
                 tickets = self._post([message for _row, _device, message in chunk])
             except Exception as exc:  # network, timeout, non-200, bad JSON
-                # Whole batch failed: count an attempt on each row so a
-                # persistently-broken send eventually stops being retried.
                 for row, _device, _message in chunk:
-                    self._record_failure(row, str(exc))
-                failed += len(chunk)
+                    outcome(row)["errors"].append(str(exc))
                 self.stderr.write(f"Batch failed: {exc}")
                 continue
 
@@ -143,10 +192,7 @@ class Command(BaseCommand):
             # left queued or a dead token never cleaned up.
             for (row, device, _message), ticket in zip(chunk, tickets, strict=True):
                 if ticket.get("status") == "ok":
-                    if row.sent_at is None:
-                        row.sent_at = timezone.now()
-                        row.save(update_fields=["sent_at"])
-                    sent += 1
+                    outcome(row)["delivered"].append(device.expo_token)
                     continue
 
                 error = (ticket.get("details") or {}).get("error")
@@ -154,16 +200,41 @@ class Command(BaseCommand):
                     # The app was uninstalled or the token rotated. Drop the
                     # device so we stop pushing into the void; this is the only
                     # signal Expo gives us that a token is permanently dead.
+                    # Counts as settled, not failed — retrying can't help.
                     device.delete()
-                    if row.sent_at is None:
-                        row.sent_at = timezone.now()
-                        row.save(update_fields=["sent_at"])
+                    outcome(row)["delivered"].append(device.expo_token)
                     continue
 
-                self._record_failure(row, ticket.get("message", "unknown error"))
-                failed += 1
+                outcome(row)["errors"].append(
+                    ticket.get("message", "unknown error")
+                )
 
-        self.stdout.write(f"Sent {sent}, failed {failed}.")
+        sent = requeued = 0
+        for entry in outcomes.values():
+            row = entry["row"]
+            if entry["delivered"]:
+                row.delivered_tokens = list(
+                    dict.fromkeys([*(row.delivered_tokens or []), *entry["delivered"]])
+                )
+            if entry["errors"]:
+                # Something is still outstanding: keep it queued so the next
+                # tick retries *only* the devices not in delivered_tokens.
+                row.attempts += 1
+                row.last_error = entry["errors"][0][:500]
+                requeued += 1
+            else:
+                row.sent_at = timezone.now()
+                sent += 1
+            row.save(
+                update_fields=[
+                    "delivered_tokens",
+                    "attempts",
+                    "last_error",
+                    "sent_at",
+                ]
+            )
+
+        self.stdout.write(f"Sent {sent}, requeued {requeued}.")
 
     def _post(self, payload):
         """POST a batch to Expo and return its list of tickets."""
@@ -185,11 +256,6 @@ class Command(BaseCommand):
         if not isinstance(tickets, list) or len(tickets) != len(payload):
             raise ValueError(f"unexpected Expo reply: {parsed!r}")
         return tickets
-
-    def _record_failure(self, row, message):
-        row.attempts += 1
-        row.last_error = message[:500]
-        row.save(update_fields=["attempts", "last_error"])
 
     def _prune(self, dry_run):
         """Delete delivered rows past the retention window."""

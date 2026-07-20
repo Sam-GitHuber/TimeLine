@@ -566,8 +566,17 @@ EXPO_PUSH_URL = os.environ.get(
 # setting in production; leave unset in dev and tests.
 EXPO_ACCESS_TOKEN = os.environ.get("EXPO_ACCESS_TOKEN", "")
 
-# Cap on one drain, matching Expo's documented 100-message limit per request.
+# Two different units, deliberately separate settings — one notification fans
+# out to every device its recipient owns, so rows and messages are not the same
+# count and one must not silently bound the other.
+#
+#   BATCH_SIZE — *messages* per HTTP request to Expo. 100 is Expo's documented
+#                maximum; there is no reason to raise it.
+#   MAX_ROWS   — *outbox rows* drained per run. The ceiling on how much work one
+#                timer tick does; must stay comfortably inside the service's
+#                TimeoutStartSec at the worst-case devices-per-user.
 EXPO_PUSH_BATCH_SIZE = env_int("EXPO_PUSH_BATCH_SIZE", 100)
+EXPO_PUSH_MAX_ROWS = env_int("EXPO_PUSH_MAX_ROWS", 200)
 
 # How long a delivered PushOutbox row is kept as a log before the command prunes
 # it. Long enough to debug "why didn't my phone buzz", short enough not to grow.

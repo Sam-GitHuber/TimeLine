@@ -25,7 +25,7 @@ import {
 } from 'react';
 
 import { api, ApiError, setSessionExpiredHandler } from './api';
-import { registerForPush, unregisterPush } from './push';
+import { forgetLocalPushToken, registerForPush, unregisterPush } from './push';
 import { clearTokens, getAccessToken } from './tokens';
 import type { User } from './types';
 
@@ -54,6 +54,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // state otherwise, and a failed refresh has to be able to log the user out.
   useEffect(() => {
     setSessionExpiredHandler(() => {
+      // Local-only, deliberately: calling the *server* unregister here would
+      // 401 (the session is precisely what has just died), trigger a refresh,
+      // fail, and re-enter this very handler. The server row therefore
+      // survives an expiry — see forgetLocalPushToken for why that's safe.
+      void forgetLocalPushToken();
       setUser(null);
       setStatus('signedOut');
     });

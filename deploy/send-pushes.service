@@ -27,6 +27,10 @@ Type=oneshot
 User=<user>
 WorkingDirectory=/home/<user>/TimeLine
 ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml exec -T backend python manage.py send_pushes
-# Must finish well inside the timer interval so runs can't pile up on each
-# other; the command caps its own batch size, so a long run means Expo is slow.
-TimeoutStartSec=120
+# Generous relative to the timer interval on purpose. The command drains up to
+# EXPO_PUSH_MAX_ROWS rows, which can be several 100-message batches at 30s of
+# Expo timeout each, so a tight cap would kill a legitimately slow run halfway
+# and leave its rows queued. Overlap isn't the risk it looks like: systemd
+# won't start this service while it's still active, and the drain takes a
+# skip_locked row lock, so a hand-run alongside it takes different rows.
+TimeoutStartSec=600

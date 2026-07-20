@@ -120,6 +120,27 @@ export async function unregisterPush(): Promise<void> {
 }
 
 /**
+ * Forget this device's push token locally, without calling the server.
+ *
+ * For the **session-expired** path, where `unregisterPush` is not an option:
+ * the unregister endpoint is authenticated, and by definition we no longer
+ * have a working token — the call would 401, trigger a refresh, fail, and
+ * re-enter the session-expired handler that called us. So the server row
+ * necessarily survives an expiry.
+ *
+ * That is acceptable, and worth being clear about why. An expired session does
+ * not change *whose* phone this is: the notifications still belong to the
+ * person holding it, who simply has to log in again. The genuine risk — a
+ * handed-on or shared phone reaching a new owner — is covered from the other
+ * end, by the backend's upsert-on-token rule moving the row to whoever logs in
+ * next. What we must not do is keep a stale token locally, or the next
+ * registration would have two ideas of this device.
+ */
+export async function forgetLocalPushToken(): Promise<void> {
+  await SecureStore.deleteItemAsync(PUSH_TOKEN_KEY);
+}
+
+/**
  * Map the server's `url` onto a route this app actually has.
  *
  * The backend phrases one deep-link for both clients (see

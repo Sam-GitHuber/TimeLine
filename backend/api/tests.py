@@ -13,10 +13,11 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 from django.db.utils import OperationalError
 from django.test import SimpleTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from PIL import Image
 from rest_framework import status
@@ -4778,16 +4779,22 @@ class SendPushesCommandTests(APITestCase):
             **(target or {"post": self.post}),
         )
 
-    def _run(self, payload=None, **kwargs):
-        """Run the command with urlopen mocked; returns the mock."""
+    def _run(self, payload=None, payloads=None, **kwargs):
+        """Run the command with urlopen mocked; returns the mock.
+
+        ``payloads`` gives a different reply per batch, for the chunking cases.
+        """
         from django.core.management import call_command
 
         with mock.patch(
             "api.management.commands.send_pushes.urllib.request.urlopen"
         ) as urlopen:
-            urlopen.return_value = _FakeExpoResponse(
-                payload if payload is not None else _ok_tickets(1)
-            )
+            if payloads is not None:
+                urlopen.side_effect = [_FakeExpoResponse(p) for p in payloads]
+            else:
+                urlopen.return_value = _FakeExpoResponse(
+                    payload if payload is not None else _ok_tickets(1)
+                )
             call_command("send_pushes", verbosity=0, **kwargs)
         return urlopen
 
@@ -4919,6 +4926,117 @@ class SendPushesCommandTests(APITestCase):
 
         urlopen.assert_not_called()
 
+    def test_a_partial_multi_device_failure_retries_only_the_missed_device(self):
+        """The finding this model's `delivered_tokens` exists for.
+
+        One notification, two devices, one transient error. Marking the row
+        sent would lose the retry for the failed device forever; leaving it
+        queued without recording the success would re-buzz the device that
+        already got it. Neither is acceptable, so the row remembers.
+        """
+        second = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[bbb]", platform="ios"
+        )
+        self._queue()
+
+        self._run(
+            payload={
+                "data": [
+                    {"status": "ok", "id": "t1"},
+                    {
+                        "status": "error",
+                        "message": "MessageRateExceeded",
+                        "details": {"error": "MessageRateExceeded"},
+                    },
+                ]
+            }
+        )
+
+        row = PushOutbox.objects.get()
+        # Still queued, because one device is outstanding.
+        self.assertIsNone(row.sent_at)
+        self.assertEqual(row.attempts, 1)
+        # And it remembers which device already has it.
+        first_token = self.device.expo_token
+        self.assertEqual(row.delivered_tokens, [first_token])
+
+        # The retry targets *only* the device that missed it.
+        urlopen = self._run()
+        retried = {m["to"] for m in self._sent_body(urlopen)}
+        self.assertEqual(retried, {second.expo_token})
+
+        row.refresh_from_db()
+        self.assertIsNotNone(row.sent_at)
+        self.assertCountEqual(
+            row.delivered_tokens, [first_token, second.expo_token]
+        )
+
+    def test_a_dead_device_settles_rather_than_blocking_the_row(self):
+        # DeviceNotRegistered can never succeed on retry, so it must count as
+        # settled — otherwise one uninstalled app keeps a row queued until it
+        # exhausts its attempts.
+        DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[dead]", platform="ios"
+        )
+        self._queue()
+
+        self._run(
+            payload={
+                "data": [
+                    {"status": "ok", "id": "t1"},
+                    {
+                        "status": "error",
+                        "message": "not registered",
+                        "details": {"error": "DeviceNotRegistered"},
+                    },
+                ]
+            }
+        )
+
+        row = PushOutbox.objects.get()
+        self.assertIsNotNone(row.sent_at)
+        self.assertEqual(row.attempts, 0)
+        self.assertEqual(DevicePushToken.objects.count(), 1)
+
+    def test_a_row_whose_devices_all_already_received_it_is_settled(self):
+        # Belt and braces for the retry path: if nothing is outstanding there
+        # is nothing to send, and the row must not sit in the queue forever.
+        self._queue()
+        PushOutbox.objects.update(delivered_tokens=[self.device.expo_token])
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_rows_are_settled_correctly_when_devices_straddle_a_batch(self):
+        # One row's devices can land in different chunks. Settling mid-loop
+        # would mark the row sent while its later devices were still unsent.
+        with self.settings(EXPO_PUSH_BATCH_SIZE=1):
+            DevicePushToken.objects.create(
+                user=self.me, expo_token="ExponentPushToken[bbb]", platform="ios"
+            )
+            self._queue()
+
+            self._run(
+                payloads=[
+                    _ok_tickets(1),
+                    {
+                        "data": [
+                            {
+                                "status": "error",
+                                "message": "MessageRateExceeded",
+                                "details": {"error": "MessageRateExceeded"},
+                            }
+                        ]
+                    },
+                ]
+            )
+
+        row = PushOutbox.objects.get()
+        self.assertIsNone(row.sent_at)
+        self.assertEqual(len(row.delivered_tokens), 1)
+
     def test_dry_run_sends_nothing_and_writes_no_state(self):
         self._queue()
 
@@ -4957,6 +5075,45 @@ class SendPushesCommandTests(APITestCase):
         self.assertEqual(PushOutbox.objects.count(), 0)
         # Pruning the delivery log must not touch the notification itself.
         self.assertTrue(Notification.objects.filter(pk=n.pk).exists())
+
+    def test_the_drain_does_not_issue_more_queries_as_the_queue_grows(self):
+        """Pins the N+1 fix without a brittle absolute query count.
+
+        The serializer reads through to the parent post for a comment
+        notification, and to the group for an event, so without select_related
+        every extra row costs extra queries. Asserting "the count is the same
+        for one row as for several" catches a regression without breaking every
+        time an unrelated query is added.
+        """
+        from django.core.management import call_command
+
+        def drain_queries(n):
+            PushOutbox.objects.all().delete()
+            Notification.objects.all().delete()
+            for i in range(n):
+                comment = Comment.objects.create(
+                    post=self.post, author=self.me, text=f"c{i}"
+                )
+                notifications.create_notification(
+                    self.me,
+                    self.actor,
+                    Notification.Kind.COMMENT_REPLY,
+                    comment=comment,
+                )
+            with mock.patch(
+                "api.management.commands.send_pushes.urllib.request.urlopen"
+            ) as urlopen:
+                urlopen.return_value = _FakeExpoResponse(_ok_tickets(n))
+                with CaptureQueriesContext(connection) as ctx:
+                    call_command("send_pushes", verbosity=0)
+            return len(ctx)
+
+        one = drain_queries(1)
+        several = drain_queries(4)
+
+        # Per-row writes (marking each row sent) are expected to scale; the
+        # *reads* must not. Three extra rows may add at most three writes.
+        self.assertLessEqual(several, one + 3)
 
     def test_recently_delivered_rows_are_kept(self):
         self._queue()

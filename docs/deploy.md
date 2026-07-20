@@ -441,6 +441,10 @@ It runs every minute (not `Persistent=true`, unlike the other timers here: after
 the box has been off, firing a backlog of stale pushes at people's phones is
 worse than skipping them — the rows still go out on the next ordinary tick).
 
+Safe to run by hand alongside the timer: the drain claims rows with
+`select_for_update(skip_locked=True)`, so a manual run takes different rows
+rather than double-sending.
+
 Set `EXPO_ACCESS_TOKEN` in `.env.prod` at the same time — see
 `.env.prod.example`. Without it Expo accepts unauthenticated sends, meaning
 anyone who learns one of your users' push tokens could push to them under your

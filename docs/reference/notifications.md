@@ -210,7 +210,15 @@ lives with EAS), and Phase 10 needs no schema change — only a different
   and a housemate logs in on the same phone, the row moves rather than leaving
   the previous owner's notifications buzzing a device they no longer control.
 - **`PushOutbox`** — a queued delivery: `notification` (one-to-one, CASCADE),
-  `created_at`, `sent_at`, `attempts`, `last_error`.
+  `created_at`, `sent_at`, `attempts`, `last_error`, `delivered_tokens`.
+
+  `delivered_tokens` exists because one notification fans out to N devices
+  while `sent_at` is a single flag. Without it, a phone that succeeded and a
+  tablet that hit a transient error share one row: marking it sent loses the
+  retry forever, and leaving it queued re-buzzes the phone that already got it.
+  Recording which tokens have been reached lets a retry target **only** the
+  devices still outstanding. `DeviceNotRegistered` counts as reached — retrying
+  can never help — so one uninstalled app can't hold a row in the queue.
 
 ### Why an outbox rather than sending inline
 
@@ -262,6 +270,39 @@ Delivered rows are kept ~14 days as a delivery log, then pruned.
 *rejects* sends that don't carry it, which stops anyone who learns one of your
 users' push tokens from pushing to them under your app's name.
 
+Two settings, deliberately separate because they count different things:
+`EXPO_PUSH_BATCH_SIZE` is **messages per HTTP request** (100, Expo's documented
+maximum); `EXPO_PUSH_MAX_ROWS` is **outbox rows per run** (200). One
+notification becomes several messages, so letting one bound the other would
+make the drain's real workload hard to reason about.
+
+The drain claims its rows with `select_for_update(skip_locked=True)`, so a
+hand-run during a timer tick takes different rows rather than sending the same
+push twice.
+
+### What leaves the box, and who sees it
+
+Worth being explicit, since privacy-first is a project non-negotiable and push
+is the first feature that hands user data to a third party.
+
+A push carries: the Expo push token, the title `TimeLine`, the server-phrased
+line (*"Ada replied to your post"*), and the deep-link route. It travels to
+**Expo's push service**, then to **Apple's APNs**, before reaching the phone.
+So both see a recipient's device token and the **display name of the person who
+acted**.
+
+Deliberately **not** included: any post or comment text, any photo, any email
+address. A push names people but never quotes them — so a lock screen in a café
+leaks no content, and the third parties in the path see no conversation.
+
+**Why Expo rather than talking to APNs directly.** Direct APNs would keep
+Apple in the path but remove Expo from it, at the cost of holding and rotating
+an APNs key on the box, implementing JWT-signed APNs auth, and writing the
+whole thing again for FCM in Phase 10. Expo was chosen as the well-trodden
+option; the data it sees is one name per notification, and no content. If that
+trade ever stops looking right, the swap is confined to `send_pushes` — nothing
+else knows how a push is delivered.
+
 ### App side (`mobile/src/push.ts`)
 
 **Registration** runs on sign-in *and* on every launch that restores a session —
@@ -277,6 +318,15 @@ the row would survive, leaving the phone buzzing with the previous user's
 notifications. The Expo token is kept in SecureStore precisely so logout can
 name *this* device without re-deriving it, which would fail exactly when the
 network is flaky. This is the other half of the upsert-on-token rule above.
+
+**A session that *expires* can't unregister at all**, and doesn't try: the
+endpoint needs auth, and an expired session is precisely the absence of it —
+calling it would 401, trigger a refresh, fail, and re-enter the session-expired
+handler that made the call. So that path drops only the local token
+(`forgetLocalPushToken`). The server row survives, which is safe: an expiry
+doesn't change whose phone it is, the notifications still belong to the person
+holding it, and the handed-on-phone case is covered from the other end by
+upsert-on-token when the next person logs in.
 
 **Taps** are handled with `useLastNotificationResponse`, which covers a
 cold-start launch *and* a tap while running in one API. The listener-only

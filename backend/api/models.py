@@ -1381,12 +1381,20 @@ class PushOutbox(models.Model):
         related_name="push",
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    # Null until delivered. The command selects on `sent_at is null`, so this is
-    # the queue marker as well as the log.
+    # Null until delivered to *every* device. The command selects on
+    # `sent_at is null`, so this is the queue marker as well as the log.
     sent_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)
     # Last failure, kept for diagnosis from the admin/shell. Truncated on write.
     last_error = models.TextField(blank=True)
+    # Expo tokens this notification has already reached.
+    #
+    # Needed because one notification fans out to N devices but `sent_at` is a
+    # single flag. Without this, a phone that succeeded and a tablet that hit a
+    # transient error share one row: marking it sent loses the retry, and
+    # leaving it queued re-buzzes the phone that already got it. Recording the
+    # delivered tokens lets a retry target only the devices still outstanding.
+    delivered_tokens = models.JSONField(default=list, blank=True)
 
     # Give up after this many failed drains, so one permanently-poisoned row
     # can't be retried forever on every timer tick.

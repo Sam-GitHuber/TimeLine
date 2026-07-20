@@ -470,6 +470,28 @@ The four questions that were open are now decided and folded into the plan above
 
 (Record deviations/gotchas here as we build.)
 
+**2026-07-20 — Milestone D review: three findings worth keeping.**
+
+- **`sent_at` is per-notification, but delivery is per-device.** The first cut
+  marked a `PushOutbox` row sent as soon as *any* device's ticket came back
+  `ok`. With two devices and one transient error that silently lost the retry
+  forever; leaving the row queued instead would have re-buzzed the device that
+  already had it. Fixed with a `delivered_tokens` list on the row, so a retry
+  targets only what's outstanding. **The general shape to watch for: a
+  one-to-many fan-out settled by a single boolean.**
+- **A session that *expires* cannot unregister its push token**, and must not
+  try. The unregister endpoint is authenticated, so calling it from the
+  session-expired handler 401s → refreshes → fails → re-enters the same
+  handler. The first attempt at "unregister on every exit path" would have
+  introduced that loop. The expiry path drops only the local token; the server
+  row is cleaned up from the other end by upsert-on-token at the next login.
+- **The drain's N+1 was invisible to every functional test.** `NotificationSerializer`
+  reads through to a comment's parent post and an event's group, so each row
+  cost extra queries — correct output, silently quadratic work. Pinned now by a
+  test asserting the query count *doesn't grow with the number of rows*, which
+  is a far less brittle guard than an absolute count (verified to fail without
+  the `select_related`).
+
 **2026-07-20 — Apple Developer Program is active; Milestone D unblocked.**
 Confirmed live two days after enrolling: App Store Connect is reachable and the
 £79 charge cleared (Apple only opens App Store Connect and takes payment once the
