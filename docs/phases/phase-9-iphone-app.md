@@ -479,10 +479,18 @@ under Membership details is the positive confirmation.
 Two consequences for Milestone D: (1) the enrolment side of the D blocker is now
 clear, leaving only the box-deploy blocker (the #91 release + `token-flush` timer,
 per the 2026-07-18 notes). (2) The Apple-side setup D needs is now available in
-**Certificates, Identifiers & Profiles** — register the App ID / Bundle ID and,
-critically, create the **APNs auth key** (`.p8`) that turns the push-ready Phase 8
-notification API into real delivery. EAS can manage the signing certs/profiles, so
-the APNs key is the piece to grab by hand.
+**Certificates, Identifiers & Profiles** — the App ID / Bundle ID and the **APNs
+auth key** (`.p8`) that turns the push-ready Phase 8 notification API into real
+delivery.
+
+**Correction (2026-07-20):** an earlier draft of this entry said the APNs key was
+"the piece to grab by hand" because EAS only manages signing certs/profiles. That
+is wrong — `eas credentials` manages the **APNs key too**: it logs into the Apple
+account, registers the App ID, enables the Push Notifications capability,
+generates the key, and stores it. Prefer that over the portal, because Apple lets
+you download an APNs auth key **exactly once, at creation** — a lost `.p8` must be
+revoked and regenerated, and an account may hold only **two APNs keys** total (one
+key serves any number of apps, so never generate one per app).
 
 **Renewal:** membership lapses ~2027-07 — if it expires the app is pulled from the
 App Store, so it wants a calendar reminder, not just this note.
