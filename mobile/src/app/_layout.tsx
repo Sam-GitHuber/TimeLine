@@ -23,7 +23,14 @@ import {
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AuthProvider, useAuth } from '@/auth';
+import { configureNotificationHandler } from '@/push';
+import { usePushNotificationTaps } from '@/usePushTaps';
 import { colors } from '@/theme';
+
+// Module scope, not an effect: the handler decides whether a notification that
+// arrives while the app is foregrounded is shown at all, and it has to be set
+// before any notification can be delivered.
+configureNotificationHandler();
 
 /**
  * Created once at module scope, not inside the component: a QueryClient holds
@@ -53,6 +60,9 @@ const queryClient = new QueryClient({
 function AuthGate() {
   const { status } = useAuth();
   const segments = useSegments();
+  // Lives here rather than in RootLayout because it reads auth state, and so
+  // must be inside AuthProvider.
+  usePushNotificationTaps();
   // The router isn't ready to navigate on the very first render; navigating
   // before it is silently does nothing.
   const navigationState = useRootNavigationState();

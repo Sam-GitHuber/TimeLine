@@ -1,0 +1,36 @@
+# systemd service: drain the push outbox and deliver queued notifications.
+# Paired with send-pushes.timer, which triggers it every minute.
+#
+# Install:
+#   sudo cp deploy/send-pushes.{service,timer} /etc/systemd/system/
+#   # then edit User= and WorkingDirectory= below to your deploy user + checkout
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now send-pushes.timer
+#
+# WHY THIS EXISTS (Phase 9, Milestone D): create_notification() runs inside
+# ordinary web requests. Calling Expo's HTTP API there would put a third-party
+# network round-trip on the critical path of a request that has nothing to do
+# with push — so the request only writes a PushOutbox row and this drains it.
+# A push failure can never fail a user's action, and a send that dies halfway
+# is retried on the next tick rather than lost.
+#
+# Runs as the DEPLOY USER (not root): it needs docker-group access to exec into
+# the running backend container. Same shape as token-flush.service.
+[Unit]
+Description=TimeLine push notification send (drains PushOutbox via Expo)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Set these to your actual deploy user and repo checkout path.
+User=<user>
+WorkingDirectory=/home/<user>/TimeLine
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml exec -T backend python manage.py send_pushes
+# Generous relative to the timer interval on purpose. The command drains up to
+# EXPO_PUSH_MAX_ROWS rows, which can be several 100-message batches at 30s of
+# Expo timeout each, so a tight cap would kill a legitimately slow run halfway
+# and leave its rows queued. Overlap isn't the risk it looks like: systemd
+# won't start this service while it's still active, and the drain takes a
+# skip_locked row lock, so a hand-run alongside it takes different rows.
+TimeoutStartSec=600

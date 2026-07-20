@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import shutil
 import tempfile
@@ -12,10 +13,11 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 from django.db.utils import OperationalError
 from django.test import SimpleTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from PIL import Image
 from rest_framework import status
@@ -27,6 +29,7 @@ from api.emoji import (
     InvalidEmoji,
     normalise_emoji,
 )
+from api.serializers import NotificationSerializer
 from api.views import (
     activate,
     active_participant_ids,
@@ -57,6 +60,7 @@ from .models import (
     PollVote,
     Post,
     PostCommentRead,
+    PushOutbox,
     Reaction,
     Report,
 )
@@ -4659,3 +4663,474 @@ class DevicePushTokenTests(APITestCase):
         )
 
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class _FakeExpoResponse:
+    """Stand-in for urlopen's context-managed HTTP response."""
+
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode()
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _ok_tickets(n):
+    return {"data": [{"status": "ok", "id": f"ticket-{i}"} for i in range(n)]}
+
+
+class PushOutboxEnqueueTests(APITestCase):
+    """Queueing a push alongside a notification (Phase 9, Milestone D).
+
+    The enqueue lives in ``create_notification`` precisely so it inherits that
+    function's existing gates — these pin that it really does.
+    """
+
+    def setUp(self):
+        self.me = make_user("push-recipient@example.com")
+        self.actor = make_user("push-actor@example.com")
+        make_connection(self.me, self.actor)
+        self.post = Post.objects.create(author=self.me, text="hello")
+
+    def test_creating_a_notification_queues_a_push(self):
+        n = notifications.create_notification(
+            self.me, self.actor, Notification.Kind.POST_REPLY, post=self.post
+        )
+
+        self.assertIsNotNone(n)
+        self.assertEqual(PushOutbox.objects.count(), 1)
+        self.assertEqual(PushOutbox.objects.get().notification, n)
+
+    def test_a_muted_kind_queues_nothing(self):
+        # The mute check is *only* in create_notification; if push ever grew its
+        # own copy this test would still pass while the real gate rotted, so it
+        # asserts the notification is absent too.
+        NotificationPreference.objects.create(
+            user=self.me, kind=Notification.Kind.POST_REPLY, enabled=False
+        )
+
+        n = notifications.create_notification(
+            self.me, self.actor, Notification.Kind.POST_REPLY, post=self.post
+        )
+
+        self.assertIsNone(n)
+        self.assertEqual(Notification.objects.count(), 0)
+        self.assertEqual(PushOutbox.objects.count(), 0)
+
+    def test_notifying_yourself_queues_nothing(self):
+        notifications.create_notification(
+            self.me, self.me, Notification.Kind.POST_REPLY, post=self.post
+        )
+
+        self.assertEqual(PushOutbox.objects.count(), 0)
+
+    def test_a_deduped_reaction_does_not_queue_a_second_push(self):
+        # React / un-react / re-react refreshes one unread row rather than
+        # stacking. The phone was already buzzed for it, so it must not buzz
+        # again for the same still-unread thing.
+        for _ in range(3):
+            notifications.create_notification(
+                self.me, self.actor, Notification.Kind.REACTION, post=self.post
+            )
+
+        self.assertEqual(Notification.objects.count(), 1)
+        self.assertEqual(PushOutbox.objects.count(), 1)
+
+    def test_deleting_the_target_removes_the_queued_push(self):
+        # Cascade chain: Post → Notification → PushOutbox. This is what makes a
+        # push for since-deleted content impossible rather than merely unlikely.
+        notifications.create_notification(
+            self.me, self.actor, Notification.Kind.POST_REPLY, post=self.post
+        )
+        self.post.delete()
+
+        self.assertEqual(Notification.objects.count(), 0)
+        self.assertEqual(PushOutbox.objects.count(), 0)
+
+
+@override_settings(EXPO_ACCESS_TOKEN="", EXPO_PUSH_RETENTION_DAYS=14)
+class SendPushesCommandTests(APITestCase):
+    """Draining the outbox (Phase 9, Milestone D).
+
+    Expo is mocked at ``urlopen`` — these assert the request we build and how we
+    react to each ticket status, not Expo itself.
+    """
+
+    def setUp(self):
+        self.me = make_user("drain-recipient@example.com")
+        self.actor = make_user("drain-actor@example.com", first_name="Ada")
+        make_connection(self.me, self.actor)
+        self.post = Post.objects.create(author=self.me, text="hello")
+        self.device = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[aaa]", platform="ios"
+        )
+
+    def _queue(self, kind=None, **target):
+        return notifications.create_notification(
+            self.me,
+            self.actor,
+            kind or Notification.Kind.POST_REPLY,
+            **(target or {"post": self.post}),
+        )
+
+    def _run(self, payload=None, payloads=None, **kwargs):
+        """Run the command with urlopen mocked; returns the mock.
+
+        ``payloads`` gives a different reply per batch, for the chunking cases.
+        """
+        from django.core.management import call_command
+
+        with mock.patch(
+            "api.management.commands.send_pushes.urllib.request.urlopen"
+        ) as urlopen:
+            if payloads is not None:
+                urlopen.side_effect = [_FakeExpoResponse(p) for p in payloads]
+            else:
+                urlopen.return_value = _FakeExpoResponse(
+                    payload if payload is not None else _ok_tickets(1)
+                )
+            call_command("send_pushes", verbosity=0, **kwargs)
+        return urlopen
+
+    def _sent_body(self, urlopen):
+        request = urlopen.call_args[0][0]
+        return json.loads(request.data.decode())
+
+    def test_a_queued_push_is_sent_and_marked(self):
+        self._queue()
+
+        urlopen = self._run()
+
+        body = self._sent_body(urlopen)
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["to"], "ExponentPushToken[aaa]")
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_the_payload_reuses_the_serializer_text_and_url(self):
+        # The push wording and deep-link must be the same ones the web activity
+        # centre renders, so the two can never drift.
+        n = self._queue()
+        expected = NotificationSerializer(n).data
+
+        urlopen = self._run()
+
+        message = self._sent_body(urlopen)[0]
+        self.assertEqual(message["body"], expected["text"])
+        self.assertEqual(message["data"]["url"], expected["url"])
+        self.assertEqual(message["data"]["notificationId"], n.id)
+        self.assertEqual(message["data"]["kind"], n.kind)
+
+    def test_a_comment_notification_deep_links_to_its_parent_post(self):
+        # The route needs the *post* id, but the notification carries a comment
+        # FK — the serializer resolves it, so the app needs no extra round-trip.
+        comment = Comment.objects.create(
+            post=self.post, author=self.me, text="mine"
+        )
+        self._queue(Notification.Kind.COMMENT_REPLY, comment=comment)
+
+        urlopen = self._run()
+
+        url = self._sent_body(urlopen)[0]["data"]["url"]
+        self.assertEqual(url, f"/p/{self.post.id}?comment={comment.id}")
+
+    def test_every_device_of_a_recipient_gets_the_push(self):
+        DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[bbb]", platform="ios"
+        )
+        self._queue()
+
+        urlopen = self._run(payload=_ok_tickets(2))
+
+        recipients = {m["to"] for m in self._sent_body(urlopen)}
+        self.assertEqual(
+            recipients, {"ExponentPushToken[aaa]", "ExponentPushToken[bbb]"}
+        )
+
+    def test_a_recipient_with_no_device_is_marked_sent_without_calling_expo(self):
+        # A web-only user must not leave a row retrying on every timer tick.
+        self.device.delete()
+        self._queue()
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_device_not_registered_deletes_the_token(self):
+        # Expo's only signal that a token is permanently dead (app uninstalled).
+        self._queue()
+
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "not registered",
+                        "details": {"error": "DeviceNotRegistered"},
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(DevicePushToken.objects.count(), 0)
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_other_errors_count_an_attempt_and_stay_queued(self):
+        self._queue()
+
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "MessageRateExceeded",
+                        "details": {"error": "MessageRateExceeded"},
+                    }
+                ]
+            }
+        )
+
+        row = PushOutbox.objects.get()
+        self.assertIsNone(row.sent_at)
+        self.assertEqual(row.attempts, 1)
+        self.assertIn("MessageRateExceeded", row.last_error)
+        # The device is intact — only DeviceNotRegistered may delete one.
+        self.assertEqual(DevicePushToken.objects.count(), 1)
+
+    def test_a_network_failure_leaves_the_row_queued_for_retry(self):
+        from django.core.management import call_command
+
+        self._queue()
+        with mock.patch(
+            "api.management.commands.send_pushes.urllib.request.urlopen",
+            side_effect=OSError("connection refused"),
+        ):
+            call_command("send_pushes", verbosity=0)
+
+        row = PushOutbox.objects.get()
+        self.assertIsNone(row.sent_at)
+        self.assertEqual(row.attempts, 1)
+
+    def test_a_row_stops_being_retried_once_attempts_are_exhausted(self):
+        # Otherwise one poisoned row is re-sent on every tick, forever.
+        self._queue()
+        PushOutbox.objects.update(attempts=PushOutbox.MAX_ATTEMPTS)
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+
+    def test_a_partial_multi_device_failure_retries_only_the_missed_device(self):
+        """The finding this model's `delivered_tokens` exists for.
+
+        One notification, two devices, one transient error. Marking the row
+        sent would lose the retry for the failed device forever; leaving it
+        queued without recording the success would re-buzz the device that
+        already got it. Neither is acceptable, so the row remembers.
+        """
+        second = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[bbb]", platform="ios"
+        )
+        self._queue()
+
+        self._run(
+            payload={
+                "data": [
+                    {"status": "ok", "id": "t1"},
+                    {
+                        "status": "error",
+                        "message": "MessageRateExceeded",
+                        "details": {"error": "MessageRateExceeded"},
+                    },
+                ]
+            }
+        )
+
+        row = PushOutbox.objects.get()
+        # Still queued, because one device is outstanding.
+        self.assertIsNone(row.sent_at)
+        self.assertEqual(row.attempts, 1)
+        # And it remembers which device already has it.
+        first_token = self.device.expo_token
+        self.assertEqual(row.delivered_tokens, [first_token])
+
+        # The retry targets *only* the device that missed it.
+        urlopen = self._run()
+        retried = {m["to"] for m in self._sent_body(urlopen)}
+        self.assertEqual(retried, {second.expo_token})
+
+        row.refresh_from_db()
+        self.assertIsNotNone(row.sent_at)
+        self.assertCountEqual(
+            row.delivered_tokens, [first_token, second.expo_token]
+        )
+
+    def test_a_dead_device_settles_rather_than_blocking_the_row(self):
+        # DeviceNotRegistered can never succeed on retry, so it must count as
+        # settled — otherwise one uninstalled app keeps a row queued until it
+        # exhausts its attempts.
+        DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[dead]", platform="ios"
+        )
+        self._queue()
+
+        self._run(
+            payload={
+                "data": [
+                    {"status": "ok", "id": "t1"},
+                    {
+                        "status": "error",
+                        "message": "not registered",
+                        "details": {"error": "DeviceNotRegistered"},
+                    },
+                ]
+            }
+        )
+
+        row = PushOutbox.objects.get()
+        self.assertIsNotNone(row.sent_at)
+        self.assertEqual(row.attempts, 0)
+        self.assertEqual(DevicePushToken.objects.count(), 1)
+
+    def test_a_row_whose_devices_all_already_received_it_is_settled(self):
+        # Belt and braces for the retry path: if nothing is outstanding there
+        # is nothing to send, and the row must not sit in the queue forever.
+        self._queue()
+        PushOutbox.objects.update(delivered_tokens=[self.device.expo_token])
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_rows_are_settled_correctly_when_devices_straddle_a_batch(self):
+        # One row's devices can land in different chunks. Settling mid-loop
+        # would mark the row sent while its later devices were still unsent.
+        with self.settings(EXPO_PUSH_BATCH_SIZE=1):
+            DevicePushToken.objects.create(
+                user=self.me, expo_token="ExponentPushToken[bbb]", platform="ios"
+            )
+            self._queue()
+
+            self._run(
+                payloads=[
+                    _ok_tickets(1),
+                    {
+                        "data": [
+                            {
+                                "status": "error",
+                                "message": "MessageRateExceeded",
+                                "details": {"error": "MessageRateExceeded"},
+                            }
+                        ]
+                    },
+                ]
+            )
+
+        row = PushOutbox.objects.get()
+        self.assertIsNone(row.sent_at)
+        self.assertEqual(len(row.delivered_tokens), 1)
+
+    def test_dry_run_sends_nothing_and_writes_no_state(self):
+        self._queue()
+
+        urlopen = self._run(**{"dry_run": True})
+
+        urlopen.assert_not_called()
+        self.assertIsNone(PushOutbox.objects.get().sent_at)
+
+    @override_settings(EXPO_ACCESS_TOKEN="secret-token")
+    def test_an_access_token_is_sent_as_a_bearer_header(self):
+        # With a token configured Expo rejects unauthenticated sends, which is
+        # what stops a leaked push token being used to push in our name.
+        self._queue()
+
+        urlopen = self._run()
+
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.headers["Authorization"], "Bearer secret-token")
+
+    def test_no_authorization_header_when_no_token_is_configured(self):
+        self._queue()
+
+        urlopen = self._run()
+
+        request = urlopen.call_args[0][0]
+        self.assertNotIn("Authorization", request.headers)
+
+    def test_delivered_rows_are_pruned_once_past_the_retention_window(self):
+        n = self._queue()
+        row = PushOutbox.objects.get()
+        old = timezone.now() - timedelta(days=15)
+        PushOutbox.objects.filter(pk=row.pk).update(sent_at=old, created_at=old)
+
+        self._run()
+
+        self.assertEqual(PushOutbox.objects.count(), 0)
+        # Pruning the delivery log must not touch the notification itself.
+        self.assertTrue(Notification.objects.filter(pk=n.pk).exists())
+
+    def test_the_drain_does_not_issue_more_queries_as_the_queue_grows(self):
+        """Pins the N+1 fix without a brittle absolute query count.
+
+        The serializer reads through to the parent post for a comment
+        notification, and to the group for an event, so without select_related
+        every extra row costs extra queries. Asserting "the count is the same
+        for one row as for several" catches a regression without breaking every
+        time an unrelated query is added.
+        """
+        from django.core.management import call_command
+
+        def drain_queries(n):
+            PushOutbox.objects.all().delete()
+            Notification.objects.all().delete()
+            for i in range(n):
+                comment = Comment.objects.create(
+                    post=self.post, author=self.me, text=f"c{i}"
+                )
+                notifications.create_notification(
+                    self.me,
+                    self.actor,
+                    Notification.Kind.COMMENT_REPLY,
+                    comment=comment,
+                )
+            with mock.patch(
+                "api.management.commands.send_pushes.urllib.request.urlopen"
+            ) as urlopen:
+                urlopen.return_value = _FakeExpoResponse(_ok_tickets(n))
+                with CaptureQueriesContext(connection) as ctx:
+                    call_command("send_pushes", verbosity=0)
+            return len(ctx)
+
+        one = drain_queries(1)
+        several = drain_queries(4)
+
+        # Per-row writes (marking each row sent) are expected to scale; the
+        # *reads* must not. Three extra rows may add at most three writes.
+        self.assertLessEqual(several, one + 3)
+
+    @override_settings(EXPO_PUSH_URL="file:///etc/passwd")
+    def test_a_non_https_push_url_is_refused(self):
+        # EXPO_PUSH_URL is env-configurable and urlopen honours file:// and
+        # custom schemes, so a typo'd or hostile value could read a local file
+        # and feed it to the ticket parser. Fail loudly instead.
+        self._queue()
+
+        self._run()
+
+        row = PushOutbox.objects.get()
+        self.assertIsNone(row.sent_at)
+        self.assertIn("https", row.last_error)
+
+    def test_recently_delivered_rows_are_kept(self):
+        self._queue()
+
+        self._run()
+
+        self.assertEqual(PushOutbox.objects.count(), 1)

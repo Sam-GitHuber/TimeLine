@@ -25,6 +25,7 @@ import {
 } from 'react';
 
 import { api, ApiError, setSessionExpiredHandler } from './api';
+import { forgetLocalPushToken, registerForPush, unregisterPush } from './push';
 import { clearTokens, getAccessToken } from './tokens';
 import type { User } from './types';
 
@@ -53,6 +54,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // state otherwise, and a failed refresh has to be able to log the user out.
   useEffect(() => {
     setSessionExpiredHandler(() => {
+      // Local-only, deliberately: calling the *server* unregister here would
+      // 401 (the session is precisely what has just died), trigger a refresh,
+      // fail, and re-enter this very handler. The server row therefore
+      // survives an expiry — see forgetLocalPushToken for why that's safe.
+      void forgetLocalPushToken();
       setUser(null);
       setStatus('signedOut');
     });
@@ -77,6 +83,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         setUser(me);
         setStatus('signedIn');
+        // Re-register on every launch, not just at login: Expo can rotate a
+        // device's token, and the backend upserts, so this is cheap and keeps
+        // `last_seen` honest. A user who is permanently logged in would
+        // otherwise register exactly once, ever.
+        void registerForPush();
       } catch (err) {
         // **Only discard the tokens when the server actually rejected them.**
         // `fetch` throws a plain TypeError when the phone has no connection,
@@ -109,9 +120,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const me = await api.login(email, password);
     setUser(me);
     setStatus('signedIn');
+    // Not awaited: registering asks for the OS permission prompt and talks to
+    // Expo, and neither should hold up landing on the feed. registerForPush
+    // never throws, so there is no unhandled rejection to chase here.
+    void registerForPush();
   }, []);
 
   const signOut = useCallback(async () => {
+    // **Before** api.logout, not after: the unregister endpoint is
+    // authenticated, so once logout has cleared the tokens it would 401 and the
+    // device row would survive — leaving this phone buzzing with the previous
+    // user's notifications. That's the exact case DevicePushToken's
+    // upsert-on-token rule exists to prevent, and this is its other half.
+    await unregisterPush();
     await api.logout();
     setUser(null);
     setStatus('signedOut');

@@ -366,10 +366,12 @@ Simulator against the real backend.
 
 **D. Push notifications.** Switch to a dev build (Expo Go can't do push), device
 registration, backend send + preference gating, the deep-link map above, cold-start
-handling. The Apple Developer enrolment this requires is **live** (confirmed
-2026-07-20). The *other* still-open blocker before the device pass is the box
-carrying the #91 release + the one-time `token-flush` timer (see the two notes-log
-entries dated 2026-07-18). Ends: a Phase 8 event lands in the iPhone's notification centre,
+handling. **All blockers cleared as of 2026-07-20**: the Apple Developer enrolment
+is live, the box carries the #91 release (mobile-auth endpoints answer on the
+public domain), and the one-time `token-flush` timer is installed. One *new*
+one-time install lands with D: `deploy/send-pushes.{service,timer}`, without which
+notifications reach the activity centre but no phone buzzes.
+Ends: a Phase 8 event lands in the iPhone's notification centre,
 tapping it opens the target, activity centre stays in sync, a muted type sends
 nothing.
 
@@ -468,6 +470,28 @@ The four questions that were open are now decided and folded into the plan above
 
 (Record deviations/gotchas here as we build.)
 
+**2026-07-20 — Milestone D review: three findings worth keeping.**
+
+- **`sent_at` is per-notification, but delivery is per-device.** The first cut
+  marked a `PushOutbox` row sent as soon as *any* device's ticket came back
+  `ok`. With two devices and one transient error that silently lost the retry
+  forever; leaving the row queued instead would have re-buzzed the device that
+  already had it. Fixed with a `delivered_tokens` list on the row, so a retry
+  targets only what's outstanding. **The general shape to watch for: a
+  one-to-many fan-out settled by a single boolean.**
+- **A session that *expires* cannot unregister its push token**, and must not
+  try. The unregister endpoint is authenticated, so calling it from the
+  session-expired handler 401s → refreshes → fails → re-enters the same
+  handler. The first attempt at "unregister on every exit path" would have
+  introduced that loop. The expiry path drops only the local token; the server
+  row is cleaned up from the other end by upsert-on-token at the next login.
+- **The drain's N+1 was invisible to every functional test.** `NotificationSerializer`
+  reads through to a comment's parent post and an event's group, so each row
+  cost extra queries — correct output, silently quadratic work. Pinned now by a
+  test asserting the query count *doesn't grow with the number of rows*, which
+  is a far less brittle guard than an absolute count (verified to fail without
+  the `select_related`).
+
 **2026-07-20 — Apple Developer Program is active; Milestone D unblocked.**
 Confirmed live two days after enrolling: App Store Connect is reachable and the
 £79 charge cleared (Apple only opens App Store Connect and takes payment once the
@@ -479,10 +503,18 @@ under Membership details is the positive confirmation.
 Two consequences for Milestone D: (1) the enrolment side of the D blocker is now
 clear, leaving only the box-deploy blocker (the #91 release + `token-flush` timer,
 per the 2026-07-18 notes). (2) The Apple-side setup D needs is now available in
-**Certificates, Identifiers & Profiles** — register the App ID / Bundle ID and,
-critically, create the **APNs auth key** (`.p8`) that turns the push-ready Phase 8
-notification API into real delivery. EAS can manage the signing certs/profiles, so
-the APNs key is the piece to grab by hand.
+**Certificates, Identifiers & Profiles** — the App ID / Bundle ID and the **APNs
+auth key** (`.p8`) that turns the push-ready Phase 8 notification API into real
+delivery.
+
+**Correction (2026-07-20):** an earlier draft of this entry said the APNs key was
+"the piece to grab by hand" because EAS only manages signing certs/profiles. That
+is wrong — `eas credentials` manages the **APNs key too**: it logs into the Apple
+account, registers the App ID, enables the Push Notifications capability,
+generates the key, and stores it. Prefer that over the portal, because Apple lets
+you download an APNs auth key **exactly once, at creation** — a lost `.p8` must be
+revoked and regenerated, and an account may hold only **two APNs keys** total (one
+key serves any number of apps, so never generate one per app).
 
 **Renewal:** membership lapses ~2027-07 — if it expires the app is pulled from the
 App Store, so it wants a calendar reminder, not just this note.
@@ -874,6 +906,17 @@ endpoints aren't deployed yet. Milestone B was therefore verified against a loca
 `docker compose` backend. **Before the Milestone D device pass, the box needs the
 release that carries #91** — and that release also needs the one-time manual
 `token-flush` systemd timer install (see `docs/deploy.md`).
+
+**Resolved 2026-07-20.** Both are done: `/api/auth/mobile/login/` now answers 400
+(not 404) on the public domain, so #91 is deployed, and the `token-flush` timer is
+installed. The dev build on a real iPhone runs against `https://your-timeline.net`.
+
+**Device-pass gotcha worth keeping:** `mobile/.env` was still
+`EXPO_PUBLIC_API_URL=http://localhost:8000` from the Milestone B/C Simulator work.
+That is fine in the Simulator, which shares the host's network, but on a physical
+iPhone `localhost` is *the phone*, so every request fails. The `.env.example`
+already warns about this; the working `.env` had drifted from it. Point it at
+`https://your-timeline.net` (or the Mac's LAN IP) for any on-device run.
 
 **2026-07-18 — Milestone B verification.** The app boots in the iOS Simulator,
 the auth gate redirects a tokenless launch to `/login`, and the login screen

@@ -38,6 +38,23 @@ jest.mock('expo-file-system', () => ({
   },
 }));
 
+// `expo-notifications` is imported transitively by anything that touches auth
+// (auth.tsx → push.ts), so nearly every suite pulls it in. Importing the real
+// module under Node isn't just noisy — it runs the library's device-token
+// auto-registration side effect at import time and warns about Expo Go. Stub
+// the surface we use; `push.test.ts` overrides this with its own mock to drive
+// the permission branches.
+jest.mock('expo-notifications', () => ({
+  getPermissionsAsync: jest.fn(async () => ({
+    granted: false,
+    canAskAgain: false,
+  })),
+  requestPermissionsAsync: jest.fn(async () => ({ granted: false })),
+  getExpoPushTokenAsync: jest.fn(async () => ({ data: null })),
+  setNotificationHandler: jest.fn(),
+  useLastNotificationResponse: jest.fn(() => null),
+}));
+
 // Reset between tests so a token stored by one can't leak into the next.
 beforeEach(() => {
   const SecureStore = require('expo-secure-store');
