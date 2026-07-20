@@ -2,8 +2,10 @@
 
 **Status:** in progress — **Milestone A done** (PR #91), **Milestone B done**
 (PR #97: Expo spine — auth, token storage, silent refresh, login/logout, CI).
-**Milestone C in progress**, split one PR per screen area as the PR strategy
-below calls for:
+**Milestone C done** (PRs #98–#101), split one PR per screen area as the PR
+strategy below called for. **Next: Milestone D (push)** — the Apple Developer
+enrolment it depends on is now live (confirmed active 2026-07-20, see the notes
+log). The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -33,6 +35,10 @@ folded into the plan. Do the **Prerequisite** below on day one, then work the
 milestones in order.
 
 ## Prerequisite — enrol in the Apple Developer Program *before* Milestone A
+
+**Done — enrolment is live** (started day one 2026-07-18, confirmed active
+2026-07-20; see the notes log). The plan below is kept for the record; nothing
+here now blocks Milestone D on the enrolment itself.
 
 Enrolment is **not instant** — approval commonly takes 24–48 hours and can run
 longer if Apple asks for identity verification. It hard-blocks Milestone D (push
@@ -360,8 +366,10 @@ Simulator against the real backend.
 
 **D. Push notifications.** Switch to a dev build (Expo Go can't do push), device
 registration, backend send + preference gating, the deep-link map above, cold-start
-handling. Requires the Apple Developer enrolment from the **Prerequisite** to be
-live by now. Ends: a Phase 8 event lands in the iPhone's notification centre,
+handling. The Apple Developer enrolment this requires is **live** (confirmed
+2026-07-20). The *other* still-open blocker before the device pass is the box
+carrying the #91 release + the one-time `token-flush` timer (see the two notes-log
+entries dated 2026-07-18). Ends: a Phase 8 event lands in the iPhone's notification centre,
 tapping it opens the target, activity centre stays in sync, a muted type sends
 nothing.
 
@@ -459,6 +467,25 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-20 — Apple Developer Program is active; Milestone D unblocked.**
+Confirmed live two days after enrolling: App Store Connect is reachable and the
+£79 charge cleared (Apple only opens App Store Connect and takes payment once the
+paid membership activates — either signal alone is proof). The "pending approval"
+label from the 2026-07-18 entry simply dropped once approved; there is no separate
+"active" badge to look for — membership showing a **renewal date ~1 year out**
+under Membership details is the positive confirmation.
+
+Two consequences for Milestone D: (1) the enrolment side of the D blocker is now
+clear, leaving only the box-deploy blocker (the #91 release + `token-flush` timer,
+per the 2026-07-18 notes). (2) The Apple-side setup D needs is now available in
+**Certificates, Identifiers & Profiles** — register the App ID / Bundle ID and,
+critically, create the **APNs auth key** (`.p8`) that turns the push-ready Phase 8
+notification API into real delivery. EAS can manage the signing certs/profiles, so
+the APNs key is the piece to grab by hand.
+
+**Renewal:** membership lapses ~2027-07 — if it expires the app is pulled from the
+App Store, so it wants a calendar reminder, not just this note.
 
 **2026-07-19 — uploads must send a `.bytes()`-shaped part, not RN's `{uri}`.**
 
