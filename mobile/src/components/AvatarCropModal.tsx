@@ -43,7 +43,7 @@ import Animated, {
 import Svg, { Circle, Path } from 'react-native-svg';
 
 import type { PhotoUpload } from '@/api';
-import { clampTranslation, computeCropRect, coverScale } from '@/avatarCrop';
+import { computeCropRect, coverScale } from '@/avatarCrop';
 import { colors, fontSize, spacing } from '@/theme';
 
 /** The exported avatar's pixel size — plenty for a thumbnail, small to upload. */
@@ -78,15 +78,21 @@ export function AvatarCropModal({
 
   const [working, setWorking] = useState(false);
 
-  // Clamp helpers run on the UI thread (worklets), so they can be read from the
-  // gesture callbacks without a hop to JS.
+  // Clamp helpers, kept as **self-contained worklets**: the gesture callbacks
+  // below run on the UI thread, and a worklet may not call an ordinary JS
+  // function there (doing so crashes the app the instant a gesture starts). So
+  // the pan-clamp maths from `avatarCrop.ts` is inlined here rather than called
+  // across the bridge; `avatarCrop.ts` keeps the same logic (unit-tested, and
+  // used by the JS-thread crop below) as the single source of truth to mirror.
   const clampX = (value: number) => {
     'worklet';
-    return clampTranslation(value, photo.width, fitScale, scale.value, crop);
+    const max = Math.max(0, (photo.width * fitScale * scale.value - crop) / 2);
+    return Math.min(max, Math.max(-max, value));
   };
   const clampY = (value: number) => {
     'worklet';
-    return clampTranslation(value, photo.height, fitScale, scale.value, crop);
+    const max = Math.max(0, (photo.height * fitScale * scale.value - crop) / 2);
+    return Math.min(max, Math.max(-max, value));
   };
 
   const pinch = Gesture.Pinch()

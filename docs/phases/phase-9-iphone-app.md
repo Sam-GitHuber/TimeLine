@@ -504,6 +504,17 @@ both paths, and `expo-file-system`'s `File` is mocked in `jest.setup.js`.
   the gesture component is left to the device, and `AvatarCropModal` is mocked in
   `profile.test.tsx` so the pick→reframe→attach wiring is still covered.
 
+  *Worklet gotcha (crashed Expo Go the instant you touched the photo):* RNGH
+  gesture callbacks run on the UI thread as reanimated worklets, and a worklet
+  **may not call an ordinary JS function** there — the pan-clamp callbacks
+  originally called `clampTranslation` imported from `avatarCrop.ts`, which
+  hard-crashed on the first drag. The modal itself rendered fine because
+  `useAnimatedStyle` is self-contained; only the gesture path reached across the
+  bridge. Fix: inline the clamp maths into the worklets (`avatarCrop.ts` stays
+  the tested source of truth, still used by the JS-thread crop). Reads of
+  `sharedValue.value` in `usePhoto` are fine — that runs on the JS thread, off a
+  plain `onPress`.
+
 - **`refreshUser` is the one genuinely new bit of spine.** After a profile save
   the web calls `refreshUser()` so the new name/avatar repaint everywhere they're
   read from auth (the nav bead, the compose box). Mobile's `AuthProvider` had no
