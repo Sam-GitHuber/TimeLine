@@ -409,6 +409,43 @@ It runs Sunday 04:15, after the 03:30 backup window so the two don't overlap on
 the database. Weekly rather than nightly because at this scale the tables grow by
 a handful of rows per person per day.
 
+## Push notification delivery (Phase 9)
+
+Notifications destined for a phone are queued into `PushOutbox` by the web
+request and delivered out-of-band by `manage.py send_pushes`, so a slow or
+unreachable Expo can never fail a user's action — see
+[`reference/notifications.md`](reference/notifications.md#phone-push-phase-9-milestone-d)
+for the why. **Without this timer installed, notifications still appear in the
+in-app activity centre but no phone ever buzzes** — the rows just accumulate
+unsent, which is the failure mode to recognise.
+
+```bash
+sudo cp deploy/send-pushes.{service,timer} /etc/systemd/system/
+sudo nano /etc/systemd/system/send-pushes.service   # set User= and paths
+sudo systemctl daemon-reload
+sudo systemctl enable --now send-pushes.timer
+
+# check it's scheduled, then watch a few runs
+systemctl list-timers send-pushes.timer
+journalctl -u send-pushes.service -f
+```
+
+Prove it by hand first — this is safe to run repeatedly and sends nothing:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T backend \
+  python manage.py send_pushes --dry-run
+```
+
+It runs every minute (not `Persistent=true`, unlike the other timers here: after
+the box has been off, firing a backlog of stale pushes at people's phones is
+worse than skipping them — the rows still go out on the next ordinary tick).
+
+Set `EXPO_ACCESS_TOKEN` in `.env.prod` at the same time — see
+`.env.prod.example`. Without it Expo accepts unauthenticated sends, meaning
+anyone who learns one of your users' push tokens could push to them under your
+app's name.
+
 ## Uptime monitoring
 
 You want to hear about an outage from a robot, not from a friend texting "is the

@@ -23,7 +23,7 @@ its notification is marked addressed so the badge stops counting it.
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import Connection, Notification, NotificationPreference
+from .models import Connection, Notification, NotificationPreference, PushOutbox
 
 # The content kinds whose actor must be visible to (connected with) the recipient
 # before we notify — so a not-connected replier/reactor on a group post never
@@ -115,7 +115,7 @@ def create_notification(recipient, actor, kind, *, post=None, comment=None,
             existing.save(update_fields=["created_at"])
             return existing
 
-    return Notification.objects.create(
+    notification = Notification.objects.create(
         recipient=recipient,
         actor=actor,
         kind=kind,
@@ -125,6 +125,13 @@ def create_notification(recipient, actor, kind, *, post=None, comment=None,
         connection=connection,
         event=event,
     )
+    # Queue a push for the same event (Phase 9, Milestone D). Only new rows get
+    # one: the _DEDUP_KINDS path above returns early, so a re-reaction or a
+    # second edit to one event refreshes a still-unread notification without
+    # buzzing the phone again for something the recipient was already told
+    # about. Enqueue only — the actual send happens out-of-band, see PushOutbox.
+    PushOutbox.objects.create(notification=notification)
+    return notification
 
 
 def address_connection_request(recipient, connection):

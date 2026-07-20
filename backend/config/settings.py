@@ -549,3 +549,26 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool(
     "DJANGO_HSTS_INCLUDE_SUBDOMAINS", default=False
 )
 SECURE_HSTS_PRELOAD = env_bool("DJANGO_HSTS_PRELOAD", default=False)
+
+
+# --- Push notifications (Phase 9, Milestone D) ---------------------------------
+# Notifications are queued into PushOutbox by create_notification() and drained
+# by `manage.py send_pushes` on a systemd timer. Expo's push service fans out to
+# APNs (and FCM in Phase 10), so the backend never speaks to Apple directly and
+# holds no APNs key — that lives with EAS. See docs/reference/notifications.md.
+EXPO_PUSH_URL = os.environ.get(
+    "EXPO_PUSH_URL", "https://exp.host/--/api/v2/push/send"
+)
+
+# Optional. Expo accepts unauthenticated sends, but with an access token set it
+# will *reject* sends that don't carry it — which stops anyone who learns one of
+# your Expo push tokens from pushing to your users in your app's name. Worth
+# setting in production; leave unset in dev and tests.
+EXPO_ACCESS_TOKEN = os.environ.get("EXPO_ACCESS_TOKEN", "")
+
+# Cap on one drain, matching Expo's documented 100-message limit per request.
+EXPO_PUSH_BATCH_SIZE = env_int("EXPO_PUSH_BATCH_SIZE", 100)
+
+# How long a delivered PushOutbox row is kept as a log before the command prunes
+# it. Long enough to debug "why didn't my phone buzz", short enough not to grow.
+EXPO_PUSH_RETENTION_DAYS = env_int("EXPO_PUSH_RETENTION_DAYS", 14)

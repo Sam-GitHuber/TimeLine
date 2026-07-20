@@ -1,0 +1,27 @@
+# systemd timer: drain the push outbox every minute.
+# Enable: sudo systemctl enable --now send-pushes.timer
+#
+# WHY EVERY MINUTE: this is a latency/load trade, and a minute is the point
+# where both stay acceptable. A push that lands up to ~60s after the reply that
+# caused it still reads as "just happened" to a human; tightening to 15s would
+# wake a Python process ~5,760 times a day on a home server for a gain nobody
+# would notice. Loosening to 5 minutes, on the other hand, would make the app
+# feel broken next to the web notification, which is instant.
+#
+# Unlike the other timers here this is NOT Persistent=true: a missed run means
+# the box was off, and firing a backlog of stale pushes at people's phones on
+# boot is worse than skipping them. The rows stay queued and go out on the next
+# ordinary tick anyway, so nothing is lost — they're just not rushed out at once.
+[Unit]
+Description=Drain the TimeLine push outbox every minute
+
+[Timer]
+# First run a minute after boot (let docker come up), then every minute.
+OnBootSec=1min
+OnUnitActiveSec=1min
+# Keep runs from stacking if one is slow — systemd won't start a second while
+# the first is active, but this makes the intent explicit.
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

@@ -1342,3 +1342,62 @@ class DevicePushToken(models.Model):
 
     def __str__(self):
         return f"{self.user} · {self.platform} · {self.expo_token[:16]}…"
+
+
+class PushOutbox(models.Model):
+    """One notification queued for delivery as a push (Phase 9, Milestone D).
+
+    **Why an outbox rather than sending inline.** ``create_notification`` runs
+    inside ordinary web requests (someone posts a reply, someone reacts). Calling
+    Expo's HTTP API there would put a third-party network round-trip — and its
+    timeouts — on the critical path of a request that has nothing to do with
+    push. So the request only writes a row; ``manage.py send_pushes`` drains the
+    queue on a systemd timer (see ``deploy/send-pushes.timer``). A push failure
+    can never fail a user's action, and a send that dies halfway is retried
+    rather than lost, which a fire-and-forget thread could not promise.
+
+    **No device tokens are stored here.** The recipient's ``DevicePushToken``
+    rows are looked up at *send* time, not enqueue time, so a device that
+    registers (or re-registers with a rotated token) in between still gets the
+    push, and a device that logged out in between correctly doesn't.
+
+    **Deletion is the safety net.** The FK cascades from ``Notification``, which
+    itself cascades from its target — so deleting a post takes its notifications
+    and their queued pushes with it. A push for since-deleted content cannot
+    fire, which is the same guarantee the deep-link map relies on.
+
+    **Muted kinds never reach here.** ``create_notification`` returns ``None``
+    for a muted kind before any row exists, so the per-type
+    ``NotificationPreference`` gate covers push automatically. There is
+    deliberately no second mute check to keep in sync.
+
+    Rows are kept after sending (``sent_at`` set) as a short delivery log; the
+    send command prunes ones older than a fortnight.
+    """
+
+    notification = models.OneToOneField(
+        "Notification",
+        on_delete=models.CASCADE,
+        related_name="push",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Null until delivered. The command selects on `sent_at is null`, so this is
+    # the queue marker as well as the log.
+    sent_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    # Last failure, kept for diagnosis from the admin/shell. Truncated on write.
+    last_error = models.TextField(blank=True)
+
+    # Give up after this many failed drains, so one permanently-poisoned row
+    # can't be retried forever on every timer tick.
+    MAX_ATTEMPTS = 5
+
+    class Meta:
+        indexes = [
+            # The drain query: unsent rows, oldest first.
+            models.Index(fields=["sent_at", "created_at"]),
+        ]
+
+    def __str__(self):
+        state = "sent" if self.sent_at else f"queued (attempts={self.attempts})"
+        return f"push #{self.pk} · {state}"
