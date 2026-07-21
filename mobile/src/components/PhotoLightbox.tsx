@@ -17,7 +17,6 @@
  * acceptable because it only happens when someone deliberately opens a photo.
  */
 
-import { Image } from 'expo-image';
 import { useState } from 'react';
 import {
   FlatList,
@@ -36,8 +35,7 @@ import {
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
 
-import { BASE_URL } from '@/api';
-import { getCachedAccessToken } from '@/tokens';
+import { AuthedImage } from './AuthedImage';
 import type { PostImage } from '@/types';
 import { fontSize, radius, spacing } from '@/theme';
 
@@ -98,7 +96,6 @@ function Pager({
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(initialIndex);
 
-  const token = getCachedAccessToken();
   const count = images.length;
 
   // Which photo you've landed on, read off the scroll offset once the swipe has
@@ -128,15 +125,12 @@ function Pager({
         getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
         renderItem={({ item, index: i }) => (
           <View style={[styles.page, { width, height }]}>
-            <Image
-              // Same reason as `AuthedImage`: /media/ is behind forward_auth in
-              // production, so an unauthenticated GET renders a blank box. The
-              // header is only ever sent to our own host.
-              source={
-                token && item.image.startsWith(BASE_URL)
-                  ? { uri: item.image, headers: { Authorization: `Bearer ${token}` } }
-                  : { uri: item.image }
-              }
+            {/* `AuthedImage` because /media/ is behind forward_auth in
+                production — it attaches the bearer header (scoped to our host)
+                so the full-size photo isn't a blank 401 box. It loads `image`,
+                not the grid's `thumbnail`, matching the web. */}
+            <AuthedImage
+              uri={item.image}
               style={styles.photo}
               // `contain`, not `cover`: the point of opening a photo is to see
               // all of it, so letterboxing beats cropping here.
