@@ -258,12 +258,22 @@ def promote_participants(convo, when):
     breaking — without it, two pending people who aren't connected to each
     other could both get admitted in the same pass because each was checked
     against the *pre-promotion* active set.
+
+    **Ordered by ``id`` — invite order — and that matters.** When two pending
+    people are each connected to every active member but *not* to each other,
+    only one can be promoted; admitting either keeps the clique intact, so the
+    rule alone doesn't say which. Without an explicit order that choice fell to
+    whatever order Postgres happened to return rows in, making the outcome
+    genuinely nondeterministic (it surfaced as an intermittently failing test).
+    First-invited-wins is the defensible tie-break, and it's reproducible.
     """
     changed = True
     while changed:
         changed = False
         actives = active_participant_ids(convo)
-        pending = convo.participants.filter(status=PENDING_P, left_at__isnull=True)
+        pending = convo.participants.filter(
+            status=PENDING_P, left_at__isnull=True
+        ).order_by("id")
         for p in pending.select_related("user"):
             connected = connected_user_ids(p.user)
             if actives <= connected:  # connected to every active member
@@ -1837,7 +1847,15 @@ class ConversationListCreateView(generics.ListCreateAPIView):
             if not is_group_member(request.user, group.id):
                 raise NotFound()
 
-        invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
+        # Ordered by id so the Participant rows below are created in a stable
+        # order. `filter(id__in=...)` has no inherent ordering, and the row order
+        # decides who wins a promotion tie in `promote_participants` — leaving it
+        # to Postgres made that outcome nondeterministic.
+        invitees = list(
+            User.objects.filter(id__in=ids, is_active=True)
+            .exclude(id=request.user.id)
+            .order_by("id")
+        )
         if not invitees:
             # Every id was unknown/inactive/yourself — don't silently create a
             # "group chat of one" (the direct path 404s an unknown user; this is
