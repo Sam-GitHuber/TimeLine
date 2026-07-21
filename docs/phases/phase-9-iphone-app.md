@@ -495,16 +495,21 @@ All four behaviours passed:
 all**, so a forgotten mute silently drops real replies with nothing in the
 activity centre to catch up on. Un-mute immediately after any such test.
 
-**Known gap — we settle rows on Expo's *ticket*, never its *receipt*.**
-`send_pushes` reads the synchronous per-message ticket and marks the row
-delivered on `status == "ok"`. Expo's `getReceipts` endpoint is not called
-anywhere. An `ok` ticket means *Expo accepted and validated the message*, not
-that Apple pushed it to a handset. Consequences: a token that has gone stale
-(app deleted, token retired by Apple) fails **after** we have recorded success,
-and because `DeviceNotRegistered` is only handled when it arrives in the ticket,
-that device row is never cleaned up and accumulates forever. Acceptable for a
-single-maintainer beta with a handful of devices; worth closing before Phase 10,
-which doubles the token population by adding Android.
+**Gap found and closed the same day — we settled rows on Expo's *ticket*, never
+its *receipt*.** `send_pushes` read the synchronous per-message ticket and marked
+the row delivered on `status == "ok"`; `getReceipts` was never called. An `ok`
+ticket means *Expo accepted and validated the message*, not that Apple pushed it
+to a handset. So a token that went stale (app deleted, token retired by Apple)
+failed **after** we had recorded success, and because `DeviceNotRegistered` was
+only handled when it arrived in the ticket, that device row was never cleaned up
+and would accumulate forever.
+
+Now fixed: a `PushReceipt` row per accepted ticket, checked on a later run,
+reaping the devices its receipts condemn. See
+[`../reference/notifications.md`](../reference/notifications.md) for the model
+and the four receipt outcomes. **The general shape to watch for — the same one
+as the `delivered_tokens` finding above: an asynchronous outcome settled by the
+synchronous acknowledgement that preceded it.**
 
 **Mute semantics, raised by the mute test and decided the same day:** muting a
 kind means "don't record this at all", not the more conventional "don't buzz me,

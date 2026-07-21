@@ -581,3 +581,23 @@ EXPO_PUSH_MAX_ROWS = env_int("EXPO_PUSH_MAX_ROWS", 200)
 # How long a delivered PushOutbox row is kept as a log before the command prunes
 # it. Long enough to debug "why didn't my phone buzz", short enough not to grow.
 EXPO_PUSH_RETENTION_DAYS = env_int("EXPO_PUSH_RETENTION_DAYS", 14)
+
+# Delivery receipts. A *ticket* (the synchronous reply to a send) only says Expo
+# accepted the message; whether Apple/Google delivered it comes back later from
+# this endpoint. Checking it is what lets us reap tokens that died after
+# registration — see the PushReceipt model for why that matters.
+EXPO_RECEIPTS_URL = os.environ.get(
+    "EXPO_RECEIPTS_URL", "https://exp.host/--/api/v2/push/getReceipts"
+)
+
+#   CHECK_DELAY  — how long a ticket must age before we ask about it. Expo needs
+#                  time to reach APNs/FCM; asking immediately just returns "not
+#                  ready" and burns a request. 15 min is comfortably past that
+#                  without letting the 24h expiry window get tight.
+#   MAX_AGE      — Expo discards receipts after ~24h, so a ticket unanswered by
+#                  then never will be. Give up rather than ask forever.
+#   BATCH_SIZE   — ticket ids per getReceipts request. 1000 is Expo's documented
+#                  maximum.
+EXPO_RECEIPT_CHECK_DELAY_SECONDS = env_int("EXPO_RECEIPT_CHECK_DELAY_SECONDS", 900)
+EXPO_RECEIPT_MAX_AGE_HOURS = env_int("EXPO_RECEIPT_MAX_AGE_HOURS", 24)
+EXPO_RECEIPT_BATCH_SIZE = env_int("EXPO_RECEIPT_BATCH_SIZE", 1000)
