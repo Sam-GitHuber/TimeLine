@@ -114,7 +114,18 @@ unread, like `reaction`. See [events](events.md).
 
 1. **Never notify yourself** — no-op if `recipient == actor`.
 2. **Respect preferences** — a muted (mutable) kind produces **no row at all**,
-   which also means no future push.
+   which also means no future push. This is stronger than the convention
+   elsewhere, where muting silences the push but keeps the in-app record to catch
+   up on: here a muted event leaves **no trace in the activity centre either**.
+
+   **Deliberate, and reaffirmed 2026-07-21.** Mute is read as "I don't want to
+   know about this", not "tell me quietly" — so the event is never recorded. The
+   cost is accepted: a muted reply is discoverable only by opening the post
+   itself. The benefit is that the preference check sits at the top of
+   `create_notification`, so **every** downstream channel (activity centre, push,
+   and anything added later) inherits muting for free, with no second check that
+   could drift out of sync. Moving the check to the push enqueue would be the
+   change to make if this is ever revisited.
 3. **Never leak an action from someone you can't see** — for the content kinds
    (`post_reply`/`comment_reply`/`reaction`) the actor must be **connected** with
    the recipient, mirroring the per-viewer pruning of the [comment tree and
@@ -201,7 +212,7 @@ one code path covers both platforms, the backend holds **no APNs key** (that
 lives with EAS), and Phase 10 needs no schema change — only a different
 `platform` value.
 
-### Two models
+### Three models
 
 - **`DevicePushToken`** — `user`, `expo_token` (**globally unique**, not per
   user), `platform`, `created_at`, `last_seen`. One user may have several. The
@@ -219,6 +230,52 @@ lives with EAS), and Phase 10 needs no schema change — only a different
   Recording which tokens have been reached lets a retry target **only** the
   devices still outstanding. `DeviceNotRegistered` counts as reached — retrying
   can never help — so one uninstalled app can't hold a row in the queue.
+
+- **`PushReceipt`** — one accepted Expo **ticket** awaiting its delivery
+  **receipt**: `ticket_id`, `expo_token`, `created_at`. Its own table rather than
+  a field on `PushOutbox` because the grain is the *ticket*, not the
+  notification (one row fans out to N devices), because outbox rows are pruned
+  once delivered and would take unchecked tickets with them, and because the two
+  have unrelated lifecycles. `expo_token` is denormalised as a plain string on
+  purpose — an FK would cascade the receipt away with the very device it exists
+  to condemn.
+
+### Tickets vs receipts — and why both are needed
+
+Expo answers a send in two stages, and conflating them is the trap here:
+
+- A **ticket** comes back synchronously, one per message. `status: "ok"` means
+  Expo *accepted and validated* the message — nothing more.
+- A **receipt**, fetched later from `getReceipts`, is what says whether Apple or
+  Google actually delivered it.
+
+So an `ok` ticket is **not proof a handset buzzed**. The failure that makes this
+matter is silent: a token alive at registration but dead by delivery (app
+deleted, token retired by the OS) still produces an `ok` ticket. Settling on the
+ticket alone would record the row delivered, never show the push, and never clean
+up the `DevicePushToken` — so dead tokens would accumulate forever, each wasting
+a message on every future notification. Ticket-time `DeviceNotRegistered`
+handling catches only tokens already dead when we sent, which is the easy half.
+
+`send_pushes` therefore records a `PushReceipt` per accepted ticket and checks
+them on a later run. Four outcomes:
+
+| Receipt | Action |
+|---|---|
+| `ok` | Delivered. Drop the row. |
+| `DeviceNotRegistered` | **Delete the `DevicePushToken`** — the reason this pass exists. |
+| any other error | Log and drop. Nothing to retry: the message is gone and the outbox row was settled at ticket time. |
+| absent from the reply | Expo has no receipt *yet*. Leave it for a later run. |
+
+Timing is bounded at both ends (`EXPO_RECEIPT_*` in `settings.py`): a ticket is
+asked about after **15 min** (sooner just returns "not ready" and burns a
+request) and given up on after **24 h**, which is when Expo discards receipts.
+That expiry is load-bearing — without it `PushReceipt` would grow without bound,
+reproducing the exact leak it was built to fix.
+
+The check runs **outside the drain's transaction**, so a receipts failure can't
+roll back sends that already succeeded, and a send failure can't stop dead
+tokens being reaped.
 
 ### Why an outbox rather than sending inline
 

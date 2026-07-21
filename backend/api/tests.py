@@ -61,6 +61,7 @@ from .models import (
     Post,
     PostCommentRead,
     PushOutbox,
+    PushReceipt,
     Reaction,
     Report,
 )
@@ -2097,6 +2098,18 @@ class GroupChatViewTests(APITestCase):
         self.assertEqual({u["id"] for u in detail.data["must_connect_with"]}, {self.b.id})
         msgs = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
         self.assertEqual(msgs.status_code, 403)
+
+    def test_a_promotion_tie_is_broken_by_invite_order(self):
+        # b and c are each connected to a but not to each other, so exactly one
+        # can be promoted — admitting either keeps the clique intact, and the
+        # rule alone doesn't say which. Left unordered, Postgres decided, and
+        # this suite failed intermittently. First invited wins.
+        detail = self.client.get(f"/api/conversations/{self.convo_id}/")
+        by_user = {p["id"]: p["status"] for p in detail.data["participants"]}
+        first, second = sorted([self.b.id, self.c.id])
+
+        self.assertEqual(by_user[first], "active")
+        self.assertEqual(by_user[second], "pending")
 
     def test_pending_member_does_not_get_last_message_text_leaked(self):
         """Finding: the ``last_message`` preview must be interval-clipped to
@@ -5134,3 +5147,190 @@ class SendPushesCommandTests(APITestCase):
         self._run()
 
         self.assertEqual(PushOutbox.objects.count(), 1)
+
+    def test_an_accepted_ticket_is_recorded_for_a_receipt_check(self):
+        # "ok" only means Expo accepted the message. Keep the ticket id so the
+        # receipt pass can find out whether a phone actually got it.
+        self._queue()
+
+        self._run(payload={"data": [{"status": "ok", "id": "ticket-xyz"}]})
+
+        receipt = PushReceipt.objects.get()
+        self.assertEqual(receipt.ticket_id, "ticket-xyz")
+        self.assertEqual(receipt.expo_token, self.device.expo_token)
+
+    def test_a_rejected_ticket_records_no_receipt(self):
+        # Nothing was accepted, so there is nothing to follow up.
+        self._queue()
+
+        self._run(
+            payload={"data": [{"status": "error", "message": "boom"}]}
+        )
+
+        self.assertEqual(PushReceipt.objects.count(), 0)
+
+
+@override_settings(EXPO_RECEIPT_CHECK_DELAY_SECONDS=0)
+class PushReceiptCheckTests(APITestCase):
+    """Following up tickets with Expo's delivery receipts (Phase 9, D).
+
+    A ticket says Expo accepted the message; only the receipt says whether
+    Apple/Google delivered it. These pin the case that motivated the whole
+    pass — a token that was alive at send time and dead by delivery, which the
+    ticket-time ``DeviceNotRegistered`` check cannot catch.
+
+    ``EXPO_RECEIPT_CHECK_DELAY_SECONDS=0`` so freshly-made rows are eligible;
+    the delay itself is covered by its own test below.
+    """
+
+    def setUp(self):
+        self.me = make_user("receipt-recipient@example.com")
+        self.device = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[live]", platform="ios"
+        )
+        self.receipt = PushReceipt.objects.create(
+            ticket_id="ticket-1", expo_token=self.device.expo_token
+        )
+
+    def _run(self, payload):
+        from django.core.management import call_command
+
+        with mock.patch(
+            "api.management.commands.send_pushes.urllib.request.urlopen"
+        ) as urlopen:
+            urlopen.return_value = _FakeExpoResponse(payload)
+            call_command("send_pushes", verbosity=0)
+        return urlopen
+
+    def test_a_delivered_receipt_clears_the_row_and_keeps_the_device(self):
+        self._run({"data": {"ticket-1": {"status": "ok"}}})
+
+        self.assertEqual(PushReceipt.objects.count(), 0)
+        self.assertTrue(
+            DevicePushToken.objects.filter(pk=self.device.pk).exists()
+        )
+
+    def test_device_not_registered_in_a_receipt_reaps_the_token(self):
+        # The point of the whole receipts pass. At send time this token looked
+        # fine and produced an "ok" ticket; only the receipt reveals it is dead.
+        # Without this the row would sit there forever, wasting a message on
+        # every future notification.
+        self._run(
+            {
+                "data": {
+                    "ticket-1": {
+                        "status": "error",
+                        "message": "not registered",
+                        "details": {"error": "DeviceNotRegistered"},
+                    }
+                }
+            }
+        )
+
+        self.assertFalse(
+            DevicePushToken.objects.filter(pk=self.device.pk).exists()
+        )
+        self.assertEqual(PushReceipt.objects.count(), 0)
+
+    def test_another_error_drops_the_row_but_keeps_the_device(self):
+        # A transient/unknown failure is not evidence the token is dead, and
+        # there is nothing to retry — the message is already gone.
+        self._run(
+            {
+                "data": {
+                    "ticket-1": {
+                        "status": "error",
+                        "message": "message too big",
+                        "details": {"error": "MessageTooBig"},
+                    }
+                }
+            }
+        )
+
+        self.assertTrue(
+            DevicePushToken.objects.filter(pk=self.device.pk).exists()
+        )
+        self.assertEqual(PushReceipt.objects.count(), 0)
+
+    def test_a_ticket_expo_has_no_receipt_for_yet_is_left_alone(self):
+        # Expo answers only about ids it has receipts for. An absent id means
+        # "not ready", not "delivered" — keep it for a later run.
+        self._run({"data": {}})
+
+        self.assertTrue(
+            PushReceipt.objects.filter(pk=self.receipt.pk).exists()
+        )
+
+    @override_settings(EXPO_RECEIPT_CHECK_DELAY_SECONDS=900)
+    def test_a_ticket_younger_than_the_delay_is_not_asked_about(self):
+        # Asking immediately just returns "not ready" and burns a request.
+        urlopen = self._run({"data": {}})
+
+        self.assertFalse(urlopen.called)
+        self.assertTrue(
+            PushReceipt.objects.filter(pk=self.receipt.pk).exists()
+        )
+
+    def test_a_receipt_past_expos_window_is_given_up_on(self):
+        # Expo discards receipts after ~24h, so this one will never be answered.
+        # Reaping it is what stops PushReceipt growing without bound.
+        PushReceipt.objects.filter(pk=self.receipt.pk).update(
+            created_at=timezone.now() - timedelta(hours=25)
+        )
+
+        self._run({"data": {}})
+
+        self.assertEqual(PushReceipt.objects.count(), 0)
+
+    def test_a_failed_receipt_check_keeps_the_row_for_the_next_run(self):
+        from django.core.management import call_command
+
+        with mock.patch(
+            "api.management.commands.send_pushes.urllib.request.urlopen"
+        ) as urlopen:
+            urlopen.side_effect = OSError("expo unreachable")
+            call_command("send_pushes", verbosity=0)
+
+        self.assertTrue(
+            PushReceipt.objects.filter(pk=self.receipt.pk).exists()
+        )
+        self.assertTrue(
+            DevicePushToken.objects.filter(pk=self.device.pk).exists()
+        )
+
+    @override_settings(EXPO_RECEIPTS_URL="file:///etc/passwd")
+    def test_a_non_https_receipts_url_is_refused(self):
+        # Same reasoning as EXPO_PUSH_URL: urlopen honours file://, so a typo'd
+        # or hostile value could feed a local file to the receipt parser.
+        self._run({"data": {}})
+
+        self.assertTrue(
+            PushReceipt.objects.filter(pk=self.receipt.pk).exists()
+        )
+        self.assertTrue(
+            DevicePushToken.objects.filter(pk=self.device.pk).exists()
+        )
+
+    def test_a_receipt_check_failure_does_not_undo_a_send(self):
+        # The receipts pass runs outside the drain's transaction on purpose:
+        # failing to *ask* about an old ticket must not roll back a push that
+        # was just delivered successfully.
+        actor = make_user("receipt-actor@example.com", first_name="Ada")
+        make_connection(self.me, actor)
+        post = Post.objects.create(author=self.me, text="hello")
+        notifications.create_notification(
+            self.me, actor, Notification.Kind.POST_REPLY, post=post
+        )
+
+        from django.core.management import call_command
+
+        with mock.patch(
+            "api.management.commands.send_pushes.urllib.request.urlopen"
+        ) as urlopen:
+            urlopen.side_effect = [
+                _FakeExpoResponse(_ok_tickets(1)),  # the send succeeds
+                OSError("expo unreachable"),  # the receipt check does not
+            ]
+            call_command("send_pushes", verbosity=0)
+
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)

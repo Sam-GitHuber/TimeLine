@@ -450,6 +450,19 @@ Set `EXPO_ACCESS_TOKEN` in `.env.prod` at the same time — see
 anyone who learns one of your users' push tokens could push to them under your
 app's name.
 
+### Reading the log
+
+Each run prints what it did. `Sent 1, requeued 0.` means Expo **accepted** one
+message — not that a phone buzzed; that only shows up in a later run's receipt
+line, e.g. `Checked 1 receipt(s); reaped 0 dead device(s).` A non-zero "reaped"
+is normal and healthy: it's a device whose app was deleted or whose token was
+retired, being removed so we stop pushing into the void.
+
+Receipts are asked about ~15 min after the send, so a quiet gap between the two
+lines is expected. `Gave up on N receipt(s) past Expo's window.` means Expo never
+answered within its 24h retention — worth a glance if it's routine, since it
+suggests the timer isn't running often enough to catch its own tickets.
+
 ## Uptime monitoring
 
 You want to hear about an outage from a robot, not from a friend texting "is the

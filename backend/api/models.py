@@ -1409,3 +1409,53 @@ class PushOutbox(models.Model):
     def __str__(self):
         state = "sent" if self.sent_at else f"queued (attempts={self.attempts})"
         return f"push #{self.pk} · {state}"
+
+
+class PushReceipt(models.Model):
+    """An Expo ticket awaiting its delivery receipt (Phase 9, Milestone D).
+
+    **Why this exists: a ticket is not a delivery.** When we POST to Expo we get
+    back a *ticket* per message, synchronously. ``status: "ok"`` there means only
+    that Expo accepted and validated the message — it says nothing about whether
+    Apple or Google actually handed it to a handset. That answer arrives later,
+    from a separate ``getReceipts`` call.
+
+    Without checking receipts, the failure that matters is silent: a token that
+    has gone dead *since* registration (app deleted, token retired by the OS)
+    still yields an ``ok`` ticket, so the outbox row is recorded delivered, the
+    push is never seen, and the ``DevicePushToken`` is never cleaned up. Dead
+    tokens then accumulate forever, and every future notification wastes a
+    message on each one. ``DeviceNotRegistered`` *is* handled at ticket time, but
+    only for tokens already dead when we sent.
+
+    **Why a separate table rather than a field on ``PushOutbox``:**
+
+    - One outbox row fans out to N devices, so it holds N tickets — the natural
+      grain here is the ticket, not the notification.
+    - Outbox rows are pruned once delivered (``EXPO_PUSH_RETENTION_DAYS``), which
+      would take still-unchecked tickets with them.
+    - The two have unrelated lifecycles: receipts are checked after a short delay
+      and expire within a day, while outbox rows live a fortnight as a log.
+
+    **``expo_token`` is stored as a string, deliberately denormalised** rather
+    than an FK to ``DevicePushToken``. The row's whole purpose is to identify a
+    token that may need deleting, and an FK would cascade the receipt away with
+    the device it was meant to condemn.
+    """
+
+    # Expo's ticket id, the handle used to ask for the receipt later.
+    ticket_id = models.CharField(max_length=200, unique=True)
+    # Which device this ticket was for — the token to delete if the receipt
+    # comes back DeviceNotRegistered. See the class docstring for why it's a
+    # plain string.
+    expo_token = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            # The check query: oldest first, filtered on age.
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return f"receipt {self.ticket_id} · {self.expo_token[:20]}…"
