@@ -114,7 +114,13 @@ unread, like `reaction`. See [events](events.md).
 
 1. **Never notify yourself** — no-op if `recipient == actor`.
 2. **Respect preferences** — a muted (mutable) kind produces **no row at all**,
-   which also means no future push.
+   which also means no future push. Note this is stronger than the convention
+   elsewhere, where muting silences the push but keeps the in-app record to catch
+   up on: here a muted event leaves **no trace in the activity centre either**.
+   That fell out of putting the check at the top of `create_notification` (which
+   is what makes muting cover push for free, with no second check to keep in
+   sync) rather than being chosen on its merits — flagged as an open product
+   question during the Phase 9 Milestone D device pass.
 3. **Never leak an action from someone you can't see** — for the content kinds
    (`post_reply`/`comment_reply`/`reaction`) the actor must be **connected** with
    the recipient, mirroring the per-viewer pruning of the [comment tree and
@@ -219,6 +225,27 @@ lives with EAS), and Phase 10 needs no schema change — only a different
   Recording which tokens have been reached lets a retry target **only** the
   devices still outstanding. `DeviceNotRegistered` counts as reached — retrying
   can never help — so one uninstalled app can't hold a row in the queue.
+
+### Known limitation — tickets are read, receipts are not
+
+`send_pushes` settles a row on Expo's **ticket**: the synchronous per-message
+reply to the send. Expo's asynchronous **receipts** endpoint (`getReceipts`) is
+deliberately not called. A ticket says *Expo accepted and validated this
+message*; only the receipt says whether Apple (or Google) actually delivered it.
+
+Two consequences to know before relying on the delivery log:
+
+- A row marked delivered is **not proof the handset buzzed** — only that the
+  message got as far as Expo.
+- `DeviceNotRegistered` is handled when it arrives in a *ticket*, but a token
+  that goes stale after acceptance (app deleted, token retired) surfaces only in
+  the receipt. That `DevicePushToken` row is therefore never cleaned up, and dead
+  tokens accumulate.
+
+Tolerable at beta scale (a handful of devices, and a dead token wastes one
+message per notification). It gets worse with device count, so it wants closing
+before Android lands in Phase 10 — poll receipts on a later tick and delete the
+device rows they condemn.
 
 ### Why an outbox rather than sending inline
 
