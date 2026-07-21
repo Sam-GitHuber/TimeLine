@@ -185,6 +185,40 @@ counts exclude your own messages.
   end of the timeline reads like every other entry. The compose avatar gets no
   accent hover ring — that rule is scoped to `.tl-entry`, so `.tl-compose` reuses
   the class and gets a plain bead for free.
+- **On mobile the compose box aligns to the spine in two bands** (`ComposeBox.tsx`),
+  because the eye pairs each spine element with whatever sits beside it: the word
+  **"now"** is level with the pulsing node (the node *is* now), and the **text
+  box** is level with your avatar bead (that's you, about to write). Both centres
+  are computed from the constants the spine column is built from rather than
+  nudged by hand, so changing the node size or the bead gap moves the body with
+  them. `BEAD_GAP` is deliberately wider than the node needs — it's what keeps
+  the two pairs reading as two statements rather than one stack.
+
+### Photo layout & the full-screen viewer
+
+Both clients follow the same two rules, because both hit the same problem: a
+post may carry up to ten photos, and rendering them full-width each turns one
+entry into screens of scrolling, which buries the rest of the timeline.
+
+- **One photo keeps its natural shape; several go into a two-column square
+  grid.** The grid is *navigation* — a compact index of what's in the post — and
+  is deliberately not where a photo gets looked at. Cost per post is then bounded
+  no matter how many photos it has.
+- **Tapping/clicking a photo opens a full-screen viewer** at that photo, loading
+  the full-size `image` rather than the grid's `thumbnail`. On the web
+  (`Lightbox.jsx`) you flip with arrow buttons or ← / →, and Esc / the × / the
+  backdrop close it. On mobile (`PhotoLightbox.tsx`) you **swipe** — arrows mean
+  nothing on a phone — with a × top-right and an `n / total` counter.
+
+Two things worth knowing about the mobile viewer:
+
+- It mounts a **`SafeAreaProvider` of its own inside the `Modal`**. React Native
+  renders a Modal in a separate native view hierarchy, so it sits outside any
+  provider mounted around the app; nesting is the documented fix, and it also
+  means no screen has to wrap itself for the chrome to clear the notch.
+- **Photos sit outside the card's own `Pressable`** (as the reaction chips
+  already did). Nested pressables make "did I open the post or the photo?" a
+  matter of touch-responder luck; side by side, the two targets can't collide.
 
 ### The imaging pipeline (`api/imaging.py`)
 

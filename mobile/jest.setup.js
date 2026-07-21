@@ -55,6 +55,17 @@ jest.mock('expo-notifications', () => ({
   useLastNotificationResponse: jest.fn(() => null),
 }));
 
+// `react-native-safe-area-context` measures the real notch/home-indicator insets
+// through a native view. Under Node there's nothing to measure, so its provider
+// renders nothing and any component inside it (the photo lightbox) disappears
+// from the tree. The library ships this mock for exactly that — it reports a
+// fixed iPhone-ish frame so children render.
+// (`.default` because the mock is published as a default-exported object, while
+// the real module is imported by name.)
+jest.mock('react-native-safe-area-context', () =>
+  require('react-native-safe-area-context/jest/mock').default
+);
+
 // Reset between tests so a token stored by one can't leak into the next.
 beforeEach(() => {
   const SecureStore = require('expo-secure-store');
