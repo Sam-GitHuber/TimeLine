@@ -17,11 +17,12 @@
  */
 
 import { router } from 'expo-router';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
+import { PhotoLightbox } from './PhotoLightbox';
 import { ReactionBar } from './ReactionBar';
 import { SPINE_COLUMN, Spine } from './timeline';
 import type { Post } from '@/types';
@@ -62,6 +63,17 @@ function Body({ onPress, children }: { onPress?: () => void; children: ReactNode
 const BEAD = 24; // matches Avatar size="xs"
 const BEAD_BORDER = 3;
 
+/**
+ * The gutter between photos in a multi-photo grid.
+ *
+ * Applied as padding *inside* each cell and cancelled by a negative margin on
+ * the grid, rather than as a `gap`: two 50%-wide cells plus a gap add up to more
+ * than the row, so a gap would push the second column off the screen. This is
+ * the standard percentage-grid gutter, and it keeps the outer edges flush with
+ * the rest of the card.
+ */
+const PHOTO_GUTTER = spacing.sm;
+
 export function PostCard({
   post,
   /** False on the permalink screen, where there's nowhere further to go. */
@@ -71,6 +83,10 @@ export function PostCard({
   interactive?: boolean;
 }) {
   const { time, meridiem } = formatClockTime(post.created_at);
+  /** Which photo the full-screen viewer is open on, or `null` when it's closed. */
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  /** Several photos get the compact square grid; a lone one keeps its shape. */
+  const multiple = post.images.length > 1;
 
   const openPost = () => router.push(`/post/${post.id}`);
   // The author's bead and name go to their profile — a separate destination
@@ -129,23 +145,54 @@ export function PostCard({
           ) : null}
 
           {post.text ? <Text style={styles.text}>{post.text}</Text> : null}
-
-          {post.images.map((image) => (
-            <AuthedImage
-              key={image.id}
-              uri={image.thumbnail}
-              style={[
-                styles.photo,
-                // Reserve the right height from the dimensions the API sends, so
-                // the feed doesn't reflow as photos load in.
-                { aspectRatio: image.width && image.height ? image.width / image.height : 1 },
-              ]}
-              contentFit="cover"
-              transition={150}
-              accessibilityLabel={`Photo from ${post.author.display_name}`}
-            />
-          ))}
         </Body>
+
+        {/* Photos sit *outside* the body Pressable, for the same reason the
+            reaction chips do: tapping a photo opens the viewer, and nesting it
+            inside the card's own Pressable makes which one wins a matter of
+            touch-responder luck. Out here the two targets can't collide. */}
+        {post.images.length > 0 ? (
+          <View style={[styles.grid, multiple && styles.gridMultiple]}>
+            {post.images.map((image, index) => (
+              <Pressable
+                key={image.id}
+                style={multiple ? styles.cellMultiple : styles.cellSingle}
+                onPress={() => setLightboxIndex(index)}
+                accessibilityRole="button"
+                accessibilityLabel={`View photo ${index + 1} of ${post.images.length} from ${post.author.display_name}`}
+              >
+                <AuthedImage
+                  uri={image.thumbnail}
+                  style={[
+                    styles.photo,
+                    multiple
+                      ? // Several photos share a uniform square grid, so a post
+                        // with ten of them costs a predictable, bounded amount
+                        // of the timeline instead of screens of scrolling.
+                        styles.photoGrid
+                      : // A lone photo keeps its natural shape, with the height
+                        // reserved from the dimensions the API sends so the feed
+                        // doesn't reflow as it loads in.
+                        {
+                          aspectRatio:
+                            image.width && image.height ? image.width / image.height : 1,
+                        },
+                  ]}
+                  contentFit="cover"
+                  transition={150}
+                />
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+
+        {lightboxIndex !== null ? (
+          <PhotoLightbox
+            images={post.images}
+            initialIndex={lightboxIndex}
+            onClose={() => setLightboxIndex(null)}
+          />
+        ) : null}
 
         {/* The comments link is handed to `ReactionBar` rather than rendered
             here, because where it belongs depends on whether there are any
@@ -237,12 +284,30 @@ const styles = StyleSheet.create({
     lineHeight: 23,
     marginTop: spacing.sm,
   },
+  grid: { marginTop: spacing.sm },
+  gridMultiple: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    // Cancels the gutter each cell pads itself with, so the outer photos stay
+    // flush with the text above them instead of being inset by half a gutter —
+    // and the last row doesn't leave a stray gutter above the reaction bar.
+    marginHorizontal: -PHOTO_GUTTER / 2,
+    marginBottom: -PHOTO_GUTTER,
+  },
+  cellSingle: { width: '100%' },
+  cellMultiple: {
+    // Exactly two columns — the whole point of the grid. An odd last photo
+    // therefore sits half-width rather than stretching back out to full.
+    width: '50%',
+    paddingHorizontal: PHOTO_GUTTER / 2,
+    paddingBottom: PHOTO_GUTTER,
+  },
   photo: {
     width: '100%',
     borderRadius: radius.md,
-    marginTop: spacing.sm,
     backgroundColor: colors.line,
   },
+  photoGrid: { aspectRatio: 1 },
   // The reaction chips' styles moved to `ReactionBar` with the rest of them —
   // one owner, so the feed and the comment thread can't drift apart.
   // No margin of its own: inline it must sit on the reaction row's centre line,

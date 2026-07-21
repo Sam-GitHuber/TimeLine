@@ -23,11 +23,23 @@ notifications, events), plus the ops runbooks `docs/deploy.md` and
 `docs/backup-restore.md`. Read the relevant one before changing a feature; it has
 the data model, endpoints, and the *why*.
 
-**Next up: Phase 9 (iPhone app).** Remaining planned work (9 iPhone → 13 short
-video clips) lives as forward-looking plans in `docs/phases/`. The Phase 8
-notification API was built push-ready (and the Phase 8b event kinds reuse it), so
-the app phases add only the delivery channel (APNs/FCM), not a new notification
-concept.
+**Phase 9 (iPhone app) is in progress — Milestones A–D are done.** The Expo app
+in `mobile/` logs in against the real backend (bearer tokens + silent refresh),
+and has the feed, compose, post detail, profiles, and **working push
+notifications** — verified end to end on a real iPhone on 2026-07-21 (delivery,
+cold-start delivery, deep-link taps, and preference gating all confirmed with a
+real second person).
+
+**Next: Milestone E (parity fill-in)** — budget ~40% of the phase here. Four
+independent chunks, in order: **E1 connections/people** (first, because it gates
+real multi-user testing), E2 messaging, E3 groups + events, E4 settings + safety
+(**report + block are App Review blockers** — don't leave them to the end). Then
+F: TestFlight.
+
+Push specifics live in [`docs/reference/notifications.md`](docs/reference/notifications.md);
+everything else Phase 9 is still in `docs/phases/phase-9-iphone-app.md`, which
+gets distilled into reference docs and deleted when the phase ships. Later phases
+(10 Android → 13 short video clips) remain sketches in `docs/phases/`.
 
 ## Before doing any work
 

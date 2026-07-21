@@ -43,22 +43,50 @@ import type { User } from '@/types';
 const NODE_SIZE = 12;
 const NODE_TOP = 10;
 
-/**
- * Where your avatar sits, and therefore where the "now" label has to line up.
- *
- * The bead hangs below the "now" tip, so the body can't just start at the top of
- * the row — its first line would float above the avatar and read as unrelated to
- * it. Derived rather than hard-coded so the two stay locked together if any of
- * the spacing changes.
- */
 const BEAD = 24; // Avatar size="xs"
 const BEAD_BORDER = 3; // surface-coloured halo
-const BEAD_GAP = 8; // gap between the tip and the bead (spacing.sm)
-/** Top of the body's first line box, so its centre lands on the bead's. */
-const BODY_TOP = NODE_TOP + NODE_SIZE + BEAD_GAP + BEAD_BORDER;
+/**
+ * Gap between the "now" tip and your avatar bead.
+ *
+ * Wider than it needs to be to merely clear the node: "now" and the node are one
+ * statement about the present, and your avatar and the text box are a separate
+ * one about writing. Crowding them makes the four read as a single stack.
+ */
+const BEAD_GAP = spacing.md + spacing.xs;
 
 /** Collapsed height of the text box. */
 const INPUT_HEIGHT = 44;
+
+/*
+ * How the body column lines up with the spine.
+ *
+ * The spine column has two things on it, and the body has two things beside it,
+ * and each pair has to read as one unit — the eye pairs them up whether or not
+ * the layout does:
+ *
+ *   ● now node   ←→  the word "now"    (this *is* now: the live tip of the line)
+ *   ◍ your bead  ←→  the text box      (this is you, about to write)
+ *
+ * Nothing lines two separate columns up automatically, so rather than nudging
+ * paddings until it looks right, both centres are computed from the same
+ * constants the spine column is built from. Change any of those and the body
+ * follows.
+ */
+const NODE_CENTRE = NODE_TOP + NODE_SIZE / 2;
+const BEAD_CENTRE = NODE_TOP + NODE_SIZE + BEAD_GAP + BEAD_BORDER + BEAD / 2;
+/**
+ * "now" is centred inside a band starting at the top of the body, so the band
+ * has to be twice the node's centre for the label to land on it.
+ */
+const NOW_BAND = 2 * NODE_CENTRE;
+/** Top of the text box, so its centre lands on the avatar's. */
+const INPUT_TOP = BEAD_CENTRE - INPUT_HEIGHT / 2;
+/**
+ * What's left between the "now" band and the box. Only ever positive because
+ * `BEAD_GAP` holds the bead well clear of the node — if you shrink that gap far
+ * enough this goes negative and the two bands overlap.
+ */
+const INPUT_GAP = INPUT_TOP - NOW_BAND;
 
 /** Mirrors `POST_MAX_LENGTH` / `MAX_IMAGES_PER_POST` in the backend. */
 const MAX_LENGTH = 5000;
@@ -153,8 +181,11 @@ export function ComposeBox({
       <View style={styles.body}>
         {/* Where a post shows its clock time, the composer says "now" — the
             live end of the timeline, labelled the same way as every entry
-            below it. */}
-        <Text style={styles.now}>now</Text>
+            below it. It sits level with the pulsing node, because the node is
+            what "now" is naming. */}
+        <View style={styles.nowBand}>
+          <Text style={styles.now}>now</Text>
+        </View>
 
         <TextInput
           accessibilityLabel="What's happening?"
@@ -240,13 +271,13 @@ const styles = StyleSheet.create({
     // shows up as a break in the line right under the compose box.
     paddingBottom: spacing.lg,
   },
+  // A fixed band centred on the node, so the label's own line height can't
+  // shift the text box out of line with the avatar below it.
+  nowBand: { height: NOW_BAND, justifyContent: 'center' },
   now: {
     fontSize: fontSize.sm,
     color: colors.accent,
     fontWeight: '600',
-    // The same bead-height line box the post header uses, so "now" sits level
-    // with your avatar exactly as a post's time sits level with the author's.
-    lineHeight: BEAD,
   },
   spineColumn: { width: SPINE_COLUMN, alignItems: 'center', paddingTop: NODE_TOP },
   bead: {
@@ -258,12 +289,9 @@ const styles = StyleSheet.create({
   body: {
     flex: 1,
     paddingLeft: spacing.sm,
-    // Drop the body so its first line sits level with your avatar, the same way
-    // a post's time and author name line up with their bead.
-    paddingTop: BODY_TOP,
   },
   input: {
-    marginTop: spacing.xs,
+    marginTop: INPUT_GAP,
     minHeight: INPUT_HEIGHT,
     backgroundColor: colors.raised,
     borderWidth: 1,
