@@ -24,7 +24,21 @@ from uuid import uuid4
 
 from django.core.files.base import ContentFile
 from PIL import Image, ImageOps, UnidentifiedImageError
+from pillow_heif import register_heif_opener
 from rest_framework import serializers
+
+# Teach Pillow to decode HEIC/HEIF — the default photo format on iPhones, and so
+# the format most of this app's actual users' photos arrive in (issue #41).
+#
+# Done at import of *this* module rather than in an AppConfig.ready(): every code
+# path that decodes an upload goes through here, so registering here means the
+# opener cannot be missing at the moment it's needed, whatever the app-loading
+# order. It's idempotent and cheap.
+#
+# Nothing else changes downstream — _strip_and_encode re-encodes every accepted
+# image to JPEG/PNG from raw pixels, so a HEIC is stored as an ordinary JPEG with
+# its EXIF (including GPS) gone, exactly like any other upload.
+register_heif_opener()
 
 # Hard cap on a single uploaded file. This is a DoS/memory guard only — it stops
 # a client streaming an unbounded file into Pillow — NOT a storage limit. Every
@@ -42,7 +56,14 @@ MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 30 MB
 # embedded second frame) — Pillow reports their format as "MPO", not "JPEG". It's
 # JPEG-based and safe: _strip_and_encode flattens it to a plain JPEG (primary
 # frame only). Without it, a normal phone photo gets wrongly rejected.
-ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF", "MPO"}
+# HEIF covers .heic/.heif from iPhones (Pillow reports both as "HEIF" once
+# pillow-heif is registered above).
+ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF", "MPO", "HEIF"}
+
+# What the allow-list is called when we have to explain it to a person. Kept
+# beside ALLOWED_FORMATS so the two can't drift — an error message listing a
+# format we no longer accept is worse than no list at all.
+SUPPORTED_FORMATS_HUMAN = "JPEG, PNG, WebP, GIF or HEIC"
 
 # Cap photos per post — bounds the work one request can trigger and the size of
 # a feed payload.
@@ -129,15 +150,42 @@ def _load_verified(upload):
         img = Image.open(upload)
         img.load()
     except (UnidentifiedImageError, OSError, ValueError):
+        # We genuinely don't know what this was — Pillow couldn't identify it —
+        # so the message says what we *can* take rather than guessing. (This is
+        # also where SVG lands: Pillow can't open it, which is the point.)
         raise serializers.ValidationError(
-            "That file isn't a valid image."
+            f"That file isn't an image we can read. Use {SUPPORTED_FORMATS_HUMAN}."
         ) from None
 
     if img.format not in ALLOWED_FORMATS:
+        # Name the format we detected. "Unsupported image type" on its own tells
+        # someone nothing about which of their photos to convert, or to what.
         raise serializers.ValidationError(
-            "Unsupported image type. Use JPEG, PNG, WebP or GIF."
+            f"{img.format} images aren't supported. Use {SUPPORTED_FORMATS_HUMAN}."
         )
     return img
+
+
+def _apply_orientation(img):
+    """Bake the camera's rotation flag into the pixels.
+
+    Phones don't rotate the pixels when you turn the handset — they store the
+    photo as the sensor read it plus an EXIF *orientation* flag saying which way
+    up it goes. Since we strip metadata, that flag has to be applied first or the
+    photo is stored (and shown) on its side, irreversibly.
+
+    **HEIC needs a nudge to get here.** pillow-heif's Pillow plugin resets the
+    EXIF orientation to 1 on decode and stashes the real value in
+    ``info["original_orientation"]`` — but it does *not* rotate the pixels on
+    this path (it does on its own ``HeifFile.to_pillow()`` path, which is what
+    makes the omission easy to miss). So ``exif_transpose`` alone sees an upright
+    image and does nothing, and every portrait iPhone photo lands sideways. Put
+    the stashed value back and the one shared code path handles it.
+    """
+    stashed = img.info.get("original_orientation")
+    if stashed is not None and stashed != 1:
+        img.getexif()[0x0112] = stashed  # 0x0112 = EXIF Orientation
+    return ImageOps.exif_transpose(img)
 
 
 def _strip_and_encode(img):
@@ -177,7 +225,7 @@ def process_image(upload, *, max_edge, thumb_edge, thumb_square=False):
     img = _load_verified(upload)
     # Honour the camera's rotation flag before we strip metadata, so a portrait
     # photo isn't stored on its side.
-    img = ImageOps.exif_transpose(img)
+    img = _apply_orientation(img)
 
     original = img.copy()
     original.thumbnail((max_edge, max_edge), Image.LANCZOS)  # only ever shrinks

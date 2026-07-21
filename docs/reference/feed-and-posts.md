@@ -227,11 +227,32 @@ All image handling — post photos *and* avatars — funnels through
 
 - **Validate by decoding, not by extension/Content-Type.** A file is accepted
   only if Pillow opens it *and* its format is in a raster allow-list
-  (JPEG/PNG/WebP/GIF). **SVG is rejected** — a script-bearing vector would be
-  stored XSS.
+  (JPEG/PNG/WebP/GIF/MPO/HEIF). **SVG is rejected** — a script-bearing vector
+  would be stored XSS. Rejections name the detected format and the accepted ones,
+  so "which photo, and convert it to what?" is answerable.
 - **EXIF (including GPS) is stripped** by re-encoding from raw pixels, after
   applying the orientation tag so photos aren't stored sideways. Phone photos leak
   home location otherwise — a real privacy win, covered by a test.
+- **HEIC/HEIF is accepted and transcoded** (issue #41). It's the *default* iPhone
+  photo format, so rejecting it turned away the photos this app's actual audience
+  takes — and because iOS only *sometimes* converts to JPEG on the way out
+  (depending on browser, pick method, and the Camera "Most Compatible" setting),
+  it presented as an intermittent "some of my photos won't upload". `pillow-heif`
+  registers a HEIF opener at import of `imaging.py` — not in `AppConfig.ready()`,
+  so it cannot be missing whatever the app-loading order. Everything downstream is
+  unchanged: a HEIC is stored as an ordinary JPEG with metadata gone, which also
+  means browsers that can't display HEIC (most) still render it. The prebuilt
+  manylinux wheels bundle libheif, so **the backend image needs no apt packages**.
+
+  > **Trap, if you touch orientation.** pillow-heif's Pillow plugin resets the
+  > EXIF orientation to 1 on decode and stashes the real value in
+  > `info["original_orientation"]` — *without* rotating the pixels. (Its own
+  > `HeifFile.to_pillow()` path does rotate, which is what makes this easy to
+  > miss.) So `ImageOps.exif_transpose` alone sees an upright image and does
+  > nothing, and every portrait iPhone photo is stored sideways — permanently,
+  > since we strip the flag. `_apply_orientation` puts the stashed value back
+  > before transposing, so both formats share one code path. Both are tested.
+
 - **Bounded:** ≤30 MB per input file, ≤10 photos per post; originals downscaled
   (long edge 2048), thumbnails generated (512 post / 128 square avatar).
   Processing is **synchronous** — fine at family scale; move to Celery if volume

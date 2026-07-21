@@ -25,6 +25,21 @@ dependencies = [
     # (Phase 4). We decode every upload with it rather than trusting the
     # extension, and re-encode to strip EXIF (incl. GPS) — see api/imaging.py.
     "pillow>=11.0",
+    # pillow-heif: teaches Pillow to decode HEIC/HEIF, the *default* photo format
+    # on iPhones. Without it every stock iPhone photo that reaches us undecoded
+    # is rejected as "not a valid image" (issue #41) — and whether it reaches us
+    # as HEIC depends on the browser and the phone's camera setting, so it shows
+    # up as a maddening "some of my photos won't upload".
+    #
+    # It ships prebuilt manylinux/macOS wheels with libheif bundled, so the
+    # backend image needs no apt packages — verified against the cp312
+    # manylinux_2_28 wheels our python3.12-bookworm-slim base resolves to.
+    #
+    # Licensing: pillow-heif is Apache-2.0 and bundles libheif (LGPL-3.0) plus
+    # HEVC codec libraries. We only ever *decode*, server-side, for a private
+    # family app — the same footing as any Linux photo viewer. Worth revisiting
+    # if this ever becomes a commercial distribution.
+    "pillow-heif>=1.4",
     "psycopg[binary]>=3.3.4",
     "requests>=2.34.2",
 ]
