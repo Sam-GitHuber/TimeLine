@@ -244,14 +244,18 @@ All image handling — post photos *and* avatars — funnels through
   means browsers that can't display HEIC (most) still render it. The prebuilt
   manylinux wheels bundle libheif, so **the backend image needs no apt packages**.
 
-  > **Trap, if you touch orientation.** pillow-heif's Pillow plugin resets the
-  > EXIF orientation to 1 on decode and stashes the real value in
-  > `info["original_orientation"]` — *without* rotating the pixels. (Its own
-  > `HeifFile.to_pillow()` path does rotate, which is what makes this easy to
-  > miss.) So `ImageOps.exif_transpose` alone sees an upright image and does
-  > nothing, and every portrait iPhone photo is stored sideways — permanently,
-  > since we strip the flag. `_apply_orientation` puts the stashed value back
-  > before transposing, so both formats share one code path. Both are tested.
+  > **Trap, if you touch orientation.** A real iPhone HEIC is decoded *upright*:
+  > pillow-heif/libheif bake the camera's rotation into the pixels on open and
+  > reset the EXIF orientation to 1. Plain `ImageOps.exif_transpose` is therefore
+  > exactly right for both formats — it rotates a JPEG (whose pixels are still in
+  > sensor orientation) and correctly no-ops on an already-upright HEIC. **Do not**
+  > re-apply `info["original_orientation"]`: on a real iPhone photo that stashed
+  > flag's rotation is already in the pixels, so re-applying it rotates a second
+  > time and stores every portrait sideways — permanently, since we strip the flag.
+  > This actually shipped once (a `_apply_orientation` helper did exactly that) and
+  > hid behind a green test, because a HEIC written by pillow-heif's *own* encoder
+  > leaves its pixels un-rotated — unlike any real camera. The regression test now
+  > uses an already-upright fixture and asserts the dimensions come out unchanged.
 
 - **Bounded:** ≤30 MB per input file, ≤10 photos per post; originals downscaled
   (long edge 2048), thumbnails generated (512 post / 128 square avatar).
