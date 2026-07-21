@@ -506,12 +506,14 @@ that device row is never cleaned up and accumulates forever. Acceptable for a
 single-maintainer beta with a handful of devices; worth closing before Phase 10,
 which doubles the token population by adding Android.
 
-**Open product question raised by the mute test (not yet decided):** the
-preference check sits at the top of `create_notification`, so muting means "don't
-record this" rather than the more conventional "don't buzz me, but keep it
-in-app to catch up on later". That fell out of the implementation rather than
-being chosen. Changing it later gets more expensive once people have muted things
-and formed expectations — see [`../reference/notifications.md`](../reference/notifications.md).
+**Mute semantics, raised by the mute test and decided the same day:** muting a
+kind means "don't record this at all", not the more conventional "don't buzz me,
+but keep it in-app". Raised because it fell out of where the preference check
+sits rather than having been chosen; **reviewed and kept** — mute is read as "I
+don't want to know", and keeping the check at the top of `create_notification`
+means every channel added later inherits muting for free rather than needing its
+own check. Written up properly in
+[`../reference/notifications.md`](../reference/notifications.md).
 
 **2026-07-20 — Milestone D review: three findings worth keeping.**
 

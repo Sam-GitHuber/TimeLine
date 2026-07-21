@@ -114,13 +114,18 @@ unread, like `reaction`. See [events](events.md).
 
 1. **Never notify yourself** — no-op if `recipient == actor`.
 2. **Respect preferences** — a muted (mutable) kind produces **no row at all**,
-   which also means no future push. Note this is stronger than the convention
+   which also means no future push. This is stronger than the convention
    elsewhere, where muting silences the push but keeps the in-app record to catch
    up on: here a muted event leaves **no trace in the activity centre either**.
-   That fell out of putting the check at the top of `create_notification` (which
-   is what makes muting cover push for free, with no second check to keep in
-   sync) rather than being chosen on its merits — flagged as an open product
-   question during the Phase 9 Milestone D device pass.
+
+   **Deliberate, and reaffirmed 2026-07-21.** Mute is read as "I don't want to
+   know about this", not "tell me quietly" — so the event is never recorded. The
+   cost is accepted: a muted reply is discoverable only by opening the post
+   itself. The benefit is that the preference check sits at the top of
+   `create_notification`, so **every** downstream channel (activity centre, push,
+   and anything added later) inherits muting for free, with no second check that
+   could drift out of sync. Moving the check to the push enqueue would be the
+   change to make if this is ever revisited.
 3. **Never leak an action from someone you can't see** — for the content kinds
    (`post_reply`/`comment_reply`/`reaction`) the actor must be **connected** with
    the recipient, mirroring the per-viewer pruning of the [comment tree and
