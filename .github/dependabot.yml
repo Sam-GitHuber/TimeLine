@@ -25,6 +25,19 @@ updates:
     groups:
       frontend-dependencies:
         patterns: ["*"]
+    # ESLint 10 is not adoptable yet: eslint-plugin-react's newest release
+    # (7.37.5) still declares `peer eslint@"... || ^9.7"`, so `npm ci` fails
+    # ERESOLVE on any tree containing both. Dependabot grouped that major in
+    # with harmless patches, turning the whole weekly digest red (PR #107).
+    # Ignoring only the *major* keeps 9.x patches and security fixes flowing.
+    # Remove this once eslint-plugin-react ships ESLint 10 support — that same
+    # release should also drop the vulnerable minimatch@3 → brace-expansion
+    # chain that the `overrides` in frontend/package.json currently pins.
+    ignore:
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@eslint/js"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
