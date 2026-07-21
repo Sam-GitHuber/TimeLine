@@ -3,9 +3,9 @@
 **Status:** in progress — **Milestone A done** (PR #91), **Milestone B done**
 (PR #97: Expo spine — auth, token storage, silent refresh, login/logout, CI).
 **Milestone C done** (PRs #98–#101), split one PR per screen area as the PR
-strategy below called for. **Next: Milestone D (push)** — the Apple Developer
-enrolment it depends on is now live (confirmed active 2026-07-20, see the notes
-log). The four screen areas:
+strategy below called for. **Milestone D done** (PR #103, device pass verified
+2026-07-21 — see the notes log). **Next: Milestone E (parity fill-in)**, starting
+with E1 (connections/people). The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -469,6 +469,51 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-21 — Milestone D device pass: push works end to end on real hardware.**
+Verified against `https://your-timeline.net` with a connected friend generating
+real `post_reply` events, on the 2026-07-20 dev build (native config was last
+touched by D1, so D2/D3 being pure JS meant no rebuild was needed — worth
+remembering, a dev build only needs redoing when native config or deps change).
+
+All four behaviours passed:
+
+- **Warm delivery + tap** — buzzed, and the tap opened **directly on the correct
+  post**, no feed flash. So routing resolves before first paint rather than
+  after mount.
+- **Cold start** — force-quit the app entirely, second comment buzzed, tap again
+  landed straight on the post. This was the path the plan flagged as easiest to
+  get wrong, and it needed its own pass: a buzz proves delivery, not the deep
+  link, and cold start uses a different Expo API from the warm listener.
+- **Preference gating** — `post_reply` muted on **web** `/settings` (the app has
+  no prefs UI until E4; muting in a browser and seeing the phone stay silent is
+  the better test anyway, since it proves the gate is server-side rather than the
+  client declining to display something it already received). Third comment
+  produced nothing.
+
+**Trap this test leaves behind:** muting a kind creates **no notification row at
+all**, so a forgotten mute silently drops real replies with nothing in the
+activity centre to catch up on. Un-mute immediately after any such test.
+
+**Known gap — we settle rows on Expo's *ticket*, never its *receipt*.**
+`send_pushes` reads the synchronous per-message ticket and marks the row
+delivered on `status == "ok"`. Expo's `getReceipts` endpoint is not called
+anywhere. An `ok` ticket means *Expo accepted and validated the message*, not
+that Apple pushed it to a handset. Consequences: a token that has gone stale
+(app deleted, token retired by Apple) fails **after** we have recorded success,
+and because `DeviceNotRegistered` is only handled when it arrives in the ticket,
+that device row is never cleaned up and accumulates forever. Acceptable for a
+single-maintainer beta with a handful of devices; worth closing before Phase 10,
+which doubles the token population by adding Android.
+
+**Mute semantics, raised by the mute test and decided the same day:** muting a
+kind means "don't record this at all", not the more conventional "don't buzz me,
+but keep it in-app". Raised because it fell out of where the preference check
+sits rather than having been chosen; **reviewed and kept** — mute is read as "I
+don't want to know", and keeping the check at the top of `create_notification`
+means every channel added later inherits muting for free rather than needing its
+own check. Written up properly in
+[`../reference/notifications.md`](../reference/notifications.md).
 
 **2026-07-20 — Milestone D review: three findings worth keeping.**
 
