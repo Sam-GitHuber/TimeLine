@@ -1154,9 +1154,10 @@ class PhotoPostTests(APITestCase):
             self.assertEqual(len(saved.getexif()), 0)
 
     def test_jpeg_orientation_is_applied_before_stripping(self):
-        # The sibling of the HEIC case below, and the reason that one was worth
-        # writing: this path had no test, so nothing would have caught the two
-        # formats' orientation handling diverging.
+        # A JPEG records rotation as an EXIF flag and stores the sensor's pixels
+        # un-rotated. Since we drop EXIF, the flag has to be baked into the pixels
+        # first — otherwise a portrait photo is stored (and shown) on its side, for
+        # good. Landscape in, portrait out proves the flag was honoured.
         exif = Image.Exif()
         exif[0x0112] = 6  # Orientation: rotate 90° CW
         upload = make_image_upload("sideways.jpg", size=(400, 300), exif=exif)
@@ -1169,13 +1170,25 @@ class PhotoPostTests(APITestCase):
         image = Post.objects.get().images.get()
         self.assertEqual((image.width, image.height), (300, 400))
 
-    def test_heic_orientation_is_applied_before_stripping(self):
-        # Phones record rotation as an EXIF flag rather than rotating the pixels.
-        # Since we drop EXIF, the rotation has to be baked in first — otherwise a
-        # portrait iPhone photo is stored (and shown) on its side, for good.
+    def test_heic_orientation_is_not_applied_twice(self):
+        # The opposite hazard to the JPEG case, and the one that actually shipped
+        # (issue #41). A real iPhone HEIC is decoded *upright* — pillow-heif/libheif
+        # bake the camera's rotation into the pixels on open and reset the EXIF
+        # orientation to 1 — yet pillow-heif still reports the original flag in
+        # info["original_orientation"]. Re-applying that flag rotates the
+        # already-upright pixels a second time, storing every portrait iPhone photo
+        # sideways.
+        #
+        # The fixture mirrors that decoded state: an already-portrait image still
+        # carrying a non-1 orientation. It must come out with its dimensions
+        # unchanged — NOT rotated to (400, 300).
+        #
+        # (This is why the earlier test was misleading: it built a *landscape* HEIC
+        # via pillow-heif's own encoder, which — unlike a real iPhone — leaves the
+        # pixels un-rotated, so the buggy double-apply happened to look correct.)
         exif = Image.Exif()
-        exif[0x0112] = 6  # Orientation: rotate 90° CW
-        upload = make_heic_upload("sideways.heic", size=(400, 300), exif=exif)
+        exif[0x0112] = 6  # a non-1 orientation still present in metadata
+        upload = make_heic_upload("upright.heic", size=(300, 400), exif=exif)
 
         resp = self.client.post(
             POSTS_URL, {"images": [upload]}, format="multipart"
@@ -1183,7 +1196,6 @@ class PhotoPostTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
         image = Post.objects.get().images.get()
-        # Landscape in, portrait out: the flag was honoured, not discarded.
         self.assertEqual((image.width, image.height), (300, 400))
 
     def test_images_appear_in_the_feed(self):

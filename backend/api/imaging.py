@@ -166,28 +166,6 @@ def _load_verified(upload):
     return img
 
 
-def _apply_orientation(img):
-    """Bake the camera's rotation flag into the pixels.
-
-    Phones don't rotate the pixels when you turn the handset — they store the
-    photo as the sensor read it plus an EXIF *orientation* flag saying which way
-    up it goes. Since we strip metadata, that flag has to be applied first or the
-    photo is stored (and shown) on its side, irreversibly.
-
-    **HEIC needs a nudge to get here.** pillow-heif's Pillow plugin resets the
-    EXIF orientation to 1 on decode and stashes the real value in
-    ``info["original_orientation"]`` — but it does *not* rotate the pixels on
-    this path (it does on its own ``HeifFile.to_pillow()`` path, which is what
-    makes the omission easy to miss). So ``exif_transpose`` alone sees an upright
-    image and does nothing, and every portrait iPhone photo lands sideways. Put
-    the stashed value back and the one shared code path handles it.
-    """
-    stashed = img.info.get("original_orientation")
-    if stashed is not None and stashed != 1:
-        img.getexif()[0x0112] = stashed  # 0x0112 = EXIF Orientation
-    return ImageOps.exif_transpose(img)
-
-
 def _strip_and_encode(img):
     """Rebuild ``img`` from raw pixels (dropping all metadata) and encode it.
 
@@ -224,8 +202,22 @@ def process_image(upload, *, max_edge, thumb_edge, thumb_square=False):
     """
     img = _load_verified(upload)
     # Honour the camera's rotation flag before we strip metadata, so a portrait
-    # photo isn't stored on its side.
-    img = _apply_orientation(img)
+    # photo isn't stored on its side. Plain exif_transpose is correct for *both*
+    # formats:
+    #   - JPEG/MPO carry a real EXIF orientation with un-rotated pixels, so this
+    #     rotates them upright.
+    #   - A real HEIC is *already* decoded upright — pillow-heif/libheif apply the
+    #     camera's rotation to the pixels on open and reset the EXIF orientation
+    #     to 1 — so this correctly does nothing.
+    #
+    # Do NOT reach for info["original_orientation"] here (issue #41). On a real
+    # iPhone HEIC that stashed value is the *original* flag whose rotation is
+    # already baked into the decoded pixels; re-applying it rotates every portrait
+    # photo a second time and stores it sideways, permanently. A HEIC written by
+    # pillow-heif's own encoder behaves differently (no rotation baked in, pixels
+    # left as-is) — the unrepresentative case that once hid this behind a green
+    # test. Verified against a real iPhone HEIC.
+    img = ImageOps.exif_transpose(img)
 
     original = img.copy()
     original.thumbnail((max_edge, max_edge), Image.LANCZOS)  # only ever shrinks
