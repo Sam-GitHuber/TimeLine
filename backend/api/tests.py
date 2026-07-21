@@ -901,6 +901,20 @@ def make_mpo_upload(name="phone.jpeg"):
     return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
 
 
+def make_heic_upload(name="IMG_4686.heic", size=(400, 300), exif=None):
+    """A HEIC photo, as a stock iPhone produces (issue #41).
+
+    Built with the same pillow-heif that decodes it in production, so this test
+    also proves the opener is actually registered — without
+    ``register_heif_opener()`` this file can't even be *written*, let alone read.
+    """
+    buffer = BytesIO()
+    save_kwargs = {"exif": exif} if exif is not None else {}
+    Image.new("RGB", size, (30, 110, 90)).save(buffer, "HEIF", **save_kwargs)
+    buffer.seek(0)
+    return SimpleUploadedFile(name, buffer.read(), content_type="image/heic")
+
+
 def make_large_photo_upload(name="big.jpg", edge=3000):
     """A large, high-detail JPEG like a real phone camera produces. Random pixel
     noise (not a flat colour) so it doesn't compress to nothing — the point is a
@@ -960,6 +974,54 @@ class PhotoPostTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Post.objects.get().images.count(), 1)
+
+    def test_an_iphone_heic_is_accepted_and_stored_as_jpeg(self):
+        # HEIC is the *default* iPhone photo format, so rejecting it turned real
+        # photos away from the app's actual audience (issue #41). It must be
+        # accepted — and, like every other upload, re-encoded: what we store is
+        # an ordinary JPEG, not the HEIC bytes, so browsers that can't display
+        # HEIC (most of them) still render it.
+        resp = self.client.post(
+            POSTS_URL,
+            {"text": "from my phone", "images": [make_heic_upload()]},
+            format="multipart",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        image = Post.objects.get().images.get()
+        self.assertTrue(image.image.name.endswith(".jpg"))
+        self.assertTrue(image.thumbnail.name.endswith(".jpg"))
+        # Dimensions come back, so the feed can reserve layout space as usual.
+        self.assertEqual((image.width, image.height), (400, 300))
+        # And the bytes really are a JPEG, not HEIC under a .jpg name.
+        with image.image.open("rb") as fh:
+            self.assertEqual(Image.open(fh).format, "JPEG")
+
+    def test_heic_avatar_is_accepted(self):
+        # Same reasoning as post photos: an iPhone user setting their profile
+        # picture picks a HEIC from the camera roll (issue #41).
+        processed = imaging.process_avatar(make_heic_upload("me.heic"))
+        self.assertEqual(processed["ext"], ".jpg")
+
+    def test_unsupported_format_error_names_the_format(self):
+        # "Unsupported image type" alone doesn't tell someone which photo to
+        # convert or to what — so the message names the format we detected and
+        # the ones we take (issue #41). BMP is a real image Pillow decodes
+        # happily, it's just not in the allow-list, which is exactly this path.
+        buffer = BytesIO()
+        Image.new("RGB", (40, 40), (5, 5, 5)).save(buffer, "BMP")
+        buffer.seek(0)
+        bmp = SimpleUploadedFile("old.bmp", buffer.read(), content_type="image/bmp")
+
+        resp = self.client.post(
+            POSTS_URL, {"text": "hi", "images": [bmp]}, format="multipart"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        message = str(resp.data["images"])
+        self.assertIn("BMP", message)
+        self.assertIn("HEIC", message)
+        self.assertIn("old.bmp", message)
 
     def test_photo_only_post_needs_no_text(self):
         resp = self.client.post(
@@ -1068,6 +1130,61 @@ class PhotoPostTests(APITestCase):
         stored = Post.objects.get().images.first()
         with Image.open(stored.image.path) as saved:
             self.assertEqual(len(saved.getexif()), 0)
+
+    def test_exif_metadata_is_stripped_from_heic_too(self):
+        # HEIC is a *separate decode path* (pillow-heif, issue #41), and iPhone
+        # HEICs are exactly the photos most likely to carry GPS. Stripping is the
+        # app's strongest privacy claim, so it gets its own test here rather than
+        # being assumed to come along for free with the JPEG one.
+        exif = Image.Exif()
+        exif[0x0110] = "iPhone"  # the Model tag
+        upload = make_heic_upload("located.heic", exif=exif)
+        # Sanity: the upload really does carry EXIF before processing, or this
+        # test would pass just as well against a no-op.
+        self.assertTrue(len(Image.open(upload).getexif()) > 0)
+        upload.seek(0)
+
+        resp = self.client.post(
+            POSTS_URL, {"images": [upload]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        stored = Post.objects.get().images.first()
+        with Image.open(stored.image.path) as saved:
+            self.assertEqual(len(saved.getexif()), 0)
+
+    def test_jpeg_orientation_is_applied_before_stripping(self):
+        # The sibling of the HEIC case below, and the reason that one was worth
+        # writing: this path had no test, so nothing would have caught the two
+        # formats' orientation handling diverging.
+        exif = Image.Exif()
+        exif[0x0112] = 6  # Orientation: rotate 90° CW
+        upload = make_image_upload("sideways.jpg", size=(400, 300), exif=exif)
+
+        resp = self.client.post(
+            POSTS_URL, {"images": [upload]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        image = Post.objects.get().images.get()
+        self.assertEqual((image.width, image.height), (300, 400))
+
+    def test_heic_orientation_is_applied_before_stripping(self):
+        # Phones record rotation as an EXIF flag rather than rotating the pixels.
+        # Since we drop EXIF, the rotation has to be baked in first — otherwise a
+        # portrait iPhone photo is stored (and shown) on its side, for good.
+        exif = Image.Exif()
+        exif[0x0112] = 6  # Orientation: rotate 90° CW
+        upload = make_heic_upload("sideways.heic", size=(400, 300), exif=exif)
+
+        resp = self.client.post(
+            POSTS_URL, {"images": [upload]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        image = Post.objects.get().images.get()
+        # Landscape in, portrait out: the flag was honoured, not discarded.
+        self.assertEqual((image.width, image.height), (300, 400))
 
     def test_images_appear_in_the_feed(self):
         self.client.post(
