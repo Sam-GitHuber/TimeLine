@@ -10,8 +10,11 @@
     "lint": "eslint .",
     "test": "vitest run"
   },
+  "overrides": {
+    "brace-expansion": "^1.1.16"
+  },
   "dependencies": {
-    "@tanstack/react-query": "^5.62.0",
+    "@tanstack/react-query": "^5.101.3",
     "emoji-picker-element": "^1.29.1",
     "emoji-picker-element-data": "^1.8.0",
     "react": "^19.2.7",
@@ -21,7 +24,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
-    "@tailwindcss/vite": "^4.1.0",
+    "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -33,7 +36,7 @@
     "globals": "^17.7.0",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.1.0",
-    "vite": "^8.1.4",
+    "vite": "^8.1.5",
     "vitest": "^4.1.10"
   }
 }
