@@ -2098,6 +2098,18 @@ class GroupChatViewTests(APITestCase):
         msgs = self.client.get(f"/api/conversations/{self.convo_id}/messages/")
         self.assertEqual(msgs.status_code, 403)
 
+    def test_a_promotion_tie_is_broken_by_invite_order(self):
+        # b and c are each connected to a but not to each other, so exactly one
+        # can be promoted — admitting either keeps the clique intact, and the
+        # rule alone doesn't say which. Left unordered, Postgres decided, and
+        # this suite failed intermittently. First invited wins.
+        detail = self.client.get(f"/api/conversations/{self.convo_id}/")
+        by_user = {p["id"]: p["status"] for p in detail.data["participants"]}
+        first, second = sorted([self.b.id, self.c.id])
+
+        self.assertEqual(by_user[first], "active")
+        self.assertEqual(by_user[second], "pending")
+
     def test_pending_member_does_not_get_last_message_text_leaked(self):
         """Finding: the ``last_message`` preview must be interval-clipped to
         what the viewer may see. A pending member is blocked from every message,
