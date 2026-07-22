@@ -513,6 +513,44 @@ export const api = {
     }),
 
   /**
+   * Create a multi-person chat (Phase 9 E2b). `participantIds` are your
+   * connections — a non-connection is rejected server-side (the clique gate). An
+   * optional `title`; `groupId` scopes the chat to a Phase 6 group (every
+   * invitee must be a member) — the group-scoped launch is E3, so E2b's picker
+   * always passes it null. Returns the new `Conversation`; the caller opens its
+   * thread.
+   */
+  createGroupChat: ({
+    participantIds,
+    title = '',
+    groupId = null,
+  }: {
+    participantIds: number[];
+    title?: string;
+    groupId?: number | null;
+  }) =>
+    request<Conversation>('/api/conversations/', {
+      method: 'POST',
+      body: {
+        participant_ids: participantIds,
+        title,
+        ...(groupId ? { group_id: groupId } : {}),
+      },
+    }),
+
+  /**
+   * Add more of your connections to an existing chat — any active member may add
+   * one of *their own* connections (see messaging.md's add-gate). Each new person
+   * lands `pending` and is promoted the instant they're connected to the whole
+   * active clique.
+   */
+  addParticipants: (conversationId: number | string, userIds: number[]) =>
+    request<void>(`/api/conversations/${conversationId}/participants/`, {
+      method: 'POST',
+      body: { user_ids: userIds },
+    }),
+
+  /**
    * Your inbox of incoming connection requests — people asking to connect with
    * you, newest-first. `count` is the badge total (the whole inbox, not this
    * page); the same query key feeds the People tab's badge and its Requests
