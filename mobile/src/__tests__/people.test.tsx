@@ -132,6 +132,26 @@ it('shows incoming requests and approves one, refreshing the shared count', asyn
   );
 });
 
+it('offers a retry on a load error and recovers when tapped', async () => {
+  // The first connections fetch fails; the retry succeeds. Keyed on the URL so
+  // the badge request (which also fires on mount) isn't the one that fails.
+  let connectedAttempts = 0;
+  mockFetch.mockImplementation((url: string) => {
+    if (url.includes('filter=connected')) {
+      connectedAttempts += 1;
+      if (connectedAttempts === 1) return Promise.reject(new Error('offline'));
+    }
+    return Promise.resolve(routeFetch(url));
+  });
+
+  await renderPeople();
+
+  fireEvent.press(await screen.findByText('Try again'));
+
+  // The retry re-fetches and the connection now renders.
+  expect(await screen.findByText('Ada Lovelace')).toBeTruthy();
+});
+
 it('rejects a request via the reject endpoint', async () => {
   await renderPeople();
   await screen.findByText('Ada Lovelace');

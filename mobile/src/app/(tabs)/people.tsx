@@ -21,13 +21,15 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
 } from '@tanstack/react-query';
 import { router } from 'expo-router';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   View,
@@ -37,10 +39,42 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { ConnectButton } from '@/components/ConnectButton';
+import { dedupeById, trimToFirstPage } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { ConnectionRequest, Paginated, PersonSummary } from '@/types';
 
 type Segment = 'connections' | 'discover' | 'requests';
+
+/**
+ * Pull-to-refresh for an infinite list: drop back to the first page, then
+ * refetch it. Trimming first means a pull re-fetches only page one — where
+ * anything new lands — rather than every page loaded so far, the same guard the
+ * feed uses (`trimToFirstPage`).
+ *
+ * `refreshing` is tracked here rather than read off `isRefetching` so the
+ * spinner belongs to the user's own pull, not to a background refetch (e.g. the
+ * one a connect/approve invalidation triggers).
+ */
+function usePullToRefresh(
+  queryKey: readonly unknown[],
+  refetch: () => Promise<unknown>
+) {
+  const queryClient = useQueryClient();
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      queryClient.setQueryData<InfiniteData<Paginated<unknown>, string>>(
+        queryKey,
+        trimToFirstPage
+      );
+      await refetch();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [queryClient, queryKey, refetch]);
+  return { refreshing, onRefresh };
+}
 
 export default function PeopleScreen() {
   const [segment, setSegment] = useState<Segment>('connections');
@@ -57,7 +91,11 @@ export default function PeopleScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <Text style={styles.title}>People</Text>
-        <View style={styles.segments}>
+        <View
+          style={styles.segments}
+          accessibilityRole="tablist"
+          accessibilityLabel="People"
+        >
           <SegmentTab
             label="Connections"
             active={segment === 'connections'}
@@ -112,7 +150,7 @@ function SegmentTab({
       {badge > 0 && (
         <View style={[styles.badge, active && styles.badgeActive]}>
           <Text style={[styles.badgeText, active && styles.badgeTextActive]}>
-            {badge}
+            {badge > 99 ? '99+' : badge}
           </Text>
         </View>
       )}
@@ -151,19 +189,36 @@ function PersonRow({
   );
 }
 
-/** A centred message for the loading / error / empty states the lists share. */
-function ListMessage({
-  children,
-  tone = 'faint',
+/** A centred message for the loading / empty states the lists share. */
+function ListMessage({ children }: { children: React.ReactNode }) {
+  return (
+    <View style={styles.message}>
+      <Text style={styles.messageText}>{children}</Text>
+    </View>
+  );
+}
+
+/**
+ * The error state, with a retry — so a transient network failure isn't a
+ * dead-end (matches the feed and profile screens, which both offer "Try again").
+ */
+function ListError({
+  message,
+  onRetry,
 }: {
-  children: React.ReactNode;
-  tone?: 'faint' | 'error';
+  message: string;
+  onRetry: () => void;
 }) {
   return (
     <View style={styles.message}>
-      <Text style={[styles.messageText, tone === 'error' && styles.messageError]}>
-        {children}
-      </Text>
+      <Text style={[styles.messageText, styles.messageError]}>{message}</Text>
+      <Pressable
+        onPress={onRetry}
+        accessibilityRole="button"
+        style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+      >
+        <Text style={styles.retryText}>Try again</Text>
+      </Pressable>
     </View>
   );
 }
@@ -196,18 +251,15 @@ function DirectoryList({
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
+  const { refreshing, onRefresh } = usePullToRefresh(queryKey, query.refetch);
 
   const people = dedupeById(query.data?.pages.flatMap((page) => page.results) ?? []);
+  const errorMessage =
+    query.error instanceof Error ? query.error.message : errorText;
 
-  if (query.isLoading) return <ListMessage>{loadingText}</ListMessage>;
-  if (query.isError)
-    return (
-      <ListMessage tone="error">
-        {query.error instanceof Error ? query.error.message : errorText}
-      </ListMessage>
-    );
-  if (people.length === 0) return <>{empty}</>;
-
+  // The FlatList renders in every state (not just when populated) so pull-to-
+  // refresh works from the empty and error states too — loading/error/empty go
+  // through ListEmptyComponent, as the feed does.
   return (
     <FlatList
       data={people}
@@ -215,10 +267,26 @@ function DirectoryList({
       renderItem={({ item }) => (
         <PersonRow person={item} trailing={renderTrailing(item)} />
       )}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.accent}
+        />
+      }
       onEndReached={() => {
         if (query.hasNextPage && !query.isFetchingNextPage) query.fetchNextPage();
       }}
       onEndReachedThreshold={0.5}
+      ListEmptyComponent={
+        query.isLoading ? (
+          <ListMessage>{loadingText}</ListMessage>
+        ) : query.isError ? (
+          <ListError message={errorMessage} onRetry={query.refetch} />
+        ) : (
+          <>{empty}</>
+        )
+      }
       ListFooterComponent={
         query.isFetchingNextPage ? (
           <ActivityIndicator style={styles.footer} color={colors.accent} />
@@ -305,6 +373,10 @@ function RequestsList() {
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
+  const { refreshing, onRefresh } = usePullToRefresh(
+    ['connectionRequests', 'list'],
+    query.refetch
+  );
 
   const decide = useMutation({
     mutationFn: ({ act, id }: { act: (id: number) => Promise<void>; id: number }) =>
@@ -321,59 +393,79 @@ function RequestsList() {
     query.data?.pages.flatMap((page) => page.results) ?? []
   );
 
-  if (query.isLoading) return <ListMessage>Loading…</ListMessage>;
-  if (query.isError)
-    return (
-      <ListMessage tone="error">
-        {query.error instanceof Error
-          ? query.error.message
-          : 'Couldn’t load requests.'}
-      </ListMessage>
-    );
-  if (requests.length === 0)
-    return <ListMessage>No pending requests.</ListMessage>;
-
   return (
     <FlatList
       data={requests}
       keyExtractor={(req) => String(req.id)}
-      renderItem={({ item }) => (
-        <PersonRow
-          person={item.requester}
-          trailing={
-            <View style={styles.decideRow}>
-              <Pressable
-                onPress={() => decide.mutate({ act: api.approveRequest, id: item.id })}
-                disabled={decide.isPending}
-                accessibilityRole="button"
-                accessibilityLabel={`Approve ${item.requester.display_name}`}
-                style={({ pressed }) => [
-                  styles.approve,
-                  (pressed || decide.isPending) && styles.pressed,
-                ]}
-              >
-                <Text style={styles.approveLabel}>Approve</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => decide.mutate({ act: api.rejectRequest, id: item.id })}
-                disabled={decide.isPending}
-                accessibilityRole="button"
-                accessibilityLabel={`Reject ${item.requester.display_name}`}
-                style={({ pressed }) => [
-                  styles.reject,
-                  (pressed || decide.isPending) && styles.pressed,
-                ]}
-              >
-                <Text style={styles.rejectLabel}>Reject</Text>
-              </Pressable>
-            </View>
-          }
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.accent}
         />
-      )}
+      }
+      renderItem={({ item }) => {
+        // Gate only the row being acted on, not every button on screen — so
+        // approving one request doesn't briefly disable all the others.
+        const pending = decide.isPending && decide.variables?.id === item.id;
+        return (
+          <PersonRow
+            person={item.requester}
+            trailing={
+              <View style={styles.decideRow}>
+                <Pressable
+                  onPress={() =>
+                    decide.mutate({ act: api.approveRequest, id: item.id })
+                  }
+                  disabled={pending}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Approve ${item.requester.display_name}`}
+                  style={({ pressed }) => [
+                    styles.approve,
+                    (pressed || pending) && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.approveLabel}>Approve</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() =>
+                    decide.mutate({ act: api.rejectRequest, id: item.id })
+                  }
+                  disabled={pending}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Reject ${item.requester.display_name}`}
+                  style={({ pressed }) => [
+                    styles.reject,
+                    (pressed || pending) && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.rejectLabel}>Reject</Text>
+                </Pressable>
+              </View>
+            }
+          />
+        );
+      }}
       onEndReached={() => {
         if (query.hasNextPage && !query.isFetchingNextPage) query.fetchNextPage();
       }}
       onEndReachedThreshold={0.5}
+      ListEmptyComponent={
+        query.isLoading ? (
+          <ListMessage>Loading…</ListMessage>
+        ) : query.isError ? (
+          <ListError
+            message={
+              query.error instanceof Error
+                ? query.error.message
+                : 'Couldn’t load requests.'
+            }
+            onRetry={query.refetch}
+          />
+        ) : (
+          <ListMessage>No pending requests.</ListMessage>
+        )
+      }
       ListFooterComponent={
         query.isFetchingNextPage ? (
           <ActivityIndicator style={styles.footer} color={colors.accent} />
@@ -381,23 +473,6 @@ function RequestsList() {
       }
     />
   );
-}
-
-/**
- * Drop repeated ids while preserving order — page-number pagination can re-send
- * a row across a page boundary when the underlying set shifts (someone connects
- * mid-scroll), and duplicate keys warn and mis-render in a FlatList. Same guard
- * the feed's `toRows` applies.
- */
-function dedupeById<T extends { id: number }>(items: T[]): T[] {
-  const seen = new Set<number>();
-  const out: T[] = [];
-  for (const item of items) {
-    if (seen.has(item.id)) continue;
-    seen.add(item.id);
-    out.push(item);
-  }
-  return out;
 }
 
 const styles = StyleSheet.create({
@@ -492,6 +567,15 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   messageError: { color: colors.danger },
+  retry: {
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  retryText: { color: colors.ink, fontWeight: '600' },
   emptyBlock: { padding: spacing.xl, alignItems: 'center', gap: spacing.md },
   primaryBtn: {
     paddingHorizontal: spacing.lg,

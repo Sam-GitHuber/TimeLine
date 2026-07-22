@@ -72,7 +72,8 @@ export default function TabsLayout() {
             <PeopleIcon color={color as string} size={TAB_ICON_SIZE} />
           ),
           // `undefined` (not 0) hides the badge — a 0 would render an empty pip.
-          tabBarBadge: pending > 0 ? pending : undefined,
+          // Cap at 99+ so a large count can't blow out the pill.
+          tabBarBadge: pending > 99 ? '99+' : pending > 0 ? pending : undefined,
           tabBarBadgeStyle: { backgroundColor: colors.accent },
         }}
       />
