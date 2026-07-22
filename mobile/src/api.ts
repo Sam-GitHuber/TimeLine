@@ -31,6 +31,9 @@ import type {
   ConnectionRequest,
   Conversation,
   DisconnectImpact,
+  Group,
+  GroupInvite,
+  GroupMember,
   LoginResponse,
   Message,
   Paginated,
@@ -550,6 +553,128 @@ export const api = {
       body: { user_ids: userIds },
     }),
 
+  /* ---- Groups (Phase 9 E3a) ---------------------------------------------- *
+   * Private, invite-only shared timelines. groups.md owns the two gates
+   * (membership gates access; connection gates whose posts you see inside),
+   * the roles model, and the endpoints. Client port; no backend change. */
+
+  /** Groups you're an active member of (name, avatar, member_count, your_role). */
+  getGroups: () => request<Paginated<Group>>('/api/groups/'),
+
+  /** One group's detail — members only, 404 otherwise. */
+  getGroup: (groupId: number | string) =>
+    request<Group>(`/api/groups/${groupId}/`),
+
+  /**
+   * Create a group — multipart so it can carry an optional avatar (name +
+   * description ride as fields). You become its first member, an admin.
+   */
+  createGroup: async ({
+    name,
+    description = '',
+    avatar,
+  }: {
+    name: string;
+    description?: string;
+    avatar?: PhotoUpload;
+  }) => {
+    const form = new FormData();
+    form.append('name', name);
+    form.append('description', description);
+    if (avatar) form.append('avatar', (await toFilePart(avatar)) as unknown as Blob);
+    return request<Group>('/api/groups/', { method: 'POST', body: form });
+  },
+
+  /**
+   * Edit a group (admins only) — multipart, like the profile edit. PATCH, so an
+   * unsent field is left untouched. `removeAvatar` clears an existing avatar; it
+   * and `avatar` are mutually exclusive.
+   */
+  updateGroup: async (
+    groupId: number | string,
+    {
+      name,
+      description,
+      avatar,
+      removeAvatar,
+    }: {
+      name?: string;
+      description?: string;
+      avatar?: PhotoUpload;
+      removeAvatar?: boolean;
+    }
+  ) => {
+    const form = new FormData();
+    if (name !== undefined) form.append('name', name);
+    if (description !== undefined) form.append('description', description);
+    if (avatar) form.append('avatar', (await toFilePart(avatar)) as unknown as Blob);
+    if (removeAvatar) form.append('remove_avatar', 'true');
+    return request<Group>(`/api/groups/${groupId}/`, {
+      method: 'PATCH',
+      body: form,
+    });
+  },
+
+  /** Delete a group (admin) — cascades to memberships, posts, photos, comments. */
+  deleteGroup: (groupId: number | string) =>
+    request<void>(`/api/groups/${groupId}/`, { method: 'DELETE' }),
+
+  /** A group's timeline — newest-first, paginated, connection-pruned (members only). */
+  getGroupPosts: (groupId: number | string) =>
+    request<Paginated<Post>>(`/api/groups/${groupId}/posts/`),
+
+  /** A group's active members, each with their role (members only, not paginated). */
+  getGroupMembers: (groupId: number | string) =>
+    request<GroupMember[]>(`/api/groups/${groupId}/members/`),
+
+  /**
+   * Invite one of *your* connections to a group — any active member may invite,
+   * but only their own connections (the add-gate; see groups.md). Lands as a
+   * pending row the invitee accepts from their inbox.
+   */
+  inviteToGroup: (groupId: number | string, userId: number) =>
+    request<void>(`/api/groups/${groupId}/members/`, {
+      method: 'POST',
+      body: { user_id: userId },
+    }),
+
+  /**
+   * Remove a member (admin), or — with your own id — **leave** the group. Blocked
+   * by the last-admin guardrail (a 400: the sole admin must promote someone
+   * first, so a group is never orphaned).
+   */
+  removeGroupMember: (groupId: number | string, userId: number) =>
+    request<void>(`/api/groups/${groupId}/members/${userId}/`, {
+      method: 'DELETE',
+    }),
+
+  /** Promote/demote a member between `admin` and `member` (admins only). */
+  setGroupMemberRole: (
+    groupId: number | string,
+    userId: number,
+    role: 'admin' | 'member'
+  ) =>
+    request<void>(`/api/groups/${groupId}/members/${userId}/role/`, {
+      method: 'POST',
+      body: { role },
+    }),
+
+  /**
+   * Your pending group invitations — "X invited you to Y", newest-first. `count`
+   * is the badge total; the same key feeds the Groups tab badge and the invites
+   * segment (mirrors connection requests).
+   */
+  getGroupInvites: () =>
+    request<Paginated<GroupInvite>>('/api/group-invites/'),
+
+  /** Accept an invite (join as a member) — `id` is the `GroupInvite.id`. */
+  acceptGroupInvite: (inviteId: number) =>
+    request<void>(`/api/group-invites/${inviteId}/accept/`, { method: 'POST' }),
+
+  /** Decline an invite. */
+  rejectGroupInvite: (inviteId: number) =>
+    request<void>(`/api/group-invites/${inviteId}/reject/`, { method: 'POST' }),
+
   /**
    * Your inbox of incoming connection requests — people asking to connect with
    * you, newest-first. `count` is the badge total (the whole inbox, not this
@@ -583,9 +708,15 @@ export const api = {
    * client — render it exactly as it arrives. See feed-and-posts.md.
    *
    * Group posts are excluded by default, so the feed keeps its meaning of "the
-   * people I'm connected with".
+   * people I'm connected with". Passing `includeGroups` merges in posts from
+   * groups you're a member of, **strictly chronologically** (no ranking) — the
+   * home feed's opt-in "include groups" toggle (E3a; see groups.md). Membership
+   * still gates which groups' posts merge.
    */
-  getFeed: () => request<Paginated<Post>>('/api/feed/'),
+  getFeed: (includeGroups = false) =>
+    request<Paginated<Post>>(
+      includeGroups ? '/api/feed/?include_groups=1' : '/api/feed/'
+    ),
 
   /**
    * Follow a paginator's `next` URL.
@@ -621,12 +752,20 @@ export const api = {
    * Each photo is uploaded via `toFilePart` — the winter fetch runtime rejects
    * the old React Native `{uri, name, type}` part.
    */
-  createPost: async (text: string, photos: PhotoUpload[] = []) => {
+  createPost: async (
+    text: string,
+    photos: PhotoUpload[] = [],
+    groupId?: number
+  ) => {
     const form = new FormData();
     form.append('text', text);
     for (const photo of photos) {
       form.append('images', (await toFilePart(photo)) as unknown as Blob);
     }
+    // A group post reuses this same endpoint with an optional `group` id
+    // (membership-checked server-side); omitting it is a personal post. See
+    // groups.md — a group post *is* a post, one nullable FK, not a new model.
+    if (groupId != null) form.append('group', String(groupId));
     return request<Post>('/api/posts/', { method: 'POST', body: form });
   },
 

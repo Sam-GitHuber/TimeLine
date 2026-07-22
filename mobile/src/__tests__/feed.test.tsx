@@ -7,7 +7,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react-native';
+import { fireEvent, render, screen } from '@testing-library/react-native';
 
 import FeedScreen from '@/app/(tabs)/index';
 import { toRows, trimToFirstPage, type FeedPages } from '@/feed';
@@ -169,6 +169,26 @@ describe('feed screen', () => {
 
     expect(await screen.findByText('Couldn’t load your feed')).toBeTruthy();
     expect(screen.getByText('Try again')).toBeTruthy();
+  });
+
+  it('merges group posts when the Groups toggle is on (E3a)', async () => {
+    // The toggle flips the feed request to ?include_groups=1; the server does the
+    // chronological merge, so the client just asks the other endpoint.
+    mockFetch.mockImplementation(async (url: string) =>
+      String(url).includes('include_groups=1')
+        ? jsonResponse(feedPage([makePost({ id: 2, text: 'From a group' })]))
+        : jsonResponse(feedPage([makePost({ id: 1, text: 'Personal only' })]))
+    );
+
+    await renderFeed();
+    expect(await screen.findByText('Personal only')).toBeTruthy();
+
+    fireEvent.press(screen.getByLabelText('Include group posts'));
+
+    expect(await screen.findByText('From a group')).toBeTruthy();
+    expect(
+      mockFetch.mock.calls.some(([u]) => String(u).includes('include_groups=1'))
+    ).toBe(true);
   });
 
   it('marks an edited post', async () => {

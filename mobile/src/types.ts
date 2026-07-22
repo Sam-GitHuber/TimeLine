@@ -246,6 +246,40 @@ export type Message = {
   created_at: string;
 };
 
+/**
+ * A group — `GroupSerializer`. Private, invite-only shared timeline (see
+ * groups.md). `member_count` and `your_role` are per-viewer, attached by the
+ * view: `your_role` (`admin`/`member`) drives whether the admin controls show,
+ * and is `null` on a group you're only *invited* to (not yet a member).
+ */
+export type Group = {
+  id: number;
+  name: string;
+  description: string;
+  avatar_url: string | null;
+  avatar_thumb: string | null;
+  member_count: number;
+  your_role: 'admin' | 'member' | null;
+  created_at: string;
+};
+
+/** One active member of a group — `GroupMemberSerializer`. */
+export type GroupMember = {
+  user: Author;
+  role: 'admin' | 'member';
+};
+
+/**
+ * A pending invite in your group-invites inbox — `GroupInviteSerializer`. `id`
+ * is the membership row's id (the handle to accept/reject), **not** the group id.
+ */
+export type GroupInvite = {
+  id: number;
+  group: { id: number; name: string; avatar_thumb: string | null };
+  invited_by: Author;
+  created_at: string;
+};
+
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */
 export type Post = {
   id: number;

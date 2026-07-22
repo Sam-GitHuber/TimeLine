@@ -178,11 +178,15 @@ describe('routeForNotification', () => {
     expect(routeForNotification('/requests')).toBe('/people');
   });
 
-  it.each(['/group-invites', '/g/1/events/9'])(
+  it('routes a group invite to the Groups tab (E3a)', () => {
+    expect(routeForNotification('/group-invites')).toBe('/groups');
+  });
+
+  it.each(['/g/1/events/9'])(
     'falls back to the feed for %s, which has no mobile screen yet',
     (url) => {
-      // Those land in Milestone E3. Until then a notification must still open
-      // the app rather than crash it.
+      // Event notifications land in Milestone E3b. Until then a notification must
+      // still open the app rather than crash it.
       expect(routeForNotification(url)).toBe('/');
     }
   );

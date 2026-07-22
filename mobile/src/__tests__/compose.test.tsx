@@ -111,7 +111,8 @@ it('posts trimmed text as multipart', async () => {
   await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
 
   // The surrounding whitespace is gone, and nothing else about the text is.
-  expect(createPost).toHaveBeenCalledWith('Hello from the phone', []);
+  // The third arg is the optional group id — undefined on the home feed (E3a).
+  expect(createPost).toHaveBeenCalledWith('Hello from the phone', [], undefined);
 
   const [url, init] = mockFetch.mock.calls[0];
   expect(url).toContain('/api/posts/');
@@ -164,9 +165,11 @@ describe('photos', () => {
 
     await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
 
-    expect(createPost).toHaveBeenCalledWith('', [
-      { uri: 'file:///tmp/a.jpg', name: 'a.jpg', type: 'image/jpeg' },
-    ]);
+    expect(createPost).toHaveBeenCalledWith(
+      '',
+      [{ uri: 'file:///tmp/a.jpg', name: 'a.jpg', type: 'image/jpeg' }],
+      undefined
+    );
   });
 
   it('synthesises a filename when the picker does not supply one', async () => {

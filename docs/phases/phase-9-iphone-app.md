@@ -431,7 +431,8 @@ taken with the user:
 
 **Three PRs:**
 
-- **E3a — Groups.** The Groups tab (list of groups you're in + a **Requests**-style
+- **E3a — Groups — done** (see the 2026-07-22 E3a notes entry). The Groups tab
+  (list of groups you're in + a **Requests**-style
   invites segment, mirroring People), group **detail** (the connection-pruned
   group timeline via the shared `TimelineList`, compose-into-group, the header
   with name/description/avatar/member-count, and a **⋯ actions menu**: Invite,
@@ -643,6 +644,44 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-22 — Milestone E3a (groups): the app grows a Groups tab. E3 begins.**
+
+The groups half of E3 — the Groups tab (list + a Requests-style invites segment),
+group detail (connection-pruned timeline + group-scoped compose + a ⋯ actions
+menu), the members roster (admin controls + last-admin guardrail), invite (a
+connections picker), create/edit forms, and the include-groups feed toggle. Pure
+client port; groups.md gained a "Mobile" section. New tab means the bar is now
+four (Feed · People · Messages · Groups); Calendar makes five in E3b.
+
+- **`createPost` and `ComposeBox` were generalised, not forked.** A group post
+  *is* a post (groups.md), so `createPost` took an optional third `groupId` and
+  `ComposeBox` took `groupId` + `invalidateKey` (defaulting to `['feed']`). The
+  home feed passes neither; the group page passes the id and `['groupPosts', id]`.
+  This changed the `createPost` call arity, so two existing compose tests now
+  assert the trailing `undefined` — worth remembering that a
+  `toHaveBeenCalledWith` pins arity, so adding an optional arg to a shared fn
+  ripples into every caller's test.
+
+- **The ⋯ menu is `ActionSheetIOS`, with an `Alert` fallback for Android.** The
+  native action sheet is the right iOS feel for a variable-length menu (admin
+  rows appear conditionally); Phase 10 can refine the Android branch. The menu
+  index maths (destructive = Delete for admins else Leave; cancel last) is kept in
+  the component rather than hard-coded, since the admin rows shift the indices.
+
+- **Last-admin guardrail stays server-side.** Leaving/deleting/demoting the sole
+  admin is a 400 the app *surfaces* (via `Alert`) rather than pre-guarding — one
+  source of truth (groups.md), and the client can't get the rule subtly wrong.
+
+- **Two tab badges + two segment counts now share query keys** the same way E1's
+  connection requests do: `['groupInvites']` feeds the Groups tab badge *and* the
+  Invites segment, so accepting/declining anywhere stays in step. The
+  `group_invite` push deep-link, which dead-ended at `/`, now lands on the tab.
+
+- **Feed query key changed `['feed']` → `['feed', includeGroups]`.** TanStack
+  prefix-matches on invalidate, so `ComposeBox`'s `invalidateQueries(['feed'])`
+  still refreshes both variants — but the screen's own `setQueryData` for
+  pull-to-refresh had to move to the full key, or a pull silently trimmed nothing.
 
 **2026-07-22 — Milestone E2b (messaging, create): the new-chat picker and
 add-people. E2 is complete.**

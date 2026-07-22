@@ -138,6 +138,27 @@ Group invitations generate a `group_invite` notification in the unified activity
 centre (accepting or rejecting **addresses** it) — see
 [notifications](notifications.md).
 
+## Mobile (Phase 9 E3a)
+
+The iPhone app is a **client port of this API — no backend change.** It drops the
+web's left-docked *switcher drawer* for a **Groups tab** (4th bottom tab) with two
+segments — your **Groups** and your pending **Invites** (accept/reject) — mirroring
+the People hub, with a group-invites badge on the tab (shared `['groupInvites']`
+query key). A group opens full-screen at `groups/[groupId]` (a root-stack sibling
+of the tabs): the connection-pruned group timeline through the shared
+`TimelineList`, capped by a **group-scoped `ComposeBox`** (`createPost` gains an
+optional `group` id; the box takes a `groupId` + `invalidateKey`). The group
+actions live behind a **⋯ menu** (ActionSheetIOS): Invite, Members, Leave, and —
+for admins — Edit, Delete. Members is its own roster screen (admin controls via a
+per-row action sheet; the last-admin guardrail surfaces the server's 400); invite
+and create/edit are pushed screens reusing the connection-picker and the profile
+editor's round avatar cropper. The **include-groups feed toggle** is a quiet pill
+in the home-feed header (`?include_groups=1`, off by default). The `group_invite`
+push notification deep-links to the Groups tab.
+
+**Events (the group's upcoming-events section, event detail, RSVP, polls, the
+calendar) are E3b/E3c** — E3a is groups only.
+
 ## Known limitations (documented, as planned)
 
 - An admin can't yet cancel a *pending* invite (the invitee can decline).
