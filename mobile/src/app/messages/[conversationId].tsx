@@ -247,6 +247,11 @@ export default function ThreadScreen() {
             ref={listRef}
             data={messages}
             keyExtractor={(m) => String(m.id)}
+            // `flex: 1` constrains the list to the gap between the header and the
+            // composer. Without it a FlatList sizes to its content, so the newest
+            // messages run *under* the composer and scrollToEnd lands them partly
+            // hidden — you'd have to nudge the thread up to read the last one.
+            style={styles.list}
             contentContainerStyle={styles.messagesContent}
             // Messages arrive oldest-first; keep the newest in view as they land
             // and on first layout.
@@ -366,6 +371,7 @@ const styles = StyleSheet.create({
   headerLoading: { fontSize: fontSize.sm, color: colors.inkFaint },
   leave: { fontSize: fontSize.sm, color: colors.danger, fontWeight: '600' },
   actionSpacer: { width: 44 },
+  list: { flex: 1 },
   messagesContent: { padding: spacing.md, flexGrow: 1 },
   spinner: { marginTop: spacing.xl },
   emptyThread: {
