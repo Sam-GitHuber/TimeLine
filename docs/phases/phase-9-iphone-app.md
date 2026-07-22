@@ -382,8 +382,9 @@ if you pause the phase you've built the things people actually open):
 - **E1. Connections / People.** Request, accept, decline, the symmetric graph.
   Gates real multi-user testing, so it comes first. **Done** — see the
   2026-07-22 notes entry (introduced the bottom tab bar with it).
-- **E2. Messaging.** DM + group threads, unread badge, 4s open-thread polling.
-  The largest single chunk — the web app's `messaging.jsx` is its own module.
+- **E2. Messaging.** DM + group threads, unread badge, open-thread polling.
+  The largest single chunk — the web app's messaging is its own module. **Full
+  plan below** ("E2 — Messaging: confirmed plan").
 - **E3. Groups + events.** Group list/detail/invites, group timelines, and the
   Phase 8b event surfaces (event detail, RSVP, polls, calendar).
 - **E4. Settings + safety.** Per-type notification prefs, account settings,
@@ -395,6 +396,87 @@ Ends: no web feature is missing from the app.
 
 **F. Distribution.** Build with EAS, upload to **TestFlight**, add real testers.
 Ends: friends/family install via TestFlight; sign-ups remain admin-approved.
+
+### E2 — Messaging: confirmed plan (2026-07-22)
+
+Read [`../reference/messaging.md`](../reference/messaging.md) first — it owns the
+data model, the clique/safety gate, interval-clipped history, and the endpoints.
+E2 is a **client port**: no backend changes. The three decisions taken with the
+user:
+
+1. **Structure: real screens on the tab bar, not a drawer.** The web app is a
+   non-modal companion *drawer* so a chat sits beside the feed and keeps its
+   scroll position — a web-only rationale that doesn't survive a 390pt screen.
+   Mobile uses the standard phone pattern instead: a **Messages tab** (third tab,
+   after Feed + People) for the conversation list, and full-screen **thread** /
+   **new-chat** screens pushed *over* the tab bar (siblings of `(tabs)`, like
+   post detail and profiles). The web's `MessagingProvider` (view state in React
+   context) is therefore replaced by Expo Router routes; there is no provider.
+   - `(tabs)/messages.tsx` — conversation list, with an unread badge on the tab.
+   - `messages/[conversationId].tsx` — a thread (pushed).
+   - `messages/new.tsx` — the new-chat picker (pushed).
+2. **New-message push is deferred**, tracked in **issue #118**. There is no
+   `message` notification kind server-side (messaging is deliberately outside the
+   activity centre — its own unread badge), so buzzing on a new message needs
+   backend work. E2 ships **polling-only** parity, exactly as the web does.
+3. **Two PRs**, split consume / create:
+   - **E2a (consume):** conversation list, the thread screen (1:1 **and** group
+     read / send / delete-your-own / leave), the per-thread + tab unread badges,
+     the **Message** button on the profile header, both poll cadences, mark-read
+     on open, and the **pending locked panel** (viewing a chat you were added to
+     but haven't joined). Everything needed to *use* existing conversations.
+   - **E2b (create):** the new-chat picker (multi-select connection search →
+     1:1 get-or-create or group + optional title), and **add-people** to an
+     existing chat. Everything that *starts or grows* a conversation.
+
+**Screens & components** (mirroring the web, restyled native):
+- **Conversation list** — 1:1 avatar or group avatar-stack; last-message preview
+  ("You: …" / "Message deleted" / "No messages yet"); relative time; per-thread
+  unread pill; pending rows read "Invited — connect to join"; empty state; slow
+  poll (`CONVERSATION_LIST_POLL_MS`).
+- **Thread** — header (1:1: other's avatar+name → their profile; group:
+  avatar-stack + title + **Add people** / **Leave**); message list with
+  right/left bubbles, **group sender-attribution runs** (label only the first
+  bubble of a consecutive run; never on 1:1 or your own), deleted-message
+  tombstones, delete-your-own; composer keyed off `can_send` (disconnected →
+  read-only footer); **pending → `PendingChatPanel`**; mark-read on open and as
+  messages land; fast poll (`MESSAGE_POLL_MS`); auto-scroll to newest.
+- **New chat** — search-filtered multi-select over your connections
+  (`listConnections`, from E1) + optional title; one selection & no title = 1:1
+  (`openConversation` get-or-create), else a group; same screen serves the
+  add-people mode.
+- **Components:** `PendingChatPanel`, `MessageBubble`, `AvatarStack`, and a
+  **Message button** on the profile action row (opens/creates the 1:1 → pushes
+  its thread), joining E1's Connect button there.
+
+**API (`api.ts`) + types:** `getConversations`, `getConversation`, `getMessages`
+(infinite), `sendMessage`, `deleteMessage`, `markConversationRead`,
+`getUnreadMessageCount`, `openConversation`, `createGroupChat`, `addParticipants`,
+`leaveConversation`; types `Conversation`, `Message`, `Participant`,
+`LastMessage`. (`getDisconnectImpact` already landed in E1.)
+
+**Polling** via TanStack `refetchInterval`, cadences named once in `api.ts`
+(`MESSAGE_POLL_MS`, `CONVERSATION_LIST_POLL_MS`) as the web does. It pauses when
+the app is backgrounded (the `focusManager`↔`AppState` wiring already in
+`_layout.tsx`), which matters for battery — confirm that on device.
+
+**Scope boundaries (deliberately *not* E2):**
+- **Block / Report → E4** (safety). The profile action row grows **Message** now;
+  Block/Report land in E4. The disconnect-impact warning modal already exists
+  from E1 and will extend to `block` then.
+- **Group-scoped "new chat"** launched from a group page (pool = group members ∩
+  your connections, chat scoped to the group) **→ E3** (groups). E2's new-chat is
+  the plain compose from the Messages tab.
+- **New-message push → issue #118.**
+
+**Definition of done (E2):** conversation list + 1:1 and group threads work
+against the real backend (send, delete-your-own, leave, mark-read, unread badges
+on tab + rows); the pending locked panel and can't-send footer render from
+`my_status`/`can_send`; new-chat creates 1:1 and group chats and adds people;
+both poll cadences live and pause when backgrounded; a Message button on profiles
+opens the 1:1; real Jest tests for the list, the thread (send + run attribution +
+delete tombstone), and the new-chat 1:1-vs-group branch; typecheck + lint + the
+`mobile-test` job green.
 
 ### PR strategy
 
