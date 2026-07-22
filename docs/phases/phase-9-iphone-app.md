@@ -384,7 +384,8 @@ if you pause the phase you've built the things people actually open):
   2026-07-22 notes entry (introduced the bottom tab bar with it).
 - **E2. Messaging.** DM + group threads, unread badge, open-thread polling.
   The largest single chunk — the web app's messaging is its own module. **Full
-  plan below** ("E2 — Messaging: confirmed plan").
+  plan below** ("E2 — Messaging: confirmed plan"). **E2a (consume) done** — see
+  the 2026-07-22 notes entry; **E2b (create) next**.
 - **E3. Groups + events.** Group list/detail/invites, group timelines, and the
   Phase 8b event surfaces (event detail, RSVP, polls, calendar).
 - **E4. Settings + safety.** Per-type notification prefs, account settings,
@@ -420,7 +421,8 @@ user:
    activity centre — its own unread badge), so buzzing on a new message needs
    backend work. E2 ships **polling-only** parity, exactly as the web does.
 3. **Two PRs**, split consume / create:
-   - **E2a (consume):** conversation list, the thread screen (1:1 **and** group
+   - **E2a (consume) — done** (see the 2026-07-22 E2a notes entry): conversation
+     list, the thread screen (1:1 **and** group
      read / send / delete-your-own / leave), the per-thread + tab unread badges,
      the **Message** button on the profile header, both poll cadences, mark-read
      on open, and the **pending locked panel** (viewing a chat you were added to
@@ -552,6 +554,51 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-22 — Milestone E2a (messaging, consume): the client port, and three
+things worth keeping.**
+
+E2a is the *use existing conversations* half of E2 — conversation list, 1:1 and
+group threads, unread badges (tab + per-row), mark-read on open, the pending
+locked panel, the can't-send footer, and the **Message** button on profiles. It's
+a pure client port: no backend change (messaging.md owns the model and gate). New
+API in `api.ts` (`getConversations`, `getConversation`, `getMessages`,
+`sendMessage`, `deleteMessage`, `markConversationRead`, `getUnreadMessageCount`,
+`openConversation`, `leaveConversation`) + poll constants `MESSAGE_POLL_MS` /
+`CONVERSATION_LIST_POLL_MS`. **E2b (new-chat picker + add-people) is next.**
+
+- **Structure follows the phone, not the web.** The web's companion *drawer*
+  (chat beside the feed, keeping scroll position) is a web-only rationale, so
+  mobile uses a **Messages tab** (list) plus full-screen **thread** pushed *over*
+  the tab bar — a root-stack sibling of `(tabs)`, like post detail and profiles.
+  There is no `MessagingProvider`; Expo Router routes replace the context view
+  state. Written up in messaging.md's new "Mobile" section.
+
+- **Two interactions had to change medium.** Delete-your-own is a **long-press →
+  confirm Alert**, not the web's hover "Delete" (a phone has no hover). And the
+  profile **Message** button *pushes* the thread full-screen rather than revealing
+  a drawer — so it only shows once `connection_status === 'connected'`, same gate
+  the web uses, with the backend enforcing it regardless.
+
+- **New-message push stays deferred (issue #118).** No `message` notification kind
+  exists server-side — messaging is deliberately outside the activity centre with
+  its own unread badge — so E2 ships polling-only parity, exactly as the web does.
+  The tab badge reads `getUnreadMessageCount` on the slow cadence and shares the
+  `['unreadMessages']` key the thread invalidates on mark-read, so opening a chat
+  clears it.
+
+*Two test gotchas (RN + Jest), both already known but they bit again:*
+
+- **`fireEvent.changeText` must be awaited** to flush the controlled input's state
+  before you read it back. Firing it synchronously and then pressing Send left
+  `text` empty, so the (correctly) disabled Send button swallowed the press and no
+  POST fired — a green-looking component that silently does nothing. The working
+  compose test already `await`s it; match that.
+- **A prompt split across styled `<Text>` nodes defeats `getByText('exact
+  string')`.** The conversation row's "You: …" preview and the pending panel's
+  "Connect with X to join" sentence are each fragmented (a coloured prefix + the
+  rest), so assert with a **regex matcher** (tests each node's composed text) or
+  on a stable **accessibility label**, not the whole concatenated string.
 
 **2026-07-22 — Milestone E1 (connections / people): the app grows its primary
 navigation.**

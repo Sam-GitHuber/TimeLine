@@ -191,6 +191,28 @@ new-message:
   blank screen). It coordinates with the left-docked [groups](groups.md) drawer on
   narrow viewports (opening one closes the other below 800px).
 
+## Mobile (Phase 9 E2)
+
+The iPhone app is a **client port of exactly this API — no backend change.** It
+deliberately drops the web's companion-drawer model (a web-only rationale: keep
+the feed's scroll position beside the chat) for the standard phone shape: a
+**Messages tab** for the conversation list, with full-screen **thread** and
+**new-chat** screens pushed *over* the tab bar. The web's `MessagingProvider`
+(view state in React context) is replaced by Expo Router routes —
+`mobile/src/app/(tabs)/messages.tsx`, `messages/[conversationId].tsx`, and
+`messages/new.tsx`. Same endpoints, same `MESSAGE_POLL_MS` /
+`CONVERSATION_LIST_POLL_MS` cadences (paused when the app is backgrounded), same
+per-thread + tab unread badges, pending `PendingChatPanel`, and group
+sender-attribution runs.
+
+Two behaviours differ because the medium does, not the model: **delete-your-own**
+is a long-press → confirm (a phone has no hover for the web's inline Delete), and
+the **Message** button on a profile pushes the thread full-screen rather than
+opening a drawer alongside. **New-message push is deferred** (issue #118): there
+is no `message` notification kind server-side — messaging stays outside the
+activity centre with its own badge — so the app is polling-only parity, exactly
+as the web is.
+
 ## Not end-to-end encrypted (yet)
 
 Messages are stored in the database **in plaintext** and are readable by the

@@ -173,6 +173,79 @@ export type ReactorGroup = {
   users: Author[];
 };
 
+/**
+ * One member of a chat — `ParticipantSerializer`. `status` is *their* membership
+ * state: `active` members can read and send; a `pending` invitee is in the
+ * waiting room (invited but not yet connected to the whole active clique) and
+ * sees only the locked panel until they're promoted. See messaging.md.
+ */
+export type Participant = {
+  id: number;
+  display_name: string;
+  avatar_thumb: string | null;
+  status: 'active' | 'pending';
+};
+
+/**
+ * The last-message preview on a conversation row — the flattened slice
+ * `get_last_message` attaches (deliberately *not* a full `Message`: it carries
+ * only `sender_id`, not the embedded sender object, since the row just needs
+ * "You: …" vs the text). `text` is blank when `is_deleted`; the row renders a
+ * "Message deleted" placeholder in its place.
+ */
+export type LastMessage = {
+  text: string;
+  is_deleted: boolean;
+  sender_id: number;
+  created_at: string;
+};
+
+/**
+ * A conversation — `ConversationSerializer`. The one type serves both the list
+ * row and the single-thread detail, exactly as the serializer does; which fields
+ * are populated differs by endpoint (see the per-field notes):
+ *
+ *   - `other` — the person you're talking to, on a `direct` thread only (`null`
+ *     for a group). Resolved per-viewer server-side.
+ *   - `participants` — every member + their `status`; drives the group header's
+ *     avatar-stack and the pending panel's "connect with X" list.
+ *   - `my_status` — *your* membership: a `pending` viewer gets the locked panel
+ *     (and `must_connect_with`) instead of message access.
+ *   - `last_message` / `unread_count` — attached per-viewer on the **list** only.
+ *   - `can_send` — whether you may still post; set only on the **detail** view
+ *     (`null` in the list). History stays readable even when it's `false`.
+ */
+export type Conversation = {
+  id: number;
+  kind: 'direct' | 'group';
+  title: string;
+  /** The group this chat belongs to, when it's a group-scoped chat; else null. */
+  group: { id: number; name: string } | null;
+  other: Author | null;
+  participants: Participant[];
+  my_status: 'active' | 'pending' | null;
+  /** People a pending viewer must connect with before they're let in. */
+  must_connect_with: Author[];
+  last_message: LastMessage | null;
+  unread_count: number;
+  can_send: boolean | null;
+  updated_at: string;
+};
+
+/**
+ * One message in a thread — `MessageSerializer`. `sender` is the embedded author
+ * slice, so the thread can align/attribute each bubble. A soft-deleted message
+ * reports `is_deleted: true` with blank `text`; the client renders a "message
+ * deleted" tombstone in its place, keeping the thread's order intact.
+ */
+export type Message = {
+  id: number;
+  sender: Author;
+  text: string;
+  is_deleted: boolean;
+  created_at: string;
+};
+
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */
 export type Post = {
   id: number;

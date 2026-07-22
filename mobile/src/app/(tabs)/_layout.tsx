@@ -16,8 +16,8 @@ import { useQuery } from '@tanstack/react-query';
 import { Tabs } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
-import { FeedIcon, PeopleIcon } from '@/components/icons';
+import { api, CONVERSATION_LIST_POLL_MS } from '@/api';
+import { FeedIcon, MessagesIcon, PeopleIcon } from '@/components/icons';
 import { colors } from '@/theme';
 
 // The bar's content height *above* the home-indicator inset. The stock iOS tab
@@ -35,6 +35,17 @@ export default function TabsLayout() {
     queryFn: api.getConnectionRequests,
   });
   const pending = data?.count ?? 0;
+
+  // The Messages tab badge: total unread across all threads. Shares the
+  // ['unreadMessages'] key the thread screen invalidates on mark-read, so
+  // opening a chat clears it. Polled on the slow (list) cadence — a new message
+  // isn't more urgent in a tab badge than in the conversation list.
+  const { data: unread } = useQuery({
+    queryKey: ['unreadMessages'],
+    queryFn: api.getUnreadMessageCount,
+    refetchInterval: CONVERSATION_LIST_POLL_MS,
+  });
+  const unreadMessages = unread?.count ?? 0;
 
   return (
     <Tabs
@@ -74,6 +85,22 @@ export default function TabsLayout() {
           // `undefined` (not 0) hides the badge — a 0 would render an empty pip.
           // Cap at 99+ so a large count can't blow out the pill.
           tabBarBadge: pending > 99 ? '99+' : pending > 0 ? pending : undefined,
+          tabBarBadgeStyle: { backgroundColor: colors.accent },
+        }}
+      />
+      <Tabs.Screen
+        name="messages"
+        options={{
+          title: 'Messages',
+          tabBarIcon: ({ color }) => (
+            <MessagesIcon color={color as string} size={TAB_ICON_SIZE} />
+          ),
+          tabBarBadge:
+            unreadMessages > 99
+              ? '99+'
+              : unreadMessages > 0
+                ? unreadMessages
+                : undefined,
           tabBarBadgeStyle: { backgroundColor: colors.accent },
         }}
       />
