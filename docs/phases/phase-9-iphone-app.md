@@ -388,7 +388,10 @@ if you pause the phase you've built the things people actually open):
   E2b (create) both shipped; see the 2026-07-22 notes entries. **E3 (groups +
   events) next.**
 - **E3. Groups + events.** Group list/detail/invites, group timelines, and the
-  Phase 8b event surfaces (event detail, RSVP, polls, calendar).
+  Phase 8b event surfaces (event detail, RSVP, polls, calendar). The largest
+  chunk — spans two feature areas. **Full plan below** ("E3 — Groups + events:
+  confirmed plan"); three PRs (E3a groups, E3b events view+participate, E3c
+  events organise). **In progress.**
 - **E4. Settings + safety.** Per-type notification prefs, account settings,
   account deletion, ToS/privacy, and **report + block**. Small in code, but
   **App Review will reject a social app without working report and block** —
@@ -398,6 +401,90 @@ Ends: no web feature is missing from the app.
 
 **F. Distribution.** Build with EAS, upload to **TestFlight**, add real testers.
 Ends: friends/family install via TestFlight; sign-ups remain admin-approved.
+
+### E3 — Groups + events: confirmed plan (2026-07-22)
+
+Read [`../reference/groups.md`](../reference/groups.md) and
+[`../reference/events.md`](../reference/events.md) first — they own the two
+gates (membership gates group *access*; **connection** gates *whose* posts/events
+you see inside it, keyed on author/organiser), the roles model, the advisory-poll
+lifecycle, and the endpoints. E3 is a **client port**: no backend changes. It's
+the largest E-chunk — roughly E1+E2 combined — so it's **three PRs**. Decisions
+taken with the user:
+
+1. **Nav: two new tabs.** Groups becomes the **4th bottom tab** (Feed · People ·
+   Messages · Groups), with a group-invites badge. The personal **Calendar** is a
+   **5th tab** (not pushed from Groups) — it unions upcoming events across every
+   group you're in, and is positioned to later host **non-group personal events**
+   (a user inviting one or two of their connections to an event that lives in no
+   group — a *future* backend feature, explicitly **not** E3; E3's calendar shows
+   group events only). Five tabs is the iOS comfortable max; E4's Activity +
+   Settings will therefore need non-tab homes (a header bell / the profile
+   screen) rather than more tabs.
+2. **Native date/time pickers**, not a port of the web's segmented
+   auto-advancing DD/MM/YYYY boxes. Same native-adaptation call as the emoji
+   picker and the avatar cropper — the OS wheel/calendar picker is what a phone
+   user expects and hands the API the same ISO date / `HH:MM`.
+3. **Structure follows E2**: list surfaces are tabs; detail/form surfaces are
+   full-screen routes pushed *over* the tabs (`groups/[groupId]`,
+   `events/[eventId]`, `groups/new`, etc.), siblings of `(tabs)`.
+
+**Three PRs:**
+
+- **E3a — Groups.** The Groups tab (list of groups you're in + a **Requests**-style
+  invites segment, mirroring People), group **detail** (the connection-pruned
+  group timeline via the shared `TimelineList`, compose-into-group, the header
+  with name/description/avatar/member-count, and a **⋯ actions menu**: Invite,
+  Members, Leave; admin-only Edit, Delete), the **members** roster (invite one of
+  your connections, admin remove/promote/demote, the last-admin guardrail
+  surfaced), **create/edit** group forms, and the **include-groups feed toggle**
+  on the home feed (`?include_groups=1`, off by default, each merged post labelled
+  "in <group>"). Closes the `group_invite` push deep-link (→ the invites segment).
+  New API: `getGroups`, `getGroup`, `createGroup`, `updateGroup`, `deleteGroup`,
+  `getGroupMembers`, `inviteToGroup`, `removeMember`, `setMemberRole`,
+  `getGroupPosts`, `getGroupInvites`, `acceptGroupInvite`, `rejectGroupInvite`;
+  `createPost` gains an optional `group`. Types `Group`, `GroupMember`,
+  `GroupInvite`. **Events are not in E3a** — the group page's upcoming-events
+  section lands in E3b.
+- **E3b — Events: view & participate.** The **upcoming-events** section on the
+  group page (post-shaped entries above the now-node; past events already fall
+  into the timeline as recaps), **event detail** (`events/[eventId]`) read side —
+  dimension **chips** (date/time/location/custom, their `unset`/`polling`/`set`
+  state), the **RSVP** control (going/maybe/declined + guests + note) with
+  complete counts / connection-gated names, and **poll voting** (`PUT
+  /polls/<id>/vote/`, pick-one vs pick-any) with the tally (complete counts,
+  gated voter names). The **Calendar** tab + the group's **month grid** (a
+  Timeline/Calendar toggle on the group page). Closes the four event push
+  deep-links (`event_created`/`poll_opened`/`event_scheduled`/`event_updated`/
+  `event_cancelled` → `events/[eventId]`). API: `getGroupEvents`, `getEvent`,
+  `rsvp`, `getRsvps`, `voteInPoll`, `getGroupCalendar`, `getPersonalCalendar`.
+  Types `Event`, `Poll`, `PollOption`, `RsvpSummary`.
+- **E3c — Events: organise.** The organiser's control surface — **Plan an event**
+  (title + create), the chip **Set · Poll / Change · Poll** affordances driving a
+  contextual **dimension editor** (native pickers for date/time; text for
+  location/custom), opening a **poll** on a dimension, **finalise**
+  (`POST /events/<id>/finalise/`, writes the built-in field or pins a custom
+  outcome — advisory, never auto-decided), **close/reopen** a poll, poll **edit**
+  (while unvoted, the 409 guard), **cancel** an event, and the event **edit**
+  (title/description/location/timezone/end-time). API: `createEvent`,
+  `updateEvent`, `cancelEvent`, `deleteEvent`, `openPoll`, `editPoll`, `closePoll`,
+  `reopenPoll`, `finaliseDimension`.
+
+**Scope boundaries (deliberately not E3):**
+- **Non-group personal events** (invite 1–2 connections, no group) — a future
+  backend feature; the Calendar tab is *shaped* for it but E3 ships group events
+  only.
+- **Report / block → E4** (safety). Group/member rows don't grow Block here.
+- **Activity centre + Settings tabs → E4.**
+
+**Definition of done (E3):** groups list + invites + detail (timeline, compose,
+members, invite/leave, admin edit/delete/promote) work against the real backend;
+the include-groups feed toggle merges chronologically; event detail shows chips +
+RSVP + poll tally with complete-counts/gated-names; RSVP and voting write through;
+the organiser can plan, set/poll/finalise dimensions, close/reopen, cancel, and
+edit; the Calendar tab and group month grid render; all five event push kinds and
+`group_invite` deep-link to their targets; real Jest tests per PR; typecheck +
+lint + the `mobile-test` job green.
 
 ### E2 — Messaging: confirmed plan (2026-07-22)
 
