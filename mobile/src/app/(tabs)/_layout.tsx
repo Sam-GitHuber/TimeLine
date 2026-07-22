@@ -46,11 +46,13 @@ export default function TabsLayout() {
           backgroundColor: colors.raised,
           borderTopColor: colors.line,
           height: TAB_BAR_CONTENT_HEIGHT + insets.bottom,
+          // Reserve *only* the safe-area inset at the bottom; with no matching
+          // top padding, react-navigation centres the icon + label within the
+          // remaining content height on its own. (Adding paddingTop or an icon
+          // margin here reintroduces the top/bottom imbalance this had.)
           paddingBottom: insets.bottom,
-          paddingTop: 4,
         },
         tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
-        tabBarIconStyle: { marginBottom: -2 },
       }}
     >
       <Tabs.Screen
