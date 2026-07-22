@@ -78,10 +78,41 @@ export default function GroupInviteScreen() {
   }
 
   const invite = useMutation({
-    mutationFn: () => Promise.all([...selected].map((uid) => api.inviteToGroup(id, uid))),
-    onSuccess: () => {
+    // `allSettled`, not `all`: the invites are independent, so one that the
+    // server rejects (a since-blocked connection, or someone already invited —
+    // pending invitees aren't filtered from the pool) must not discard the ones
+    // that succeeded. We tally the outcomes and report them, rather than failing
+    // the whole batch on the first rejection.
+    mutationFn: async () => {
+      const ids = [...selected];
+      const results = await Promise.allSettled(
+        ids.map((uid) => api.inviteToGroup(id, uid))
+      );
+      const rejected = results.filter(
+        (r): r is PromiseRejectedResult => r.status === 'rejected'
+      );
+      const firstError =
+        rejected[0]?.reason instanceof Error ? rejected[0].reason.message : null;
+      return { total: ids.length, failed: rejected.length, firstError };
+    },
+    onSuccess: ({ total, failed, firstError }) => {
       queryClient.invalidateQueries({ queryKey: ['groupMembers', id] });
-      router.back();
+      if (failed === 0) {
+        router.back();
+      } else if (failed === total) {
+        // Nothing went through — keep the picker open so they can retry.
+        Alert.alert(
+          'Couldn’t invite anyone',
+          firstError ?? 'None of the invites went through. Please try again.'
+        );
+      } else {
+        // Some landed; those people now have pending invites, so leave.
+        Alert.alert(
+          'Some invites didn’t send',
+          `Invited ${total - failed} of ${total}. ${failed} couldn’t be invited.`
+        );
+        router.back();
+      }
     },
     onError: (error) =>
       Alert.alert(

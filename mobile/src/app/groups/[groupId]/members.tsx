@@ -63,40 +63,39 @@ export default function GroupMembersScreen() {
   function manage(member: GroupMember) {
     if (!isAdmin) return;
     const name = member.user.display_name;
-    const roleAction =
-      member.role === 'admin'
-        ? { label: 'Make member', run: () => api.setGroupMemberRole(id, member.user.id, 'member') }
-        : { label: 'Make admin', run: () => api.setGroupMemberRole(id, member.user.id, 'admin') };
-    const removeAction = {
-      label: 'Remove from group',
-      run: () =>
-        new Promise<void>((resolve, reject) => {
-          Alert.alert('Remove member?', `Remove ${name} from this group?`, [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve() },
-            {
-              text: 'Remove',
-              style: 'destructive',
-              onPress: () =>
-                api.removeGroupMember(id, member.user.id).then(resolve).catch(reject),
-            },
-          ]);
-        }),
-    };
-    const actions = [roleAction, removeAction];
-    const labels = [...actions.map((a) => a.label), 'Cancel'];
+    const roleLabel = member.role === 'admin' ? 'Make member' : 'Make admin';
+    const nextRole = member.role === 'admin' ? 'member' : 'admin';
 
+    const promote = () =>
+      mutation.mutate(() => api.setGroupMemberRole(id, member.user.id, nextRole));
+    // Confirm *before* the mutation, so tapping Cancel is a true no-op rather
+    // than resolving into the mutation's success path (which would fire the
+    // invalidations below for a removal that never happened).
+    const remove = () =>
+      Alert.alert('Remove member?', `Remove ${name} from this group?`, [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => mutation.mutate(() => api.removeGroupMember(id, member.user.id)),
+        },
+      ]);
+
+    const labels = [roleLabel, 'Remove from group', 'Cancel'];
     const pick = (i: number) => {
-      if (i < actions.length) mutation.mutate(actions[i].run);
+      if (i === 0) promote();
+      else if (i === 1) remove();
     };
 
     if (Platform.OS === 'ios') {
       ActionSheetIOS.showActionSheetWithOptions(
-        { title: name, options: labels, destructiveButtonIndex: 1, cancelButtonIndex: labels.length - 1 },
+        { title: name, options: labels, destructiveButtonIndex: 1, cancelButtonIndex: 2 },
         pick
       );
     } else {
       Alert.alert(name, undefined, [
-        ...actions.map((a, i) => ({ text: a.label, onPress: () => pick(i) })),
+        { text: labels[0], onPress: () => pick(0) },
+        { text: labels[1], style: 'destructive' as const, onPress: () => pick(1) },
         { text: 'Cancel', style: 'cancel' as const },
       ]);
     }

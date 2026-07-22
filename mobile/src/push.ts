@@ -174,9 +174,12 @@ export function routeForNotification(url: string | null | undefined): Href {
   // annoying.
   if (path === '/requests') return '/people';
 
-  // A group invite (backend sends `/group-invites`) opens the Groups tab, which
-  // lands on its Invites segment when there are pending invites (E3a) — the same
-  // pattern as connection requests → People.
+  // A group invite (backend sends `/group-invites`) opens the Groups tab. Like
+  // connection requests → People above, it lands on the tab's default (Groups)
+  // segment rather than the Invites one; the pending-count badge on the Invites
+  // segment surfaces the invite from there. Landing directly on Invites would
+  // mean threading a segment param through the tab's retained state — deferred
+  // for the same reason as the requests case (E3a).
   if (path === '/group-invites') return '/groups';
 
   // /g/<id>/events/<id> (event notifications) have no mobile screen yet (E3b).
