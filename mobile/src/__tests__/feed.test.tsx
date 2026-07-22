@@ -9,7 +9,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react-native';
 
-import FeedScreen from '@/app/index';
+import FeedScreen from '@/app/(tabs)/index';
 import { toRows, trimToFirstPage, type FeedPages } from '@/feed';
 import { AuthProvider } from '@/auth';
 import type { Post } from '@/types';

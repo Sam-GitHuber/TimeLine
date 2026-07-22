@@ -345,6 +345,62 @@ describe('createPost multipart body', () => {
   });
 });
 
+describe('connections (E1)', () => {
+  beforeEach(async () => {
+    await saveTokens({ access: 'access-1', refresh: 'refresh-1' });
+  });
+
+  it('lists connections and discover with the right filter param', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ count: 0, next: null, results: [] }));
+
+    await api.listConnections();
+    expect(mockFetch.mock.calls[0][0]).toBe(`${BASE}/api/users/?filter=connected`);
+
+    await api.listDiscover();
+    expect(mockFetch.mock.calls[1][0]).toBe(`${BASE}/api/users/?filter=discover`);
+  });
+
+  it('connects with a POST and disconnects with a DELETE on the same URL', async () => {
+    mockFetch.mockResolvedValue(jsonResponse(null, 204));
+
+    await api.connect(42);
+    expect(mockFetch.mock.calls[0][0]).toBe(`${BASE}/api/users/42/connect/`);
+    expect(mockFetch.mock.calls[0][1].method).toBe('POST');
+
+    await api.disconnect(42);
+    expect(mockFetch.mock.calls[1][0]).toBe(`${BASE}/api/users/42/connect/`);
+    expect(mockFetch.mock.calls[1][1].method).toBe('DELETE');
+  });
+
+  it('approves and rejects a request by the Connection row id, via POST', async () => {
+    mockFetch.mockResolvedValue(jsonResponse(null, 204));
+
+    await api.approveRequest(7);
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      `${BASE}/api/connection-requests/7/approve/`
+    );
+    expect(mockFetch.mock.calls[0][1].method).toBe('POST');
+
+    await api.rejectRequest(7);
+    expect(mockFetch.mock.calls[1][0]).toBe(
+      `${BASE}/api/connection-requests/7/reject/`
+    );
+    expect(mockFetch.mock.calls[1][1].method).toBe('POST');
+  });
+
+  it('fetches the disconnect impact as a plain GET', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ chats: [] }));
+
+    await api.getDisconnectImpact(42);
+
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      `${BASE}/api/users/42/disconnect-impact/`
+    );
+    // No method override means GET.
+    expect(mockFetch.mock.calls[0][1].method).toBe('GET');
+  });
+});
+
 describe('token storage', () => {
   it('round-trips and clears', async () => {
     await saveTokens({ access: 'a', refresh: 'r' });

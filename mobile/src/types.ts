@@ -50,6 +50,38 @@ export type ProfileUser = {
   is_blocked: boolean;
 };
 
+/**
+ * A row in the People hub's lists — `api.serializers.UserListSerializer`, the
+ * same serializer behind `getUser`. It's structurally a `ProfileUser`: the
+ * `/api/users/` list endpoint annotates `connection_status` per row and defaults
+ * `is_blocked` to `false` (block state is only surfaced on the profile detail),
+ * so one type serves both. Aliased rather than duplicated so a serializer change
+ * lands in one place.
+ */
+export type PersonSummary = ProfileUser;
+
+/**
+ * `GET /api/connection-requests/` — `ConnectionRequestSerializer`.
+ *
+ * One incoming request in *your* inbox: someone has asked to connect with you
+ * and is waiting on your approval. `id` is the underlying `Connection` row's id
+ * — the handle you pass to approve/reject, **not** the requester's user id.
+ */
+export type ConnectionRequest = {
+  id: number;
+  requester: Author;
+  created_at: string;
+};
+
+/**
+ * `GET /api/users/<id>/disconnect-impact/` — the shared group chats a disconnect
+ * (or block) would drop you out of, so the warning modal can name them before
+ * you confirm. Empty when severing this connection breaks no chat.
+ */
+export type DisconnectImpact = {
+  chats: { id: number; title: string; kind: string }[];
+};
+
 /** `POST /api/auth/mobile/login/` — see `accounts.views.MobileLoginView`. */
 export type LoginResponse = {
   access: string;

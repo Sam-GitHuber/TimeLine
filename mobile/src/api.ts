@@ -28,8 +28,11 @@ import {
 } from './tokens';
 import type {
   Comment,
+  ConnectionRequest,
+  DisconnectImpact,
   LoginResponse,
   Paginated,
+  PersonSummary,
   Post,
   ProfileUser,
   ReactionSummary,
@@ -351,6 +354,69 @@ export const api = {
    */
   getUserPosts: (userId: number | string) =>
     request<Paginated<Post>>(`/api/users/${userId}/posts/`),
+
+  /**
+   * The People hub's two directories, one endpoint narrowed by a filter:
+   *   - `listConnections` — people you're already accepted-connected with.
+   *   - `listDiscover` — everyone you're *not* yet connected with (so existing
+   *     connections don't clutter "find new people"). Pending/incoming requests
+   *     still appear here, so you can act on them.
+   * Both paginate like every list, so the screen follows `next` with `getPage`.
+   */
+  listConnections: () =>
+    request<Paginated<PersonSummary>>('/api/users/?filter=connected'),
+  listDiscover: () =>
+    request<Paginated<PersonSummary>>('/api/users/?filter=discover'),
+
+  /**
+   * Send a connection request **or** accept an incoming one — the backend
+   * decides. Accounts are private, so this creates a *pending* request that
+   * grants nothing until the other person approves; the one exception is when
+   * they've already requested you, in which case this accepts that existing row
+   * (a mutual intent, not a competing second request). See connections.md.
+   */
+  connect: (userId: number | string) =>
+    request<void>(`/api/users/${userId}/connect/`, { method: 'POST' }),
+
+  /**
+   * Cancel a pending request or end an accepted connection — same endpoint,
+   * same DELETE. Disconnecting is symmetric: it severs the single shared row, so
+   * neither of you sees the other's posts afterwards.
+   */
+  disconnect: (userId: number | string) =>
+    request<void>(`/api/users/${userId}/connect/`, { method: 'DELETE' }),
+
+  /**
+   * The shared group chats a disconnect/block would drop you out of, so the
+   * warning modal can name them before you confirm. Read as a plain check, not a
+   * mutation — it changes nothing.
+   */
+  getDisconnectImpact: (userId: number | string) =>
+    request<DisconnectImpact>(`/api/users/${userId}/disconnect-impact/`),
+
+  /**
+   * Your inbox of incoming connection requests — people asking to connect with
+   * you, newest-first. `count` is the badge total (the whole inbox, not this
+   * page); the same query key feeds the People tab's badge and its Requests
+   * segment, so approving/rejecting keeps both in step.
+   */
+  getConnectionRequests: () =>
+    request<Paginated<ConnectionRequest>>('/api/connection-requests/'),
+
+  /**
+   * Approve an incoming request (makes the connection mutual — you both start
+   * seeing each other's posts) or reject it (discards the request). `id` is the
+   * `ConnectionRequest.id`, not a user id. Guarded server-side so only the
+   * requestee can act; someone else's request 404s rather than being revealed.
+   */
+  approveRequest: (requestId: number) =>
+    request<void>(`/api/connection-requests/${requestId}/approve/`, {
+      method: 'POST',
+    }),
+  rejectRequest: (requestId: number) =>
+    request<void>(`/api/connection-requests/${requestId}/reject/`, {
+      method: 'POST',
+    }),
 
   /**
    * The reverse-chronological feed: your posts plus those of everyone you're
