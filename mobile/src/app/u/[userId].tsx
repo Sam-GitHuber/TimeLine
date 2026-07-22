@@ -36,6 +36,7 @@ import { api, ApiError } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { ConnectButton } from '@/components/ConnectButton';
+import { MessageButton } from '@/components/MessageButton';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
 import { TimelineList } from '@/components/TimelineList';
 import { toRows } from '@/feed';
@@ -140,10 +141,12 @@ export default function ProfileScreen() {
                 <Text style={styles.logoutLabel}>Log out</Text>
               </Pressable>
             ) : user ? (
-              // The connection control (E1). Its own mutation invalidates
+              // The connection control (E1) plus, once you're connected, the
+              // Message button (E2). ConnectButton's mutation invalidates
               // ['user', id] + ['userPosts', id], so accepting/connecting here
-              // re-fetches `connection_status` and flips the posts wall below
-              // without leaving this screen. Message + Block join it in E2/E4.
+              // re-fetches `connection_status` and flips both the posts wall and
+              // whether Message shows — without leaving this screen. Block joins
+              // them in E4.
               <View style={styles.actions}>
                 <ConnectButton
                   userId={id}
@@ -151,6 +154,9 @@ export default function ProfileScreen() {
                   connectionStatus={user.connection_status}
                   size="md"
                 />
+                {user.connection_status === 'connected' && (
+                  <MessageButton userId={id} />
+                )}
               </View>
             ) : null}
           </View>

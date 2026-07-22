@@ -52,6 +52,21 @@ export function FeedIcon({ color, size = 26 }: IconProps) {
   );
 }
 
+/** A speech bubble — messaging. */
+export function MessagesIcon({ color, size = 26 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H9l-4 3.5V16H5.5A1.5 1.5 0 0 1 4 14.5z"
+        stroke={color}
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 /** Two people — the connection graph. */
 export function PeopleIcon({ color, size = 26 }: IconProps) {
   return (

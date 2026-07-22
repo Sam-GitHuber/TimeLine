@@ -29,8 +29,10 @@ import {
 import type {
   Comment,
   ConnectionRequest,
+  Conversation,
   DisconnectImpact,
   LoginResponse,
+  Message,
   Paginated,
   PersonSummary,
   Post,
@@ -57,6 +59,20 @@ import type {
 // request into a relative URL that goes nowhere.
 export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://your-timeline.net';
+
+/**
+ * Messaging poll cadences, named once here exactly as the web keeps them in
+ * `frontend/src/api.js`. Near-real-time is deliberately polling, not sockets
+ * (see messaging.md) — an open thread refetches fast, the conversation list and
+ * the unread badge slower, since a new message isn't more urgent in a list than
+ * it is in a bell.
+ *
+ * TanStack Query's `refetchInterval` pauses while the app is backgrounded,
+ * because `_layout.tsx` wires `focusManager` to `AppState` — so these don't drain
+ * the battery when the phone's in a pocket.
+ */
+export const MESSAGE_POLL_MS = 4000;
+export const CONVERSATION_LIST_POLL_MS = 12000;
 
 /**
  * A photo chosen from the library, ready to upload. The picker hands us the
@@ -393,6 +409,108 @@ export const api = {
    */
   getDisconnectImpact: (userId: number | string) =>
     request<DisconnectImpact>(`/api/users/${userId}/disconnect-impact/`),
+
+  /* ---- Messaging (Phase 9 E2) -------------------------------------------- *
+   * Direct + group chats share these endpoints, and a `Conversation` serves both
+   * the list row and the thread detail — see messaging.md, which owns the data
+   * model, the clique/safety gate, and the interval-clipped history. This is a
+   * pure client port: no backend change. E2a (this PR) reads and uses existing
+   * conversations; E2b adds create/add-people (`createGroupChat`,
+   * `addParticipants`). */
+
+  /**
+   * Your conversations, most-recent-activity first, each with a last-message
+   * preview and your per-thread `unread_count`. Paginated like every list.
+   * Polled on the slow cadence (`CONVERSATION_LIST_POLL_MS`).
+   */
+  getConversations: () =>
+    request<Paginated<Conversation>>('/api/conversations/'),
+
+  /**
+   * A single conversation's detail — the other person / participants, your
+   * `my_status`, and `can_send`. This exists **separately from the messages
+   * endpoint** because the thread header needs the other participant on a cold
+   * load, which the message list doesn't carry (see messaging.md).
+   */
+  getConversation: (conversationId: number | string) =>
+    request<Conversation>(`/api/conversations/${conversationId}/`),
+
+  /**
+   * A thread's messages, oldest-first and paginated, **clipped to your
+   * participation intervals** server-side (a member who left and returned never
+   * sees the gap). 403s while you're a pending member — the thread renders the
+   * locked panel instead of calling this.
+   */
+  getMessages: (conversationId: number | string) =>
+    request<Paginated<Message>>(
+      `/api/conversations/${conversationId}/messages/`
+    ),
+
+  /**
+   * Send a message. The sender is the authenticated user, never the body — you
+   * can't post as someone else. Active participants only (the composer keys off
+   * `can_send`, and the backend enforces the same gate).
+   */
+  sendMessage: (conversationId: number | string, text: string) =>
+    request<Message>(`/api/conversations/${conversationId}/messages/`, {
+      method: 'POST',
+      body: { text },
+    }),
+
+  /**
+   * Soft-delete your *own* message — it becomes a "message deleted" tombstone
+   * that keeps its place in the thread (so nothing reshuffles and pagination
+   * isn't disturbed), rather than vanishing. Deleted messages don't count toward
+   * unread.
+   */
+  deleteMessage: (
+    conversationId: number | string,
+    messageId: number | string
+  ) =>
+    request<void>(
+      `/api/conversations/${conversationId}/messages/${messageId}/`,
+      { method: 'DELETE' }
+    ),
+
+  /**
+   * Mark the conversation read up to now, clearing its unread count. Called on
+   * open and as new messages land — the thread-level equivalent of stamping a
+   * post thread "seen".
+   */
+  markConversationRead: (conversationId: number | string) =>
+    request<void>(`/api/conversations/${conversationId}/read/`, {
+      method: 'POST',
+    }),
+
+  /**
+   * Total unread messages across all conversations — one number for the Messages
+   * tab badge, so it doesn't have to load and sum the paginated list. Polled on
+   * the same slow cadence as the list.
+   */
+  getUnreadMessageCount: () =>
+    request<{ count: number }>('/api/messages/unread-count/'),
+
+  /**
+   * Get-or-create the 1:1 conversation with a connected person — idempotent, so
+   * the Message button on a profile can call it blind and land on the existing
+   * thread if there is one. Returns the `Conversation`; the caller pushes its
+   * thread. Backend gates it to people you're connected with.
+   */
+  openConversation: (userId: number | string) =>
+    request<Conversation>('/api/conversations/', {
+      method: 'POST',
+      body: { user_id: userId },
+    }),
+
+  /**
+   * Leave a chat, or — while pending — decline the invite. Works from either
+   * status (see messaging.md); closes your interval and triggers a promote
+   * re-eval for everyone else. The thread routes back to the list on success.
+   */
+  leaveConversation: (conversationId: number | string) =>
+    request<void>(`/api/conversations/${conversationId}/leave/`, {
+      method: 'POST',
+    }),
 
   /**
    * Your inbox of incoming connection requests — people asking to connect with
