@@ -40,7 +40,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api, ApiError, MESSAGE_POLL_MS } from '@/api';
 import { useAuth } from '@/auth';
@@ -51,11 +51,15 @@ import { PendingChatPanel } from '@/components/PendingChatPanel';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
 
+/** The composer bar's base vertical padding, before the home-indicator inset. */
+const COMPOSER_PAD = spacing.sm + 2;
+
 export default function ThreadScreen() {
   const { conversationId } = useLocalSearchParams<{ conversationId: string }>();
   const id = Number(conversationId);
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
+  const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const listRef = useRef<FlatList<Message>>(null);
 
@@ -274,7 +278,17 @@ export default function ThreadScreen() {
             }
           />
 
-          <View style={styles.composerBar}>
+          {/* Pad the bar past the home-indicator inset so the composer and Send
+              button clear the bottom edge / swipe area on full-screen phones. On
+              a home-button phone `insets.bottom` is 0, so this is the base pad.
+              When the keyboard is up, KeyboardAvoidingView lifts the whole bar
+              above it, and this inset becomes a small, harmless gap. */}
+          <View
+            style={[
+              styles.composerBar,
+              { paddingBottom: COMPOSER_PAD + insets.bottom },
+            ]}
+          >
             {canSend ? (
               <View style={styles.composer}>
                 <TextInput
@@ -364,7 +378,8 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.line,
     paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.sm + 2,
+    paddingTop: spacing.sm + 2,
+    // paddingBottom is applied inline: COMPOSER_PAD + the home-indicator inset.
   },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
   input: {
