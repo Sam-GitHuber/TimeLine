@@ -126,7 +126,13 @@ export default function ThreadScreen() {
 
   const leaveMutation = useMutation({
     mutationFn: () => api.leaveConversation(id),
-    onSuccess: goBack,
+    onSuccess: () => {
+      // Drop the just-left chat off the list (and its unread out of the tab
+      // badge) immediately, rather than waiting up to a poll cycle for it.
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
+      goBack();
+    },
   });
 
   function handleSend() {

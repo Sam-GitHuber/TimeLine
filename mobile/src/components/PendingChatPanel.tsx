@@ -43,7 +43,13 @@ export function PendingChatPanel({
 
   const leaveMutation = useMutation({
     mutationFn: () => api.leaveConversation(conversationId),
-    onSuccess: onLeave,
+    onSuccess: () => {
+      // Declining drops the pending invite off the list immediately, rather
+      // than lingering until the next poll.
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
+      onLeave();
+    },
   });
 
   const people = mustConnectWith ?? [];

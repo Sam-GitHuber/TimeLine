@@ -10,6 +10,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
@@ -206,6 +207,34 @@ it('attributes only the first bubble of a run in a group thread', async () => {
   // new run gets its own label. The header title "Hikers" isn't a sender label.
   expect(screen.getAllByText('Ada Lovelace')).toHaveLength(1);
   expect(screen.getByText('Grace Hopper')).toBeTruthy();
+});
+
+it('deletes your own message on long-press → confirm', async () => {
+  const meAuthor = { id: ME.pk, display_name: ME.display_name, avatar_thumb: null };
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: meAuthor, text: 'oops typo' })],
+  });
+  // Stand in for the native confirm dialog by firing its destructive button.
+  const alertSpy = jest
+    .spyOn(Alert, 'alert')
+    .mockImplementation((_title, _msg, buttons) => {
+      buttons?.find((b) => b.style === 'destructive')?.onPress?.();
+    });
+
+  await renderScreen();
+  fireEvent(await screen.findByLabelText('Your message: oops typo'), 'longPress');
+
+  await waitFor(() =>
+    expect(
+      mockFetch.mock.calls.some(
+        ([url, init]) =>
+          String(url).includes('/api/conversations/5/messages/7/') &&
+          init?.method === 'DELETE'
+      )
+    ).toBe(true)
+  );
+  alertSpy.mockRestore();
 });
 
 it('shows a tombstone for a deleted message', async () => {
