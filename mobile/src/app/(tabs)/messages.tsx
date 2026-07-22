@@ -12,9 +12,9 @@
  * The list polls on the slow cadence (`CONVERSATION_LIST_POLL_MS`); TanStack's
  * `refetchInterval` pauses while the app is backgrounded (see `_layout.tsx`).
  *
- * **Starting a new chat is E2b** — for now you begin one from a person's profile
- * (the Message button). The empty state points there rather than offering a
- * compose button that doesn't exist yet.
+ * The header's compose button and the empty-state CTA both open the new-chat
+ * picker (`messages/new`, E2b). You can also start a 1:1 from a person's profile
+ * (the Message button).
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -34,6 +34,7 @@ import { api, CONVERSATION_LIST_POLL_MS } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
+import { ComposeIcon } from '@/components/icons';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation } from '@/types';
 import { formatRelativeTime } from '@/utils';
@@ -67,6 +68,15 @@ export default function MessagesScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <Text style={styles.title}>Messages</Text>
+        <Pressable
+          onPress={() => router.push('/messages/new')}
+          accessibilityRole="button"
+          accessibilityLabel="New message"
+          hitSlop={12}
+          style={({ pressed }) => [styles.compose, pressed && styles.pressed]}
+        >
+          <ComposeIcon color={colors.accent} size={24} />
+        </Pressable>
       </View>
 
       <FlatList
@@ -110,9 +120,15 @@ export default function MessagesScreen() {
             <View style={styles.centre}>
               <Text style={styles.emptyTitle}>No conversations yet</Text>
               <Text style={styles.messageText}>
-                Start one from someone’s profile — open a connection and tap
-                Message.
+                Start one with someone you’re connected with.
               </Text>
+              <Pressable
+                onPress={() => router.push('/messages/new')}
+                accessibilityRole="button"
+                style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+              >
+                <Text style={styles.primaryBtnLabel}>New message</Text>
+              </Pressable>
             </View>
           )
         }
@@ -214,12 +230,25 @@ function ListMessage({ children }: { children: React.ReactNode }) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.surface },
   header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.sm,
     borderBottomWidth: 1,
     borderBottomColor: colors.line,
   },
   title: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink },
+  // Plain icon button in the header — no pill, the iOS nav-action pattern.
+  compose: { padding: spacing.xs },
+  primaryBtn: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.pill,
+    backgroundColor: colors.accent,
+  },
+  primaryBtnLabel: { fontSize: fontSize.sm, fontWeight: '600', color: '#ffffff' },
   listContent: { flexGrow: 1 },
   row: {
     flexDirection: 'row',

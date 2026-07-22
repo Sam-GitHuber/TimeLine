@@ -208,17 +208,27 @@ export default function ThreadScreen() {
         </View>
 
         {isGroup && !loadError && !isPending ? (
-          <Pressable
-            onPress={confirmLeave}
-            accessibilityRole="button"
-            accessibilityLabel="Leave chat"
-            hitSlop={8}
-          >
-            <Text style={styles.leave}>Leave</Text>
-          </Pressable>
+          <View style={styles.headerActions}>
+            <Pressable
+              onPress={() => router.push(`/messages/new?addTo=${id}`)}
+              accessibilityRole="button"
+              accessibilityLabel="Add people"
+              hitSlop={8}
+            >
+              <Text style={styles.headerAction}>Add</Text>
+            </Pressable>
+            <Pressable
+              onPress={confirmLeave}
+              accessibilityRole="button"
+              accessibilityLabel="Leave chat"
+              hitSlop={8}
+            >
+              <Text style={styles.leave}>Leave</Text>
+            </Pressable>
+          </View>
         ) : (
           // A fixed-width spacer keeps the identity block centred against the
-          // Back button whether or not a Leave action is present.
+          // Back button whether or not header actions are present.
           <View style={styles.actionSpacer} />
         )}
       </View>
@@ -376,7 +386,11 @@ const styles = StyleSheet.create({
   },
   headerLoading: { fontSize: fontSize.sm, color: colors.inkFaint },
   leave: { fontSize: fontSize.sm, color: colors.danger, fontWeight: '600' },
-  actionSpacer: { width: 44 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  headerAction: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '600' },
+  // Roughly the width of the Add + Leave actions, so the identity block stays
+  // centred against the Back button on threads without those actions.
+  actionSpacer: { width: 72 },
   list: { flex: 1 },
   messagesContent: { padding: spacing.md, flexGrow: 1 },
   spinner: { marginTop: spacing.xl },

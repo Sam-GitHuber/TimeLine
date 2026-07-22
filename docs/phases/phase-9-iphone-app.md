@@ -384,8 +384,9 @@ if you pause the phase you've built the things people actually open):
   2026-07-22 notes entry (introduced the bottom tab bar with it).
 - **E2. Messaging.** DM + group threads, unread badge, open-thread polling.
   The largest single chunk — the web app's messaging is its own module. **Full
-  plan below** ("E2 — Messaging: confirmed plan"). **E2a (consume) done** — see
-  the 2026-07-22 notes entry; **E2b (create) next**.
+  plan below** ("E2 — Messaging: confirmed plan"). **Done** — E2a (consume) and
+  E2b (create) both shipped; see the 2026-07-22 notes entries. **E3 (groups +
+  events) next.**
 - **E3. Groups + events.** Group list/detail/invites, group timelines, and the
   Phase 8b event surfaces (event detail, RSVP, polls, calendar).
 - **E4. Settings + safety.** Per-type notification prefs, account settings,
@@ -427,9 +428,10 @@ user:
      the **Message** button on the profile header, both poll cadences, mark-read
      on open, and the **pending locked panel** (viewing a chat you were added to
      but haven't joined). Everything needed to *use* existing conversations.
-   - **E2b (create):** the new-chat picker (multi-select connection search →
-     1:1 get-or-create or group + optional title), and **add-people** to an
-     existing chat. Everything that *starts or grows* a conversation.
+   - **E2b (create) — done** (see the 2026-07-22 E2b notes entry): the new-chat
+     picker (multi-select connection search → 1:1 get-or-create or group +
+     optional title), and **add-people** to an existing chat. Everything that
+     *starts or grows* a conversation.
 
 **Screens & components** (mirroring the web, restyled native):
 - **Conversation list** — 1:1 avatar or group avatar-stack; last-message preview
@@ -554,6 +556,41 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-22 — Milestone E2b (messaging, create): the new-chat picker and
+add-people. E2 is complete.**
+
+The *start or grow a conversation* half of E2 — one screen, `messages/new.tsx`,
+serving two modes. New API: `createGroupChat` (`{ participant_ids, title,
+group_id? }`) and `addParticipants` (`{ user_ids }`); `openConversation` (E2a)
+is reused for the 1:1 branch.
+
+- **One screen, three navigation outcomes.** Multi-select your connections
+  (checkbox rows), optional title, Create. One selection + no title →
+  `openConversation` (1:1 get-or-create); anything else → `createGroupChat`. On
+  success it **`router.replace`s** the picker with the new thread, so Back from
+  the thread lands on the Messages list, not back on the picker. `?addTo=<id>`
+  flips it to **add-people** mode (from a group thread's new **Add** button): no
+  title field, Create calls `addParticipants` and `router.back()`s to the thread,
+  which is invalidated so the new members show. Entry points wired: the Messages
+  header **New** button and the empty-state CTA (both deferred stubs in E2a).
+
+- **Connection pool reuses the People `['connections']` query key**, so the picker
+  and the People screen share one cache and can't drift on paging/filter. Loads
+  all pages (auto-`fetchNextPage`) so search covers everyone, then filters
+  client-side by `display_name` — same shape as the web's `useConnections`.
+
+- **Group-scoped new-chat stays E3.** `createGroupChat` already takes `groupId`,
+  but the *launch from a group page* (pool = members ∩ connections) is a group
+  surface — E2b's picker always passes it null.
+
+*Test gotcha (again — third time now, worth internalising):* **`fireEvent` must be
+awaited under RNTL v14 + React 19** when a later interaction depends on the state
+the event set. The picker's Create button reads `selected.size`; pressing a row
+then immediately pressing Create without `await` left the selection empty, so
+Create was disabled and no request fired — a silent no-op that looks like broken
+wiring, not a test bug. Same fix as the E2a compose test: `await
+fireEvent.press(...)` / `await fireEvent.changeText(...)`.
 
 **2026-07-22 — Milestone E2a (messaging, consume): the client port, and three
 things worth keeping.**
