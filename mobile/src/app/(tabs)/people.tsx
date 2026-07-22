@@ -267,6 +267,12 @@ function DirectoryList({
       renderItem={({ item }) => (
         <PersonRow person={item} trailing={renderTrailing(item)} />
       )}
+      // `alwaysBounceVertical` + a full-height content container let the list
+      // overscroll (and so pull-to-refresh) even when it's short or empty — a
+      // FlatList that fits on screen otherwise can't bounce, so a sparse
+      // Discover/Requests tab would silently swallow the pull gesture.
+      alwaysBounceVertical
+      contentContainerStyle={styles.listContent}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
@@ -397,6 +403,10 @@ function RequestsList() {
     <FlatList
       data={requests}
       keyExtractor={(req) => String(req.id)}
+      // See DirectoryList: bounce even when short/empty so the pull gesture
+      // works on a near-empty Requests inbox.
+      alwaysBounceVertical
+      contentContainerStyle={styles.listContent}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
@@ -559,7 +569,10 @@ const styles = StyleSheet.create({
   },
   rejectLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.ink },
   pressed: { opacity: 0.7 },
-  message: { padding: spacing.xl, alignItems: 'center' },
+  // flexGrow so a short/empty list still fills the viewport — needed for the
+  // overscroll pull gesture, and it lets the empty states centre themselves.
+  listContent: { flexGrow: 1 },
+  message: { flex: 1, padding: spacing.xl, alignItems: 'center', justifyContent: 'center' },
   messageText: {
     fontSize: fontSize.sm,
     color: colors.inkFaint,
@@ -576,7 +589,13 @@ const styles = StyleSheet.create({
     borderColor: colors.lineStrong,
   },
   retryText: { color: colors.ink, fontWeight: '600' },
-  emptyBlock: { padding: spacing.xl, alignItems: 'center', gap: spacing.md },
+  emptyBlock: {
+    flex: 1,
+    padding: spacing.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+  },
   primaryBtn: {
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.sm,
