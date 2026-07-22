@@ -160,9 +160,9 @@ it('navigates again for a genuinely different notification', async () => {
 });
 
 it('opens the app rather than crashing when the target has no screen yet', async () => {
-  // /group-invites lands in Milestone E3.
+  // Event notifications (/g/<id>/events/<id>) land in Milestone E3b.
   mockNotifications.useLastNotificationResponse.mockReturnValue(
-    response({ url: '/group-invites' })
+    response({ url: '/g/1/events/9' })
   );
 
   await render(<Probe />);

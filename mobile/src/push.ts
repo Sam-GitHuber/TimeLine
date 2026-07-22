@@ -174,6 +174,11 @@ export function routeForNotification(url: string | null | undefined): Href {
   // annoying.
   if (path === '/requests') return '/people';
 
-  // /group-invites and /g/<id>/events/<id> have no mobile screen yet (E3).
+  // A group invite (backend sends `/group-invites`) opens the Groups tab, which
+  // lands on its Invites segment when there are pending invites (E3a) — the same
+  // pattern as connection requests → People.
+  if (path === '/group-invites') return '/groups';
+
+  // /g/<id>/events/<id> (event notifications) have no mobile screen yet (E3b).
   return '/';
 }

@@ -95,27 +95,36 @@ const MAX_PHOTOS = 10;
 export function ComposeBox({
   user,
   onPosted,
+  groupId,
+  invalidateKey = ['feed'],
 }: {
   user: User | null;
   /** Called after a post lands, so the feed can bring it into view. */
   onPosted?: () => void;
+  /**
+   * When set, the post goes to this group (E3a) instead of the personal feed —
+   * `createPost` sends the `group` id and `invalidateKey` should be the group's
+   * timeline query so the new post appears there, not on the home feed.
+   */
+  groupId?: number;
+  invalidateKey?: readonly unknown[];
 }) {
   const [text, setText] = useState('');
   const [photos, setPhotos] = useState<PhotoUpload[]>([]);
   const queryClient = useQueryClient();
 
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.createPost(text.trim(), photos),
+    mutationFn: () => api.createPost(text.trim(), photos, groupId),
     onSuccess: () => {
       setText('');
       setPhotos([]);
       // Put the keyboard away: the thought is finished, and leaving it up means
       // the list resizes under the user a moment later, which reads as a jolt.
       Keyboard.dismiss();
-      // Refetch the feed so the new post appears at the top. Invalidating rather
-      // than optimistically inserting keeps the client from having to guess the
-      // server's shape (ids, timestamps, counts) for a brand-new post.
-      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      // Refetch the timeline so the new post appears at the top. Invalidating
+      // rather than optimistically inserting keeps the client from having to
+      // guess the server's shape (ids, timestamps, counts) for a brand-new post.
+      queryClient.invalidateQueries({ queryKey: invalidateKey });
       // Inserting a post above whatever you were looking at shifts everything
       // down. Scrolling to the top turns that from an unexplained lurch into a
       // deliberate move that shows you the thing you just wrote.

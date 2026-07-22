@@ -67,6 +67,17 @@ export function MessagesIcon({ color, size = 26 }: IconProps) {
   );
 }
 
+/** A cluster of three — a group of people. Distinct from the two-person People. */
+export function GroupsIcon({ color, size = 26 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Circle cx={12} cy={7} r={2.5} stroke={color} strokeWidth={1.75} />
+      <Circle cx={6.5} cy={15} r={2.5} stroke={color} strokeWidth={1.75} />
+      <Circle cx={17.5} cy={15} r={2.5} stroke={color} strokeWidth={1.75} />
+    </Svg>
+  );
+}
+
 /** A pencil over a line — compose / start a new message. Matches the web's. */
 export function ComposeIcon({ color, size = 26 }: IconProps) {
   return (

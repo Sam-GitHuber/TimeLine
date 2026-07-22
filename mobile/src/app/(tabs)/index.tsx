@@ -38,6 +38,13 @@ import { useDayBoundary } from '@/useDayBoundary';
 export default function FeedScreen() {
   const { user } = useAuth();
 
+  // The home feed means "the people I'm connected with"; group posts stay inside
+  // their groups by default. This opt-in toggle merges them in chronologically
+  // (E3a — see groups.md). Off by default; local state, not persisted (the web
+  // remembers it per-browser, a nicety we can add later if a tester wants it).
+  const [includeGroups, setIncludeGroups] = useState(false);
+  const feedKey = ['feed', includeGroups] as const;
+
   const {
     data,
     error,
@@ -47,9 +54,9 @@ export default function FeedScreen() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['feed'],
+    queryKey: feedKey,
     queryFn: ({ pageParam }) =>
-      pageParam ? api.getPage<Post>(pageParam) : api.getFeed(),
+      pageParam ? api.getPage<Post>(pageParam) : api.getFeed(includeGroups),
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
@@ -80,12 +87,13 @@ export default function FeedScreen() {
   const onPullToRefresh = useCallback(async () => {
     setPulled(true);
     try {
-      queryClient.setQueryData<FeedPages>(['feed'], trimToFirstPage);
+      queryClient.setQueryData<FeedPages>(feedKey, trimToFirstPage);
       await refetch();
     } finally {
       setPulled(false);
     }
-  }, [refetch, queryClient]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- feedKey is derived from includeGroups
+  }, [refetch, queryClient, includeGroups]);
 
   /**
    * Held so a new post can be scrolled into view.
@@ -122,17 +130,38 @@ export default function FeedScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <Text style={styles.title}>TimeLine</Text>
-        {/* Your bead opens your own profile — where logout now lives. It used to
-            be a shortcut to logout itself; a tap that silently ended the session
-            was only ever a stopgap until this screen existed (C4). */}
-        <Pressable
-          onPress={() => user && router.push(`/u/${user.pk}`)}
-          accessibilityRole="button"
-          accessibilityLabel="Your profile"
-          hitSlop={8}
-        >
-          <Avatar user={user} size="sm" />
-        </Pressable>
+        <View style={styles.headerRight}>
+          {/* Opt-in merge of your groups' posts into the home feed (E3a). A quiet
+              text toggle, not a switch — it's a low-frequency preference, and the
+              accent state reads as "on" without a control the eye keeps landing on. */}
+          <Pressable
+            onPress={() => setIncludeGroups((on) => !on)}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: includeGroups }}
+            accessibilityLabel="Include group posts"
+            hitSlop={8}
+            style={({ pressed }) => [
+              styles.groupsToggle,
+              includeGroups && styles.groupsToggleOn,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={[styles.groupsToggleLabel, includeGroups && styles.groupsToggleLabelOn]}>
+              Groups
+            </Text>
+          </Pressable>
+          {/* Your bead opens your own profile — where logout now lives. It used to
+              be a shortcut to logout itself; a tap that silently ended the session
+              was only ever a stopgap until this screen existed (C4). */}
+          <Pressable
+            onPress={() => user && router.push(`/u/${user.pk}`)}
+            accessibilityRole="button"
+            accessibilityLabel="Your profile"
+            hitSlop={8}
+          >
+            <Avatar user={user} size="sm" />
+          </Pressable>
+        </View>
       </View>
 
       <TimelineList
@@ -200,6 +229,18 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.sm,
   },
   title: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  groupsToggle: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 1,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  groupsToggleOn: { backgroundColor: colors.accentTint, borderColor: colors.accent },
+  groupsToggleLabel: { fontSize: fontSize.sm - 1, fontWeight: '600', color: colors.inkSoft },
+  groupsToggleLabelOn: { color: colors.accentDeep },
+  pressed: { opacity: 0.7 },
   emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
   emptyBody: {
     fontSize: fontSize.sm,

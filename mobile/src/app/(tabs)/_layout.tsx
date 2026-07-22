@@ -17,7 +17,7 @@ import { Tabs } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api, CONVERSATION_LIST_POLL_MS } from '@/api';
-import { FeedIcon, MessagesIcon, PeopleIcon } from '@/components/icons';
+import { FeedIcon, GroupsIcon, MessagesIcon, PeopleIcon } from '@/components/icons';
 import { colors } from '@/theme';
 
 // The bar's content height *above* the home-indicator inset. The stock iOS tab
@@ -46,6 +46,14 @@ export default function TabsLayout() {
     refetchInterval: CONVERSATION_LIST_POLL_MS,
   });
   const unreadMessages = unread?.count ?? 0;
+
+  // Pending group invites — the Groups tab badge, sharing the ['groupInvites']
+  // key with the Invites segment so accepting/declining keeps both in step.
+  const { data: invites } = useQuery({
+    queryKey: ['groupInvites'],
+    queryFn: api.getGroupInvites,
+  });
+  const groupInvites = invites?.count ?? 0;
 
   return (
     <Tabs
@@ -101,6 +109,18 @@ export default function TabsLayout() {
               : unreadMessages > 0
                 ? unreadMessages
                 : undefined,
+          tabBarBadgeStyle: { backgroundColor: colors.accent },
+        }}
+      />
+      <Tabs.Screen
+        name="groups"
+        options={{
+          title: 'Groups',
+          tabBarIcon: ({ color }) => (
+            <GroupsIcon color={color as string} size={TAB_ICON_SIZE} />
+          ),
+          tabBarBadge:
+            groupInvites > 99 ? '99+' : groupInvites > 0 ? groupInvites : undefined,
           tabBarBadgeStyle: { backgroundColor: colors.accent },
         }}
       />
