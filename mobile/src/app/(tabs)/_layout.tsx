@@ -14,12 +14,22 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { Tabs } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { FeedIcon, PeopleIcon } from '@/components/icons';
 import { colors } from '@/theme';
 
+// The bar's content height *above* the home-indicator inset. The stock iOS tab
+// bar is ~49pt here, which reads chunky under our lighter chrome; 40 trims it
+// without crowding the smaller icon + label. The safe-area inset is added on
+// top so the row still clears the home indicator (and collapses to nothing on
+// devices without one).
+const TAB_BAR_CONTENT_HEIGHT = 40;
+const TAB_ICON_SIZE = 22;
+
 export default function TabsLayout() {
+  const insets = useSafeAreaInsets();
   const { data } = useQuery({
     queryKey: ['connectionRequests'],
     queryFn: api.getConnectionRequests,
@@ -32,22 +42,33 @@ export default function TabsLayout() {
         headerShown: false,
         tabBarActiveTintColor: colors.accent,
         tabBarInactiveTintColor: colors.inkFaint,
-        tabBarStyle: { backgroundColor: colors.raised, borderTopColor: colors.line },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+        tabBarStyle: {
+          backgroundColor: colors.raised,
+          borderTopColor: colors.line,
+          height: TAB_BAR_CONTENT_HEIGHT + insets.bottom,
+          paddingBottom: insets.bottom,
+          paddingTop: 4,
+        },
+        tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
+        tabBarIconStyle: { marginBottom: -2 },
       }}
     >
       <Tabs.Screen
         name="index"
         options={{
           title: 'Feed',
-          tabBarIcon: ({ color }) => <FeedIcon color={color as string} />,
+          tabBarIcon: ({ color }) => (
+            <FeedIcon color={color as string} size={TAB_ICON_SIZE} />
+          ),
         }}
       />
       <Tabs.Screen
         name="people"
         options={{
           title: 'People',
-          tabBarIcon: ({ color }) => <PeopleIcon color={color as string} />,
+          tabBarIcon: ({ color }) => (
+            <PeopleIcon color={color as string} size={TAB_ICON_SIZE} />
+          ),
           // `undefined` (not 0) hides the badge — a 0 would render an empty pip.
           tabBarBadge: pending > 0 ? pending : undefined,
           tabBarBadgeStyle: { backgroundColor: colors.accent },
