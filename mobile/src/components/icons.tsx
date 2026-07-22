@@ -67,6 +67,21 @@ export function MessagesIcon({ color, size = 26 }: IconProps) {
   );
 }
 
+/** A pencil over a line — compose / start a new message. Matches the web's. */
+export function ComposeIcon({ color, size = 26 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"
+        stroke={color}
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 /** Two people — the connection graph. */
 export function PeopleIcon({ color, size = 26 }: IconProps) {
   return (

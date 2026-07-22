@@ -34,6 +34,7 @@ import { api, CONVERSATION_LIST_POLL_MS } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
+import { ComposeIcon } from '@/components/icons';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation } from '@/types';
 import { formatRelativeTime } from '@/utils';
@@ -71,10 +72,10 @@ export default function MessagesScreen() {
           onPress={() => router.push('/messages/new')}
           accessibilityRole="button"
           accessibilityLabel="New message"
-          hitSlop={8}
+          hitSlop={12}
           style={({ pressed }) => [styles.compose, pressed && styles.pressed]}
         >
-          <Text style={styles.composeLabel}>New</Text>
+          <ComposeIcon color={colors.accent} size={24} />
         </Pressable>
       </View>
 
@@ -238,13 +239,8 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.line,
   },
   title: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink },
-  compose: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: radius.pill,
-    backgroundColor: colors.accentTint,
-  },
-  composeLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.accentDeep },
+  // Plain icon button in the header — no pill, the iOS nav-action pattern.
+  compose: { padding: spacing.xs },
   primaryBtn: {
     marginTop: spacing.sm,
     paddingHorizontal: spacing.lg,
