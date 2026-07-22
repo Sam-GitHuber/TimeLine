@@ -174,11 +174,15 @@ describe('routeForNotification', () => {
     expect(routeForNotification('/u/3')).toBe('/u/3');
   });
 
-  it.each(['/requests', '/group-invites', '/g/1/events/9'])(
+  it('opens the People hub for a connection request (E1)', () => {
+    expect(routeForNotification('/requests')).toBe('/people');
+  });
+
+  it.each(['/group-invites', '/g/1/events/9'])(
     'falls back to the feed for %s, which has no mobile screen yet',
     (url) => {
-      // Those land in Milestones E1 and E3. Until then a notification must
-      // still open the app rather than crash it.
+      // Those land in Milestone E3. Until then a notification must still open
+      // the app rather than crash it.
       expect(routeForNotification(url)).toBe('/');
     }
   );

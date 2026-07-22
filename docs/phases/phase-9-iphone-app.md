@@ -380,7 +380,8 @@ It's four independent chunks, each its own PR, in this order (most-used first, s
 if you pause the phase you've built the things people actually open):
 
 - **E1. Connections / People.** Request, accept, decline, the symmetric graph.
-  Gates real multi-user testing, so it comes first.
+  Gates real multi-user testing, so it comes first. **Done** — see the
+  2026-07-22 notes entry (introduced the bottom tab bar with it).
 - **E2. Messaging.** DM + group threads, unread badge, 4s open-thread polling.
   The largest single chunk — the web app's `messaging.jsx` is its own module.
 - **E3. Groups + events.** Group list/detail/invites, group timelines, and the
@@ -469,6 +470,55 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-22 — Milestone E1 (connections / people): the app grows its primary
+navigation.**
+
+E1 needed a home for the People screen, and E2–E4 each add another top-level
+surface (Messages, Groups, Activity, Settings). Rather than accrete buttons on
+the feed header, **E1 introduces a native bottom tab bar** (decided with the
+user). It's the once-and-done nav shell: each later milestone slots in as a tab.
+
+- **Routing restructure.** The feed moved from `src/app/index.tsx` into a
+  `src/app/(tabs)/` route group with its own `_layout.tsx` rendering
+  `expo-router`'s `<Tabs>`. Route groups don't appear in the URL, so `/` still
+  resolves to the feed and `router.replace('/')` (the auth gate) is unchanged.
+  **Post detail and profiles stay *outside* `(tabs)`** (root-stack siblings), so
+  opening one covers the tab bar full-screen — the expected native behaviour, and
+  free from this layout.
+- **No new dependency for the tab bar or its icons.** `expo-router` now vendors
+  its own bottom-tabs implementation (`Tabs` is exported), and the icons are
+  hand-drawn with `react-native-svg` (already a dep) — the feed glyph is the
+  app's own timeline spine, which no stock icon set carries. `@expo/vector-icons`
+  is *not* installed and wasn't added.
+- **`tabBarIcon`'s `color` is `ColorValue`, not `string`.** The icon components
+  take `string` (SVG stroke/fill), so the call site casts (`color as string`) —
+  the tab bar always passes a real hex.
+- **ConnectButton + DisconnectWarningModal ported from the web**, state machine
+  identical (none→Connect, requested→Requested, incoming→Approve,
+  connected→Connected; Connect and Approve both call `POST /connect/`). Only the
+  `connected`→disconnect path routes through the warning modal, because only a
+  live connection can sever shared group chats. Wired into **both** the People
+  Discover list *and* the profile header — closing the C4 deferral (C4 read
+  `connection_status` only for the posts-wall message; now it drives the button).
+- **The People tab badge and the Requests segment share the
+  `['connectionRequests']` query key**, so approving/rejecting anywhere keeps the
+  badge, the segment count, and the list in step — the same key discipline the
+  web uses.
+- **Push deep-link closed:** `routeForNotification` now maps the backend's
+  `/requests` (a `connection_request` notification) to `/people`, where before it
+  dead-ended at `/` because the screen didn't exist. It lands on the Connections
+  segment, not Requests — opening directly on Requests would mean threading a
+  segment param through the tab's retained state, deferred until a tester finds
+  the extra tap annoying. `/group-invites` and event URLs still fall back to `/`
+  (E3).
+- **Test gotcha — a multi-render-with-`unmount` loop breaks the whole file.** The
+  first cut of the ConnectButton label test rendered all four states in one `it`
+  with `unmount()` between them; it not only failed to find later labels but
+  **corrupted the act environment for every subsequent test in the file** (all
+  six failed together, each passed in isolation). Switching to `it.each` — one
+  render per test, RNTL's auto-cleanup between them — fixed it. General rule:
+  don't hand-loop multiple renders in a single RN test; give each its own case.
 
 **2026-07-21 — Milestone D device pass: push works end to end on real hardware.**
 Verified against `https://your-timeline.net` with a connected friend generating

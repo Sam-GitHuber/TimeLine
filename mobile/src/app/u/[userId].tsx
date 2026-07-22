@@ -35,6 +35,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
+import { ConnectButton } from '@/components/ConnectButton';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
 import { TimelineList } from '@/components/TimelineList';
 import { toRows } from '@/feed';
@@ -138,6 +139,19 @@ export default function ProfileScreen() {
               >
                 <Text style={styles.logoutLabel}>Log out</Text>
               </Pressable>
+            ) : user ? (
+              // The connection control (E1). Its own mutation invalidates
+              // ['user', id] + ['userPosts', id], so accepting/connecting here
+              // re-fetches `connection_status` and flips the posts wall below
+              // without leaving this screen. Message + Block join it in E2/E4.
+              <View style={styles.actions}>
+                <ConnectButton
+                  userId={id}
+                  displayName={user.display_name}
+                  connectionStatus={user.connection_status}
+                  size="md"
+                />
+              </View>
             ) : null}
           </View>
         </View>
@@ -266,6 +280,7 @@ const styles = StyleSheet.create({
   ghostLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.ink },
   logout: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   logoutLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.danger },
+  actions: { marginTop: spacing.sm, flexDirection: 'row', gap: spacing.sm },
   spinner: { marginTop: spacing.xl },
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.sm },
   locked: { padding: spacing.xl, alignItems: 'center', gap: spacing.sm },

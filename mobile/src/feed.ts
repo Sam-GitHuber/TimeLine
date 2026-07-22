@@ -11,29 +11,13 @@ import type { InfiniteData } from '@tanstack/react-query';
 import type { Paginated, Post } from './types';
 import { dayHeading, dayKey } from './utils';
 
+// Pull-to-refresh trimming is generic and shared with the people/requests
+// lists; re-exported here so the feed's existing call sites and tests keep
+// importing it from `@/feed`.
+export { trimToFirstPage } from './lists';
+
 /** The shape TanStack keeps for the paginated feed query. */
 export type FeedPages = InfiniteData<Paginated<Post>, string>;
-
-/**
- * Drop every loaded page but the first.
- *
- * Used before a pull-to-refresh. `refetch()` on an infinite query refetches
- * **all** the pages currently loaded, one after another — so someone ten pages
- * deep would fire ten sequential requests over a phone connection and watch the
- * spinner for every one of them, when only the first page can hold anything
- * new. (TanStack v5 removed the old `refetchPage` option; trimming the cache
- * first is the documented replacement.)
- *
- * Returns the input unchanged when there's nothing to trim, so the cache entry
- * keeps its identity and no needless re-render is triggered.
- */
-export function trimToFirstPage(data: FeedPages | undefined): FeedPages | undefined {
-  if (!data || data.pages.length <= 1) return data;
-  return {
-    pages: data.pages.slice(0, 1),
-    pageParams: data.pageParams.slice(0, 1),
-  };
-}
 
 /** A day divider, or a post. Flattened so one `FlatList` renders both. */
 export type FeedRow =

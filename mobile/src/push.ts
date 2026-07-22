@@ -166,6 +166,14 @@ export function routeForNotification(url: string | null | undefined): Href {
   const profile = path.match(/^\/u\/(\d+)$/);
   if (profile) return `/u/${profile[1]}` as Href;
 
-  // /requests, /group-invites and /g/<id>/events/<id> have no mobile screen yet.
+  // A connection request (backend sends `/requests`) opens the People hub (E1).
+  // It lands on the Connections segment rather than Requests — the pending-count
+  // badge on the Requests segment surfaces the incoming request from there.
+  // Opening directly on Requests would mean threading a segment param through
+  // the tab's retained state; deferred until a tester finds the extra tap
+  // annoying.
+  if (path === '/requests') return '/people';
+
+  // /group-invites and /g/<id>/events/<id> have no mobile screen yet (E3).
   return '/';
 }
