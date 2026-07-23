@@ -229,6 +229,41 @@ describe('event detail', () => {
     expect(screen.getByRole('button', { name: /Can't go/ })).toBeTruthy();
   });
 
+  it('renders a tappable link for a safe http(s) location url', async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/'))
+        return jsonResponse(
+          makeEvent({ location_name: 'The park', location_url: 'https://maps.example.com/park' })
+        );
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    await screen.findByText(/The park/);
+
+    expect(screen.getByRole('link')).toBeTruthy();
+  });
+
+  it('drops the link for a non-http(s) location url (no unsafe scheme)', async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/'))
+        return jsonResponse(
+          // An attacker-controlled value — any member can organise an event, and
+          // `Linking.openURL` would fire *any* scheme, so a non-http(s) link must
+          // not become a tappable affordance.
+          makeEvent({ location_name: 'The park', location_url: 'javascript:alert(1)' })
+        );
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    await screen.findByText(/The park/);
+
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
   it('shows "not available" for an event you cannot see (a 404)', async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes('/api/auth/user/')) return jsonResponse(ME);

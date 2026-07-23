@@ -34,6 +34,17 @@ import { RsvpBar } from '@/components/events/RsvpBar';
 import { formatEventWhen } from '@/eventFormat';
 import { colors, fontSize, fonts, spacing } from '@/theme';
 
+/**
+ * Whether an organiser-pasted location link is safe to open. `Linking.openURL`
+ * will fire *any* scheme — `javascript:`, `tel:`, a custom app deep-link — so a
+ * link is only shown/opened when it's plainly **http(s)**. The value is
+ * attacker-controlled (any group member can organise an event), so this guards
+ * both the affordance and the tap.
+ */
+function isSafeHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url.trim());
+}
+
 export default function EventScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const id = Number(eventId);
@@ -121,7 +132,7 @@ export default function EventScreen() {
           {event.location_name ? (
             <Text style={styles.location}>
               {event.location_name}
-              {event.location_url ? (
+              {isSafeHttpUrl(event.location_url) ? (
                 <Text
                   style={styles.locationLink}
                   onPress={() => Linking.openURL(event.location_url).catch(() => {})}
