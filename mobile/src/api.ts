@@ -37,6 +37,7 @@ import type {
   GroupMember,
   LoginResponse,
   Message,
+  Notification,
   NotificationPreferences,
   Paginated,
   PersonSummary,
@@ -81,6 +82,14 @@ export const BASE_URL =
  */
 export const MESSAGE_POLL_MS = 4000;
 export const CONVERSATION_LIST_POLL_MS = 12000;
+
+/**
+ * The activity-centre bell badge polls the cheap unread-count endpoint on the
+ * same slow cadence as the conversation list — a notification isn't more urgent
+ * in a bell than a message is in a tab badge, and this mirrors the web's
+ * `NOTIFICATIONS_POLL_MS`. Like the others, it pauses when backgrounded.
+ */
+export const NOTIFICATIONS_POLL_MS = 12000;
 
 /**
  * A photo chosen from the library, ready to upload. The picker hands us the
@@ -1147,6 +1156,36 @@ export const api = {
   markNotificationAddressed: (notificationId: number) =>
     request<void>(`/api/notifications/${notificationId}/addressed/`, {
       method: 'POST',
+    }),
+
+  /* ---- Activity centre (Phase 9 E4c) ------------------------------------ *
+   * The in-app notification list + bell badge. Pure client port of the web
+   * ActivityCenter — the delivery channel (push) landed in Milestone D, this is
+   * the on-device history it deep-links into. No backend change (all endpoints
+   * are Phase 8). `markNotificationAddressed` above is shared with push taps.  */
+
+  /**
+   * Your notifications, newest-first, paginated (`NotificationSerializer`). Only
+   * fetched while the activity screen is open — the bell badge uses the cheap
+   * count endpoint below, so we never pull the full list just to render a pip.
+   */
+  getNotifications: () =>
+    request<Paginated<Notification>>('/api/notifications/'),
+
+  /** Your unread (not-yet-seen) count — drives the bell badge. Cheap; polled. */
+  getUnreadNotificationCount: () =>
+    request<{ count: number }>('/api/notifications/unread-count/'),
+
+  /**
+   * Mark unread notifications **seen** — clears the badge while keeping every
+   * item in the list. Called once when the activity screen opens. Omitting `ids`
+   * marks all currently-unread seen (what we want); the param mirrors the web's
+   * signature for parity. Idempotent server-side.
+   */
+  markNotificationsSeen: (ids?: number[]) =>
+    request<{ updated: number }>('/api/notifications/seen/', {
+      method: 'POST',
+      body: ids ? { ids } : {},
     }),
 
   /* ---- Settings (Phase 9 E4b) ------------------------------------------- *

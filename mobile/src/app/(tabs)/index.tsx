@@ -27,6 +27,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { ActivityBell } from '@/components/ActivityBell';
 import { Avatar } from '@/components/Avatar';
 import { ComposeBox } from '@/components/ComposeBox';
 import { TimelineList } from '@/components/TimelineList';
@@ -132,6 +133,9 @@ export default function FeedScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>TimeLine</Text>
         <View style={styles.headerRight}>
+          {/* The activity bell (E4c) — notifications' non-tab home, the Instagram
+              pattern. Sits left of the profile bead. */}
+          <ActivityBell />
           {/* Your bead opens your own profile — where logout now lives. It used to
               be a shortcut to logout itself; a tap that silently ended the session
               was only ever a stopgap until this screen existed (C4). */}

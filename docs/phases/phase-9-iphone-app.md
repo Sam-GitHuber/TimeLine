@@ -4,14 +4,15 @@
 (PR #97: Expo spine — auth, token storage, silent refresh, login/logout, CI).
 **Milestone C done** (PRs #98–#101), split one PR per screen area as the PR
 strategy below called for. **Milestone D done** (PR #103, device pass verified
-2026-07-21 — see the notes log). **Milestone E in progress** — E1
+2026-07-21 — see the notes log). **Milestone E is complete** — E1
 (connections/people), E2 (messaging: E2a+E2b), E3 groups+events, and E4
-settings+safety are landing: **E3a (groups)**, **E3b (events: view &
+settings+safety all done: **E3a (groups)**, **E3b (events: view &
 participate)**, **E3c-a (events: organise — plan & set)**, and **E3c-b (events:
-polls)** done — **E3 is complete** — plus **E4a (report + block)** (brought ahead
-of E3c-b because report + block are App Review blockers) and **E4b (settings)**.
-Still open: **E4c (activity centre)** — the last parity chunk before Milestone F
-(TestFlight). The four screen areas:
+polls)** — **E3 complete** — plus **E4a (report + block)** (brought ahead
+of E3c-b because report + block are App Review blockers), **E4b (settings)**, and
+**E4c (activity centre)** — **E4 complete**. Every web feature is now present in
+the app; the only remaining milestone is **F (TestFlight)**. The four screen
+areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -549,11 +550,14 @@ taken with the user:
   `getNotificationPreferences`, `updateNotificationPreferences`; type
   `NotificationPreferences`; a per-device `PreferencesProvider`
   (`preferences.tsx`); new `SettingsIcon` (gear) in `icons.tsx`.
-- **E4c — Activity centre.** A feed-header bell (unread badge) → `activity.tsx`:
-  the notification list, three states, mark-seen on open, mark-addressed on tap
+- **E4c — Activity centre — done** (see the 2026-07-23 E4c notes entry). A
+  feed-header bell (`ActivityBell`, unread badge) → `activity.tsx`: the
+  notification list, three states, mark-seen on open, mark-addressed on tap
   (reusing `routeForNotification`, so in-app and push click-through share one map).
   New API `getNotifications`, `getUnreadNotificationCount`, `markNotificationsSeen`
-  (`markNotificationAddressed` already exists from Milestone D).
+  (`markNotificationAddressed` already exists from Milestone D); type
+  `Notification`/`NotificationTarget`; new `BellIcon`. **E4 and Milestone E are
+  complete — next is F (TestFlight).**
 
 **Definition of done (E4):** report reachable on any post + comment; delete-own on
 posts; block/unblock on profiles (with the shared-chat warning); settings surface
@@ -718,6 +722,45 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-23 — Milestone E4c (activity centre): the feed grows a bell, and the
+app's last parity gap closes. Milestone E is complete.**
+
+The in-app notification list, ported from the web `ActivityCenter`. A feed-header
+`ActivityBell` (unread badge, polled on `NOTIFICATIONS_POLL_MS`) pushes
+`app/activity.tsx` — a root-stack sibling of `(tabs)`, full-screen over the tabs
+like every other detail screen. Three states drive each row (unread → bold +
+accent dot; seen → normal but still standing out; addressed → dulled but kept);
+opening marks all unread *seen* (one POST, no ids), tapping a row addresses it and
+deep-links. Pure client port — every endpoint is Phase 8. New API
+`getNotifications`, `getUnreadNotificationCount`, `markNotificationsSeen`; type
+`Notification`/`NotificationTarget`; new `BellIcon`.
+
+- **The bell is a header button, not a sixth tab.** Five tabs is the iOS
+  comfortable max and they're already full (the E4 nav decision), so the activity
+  centre took the same non-tab route Settings did: a header button (the Instagram
+  pattern), sitting left of the profile bead. Settings → profile gear, Activity →
+  feed-header bell — the two E4 surfaces that couldn't be tabs.
+
+- **Click-through reuses `routeForNotification` verbatim — the one Milestone D
+  wrote for push taps.** In-app taps and push taps now share a single web-URL →
+  mobile-`Href` map, so a `post_reply` opens `/post/<id>` and an event kind maps
+  the backend's nested `/g/<gid>/events/<eid>` down to the flat `/events/<eid>`
+  identically whether the user arrived from the list or from a buzzed
+  notification. No second mapping to drift. `markNotificationAddressed` was
+  likewise already in `api.ts` from D — E4c only added the three read-side methods.
+
+- **`markNotificationsSeen()` sends an empty body to mean "all".** The backend's
+  seen endpoint treats a missing `ids` as "mark every unread seen"; the client
+  passes `{}` on open (the `ids` param exists only to mirror the web signature).
+  Fired mount-only — unread that arrive *after* the screen opens stay unread until
+  the next open, matching the web's open-transition behaviour.
+
+- **Deep-link parity is exhaustive by construction.** Every `kind`'s server `url`
+  (`/p/<id>`, `?comment=`, `/requests`, `/u/<id>`, `/group-invites`,
+  `/g/<gid>/events/<eid>`) is already handled by `routeForNotification`, so the
+  list needs no per-kind branching of its own — it hands the url straight to the
+  shared mapper. Pure-JS chunk (no native dep), so Metro reload, no rebuild.
 
 **2026-07-23 — Milestone E4b (settings): the profile grows a gear, and the app
 gets its account controls.**

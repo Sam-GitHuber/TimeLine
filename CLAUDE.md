@@ -30,11 +30,11 @@ notifications** — verified end to end on a real iPhone on 2026-07-21 (delivery
 cold-start delivery, deep-link taps, and preference gating all confirmed with a
 real second person).
 
-**Next: Milestone E (parity fill-in)** — budget ~40% of the phase here. Four
-independent chunks, in order: **E1 connections/people** (first, because it gates
-real multi-user testing), E2 messaging, E3 groups + events, E4 settings + safety
-(**report + block are App Review blockers** — don't leave them to the end). Then
-F: TestFlight.
+**Milestone E (parity fill-in) is complete** — all four chunks shipped: E1
+connections/people, E2 messaging, E3 groups + events, E4 settings + safety
+(report + block, settings, and the activity centre). Every web feature is now
+present in the app. **Only Milestone F (TestFlight) remains**: build with EAS,
+add a demo account for App Review, upload, invite testers.
 
 Push specifics live in [`docs/reference/notifications.md`](docs/reference/notifications.md);
 everything else Phase 9 is still in `docs/phases/phase-9-iphone-app.md`, which
