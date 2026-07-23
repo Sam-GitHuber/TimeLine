@@ -20,7 +20,7 @@ import DateTimePicker, {
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { colors, fontSize, radius, spacing } from '@/theme';
+import { colors, fontSize, pickerHeight, pickerThemeVariant, radius, spacing } from '@/theme';
 import { PollOptionFields } from './PollOptionFields';
 import {
   blankOption,
@@ -210,10 +210,10 @@ function DateTimeField({
         value={value}
         mode={dimension}
         display="spinner"
-        // Needs an explicit width + height or the inline iOS spinner collapses;
-        // themeVariant keeps the wheel's numbers visible on the light surface.
+        // `styles.picker` / `pickerThemeVariant` carry the two picker quirks
+        // (explicit size, forced light wheel) — see theme.ts.
         style={styles.picker}
-        themeVariant="light"
+        themeVariant={pickerThemeVariant}
         onChange={onChange}
       />
       <Actions
@@ -283,7 +283,7 @@ const styles = StyleSheet.create({
   },
   row: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },
   column: { gap: spacing.sm, alignItems: 'flex-start' },
-  picker: { alignSelf: 'stretch', height: 216 },
+  picker: { alignSelf: 'stretch', height: pickerHeight },
   hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20 },
   input: {
     flexGrow: 1,

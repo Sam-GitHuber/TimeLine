@@ -136,8 +136,15 @@ export default function EventScreen() {
   const closePoll = useMutation({ mutationFn: (pollId: number) => api.closePoll(pollId), onSuccess: invalidate });
   const reopenPoll = useMutation({ mutationFn: (pollId: number) => api.reopenPoll(pollId), onSuccess: invalidate });
   const deletePoll = useMutation({ mutationFn: (pollId: number) => api.deletePoll(pollId), onSuccess: invalidate });
+  // `finalise` is in here too: the tally's per-option Set/Pin is a finalise, so it
+  // must disable while one is in flight — otherwise a double-tap fires it twice.
   const pollBusy =
-    openPoll.isPending || editPoll.isPending || closePoll.isPending || reopenPoll.isPending || deletePoll.isPending;
+    finalise.isPending ||
+    openPoll.isPending ||
+    editPoll.isPending ||
+    closePoll.isPending ||
+    reopenPoll.isPending ||
+    deletePoll.isPending;
   const cancel = useMutation({
     mutationFn: () => api.cancelEvent(id),
     onSuccess: invalidate,

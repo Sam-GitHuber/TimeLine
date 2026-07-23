@@ -16,7 +16,7 @@ import DateTimePicker, {
 import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { formatEventDate, formatEventTime } from '@/eventFormat';
-import { colors, fontSize, fonts, radius, spacing } from '@/theme';
+import { colors, fontSize, fonts, pickerHeight, pickerThemeVariant, radius, spacing } from '@/theme';
 import {
   blankOption,
   OPTION_NOUN,
@@ -95,14 +95,10 @@ export function PollOptionFields({
                   value={valueToDate(dimension, opt.value)}
                   mode={dimension}
                   display="spinner"
-                  // The inline iOS spinner collapses in a nested flex layout: it
-                  // reports a tiny intrinsic size, so the wheel needs an explicit
-                  // width (`alignSelf: stretch`) *and* height to draw in — without
-                  // the height you get an empty gap with only "Done".
+                  // `styles.picker` / `pickerThemeVariant` carry the two picker
+                  // quirks (explicit size, forced light wheel) — see theme.ts.
                   style={styles.picker}
-                  // Force the light wheel so its numbers aren't invisible when the
-                  // OS is in dark mode but the app surface is light.
-                  themeVariant="light"
+                  themeVariant={pickerThemeVariant}
                   onChange={(_e: DateTimePickerEvent, picked?: Date) => {
                     if (picked) setValue(i, pickedToValue(dimension, picked));
                   }}
@@ -175,7 +171,7 @@ const styles = StyleSheet.create({
   pickerValue: { fontFamily: fonts.mono, fontSize: fontSize.sm, color: colors.ink },
   placeholder: { fontFamily: undefined, color: colors.inkFaint },
   pickerOpen: { alignSelf: 'stretch' },
-  picker: { alignSelf: 'stretch', height: 216 },
+  picker: { alignSelf: 'stretch', height: pickerHeight },
   done: {
     alignSelf: 'flex-end',
     paddingHorizontal: spacing.md,

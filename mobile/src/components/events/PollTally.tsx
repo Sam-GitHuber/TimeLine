@@ -163,6 +163,9 @@ export function PollTally({
         {options.map((opt) => {
           const chosen = selected.has(opt.id);
           const pct = Math.round(((opt.count || 0) / max) * 100);
+          // The finalise arg for this option, or null if it carries no value to
+          // pin (unreachable for a well-formed poll — the button just hides).
+          const finaliseArg = canManage && onFinalise ? finaliseFor(poll, opt) : null;
           return (
             <View key={opt.id}>
               <View style={styles.optionLine}>
@@ -177,9 +180,9 @@ export function PollTally({
                   <Text style={styles.optionLabel}>{optionLabel(poll, opt)}</Text>
                   <Text style={styles.optionCount}>{opt.count || 0}</Text>
                 </Pressable>
-                {canManage && onFinalise ? (
+                {finaliseArg ? (
                   <Pressable
-                    onPress={() => onFinalise(finaliseFor(poll, opt))}
+                    onPress={() => onFinalise?.(finaliseArg)}
                     disabled={busy}
                     accessibilityRole="button"
                     accessibilityLabel={`${isCustom ? 'Pin' : 'Set'} ${optionLabel(poll, opt)}`}
@@ -315,12 +318,15 @@ function optionLabel(poll: Poll, opt: PollResultOption): string {
 }
 
 /** Finalise arg for pinning a specific option — a value for a built-in, or the
- *  option id for a custom poll. */
-function finaliseFor(poll: Poll, opt: PollResultOption): FinaliseArg {
+ *  option id for a custom poll. `null` when a built-in option carries no value to
+ *  pin (unreachable for a well-formed poll): the caller hides the button rather
+ *  than finalising an empty value the server would reject. */
+function finaliseFor(poll: Poll, opt: PollResultOption): FinaliseArg | null {
   if (poll.dimension === 'custom') return { dimension: 'custom', optionId: opt.id };
-  if (poll.dimension === 'date') return { dimension: 'date', value: opt.date_value ?? '' };
-  if (poll.dimension === 'time') return { dimension: 'time', value: opt.time_value ?? '' };
-  return { dimension: 'location', value: opt.text_value || opt.label };
+  if (poll.dimension === 'date') return opt.date_value ? { dimension: 'date', value: opt.date_value } : null;
+  if (poll.dimension === 'time') return opt.time_value ? { dimension: 'time', value: opt.time_value } : null;
+  const place = opt.text_value || opt.label;
+  return place ? { dimension: 'location', value: place } : null;
 }
 
 const styles = StyleSheet.create({
