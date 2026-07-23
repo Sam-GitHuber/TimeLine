@@ -418,6 +418,42 @@ export type Event = {
  */
 export type NotificationPreferences = Record<string, boolean>;
 
+/**
+ * The target a notification points at, as `{type, id}` — enough to route by
+ * target directly if a client prefers it to parsing `url`. The mobile app routes
+ * off `url` via `routeForNotification` (shared with push taps), so this rides
+ * along unused for now, but it's part of the payload and typed for completeness.
+ */
+export type NotificationTarget = {
+  type: string;
+  id: number;
+};
+
+/**
+ * One activity-centre notification (`GET /api/notifications/`) — the same
+ * push-ready payload the web dropdown renders (`NotificationSerializer`).
+ *
+ * `text` is phrased **server-side** per `kind`, so the web app, this list, and a
+ * push payload all share one wording. `url` is the in-app route to open, mapped
+ * to a mobile `Href` by `routeForNotification` (the same map push taps use).
+ *
+ * `seen`/`addressed` are the two read-state booleans that drive the row's look:
+ *   - unread (`!seen`)     → bold, and what the bell badge counts.
+ *   - seen but not addressed → normal weight, still stands out until dealt with.
+ *   - addressed            → dulled, but kept in the history.
+ */
+export type Notification = {
+  id: number;
+  kind: string;
+  actor: Author | null;
+  text: string;
+  target: NotificationTarget | null;
+  url: string | null;
+  created_at: string;
+  seen: boolean;
+  addressed: boolean;
+};
+
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */
 export type Post = {
   id: number;
