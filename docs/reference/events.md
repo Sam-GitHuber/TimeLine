@@ -273,11 +273,24 @@ push deep-link's nested `/g/<gid>/events/<eid>` maps to it), the read-only
 dimension **chips**, **RSVP**, and **poll voting**, plus a personal **Calendar**
 tab and the group **month grid**. The same two gates and the same
 complete-counts / connection-gated-names rules hold — they're server-side, so the
-client just renders what arrives. The **organiser's control surface** (plan,
-Set/Poll/finalise a dimension, poll lifecycle, cancel/edit) is **E3c**, not yet
-on mobile; the chips are status-only there. Date/time render through a mobile copy
-of the `formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
+client just renders what arrives. Date/time render through a mobile copy of the
+`formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
 `frontend/src/utils.js`.
+
+The **organiser's control surface** arrives in **E3c**, split into two PRs:
+
+- **E3c-a — plan & set.** **Plan an event** (a `groups/<id>/plan` form reached from
+  the group ⋯ menu), the chip **Set/Change** → a contextual `DimensionEditor` →
+  **finalise** a built-in value, and **cancel/delete**. The date/time editor uses
+  the **native OS picker** (`@react-native-community/datetimepicker`) rather than a
+  port of the web's segmented boxes — the native-adaptation call from the E3 plan;
+  it hands `finalise` the same ISO `YYYY-MM-DD` / `HH:MM`. Setting a value is
+  advisory (decision 3) and closes any open poll on the dimension. An
+  event-*field* edit form is **not** built — `updateEvent` is a dormant endpoint on
+  the web too (no UI), so the app ports the method but no form.
+- **E3c-b — polls.** The chip **Poll** affordance + the poll builder and lifecycle
+  (open / edit-while-unvoted / close / reopen / delete, and finalising a custom
+  poll). Until it lands, a `polling` chip is read-only on mobile.
 
 ## Scope / non-goals (v1)
 

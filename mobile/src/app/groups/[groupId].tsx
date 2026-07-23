@@ -126,7 +126,9 @@ export default function GroupScreen() {
   const { leave, remove } = useGroupActions(id);
 
   function openMenu() {
-    const options = ['Invite people', 'Members'];
+    // "Plan an event" leads — any active member can plan (events.md), and it's
+    // the group page's main creative action.
+    const options = ['Plan an event', 'Invite people', 'Members'];
     const adminOptions = isAdmin ? ['Edit group', 'Delete group'] : [];
     const labels = [...options, ...adminOptions, 'Leave group', 'Cancel'];
     const cancelIndex = labels.length - 1;
@@ -135,7 +137,8 @@ export default function GroupScreen() {
 
     const run = (i: number) => {
       const label = labels[i];
-      if (label === 'Invite people') router.push(`/groups/${id}/invite`);
+      if (label === 'Plan an event') router.push(`/groups/${id}/plan`);
+      else if (label === 'Invite people') router.push(`/groups/${id}/invite`);
       else if (label === 'Members') router.push(`/groups/${id}/members`);
       else if (label === 'Edit group') router.push(`/groups/${id}/edit`);
       else if (label === 'Delete group') remove();

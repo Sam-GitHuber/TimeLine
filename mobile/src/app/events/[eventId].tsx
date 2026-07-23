@@ -8,15 +8,19 @@
  * detail. An event you're not connected to the organiser of is a **404**; it
  * renders as "not available" rather than leaking that it exists (events.md).
  *
- * **E3b is read + participate.** The organiser's control surface — plan, set /
- * poll / finalise a dimension, edit, cancel/delete — is E3c; none of it lives
- * here yet. Ported (participate side) from `frontend/src/pages/EventPage.jsx`.
+ * **E3b was read + participate.** **E3c-a** adds the organiser's *set* surface —
+ * the chip **Set/Change** → the contextual `DimensionEditor` → **finalise**, plus
+ * **cancel/delete**. The **poll** control (open/edit/close/reopen) is E3c-b, so
+ * `PollTally` here is still vote-only. Ported from
+ * `frontend/src/pages/EventPage.jsx`.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
+import { useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Linking,
   Pressable,
   ScrollView,
@@ -29,10 +33,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
+import { DimensionEditor } from '@/components/events/DimensionEditor';
 import { PollTally } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
 import { formatEventWhen } from '@/eventFormat';
-import { colors, fontSize, fonts, spacing } from '@/theme';
+import { colors, fontSize, fonts, radius, spacing } from '@/theme';
+
+type BuiltinDim = 'date' | 'time' | 'location';
 
 /**
  * Whether an organiser-pasted location link is safe to open. `Linking.openURL`
@@ -50,6 +57,9 @@ export default function EventScreen() {
   const id = Number(eventId);
   const queryClient = useQueryClient();
 
+  // Which built-in dimension's editor is open (organiser's Set/Change), or null.
+  const [editing, setEditing] = useState<BuiltinDim | null>(null);
+
   const eventQuery = useQuery({
     queryKey: ['event', id],
     queryFn: () => api.getEvent(id),
@@ -61,11 +71,17 @@ export default function EventScreen() {
     queryClient.invalidateQueries({ queryKey: ['event', id] });
     if (event) {
       // The group's upcoming/past lists and calendars show the same RSVP/vote
-      // tallies, so keep them in step once this write lands.
+      // tallies and dimension values, so keep them in step once this write lands.
       queryClient.invalidateQueries({ queryKey: ['groupEvents', event.group.id] });
       queryClient.invalidateQueries({ queryKey: ['groupCalendar', event.group.id] });
       queryClient.invalidateQueries({ queryKey: ['personalCalendar'] });
     }
+  };
+
+  const goBack = () => {
+    if (router.canGoBack()) router.back();
+    else if (event) router.replace(`/groups/${event.group.id}`);
+    else router.replace('/groups');
   };
 
   const rsvp = useMutation({
@@ -77,12 +93,41 @@ export default function EventScreen() {
       api.votePoll(pollId, optionIds),
     onSuccess: invalidate,
   });
+  // The organiser's decision on a built-in dimension (advisory finalise).
+  const finalise = useMutation({
+    mutationFn: ({ dimension, value }: { dimension: BuiltinDim; value: string }) =>
+      api.finaliseDimension(id, { dimension, value }),
+    onSuccess: () => {
+      setEditing(null);
+      invalidate();
+    },
+    onError: (err) =>
+      Alert.alert('Couldn’t save', err instanceof Error ? err.message : 'Something went wrong.'),
+  });
+  const cancel = useMutation({
+    mutationFn: () => api.cancelEvent(id),
+    onSuccess: invalidate,
+  });
+  const remove = useMutation({
+    mutationFn: () => api.deleteEvent(id),
+    onSuccess: () => {
+      invalidate();
+      goBack();
+    },
+  });
 
-  const goBack = () => {
-    if (router.canGoBack()) router.back();
-    else if (event) router.replace(`/groups/${event.group.id}`);
-    else router.replace('/groups');
-  };
+  function confirmCancel() {
+    Alert.alert('Cancel this event?', 'People who RSVP’d will be notified.', [
+      { text: 'Keep it', style: 'cancel' },
+      { text: 'Cancel event', style: 'destructive', onPress: () => cancel.mutate() },
+    ]);
+  }
+  function confirmDelete() {
+    Alert.alert('Delete this event?', 'This deletes it for everyone and can’t be undone.', [
+      { text: 'Keep it', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => remove.mutate() },
+    ]);
+  }
 
   const notFound = eventQuery.error instanceof ApiError && eventQuery.error.status === 404;
 
@@ -146,7 +191,20 @@ export default function EventScreen() {
 
           {event.status !== 'cancelled' ? (
             <View style={styles.section}>
-              <DimensionChips event={event} />
+              <DimensionChips
+                event={event}
+                canManage={event.can_manage}
+                onAction={(dimension) => setEditing(dimension)}
+              />
+              {editing ? (
+                <DimensionEditor
+                  key={editing}
+                  dimension={editing}
+                  busy={finalise.isPending}
+                  onSet={(dimension, value) => finalise.mutate({ dimension, value })}
+                  onCancel={() => setEditing(null)}
+                />
+              ) : null}
             </View>
           ) : null}
 
@@ -168,6 +226,34 @@ export default function EventScreen() {
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Are you going?</Text>
               <RsvpBar event={event} busy={rsvp.isPending} onRsvp={(b) => rsvp.mutate(b)} />
+            </View>
+          ) : null}
+
+          {/* Cancel/delete — the organiser or a group admin (`can_moderate`).
+              Cancel soft-cancels (a tombstone that notifies RSVPs); delete is a
+              hard, everyone removal. */}
+          {event.can_moderate ? (
+            <View style={styles.section}>
+              <View style={styles.moderate}>
+                {event.status !== 'cancelled' ? (
+                  <Pressable
+                    onPress={confirmCancel}
+                    disabled={cancel.isPending}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [styles.dangerBtn, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.dangerLabel}>Cancel event</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  onPress={confirmDelete}
+                  disabled={remove.isPending}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [styles.dangerBtn, pressed && styles.pressed]}
+                >
+                  <Text style={styles.dangerLabel}>Delete event</Text>
+                </Pressable>
+              </View>
             </View>
           ) : null}
         </ScrollView>
@@ -218,4 +304,14 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   sectionTitle: { fontSize: fontSize.base, fontWeight: '700', color: colors.ink },
+  moderate: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  dangerBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  dangerLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.danger },
+  pressed: { opacity: 0.7 },
 });

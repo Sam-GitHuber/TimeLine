@@ -7,9 +7,10 @@ strategy below called for. **Milestone D done** (PR #103, device pass verified
 2026-07-21 — see the notes log). **Milestone E in progress** — E1
 (connections/people), E2 (messaging: E2a+E2b), E3 groups+events, and E4
 settings+safety are landing: **E3a (groups)**, **E3b (events: view &
-participate)**, and **E4a (report + block)** done. Still open: **E3c (events:
-organise)** and **E4b/E4c (settings, activity centre)** — E4 was brought ahead of
-E3c because report + block are App Review blockers. The four screen areas:
+participate)**, **E3c-a (events: organise — plan & set)**, and **E4a (report +
+block)** done. Still open: **E3c-b (events: polls)** and **E4b/E4c (settings,
+activity centre)** — E4a was brought ahead of E3c-b because report + block are
+App Review blockers. The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -468,16 +469,24 @@ taken with the user:
   `getPersonalCalendar`. Types `Event`, `Poll`, `PollResultOption`, `RsvpSummary`,
   `DimensionState`. **The organiser's chip actions stay read-only here** — Set ·
   Poll · Change and the poll lifecycle are E3c.
-- **E3c — Events: organise.** The organiser's control surface — **Plan an event**
-  (title + create), the chip **Set · Poll / Change · Poll** affordances driving a
-  contextual **dimension editor** (native pickers for date/time; text for
-  location/custom), opening a **poll** on a dimension, **finalise**
-  (`POST /events/<id>/finalise/`, writes the built-in field or pins a custom
-  outcome — advisory, never auto-decided), **close/reopen** a poll, poll **edit**
-  (while unvoted, the 409 guard), **cancel** an event, and the event **edit**
-  (title/description/location/timezone/end-time). API: `createEvent`,
-  `updateEvent`, `cancelEvent`, `deleteEvent`, `openPoll`, `editPoll`, `closePoll`,
-  `reopenPoll`, `finaliseDimension`.
+- **E3c — Events: organise.** The organiser's control surface. **Split into two
+  PRs** — it's the largest E-chunk, and splitting keeps each reviewable and
+  isolates the one native dependency:
+  - **E3c-a — Plan & set — done** (see the 2026-07-23 E3c-a notes entry).
+    **Plan an event** (title + create, from the group ⋯ menu → `groups/<id>/plan`),
+    the chip **Set / Change** affordance driving a contextual **dimension editor**
+    (the **native OS date/time picker** — `@react-native-community/datetimepicker`,
+    a new native dep; text for location) → **finalise** (`POST /events/<id>/finalise/`,
+    writes the built-in field — advisory, never auto-decided), and **cancel/delete**
+    behind a confirm. API `createEvent`, `finaliseDimension`, `cancelEvent`,
+    `deleteEvent`, and `updateEvent` (ported dormant — the web has no edit-fields UI
+    either). The chip **Poll** affordance stays absent here.
+  - **E3c-b — Poll.** The chip **Poll** affordance → the poll builder, and the poll
+    lifecycle: `openPoll`, `editPoll` (while unvoted, the 409 guard), `closePoll`,
+    `reopenPoll`, `deletePoll`, plus finalising a **custom** poll (`option_id`).
+  - **Not built (matches the web):** an event-field **edit** form — `updateEvent`
+    is a dormant endpoint on the web too, with no UI, so mobile ports the method
+    but builds no form. Building one would be net-new, not a port.
 
 **Scope boundaries (deliberately not E3):**
 - **Non-group personal events** (invite 1–2 connections, no group) — a future
@@ -698,6 +707,41 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-23 — Milestone E3c-a (events, organise: plan & set): the chips become a
+control surface, and the app gains its first date picker.**
+
+The organiser's *set* half of E3c: **Plan an event** (a `groups/<id>/plan` form
+off the group ⋯ menu), the chip **Set/Change** → a contextual `DimensionEditor` →
+**finalise**, and **cancel/delete**. New API `createEvent`, `finaliseDimension`,
+`cancelEvent`, `deleteEvent`, `updateEvent`. E3c was **split a→b** (see the E3c
+plan above): the poll lifecycle is E3c-b.
+
+- **First native module since Milestone D: `@react-native-community/datetimepicker`.**
+  The plan chose the OS date/time wheel over a port of the web's segmented
+  DD/MM/YYYY boxes — it's what a phone user expects and hands the API the same ISO
+  `YYYY-MM-DD` / `HH:MM`. It ships a **config plugin** (added to `app.json`), so
+  unlike every E-chunk since D this one **needs a dev-build rebuild** before an
+  on-device pass (a dev build only needs redoing when native config/deps change).
+  It can't run under Jest either, so it's **stubbed in `jest.setup.js`** to fire
+  `onChange` with a fixed date (2026-08-15) on press — the same "stub the native
+  bit, test the wiring" shape as the avatar cropper.
+
+- **`updateEvent` is a dormant endpoint — the web has no event-edit UI**, so E3c
+  ports the API method for completeness but builds **no edit form**. Building one
+  would be net-new, not a port, so it stays out (a form is a bigger,
+  separately-justified piece if ever wanted). The scheduling fields go through
+  `finalise`; title/description are set at Plan time.
+
+- **The Set affordance replaces the web's Set·Poll pair, for now.** E3c-a's chip
+  shows only **Set/Change** (Poll lands in E3c-b), so a chip's action set reveals
+  incrementally. A `polling` chip stays read-only here (the organiser can't manage
+  a poll yet); its jump-to-poll and the poll builder are E3c-b.
+
+- **Finalise is deliberately advisory even in the direct-set path** (events.md
+  decision 3): "Set the date" writes *any* value the organiser picks; it isn't a
+  poll winner. `finaliseDimension` defaults `close_poll: true`, so setting a value
+  also closes any open poll on that dimension server-side.
 
 **2026-07-23 — Milestone E4a (report + block): the App-Review-critical safety
 controls. E4 begins.**
