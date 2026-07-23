@@ -31,6 +31,7 @@ import type {
   ConnectionRequest,
   Conversation,
   DisconnectImpact,
+  Event,
   Group,
   GroupInvite,
   GroupMember,
@@ -38,11 +39,13 @@ import type {
   Message,
   Paginated,
   PersonSummary,
+  Poll,
   Post,
   ProfileUser,
   ReactionSummary,
   ReactorGroup,
   RefreshResponse,
+  RsvpSummary,
   User,
 } from './types';
 
@@ -674,6 +677,88 @@ export const api = {
   /** Decline an invite. */
   rejectGroupInvite: (inviteId: number) =>
     request<void>(`/api/group-invites/${inviteId}/reject/`, { method: 'POST' }),
+
+  // --- Events (Phase 9 E3b: the view + participate subset) -----------------
+  // Organiser writes (create/finalise/poll-lifecycle/cancel/edit) land in E3c.
+
+  /**
+   * A group's events you can see, `window` = `upcoming` (default) / `past` /
+   * `all`. Returns a **plain array**, not paginated — bounded by the window
+   * (unlike the group's posts). Connection-pruned to organisers you're connected
+   * with; members only (404 otherwise). See events.md.
+   */
+  getGroupEvents: (groupId: number | string, window: 'upcoming' | 'past' | 'all' = 'upcoming') =>
+    request<Event[]>(`/api/groups/${groupId}/events/?window=${window}`),
+
+  /**
+   * One event's full detail — dimensions + states, your RSVP/votes, poll
+   * tallies (counts complete, voter/RSVP names connection-gated), and
+   * `can_manage`/`can_moderate`. A **404** if you're not connected to the
+   * organiser (the event doesn't exist for you).
+   */
+  getEvent: (eventId: number | string) => request<Event>(`/api/events/${eventId}/`),
+
+  /**
+   * Upsert your RSVP (any member who can see the event) — one per person.
+   * `guests` is a "+N" headcount, `note` an optional short line.
+   */
+  rsvpEvent: (
+    eventId: number | string,
+    { response, guests = 0, note = '' }: {
+      response: 'going' | 'maybe' | 'declined';
+      guests?: number;
+      note?: string;
+    }
+  ) =>
+    request<Event>(`/api/events/${eventId}/rsvp/`, {
+      method: 'PUT',
+      body: { response, guests, note },
+    }),
+
+  /** The event's RSVPs on their own: complete counts + connection-gated lists. */
+  getEventRsvps: (eventId: number | string) =>
+    request<RsvpSummary>(`/api/events/${eventId}/rsvps/`),
+
+  /**
+   * Cast/replace your votes on an open poll — `optionIds` is your **full**
+   * selection (it replaces any prior votes; an empty array clears your vote).
+   * Single-choice polls take one id; pick-any takes several.
+   */
+  votePoll: (pollId: number | string, optionIds: number[]) =>
+    request<Poll>(`/api/polls/${pollId}/vote/`, {
+      method: 'PUT',
+      body: { option_ids: optionIds },
+    }),
+
+  /**
+   * One group's **dated** events in a window, for the month grid. `from`/`to`
+   * are `YYYY-MM-DD`; the server defaults to a sensible window when omitted.
+   */
+  getGroupCalendar: (
+    groupId: number | string,
+    { from, to }: { from?: string; to?: string } = {}
+  ) => {
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to) qs.set('to', to);
+    const suffix = qs.toString();
+    return request<Event[]>(
+      `/api/groups/${groupId}/calendar/${suffix ? `?${suffix}` : ''}`
+    );
+  },
+
+  /**
+   * Your personal calendar: a time-merge of the dated events you can see across
+   * every group you're an active member of, each labelled with its group — the
+   * same discipline as the `include_groups` feed toggle.
+   */
+  getPersonalCalendar: ({ from, to }: { from?: string; to?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to) qs.set('to', to);
+    const suffix = qs.toString();
+    return request<Event[]>(`/api/calendar/${suffix ? `?${suffix}` : ''}`);
+  },
 
   /**
    * Your inbox of incoming connection requests — people asking to connect with

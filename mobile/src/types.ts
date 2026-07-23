@@ -280,6 +280,123 @@ export type GroupInvite = {
   created_at: string;
 };
 
+/**
+ * One built-in dimension's state on an event — `_dimension_states`. Each of
+ * `date` / `time` / `location` is `set` (its field is populated), `polling` (an
+ * open poll targets it), or `unset`. `poll` is that open poll's id (surfaced
+ * even on a `set` dimension, so a re-poll on a decided value still shows a live
+ * tally on the chip); `null` otherwise. See events.md.
+ */
+export type DimensionState = {
+  state: 'unset' | 'polling' | 'set';
+  poll: number | null;
+};
+
+/**
+ * One option's tally in a poll — `build_poll_results`. **The count is complete**
+ * across the whole audience; **`voters` is connection-gated** (only you + your
+ * connections — everyone else folds into `count` as an anonymous +1). One typed
+ * value column is populated per the poll's dimension. `you_voted` flags your own
+ * pick. See decision 2 in events.md.
+ */
+export type PollResultOption = {
+  id: number;
+  label: string;
+  date_value: string | null;
+  time_value: string | null;
+  text_value: string | null;
+  order: number;
+  count: number;
+  voters: Author[];
+  you_voted: boolean;
+};
+
+/**
+ * An advisory poll on one event dimension — `serialize_poll`. Polls never
+ * auto-decide (decision 3): the tally *informs*, the organiser *decides* via
+ * finalise. `allow_multiple` is pick-any vs pick-one. `your_votes` is your
+ * current selection (drives the vote control's pressed state). `vote_count` is
+ * the complete total — the client gates the (E3c) edit affordance on it being 0,
+ * matching the server's 409. `decided_option` is the pinned option for a
+ * finalised *custom* poll (built-ins write the event's fields instead).
+ */
+export type Poll = {
+  id: number;
+  event: number;
+  dimension: 'date' | 'time' | 'location' | 'custom';
+  question: string;
+  allow_multiple: boolean;
+  status: 'open' | 'closed';
+  closes_at: string | null;
+  created_at: string;
+  options: PollResultOption[];
+  vote_count: number;
+  your_votes: number[];
+  decided_option: number | null;
+};
+
+/**
+ * An event's RSVP tallies — `build_rsvp_summary`. **Counts are complete**;
+ * **named lists are connection-gated** and present only on the *detail* payload
+ * (`named=True`) — the calendar/list summaries omit them. `guests` is the summed
+ * "+N" headcount of the *going* responses. `your_response` is your own RSVP (or
+ * null). See decision 2 in events.md.
+ */
+export type RsvpSummary = {
+  counts: { going: number; maybe: number; declined: number; guests: number };
+  your_response: {
+    response: 'going' | 'maybe' | 'declined';
+    guests: number;
+    note: string;
+  } | null;
+  going_list?: Author[];
+  maybe_list?: Author[];
+  declined_list?: Author[];
+};
+
+/**
+ * A group event — `serialize_event`. Connection-gated to its **organiser** (a
+ * 404 if you're not connected, exactly like their posts): whoever you see an
+ * event iff you're a member of the group *and* connected to whoever organised it.
+ * `status` is derived from the dimensions on write; `is_past`/`starts_at` are
+ * computed. The scheduling fields (`event_date`/`start_time`/`location_name`)
+ * are written only through finalise (E3c), never a plain edit. See events.md.
+ *
+ * The named RSVP lists and richer poll detail ride the full detail payload
+ * (`getEvent`); the list/calendar payloads carry the same shape with the named
+ * lists omitted, so one type serves both.
+ */
+export type Event = {
+  id: number;
+  group: { id: number; name: string };
+  organiser: Author;
+  title: string;
+  description: string;
+  /** `YYYY-MM-DD`, null until a date is set — the calendar key. */
+  event_date: string | null;
+  /** `HH:MM:SS`, null when the event is all-day (date only). */
+  start_time: string | null;
+  end_time: string | null;
+  /** One IANA name per event (a documented simplification). */
+  timezone: string;
+  location_name: string;
+  /** An organiser-pasted link — never geocoded, never an embedded map. */
+  location_url: string;
+  location_note: string;
+  status: 'planning' | 'scheduled' | 'cancelled';
+  is_past: boolean;
+  starts_at: string | null;
+  dimensions: { date: DimensionState; time: DimensionState; location: DimensionState };
+  rsvp: RsvpSummary;
+  /** You are the organiser (the E3c control surface unlocks on this). */
+  can_manage: boolean;
+  /** You are the organiser or a group admin (cancel/delete). */
+  can_moderate: boolean;
+  created_at: string;
+  updated_at: string;
+  polls: Poll[];
+};
+
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */
 export type Post = {
   id: number;

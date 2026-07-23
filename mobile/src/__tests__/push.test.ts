@@ -182,14 +182,13 @@ describe('routeForNotification', () => {
     expect(routeForNotification('/group-invites')).toBe('/groups');
   });
 
-  it.each(['/g/1/events/9'])(
-    'falls back to the feed for %s, which has no mobile screen yet',
-    (url) => {
-      // Event notifications land in Milestone E3b. Until then a notification must
-      // still open the app rather than crash it.
-      expect(routeForNotification(url)).toBe('/');
-    }
-  );
+  it('routes an event notification to the flat event screen (E3b)', () => {
+    // The backend sends the web's nested shape (`/g/<gid>/events/<eid>`); mobile
+    // keeps events flat and takes only the event id. All five event push kinds
+    // deep-link here.
+    expect(routeForNotification('/g/1/events/9')).toBe('/events/9');
+    expect(routeForNotification('/g/42/events/7')).toBe('/events/7');
+  });
 
   it('falls back to the feed for a missing url', () => {
     expect(routeForNotification(undefined)).toBe('/');

@@ -4,8 +4,10 @@
 (PR #97: Expo spine — auth, token storage, silent refresh, login/logout, CI).
 **Milestone C done** (PRs #98–#101), split one PR per screen area as the PR
 strategy below called for. **Milestone D done** (PR #103, device pass verified
-2026-07-21 — see the notes log). **Next: Milestone E (parity fill-in)**, starting
-with E1 (connections/people). The four screen areas:
+2026-07-21 — see the notes log). **Milestone E in progress** — E1
+(connections/people), E2 (messaging: E2a+E2b), and E3 groups+events are landing:
+**E3a (groups)**, **E3b (events: view & participate)** done; **next is E3c
+(events: organise)**, then **E4 (settings + safety)**. The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -447,19 +449,23 @@ taken with the user:
   `createPost` gains an optional `group`. Types `Group`, `GroupMember`,
   `GroupInvite`. **Events are not in E3a** — the group page's upcoming-events
   section lands in E3b.
-- **E3b — Events: view & participate.** The **upcoming-events** section on the
-  group page (post-shaped entries above the now-node; past events already fall
-  into the timeline as recaps), **event detail** (`events/[eventId]`) read side —
+- **E3b — Events: view & participate — done** (see the 2026-07-23 E3b notes
+  entry). The **upcoming-events** section on the group page (post-shaped
+  `EventCard`s above the composer, furthest-first so the nearest sits by "now";
+  past events fall **into** the group timeline as recap entries on the spine),
+  **event detail** (`events/[eventId]`, a root-stack sibling) read side —
   dimension **chips** (date/time/location/custom, their `unset`/`polling`/`set`
   state), the **RSVP** control (going/maybe/declined + guests + note) with
   complete counts / connection-gated names, and **poll voting** (`PUT
   /polls/<id>/vote/`, pick-one vs pick-any) with the tally (complete counts,
-  gated voter names). The **Calendar** tab + the group's **month grid** (a
-  Timeline/Calendar toggle on the group page). Closes the four event push
-  deep-links (`event_created`/`poll_opened`/`event_scheduled`/`event_updated`/
-  `event_cancelled` → `events/[eventId]`). API: `getGroupEvents`, `getEvent`,
-  `rsvp`, `getRsvps`, `voteInPoll`, `getGroupCalendar`, `getPersonalCalendar`.
-  Types `Event`, `Poll`, `PollOption`, `RsvpSummary`.
+  gated voter names). The **Calendar** tab (a fifth tab) + the group's **month
+  grid** (a Timeline/Calendar toggle on the group page). Closes the five event
+  push deep-links (`event_created`/`poll_opened`/`event_scheduled`/
+  `event_updated`/`event_cancelled` → `/events/<eid>`). API: `getGroupEvents`,
+  `getEvent`, `rsvpEvent`, `getEventRsvps`, `votePoll`, `getGroupCalendar`,
+  `getPersonalCalendar`. Types `Event`, `Poll`, `PollResultOption`, `RsvpSummary`,
+  `DimensionState`. **The organiser's chip actions stay read-only here** — Set ·
+  Poll · Change and the poll lifecycle are E3c.
 - **E3c — Events: organise.** The organiser's control surface — **Plan an event**
   (title + create), the chip **Set · Poll / Change · Poll** affordances driving a
   contextual **dimension editor** (native pickers for date/time; text for
@@ -644,6 +650,53 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-23 — Milestone E3b (events, view & participate): the app grows a
+Calendar tab and events thread the line.**
+
+The read + participate half of events — event detail (`events/[eventId]`), the
+group page's upcoming section + Timeline/Calendar toggle, past events woven into
+the group spine, the personal Calendar tab (a fifth tab), RSVP, and poll voting.
+Pure client port; the organiser's write surface (Set/Poll/finalise/edit/cancel)
+stays E3c, so the chips are read-only here. New event date/time helpers live in
+their own `eventFormat.ts` (a copy of the web `formatEvent*`, kept apart from
+`utils.ts`'s instant-formatters because these parse wall-clock values).
+
+- **`await render(...)` in the new suite, and why the others quietly needed it
+  too.** Under React 19's concurrent root the initial commit lands in a
+  microtask, so an *unawaited* `render()` leaves RNTL's `screen` unpopulated —
+  every `findByText` then throws "render function has not been called", and the
+  orphaned async commit later trips RN's lazy `View`/`Pressable` getters *after*
+  Jest tears the env down, surfacing as a misleading "Element type is invalid".
+  The fix is the shared-helper shape people.test/groupDetail already use: an
+  `async` render helper whose `render(...)` is awaited. Worth knowing this is the
+  failure signature — the "element type invalid" points at your component and
+  sends you hunting a bad import that isn't there.
+
+- **Past events are merged client-side in `toGroupRows`, not by the server.**
+  A separate `toGroupRows(posts, pastEvents)` (beside `toRows`) interleaves the
+  bounded `window=past` events with the paginated posts by time and re-day-groups
+  — mirroring the web `Timeline`. It **sorts** (posts arrive ordered, events must
+  be slotted in), but only ever interleaves; it never reorders posts among
+  themselves, so the reverse-chronological guarantee holds. `FeedRow` grew an
+  `event` kind; `TimelineList` renders it as `EventTimelineEntry variant="past"`.
+
+- **The web's bidirectional-scroll spine was deliberately not ported.** The
+  scroll-to-now anchor, "↑ N upcoming ↑" cue, "back to now" pill, and double
+  sticky header are desktop-scroll affordances. Mobile renders **upcoming as
+  `EventCard`s in the list header above the composer** (furthest-first, so the
+  nearest sits by "now") — one directional list, no scroll gymnastics. A small
+  "↑ N upcoming" heading is the only cue.
+
+- **Events routes are flat (`/events/<eid>`), not nested under the group.** The
+  backend push `url` is the web's `/g/<gid>/events/<eid>`; `routeForNotification`
+  now takes just the event id (the detail screen loads the event, which carries
+  its group, and its Back returns there). Closes all five event push kinds.
+
+- **`PollTally` seeds its selection once and owns it locally** (no prop→state
+  sync effect, which React's lint flags). A cast fires `onVote`; success
+  refetches for fresh *counts* while the component instance — and your selection
+  — persists. Same as the web `PollTally`.
 
 **2026-07-22 — Milestone E3a (groups): the app grows a Groups tab. E3 begins.**
 

@@ -159,10 +159,23 @@ it('navigates again for a genuinely different notification', async () => {
   await waitFor(() => expect(router.push).toHaveBeenCalledWith('/u/3'));
 });
 
-it('opens the app rather than crashing when the target has no screen yet', async () => {
-  // Event notifications (/g/<id>/events/<id>) land in Milestone E3b.
+it('deep-links an event notification to its flat event screen (E3b)', async () => {
+  // The backend sends the web's nested `/g/<id>/events/<id>`; mobile takes the
+  // event id and opens the flat `/events/<id>` detail.
   mockNotifications.useLastNotificationResponse.mockReturnValue(
     response({ url: '/g/1/events/9' })
+  );
+
+  await render(<Probe />);
+
+  await waitFor(() => expect(router.push).toHaveBeenCalledWith('/events/9'));
+});
+
+it('opens the app rather than crashing when the target has no screen yet', async () => {
+  // A target whose screen isn't built yet (e.g. settings, Milestone E4) must
+  // still open the app rather than crash it.
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({ url: '/settings' })
   );
 
   await render(<Probe />);

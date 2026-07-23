@@ -17,7 +17,13 @@ import { Tabs } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api, CONVERSATION_LIST_POLL_MS } from '@/api';
-import { FeedIcon, GroupsIcon, MessagesIcon, PeopleIcon } from '@/components/icons';
+import {
+  CalendarIcon,
+  FeedIcon,
+  GroupsIcon,
+  MessagesIcon,
+  PeopleIcon,
+} from '@/components/icons';
 import { colors } from '@/theme';
 
 // The bar's content height *above* the home-indicator inset. The stock iOS tab
@@ -122,6 +128,15 @@ export default function TabsLayout() {
           tabBarBadge:
             groupInvites > 99 ? '99+' : groupInvites > 0 ? groupInvites : undefined,
           tabBarBadgeStyle: { backgroundColor: colors.accent },
+        }}
+      />
+      <Tabs.Screen
+        name="calendar"
+        options={{
+          title: 'Calendar',
+          tabBarIcon: ({ color }) => (
+            <CalendarIcon color={color as string} size={TAB_ICON_SIZE} />
+          ),
         }}
       />
     </Tabs>

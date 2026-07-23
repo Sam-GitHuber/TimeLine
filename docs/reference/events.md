@@ -261,6 +261,24 @@ The gate needs a *present* organiser. Two paths:
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).
 
+## Mobile (Phase 9 E3b)
+
+The iPhone app is a client port over the same API — no backend changes. It
+covers the **view + participate** side: the group page's upcoming-events section
+(`EventCard`s above the composer, furthest-first) with a **Timeline/Calendar**
+toggle, past events woven **into** the group timeline as recap entries on the
+spine (`toGroupRows` merges them with posts by time, mirroring the web
+`Timeline`), the **event detail** screen (`/events/<eid>` — a flat route; the
+push deep-link's nested `/g/<gid>/events/<eid>` maps to it), the read-only
+dimension **chips**, **RSVP**, and **poll voting**, plus a personal **Calendar**
+tab and the group **month grid**. The same two gates and the same
+complete-counts / connection-gated-names rules hold — they're server-side, so the
+client just renders what arrives. The **organiser's control surface** (plan,
+Set/Poll/finalise a dimension, poll lifecycle, cancel/edit) is **E3c**, not yet
+on mobile; the chips are status-only there. Date/time render through a mobile copy
+of the `formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
+`frontend/src/utils.js`.
+
 ## Scope / non-goals (v1)
 
 No recurring events, no maps/geocoding, no timed push reminders (needs a background

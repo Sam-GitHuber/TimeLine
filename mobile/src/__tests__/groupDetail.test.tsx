@@ -82,6 +82,11 @@ function serve(posts: Post[]) {
     if (url.includes('/api/groups/7/posts/')) {
       return jsonResponse({ count: posts.length, next: null, previous: null, results: posts });
     }
+    // The E3b events/calendar endpoints — empty here; their own suite covers the
+    // populated cases. These must be matched before the generic group route,
+    // since their URLs contain `/api/groups/7/` too.
+    if (url.includes('/api/groups/7/events/')) return jsonResponse([]);
+    if (url.includes('/api/groups/7/calendar/')) return jsonResponse([]);
     if (url.includes('/api/groups/7/')) return jsonResponse(GROUP);
     return jsonResponse(null, 404);
   });

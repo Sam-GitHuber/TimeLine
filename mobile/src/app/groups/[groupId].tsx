@@ -8,8 +8,14 @@
  *
  * The **⋯ menu** carries the group actions: Invite, Members, Leave, and — for
  * admins — Edit and Delete. Members + Invite are their own pushed screens
- * (E3a); Leave/Delete confirm first. **Events (the upcoming section) land in
- * E3b** — this is groups only.
+ * (E3a); Leave/Delete confirm first.
+ *
+ * **Events (E3b)** hang off this page two ways. Upcoming events sit in a section
+ * *above* the composer (post-shaped cards, nearest just above the "now" of the
+ * compose box — scroll up to travel forward); past events fall **into** the
+ * timeline among the posts as recaps (`toGroupRows`). A **Timeline / Calendar**
+ * toggle swaps the spine for a month grid. Planning an event (the organiser's
+ * create) is E3c. See events.md.
  *
  * Whose posts you see here is **connection-gated**, not membership-gated (see
  * groups.md): you see a co-member's posts only if you're connected. So each
@@ -18,13 +24,14 @@
 
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -36,8 +43,10 @@ import { useAuth } from '@/auth';
 import { useGroupActions } from '@/components/useGroupActions';
 import { Avatar } from '@/components/Avatar';
 import { ComposeBox } from '@/components/ComposeBox';
+import { EventCard } from '@/components/events/EventCard';
+import { MonthGrid } from '@/components/events/MonthGrid';
 import { TimelineList } from '@/components/TimelineList';
-import { toRows } from '@/feed';
+import { toGroupRows } from '@/feed';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
 import { useDayBoundary } from '@/useDayBoundary';
@@ -46,6 +55,9 @@ export default function GroupScreen() {
   const { groupId } = useLocalSearchParams<{ groupId: string }>();
   const id = Number(groupId);
   const { user: me } = useAuth();
+
+  // Timeline (the spine) or Calendar (the month grid) — a per-group view toggle.
+  const [view, setView] = useState<'timeline' | 'calendar'>('timeline');
 
   const groupQuery = useQuery({
     queryKey: ['group', id],
@@ -63,12 +75,50 @@ export default function GroupScreen() {
     enabled: !!group,
   });
 
+  // Upcoming events hang above the composer; past events fall into the spine.
+  // Both are plain (bounded) arrays, not paginated.
+  const upcomingQuery = useQuery({
+    queryKey: ['groupEvents', id, 'upcoming'],
+    queryFn: () => api.getGroupEvents(id, 'upcoming'),
+    enabled: !!group,
+  });
+  const pastEventsQuery = useQuery({
+    queryKey: ['groupEvents', id, 'past'],
+    queryFn: () => api.getGroupEvents(id, 'past'),
+    enabled: !!group,
+  });
+  const calendarQuery = useQuery({
+    queryKey: ['groupCalendar', id],
+    queryFn: () => api.getGroupCalendar(id),
+    enabled: !!group && view === 'calendar',
+  });
+
   const today = useDayBoundary();
   const rows = useMemo(
-    () => toRows(postsQuery.data?.pages.flatMap((p) => p.results) ?? []),
+    () =>
+      toGroupRows(
+        postsQuery.data?.pages.flatMap((p) => p.results) ?? [],
+        pastEventsQuery.data ?? []
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- today is a trigger
-    [postsQuery.data, today]
+    [postsQuery.data, pastEventsQuery.data, today]
   );
+
+  // Cancelled events are tombstones, not upcoming plans — leave them off the
+  // upcoming region (they resurface as a past recap once their date passes, and
+  // the detail page keeps them). Scheduled events are ordered **furthest-first**
+  // so the nearest one ends up just above the composer's "now"; date-less events
+  // being planned sit in a small staging strip after them.
+  const upcoming = (upcomingQuery.data ?? []).filter((e) => e.status !== 'cancelled');
+  const staging = upcoming.filter((e) => !e.event_date);
+  const scheduledFuture = upcoming
+    .filter((e) => e.event_date)
+    .sort(
+      (a, b) =>
+        new Date(b.starts_at ?? b.event_date!).getTime() -
+        new Date(a.starts_at ?? a.event_date!).getTime()
+    );
+  const upcomingCount = upcoming.length;
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/groups');
@@ -119,7 +169,7 @@ export default function GroupScreen() {
   const notFound =
     groupQuery.error instanceof ApiError && groupQuery.error.status === 404;
 
-  const header = group ? (
+  const identity = group ? (
     <View style={styles.info}>
       <Avatar user={{ display_name: group.name, avatar_thumb: group.avatar_thumb }} size="lg" />
       <View style={styles.infoBody}>
@@ -138,6 +188,54 @@ export default function GroupScreen() {
       </View>
     </View>
   ) : null;
+
+  const toggle = (
+    <View style={styles.toggle} accessibilityLabel="Group view">
+      <Pressable
+        onPress={() => setView('timeline')}
+        accessibilityRole="button"
+        accessibilityState={{ selected: view === 'timeline' }}
+        style={[styles.toggleBtn, view === 'timeline' && styles.toggleOn]}
+      >
+        <Text style={[styles.toggleText, view === 'timeline' && styles.toggleTextOn]}>
+          Timeline
+        </Text>
+      </Pressable>
+      <Pressable
+        onPress={() => setView('calendar')}
+        accessibilityRole="button"
+        accessibilityState={{ selected: view === 'calendar' }}
+        style={[styles.toggleBtn, view === 'calendar' && styles.toggleOn]}
+      >
+        <Text style={[styles.toggleText, view === 'calendar' && styles.toggleTextOn]}>
+          Calendar
+        </Text>
+      </Pressable>
+    </View>
+  );
+
+  // The upcoming region — furthest-first, so the nearest event sits just above
+  // the composer's "now". Date-less "being planned" events follow in a staging
+  // strip. Rendered above the composer in the timeline view's header.
+  const upcomingSection =
+    upcomingCount > 0 ? (
+      <View style={styles.upcoming}>
+        <Text style={styles.upcomingHeading}>
+          ↑ {upcomingCount} upcoming
+        </Text>
+        {scheduledFuture.map((e) => (
+          <EventCard key={e.id} event={e} />
+        ))}
+        {staging.length > 0 ? (
+          <>
+            <Text style={styles.stagingHeading}>Being planned</Text>
+            {staging.map((e) => (
+              <EventCard key={e.id} event={e} />
+            ))}
+          </>
+        ) : null}
+      </View>
+    ) : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -173,13 +271,29 @@ export default function GroupScreen() {
             <Text style={styles.retryText}>Try again</Text>
           </Pressable>
         </View>
+      ) : view === 'calendar' ? (
+        <ScrollView contentContainerStyle={styles.calendarContent}>
+          {identity}
+          {toggle}
+          {calendarQuery.isLoading ? (
+            <ActivityIndicator color={colors.accent} style={styles.spinner} />
+          ) : (calendarQuery.data ?? []).length === 0 ? (
+            <Text style={styles.calendarEmpty}>
+              No dated events yet. Scheduled events show up here.
+            </Text>
+          ) : (
+            <MonthGrid events={calendarQuery.data ?? []} />
+          )}
+        </ScrollView>
       ) : (
         <TimelineList
           rows={rows}
           keyboardShouldPersistTaps="handled"
           ListHeaderComponent={
             <>
-              {header}
+              {identity}
+              {toggle}
+              {upcomingSection}
               <ComposeBox
                 user={me}
                 groupId={id}
@@ -239,6 +353,40 @@ const styles = StyleSheet.create({
   infoBody: { flex: 1, gap: spacing.xs },
   description: { fontSize: fontSize.base, color: colors.inkSoft, lineHeight: 22 },
   memberCount: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '600' },
+  toggle: {
+    flexDirection: 'row',
+    alignSelf: 'center',
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+  },
+  toggleBtn: { paddingHorizontal: spacing.lg, paddingVertical: spacing.xs },
+  toggleOn: { backgroundColor: colors.accent },
+  toggleText: { fontSize: fontSize.sm, fontWeight: '600', color: colors.inkSoft },
+  toggleTextOn: { color: colors.raised },
+  upcoming: { paddingHorizontal: spacing.md, gap: spacing.sm, marginBottom: spacing.sm },
+  upcomingHeading: {
+    fontSize: fontSize.sm,
+    fontWeight: '700',
+    color: colors.accentDeep,
+    textAlign: 'center',
+  },
+  stagingHeading: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.inkFaint,
+    textTransform: 'uppercase',
+    marginTop: spacing.xs,
+  },
+  calendarContent: { padding: spacing.md, paddingBottom: spacing.xxl },
+  calendarEmpty: {
+    fontSize: fontSize.sm,
+    color: colors.inkSoft,
+    textAlign: 'center',
+    marginTop: spacing.xl,
+  },
   spinner: { marginTop: spacing.xl },
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.sm },
   locked: { padding: spacing.xl, alignItems: 'center', gap: spacing.sm },
