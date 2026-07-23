@@ -9,8 +9,10 @@
  * still confirms, but as a plain "Disconnect X?" — a disconnect is worth a
  * deliberate second tap either way.
  *
- * The web version handles block too (`action` prop); mobile block lands in E4,
- * so this is disconnect-only for now and grows an `action` prop when block does.
+ * It serves both disconnect and **block** (E4a): a block severs any connection
+ * *and* the same shared group chats, so it warns exactly the same way. The
+ * `action` prop swaps only the verb/label; the impact fetch and shape are
+ * identical (`getDisconnectImpact` covers both — see api.ts).
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -30,6 +32,8 @@ import { colors, fontSize, radius, spacing } from '@/theme';
 type Props = {
   userId: number;
   userName: string;
+  /** Swaps the verb/label; the warning is otherwise identical. Default disconnect. */
+  action?: 'disconnect' | 'block';
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -37,6 +41,7 @@ type Props = {
 export function DisconnectWarningModal({
   userId,
   userName,
+  action = 'disconnect',
   onConfirm,
   onCancel,
 }: Props) {
@@ -47,6 +52,8 @@ export function DisconnectWarningModal({
 
   const chats = impactQuery.data?.chats ?? [];
   const hasImpact = chats.length > 0;
+  const verb = action === 'block' ? 'Blocking' : 'Disconnecting from';
+  const label = action === 'block' ? 'Block' : 'Disconnect';
 
   return (
     <Modal
@@ -69,9 +76,8 @@ export function DisconnectWarningModal({
           ) : hasImpact ? (
             <>
               <Text style={styles.body}>
-                Disconnecting from{' '}
-                <Text style={styles.strong}>{userName}</Text> will remove you
-                from these chats until you’re connected to everyone again:
+                {verb} <Text style={styles.strong}>{userName}</Text> will remove
+                you from these chats until you’re connected to everyone again:
               </Text>
               <ScrollView style={styles.chatList} contentContainerStyle={styles.chatListInner}>
                 {chats.map((chat) => (
@@ -83,7 +89,7 @@ export function DisconnectWarningModal({
             </>
           ) : (
             <Text style={styles.body}>
-              Disconnect from <Text style={styles.strong}>{userName}</Text>?
+              {label} <Text style={styles.strong}>{userName}</Text>?
             </Text>
           )}
 
@@ -108,7 +114,7 @@ export function DisconnectWarningModal({
               {impactQuery.isLoading ? (
                 <ActivityIndicator color="#ffffff" size="small" />
               ) : (
-                <Text style={styles.dangerLabel}>Disconnect</Text>
+                <Text style={styles.dangerLabel}>{label}</Text>
               )}
             </Pressable>
           </View>

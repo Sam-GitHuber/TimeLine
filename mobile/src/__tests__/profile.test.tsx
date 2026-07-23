@@ -297,7 +297,11 @@ describe('reaching a profile', () => {
   it('opens the author’s profile when their name is tapped on a post', async () => {
     await render(
       <QueryClientProvider client={makeQueryClient()}>
-        <PostCard post={makePost({ id: 9, author: { id: 42, display_name: 'Carol Clark', avatar_thumb: null } })} />
+        {/* PostCard's ⋯ menu reads auth; with no session primed the user is null
+            and the menu renders nothing, which is all this tap test needs. */}
+        <AuthProvider>
+          <PostCard post={makePost({ id: 9, author: { id: 42, display_name: 'Carol Clark', avatar_thumb: null } })} />
+        </AuthProvider>
       </QueryClientProvider>
     );
 

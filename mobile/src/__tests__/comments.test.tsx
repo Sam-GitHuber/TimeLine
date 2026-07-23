@@ -14,6 +14,14 @@ import { StyleSheet } from 'react-native';
 import { CommentThread, ancestorIdsOf } from '@/components/CommentThread';
 import type { Comment } from '@/types';
 
+// CommentThread reads the current user (to hide "Report" on your own comment).
+// A fixed stub keeps the real AuthProvider's async setState out of these tests;
+// pk 99 is nobody in these fixtures, so Report shows on every comment here.
+jest.mock('@/auth', () => ({
+  ...jest.requireActual('@/auth'),
+  useAuth: () => ({ user: { pk: 99, display_name: 'Test Viewer' } }),
+}));
+
 const mockFetch = jest.fn();
 
 function jsonResponse(body: unknown, status = 200) {

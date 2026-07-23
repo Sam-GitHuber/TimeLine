@@ -17,6 +17,15 @@ jest.mock('expo-router', () => ({
   router: { push: jest.fn(), back: jest.fn(), replace: jest.fn(), canGoBack: () => true },
 }));
 
+// The post card's ⋯ menu and each comment's Report affordance read the current
+// user (owner checks). A fixed stub avoids wrapping this screen in an
+// AuthProvider; pk 99 is nobody in these fixtures, so both surfaces just offer
+// "Report", which this file (deep-link scrolling) doesn't exercise.
+jest.mock('@/auth', () => ({
+  ...jest.requireActual('@/auth'),
+  useAuth: () => ({ user: { pk: 99, display_name: 'Test Viewer' } }),
+}));
+
 const mockFetch = jest.fn();
 
 function jsonResponse(body: unknown, status = 200) {

@@ -23,6 +23,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
 import { PhotoLightbox } from './PhotoLightbox';
+import { PostMenu } from './PostMenu';
 import { ReactionBar } from './ReactionBar';
 import { SPINE_COLUMN, Spine } from './timeline';
 import type { Post } from '@/types';
@@ -138,6 +139,10 @@ export function PostCard({
             {/* Silently altering content others have read is a trust problem, so
                 the marker is not optional — see feed-and-posts.md. */}
             {post.edited_at ? <Text style={styles.edited}>· edited</Text> : null}
+            {/* The ⋯ menu (Delete own / Report others). A nested Pressable, so it
+                wins its own touch over the body behind it, and pushes itself to
+                the far right via `marginLeft: auto`. */}
+            <PostMenu postId={post.id} authorId={post.author.id} />
           </View>
 
           {post.group ? (
