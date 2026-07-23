@@ -719,9 +719,97 @@ The four questions that were open are now decided and folded into the plan above
 - How much genuinely-Android-specific work is left for Phase 10 — re-scope that
   plan once this one ships.
 
+## Follow-on to Milestone F — continuous deployment for the app (EAS Update / OTA)
+
+**Status: planned, not built.** A tail-end of Phase 9, deliberately deferred until
+F is signed off and the app is confirmed working on a real phone via TestFlight —
+it changes how updates ship, so it shouldn't churn underneath the first
+distribution. Nothing here is wired yet (`expo-updates` is not installed, no
+`runtimeVersion`, no channels in `eas.json`).
+
+**The goal:** an app-update story that mirrors the web's continuous deploy, so a
+merge to `main` reaches installed phones without a manual App Store round-trip —
+*for the changes where that's actually possible*.
+
+**Two kinds of change, two mechanisms.** This is the whole mental model, and it
+maps exactly onto the "pure JS, Metro reload" vs "needs a dev-build rebuild"
+distinction that ran through Milestone E:
+
+| Change type | Examples from the build | How it ships |
+|---|---|---|
+| **JS / assets only** | Most of E1–E4 (settings, activity bell, poll builder logic) | **OTA update** (EAS Update) |
+| **Native** | New native module (`datetimepicker`), permissions, icon, SDK bump | **New binary** (`eas build` + resubmit) |
+
+- **EAS Update (OTA)** pushes a new JS bundle straight to installed apps — no new
+  build, no App Store round-trip; the app fetches it on next launch. This is the
+  real analog to the web CD, and covers the large majority of changes.
+- **Native changes can't go OTA** — the JS must match the installed native binary.
+  A **`runtimeVersion: { policy: "fingerprint" }`** hashes the native layer, and an
+  OTA update only lands on apps whose fingerprint matches. Change a native dep →
+  fingerprint changes → OTA correctly refuses, signalling "this one needs a
+  rebuild." The tooling enforces the split so a mismatched bundle can't ship.
+
+**Plan (three phases):**
+
+1. **Wire up OTA.** `npx expo install expo-updates`; set
+   `runtimeVersion: { policy: "fingerprint" }` in `app.json`; add a `channel`
+   (e.g. `production`) to the production build profile in `eas.json`; run
+   `eas update:configure`. Then rebuild + resubmit **once** (a native change — it
+   adds the updates runtime) so installed apps can receive OTA updates at all.
+2. **Automate JS updates in CI.** A job that, on merge to `main` touching
+   `mobile/`, runs `eas update --branch production --auto`. That is the app's
+   continuous deploy for JS changes — merge a tweak, every app has it next launch.
+3. **Keep native builds deliberate.** New binaries stay a conscious step (a
+   tagged/manual `eas build --profile production --auto-submit`), *not* fired on
+   every merge: they produce a new binary and — for external/App Store — hit Apple
+   review. Auto-building those would burn build minutes and spam review.
+
+**Caveats to fold in when building:**
+
+- **App Store policy.** Apple explicitly permits OTA for bug fixes and JS tweaks —
+  its intended use. The line not to cross: OTA-ing a *materially different app* to
+  dodge review. Normal updates are fine.
+- **Security (real family data — treat as non-optional here).** OTA bundles come
+  from Expo's CDN. Add **update code-signing** (`expo-updates` code signing) so a
+  compromised update server can't push malicious JS to family phones. Fold into
+  phase 1, not bolted on later.
+- **Cost.** EAS Update has a free tier that's generous at friends-and-family
+  scale; paid only if the beta grows a lot.
+
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-24 — Milestone F (TestFlight): the release path works end to end. First
+internal build installed on a real iPhone; app icon + launch screen shipped.**
+
+The full EAS → TestFlight pipeline is proven and now has its own durable runbook,
+[`../mobile-release.md`](../mobile-release.md) (the mobile sibling of `deploy.md`) —
+future releases follow that, not this log. One-time setup completed: the App Store
+Connect app record **"YourTimeLine"** (App ID `6794099197`, bundle
+`net.yourtimeline.app`), iOS **distribution credentials** + an **ASC API key**
+(App Manager) both stored on EAS, and the **"Family and Friends"** internal group.
+A `production` build → `submit --latest` → Apple processing → installed on the
+maintainer's phone.
+
+- **Interactive-TTY gotcha (caught live).** The first production build failed under
+  Claude Code's `!` prefix — *"Distribution Certificate is not validated for
+  non-interactive builds… Run this command again in interactive mode."* The `!`
+  prefix provides no interactive TTY, so EAS ran non-interactively and couldn't do
+  first-time credential setup / Apple login. Fix: run `eas build`/`eas submit` in a
+  **real Terminal window** for anything needing Apple login. Once creds + the ASC
+  API key are stored on EAS, subsequent builds/submits are non-interactive.
+
+- **App icon + launch screen (PR #136).** Replaced the stock Expo logo and the
+  blank splash with the web brand mark (timeline spine + emerald now-dot, from
+  `Layout.jsx`) on the warm surface `#FBFAF7`. Dropped the `ios.icon` override so
+  iOS renders from the single 1024 PNG; removed the unused `expo.icon` bundle.
+  Assets rendered SVG→PNG via `@resvg/resvg-js`. A **native change**, so it needs a
+  rebuild + resubmit to reach TestFlight (can't ship OTA).
+
+- **Still open before F fully closes:** verify the new icon on-device after the
+  rebuild lands; then the external-testers decision (external needs Apple Beta App
+  Review + a demo account — see `mobile-release.md` "Testers").
 
 **2026-07-23 — Milestone E4c (activity centre): the feed grows a bell, and the
 app's last parity gap closes. Milestone E is complete.**
