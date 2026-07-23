@@ -107,6 +107,10 @@ function DateTimeField({
     if (picked) setValue(picked);
   };
 
+  // iOS renders the spinner inline and persistently, which is what this layout
+  // assumes. Android's picker is a one-shot modal dialog: an always-mounted
+  // instance shows once and won't reopen after dismissal, so Phase 10 (Android)
+  // will need a `show` state + remount around this. iOS-only for now.
   return (
     <View style={styles.column}>
       <DateTimePicker

@@ -198,6 +198,7 @@ export default function EventScreen() {
               />
               {editing ? (
                 <DimensionEditor
+                  key={editing}
                   dimension={editing}
                   busy={finalise.isPending}
                   onSet={(dimension, value) => finalise.mutate({ dimension, value })}
