@@ -17,6 +17,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -118,7 +119,18 @@ export default function EventScreen() {
           {event.description ? <Text style={styles.description}>{event.description}</Text> : null}
 
           {event.location_name ? (
-            <Text style={styles.location}>{event.location_name}</Text>
+            <Text style={styles.location}>
+              {event.location_name}
+              {event.location_url ? (
+                <Text
+                  style={styles.locationLink}
+                  onPress={() => Linking.openURL(event.location_url).catch(() => {})}
+                  accessibilityRole="link"
+                >
+                  {'  ·  link'}
+                </Text>
+              ) : null}
+            </Text>
           ) : null}
 
           {event.status !== 'cancelled' ? (
@@ -186,6 +198,7 @@ const styles = StyleSheet.create({
   when: { fontFamily: fonts.mono, fontSize: fontSize.base, color: colors.inkSoft },
   description: { fontSize: fontSize.base, color: colors.inkSoft, lineHeight: 23 },
   location: { fontSize: fontSize.sm, color: colors.inkSoft },
+  locationLink: { color: colors.accentDeep, fontWeight: '600' },
   section: {
     marginTop: spacing.md,
     borderTopWidth: 1,

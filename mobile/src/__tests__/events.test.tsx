@@ -16,6 +16,7 @@ import EventScreen from '@/app/events/[eventId]';
 import CalendarScreen from '@/app/(tabs)/calendar';
 import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
+import { MonthGrid } from '@/components/events/MonthGrid';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, Poll, User } from '@/types';
 
@@ -98,6 +99,49 @@ const DATE_POLL: Poll = {
     },
   ],
   vote_count: 2,
+  your_votes: [],
+  decided_option: null,
+};
+
+// A custom poll whose option labels are plain text (not a formatted date). The
+// vote path is dimension-agnostic, and a date option's *rendered* label goes
+// through `toLocaleDateString`, which orders day/month differently by locale
+// (en-GB "Sun 26 Jul" vs en-US "Sun, Jul 26") — so asserting on it is brittle
+// across machines/CI. Plain-text labels keep the vote test locale-independent.
+const CUSTOM_POLL: Poll = {
+  id: 4,
+  event: 9,
+  dimension: 'custom',
+  question: 'What should we bring?',
+  allow_multiple: false,
+  status: 'open',
+  closes_at: null,
+  created_at: '2026-07-18T10:00:00Z',
+  options: [
+    {
+      id: 40,
+      label: 'Snacks',
+      date_value: null,
+      time_value: null,
+      text_value: 'Snacks',
+      order: 0,
+      count: 1,
+      voters: [],
+      you_voted: false,
+    },
+    {
+      id: 41,
+      label: 'Drinks',
+      date_value: null,
+      time_value: null,
+      text_value: 'Drinks',
+      order: 1,
+      count: 0,
+      voters: [],
+      you_voted: false,
+    },
+  ],
+  vote_count: 1,
   your_votes: [],
   decided_option: null,
 };
@@ -217,21 +261,24 @@ describe('event detail', () => {
   });
 
   it('casts your vote as the full option selection', async () => {
+    // A custom poll — its option labels are plain text, so the query isn't
+    // locale-dependent (see CUSTOM_POLL). The vote path is the same as a date
+    // poll's.
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes('/api/auth/user/')) return jsonResponse(ME);
-      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent({ polls: [CUSTOM_POLL] }));
       return jsonResponse(null, 404);
     });
-    const vote = jest.spyOn(api, 'votePoll').mockResolvedValue(DATE_POLL);
+    const vote = jest.spyOn(api, 'votePoll').mockResolvedValue(CUSTOM_POLL);
 
     await renderWith(<EventScreen />);
-    await screen.findByText('Which weekend works?');
 
-    // Tap the second (unvoted) date option — a single-choice poll, so the full
-    // selection is just that one id.
-    await fireEvent.press(screen.getByRole('button', { name: /Sun 26 Jul/ }));
+    // Tap the second (unvoted) option — single-choice, so the full selection is
+    // just that one id. `findByRole` waits for the poll to render (the question
+    // text itself is ambiguous — it's also a DimensionChips label for the poll).
+    await fireEvent.press(await screen.findByRole('button', { name: /Drinks/ }));
 
-    await waitFor(() => expect(vote).toHaveBeenCalledWith(3, [31]));
+    await waitFor(() => expect(vote).toHaveBeenCalledWith(4, [41]));
     vote.mockRestore();
   });
 });
@@ -278,7 +325,8 @@ describe('group page events', () => {
   function serveGroup({
     upcoming = [],
     past = [],
-  }: { upcoming?: Event[]; past?: Event[] } = {}) {
+    calendar = [],
+  }: { upcoming?: Event[]; past?: Event[]; calendar?: Event[] } = {}) {
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes('/api/auth/user/')) return jsonResponse(ME);
       if (url.includes('/api/groups/7/posts/')) {
@@ -286,7 +334,7 @@ describe('group page events', () => {
       }
       if (url.includes('/api/groups/7/events/?window=upcoming')) return jsonResponse(upcoming);
       if (url.includes('/api/groups/7/events/?window=past')) return jsonResponse(past);
-      if (url.includes('/api/groups/7/calendar/')) return jsonResponse([]);
+      if (url.includes('/api/groups/7/calendar/')) return jsonResponse(calendar);
       if (url.includes('/api/groups/7/')) return jsonResponse(GROUP);
       return jsonResponse(null, 404);
     });
@@ -333,5 +381,49 @@ describe('group page events', () => {
     expect(await screen.findByText('Spring picnic')).toBeTruthy();
     // The recap carries its turnout.
     expect(screen.getByText('6 went')).toBeTruthy();
+  });
+
+  it('swaps the timeline for the month grid when you toggle to Calendar', async () => {
+    const dated = makeEvent({
+      id: 22,
+      title: 'Quiz night',
+      status: 'scheduled',
+      event_date: '2026-08-14',
+      starts_at: '2026-08-14T19:00:00Z',
+      start_time: '19:00:00',
+    });
+    // The group calendar query is lazy (fires only in the calendar view), so the
+    // event appears in the grid only after the toggle.
+    serveGroup({ calendar: [dated] });
+
+    await renderWith(<GroupScreen />);
+    await screen.findByText('Family group'); // group loaded (its description)
+
+    expect(screen.queryByText('Quiz night')).toBeNull();
+    // Await the press: the later assertion reads the state it sets (the view
+    // toggle), which won't flush otherwise.
+    await fireEvent.press(screen.getByRole('button', { name: 'Calendar' }));
+
+    expect(await screen.findByText(/Quiz night/)).toBeTruthy();
+  });
+});
+
+// --- MonthGrid (component) -------------------------------------------------
+
+describe('MonthGrid', () => {
+  it('renders the month heading, weekday row, and an event in its day cell', async () => {
+    const dated = makeEvent({
+      id: 30,
+      title: 'Quiz night',
+      status: 'scheduled',
+      event_date: '2026-08-14',
+      starts_at: '2026-08-14T19:00:00Z',
+      start_time: '19:00:00',
+    });
+    await render(<MonthGrid events={[dated]} />);
+
+    expect(screen.getByText('August 2026')).toBeTruthy();
+    expect(screen.getByText('Mon')).toBeTruthy();
+    expect(screen.getByText(/Quiz night/)).toBeTruthy();
   });
 });
