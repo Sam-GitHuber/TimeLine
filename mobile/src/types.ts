@@ -409,6 +409,15 @@ export type Event = {
   polls: Poll[];
 };
 
+/**
+ * `GET/PATCH /api/notification-preferences/` — a `{ kind: enabled }` map over
+ * just the *mutable* notification kinds (replies, reactions, the five event
+ * kinds). The always-on connection/invite kinds never appear. An unknown kind
+ * still renders (label falls back to the raw key), so a new backend kind
+ * degrades gracefully rather than dropping the toggle.
+ */
+export type NotificationPreferences = Record<string, boolean>;
+
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */
 export type Post = {
   id: number;

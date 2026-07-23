@@ -37,6 +37,7 @@ import type {
   GroupMember,
   LoginResponse,
   Message,
+  NotificationPreferences,
   Paginated,
   PersonSummary,
   Poll,
@@ -1146,6 +1147,58 @@ export const api = {
   markNotificationAddressed: (notificationId: number) =>
     request<void>(`/api/notifications/${notificationId}/addressed/`, {
       method: 'POST',
+    }),
+
+  /* ---- Settings (Phase 9 E4b) ------------------------------------------- *
+   * Account hygiene + per-type notification preferences. Pure client port of
+   * the web SettingsPage's three sections — no backend change (password change
+   * is Phase 7, account deletion Phase 7, prefs Phase 8).                     */
+
+  /**
+   * Change your password. The current password is required (the backend
+   * enforces it via `OLD_PASSWORD_FIELD_ENABLED`) so a hijacked session can't
+   * silently rotate it; `confirm` is re-checked server-side too. On success the
+   * session stays valid — no re-login, and the tokens are unaffected.
+   */
+  changePassword: (
+    currentPassword: string,
+    newPassword: string,
+    confirmPassword: string
+  ) =>
+    request<void>('/api/auth/password/change/', {
+      method: 'POST',
+      body: {
+        old_password: currentPassword,
+        new_password1: newPassword,
+        new_password2: confirmPassword,
+      },
+    }),
+
+  /**
+   * Permanently delete your own account and all your data (UK GDPR erasure).
+   * Password-reconfirmed because it's irreversible; the backend rejects a wrong
+   * password. On success the server returns 204 and the session is dead — the
+   * caller signs out to wipe the device and land on login.
+   */
+  deleteAccount: (password: string) =>
+    request<void>('/api/account/delete/', {
+      method: 'POST',
+      body: { password },
+    }),
+
+  /**
+   * Per-kind notification preferences as a `{ kind: bool }` map over just the
+   * *mutable* kinds (replies/reactions/events). The connection & invite kinds
+   * are always-on and never appear here. GET reads the merged map.
+   */
+  getNotificationPreferences: () =>
+    request<NotificationPreferences>('/api/notification-preferences/'),
+
+  /** PATCH a partial `{ kind: bool }` map; returns the full merged map back. */
+  updateNotificationPreferences: (patch: NotificationPreferences) =>
+    request<NotificationPreferences>('/api/notification-preferences/', {
+      method: 'PATCH',
+      body: patch,
     }),
 
   /**

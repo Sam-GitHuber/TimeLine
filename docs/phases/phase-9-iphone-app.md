@@ -9,8 +9,9 @@ strategy below called for. **Milestone D done** (PR #103, device pass verified
 settings+safety are landing: **E3a (groups)**, **E3b (events: view &
 participate)**, **E3c-a (events: organise — plan & set)**, and **E3c-b (events:
 polls)** done — **E3 is complete** — plus **E4a (report + block)** (brought ahead
-of E3c-b because report + block are App Review blockers). Still open: **E4b/E4c
-(settings, activity centre)**. The four screen areas:
+of E3c-b because report + block are App Review blockers) and **E4b (settings)**.
+Still open: **E4c (activity centre)** — the last parity chunk before Milestone F
+(TestFlight). The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -537,11 +538,17 @@ taken with the user:
   **Block/Unblock** on the profile action row, reusing `DisconnectWarningModal`
   (grown an `action` prop) for the block-confirm — Connect/Message are replaced by
   an Unblock + explanation once you've blocked someone, mirroring the web.
-- **E4b — Settings.** `settings.tsx` (reached from a profile gear): per-type
-  notification-pref toggles, change-password, delete-account (→ signOut), and
-  ToS/Privacy rows opening the hosted pages via `expo-web-browser`. New API
-  `changePassword`, `deleteAccount`, `getNotificationPreferences`,
-  `updateNotificationPreferences`.
+- **E4b — Settings — done** (see the 2026-07-23 E4b notes entry). `settings.tsx`
+  (reached from a **gear** on your own-profile top bar, beside where logout
+  lives): a **Feed** section (the include-groups preference, moved here from the
+  feed header), the three ported web sections — per-type notification-pref
+  toggles (native `Switch`, optimistic), change-password (inline expanding form),
+  delete-account (password-confirm modal → `signOut`) — plus an **About** section
+  with Terms/Privacy rows opening the web's own hosted pages via
+  `expo-web-browser`. New API `changePassword`, `deleteAccount`,
+  `getNotificationPreferences`, `updateNotificationPreferences`; type
+  `NotificationPreferences`; a per-device `PreferencesProvider`
+  (`preferences.tsx`); new `SettingsIcon` (gear) in `icons.tsx`.
 - **E4c — Activity centre.** A feed-header bell (unread badge) → `activity.tsx`:
   the notification list, three states, mark-seen on open, mark-addressed on tap
   (reusing `routeForNotification`, so in-app and push click-through share one map).
@@ -711,6 +718,59 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-23 — Milestone E4b (settings): the profile grows a gear, and the app
+gets its account controls.**
+
+The three web SettingsPage sections, ported to native and composed in
+`app/settings.tsx` (a root-stack sibling of `(tabs)`, pushed over the tabs like
+every other detail/form screen). Reached from a new **gear** on your own-profile
+top bar — Settings is **not a tab** (five tabs is the iOS max and they're
+already full; see the E4 nav decision), so it shares the profile screen with
+logout. Pure client port: password-change is Phase 7, account deletion Phase 7,
+prefs Phase 8 — no backend change. New API `changePassword`, `deleteAccount`,
+`getNotificationPreferences`, `updateNotificationPreferences`; type
+`NotificationPreferences`.
+
+- **The toggle is the OS `Switch`, not a port of the web's styled checkbox.**
+  Same native-adaptation call as the date picker / emoji picker: a phone user
+  expects the system switch, and it carries its own value/label semantics. The
+  optimistic-update machinery (flip immediately, roll back on error, treat the
+  server's returned merged map as truth) is copied verbatim from the web — that's
+  the part worth keeping identical.
+
+- **Delete-account reuses `signOut` rather than re-implementing the teardown.**
+  On success the server session is dead, so the component just calls the auth
+  provider's `signOut`, which wipes the device tokens and lets the auth gate boot
+  to `/login`. `signOut`'s `unregisterPush` + `logout` calls already swallow the
+  401 a just-deleted account provokes (its token is gone), so no special-casing
+  was needed — the robustness built in Milestone D pays off here.
+
+- **The include-groups toggle moved out of the feed header into Settings.** E3a
+  shipped it as a quiet pill in the home-feed header; it's a low-frequency
+  preference, so E4b relocated it to a **Feed** section in Settings and made it a
+  proper persisted choice. It's stored **per-device** in a small
+  `PreferencesProvider` (`preferences.tsx`) backed by `expo-secure-store` — the
+  phone equivalent of the web's per-browser `localStorage`, and secure-store only
+  because it's the sole key-value store already installed (a non-secret boolean
+  doesn't need the Keychain, but adding `@react-native-async-storage` — a native
+  module, hence a rebuild — for one flag wasn't worth it). The feed now *reads*
+  the preference (`usePreferences`) instead of holding local state. **Wording
+  correction:** the merge is group **posts** only — group *events* live on the
+  group pages and the Calendar tab and never enter the home feed — so the toggle
+  says "Show group posts in your feed", not "posts and events".
+
+- **Terms/Privacy open the web's *own* hosted pages** (`${BASE_URL}/terms`,
+  `/privacy`) in an in-app browser via `expo-web-browser`, not a re-implementation
+  — one source of truth for the legal wording, and App Review wants them reachable.
+  `expo-web-browser` was already a dependency (no new native module, so no
+  dev-build rebuild — a pure-JS chunk like every E-chunk except E3c-a).
+
+- **Test collision worth remembering: the section heading and the submit button
+  share the text "Change password".** `getByText` found both; the fix is
+  `getByRole('button', { name })`, since the heading is a `Text` with no button
+  role. General rule for these ported forms — disambiguate a control from its own
+  section title by role, not text.
 
 **2026-07-23 — Milestone E3c-b (events, organise: polls): the poll builder and
 lifecycle. E3 is complete.**

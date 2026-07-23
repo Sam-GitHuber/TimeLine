@@ -23,6 +23,7 @@ import {
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AuthProvider, useAuth } from '@/auth';
+import { PreferencesProvider } from '@/preferences';
 import { configureNotificationHandler } from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
 import { colors } from '@/theme';
@@ -135,8 +136,10 @@ export default function RootLayout() {
     <GestureHandlerRootView style={styles.root}>
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
-          <StatusBar style="dark" />
-          <AuthGate />
+          <PreferencesProvider>
+            <StatusBar style="dark" />
+            <AuthGate />
+          </PreferencesProvider>
         </AuthProvider>
       </QueryClientProvider>
     </GestureHandlerRootView>

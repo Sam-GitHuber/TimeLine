@@ -35,6 +35,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
+import { SettingsIcon } from '@/components/icons';
 import { BlockButton } from '@/components/BlockButton';
 import { ConnectButton } from '@/components/ConnectButton';
 import { MessageButton } from '@/components/MessageButton';
@@ -203,6 +204,19 @@ export default function ProfileScreen() {
         >
           <Text style={styles.back}>← Back</Text>
         </Pressable>
+        {/* Settings lives behind a gear on your own profile — five tabs is the
+            iOS max and already full, so account controls get a non-tab home
+            here, beside where logout lives (phase plan, E4 nav decision). */}
+        {isSelf ? (
+          <Pressable
+            onPress={() => router.push('/settings')}
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
+            hitSlop={8}
+          >
+            <SettingsIcon color={colors.inkSoft} />
+          </Pressable>
+        ) : null}
       </View>
 
       {userQuery.isLoading ? (
@@ -281,7 +295,13 @@ export default function ProfileScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.surface },
   fill: { flex: 1 },
-  topBar: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+  },
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
   profileHeader: {
     paddingHorizontal: spacing.md,

@@ -152,9 +152,13 @@ actions live behind a **⋯ menu** (ActionSheetIOS): Invite, Members, Leave, and
 for admins — Edit, Delete. Members is its own roster screen (admin controls via a
 per-row action sheet; the last-admin guardrail surfaces the server's 400); invite
 and create/edit are pushed screens reusing the connection-picker and the profile
-editor's round avatar cropper. The **include-groups feed toggle** is a quiet pill
-in the home-feed header (`?include_groups=1`, off by default). The `group_invite`
-push notification deep-links to the Groups tab.
+editor's round avatar cropper. The **include-groups feed preference**
+(`?include_groups=1`, off by default) is a switch in **Settings → Feed**, not a
+header control — it's a low-frequency choice, persisted per-device via
+`expo-secure-store` (the web's per-browser `localStorage` equivalent); it merges
+group **posts** only, never events. (E4b moved it there from the feed header,
+where E3a first shipped it.) The `group_invite` push notification deep-links to
+the Groups tab.
 
 **Events (the group's upcoming-events section, event detail, RSVP, polls, the
 calendar) are E3b/E3c** — E3a is groups only.
