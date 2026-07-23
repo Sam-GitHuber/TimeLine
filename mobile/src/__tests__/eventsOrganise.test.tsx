@@ -15,7 +15,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { ActionSheetIOS } from 'react-native';
+import { ActionSheetIOS, Alert } from 'react-native';
 
 import { api } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
@@ -243,7 +243,7 @@ describe('cancel and delete', () => {
   it('cancels the event after a confirm (moderator only)', async () => {
     serveEvent(planningEvent());
     const cancel = jest.spyOn(api, 'cancelEvent').mockResolvedValue(planningEvent());
-    const alert = jest.spyOn(require('react-native').Alert, 'alert');
+    const alert = jest.spyOn(Alert, 'alert');
 
     await renderWith(<EventScreen />);
 

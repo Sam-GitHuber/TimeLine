@@ -9,10 +9,9 @@
  * the wheel/calendar is what a phone user expects, and it hands the API the same
  * ISO `YYYY-MM-DD` / `HH:MM`. Location is plain text (an organiser-typed place).
  *
- * E3c-a covers **set** only (finalise a value directly). The **poll** builder is
- * E3c-b — this component grows a `mode`/poll branch then, mirroring the web
- * `DimensionEditor`. Ported (set side) from
- * `frontend/src/components/events/DimensionEditor.jsx`.
+ * `mode` is **set** (finalise a value directly, built-ins only) or **poll** (open
+ * an advisory poll the group votes on — E3c-b, for any dimension incl. custom).
+ * Ported from `frontend/src/components/events/DimensionEditor.jsx`.
  */
 
 import DateTimePicker, {
@@ -22,34 +21,128 @@ import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, fontSize, radius, spacing } from '@/theme';
+import { PollOptionFields } from './PollOptionFields';
+import {
+  blankOption,
+  OPTION_NOUN,
+  optionValuePayload,
+  type OptionRow,
+  type PollDimension,
+} from './pollOptions';
+import type { PollOptionPayload } from '@/types';
 
-type Dimension = 'date' | 'time' | 'location';
+type BuiltinDim = 'date' | 'time' | 'location';
 
-const SET_VERB: Record<Dimension, string> = {
+const SET_VERB: Record<BuiltinDim, string> = {
   date: 'Set the date',
   time: 'Set the time',
   location: 'Set the place',
 };
 
+/** What the poll builder hands up — the shape `api.openPoll` takes. */
+export type PollDraft = {
+  dimension: PollDimension;
+  question?: string;
+  allowMultiple: boolean;
+  options: PollOptionPayload[];
+};
+
 export function DimensionEditor({
   dimension,
+  mode,
   onSet,
+  onPoll,
   onCancel,
   busy = false,
 }: {
-  dimension: Dimension;
-  /** Hands up the ISO value: `YYYY-MM-DD` (date), `HH:MM` (time), or free text. */
-  onSet: (dimension: Dimension, value: string) => void;
+  dimension: PollDimension;
+  mode: 'set' | 'poll';
+  /** Set mode: the ISO value — `YYYY-MM-DD` / `HH:MM` / free text. */
+  onSet?: (dimension: BuiltinDim, value: string) => void;
+  /** Poll mode: the drafted poll. */
+  onPoll?: (draft: PollDraft) => void;
   onCancel: () => void;
   busy?: boolean;
 }) {
   return (
     <View style={styles.editor}>
-      {dimension === 'location' ? (
+      {mode === 'poll' ? (
+        <PollBuilder dimension={dimension} onPoll={onPoll} onCancel={onCancel} busy={busy} />
+      ) : dimension === 'location' ? (
         <LocationField onSet={onSet} onCancel={onCancel} busy={busy} />
       ) : (
-        <DateTimeField dimension={dimension} onSet={onSet} onCancel={onCancel} busy={busy} />
+        // Set mode is built-ins only; 'custom' never reaches here (no direct value).
+        <DateTimeField dimension={dimension as 'date' | 'time'} onSet={onSet} onCancel={onCancel} busy={busy} />
       )}
+    </View>
+  );
+}
+
+// Candidate options typed to the dimension, plus (for custom) the question.
+// At least two filled options to open; you make the final call regardless.
+function PollBuilder({
+  dimension,
+  onPoll,
+  onCancel,
+  busy,
+}: {
+  dimension: PollDimension;
+  onPoll?: (draft: PollDraft) => void;
+  onCancel: () => void;
+  busy: boolean;
+}) {
+  const [question, setQuestion] = useState('');
+  const [options, setOptions] = useState<OptionRow[]>(() => [blankOption(), blankOption()]);
+  // Seed pick-one/any from the same per-dimension default the server would apply
+  // (date/time → pick any, location/custom → pick one); the organiser can override.
+  const [allowMultiple, setAllowMultiple] = useState(dimension === 'date' || dimension === 'time');
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+
+  const filled = options.filter((o) => o.value.trim());
+  const canOpen = filled.length >= 2 && (dimension !== 'custom' || question.trim().length > 0);
+  const noun = dimension === 'custom' ? 'options' : `${OPTION_NOUN[dimension]}s`;
+
+  function submit() {
+    if (!canOpen) return;
+    onPoll?.({
+      dimension,
+      question: dimension === 'custom' ? question.trim() : undefined,
+      allowMultiple,
+      options: filled.map((o) => optionValuePayload(dimension, o.value)),
+    });
+  }
+
+  return (
+    <View style={{ gap: spacing.sm }}>
+      <Text style={styles.hint}>
+        Give the group a few {noun} to choose from — you make the final call.
+      </Text>
+      {dimension === 'custom' ? (
+        <TextInput
+          style={styles.input}
+          value={question}
+          onChangeText={setQuestion}
+          placeholder="Your question — e.g. What should we bring?"
+          placeholderTextColor={colors.inkFaint}
+          accessibilityLabel="Poll question"
+          autoFocus
+        />
+      ) : null}
+      <PollOptionFields
+        dimension={dimension}
+        options={options}
+        onChange={setOptions}
+        allowMultiple={allowMultiple}
+        onAllowMultiple={setAllowMultiple}
+        activeIndex={activeIndex}
+        onActiveIndex={setActiveIndex}
+      />
+      <Actions
+        label="Open poll"
+        disabled={busy || !canOpen}
+        onSet={submit}
+        onCancel={onCancel}
+      />
     </View>
   );
 }
@@ -59,7 +152,7 @@ function LocationField({
   onCancel,
   busy,
 }: {
-  onSet: (dimension: Dimension, value: string) => void;
+  onSet?: (dimension: BuiltinDim, value: string) => void;
   onCancel: () => void;
   busy: boolean;
 }) {
@@ -80,7 +173,7 @@ function LocationField({
       <Actions
         label={SET_VERB.location}
         disabled={busy || !trimmed}
-        onSet={() => onSet('location', trimmed)}
+        onSet={() => onSet?.('location', trimmed)}
         onCancel={onCancel}
       />
     </View>
@@ -94,7 +187,7 @@ function DateTimeField({
   busy,
 }: {
   dimension: 'date' | 'time';
-  onSet: (dimension: Dimension, value: string) => void;
+  onSet?: (dimension: BuiltinDim, value: string) => void;
   onCancel: () => void;
   busy: boolean;
 }) {
@@ -113,13 +206,17 @@ function DateTimeField({
         value={value}
         mode={dimension}
         display="spinner"
+        // Needs an explicit width + height or the inline iOS spinner collapses;
+        // themeVariant keeps the wheel's numbers visible on the light surface.
+        style={styles.picker}
+        themeVariant="light"
         onChange={onChange}
       />
       <Actions
         label={SET_VERB[dimension]}
         disabled={busy}
         onSet={() =>
-          onSet(dimension, dimension === 'date' ? toISODate(value) : toHM(value))
+          onSet?.(dimension, dimension === 'date' ? toISODate(value) : toHM(value))
         }
         onCancel={onCancel}
       />
@@ -182,6 +279,8 @@ const styles = StyleSheet.create({
   },
   row: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },
   column: { gap: spacing.sm, alignItems: 'flex-start' },
+  picker: { alignSelf: 'stretch', height: 216 },
+  hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20 },
   input: {
     flexGrow: 1,
     minWidth: 160,
