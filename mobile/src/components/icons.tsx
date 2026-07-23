@@ -93,6 +93,23 @@ export function ComposeIcon({ color, size = 26 }: IconProps) {
   );
 }
 
+/** A month grid with a bound top edge — the calendar. */
+export function CalendarIcon({ color, size = 26 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M4.5 6.5A1.5 1.5 0 0 1 6 5h12a1.5 1.5 0 0 1 1.5 1.5v12A1.5 1.5 0 0 1 18 19H6a1.5 1.5 0 0 1-1.5-1.5z"
+        stroke={color}
+        strokeWidth={1.75}
+        strokeLinejoin="round"
+      />
+      <Line x1={4.5} y1={9} x2={19.5} y2={9} stroke={color} strokeWidth={1.75} />
+      <Line x1={8} y1={3.5} x2={8} y2={6} stroke={color} strokeWidth={1.75} strokeLinecap="round" />
+      <Line x1={16} y1={3.5} x2={16} y2={6} stroke={color} strokeWidth={1.75} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
 /** Two people — the connection graph. */
 export function PeopleIcon({ color, size = 26 }: IconProps) {
   return (

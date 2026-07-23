@@ -30,6 +30,7 @@ import {
   type FlatListProps,
 } from 'react-native';
 
+import { EventTimelineEntry } from './events/EventTimelineEntry';
 import { PostCard } from './PostCard';
 import { SPINE_COLUMN, Spine } from './timeline';
 import type { FeedRow } from '@/feed';
@@ -61,6 +62,10 @@ function renderRow({ item }: { item: FeedRow }) {
         <View style={styles.dayRule} />
       </View>
     );
+  }
+  // A past event fallen into a group timeline as a recap (see toGroupRows).
+  if (item.kind === 'event') {
+    return <EventTimelineEntry event={item.event} variant="past" />;
   }
   return <PostCard post={item.post} />;
 }

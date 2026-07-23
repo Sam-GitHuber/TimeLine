@@ -182,6 +182,14 @@ export function routeForNotification(url: string | null | undefined): Href {
   // for the same reason as the requests case (E3a).
   if (path === '/group-invites') return '/groups';
 
-  // /g/<id>/events/<id> (event notifications) have no mobile screen yet (E3b).
+  // An event notification (backend sends `/g/<gid>/events/<eid>` — the web's
+  // nested shape) opens the event detail screen. Mobile keeps events flat
+  // (`/events/<eid>`), so we take only the event id; the detail screen loads the
+  // event (which carries its group) and its Back returns there. This closes all
+  // five event push kinds (created / poll_opened / scheduled / updated /
+  // cancelled), which all deep-link to the same target (E3b).
+  const event = path.match(/^\/g\/\d+\/events\/(\d+)$/);
+  if (event) return `/events/${event[1]}` as Href;
+
   return '/';
 }
