@@ -312,6 +312,18 @@ export type PollResultOption = {
 };
 
 /**
+ * One option in a poll create/edit payload (E3c-b). Typed to the poll's
+ * dimension — exactly one of the value fields is sent. An `id` marks an existing
+ * option to rewrite on edit; its absence means a new option. See events.md.
+ */
+export type PollOptionPayload = {
+  id?: number;
+  date_value?: string;
+  time_value?: string;
+  text_value?: string;
+};
+
+/**
  * An advisory poll on one event dimension — `serialize_poll`. Polls never
  * auto-decide (decision 3): the tally *informs*, the organiser *decides* via
  * finalise. `allow_multiple` is pick-any vs pick-one. `your_votes` is your

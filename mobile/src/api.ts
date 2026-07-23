@@ -40,6 +40,7 @@ import type {
   Paginated,
   PersonSummary,
   Poll,
+  PollOptionPayload,
   Post,
   ProfileUser,
   ReactionSummary,
@@ -872,6 +873,78 @@ export const api = {
         close_poll: closePoll,
       },
     }),
+
+  /* ---- Events: poll lifecycle (Phase 9 E3c-b) ---------------------------- *
+   * Open/edit/close/reopen/remove an advisory poll on a dimension. Options are
+   * organiser-authored, typed to the dimension (`date_value`/`time_value`/
+   * `text_value`). See events.md's poll section. */
+
+  /**
+   * Open a poll on a dimension (organiser). `options` is `[{ date_value | ...
+   * text_value }]` typed to the dimension; `question` is required for custom.
+   * At most one open poll per built-in dimension (server-enforced).
+   */
+  openPoll: (
+    eventId: number | string,
+    {
+      dimension,
+      question,
+      allowMultiple,
+      closesAt,
+      options,
+    }: {
+      dimension: 'date' | 'time' | 'location' | 'custom';
+      question?: string;
+      allowMultiple?: boolean;
+      closesAt?: string;
+      options: PollOptionPayload[];
+    }
+  ) =>
+    request<Poll>(`/api/events/${eventId}/polls/`, {
+      method: 'POST',
+      body: {
+        dimension,
+        ...(question !== undefined ? { question } : {}),
+        ...(allowMultiple !== undefined ? { allow_multiple: allowMultiple } : {}),
+        ...(closesAt ? { closes_at: closesAt } : {}),
+        options,
+      },
+    }),
+
+  /**
+   * Fix a poll's mistakes (organiser) — its `question`, `allowMultiple`, and its
+   * full `options` set (an entry with an `id` rewrites, an id-less one is new,
+   * an omitted existing option is deleted). **Refused (409) once any vote
+   * exists** — the client also hides the affordance on `vote_count > 0`.
+   */
+  editPoll: (
+    pollId: number | string,
+    {
+      question,
+      allowMultiple,
+      options,
+    }: { question?: string; allowMultiple?: boolean; options: PollOptionPayload[] }
+  ) =>
+    request<Poll>(`/api/polls/${pollId}/`, {
+      method: 'PATCH',
+      body: {
+        ...(question !== undefined ? { question } : {}),
+        ...(allowMultiple !== undefined ? { allow_multiple: allowMultiple } : {}),
+        options,
+      },
+    }),
+
+  /** Close a poll without deciding (organiser) — freezes the tally. */
+  closePoll: (pollId: number | string) =>
+    request<Poll>(`/api/polls/${pollId}/close/`, { method: 'POST' }),
+
+  /** Re-open a closed poll (organiser) — voting resumes; re-checks the one-open rule. */
+  reopenPoll: (pollId: number | string) =>
+    request<Poll>(`/api/polls/${pollId}/reopen/`, { method: 'POST' }),
+
+  /** Remove a poll (organiser). Returns 204. */
+  deletePoll: (pollId: number | string) =>
+    request<void>(`/api/polls/${pollId}/`, { method: 'DELETE' }),
 
   /**
    * Your inbox of incoming connection requests — people asking to connect with

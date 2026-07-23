@@ -80,3 +80,20 @@ export const fontSize = {
   lg: 20,
   xl: 28,
 } as const;
+
+/**
+ * The native date/time picker (`@react-native-community/datetimepicker`) renders
+ * its own wheel and doesn't read our tokens, so it has to be told two things
+ * directly — kept here as the single source both poll pickers share.
+ *
+ * `pickerHeight`: the inline iOS spinner reports a tiny intrinsic size and
+ * collapses inside a nested flex layout, so it needs an explicit height to draw
+ * into (paired with `alignSelf: 'stretch'` for width).
+ *
+ * `pickerThemeVariant`: forces the wheel's luminance. The app surface is always
+ * light (there is no dark theme — see `colors` above), so the wheel is too;
+ * without this its numbers go invisible when the OS is in dark mode. If a dark
+ * theme ever lands, this is the one place to make the picker follow it.
+ */
+export const pickerHeight = 216;
+export const pickerThemeVariant = 'light' as const;

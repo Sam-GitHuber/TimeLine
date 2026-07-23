@@ -6,12 +6,13 @@
  *   - `polling` — a live vote count ("3 votes"), a poll is open on it.
  *   - `unset`   — "not set".
  *
- * **The organiser's control surface (E3c-a).** When `canManage` is true these
- * chips double as the organiser's controls: an unset built-in offers **Set**, a
- * set one shows the value with a quiet **Change** — both open the contextual
- * `DimensionEditor` via `onAction(dimension, 'set')`. The **Poll** affordance
- * (and the polling-chip jump-to-poll) is E3c-b. Members — and the summary cards
- * — pass no `canManage`, so the chips stay glanceable status. Ported from
+ * **The organiser's control surface.** When `canManage` is true these chips
+ * double as the organiser's controls: an unset built-in offers **Set · Poll**, a
+ * set one shows the value with **Change · Poll** — each opens the contextual
+ * `DimensionEditor` via `onAction(dimension, 'set' | 'poll')`. A `polling` chip
+ * stays a read-only tally (its poll is managed in the `PollTally` card below).
+ * Members — and the summary cards — pass no `canManage`, so the chips stay
+ * glanceable status. Ported from
  * `frontend/src/components/events/DimensionChips.jsx`. See events.md.
  */
 
@@ -46,8 +47,8 @@ export function DimensionChips({
 }: {
   event: Event;
   canManage?: boolean;
-  /** The organiser tapped Set/Change on a built-in dimension. */
-  onAction?: (dimension: BuiltinDim, mode: 'set') => void;
+  /** The organiser tapped Set/Change (finalise) or Poll on a built-in dimension. */
+  onAction?: (dimension: BuiltinDim, mode: 'set' | 'poll') => void;
 }) {
   const dims = event.dimensions;
   const polls = event.polls ?? [];
@@ -90,10 +91,10 @@ function Chip({
 }: {
   chip: ChipModel;
   canManage: boolean;
-  onAction?: (dimension: BuiltinDim, mode: 'set') => void;
+  onAction?: (dimension: BuiltinDim, mode: 'set' | 'poll') => void;
 }) {
   const { dim, label, state, value, total } = chip;
-  // Set/Change acts on a built-in dimension only, for the organiser.
+  // Set/Change/Poll act on a built-in dimension only, for the organiser.
   const manage = canManage && dim ? onAction : undefined;
 
   if (state === 'polling') {
@@ -112,7 +113,11 @@ function Chip({
         <Text style={styles.label}>{label}</Text>
         {value ? <Text style={[styles.value, styles.valueMono]}>{value}</Text> : null}
         {manage && dim ? (
-          <ChipAction verb="Change" chipLabel={label} onPress={() => manage(dim, 'set')} />
+          <View style={styles.actions}>
+            <ChipAction verb="Change" chipLabel={label} onPress={() => manage(dim, 'set')} />
+            <Text style={styles.sep}>·</Text>
+            <ChipAction verb="Poll" chipLabel={label} onPress={() => manage(dim, 'poll')} />
+          </View>
         ) : null}
       </View>
     );
@@ -122,7 +127,11 @@ function Chip({
     <View style={[styles.chip, styles.chipUnset]}>
       <Text style={styles.label}>{label}</Text>
       {manage && dim ? (
-        <ChipAction verb="Set" chipLabel={label} onPress={() => manage(dim, 'set')} />
+        <View style={styles.actions}>
+          <ChipAction verb="Set" chipLabel={label} onPress={() => manage(dim, 'set')} />
+          <Text style={styles.sep}>·</Text>
+          <ChipAction verb="Poll" chipLabel={label} onPress={() => manage(dim, 'poll')} />
+        </View>
       ) : (
         <Text style={styles.value}>not set</Text>
       )}
@@ -131,14 +140,14 @@ function Chip({
 }
 
 // The visible label is the short verb; the accessibility label folds in the
-// dimension ("Set Date", "Change Where") so the three chips' actions stay
+// dimension ("Set Date", "Poll Where") so every chip's actions stay
 // distinguishable to a screen reader — and to a test.
 function ChipAction({
   verb,
   chipLabel,
   onPress,
 }: {
-  verb: 'Set' | 'Change';
+  verb: 'Set' | 'Change' | 'Poll';
   chipLabel: string;
   onPress: () => void;
 }) {
@@ -192,7 +201,9 @@ const styles = StyleSheet.create({
   chipUnset: { backgroundColor: colors.raised, borderColor: colors.line },
   label: { fontSize: 11, fontWeight: '700', color: colors.inkFaint, textTransform: 'uppercase' },
   value: { fontSize: fontSize.sm, color: colors.inkSoft },
+  actions: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
   action: { fontSize: fontSize.sm, fontWeight: '700', color: colors.accentDeep },
+  sep: { fontSize: fontSize.sm, color: colors.inkFaint },
   valueMono: { fontFamily: fonts.mono, color: colors.ink },
   valueAccent: { color: colors.accentDeep, fontWeight: '600' },
 });

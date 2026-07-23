@@ -7,10 +7,10 @@ strategy below called for. **Milestone D done** (PR #103, device pass verified
 2026-07-21 — see the notes log). **Milestone E in progress** — E1
 (connections/people), E2 (messaging: E2a+E2b), E3 groups+events, and E4
 settings+safety are landing: **E3a (groups)**, **E3b (events: view &
-participate)**, **E3c-a (events: organise — plan & set)**, and **E4a (report +
-block)** done. Still open: **E3c-b (events: polls)** and **E4b/E4c (settings,
-activity centre)** — E4a was brought ahead of E3c-b because report + block are
-App Review blockers. The four screen areas:
+participate)**, **E3c-a (events: organise — plan & set)**, and **E3c-b (events:
+polls)** done — **E3 is complete** — plus **E4a (report + block)** (brought ahead
+of E3c-b because report + block are App Review blockers). Still open: **E4b/E4c
+(settings, activity centre)**. The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -481,9 +481,13 @@ taken with the user:
     behind a confirm. API `createEvent`, `finaliseDimension`, `cancelEvent`,
     `deleteEvent`, and `updateEvent` (ported dormant — the web has no edit-fields UI
     either). The chip **Poll** affordance stays absent here.
-  - **E3c-b — Poll.** The chip **Poll** affordance → the poll builder, and the poll
-    lifecycle: `openPoll`, `editPoll` (while unvoted, the 409 guard), `closePoll`,
-    `reopenPoll`, `deletePoll`, plus finalising a **custom** poll (`option_id`).
+  - **E3c-b — Poll — done** (see the 2026-07-23 E3c-b notes entry). The chip
+    **Poll** affordance + a custom-poll opener → the poll builder (typed options,
+    date/time via the native picker; pick-one/any), the tally's per-option
+    **Set/Pin** finalise, and the lifecycle behind a ⋯ menu: `openPoll`, `editPoll`
+    (while unvoted — the 409 guard, hidden client-side on `vote_count > 0`),
+    `closePoll`, `reopenPoll`, `deletePoll`, plus finalising a **custom** poll
+    (`option_id`).
   - **Not built (matches the web):** an event-field **edit** form — `updateEvent`
     is a dormant endpoint on the web too, with no UI, so mobile ports the method
     but builds no form. Building one would be net-new, not a port.
@@ -707,6 +711,45 @@ The four questions that were open are now decided and folded into the plan above
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-23 — Milestone E3c-b (events, organise: polls): the poll builder and
+lifecycle. E3 is complete.**
+
+The organiser's *poll* half: the chip **Poll** affordance + a custom-poll opener
+→ the poll builder (`PollOptionFields` — typed options, date/time via the native
+picker, pick-one/any), the tally's per-option **Set/Pin** finalise, and the
+lifecycle behind a ⋯ menu (edit-while-unvoted / close / reopen / remove). New API
+`openPoll`, `editPoll`, `closePoll`, `reopenPoll`, `deletePoll`; `finaliseDimension`
+(E3c-a) gained the `option_id`/custom path. It builds directly on E3c-a's
+`DimensionEditor`/`DimensionChips`/event screen, so the PR is **stacked on E3c-a**.
+
+- **A spinner's `onChange` fires on every tick — closing the picker there
+  dismissed it the instant you touched it (device bug, caught by the maintainer).**
+  The first cut of the poll date/time option picker set the value *and* collapsed
+  the row in the same `onChange`. On iOS the wheel emits `onChange` continuously as
+  it spins, so the very first movement closed the picker before a value could be
+  chosen — it read as "the pickers don't work". Fix: keep the picker open while its
+  row is active (updating the value live, exactly like the E3c-a *set* field, which
+  never had this bug because it keeps one always-visible picker), and collapse it
+  on an explicit **Done** (or by opening another row). **General rule: never treat
+  a continuous picker's `onChange` as a commit — separate "value changed" from
+  "the user is finished".** Pure JS, so it needs only a Metro reload, not a rebuild.
+
+- **The chip's Poll affordance replaces the E3c-a Set-only pair.** `DimensionChips`'
+  `onAction` widened to `(dimension, 'set' | 'poll')`; an unset built-in now shows
+  **Set · Poll**, a set one **Change · Poll**. A `polling` chip stays a read-only
+  tally on mobile — its poll is managed in the `PollTally` card below, not by a
+  jump-to-poll (the web's goto is a desktop-scroll affordance).
+
+- **Custom polls start from a button, not a chip.** The chip row only has the three
+  built-ins, so a fresh custom question opens from "**+ Ask the group something
+  else**" (→ `DimensionEditor` in poll mode, dimension `custom`), mirroring the web.
+
+- **Editing is client-gated on `vote_count === 0`** (the ⋯ menu omits *Edit poll*
+  once votes exist), mirroring the server's 409 — the honest-coordination-number
+  rule (a cast vote can't be silently redefined). The edit form is the create form
+  pre-filled via the shared `PollOptionFields`; built-in questions are auto-derived
+  so only custom shows the question field (the API's `question` is optional).
 
 **2026-07-23 — Milestone E3c-a (events, organise: plan & set): the chips become a
 control surface, and the app gains its first date picker.**

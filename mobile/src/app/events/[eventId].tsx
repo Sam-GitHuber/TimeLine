@@ -33,13 +33,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
-import { DimensionEditor } from '@/components/events/DimensionEditor';
-import { PollTally } from '@/components/events/PollTally';
+import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEditor';
+import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
 import { formatEventWhen } from '@/eventFormat';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 
-type BuiltinDim = 'date' | 'time' | 'location';
+type PollDimension = 'date' | 'time' | 'location' | 'custom';
+/** Which chip's editor is open, and whether it's setting a value or opening a poll. */
+type Editing = { dimension: PollDimension; mode: 'set' | 'poll' };
 
 /**
  * Whether an organiser-pasted location link is safe to open. `Linking.openURL`
@@ -52,13 +54,23 @@ function isSafeHttpUrl(url: string): boolean {
   return /^https?:\/\//i.test(url.trim());
 }
 
+/** A brand-new event with nothing set and no polls — shows the first-step hint. */
+function nothingDecided(event: { event_date: string | null; start_time: string | null; location_name: string; polls: unknown[] }): boolean {
+  return (
+    !event.event_date &&
+    !event.start_time &&
+    !event.location_name &&
+    (event.polls ?? []).length === 0
+  );
+}
+
 export default function EventScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const id = Number(eventId);
   const queryClient = useQueryClient();
 
-  // Which built-in dimension's editor is open (organiser's Set/Change), or null.
-  const [editing, setEditing] = useState<BuiltinDim | null>(null);
+  // Which chip's editor is open (organiser's Set/Change/Poll), or null.
+  const [editing, setEditing] = useState<Editing | null>(null);
 
   const eventQuery = useQuery({
     queryKey: ['event', id],
@@ -93,10 +105,10 @@ export default function EventScreen() {
       api.votePoll(pollId, optionIds),
     onSuccess: invalidate,
   });
-  // The organiser's decision on a built-in dimension (advisory finalise).
+  // The organiser's decision on a dimension (advisory finalise): a built-in value,
+  // or an option pinned for a custom poll. Closes any open poll on the dimension.
   const finalise = useMutation({
-    mutationFn: ({ dimension, value }: { dimension: BuiltinDim; value: string }) =>
-      api.finaliseDimension(id, { dimension, value }),
+    mutationFn: (arg: FinaliseArg) => api.finaliseDimension(id, arg),
     onSuccess: () => {
       setEditing(null);
       invalidate();
@@ -104,6 +116,35 @@ export default function EventScreen() {
     onError: (err) =>
       Alert.alert('Couldn’t save', err instanceof Error ? err.message : 'Something went wrong.'),
   });
+  // Open a poll on a dimension (organiser). Closes the editor on success.
+  const openPoll = useMutation({
+    mutationFn: (draft: PollDraft) => api.openPoll(id, draft),
+    onSuccess: () => {
+      setEditing(null);
+      invalidate();
+    },
+    onError: (err) =>
+      Alert.alert('Couldn’t open the poll', err instanceof Error ? err.message : 'Something went wrong.'),
+  });
+  // Poll lifecycle. Edit is `mutateAsync` so the edit form can await + surface a
+  // 409 (voting has started) in place, matching the web.
+  const editPoll = useMutation({
+    mutationFn: ({ pollId, payload }: { pollId: number; payload: EditPollPayload }) =>
+      api.editPoll(pollId, payload),
+    onSuccess: invalidate,
+  });
+  const closePoll = useMutation({ mutationFn: (pollId: number) => api.closePoll(pollId), onSuccess: invalidate });
+  const reopenPoll = useMutation({ mutationFn: (pollId: number) => api.reopenPoll(pollId), onSuccess: invalidate });
+  const deletePoll = useMutation({ mutationFn: (pollId: number) => api.deletePoll(pollId), onSuccess: invalidate });
+  // `finalise` is in here too: the tally's per-option Set/Pin is a finalise, so it
+  // must disable while one is in flight — otherwise a double-tap fires it twice.
+  const pollBusy =
+    finalise.isPending ||
+    openPoll.isPending ||
+    editPoll.isPending ||
+    closePoll.isPending ||
+    reopenPoll.isPending ||
+    deletePoll.isPending;
   const cancel = useMutation({
     mutationFn: () => api.cancelEvent(id),
     onSuccess: invalidate,
@@ -191,19 +232,39 @@ export default function EventScreen() {
 
           {event.status !== 'cancelled' ? (
             <View style={styles.section}>
+              {event.can_manage && nothingDecided(event) && !editing ? (
+                <Text style={styles.hint}>
+                  Nothing’s set yet. Start with a date — set it now, or open a poll
+                  and let the group pick.
+                </Text>
+              ) : null}
               <DimensionChips
                 event={event}
                 canManage={event.can_manage}
-                onAction={(dimension) => setEditing(dimension)}
+                onAction={(dimension, mode) => setEditing({ dimension, mode })}
               />
               {editing ? (
                 <DimensionEditor
-                  key={editing}
-                  dimension={editing}
-                  busy={finalise.isPending}
+                  key={`${editing.dimension}:${editing.mode}`}
+                  dimension={editing.dimension}
+                  mode={editing.mode}
+                  busy={finalise.isPending || openPoll.isPending}
                   onSet={(dimension, value) => finalise.mutate({ dimension, value })}
+                  onPoll={(draft) => openPoll.mutate(draft)}
                   onCancel={() => setEditing(null)}
                 />
+              ) : null}
+              {/* Open a poll on a fresh custom question — the chips only cover the
+                  three built-ins, so a custom poll starts here. */}
+              {event.can_manage && !editing ? (
+                <Pressable
+                  onPress={() => setEditing({ dimension: 'custom', mode: 'poll' })}
+                  accessibilityRole="button"
+                  hitSlop={6}
+                  style={styles.askMore}
+                >
+                  <Text style={styles.askMoreLabel}>+ Ask the group something else</Text>
+                </Pressable>
               ) : null}
             </View>
           ) : null}
@@ -215,8 +276,14 @@ export default function EventScreen() {
                 <PollTally
                   key={poll.id}
                   poll={poll}
-                  busy={vote.isPending}
+                  busy={vote.isPending || pollBusy}
                   onVote={(optionIds) => vote.mutate({ pollId: poll.id, optionIds })}
+                  canManage={event.can_manage}
+                  onFinalise={(arg) => finalise.mutate(arg)}
+                  onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, payload })}
+                  onClose={() => closePoll.mutate(poll.id)}
+                  onReopen={() => reopenPoll.mutate(poll.id)}
+                  onDelete={() => deletePoll.mutate(poll.id)}
                 />
               ))}
             </View>
@@ -304,6 +371,9 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   sectionTitle: { fontSize: fontSize.base, fontWeight: '700', color: colors.ink },
+  hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20, marginBottom: spacing.xs },
+  askMore: { marginTop: spacing.sm, alignSelf: 'flex-start' },
+  askMoreLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.accentDeep },
   moderate: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   dangerBtn: {
     paddingHorizontal: spacing.md,
