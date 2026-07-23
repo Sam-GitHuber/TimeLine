@@ -225,6 +225,48 @@ describe('setting a dimension', () => {
     finalise.mockRestore();
   });
 
+  it('offers Change on an already-set chip and opens its editor', async () => {
+    // A date-decided event: the date chip is `set`, so the organiser sees Change.
+    serveEvent(
+      planningEvent({
+        event_date: '2026-08-15',
+        dimensions: {
+          date: { state: 'set', poll: null },
+          time: { state: 'unset', poll: null },
+          location: { state: 'unset', poll: null },
+        },
+      })
+    );
+
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByLabelText('Change Date'));
+    // The editor opened — its native picker stub is on screen.
+    expect(await screen.findByLabelText('Pick a value')).toBeTruthy();
+  });
+
+  it('surfaces a finalise failure in an alert and keeps the editor open', async () => {
+    serveEvent(planningEvent());
+    const finalise = jest
+      .spyOn(api, 'finaliseDimension')
+      .mockRejectedValue(new Error('Server said no'));
+    const alert = jest.spyOn(Alert, 'alert');
+
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByLabelText('Set Date'));
+    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    await fireEvent.press(screen.getByText('Set the date'));
+
+    await waitFor(() =>
+      expect(alert).toHaveBeenCalledWith('Couldn’t save', 'Server said no')
+    );
+    // The editor stays open on error so the organiser can retry.
+    expect(screen.getByText('Set the date')).toBeTruthy();
+    finalise.mockRestore();
+    alert.mockRestore();
+  });
+
   it('offers no Set affordance to a non-organiser', async () => {
     serveEvent(planningEvent({ can_manage: false, can_moderate: false }));
 
@@ -256,6 +298,25 @@ describe('cancel and delete', () => {
 
     await waitFor(() => expect(cancel).toHaveBeenCalledWith(9));
     cancel.mockRestore();
+    alert.mockRestore();
+  });
+
+  it('deletes the event after a confirm (moderator only)', async () => {
+    serveEvent(planningEvent());
+    const del = jest.spyOn(api, 'deleteEvent').mockResolvedValue(undefined);
+    const alert = jest.spyOn(Alert, 'alert');
+
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByText('Delete event'));
+    // The confirm Alert hands us its buttons; press the destructive one.
+    await act(async () => {
+      const buttons = alert.mock.calls.at(-1)?.[2] as { text?: string; onPress?: () => void }[];
+      buttons?.find((b) => b.text === 'Delete')?.onPress?.();
+    });
+
+    await waitFor(() => expect(del).toHaveBeenCalledWith(9));
+    del.mockRestore();
     alert.mockRestore();
   });
 

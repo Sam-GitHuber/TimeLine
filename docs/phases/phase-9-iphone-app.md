@@ -5,10 +5,12 @@
 **Milestone C done** (PRs #98–#101), split one PR per screen area as the PR
 strategy below called for. **Milestone D done** (PR #103, device pass verified
 2026-07-21 — see the notes log). **Milestone E in progress** — E1
-(connections/people), E2 (messaging: E2a+E2b), and E3 groups+events are landing:
-**E3a (groups)**, **E3b (events: view & participate)**, and **E3c-a (events:
-organise — plan & set)**, and **E3c-b (events: polls)** done — **E3 is complete**;
-**next is E4 (settings + safety)**. The four screen areas:
+(connections/people), E2 (messaging: E2a+E2b), E3 groups+events, and E4
+settings+safety are landing: **E3a (groups)**, **E3b (events: view &
+participate)**, **E3c-a (events: organise — plan & set)**, and **E3c-b (events:
+polls)** done — **E3 is complete** — plus **E4a (report + block)** (brought ahead
+of E3c-b because report + block are App Review blockers). Still open: **E4b/E4c
+(settings, activity centre)**. The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -506,6 +508,52 @@ edit; the Calendar tab and group month grid render; all five event push kinds an
 `group_invite` deep-link to their targets; real Jest tests per PR; typecheck +
 lint + the `mobile-test` job green.
 
+### E4 — Settings + safety: confirmed plan (2026-07-23)
+
+The final parity chunk. Read [`../reference/accounts.md`](../reference/accounts.md)
+(report/block, account deletion, password, ToS/privacy) and
+[`../reference/notifications.md`](../reference/notifications.md) (per-type prefs,
+the activity centre) first. Pure **client port**: block has existed since Phase 5,
+report since Phase 7, prefs/activity since Phase 8 — no backend change. Decisions
+taken with the user:
+
+1. **Report + block ship first** — App Review rejects a social app without them.
+2. **Own-content**: add **Report** on posts + comments and **delete-your-own** on
+   **posts** only. There is **no comment-delete endpoint** (the web can't delete
+   comments either — comments are report-only), so comments get Report alone. Post
+   *edit* (inline editor) is tracked separately, not E4.
+3. **Activity centre is in E4** (its own PR) — the phase's full-parity DoD needs
+   it and it has no other home.
+4. **Non-tab homes** (five tabs is the iOS max, already full): **Settings** →
+   a gear on your own-profile screen (where logout lives); **Activity centre** →
+   a bell in the feed-tab header (the Instagram pattern).
+
+**Three PRs:**
+
+- **E4a — Report + block — done** (see the 2026-07-23 E4a notes entry). New API
+  `deletePost`, `blockUser`, `unblockUser`, `reportContent`. A post **⋯ menu**
+  (`PostMenu`, `ActionSheetIOS`): own → Delete (confirm), others → Report; an
+  inline **Report** on others' comments in `CommentThread`; a shared `ReportModal`.
+  **Block/Unblock** on the profile action row, reusing `DisconnectWarningModal`
+  (grown an `action` prop) for the block-confirm — Connect/Message are replaced by
+  an Unblock + explanation once you've blocked someone, mirroring the web.
+- **E4b — Settings.** `settings.tsx` (reached from a profile gear): per-type
+  notification-pref toggles, change-password, delete-account (→ signOut), and
+  ToS/Privacy rows opening the hosted pages via `expo-web-browser`. New API
+  `changePassword`, `deleteAccount`, `getNotificationPreferences`,
+  `updateNotificationPreferences`.
+- **E4c — Activity centre.** A feed-header bell (unread badge) → `activity.tsx`:
+  the notification list, three states, mark-seen on open, mark-addressed on tap
+  (reusing `routeForNotification`, so in-app and push click-through share one map).
+  New API `getNotifications`, `getUnreadNotificationCount`, `markNotificationsSeen`
+  (`markNotificationAddressed` already exists from Milestone D).
+
+**Definition of done (E4):** report reachable on any post + comment; delete-own on
+posts; block/unblock on profiles (with the shared-chat warning); settings surface
+with prefs + password + deletion + ToS/privacy; the activity bell + list with the
+three states and deep-link click-through; real Jest tests per PR; typecheck + lint
++ the `mobile-test` job green.
+
 ### E2 — Messaging: confirmed plan (2026-07-22)
 
 Read [`../reference/messaging.md`](../reference/messaging.md) first — it owns the
@@ -737,6 +785,52 @@ plan above): the poll lifecycle is E3c-b.
   decision 3): "Set the date" writes *any* value the organiser picks; it isn't a
   poll winner. `finaliseDimension` defaults `close_poll: true`, so setting a value
   also closes any open poll on that dimension server-side.
+
+**2026-07-23 — Milestone E4a (report + block): the App-Review-critical safety
+controls. E4 begins.**
+
+Report and block ship first because App Review rejects a social app without them.
+Pure client port (block since Phase 5, report since Phase 7). New API:
+`deletePost`, `blockUser`/`unblockUser`, `reportContent`. New components
+`ReportModal`, `PostMenu`, `BlockButton`; `DisconnectWarningModal` grew an
+`action` prop.
+
+- **Report needed a container that didn't exist: posts had no ⋯ menu at all.**
+  The web houses Report in a post overflow menu alongside Edit/Delete; mobile had
+  none of that. E4a adds a `PostMenu` (`ActionSheetIOS`, the group-menu pattern):
+  own post → Delete (confirm `Alert`), others' → Report. The kebab is a nested
+  `Pressable` in the card header (`marginLeft: 'auto'`) so it wins its own touch
+  over the body's open-post `Pressable` behind it.
+
+- **Comments are report-only — there is no comment-delete endpoint**, and the web
+  can't delete comments either. So the plan's "delete-your-own comment" was
+  dropped on discovery: comments get an inline **Report** action in their actions
+  row (after Reply, hidden on your own via `user.pk === author.id`), exactly
+  mirroring the web's `ReportButton` placement. No long-press menu — a single
+  action reads better inline, and it's discoverable.
+
+- **`useAuth` throws without a provider, so adding an owner check to shared
+  components rippled into tests.** `PostMenu` (in `PostCard`) and the comment
+  Report control both call `useAuth`, which hard-throws outside an `AuthProvider`.
+  Every test rendering `PostCard`/`CommentThread` bare then broke. Tests that
+  already wrap in `AuthProvider` (feed/profile-screen/groupDetail) were fine;
+  `comments`/`photos`/`postDetail` got a fixed `useAuth` stub, and the one bare
+  `PostCard` render in `profile.test` got wrapped in `AuthProvider` (unprimed →
+  `user` null → the menu renders nothing, which is all that tap test needs).
+  **General rule: adding `useAuth` to a widely-rendered component is a
+  cross-cutting test change, not a local one.**
+
+- **Block reuses the disconnect machinery.** A block severs the same shared group
+  chats a disconnect does, so `DisconnectWarningModal` (already ported for
+  disconnect) just took an `action: 'disconnect' | 'block'` prop swapping the
+  verb/label; the impact fetch and shape are identical. On the profile, once
+  you've blocked someone the only action is **Unblock** plus an explanation —
+  Connect/Message disappear — matching the web `ProfilePage`.
+
+- **The RNTL v14 async-render trap again**, in the new suite's shared helper: an
+  unawaited `render()` leaves `screen` empty on the next synchronous line, so
+  every `getBy*` throws "render function has not been called". The fix is the same
+  as elsewhere — an `async` render helper that `await`s the render (inside `act`).
 
 **2026-07-23 — Milestone E3b (events, view & participate): the app grows a
 Calendar tab and events thread the line.**

@@ -31,8 +31,10 @@ import {
 } from 'react-native';
 
 import { api } from '@/api';
+import { useAuth } from '@/auth';
 import { Avatar } from './Avatar';
 import { ReactionBar } from './ReactionBar';
+import { ReportModal } from './ReportModal';
 import { SPINE_CENTRE } from './timeline';
 import { markPostCommentsSeen } from '@/postCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -333,8 +335,14 @@ function CommentNode({
    *  on to a comment that isn't there. */
   isLast: boolean;
 }) {
+  const { user } = useAuth();
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
+  const [reporting, setReporting] = useState(false);
+  // Reporting yourself is pointless, so the control is hidden on your own
+  // comment — the same owner check the web's inline `ReportButton` makes. The
+  // backend refuses a self-report regardless.
+  const canReport = user != null && user.pk !== comment.author.id;
   const [collapsed, setCollapsed] = useState(
     replies.length > 0 && !(expandIds?.has(comment.id) ?? false)
   );
@@ -478,6 +486,17 @@ function CommentNode({
                     <Text style={styles.action}>Reply</Text>
                   </Pressable>
 
+                  {canReport ? (
+                    <Pressable
+                      onPress={() => setReporting(true)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Report comment"
+                      hitSlop={6}
+                    >
+                      <Text style={styles.action}>Report</Text>
+                    </Pressable>
+                  ) : null}
+
                   {replies.length > 0 ? (
                     <Pressable
                       onPress={() => setCollapsed((value) => !value)}
@@ -503,6 +522,13 @@ function CommentNode({
                 autoFocus
                 placeholder={`Reply to ${comment.author.display_name}…`}
                 onDone={() => setShowReply(false)}
+              />
+            ) : null}
+
+            {reporting ? (
+              <ReportModal
+                commentId={comment.id}
+                onClose={() => setReporting(false)}
               />
             ) : null}
           </View>

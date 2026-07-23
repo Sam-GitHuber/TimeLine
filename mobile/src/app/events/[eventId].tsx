@@ -238,6 +238,7 @@ export default function EventScreen() {
               />
               {editing ? (
                 <DimensionEditor
+                  key={`${editing.dimension}:${editing.mode}`}
                   dimension={editing.dimension}
                   mode={editing.mode}
                   busy={finalise.isPending || openPoll.isPending}

@@ -21,7 +21,7 @@ export function PlanEventForm({ groupId }: { groupId: number }) {
   const queryClient = useQueryClient();
 
   const create = useMutation({
-    mutationFn: () => api.createEvent(groupId, { title: title.trim(), description }),
+    mutationFn: () => api.createEvent(groupId, { title: title.trim(), description: description.trim() }),
     onSuccess: (event) => {
       queryClient.invalidateQueries({ queryKey: ['groupEvents', groupId] });
       // Replace, not push, so Back from the event lands on the group, not here.

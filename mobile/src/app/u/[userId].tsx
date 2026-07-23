@@ -35,6 +35,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
+import { BlockButton } from '@/components/BlockButton';
 import { ConnectButton } from '@/components/ConnectButton';
 import { MessageButton } from '@/components/MessageButton';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
@@ -140,24 +141,50 @@ export default function ProfileScreen() {
               >
                 <Text style={styles.logoutLabel}>Log out</Text>
               </Pressable>
+            ) : user && user.is_blocked ? (
+              // Once you've blocked someone the only action is to unblock; Connect
+              // and Message make no sense (the block severed the connection and
+              // bars messaging), so they're replaced by an explanation — mirroring
+              // the web ProfilePage.
+              <>
+                <View style={styles.actions}>
+                  <BlockButton
+                    userId={id}
+                    displayName={user.display_name}
+                    isBlocked
+                  />
+                </View>
+                <Text style={styles.blockedNote}>
+                  You’ve blocked {user.display_name}. They can’t message you or see
+                  your posts, and you can’t see theirs.
+                </Text>
+              </>
             ) : user ? (
-              // The connection control (E1) plus, once you're connected, the
-              // Message button (E2). ConnectButton's mutation invalidates
-              // ['user', id] + ['userPosts', id], so accepting/connecting here
-              // re-fetches `connection_status` and flips both the posts wall and
-              // whether Message shows — without leaving this screen. Block joins
-              // them in E4.
-              <View style={styles.actions}>
-                <ConnectButton
-                  userId={id}
-                  displayName={user.display_name}
-                  connectionStatus={user.connection_status}
-                  size="md"
-                />
-                {user.connection_status === 'connected' && (
-                  <MessageButton userId={id} />
-                )}
-              </View>
+              // The connection control (E1), the Message button once connected
+              // (E2), and Block as a quieter secondary action (E4a). ConnectButton's
+              // mutation invalidates ['user', id] + ['userPosts', id], so
+              // accepting/connecting here flips both the posts wall and whether
+              // Message shows without leaving the screen.
+              <>
+                <View style={styles.actions}>
+                  <ConnectButton
+                    userId={id}
+                    displayName={user.display_name}
+                    connectionStatus={user.connection_status}
+                    size="md"
+                  />
+                  {user.connection_status === 'connected' && (
+                    <MessageButton userId={id} />
+                  )}
+                </View>
+                <View style={styles.blockRow}>
+                  <BlockButton
+                    userId={id}
+                    displayName={user.display_name}
+                    isBlocked={false}
+                  />
+                </View>
+              </>
             ) : null}
           </View>
         </View>
@@ -287,6 +314,15 @@ const styles = StyleSheet.create({
   logout: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   logoutLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.danger },
   actions: { marginTop: spacing.sm, flexDirection: 'row', gap: spacing.sm },
+  // Block is a quieter, secondary action, so it sits on its own line below the
+  // primary connect/message row (as on the web), left-aligned.
+  blockRow: { marginTop: spacing.xs, flexDirection: 'row', alignSelf: 'flex-start' },
+  blockedNote: {
+    marginTop: spacing.sm,
+    fontSize: fontSize.sm,
+    color: colors.inkFaint,
+    lineHeight: 20,
+  },
   spinner: { marginTop: spacing.xl },
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.sm },
   locked: { padding: spacing.xl, alignItems: 'center', gap: spacing.sm },
