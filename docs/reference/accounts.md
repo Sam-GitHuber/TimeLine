@@ -413,6 +413,17 @@ resolved). Removal itself stays a manual admin action (the maintainer's
 judgement). Chosen over an email-only takedown path so it's self-contained and
 testable. See also the moderation runbook in [deploy.md](../deploy.md).
 
+**Mobile (Phase 9 E4a).** The iOS app surfaces the same controls against the same
+endpoints — App Review requires working report **and** block for a social app. A
+post's ⋯ overflow menu offers **Report** on others' posts (and **Delete** on your
+own — the only own-content management the app has; there is no comment-delete
+endpoint, so comments are report-only there too, via an inline **Report** action).
+**Block/Unblock** lives on a person's profile, confirmed through the shared
+disconnect-warning modal (a block severs the same shared group chats — see
+[connections.md](connections.md)); once you've blocked someone the profile shows
+only Unblock plus an explanation. No backend change — the app is another client of
+the Phase 5 block and Phase 7 report endpoints.
+
 ## Security posture
 
 This is the layer holding real credentials, so:

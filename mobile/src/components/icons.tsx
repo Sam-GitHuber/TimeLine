@@ -110,6 +110,17 @@ export function CalendarIcon({ color, size = 26 }: IconProps) {
   );
 }
 
+/** Three dots — a post's overflow (⋯) menu. Matches the web's kebab. */
+export function KebabIcon({ color, size = 20 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
+      <Circle cx={12} cy={5} r={1.6} />
+      <Circle cx={12} cy={12} r={1.6} />
+      <Circle cx={12} cy={19} r={1.6} />
+    </Svg>
+  );
+}
+
 /** Two people — the connection graph. */
 export function PeopleIcon({ color, size = 26 }: IconProps) {
   return (

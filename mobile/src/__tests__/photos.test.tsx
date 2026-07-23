@@ -25,6 +25,14 @@ jest.mock('expo-router', () => ({
   router: { push: jest.fn(), back: jest.fn(), replace: jest.fn() },
 }));
 
+// PostCard's ⋯ menu reads the current user (owner check). A fixed stub avoids
+// wrapping every render here in an AuthProvider — pk 99 is nobody in these
+// fixtures, so the menu offers "Report", which this file doesn't exercise.
+jest.mock('@/auth', () => ({
+  ...jest.requireActual('@/auth'),
+  useAuth: () => ({ user: { pk: 99, display_name: 'Test Viewer' } }),
+}));
+
 function makeImage(id: number): PostImage {
   return {
     id,
