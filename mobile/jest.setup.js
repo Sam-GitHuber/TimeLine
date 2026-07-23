@@ -66,6 +66,30 @@ jest.mock('react-native-safe-area-context', () =>
   require('react-native-safe-area-context/jest/mock').default
 );
 
+// `@react-native-community/datetimepicker` is a native module (the OS date/time
+// wheel) with no Node counterpart, and it's imported by the event dimension
+// editor (E3c). Stand it in with a pressable that, on press, fires `onChange`
+// with a **fixed** date (2026-08-15 10:30) so a test can drive "the organiser
+// picked a value" deterministically and then assert the finalise call.
+jest.mock('@react-native-community/datetimepicker', () => {
+  const React = require('react');
+  const { Pressable, Text } = require('react-native');
+  return {
+    __esModule: true,
+    default: ({ onChange, testID }) =>
+      React.createElement(
+        Pressable,
+        {
+          testID: testID ?? 'datetimepicker',
+          accessibilityLabel: 'Pick a value',
+          onPress: () =>
+            onChange?.({ type: 'set' }, new Date(2026, 7, 15, 10, 30)),
+        },
+        React.createElement(Text, null, 'picker')
+      ),
+  };
+});
+
 // Reset between tests so a token stored by one can't leak into the next.
 beforeEach(() => {
   const SecureStore = require('expo-secure-store');

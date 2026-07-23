@@ -678,8 +678,9 @@ export const api = {
   rejectGroupInvite: (inviteId: number) =>
     request<void>(`/api/group-invites/${inviteId}/reject/`, { method: 'POST' }),
 
-  // --- Events (Phase 9 E3b: the view + participate subset) -----------------
-  // Organiser writes (create/finalise/poll-lifecycle/cancel/edit) land in E3c.
+  // --- Events (Phase 9 E3b: view + participate; E3c: organiser writes) ------
+  // E3b reads/participates; E3c-a adds create + finalise (set a dimension) +
+  // cancel/delete; E3c-b adds the poll lifecycle. Pure client port (events.md).
 
   /**
    * A group's events you can see, `window` = `upcoming` (default) / `past` /
@@ -759,6 +760,75 @@ export const api = {
     const suffix = qs.toString();
     return request<Event[]>(`/api/calendar/${suffix ? `?${suffix}` : ''}`);
   },
+
+  /* ---- Events: organiser writes (Phase 9 E3c-a) -------------------------- *
+   * Create + finalise (set a built-in dimension) + cancel/delete. The poll
+   * lifecycle (open/edit/close/reopen) is E3c-b. */
+
+  /**
+   * Plan an event in a group (any active member). Body is the organiser-authored
+   * fields — the date/time/location are set later via `finaliseDimension`.
+   * Returns the new event (in `planning`, with you as organiser).
+   */
+  createEvent: (
+    groupId: number | string,
+    { title, description = '', timezone }: { title: string; description?: string; timezone?: string }
+  ) =>
+    request<Event>(`/api/groups/${groupId}/events/`, {
+      method: 'POST',
+      body: { title, description, ...(timezone ? { timezone } : {}) },
+    }),
+
+  /**
+   * Edit an event's non-scheduling fields (organiser): title, description,
+   * location link/note, timezone, end time. **No web UI drives this yet** (it's a
+   * dormant endpoint on the web too) — ported for completeness; the scheduling
+   * fields go through `finaliseDimension`, never here.
+   */
+  updateEvent: (eventId: number | string, fields: Record<string, unknown>) =>
+    request<Event>(`/api/events/${eventId}/`, { method: 'PATCH', body: fields }),
+
+  /**
+   * Soft-cancel an event (organiser or a group admin) — a tombstone that notifies
+   * going/maybe RSVPs, not a delete. The event stays visible, marked cancelled.
+   */
+  cancelEvent: (eventId: number | string) =>
+    request<Event>(`/api/events/${eventId}/cancel/`, { method: 'POST' }),
+
+  /** Hard-delete an event (organiser or a group admin). Cascades. Returns 204. */
+  deleteEvent: (eventId: number | string) =>
+    request<void>(`/api/events/${eventId}/`, { method: 'DELETE' }),
+
+  /**
+   * The organiser's **decision** on a dimension — advisory, never auto-decided
+   * (events.md decision 3). For a built-in (`date`/`time`/`location`), `value`
+   * writes the field (need not be a poll option — "actually, let's do Friday");
+   * for a custom poll, `optionId` pins a winning option. `closePoll` (default
+   * true) closes any open poll on the dimension. Recomputes status, notifies.
+   */
+  finaliseDimension: (
+    eventId: number | string,
+    {
+      dimension,
+      value,
+      optionId,
+      closePoll = true,
+    }: {
+      dimension: 'date' | 'time' | 'location' | 'custom';
+      value?: string;
+      optionId?: number;
+      closePoll?: boolean;
+    }
+  ) =>
+    request<Event>(`/api/events/${eventId}/finalise/`, {
+      method: 'POST',
+      body: {
+        dimension,
+        ...(value !== undefined ? { value } : {}),
+        ...(optionId !== undefined ? { option_id: optionId } : {}),
+        close_poll: closePoll,
+      },
+    }),
 
   /**
    * Your inbox of incoming connection requests — people asking to connect with
