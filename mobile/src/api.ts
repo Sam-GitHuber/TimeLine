@@ -416,6 +416,49 @@ export const api = {
   getDisconnectImpact: (userId: number | string) =>
     request<DisconnectImpact>(`/api/users/${userId}/disconnect-impact/`),
 
+  /* ---- Safety: block + report (Phase 9 E4a) ------------------------------ *
+   * The App-Review-critical controls. Pure client port — block has existed since
+   * Phase 5, report since Phase 7 (see accounts.md); no backend change. */
+
+  /**
+   * Block (POST) or unblock (DELETE) a person. Blocking is the strong, explicit
+   * cut: it severs any connection, stops messaging both ways, hides your
+   * conversation from both of you, and bars re-connecting — so the caller confirms
+   * first via `DisconnectWarningModal` (which also names shared group chats you'd
+   * be dropped from). Unblocking undoes none of that damage, so it needs no
+   * warning. The block is directional but enforced both ways; unblock lifts only
+   * your own.
+   */
+  blockUser: (userId: number | string) =>
+    request<void>(`/api/users/${userId}/block/`, { method: 'POST' }),
+  unblockUser: (userId: number | string) =>
+    request<void>(`/api/users/${userId}/block/`, { method: 'DELETE' }),
+
+  /**
+   * Flag a post or comment for the maintainer to review (the content-takedown
+   * path). Pass exactly one of `postId` / `commentId`, plus an optional reason.
+   * Idempotent server-side: a repeat flag returns your existing report rather
+   * than stacking duplicates. You can only report content you can see (a
+   * non-visible target 404s, same wall as the feed).
+   */
+  reportContent: ({
+    postId,
+    commentId,
+    reason = '',
+  }: {
+    postId?: number;
+    commentId?: number;
+    reason?: string;
+  }) =>
+    request<{ id: number }>('/api/reports/', {
+      method: 'POST',
+      body: {
+        ...(postId != null ? { post: postId } : {}),
+        ...(commentId != null ? { comment: commentId } : {}),
+        reason,
+      },
+    }),
+
   /* ---- Messaging (Phase 9 E2) -------------------------------------------- *
    * Direct + group chats share these endpoints, and a `Conversation` serves both
    * the list row and the thread detail — see messaging.md, which owns the data
@@ -935,6 +978,15 @@ export const api = {
    * exists.
    */
   getPost: (postId: number | string) => request<Post>(`/api/posts/${postId}/`),
+
+  /**
+   * Delete your own post (Phase 9 E4a). The backend refuses one that isn't yours,
+   * so this needs no client-side owner check beyond hiding the affordance. There
+   * is deliberately **no** comment-delete counterpart — the API has no such
+   * endpoint, and comments are report-only on the web too (see accounts.md).
+   */
+  deletePost: (postId: number | string) =>
+    request<void>(`/api/posts/${postId}/`, { method: 'DELETE' }),
 
   /**
    * A post's comment tree, already pruned to what you may see.
