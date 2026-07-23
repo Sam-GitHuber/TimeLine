@@ -8,7 +8,6 @@
     "scheme": "timeline",
     "userInterfaceStyle": "light",
     "ios": {
-      "icon": "./assets/expo.icon",
       "bundleIdentifier": "net.yourtimeline.app",
       "supportsTablet": false,
       "infoPlist": {
