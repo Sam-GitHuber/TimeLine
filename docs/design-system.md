@@ -80,21 +80,30 @@ line, and both are easy to reintroduce by accident:
 
 The indent per level has to clear the avatars, since a parent's line now passes
 them: keep it above half a bead width (22pt against a 30pt bead on mobile) or the
-line grazes every face it goes by. It shrinks past the third level so deep
+line grazes every face it goes by. It shrinks past the *fourth* level so deep
 threads don't march off the side of a phone; replies start collapsed, so more
-than a couple of visible levels is rare.
+than a couple of visible levels is rare. (Mobile's `indentFor` is handed the
+*parent's* depth, so its `depth < 3` is the fifth level onwards — the same rule
+the web spells out as `depth >= 4` on the comment's own depth.)
 
 The elbow is two borders and one rounded corner (`border-left` + `border-bottom`
 + a bottom-left radius) — no SVG needed for what is, in the end, a quarter
 circle. Draw it *before* the avatar so the avatar's surface-coloured halo paints
 over the end of it and the line appears to run into the face, not under it.
 
-**Implemented on mobile** (`mobile/src/components/CommentThread.tsx`, which has
-the geometry constants and the full derivation in its header comment).
-**The web still uses the old flat treatment** — `frontend/src/components/
-CommentThread.jsx` nests replies under a plain `border-l` rule with
-`space-y-4` — and should be brought over to this. Note the `space-y-4` is exactly
-the gap problem above, so that port is a real change in structure, not a restyle.
+Comments sit on the app ground (`surface`) like everything else on the line — not
+in raised white cards, which read as a comments widget bolted underneath the post
+rather than as part of the one tree.
+
+**Implemented on both clients.** `mobile/src/components/CommentThread.tsx` has the
+geometry constants and the full derivation in its header comment; the web's
+(#135) lives in the `.tl-comment*` block of `frontend/src/index.css` (the
+geometry, as custom properties, alongside the rest of the spine mechanics) driven
+by `frontend/src/components/CommentThread.jsx` (which piece of line each comment
+draws). The one place they differ is what a *top-level* comment hangs off: on
+mobile the thread redraws the post's spine, while on the web the feed already
+paints one continuous line down `.tl-feed`, so the thread simply reaches back
+over the body inset (`--tl-body-inset`) and hooks onto the real thing.
 
 ## Tokens (see `frontend/src/index.css`)
 

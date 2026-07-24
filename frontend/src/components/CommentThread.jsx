@@ -29,7 +29,24 @@ function ancestorIdsOf(comments, targetId) {
   return found;
 }
 
-// The comment tree for one post, as a collapsible accordion.
+// The depth at which a level's step right shrinks (`--tl-c-indent-deep`), so a
+// deep thread doesn't march off the side of a narrow screen. Replies start
+// collapsed, so more than a couple of visible levels is rare in practice.
+const DEEP_FROM = 4;
+
+// The comment tree for one post, drawn as the living line one level down.
+//
+// **The shape is the point.** The post's spine runs on down behind the thread;
+// each comment reaches out to its parent's line with a curved elbow that lands
+// on its own face; a comment with replies grows a spine of its own. So reply
+// depth is read off *which* vertical line a comment hangs from, not off
+// indentation alone — the same shape, and the same reasoning, as a file tree.
+// Who you're replying to is the single most important thing a thread has to
+// communicate. The geometry (and the traps in it — chiefly that comments must
+// never be spaced with a `gap`, which shows up as a break in the line) lives
+// with the rest of the spine mechanics in `index.css`, under "the line, one
+// level down"; `docs/design-system.md` has the why, and the app's
+// `mobile/src/components/CommentThread.tsx` the full derivation.
 //
 // The backend returns an already-pruned nested tree: you only ever receive
 // comments (and replies) from people you're connected with — a not-connected
@@ -67,11 +84,15 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
       : null;
 
   return (
-    <div className="mt-4 rounded-2xl border border-line bg-raised p-4">
-      {isLoading && <p className="text-sm text-ink-faint">Loading comments…</p>}
+    <div className="tl-thread">
+      {isLoading && (
+        <p className="tl-thread-foot text-sm text-ink-faint">
+          Loading comments…
+        </p>
+      )}
 
       {isError && (
-        <p className="text-sm text-red-600">
+        <p className="tl-thread-foot text-sm text-red-600">
           {error?.message || "Couldn't load comments."}
         </p>
       )}
@@ -79,25 +100,30 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
       {!isLoading && !isError && (
         <>
           {comments.length === 0 ? (
-            <p className="text-sm text-ink-faint">
+            <p className="tl-thread-foot text-sm text-ink-faint">
               No comments yet. Start the conversation.
             </p>
           ) : (
-            <ul className="space-y-4">
-              {comments.map((comment) => (
+            // No spacing utility here, deliberately — see `.tl-comment-list`.
+            <ul className="tl-comment-list">
+              {comments.map((comment, index) => (
                 <CommentNode
                   key={comment.id}
                   comment={comment}
                   postId={postId}
                   expandIds={expandIds}
                   highlightId={highlightId}
+                  // The line these hang off is the *post's* spine; the thread's
+                  // own offset puts it exactly where any other comment finds
+                  // its parent's line, so top-level needs no special case.
+                  isLast={index === comments.length - 1}
                 />
               ))}
             </ul>
           )}
 
           {/* Top-level composer (a comment on the post itself). */}
-          <div className="mt-4">
+          <div className="tl-thread-foot mt-2">
             <CommentComposer postId={postId} placeholder="Write a comment…" />
           </div>
         </>
@@ -106,12 +132,22 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
   );
 }
 
-// One comment plus its replies, indented under it. Replies start *collapsed*, so
-// a busy post opens as a clean list of top-level comments and you drill into
-// just the sub-thread you want — much easier to follow a long thread (and less
-// overwhelming) than a wall of nested replies. Opening the reply box, or having
-// posted a reply, reveals the sub-thread so you always see your own reply.
-function CommentNode({ comment, postId, expandIds = null, highlightId = null }) {
+// One comment: a face on its parent's line, with its replies branching off its
+// own. Replies start *collapsed*, so a busy post opens as a clean list of
+// top-level comments and you drill into just the sub-thread you want — much
+// easier to follow (and less overwhelming) than a wall of nesting. Opening the
+// reply box, or having posted a reply, reveals the sub-thread so you always see
+// your own reply.
+function CommentNode({
+  comment,
+  postId,
+  expandIds = null,
+  highlightId = null,
+  depth = 0,
+  // Last of its siblings, so the parent's line stops here rather than carrying
+  // on to a comment that isn't there — that's what ends a run on a face.
+  isLast = true,
+}) {
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
   // Replies start collapsed — unless this node is an ancestor of a deep-linked
@@ -120,118 +156,152 @@ function CommentNode({ comment, postId, expandIds = null, highlightId = null }) 
     replies.length > 0 && !(expandIds && expandIds.has(comment.id))
   );
   const isHighlighted = highlightId != null && comment.id === highlightId;
+  const showReplies = replies.length > 0 && !collapsed;
 
   return (
-    <li id={`comment-${comment.id}`}>
-      <div
-        className={
-          isHighlighted
-            ? "-mx-2 rounded-xl bg-accent-tint px-2 py-1 ring-2 ring-accent transition"
-            : ""
-        }
-      >
-        {/* Header: avatar sits inline with the name + time. Keeping the avatar
-            up here (rather than as a full-height left column) lets the comment
-            body flow full-width underneath — so each reply level only costs a
-            thin left rule instead of an avatar's width, and deep threads stay
-            readable on narrow screens instead of squashing off to the right
-            (issue #80). */}
-        <div className="flex min-w-0 items-center gap-2">
-          <Link to={`/u/${comment.author.id}`} tabIndex={-1} aria-hidden="true">
-            <Avatar user={comment.author} size="xs" />
-          </Link>
-          <Link
-            to={`/u/${comment.author.id}`}
-            className="min-w-0 truncate text-sm font-semibold text-ink hover:text-accent-deep"
-          >
-            {comment.author.display_name}
-          </Link>
-          <time
-            className="shrink-0 font-mono text-xs text-ink-faint"
-            dateTime={comment.created_at}
-            title={formatAbsoluteTime(comment.created_at)}
-          >
-            {formatRelativeTime(comment.created_at)}
-          </time>
-        </div>
+    <li
+      id={`comment-${comment.id}`}
+      className={`tl-comment${depth >= DEEP_FROM ? " tl-comment--deep" : ""}`}
+    >
+      {/* Out from the parent's line and down onto our own face. Every comment
+          has one, including top-level, whose parent line is the post's spine. */}
+      <span className="tl-branch" aria-hidden="true" />
 
-        <p className="mt-1 whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
-          {comment.text}
-        </p>
+      {/* The parent's line carried past us — the whole node, replies and all,
+          so it reaches the sibling below rather than stopping at our text. */}
+      {!isLast && <span className="tl-cline tl-past" aria-hidden="true" />}
 
-        <div className="mt-1.5 flex items-center gap-4 text-sm font-medium text-ink-faint">
-          <button
-            type="button"
-            onClick={() => {
-              setShowReply((v) => !v);
-              // Engaging with a sub-thread should show it (for context, and so
-              // the reply you're about to add is visible).
-              setCollapsed(false);
-            }}
-            className="transition hover:text-accent-deep"
+      <div className="tl-comment-row">
+        {/* Our own line, from our face down to where our replies start. There's
+            nothing to hold up when they're collapsed. */}
+        {showReplies && <span className="tl-cline tl-stem" aria-hidden="true" />}
+
+        {/* The face is a bead on the line, as a post's is on the feed's spine.
+            This link is decorative (tabIndex -1 + aria-hidden): the author's
+            name beside it is the single accessible link to the same profile,
+            matching PostCard and avoiding two identical adjacent links. */}
+        <Link
+          to={`/u/${comment.author.id}`}
+          className="tl-comment-bead"
+          tabIndex={-1}
+          aria-hidden="true"
+        >
+          <Avatar user={comment.author} size="xs" />
+        </Link>
+
+        <div className="tl-comment-body">
+          <div
+            className={
+              isHighlighted
+                ? "-mx-2 rounded-xl bg-accent-tint px-2 py-1 ring-2 ring-accent transition"
+                : ""
+            }
           >
-            Reply
-          </button>
-          <ReportButton commentId={comment.id} authorId={comment.author.id} />
-          {replies.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setCollapsed((v) => !v)}
-              aria-expanded={!collapsed}
-              className="inline-flex items-center gap-1.5 font-semibold text-accent-deep transition hover:underline"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.75"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-                className={`h-4 w-4 transition-transform ${
-                  collapsed ? "" : "rotate-90"
-                }`}
+            {/* `leading-6` is an explicit line box of exactly the face's height,
+                so the name's centre lands on the face's centre with no nudging. */}
+            <div className="flex min-w-0 items-center gap-2 leading-6">
+              <Link
+                to={`/u/${comment.author.id}`}
+                className="min-w-0 truncate text-sm font-semibold text-ink hover:text-accent-deep"
               >
-                <path d="m9 18 6-6-6-6" />
-              </svg>
-              {collapsed
-                ? `Show ${replies.length} ${replies.length === 1 ? "reply" : "replies"}`
-                : "Hide replies"}
-            </button>
-          )}
-        </div>
+                {comment.author.display_name}
+              </Link>
+              <time
+                className="shrink-0 font-mono text-xs text-ink-faint"
+                dateTime={comment.created_at}
+                title={formatAbsoluteTime(comment.created_at)}
+              >
+                {formatRelativeTime(comment.created_at)}
+              </time>
+            </div>
 
-        <ReactionBar commentId={comment.id} reactions={comment.reactions} />
+            <p className="mt-1 whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
+              {comment.text}
+            </p>
 
-        {showReply && (
-          <div className="mt-2">
-            <CommentComposer
-              postId={postId}
-              parentId={comment.id}
-              autoFocus
-              placeholder={`Reply to ${comment.author.display_name}…`}
-              onDone={() => setShowReply(false)}
-            />
-          </div>
-        )}
-
-        {/* Replies nest under a thin left rule, so depth reads at a glance.
-            The rule is the *only* horizontal cost per level now (a few px),
-            which is what keeps deep threads from marching off-screen. */}
-        {replies.length > 0 && !collapsed && (
-          <ul className="mt-3 space-y-4 border-l border-line pl-3">
-            {replies.map((reply) => (
-              <CommentNode
-                key={reply.id}
-                comment={reply}
-                postId={postId}
-                expandIds={expandIds}
-                highlightId={highlightId}
+            <div className="mt-1.5 flex items-center gap-4 text-sm font-medium text-ink-faint">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowReply((v) => !v);
+                  // Engaging with a sub-thread should show it (for context, and
+                  // so the reply you're about to add is visible).
+                  setCollapsed(false);
+                }}
+                className="transition hover:text-accent-deep"
+              >
+                Reply
+              </button>
+              <ReportButton
+                commentId={comment.id}
+                authorId={comment.author.id}
               />
-            ))}
-          </ul>
-        )}
+              {replies.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setCollapsed((v) => !v)}
+                  aria-expanded={!collapsed}
+                  className="inline-flex items-center gap-1.5 font-semibold text-accent-deep transition hover:underline"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                    className={`h-4 w-4 transition-transform ${
+                      collapsed ? "" : "rotate-90"
+                    }`}
+                  >
+                    <path d="m9 18 6-6-6-6" />
+                  </svg>
+                  {collapsed
+                    ? `Show ${replies.length} ${replies.length === 1 ? "reply" : "replies"}`
+                    : "Hide replies"}
+                </button>
+              )}
+            </div>
+
+            <ReactionBar commentId={comment.id} reactions={comment.reactions} />
+
+            {showReply && (
+              <div className="mt-2">
+                <CommentComposer
+                  postId={postId}
+                  parentId={comment.id}
+                  autoFocus
+                  placeholder={`Reply to ${comment.author.display_name}…`}
+                  onDone={() => setShowReply(false)}
+                />
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+
+      {/* The replies hang off our line by their own elbows, each of which
+          carries the run on to the sibling below it. **No indent and no top
+          padding here**: the step right is each reply's own left padding (which
+          keeps its elbow inside its own box), and our stem ends exactly where
+          the first elbow starts — anything between them is a break in the line.
+          The air above comes from our own body's bottom padding. */}
+      {showReplies && (
+        <ul className="tl-comment-list">
+          {replies.map((reply, index) => (
+            <CommentNode
+              key={reply.id}
+              comment={reply}
+              postId={postId}
+              expandIds={expandIds}
+              highlightId={highlightId}
+              depth={depth + 1}
+              isLast={index === replies.length - 1}
+            />
+          ))}
+        </ul>
+      )}
     </li>
   );
 }
@@ -274,7 +344,7 @@ function CommentComposer({
         rows={2}
         autoFocus={autoFocus}
         placeholder={placeholder}
-        className="w-full resize-none rounded-xl border border-line-strong bg-surface px-3 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
+        className="w-full resize-none rounded-xl border border-line-strong bg-raised px-3 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
       />
       {mutation.isError && (
         <p className="text-xs text-red-600">
