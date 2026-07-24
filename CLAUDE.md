@@ -33,13 +33,14 @@ real second person).
 **Milestone E (parity fill-in) is complete** — all four chunks shipped: E1
 connections/people, E2 messaging, E3 groups + events, E4 settings + safety
 (report + block, settings, and the activity centre). Every web feature is now
-present in the app. **Milestone F (TestFlight) is in progress** — the EAS →
-TestFlight release path works end to end (an internal build is installed on a real
-iPhone) and the app icon + launch screen now use the brand mark. **How to build
-and ship a new app version lives in [`docs/mobile-release.md`](docs/mobile-release.md)**
-— read it before any app release. Still open before F closes: verify the new icon
-on-device after its rebuild, and the external-testers decision (external needs
-Apple Beta App Review + a demo account).
+present in the app. **Milestone F (TestFlight) is done — Phase 9 has shipped.**
+The app is live in **external TestFlight beta** with real testers (brand icon +
+launch screen included); a friend has downloaded and is using it, with the
+admin-approval gate intact. **How to build and ship a new app version lives in
+[`docs/mobile-release.md`](docs/mobile-release.md)** — read it before any app
+release. Remaining housekeeping (not blocking): distil `phase-9-iphone-app.md`
+into `docs/reference/` mobile docs and delete it, per the phase-ships convention
+(the release half already lives in `mobile-release.md`).
 
 Push specifics live in [`docs/reference/notifications.md`](docs/reference/notifications.md);
 release/build steps live in `docs/mobile-release.md`; everything else Phase 9 is

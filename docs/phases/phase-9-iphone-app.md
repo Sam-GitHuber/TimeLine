@@ -1,6 +1,6 @@
 # Phase 9 — iPhone App
 
-**Status:** in progress — **Milestone A done** (PR #91), **Milestone B done**
+**Status:** shipped — **Milestone A done** (PR #91), **Milestone B done**
 (PR #97: Expo spine — auth, token storage, silent refresh, login/logout, CI).
 **Milestone C done** (PRs #98–#101), split one PR per screen area as the PR
 strategy below called for. **Milestone D done** (PR #103, device pass verified
@@ -11,8 +11,12 @@ participate)**, **E3c-a (events: organise — plan & set)**, and **E3c-b (events
 polls)** — **E3 complete** — plus **E4a (report + block)** (brought ahead
 of E3c-b because report + block are App Review blockers), **E4b (settings)**, and
 **E4c (activity centre)** — **E4 complete**. Every web feature is now present in
-the app; the only remaining milestone is **F (TestFlight)**. The four screen
-areas:
+the app. **Milestone F (TestFlight) is done** — the app is live in **external
+TestFlight beta** with real testers (2026-07-24, release `v0.18.0`); the full
+release procedure lives in [`../mobile-release.md`](../mobile-release.md).
+**Phase 9 is complete** bar housekeeping: distil this plan into `docs/reference/`
+mobile docs and delete this file, per the phase-ships convention (the release
+half already lives in `mobile-release.md`). The four screen areas:
 
 - **C1 — feed.** Done: reverse-chronological list, day dividers, the timeline
   spine, photos, reaction counts, infinite scroll, pull-to-refresh.
@@ -779,6 +783,36 @@ distinction that ran through Milestone E:
 ## Notes / decisions log
 
 (Record deviations/gotchas here as we build.)
+
+**2026-07-24 — Milestone F (TestFlight) done. Phase 9 ships: the app is live in
+external TestFlight beta and a real friend is using it.**
+
+The external-TestFlight path is complete end to end and documented in
+[`../mobile-release.md`](../mobile-release.md) ("Going external"). What happened:
+the icon/splash build (#136) went out, then `create_review_account` (#138) landed
+via release `v0.18.0`, an **isolated demo account** was created on the box, the
+App Store Connect **Test Information** + a **public-link external group** were set
+up, the build passed **Beta App Review**, the public link was shared, and a real
+friend downloaded and started testing — with the **admin-approval gate intact**
+(installing ≠ access; each sign-up is still approved in Django admin).
+
+- **The demo account is deliberately isolated** (see #138): the reviewer logs in
+  as a real user, so wiring it into the real graph would expose family data to
+  Apple. `create_review_account` connects it only to a throwaway companion that
+  also serves as the Report/Block target Beta App Review checks for.
+- **Deploy trigger gotcha caught here:** the box deploys on **publishing a GitHub
+  Release**, *not* on merge to `main`. `create_review_account` was merged but
+  absent from the box until `v0.18.0` was released. And the on-box run must be
+  `cd ~/TimeLine` + `docker compose -f docker-compose.prod.yml exec …` or Compose
+  reports "no configuration file provided" (both now in `mobile-release.md`).
+- **Age-rating social-media notice (Apple, 2026-07-09):** informational — a new
+  age-rating question for social apps, *required* only from Sept 2026. Answer the
+  social-media capability question truthfully (TimeLine has a social feed +
+  interaction, so: yes); it just adds a "Social Media" descriptor, no blocker.
+
+**Housekeeping remaining (not blocking):** distil this file's screen inventory /
+decisions into `docs/reference/` mobile docs and delete it (the release half is
+already `mobile-release.md`). Then Phase 10 (Android) can re-scope.
 
 **2026-07-24 — Milestone F (TestFlight): the release path works end to end. First
 internal build installed on a real iPhone; app icon + launch screen shipped.**
