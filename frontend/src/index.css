@@ -73,6 +73,31 @@
   --tl-gutter: 76px; /* width of the timeline's time rail */
   --tl-node: 12px;
   --tl-node-avatar: 24px; /* poster avatar marking a post on the rail (#64) */
+  /* How far a post's body sits right of the spine. Shared by everything in the
+     body column — and reached back over by a comment thread, which has to find
+     the spine again to hang off it (see "the line, one level down"). */
+  --tl-body-inset: 20px;
+
+  /* ---- Comment-thread geometry (see @layer components below) ---- */
+  --tl-c-bead: 24px; /* a commenter's face: Avatar size="xs" */
+  --tl-c-halo: 3px; /* the surface ring that lifts it off the line */
+  --tl-c-column: calc(var(--tl-c-bead) + 2 * var(--tl-c-halo));
+  /* Both the half-column the lines run down and the drop from a comment's top
+     edge to the centre of its face — the same 15px, which is why an elbow
+     lands level with the eye whatever height the comment turns out to be. */
+  --tl-c-centre: calc(var(--tl-c-column) / 2);
+  --tl-c-line: 2px;
+  /* A level's step right. It has to clear the faces, since a parent's line now
+     runs *past* its children: much under half a bead and the line grazes every
+     face it goes by.
+
+     That does put a real horizontal cost back on each level, which the flat
+     treatment before it had deliberately avoided (#80 — deep threads squashing
+     off the side). Three things pay for it: the thread starts a step *left* of
+     where the post's body does, the step shrinks past the fourth level, and
+     replies start collapsed, so more than a couple of visible levels is rare. */
+  --tl-c-indent: 22px;
+  --tl-c-indent-deep: 16px;
 }
 @media (max-width: 560px) {
   :root {
@@ -261,14 +286,14 @@
     transform: scale(1.08);
   }
   .tl-body {
-    padding-left: 20px;
+    padding-left: var(--tl-body-inset);
     min-width: 0;
   }
   /* Non-entry content that still lives inside the spine feed (the plan form, the
      staging strip): inset it to the same column as a post body — past the gutter
      the spine runs down — so boxes sit to the *right* of the line, not behind it. */
   .tl-inset {
-    padding-left: calc(var(--tl-gutter) + 20px);
+    padding-left: calc(var(--tl-gutter) + var(--tl-body-inset));
     padding-right: 22px;
   }
 
@@ -368,6 +393,138 @@
       transform: scale(2.5);
       opacity: 0;
     }
+  }
+
+  /* ---- The line, one level down: comment threads (#135) ----
+     A thread is the same living line, branching. The post's spine runs on down
+     behind the thread (it's `.tl-feed::before`, one line for the whole feed);
+     each comment reaches out to its parent's line with a curved elbow that lands
+     on its own face; and a comment with replies grows a spine of its own. Post,
+     comments and replies are then one tree under one rule — not a timeline with
+     a comments widget bolted underneath. Ported from the app's
+     `mobile/src/components/CommentThread.tsx`, which has the full derivation.
+
+     **Every comment branches off its parent's line individually** — siblings
+     never share a spine of their own. With one line threaded down through all
+     the top-level comments, the second one reads as a *reply to the first*,
+     because that line's only visible origin is the first comment's face. Who
+     you're replying to is the most important thing a thread communicates, so
+     the line has to carry it. Same shape as a file tree, for the same reason.
+
+     Each comment draws up to three pieces of that line, all of them inside its
+     own box: its `.tl-branch` elbow, the parent's line carried `.tl-past` it
+     when it isn't the last sibling, and its own `.tl-stem` down to its replies.
+     A run therefore *ends* by not being drawn (the last sibling omits its
+     carried-past line), which is what makes the line terminate on a face
+     rather than trail off into the composer. */
+
+  /* Reach back over the body inset so the *post's* spine lands half a bead
+     inside a top-level comment — exactly where every other comment finds its
+     parent's line. A top-level comment then needs no special case: it takes its
+     step right from the same padding as everyone else. */
+  .tl-thread {
+    margin-left: calc(-1 * (var(--tl-body-inset) + var(--tl-c-centre)));
+    margin-top: 14px;
+  }
+  /* **Never a `gap` or `space-y-*` here.** Space between comments is empty
+     space no segment covers, so it shows up as a break in the line — the
+     spacing lives *inside* a comment instead (`.tl-comment-body`'s bottom
+     padding), where the run above covers it. Same reason there's no top padding
+     on a thread or a replies block: the line above ends exactly at the block's
+     top edge and the first elbow starts exactly there. */
+  .tl-comment-list {
+    padding-top: 0;
+  }
+  /* Each comment carries its own step right as padding, and the replies block
+     adds none. That's what keeps every line inside the element that draws it:
+     absolutely-positioned children measure from the padding box, so in here the
+     parent's line is at `--tl-c-centre` and this comment's own line one step
+     further in. Indenting the replies block instead — and letting each child
+     reach back out — would put the elbow at a negative offset, outside its own
+     bounds (fine in a browser, liable to be clipped on Android). */
+  .tl-comment {
+    --tl-c-step: var(--tl-c-indent);
+    position: relative;
+    padding-left: var(--tl-c-step);
+  }
+  .tl-comment--deep {
+    --tl-c-step: var(--tl-c-indent-deep);
+  }
+  /* The elbow: out from the parent's line, curving down onto this comment's own
+     face. Two borders and one rounded corner — no SVG for what is, in the end,
+     a quarter circle. It spans exactly the step right, so it always meets the
+     line this comment sits on. */
+  .tl-branch {
+    position: absolute;
+    top: 0;
+    left: calc(var(--tl-c-centre) - var(--tl-c-line) / 2);
+    width: var(--tl-c-step);
+    height: var(--tl-c-centre);
+    border-left: var(--tl-c-line) solid var(--color-spine);
+    border-bottom: var(--tl-c-line) solid var(--color-spine);
+    border-bottom-left-radius: 10px;
+  }
+  .tl-cline {
+    position: absolute;
+    left: calc(var(--tl-c-centre) - var(--tl-c-line) / 2);
+    width: var(--tl-c-line);
+    background: var(--color-spine);
+  }
+  /* The parent's line carried past this comment — the *whole* node, replies and
+     all, so it reaches the sibling below rather than stopping at the text. */
+  .tl-past {
+    top: 0;
+    bottom: 0;
+  }
+  /* This comment's own line, from its face down to where its replies begin. It
+     spans the row only; the replies pick the run up from there with their own
+     elbows. Nothing to hold up when the replies are collapsed. */
+  .tl-stem {
+    top: var(--tl-c-centre);
+    bottom: 0;
+  }
+  .tl-comment-row {
+    position: relative;
+    display: flex;
+    /* Not `stretch`: the bead is a link, and a stretched one would put an
+       invisible full-height target down the left of every comment. */
+    align-items: flex-start;
+  }
+  /* The commenter's face, centred on this comment's own line — the same
+     avatar-in-a-link bead as `.tl-avatar-node`, one level down. */
+  .tl-comment-bead {
+    flex: none;
+    width: var(--tl-c-column);
+    display: flex;
+    justify-content: center;
+    line-height: 0;
+    /* Above the lines, so the halo paints over the end of the elbow and the
+       line reads as running *into* the face rather than under it. In CSS a
+       positioned element wins over static content whatever the DOM order, so
+       this has to be said explicitly (unlike the app, where drawing it first
+       is enough). */
+    position: relative;
+    z-index: 1;
+  }
+  .tl-comment-bead > * {
+    box-shadow: 0 0 0 var(--tl-c-halo) var(--color-surface);
+  }
+  .tl-comment-body {
+    flex: 1;
+    min-width: 0;
+    padding-left: 8px;
+    /* The halo sits outside the face, so the text column drops by that much to
+       sit level with the face rather than with the halo's edge. */
+    padding-top: var(--tl-c-halo);
+    /* The breathing room between comments — inside the node, so the segment
+       above covers it. See the `gap` warning above. */
+    padding-bottom: 16px;
+  }
+  /* The composer and the empty state aren't comments, so they don't carry a
+     comment's step right; line them up with where a comment's own box starts
+     rather than leaving them flush against the thread's reached-back edge. */
+  .tl-thread-foot {
+    margin-left: var(--tl-c-indent);
   }
 
   /* ---- Messages drawer ----
