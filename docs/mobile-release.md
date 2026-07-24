@@ -122,14 +122,45 @@ the old one.
   (max 100). Builds are available **minutes after processing, no Apple review**.
   Best for the maintainer + very close family. Downside: internal testers are team
   members, so they get some App Store Connect access.
-- **External** (not set up yet): invite by email (up to 10,000), no team
-  membership, in groups. The **first build per group needs Apple "Beta App
+- **External**: invite by email (up to 10,000) *or* a shareable public link, no
+  team membership, in groups. The **first build per group needs Apple "Beta App
   Review"** (~a day), and you must fill in **Test Information** including a
   **demo/review account** and "what to test" notes. This is the path for a wider
-  friends-and-family beta *without* handing out console access. When going
-  external: create a demo account on the backend (admin-approved like any user),
-  put its credentials in App Store Connect's test info, and submit the group for
-  review.
+  friends-and-family beta *without* handing out console access.
+
+### Going external: friends & family via a public link
+
+The app is login-only and sign-ups are admin-approved, so Apple's reviewer can't
+self-register — they need a working demo account. **Because the reviewer logs in
+as a real user, the demo account must be isolated from real data**, or the
+reviewer would see actual friends'/family's private posts.
+
+1. **Create the isolated review account** (on the box; prints the credentials):
+   ```bash
+   docker compose exec backend python manage.py create_review_account
+   ```
+   `create_review_account` is **prod-safe**: it only ever touches its two fixed
+   sentinel accounts (`appreview@your-timeline.net` + a `review-buddy@example.com`
+   companion), so it never wipes real data and re-running rotates the password.
+   The account logs straight in (active + no unverified-email block) and is
+   connected only to the demo companion, who has a post — so the reviewer can try
+   **Report** and **Block** (what App Review checks) without seeing real people.
+   *(Do **not** use `seed_demo` on prod — it rebuilds a whole demo world and its
+   own docstring says never run it against a real deployment.)*
+2. **App Store Connect → your app → TestFlight → Test Information**: set a feedback
+   email, contact details, a one-line description, tick **Sign-in required**, and
+   paste the review account's **email + password** from step 1.
+3. **Create an External group** (TestFlight → External Testing → `+`), attach the
+   current build, and **enable the public link** (set a tester cap, e.g. 50).
+4. **Submit for Beta App Review.** Approval takes ~a day. Only the *first* build a
+   group sees needs review; later builds usually distribute without a new review.
+5. **Share the public link.** Anyone who taps it installs via TestFlight — but
+   your **admin-approval gate still applies**, so nobody can actually use the app
+   until you approve their account in Django admin. That's what makes a public
+   link safe here.
+
+Re-run `create_review_account` (and update the App Store Connect fields) whenever
+you want to rotate the demo password.
 
 ## Icon / splash / other asset changes
 

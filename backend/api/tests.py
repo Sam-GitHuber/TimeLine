@@ -5463,3 +5463,62 @@ class PushReceiptCheckTests(APITestCase):
             call_command("send_pushes", verbosity=0)
 
         self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+
+class CreateReviewAccountTests(APITestCase):
+    """The isolated App Review demo account for TestFlight (create_review_account).
+
+    Guards the two properties that matter: the reviewer can actually log in
+    (both auth gates satisfied), and the account is walled off from real data
+    with just one demo companion as a Report/Block target.
+    """
+
+    REVIEW = "appreview@your-timeline.net"
+    BUDDY = "review-buddy@example.com"
+
+    def test_creates_isolated_loginable_account(self):
+        from io import StringIO
+
+        from allauth.account.models import EmailAddress
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("create_review_account", password="ReviewPass123", stdout=out)
+
+        review = User.objects.get(email=self.REVIEW)
+        # Both login gates: admin-approved AND no unverified-email block.
+        self.assertTrue(review.is_active)
+        self.assertTrue(review.check_password("ReviewPass123"))
+        self.assertFalse(EmailAddress.objects.filter(user=review).exists())
+
+        # Walled off: connected only to the one demo companion.
+        buddy = User.objects.get(email=self.BUDDY)
+        self.assertFalse(buddy.has_usable_password())
+        self.assertTrue(
+            Connection.objects.filter(
+                requester=buddy, requestee=review, status=ACCEPTED
+            ).exists()
+        )
+        self.assertEqual(review.connections_requested.count()
+                         + review.connections_received.count(), 1)
+
+        # A Report target exists in the review account's feed.
+        self.assertTrue(Post.objects.filter(author=buddy).exists())
+        self.assertIn(self.REVIEW, out.getvalue())
+
+    def test_rerun_is_a_clean_reset_and_rotates_password(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        call_command("create_review_account", password="first", stdout=StringIO())
+        call_command("create_review_account", password="second", stdout=StringIO())
+
+        # Exactly one of each account; password rotated to the newest value.
+        self.assertEqual(User.objects.filter(email=self.REVIEW).count(), 1)
+        self.assertTrue(User.objects.get(email=self.REVIEW).check_password("second"))
+        # No duplicate content piled up (one buddy post + one review post).
+        self.assertEqual(
+            Post.objects.filter(author__email__in=[self.REVIEW, self.BUDDY]).count(),
+            2,
+        )
