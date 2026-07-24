@@ -135,10 +135,17 @@ self-register — they need a working demo account. **Because the reviewer logs 
 as a real user, the demo account must be isolated from real data**, or the
 reviewer would see actual friends'/family's private posts.
 
-1. **Create the isolated review account** (on the box; prints the credentials):
+1. **Create the isolated review account** (on the box; prints the credentials).
+   The command ships in the backend image, so it must be **deployed first** —
+   publish a GitHub Release and let the box autodeploy (see `deploy.md`; the box
+   deploys on **release**, not on merge to `main`). Then, from the repo checkout on
+   the box, using the **prod** compose file:
    ```bash
-   docker compose exec backend python manage.py create_review_account
+   cd ~/TimeLine
+   docker compose -f docker-compose.prod.yml exec backend python manage.py create_review_account
    ```
+   (Without `cd ~/TimeLine` + `-f docker-compose.prod.yml`, Compose reports "no
+   configuration file provided: not found".)
    `create_review_account` is **prod-safe**: it only ever touches its two fixed
    sentinel accounts (`appreview@your-timeline.net` + a `review-buddy@example.com`
    companion), so it never wipes real data and re-running rotates the password.
