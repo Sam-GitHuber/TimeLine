@@ -68,10 +68,11 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M5** | Thread mechanics | — (do before M7) | **M–L** | ☐ |
 | **M6** | Conversation list + thread info | — | **M** | ☐ |
 | **M7** | Photo messages | M5 | **L** | ☐ |
-| **M8** | Web parity | M1–M7 | **L** | ☐ |
+| **M8** | Text, mentions & quick actions | M1 | **M** | ☐ |
+| **M9** | Web parity | M1–M8 | **L** | ☐ |
 
-M0/M1 first. After that only the listed dependencies bind — M4, M5 and M6 can be
-done in any order.
+M0/M1 first. After that only the listed dependencies bind — M4, M5, M6 and M8 can
+be done in any order.
 
 ---
 
@@ -109,6 +110,9 @@ Stated up front, because "as good as the big messengers" is otherwise unbounded.
 | **Link previews** | The server would fetch every URL anyone pastes — a tracking leak and an SSRF surface, for a thumbnail. |
 | **Voice notes, calls** | Separate phases with real infra (media pipeline, WebRTC). Not this. |
 | **Server-side message search** | Dies under E2E anyway (see Privacy). Don't build toward it. |
+| **Stickers / GIF search** | GIF search means a third-party API on every keystroke — a tracker in the composer, straight against the privacy principle. Emoji and photos cover the need. |
+| **Video in chat** | Not "never" — it's **Phase 13** (`phase-13-video-clips.md`), which builds the whole video pipeline. M7 lays the attachment groundwork it will reuse. |
+| **A "delivered" tick** | The category shows sending → sent → **delivered** → read; we do three states, not four. Delivery means a device acknowledged receipt, and with polling + push nothing reports that. Faking it from the push receipt would be a lie with a tick on it. Decided in M4, not overlooked. |
 
 ---
 
@@ -515,7 +519,12 @@ the user typed. This is most of what makes a polling app feel instant, and it's
 why we can stay on polling at all.
 
 **Build — read receipts**
-1. Ticks: clock (sending) → single (sent) → double, accented (read).
+1. Ticks: clock (sending) → single (sent) → double, accented (read). **Three
+   states, not the four you may be used to** — there is no "delivered" tick,
+   because nothing in our stack reports that a device received a message.
+   Inferring it from an Expo push receipt would mean showing a tick that means
+   "we handed it to Apple", which is not what the user would read it as. Better
+   to show one fewer state honestly.
 2. Compute read client-side from data we nearly have: put each participant's
    `last_read_at` on the **conversation detail** payload and compare against each
    message's `created_at`. One small field, zero per-message cost.
@@ -588,10 +597,25 @@ highest value — don't skip it.
 7. **Keyboard handling** — the current `KeyboardAvoidingView` is blunt; the list
    should stay pinned while the keyboard animates.
 8. Light haptic on send.
+9. **Make URLs tappable.** A message body renders as a plain `<Text>` today, so a
+   link someone sends is dead text you have to retype. This is the single
+   cheapest "feels broken" fix in the phase — linkify URLs (and email addresses)
+   and open them in the system browser. **Linkifying is not link *previews***:
+   no server-side fetch, nothing rendered from the target, so none of the
+   tracking/SSRF objection applies.
+10. **Emoji-only messages render large.** A message that is nothing but one to
+    three emoji drops the bubble and renders at ~3× size. A few lines of code,
+    and one of the most-noticed details in any messenger.
+11. **Per-chat draft persistence.** Type half a message, navigate away, come back
+    — the text should still be there. It isn't today; the composer state dies
+    with the screen. Keep drafts keyed by conversation id (in-memory is enough to
+    start; persist across app restarts if it's cheap).
 
 **Done when**
 - [ ] Opening a thread loads **one page**; older messages page in on scroll-up.
 - [ ] Day separators, clock times, grouped runs, unread divider, jump-to-latest.
+- [ ] Links are tappable; emoji-only messages render large; drafts survive
+      leaving and returning to a thread.
 - [ ] `messaging.md` *Mobile* section rewritten to match.
 
 ---
@@ -619,10 +643,18 @@ highest value — don't skip it.
    shape and simply better; the header becomes identity + `⋯`.
 4. Rename needs a small `PATCH /api/conversations/<id>/` — any active member,
    group chats only.
+5. **Mark as unread.** Small, and used constantly by people who treat the badge
+   as a to-do list ("I'll reply properly later"). It's just moving
+   `ConversationRead.last_read_at` back behind the last message — a `DELETE` on
+   the read row, effectively. Put it on the row's swipe menu.
+6. **Media gallery in the info screen** — every photo in this chat, in a grid,
+   tapping into the existing `PhotoLightbox`. Natural home, and the first place
+   anyone looks for a picture someone sent last week. *(Do this after M7, or
+   leave the section out until the photos exist.)*
 
 **Done when**
 - [ ] Info screen exists with all actions moved into it; header is clean.
-- [ ] Group chats can be renamed; list rows swipe to mute.
+- [ ] Group chats can be renamed; list rows swipe to mute and mark-unread.
 - [ ] `messaging.md` *API* + *Mobile* updated.
 
 ---
@@ -652,14 +684,22 @@ Sequenced last of the feature work: biggest chunk, nothing depends on it.
    - Accept the trade: the server can no longer verify a blob is really an image.
      Byte caps and per-message count caps are the mitigation.
 3. `POST messages/` accepts multipart, as posts do.
-4. Bubble renders via the existing `AuthedImage`; tap opens the existing
+4. **Offer the camera, not just the library.** "Take a photo" is at least half of
+   what people send in a chat, and routing them out to the camera app and back is
+   the kind of friction that makes an app feel like a website.
+   `expo-image-picker` (already a dep) does both.
+5. Bubble renders via the existing `AuthedImage`; tap opens the existing
    `PhotoLightbox`.
-5. List preview: "📷 Photo".
-6. **Push body: `"Ada sent a photo"`** — names the sender, says nothing about
+6. List preview: "📷 Photo".
+7. **Push body: `"Ada sent a photo"`** — names the sender, says nothing about
    content, consistent with the existing rule.
-7. **Storage needs no new decision** — it rides the `django-storages` seam: local
+8. **Storage needs no new decision** — it rides the `django-storages` seam: local
    disk volume now, S3 bucket at Phase 11, same as every other image.
-8. ✅ **Verify [`../backup-restore.md`](../backup-restore.md) and
+9. **Leave a seam for video.** Phase 13 (`phase-13-video-clips.md`) adds video
+   clips. Shape `MessageImage` and the attachment endpoint so a second media type
+   slots in rather than forcing a parallel path — but **don't build video here**;
+   it needs a transcode pipeline this phase has no business growing.
+10. ✅ **Verify [`../backup-restore.md`](../backup-restore.md) and
    `deploy/backup.sh` cover the whole media directory**, not an enumerated list
    of subdirectories. If they enumerate, message images silently aren't backed up
    — a data-loss bug that only surfaces the day you need the backup.
@@ -673,9 +713,64 @@ Sequenced last of the feature work: biggest chunk, nothing depends on it.
 
 ---
 
-## M8 — Web parity
+## M8 — Text, mentions & quick actions
 
-**Branch:** `messaging/m8-web` · **Depends on:** M1–M7 · **Size:** L
+**Branch:** `messaging/m8-text` · **Depends on:** M1 · **Size:** M
+
+Four features that don't fit the other milestones and are, between them, most of
+the remaining distance to the bar. Each is independently shippable — if the
+milestone runs long, land them one at a time.
+
+**Read first**
+- `mobile/src/components/MessageBubble.tsx` (text rendering).
+- [`../reference/notifications.md`](../reference/notifications.md) → the push
+  payload shape, for quick-reply.
+- `mobile/src/components/MessageActionMenu.tsx` (from M1) — multi-select
+  reuses its actions.
+
+**Build**
+
+1. **Inline text formatting** — `*bold*`, `_italic_`, `~strikethrough~`,
+   `` `monospace` ``. People type these out of habit and it looks broken when the
+   asterisks just sit there. Parse to styled `<Text>` runs at render time; **do
+   not store markup-processed text** — the raw string stays the source of truth,
+   which also keeps it a single opaque blob under E2E. Watch the interaction with
+   linkification (M5 #9): one pass producing both, not two passes fighting.
+2. **@mentions in group chats.** Type `@`, pick from the thread's active
+   participants, and the name renders highlighted. **A mention should notify even
+   in a muted thread** — that's the whole point of mentioning someone, and it's
+   the one justified exception to `Participant.muted_at`. Note the tension: it's
+   also a way to punch through someone's mute, so mention-notifications need
+   their own preference (this one *does* belong in `NotificationPreference`, since
+   it's a genuine notification kind — unlike the read-receipt setting in M4).
+   - Store mentions as a real relation, not by parsing display names out of text
+     at read time — names change, and text parsing under E2E is impossible
+     server-side.
+3. **Multi-select messages.** Tap-select several (entering select mode from the
+   M1 long-press menu), then bulk **Copy** or **Delete**. Deleting a burst of
+   messages one long-press at a time is genuinely irritating.
+4. **Reply from the notification.** iOS supports a text field directly in the
+   push, and `expo-notifications` supports notification categories with a text
+   input action. High delight for moderate effort, and it makes the push actually
+   useful rather than just a doorbell. The reply posts to the existing send
+   endpoint; the thread's mark-read-on-open already handles the badge.
+   - Verify it against the real device, not the simulator — this is push, and
+     Phase 9's Milestone D notes apply.
+
+**Done when**
+- [ ] `*bold*`/`_italic_` render; raw text unchanged in the database.
+- [ ] @mention a group member; they're notified even if the thread is muted, and
+      can turn that off in preferences.
+- [ ] Select several messages and delete them in one action.
+- [ ] Reply to a message from the notification without opening the app
+      (**device-tested**).
+- [ ] `messaging.md` + `notifications.md` updated.
+
+---
+
+## M9 — Web parity
+
+**Branch:** `messaging/m9-web` · **Depends on:** M1–M8 · **Size:** L
 
 **Read first**
 - `frontend/src/components/MessagesDrawer.jsx` — all 566 lines.
@@ -687,7 +782,10 @@ Sequenced last of the feature work: biggest chunk, nothing depends on it.
    file and this phase touches all of them; splitting first keeps the
    feature diff from tangling with the code-move diff.
 2. Port: edit + edited marker, reply, reactions, ticks + the setting, day
-   separators and clock times, the unread divider, photos.
+   separators and clock times, the unread divider, photos, tappable links,
+   large emoji-only messages, drafts, formatting, mentions, multi-select.
+   **Build the checklist from each milestone's *Done when*** rather than from
+   this line — it's a summary, and summaries drift.
 3. The interaction differs because the medium does — the web has hover, so the
    menu is a hover `⋯` on the bubble rather than a long-press, the same way
    delete already works there.
@@ -700,7 +798,7 @@ Sequenced last of the feature work: biggest chunk, nothing depends on it.
 
 ---
 
-## Compatibility (the rule that keeps M1–M7 safe to ship without the web)
+## Compatibility (the rule that keeps M1–M8 safe to ship without the web)
 
 The box deploys **only on publishing a GitHub Release**, and the app ships
 separately via TestFlight — so backend and clients are never in lockstep, and
@@ -721,12 +819,18 @@ than discovered.
 
 ## Definition of done (whole phase)
 
-- [ ] All nine milestones ticked in **Progress**.
+- [ ] All ten milestones ticked in **Progress**.
 - [ ] Message text unreachable from the admin except via a report.
 - [ ] Backend + mobile + frontend tests green in CI.
 - [ ] Every milestone deployed after a backup.
 - [ ] `../reference/messaging.md` reflects the finished state, and **this file is
       deleted**, per the phase-ships convention.
+
+**The real acceptance test, and it isn't a checkbox:** hand the app to someone who
+uses a mainstream messenger daily and watch them use it for a week without
+prompting. If they never once reach for something that isn't there, and never
+have to think about how to do something, it's done. Every milestone above exists
+because of a specific moment where they'd otherwise notice.
 
 ## Open questions (settle when you reach them, not now)
 
@@ -737,4 +841,11 @@ than discovered.
   more concept than it's worth at family scale unless someone asks.
 - **Adaptive polling** — see **Real-time** above. Only if M2 feels laggy in real
   use.
+- **Pinned chats.** Deliberately left out: it's user-controlled ordering, not an
+  algorithm, so it doesn't offend the principles — it's just low value until
+  someone has enough conversations to lose one. Revisit if that happens.
+- **Search within a conversation.** Client-side over loaded messages is possible
+  and survives E2E; server-side doesn't. Not scoped here.
+- **Per-person read state in a group** ("message info"). The data exists after
+  M4; it's a small screen if anyone asks for it.
 - *(Message reporting was an open question and is now answered in **M0**.)*
