@@ -191,5 +191,14 @@ export function routeForNotification(url: string | null | undefined): Href {
   const event = path.match(/^\/g\/\d+\/events\/(\d+)$/);
   if (event) return `/events/${event[1]}` as Href;
 
+  // A new message (backend sends `/messages/<conversationId>`) opens the thread.
+  // Unlike every other case here there's no activity-centre row behind it —
+  // messaging keeps its own unread badge and is deliberately outside the bell
+  // (issue #118) — so the push's `kind` is "message" and its `notificationId` is
+  // null. Nothing downstream needs that distinction: the thread screen marks
+  // itself read on open, which is what clears the badge.
+  const conversation = path.match(/^\/messages\/(\d+)$/);
+  if (conversation) return `/messages/${conversation[1]}` as Href;
+
   return '/';
 }

@@ -414,6 +414,14 @@ export const api = {
   leaveConversation: (conversationId) =>
     request(`/api/conversations/${conversationId}/leave/`, { method: "POST" }),
 
+  // Mute/unmute this thread's push notifications for you (issue #118). The web
+  // app itself has no push, so this control exists here to manage what your
+  // *phone* does — muting from the browser you happen to have open is the point.
+  setConversationMuted: (conversationId, muted) =>
+    request(`/api/conversations/${conversationId}/mute/`, {
+      method: muted ? "POST" : "DELETE",
+    }),
+
   // The chats a disconnect/block would remove you from (for the warning modal).
   getDisconnectImpact: (userId) =>
     request(`/api/users/${userId}/disconnect-impact/`),

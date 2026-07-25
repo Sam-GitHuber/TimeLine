@@ -479,6 +479,23 @@ class Participant(models.Model):
         related_name="chat_invites_sent",
     )
     left_at = models.DateTimeField(null=True, blank=True)
+    # When this person muted the thread's **push notifications** (null = unmuted).
+    #
+    # Per-participant, not per-conversation: muting a noisy group chat is one
+    # member's choice and must not silence it for everyone else. It lives here
+    # rather than in ``NotificationPreference`` because messaging is deliberately
+    # not part of the activity centre (see docs/reference/messaging.md), so there
+    # is no notification *kind* to hang a preference off.
+    #
+    # A timestamp rather than a boolean for the same reason ``left_at`` is: it
+    # records *when*, which is free to store and answers "since when has this
+    # been quiet?" when someone reports missing messages.
+    #
+    # Mute affects **push only**. The thread still accrues unread messages and
+    # still shows its unread badge — muting means "don't buzz my phone", not
+    # "hide this conversation", which would be a much bigger promise and would
+    # risk someone silently missing a thread entirely.
+    muted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1345,7 +1362,7 @@ class DevicePushToken(models.Model):
 
 
 class PushOutbox(models.Model):
-    """One notification queued for delivery as a push (Phase 9, Milestone D).
+    """One push queued for delivery to a user's devices (Phase 9, Milestone D).
 
     **Why an outbox rather than sending inline.** ``create_notification`` runs
     inside ordinary web requests (someone posts a reply, someone reacts). Calling
@@ -1361,15 +1378,32 @@ class PushOutbox(models.Model):
     registers (or re-registers with a rotated token) in between still gets the
     push, and a device that logged out in between correctly doesn't.
 
-    **Deletion is the safety net.** The FK cascades from ``Notification``, which
-    itself cascades from its target — so deleting a post takes its notifications
-    and their queued pushes with it. A push for since-deleted content cannot
-    fire, which is the same guarantee the deep-link map relies on.
+    **Two kinds of push, one queue.** Exactly one of ``notification`` and
+    ``message`` is set (enforced by a check constraint):
 
-    **Muted kinds never reach here.** ``create_notification`` returns ``None``
-    for a muted kind before any row exists, so the per-type
-    ``NotificationPreference`` gate covers push automatically. There is
-    deliberately no second mute check to keep in sync.
+    - ``notification`` — an activity-centre event (a reply, a reaction, an
+      invite). Its wording and deep-link come from ``NotificationSerializer``,
+      so the phone and the bell always say the same thing.
+    - ``message`` — a **direct/group message** (issue #118). Messaging is
+      deliberately *not* part of the activity centre — it has its own unread
+      badge (see docs/reference/messaging.md) — so a message must be able to
+      buzz a phone **without** creating a ``Notification`` row that would
+      double-surface every message in the bell. Rather than let this model carry
+      a free-text payload, it points at the ``Message`` itself and the send
+      command phrases the line; that keeps the cascade guarantee below intact and
+      leaves no way to smuggle message text into a stored push body.
+
+    **Deletion is the safety net.** Both FKs cascade, and ``Notification``
+    itself cascades from its target — so deleting a post takes its notifications
+    and their queued pushes with it, and deleting a conversation takes its
+    messages and theirs. A push for since-deleted content cannot fire, which is
+    the same guarantee the deep-link map relies on.
+
+    **Muting happens before here, on both paths.** ``create_notification``
+    returns ``None`` for a muted kind before any row exists, so the per-type
+    ``NotificationPreference`` gate covers push automatically; the message path
+    checks ``Participant.muted_at`` at enqueue for the same reason. There is
+    deliberately no second mute check at send time to keep in sync.
 
     Rows are kept after sending (``sent_at`` set) as a short delivery log; the
     send command prunes ones older than a fortnight.
@@ -1379,6 +1413,31 @@ class PushOutbox(models.Model):
         "Notification",
         on_delete=models.CASCADE,
         related_name="push",
+        null=True,
+        blank=True,
+    )
+    # The message this push announces — the non-notification target above. Not
+    # a OneToOne: one message fans out to every participant, so it's one row per
+    # (message, recipient), which the unique constraint below pins down.
+    message = models.ForeignKey(
+        "Message",
+        on_delete=models.CASCADE,
+        related_name="pushes",
+        null=True,
+        blank=True,
+    )
+    # Who this push is for.
+    #
+    # Denormalised from ``notification.recipient`` on that path (and backfilled
+    # for pre-existing rows in migration 0021) rather than resolved through the
+    # FK, so the drain reads one field whichever target is set instead of
+    # branching. Safe to denormalise because a notification's recipient is fixed
+    # at creation and never reassigned — there is nothing for the copy to drift
+    # from.
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="queued_pushes",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     # Null until delivered to *every* device. The command selects on
@@ -1401,14 +1460,39 @@ class PushOutbox(models.Model):
     MAX_ATTEMPTS = 5
 
     class Meta:
+        constraints = [
+            # Exactly one target. A row with neither has nothing to say and
+            # nothing to link to; a row with both would have two competing
+            # wordings, and the drain would have to pick.
+            models.CheckConstraint(
+                name="push_outbox_exactly_one_target",
+                condition=(
+                    models.Q(notification__isnull=False, message__isnull=True)
+                    | models.Q(notification__isnull=True, message__isnull=False)
+                ),
+            ),
+            # One push per person per message. The coalescing at enqueue is the
+            # real defence against a buzz storm; this is the backstop that makes
+            # a double-enqueue (a retried request, a future second call site) an
+            # error rather than a second buzz. NULLs compare as distinct in
+            # Postgres, so notification rows are unaffected by it.
+            models.UniqueConstraint(
+                fields=["message", "recipient"],
+                name="unique_message_push_per_recipient",
+            ),
+        ]
         indexes = [
             # The drain query: unsent rows, oldest first.
             models.Index(fields=["sent_at", "created_at"]),
+            # Coalescing asks "has this person already got an unsent push for
+            # this conversation?" on every message sent, so index the recipient.
+            models.Index(fields=["recipient", "sent_at"]),
         ]
 
     def __str__(self):
         state = "sent" if self.sent_at else f"queued (attempts={self.attempts})"
-        return f"push #{self.pk} · {state}"
+        target = "message" if self.message_id else "notification"
+        return f"push #{self.pk} · {target} · {state}"
 
 
 class PushReceipt(models.Model):

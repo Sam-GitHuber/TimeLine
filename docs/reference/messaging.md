@@ -41,7 +41,8 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
     chat. Dropping those columns is a future cleanup, not required.
 - **`Participant`** — `conversation`, `user` (unique together), `status`
   (`active` | `pending`), `invited_by` (drives the "connect with X" prompts + the
-  add-gate), `left_at` (self-leave/decline tombstone).
+  add-gate), `left_at` (self-leave/decline tombstone), `muted_at` (per-person
+  push mute — see [Push notifications](#push-notifications)).
 - **`ParticipantInterval`** — the spans during which a participant was `active`:
   `started_at`, `ended_at` (null = currently active). Becoming active **opens** an
   interval; dropping to pending / leaving **closes** it; returning opens a new one.
@@ -133,6 +134,9 @@ Direct and group chats share the endpoints:
 - `POST /api/conversations/<id>/messages/` — send; active participants only; bumps
   `updated_at`.
 - `POST /api/conversations/<id>/read/` — mark read up to now (clears unread).
+- `POST` / `DELETE /api/conversations/<id>/mute/` — mute / unmute **your** push
+  notifications for this thread; returns `{ muted }`. Member-only (404
+  otherwise). The state also rides on the conversation payload as `muted`.
 - `DELETE /api/conversations/<id>/messages/<msg_id>/` — **soft-delete** your own
   message (blanks `text`, sets `deleted_at`, keeps a "message deleted" tombstone in
   place so the thread doesn't silently reshuffle and pagination isn't disturbed;
@@ -161,6 +165,68 @@ swap is non-breaking by design:** the REST endpoints and data model stay identic
 going real-time later just adds a Channels consumer and replaces the interval with
 a socket subscription — no schema/API migration.
 
+## Push notifications
+
+A new message buzzes the other participants' phones (issue #118). The mechanics —
+outbox, Expo, receipts, device tokens — are shared with every other push and
+documented in [`notifications.md`](notifications.md); what's specific to messaging
+is *who gets one* and the fact that it **creates no `Notification` row**.
+
+**No activity-centre row, deliberately.** Messaging keeps its own unread badge and
+sits outside the bell. A `Notification` per message would double-surface every
+message — once in the badge, once in the activity centre — and bury the things the
+centre exists for. So `PushOutbox` takes a `Message` as an alternative target to a
+`Notification`, and the send command phrases that row itself.
+
+**Who gets buzzed** — decided in one place, `enqueue_message_pushes`:
+
+| Rule | Why |
+| --- | --- |
+| Not the sender | It isn't news to them. |
+| `active`, not left, active account | The same population that can read the thread. |
+| Their `ParticipantInterval` spans the message | **The one that's easy to get wrong.** A `pending` member, or one in a gap between intervals, is clipped out of the thread by `visible_messages_for` — buzzing them would announce a message the app then refuses to show. The interval test is a *single* `filter()` call so one interval must satisfy both ends; split in two, Django joins the table twice and a gap member slips through. |
+| Not muted (`Participant.muted_at`) | See below. |
+| No unsent push already queued for that thread | **Coalescing.** Ten rapid messages must be one buzz — the unread badge carries the count. Without it the outbox faithfully delivers ten, which is the fastest way to make someone turn notifications off. |
+
+**Two things drop a queued push at send time**, both settled rather than retried
+since neither state is ever undone:
+
+- **Already read.** Because the send is out-of-band, by the time the timer drains
+  the queue anyone with the thread open — web or app — has polled and moved their
+  `ConversationRead` marker past the message. Comparing against that marker gets
+  "don't buzz me for the thread I'm looking at" with no presence system, no
+  heartbeat, and nothing for the app to report. It also covers a message read on
+  another device before the timer fired.
+- **Deleted since enqueue.** Message deletion is *soft* (a tombstone, so the
+  thread doesn't reshuffle), so there's no cascade to take the queued push with
+  it the way there is for a hard delete. Without this check, deleting a message
+  you regret still buzzes everyone up to a tick later and the tap lands on
+  "message deleted". The two together are what make "a push for deleted content
+  cannot fire" true for messages in both senses.
+
+**The body never quotes the message.** It reads `New message from Ada`, or
+`Ada in Book Club` for a titled group. Push bodies transit Expo's servers and
+Apple's, so naming the sender is the most we ever say — that rule is what makes
+pushing private messages acceptable at all.
+
+**Mute** is per-participant (`Participant.muted_at`), not per-conversation, so
+silencing a busy group chat is your choice alone. It lives on `Participant` rather
+than in `NotificationPreference` because there is no notification *kind* to hang a
+preference off. It's checked at **enqueue**, matching how a muted kind never
+reaches the outbox either — one gate, nothing to keep in sync; the cost is that
+muting isn't retroactive (an already-queued push still goes out, a second or two
+later). **Mute stops the buzz, not the messages**: the thread keeps accruing unread
+and keeps its badge, so a muted chat is quiet, never hidden — nobody should be able
+to lose a conversation by silencing it. Both clients expose the toggle in the
+thread header, the web included: the setting is server-side and per-person, so the
+browser is a perfectly good place to turn off the buzzing in your pocket.
+
+**A thread with no `Participant` rows sends nothing** — the legacy 1:1 shape that
+predates Phase 6a (real ones were backfilled by migration `0009`; only threads
+built straight off the model, as Phase 5's tests do, still lack them). Silence is
+the right failure: visibility is decided by intervals, and without them there's
+nothing to decide it with.
+
 ## Frontend
 
 Messaging is a **non-modal companion drawer** (`MessagesDrawer.jsx`, driven by
@@ -171,7 +237,8 @@ new-message:
 - **New chat** — a multi-select connection picker → 1:1 or group chat (+ optional
   title). Launched from a Group page it's scoped to that group (pool = group
   members ∩ your connections).
-- **Thread** — group header (title, participants, **Add people**, **Leave**). A
+- **Thread** — header actions: **Mute** (a bell, struck through when muted — on
+  every thread, direct or group) and, for groups, **Add people** and **Leave**. A
   `pending` viewer sees a **locked panel**: "Connect with C & D to join", inline
   connection-request buttons, and a **Decline / Leave** button.
 - **Sender attribution (group threads only).** An incoming message in a *group*
@@ -208,10 +275,14 @@ sender-attribution runs.
 Two behaviours differ because the medium does, not the model: **delete-your-own**
 is a long-press → confirm (a phone has no hover for the web's inline Delete), and
 the **Message** button on a profile pushes the thread full-screen rather than
-opening a drawer alongside. **New-message push is deferred** (issue #118): there
-is no `message` notification kind server-side — messaging stays outside the
-activity centre with its own badge — so the app is polling-only parity, exactly
-as the web is.
+opening a drawer alongside.
+
+**New-message push** (issue #118) is the one place the app gets something the web
+can't have. A tapped message push deep-links to the thread via `routeForNotification`
+(`/messages/<id>` → `/messages/[conversationId]`); the thread screen's existing
+mark-read-on-open clears the badge, so the tap path needs nothing special. It's the
+only push with `notificationId: null` and `kind: "message"` — there's no
+activity-centre row behind it. See [Push notifications](#push-notifications).
 
 ## Not end-to-end encrypted (yet)
 

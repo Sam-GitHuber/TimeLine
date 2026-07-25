@@ -563,6 +563,17 @@ export const api = {
     }),
 
   /**
+   * Mute or unmute this thread's push notifications for you (issue #118).
+   * Per-participant, so it never silences the chat for anyone else, and it
+   * stops the buzz only — the thread keeps its unread badge either way.
+   * Returns the resulting state, so the caller can render from the response.
+   */
+  setConversationMuted: (conversationId: number | string, muted: boolean) =>
+    request<{ muted: boolean }>(`/api/conversations/${conversationId}/mute/`, {
+      method: muted ? 'POST' : 'DELETE',
+    }),
+
+  /**
    * Leave a chat, or — while pending — decline the invite. Works from either
    * status (see messaging.md); closes your interval and triggers a promote
    * re-eval for everyone else. The thread routes back to the list on success.

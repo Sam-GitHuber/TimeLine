@@ -4896,6 +4896,276 @@ class PushOutboxEnqueueTests(APITestCase):
         self.assertEqual(PushOutbox.objects.count(), 0)
 
 
+class MessagePushEnqueueTests(APITestCase):
+    """Queueing a push for a new **message** (issue #118).
+
+    Messages don't create ``Notification`` rows — messaging keeps its own unread
+    badge and is deliberately outside the activity centre — so these gates live
+    in ``enqueue_message_pushes`` rather than being inherited from
+    ``create_notification``. That makes them worth pinning individually.
+    """
+
+    def setUp(self):
+        self.ada = make_user("msg-push-ada@example.com", first_name="Ada")
+        self.bea = make_user("msg-push-bea@example.com", first_name="Bea")
+        make_connection(self.ada, self.bea)
+
+    def _direct(self):
+        """A direct thread with the Participant rows + open intervals a real one
+        gets (via ``_ensure_direct_participants``), since visibility is decided
+        off the intervals."""
+        convo = Conversation.objects.create(
+            kind="direct", user_a=self.ada, user_b=self.bea
+        )
+        for user in (self.ada, self.bea):
+            p = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=convo.created_at
+            )
+        return convo
+
+    def _send(self, convo, sender, text="hi"):
+        message = Message.objects.create(
+            conversation=convo, sender=sender, text=text
+        )
+        notifications.enqueue_message_pushes(message)
+        return message
+
+    def _queued_for(self, user):
+        return PushOutbox.objects.filter(recipient=user, sent_at__isnull=True)
+
+    def test_a_message_queues_a_push_for_the_other_person(self):
+        convo = self._direct()
+        message = self._send(convo, self.ada)
+
+        row = self._queued_for(self.bea).get()
+        self.assertEqual(row.message, message)
+        # The message target is used, *not* a notification — the whole point of
+        # issue #118 is that this never shows up in the activity centre.
+        self.assertIsNone(row.notification)
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_the_sender_is_never_queued(self):
+        convo = self._direct()
+        self._send(convo, self.ada)
+
+        self.assertFalse(self._queued_for(self.ada).exists())
+
+    def test_a_muted_thread_queues_nothing(self):
+        convo = self._direct()
+        Participant.objects.filter(conversation=convo, user=self.bea).update(
+            muted_at=timezone.now()
+        )
+
+        self._send(convo, self.ada)
+
+        self.assertFalse(self._queued_for(self.bea).exists())
+
+    def test_muting_is_per_person_not_per_thread(self):
+        # Bea muting must not silence the same conversation for Cal.
+        cal = make_user("msg-push-cal@example.com", first_name="Cal")
+        make_connection(self.ada, cal)
+        make_connection(self.bea, cal)
+        convo = Conversation.objects.create(kind="group", created_by=self.ada)
+        for user in (self.ada, self.bea, cal):
+            p = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=timezone.now()
+            )
+        Participant.objects.filter(conversation=convo, user=self.bea).update(
+            muted_at=timezone.now()
+        )
+
+        self._send(convo, self.ada)
+
+        self.assertFalse(self._queued_for(self.bea).exists())
+        self.assertTrue(self._queued_for(cal).exists())
+
+    def test_a_pending_member_is_not_queued(self):
+        # Pending = invited but not yet connected to everyone. They can't read
+        # the thread at all, so buzzing them would announce something the app
+        # would then refuse to show.
+        cal = make_user("msg-push-pending@example.com")
+        make_connection(self.ada, cal)
+        convo = Conversation.objects.create(kind="group", created_by=self.ada)
+        for user, st in [(self.ada, "active"), (self.bea, "active"), (cal, "pending")]:
+            p = Participant.objects.create(
+                conversation=convo, user=user, status=st
+            )
+            if st == "active":
+                ParticipantInterval.objects.create(
+                    participant=p, started_at=timezone.now()
+                )
+
+        self._send(convo, self.ada)
+
+        self.assertFalse(self._queued_for(cal).exists())
+        self.assertTrue(self._queued_for(self.bea).exists())
+
+    def test_a_member_in_an_interval_gap_is_not_queued(self):
+        # The subtle case: an *active* member whose access interval is closed at
+        # the moment the message lands. `visible_messages_for` clips it out of
+        # their thread, so the push must be clipped too — the two rules have to
+        # agree or the app shows an empty thread for a message it just announced.
+        convo = Conversation.objects.create(kind="group", created_by=self.ada)
+        pa = Participant.objects.create(
+            conversation=convo, user=self.ada, status="active"
+        )
+        pb = Participant.objects.create(
+            conversation=convo, user=self.bea, status="active"
+        )
+        ParticipantInterval.objects.create(participant=pa, started_at=timezone.now())
+        ParticipantInterval.objects.create(participant=pb, started_at=timezone.now())
+        deactivate(pb, timezone.now())
+
+        gap_message = self._send(convo, self.ada, text="during the gap")
+
+        self.assertFalse(self._queued_for(self.bea).exists())
+        self.assertNotIn(
+            gap_message.id,
+            set(visible_messages_for(convo, self.bea).values_list("id", flat=True)),
+        )
+
+    def test_a_returning_member_is_queued_again(self):
+        # The other half of the gap rule: reopening an interval must restore the
+        # buzz, or a rejoined member goes permanently silent.
+        convo = Conversation.objects.create(kind="group", created_by=self.ada)
+        pa = Participant.objects.create(
+            conversation=convo, user=self.ada, status="active"
+        )
+        pb = Participant.objects.create(
+            conversation=convo, user=self.bea, status="active"
+        )
+        ParticipantInterval.objects.create(participant=pa, started_at=timezone.now())
+        ParticipantInterval.objects.create(participant=pb, started_at=timezone.now())
+        deactivate(pb, timezone.now())
+        self._send(convo, self.ada, text="during the gap")
+        activate(pb, timezone.now())
+
+        self._send(convo, self.ada, text="welcome back")
+
+        self.assertEqual(self._queued_for(self.bea).count(), 1)
+
+    def test_a_burst_of_messages_queues_one_push(self):
+        # Ten messages must not mean ten buzzes; the unread badge carries the
+        # count. Without coalescing the outbox would faithfully deliver all ten.
+        convo = self._direct()
+        for i in range(10):
+            self._send(convo, self.ada, text=f"message {i}")
+
+        self.assertEqual(self._queued_for(self.bea).count(), 1)
+
+    def test_a_new_push_is_queued_once_the_previous_one_is_sent(self):
+        # Coalescing keys off *unsent* rows only, so a later message still buzzes
+        # rather than the thread going quiet forever after the first push.
+        convo = self._direct()
+        self._send(convo, self.ada, text="first")
+        self._queued_for(self.bea).update(sent_at=timezone.now())
+
+        self._send(convo, self.ada, text="second")
+
+        self.assertEqual(self._queued_for(self.bea).count(), 1)
+
+    def test_deleting_the_conversation_removes_the_queued_push(self):
+        # Cascade chain: Conversation → Message → PushOutbox, matching the
+        # notification path's Post → Notification → PushOutbox guarantee.
+        convo = self._direct()
+        self._send(convo, self.ada)
+        convo.delete()
+
+        self.assertEqual(PushOutbox.objects.count(), 0)
+
+    def test_sending_via_the_api_queues_a_push(self):
+        # The unit tests above call the helper directly; this pins that the view
+        # actually calls it, which is the wiring that would silently rot.
+        convo = self._direct()
+        self.client.force_authenticate(self.ada)
+
+        response = self.client.post(
+            f"/api/conversations/{convo.id}/messages/", {"text": "hello"}
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(self._queued_for(self.bea).count(), 1)
+
+
+class ConversationMuteTests(APITestCase):
+    """Muting a thread's pushes (issue #118)."""
+
+    def setUp(self):
+        self.ada = make_user("mute-ada@example.com")
+        self.bea = make_user("mute-bea@example.com")
+        make_connection(self.ada, self.bea)
+        self.convo = Conversation.objects.create(
+            kind="direct", user_a=self.ada, user_b=self.bea
+        )
+        for user in (self.ada, self.bea):
+            p = Participant.objects.create(
+                conversation=self.convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=self.convo.created_at
+            )
+        self.url = f"/api/conversations/{self.convo.id}/mute/"
+
+    def test_mute_then_unmute(self):
+        self.client.force_authenticate(self.ada)
+
+        muted = self.client.post(self.url)
+        self.assertEqual(muted.status_code, 200)
+        self.assertTrue(muted.data["muted"])
+        self.assertIsNotNone(
+            Participant.objects.get(
+                conversation=self.convo, user=self.ada
+            ).muted_at
+        )
+
+        unmuted = self.client.delete(self.url)
+        self.assertEqual(unmuted.status_code, 200)
+        self.assertFalse(unmuted.data["muted"])
+        self.assertIsNone(
+            Participant.objects.get(
+                conversation=self.convo, user=self.ada
+            ).muted_at
+        )
+
+    def test_the_serializer_reports_your_own_mute_state(self):
+        self.client.force_authenticate(self.ada)
+        self.client.post(self.url)
+
+        mine = self.client.get(f"/api/conversations/{self.convo.id}/")
+        self.assertTrue(mine.data["muted"])
+
+        # Bea sees the same thread as unmuted — mute is per-participant.
+        self.client.force_authenticate(self.bea)
+        theirs = self.client.get(f"/api/conversations/{self.convo.id}/")
+        self.assertFalse(theirs.data["muted"])
+
+    def test_muting_does_not_hide_the_thread_or_its_unread_count(self):
+        # Mute means "don't buzz me", not "hide this" — someone must never lose
+        # a conversation by silencing it.
+        self.client.force_authenticate(self.bea)
+        self.client.post(self.url)
+        Message.objects.create(
+            conversation=self.convo, sender=self.ada, text="still here"
+        )
+
+        listed = self.client.get("/api/conversations/")
+        row = [c for c in listed.data["results"] if c["id"] == self.convo.id]
+        self.assertEqual(len(row), 1)
+        self.assertEqual(row[0]["unread_count"], 1)
+
+    def test_a_non_member_gets_404(self):
+        outsider = make_user("mute-outsider@example.com")
+        self.client.force_authenticate(outsider)
+
+        self.assertEqual(self.client.post(self.url).status_code, 404)
+
+
 @override_settings(EXPO_ACCESS_TOKEN="", EXPO_PUSH_RETENTION_DAYS=14)
 class SendPushesCommandTests(APITestCase):
     """Draining the outbox (Phase 9, Milestone D).
@@ -4967,6 +5237,116 @@ class SendPushesCommandTests(APITestCase):
         self.assertEqual(message["data"]["url"], expected["url"])
         self.assertEqual(message["data"]["notificationId"], n.id)
         self.assertEqual(message["data"]["kind"], n.kind)
+
+    def _queue_message(self, kind="direct", title="", text="secret plans"):
+        """Queue a *message* push to self.me, the way the send path sees one."""
+        if kind == "direct":
+            convo = Conversation.objects.create(
+                kind="direct", user_a=self.me, user_b=self.actor
+            )
+        else:
+            convo = Conversation.objects.create(
+                kind="group", title=title, created_by=self.actor
+            )
+        for user in (self.me, self.actor):
+            p = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=convo.created_at
+            )
+        message = Message.objects.create(
+            conversation=convo, sender=self.actor, text=text
+        )
+        notifications.enqueue_message_pushes(message)
+        return convo, message
+
+    def test_a_message_push_names_the_sender_and_deep_links_to_the_thread(self):
+        convo, _message = self._queue_message()
+
+        urlopen = self._run()
+
+        message = self._sent_body(urlopen)[0]
+        self.assertEqual(message["body"], "New message from Ada")
+        self.assertEqual(message["data"]["url"], f"/messages/{convo.id}")
+        self.assertEqual(message["data"]["kind"], "message")
+        # No activity-centre row exists, so there's no id for the app to mark
+        # read — it keys off `kind` instead.
+        self.assertIsNone(message["data"]["notificationId"])
+
+    def test_a_message_push_never_carries_the_message_text(self):
+        # The body crosses Expo's servers and Apple's. Naming the sender is the
+        # most we ever say; quoting a private message would be a real leak.
+        self._queue_message(text="meet me at the usual place at nine")
+
+        urlopen = self._run()
+
+        body = json.dumps(self._sent_body(urlopen))
+        self.assertNotIn("usual place", body)
+
+    def test_a_group_message_push_names_the_group(self):
+        # "New message from Ada" is ambiguous when Ada is in four of your chats.
+        self._queue_message(kind="group", title="Book Club")
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["body"], "Ada in Book Club")
+
+    def test_an_untitled_group_message_falls_back_to_the_plain_wording(self):
+        self._queue_message(kind="group", title="")
+
+        urlopen = self._run()
+
+        self.assertEqual(
+            self._sent_body(urlopen)[0]["body"], "New message from Ada"
+        )
+
+    def test_a_message_already_read_is_dropped_rather_than_sent(self):
+        # Someone with the thread open has polled and moved their read marker
+        # past this message before the timer fired. Buzzing them for something
+        # they're looking at is the fastest way to make push feel broken.
+        convo, message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo, user=self.me, last_read_at=timezone.now()
+        )
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        # Settled, not retried: it can never become unread again.
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_a_message_deleted_before_the_drain_is_not_sent(self):
+        # Message deletion is *soft* (a tombstone, so the thread doesn't
+        # reshuffle), so unlike the notification path there's no cascade to take
+        # the queued push with it. Without an explicit check, deleting a message
+        # you regret still buzzes everyone up to a timer tick later, and the tap
+        # lands on "message deleted".
+        _convo, message = self._queue_message()
+        message.text = ""
+        message.deleted_at = timezone.now()
+        message.save(update_fields=["text", "deleted_at"])
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        # Settled, not retried — a soft delete is never undone.
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_a_message_read_before_it_arrived_still_sends(self):
+        # The guard must compare against *this* message, not merely "has a read
+        # marker" — an old marker means the thread was read at some point, which
+        # says nothing about the new message.
+        convo, message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=message.created_at - timedelta(minutes=5),
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
 
     def test_a_comment_notification_deep_links_to_its_parent_post(self):
         # The route needs the *post* id, but the notification carries a comment

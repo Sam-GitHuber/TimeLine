@@ -221,7 +221,22 @@ lives with EAS), and Phase 10 needs no schema change — only a different
   and a housemate logs in on the same phone, the row moves rather than leaving
   the previous owner's notifications buzzing a device they no longer control.
 - **`PushOutbox`** — a queued delivery: `notification` (one-to-one, CASCADE),
-  `created_at`, `sent_at`, `attempts`, `last_error`, `delivered_tokens`.
+  `message` (FK, CASCADE), `recipient`, `created_at`, `sent_at`, `attempts`,
+  `last_error`, `delivered_tokens`.
+
+  **Exactly one of `notification` and `message` is set**, by check constraint.
+  The `message` target (issue #118) lets a direct/group message buzz a phone
+  **without** creating a `Notification` row: messaging keeps its own unread badge
+  and sits outside the activity centre, so a row per message would double-surface
+  every one of them in the bell. It points at the `Message` rather than carrying a
+  free-text body, which keeps the cascade guarantee below and leaves no way to
+  store message text in a push. The wording rules and gating are messaging's, and
+  live in [messaging.md](messaging.md#push-notifications).
+
+  `recipient` is denormalised (backfilled from `notification.recipient` in
+  migration `0021`) so the drain reads one field whichever target is set. Safe
+  because a notification's recipient is fixed at creation — there's nothing for
+  the copy to drift from.
 
   `delivered_tokens` exists because one notification fans out to N devices
   while `sent_at` is a single flag. Without it, a phone that succeeded and a
@@ -297,7 +312,10 @@ without waking a process every few seconds on a home server.
 - **A push for deleted content cannot fire.** The cascade chain is target →
   `Notification` → `PushOutbox`, so deleting a post takes its queued pushes with
   it. This is what makes the deep-link map safe: no dangling targets to defend
-  against.
+  against. Message pushes get the same guarantee from the same cascade
+  (`Conversation` → `Message` → `PushOutbox`) **plus** an explicit check at send
+  time, because message deletion is *soft* and so leaves the row standing — see
+  [messaging.md](messaging.md#push-notifications).
 - **Dedup means one buzz, not several.** The `reaction` / `event_updated` dedup
   path refreshes a still-unread notification instead of creating one, and
   returns before the enqueue — so a re-reaction or a second edit doesn't buzz
@@ -348,9 +366,11 @@ line (*"Ada replied to your post"*), and the deep-link route. It travels to
 So both see a recipient's device token and the **display name of the person who
 acted**.
 
-Deliberately **not** included: any post or comment text, any photo, any email
-address. A push names people but never quotes them — so a lock screen in a café
-leaks no content, and the third parties in the path see no conversation.
+Deliberately **not** included: any post, comment **or message** text, any photo,
+any email address. A push names people but never quotes them — so a lock screen
+in a café leaks no content, and the third parties in the path see no
+conversation. That rule is what makes pushing private messages acceptable: a new
+message says *"New message from Ada"* and nothing more.
 
 **Why Expo rather than talking to APNs directly.** Direct APNs would keep
 Apple in the path but remove Expo from it, at the cost of holding and rotating
@@ -395,11 +415,17 @@ cold-start tap doesn't race the auth gate's redirect to `/login`. Tapping marks
 the notification **addressed**, matching the web dropdown's click-through.
 
 **Route mapping** (`routeForNotification`) translates the server's one `url`
-into a mobile route: `/p/42` → `/post/42`, `?comment=` preserved, `/u/3`
-unchanged. Targets whose screens don't exist yet — `/requests` (E1),
-`/group-invites` and `/g/…/events/…` (E3) — fall back to the feed, so a
-notification always opens the app rather than crashing it. Add cases as those
-milestones land.
+into a mobile route: `/p/42` → `/post/42` (`?comment=` preserved), `/u/3`
+unchanged, `/requests` → `/people`, `/group-invites` → `/groups`,
+`/g/<gid>/events/<eid>` → `/events/<eid>` (mobile keeps events flat), and
+`/messages/<id>` → `/messages/[conversationId]`. Anything unrecognised falls back
+to the feed, so a notification always opens the app rather than crashing it.
+
+The message case is the odd one: it's the only push with no `Notification` behind
+it, so it arrives with `kind: "message"` and `notificationId: null`. Nothing
+downstream needs to care — the tap can't mark an activity-centre row addressed
+because there isn't one, and the thread screen's mark-read-on-open is what clears
+its badge instead.
 
 A foreground `setNotificationHandler` shows banners while the app is open,
 which iOS otherwise suppresses: there's no in-app activity centre on mobile
@@ -424,4 +450,8 @@ redundant.
 - **Android push** — Phase 10. The Expo transport above already covers it; only
   a different `platform` value and an FCM credential are outstanding.
 - **Email / digest** notifications; **@-mentions** (TimeLine has no mention
-  feature); notifications for **messages** (they keep the unread-count badge).
+  feature).
+- **Messages in the activity centre** — still deliberately out, and now
+  permanently so: messaging keeps its own unread badge, and message *push* rides
+  the outbox without a `Notification` row (issue #118, see
+  [messaging.md](messaging.md#push-notifications)).

@@ -10,8 +10,9 @@ The flow per drain:
 2. Resolve each recipient's *current* device tokens (looked up now, not at
    enqueue time, so a rotated token still gets the push), skipping any device
    this row has already reached.
-3. Build one Expo message per (notification × outstanding device) and POST in
-   batches.
+3. Build one Expo message per (row × outstanding device) and POST in batches.
+   A **message** row is dropped here instead if the recipient has since read the
+   thread — see ``_message_body``.
 4. Read the reply's per-message tickets, then settle each row: delivered
    everywhere → mark sent; anything still outstanding → record the error and
    leave it queued for the next tick. Tokens Expo reports as
@@ -23,9 +24,12 @@ The flow per drain:
    registration. See ``PushReceipt`` for why that would otherwise be silent.
 6. Prune delivered rows older than the retention window.
 
-The notification's wording and deep-link come straight from
+A **notification** row's wording and deep-link come straight from
 ``NotificationSerializer`` — the same ``text`` and ``url`` the web activity
-centre renders, so a push and the in-app row can never drift apart.
+centre renders, so a push and the in-app row can never drift apart. A
+**message** row (issue #118) has no in-app row to agree with, so this command
+phrases it, to the same rule every other push follows: name the person, never
+quote them.
 """
 
 import json
@@ -39,7 +43,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from ...models import DevicePushToken, PushOutbox, PushReceipt
+from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
 from ...serializers import NotificationSerializer
 
 # Expo's reply carries one ticket per message, in the order sent.
@@ -95,6 +99,11 @@ class Command(BaseCommand):
             "notification__comment",
             "notification__event",
             "notification__group",
+            # The message path reads the sender's name and the conversation's
+            # title/kind to phrase its line.
+            "message",
+            "message__sender",
+            "message__conversation",
         )
         if not dry_run:
             # skip_locked: a concurrent run takes different rows rather than
@@ -107,19 +116,30 @@ class Command(BaseCommand):
             return
 
         # One query for every recipient's devices, rather than one per row.
-        recipient_ids = {row.notification.recipient_id for row in pending}
+        recipient_ids = {row.recipient_id for row in pending}
         devices_by_user = {}
         for device in DevicePushToken.objects.filter(user_id__in=recipient_ids):
             devices_by_user.setdefault(device.user_id, []).append(device)
 
+        read_markers = self._read_markers(pending)
+
         messages = []
         for row in pending:
+            # Two reasons to drop a message push rather than send it, both
+            # settled (not retried) because neither state is ever undone: the
+            # message has since been deleted, or the recipient has already read
+            # it. See _should_drop.
+            if row.message_id and self._should_drop(row, read_markers):
+                if not dry_run:
+                    row.sent_at = timezone.now()
+                    row.save(update_fields=["sent_at"])
+                continue
             # Skip devices this row already reached on an earlier attempt, so a
             # retry never re-buzzes a phone that got it the first time.
             delivered = set(row.delivered_tokens or [])
             outstanding = [
                 device
-                for device in devices_by_user.get(row.notification.recipient_id, [])
+                for device in devices_by_user.get(row.recipient_id, [])
                 if device.expo_token not in delivered
             ]
             if not outstanding:
@@ -130,9 +150,9 @@ class Command(BaseCommand):
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
                 continue
-            data = NotificationSerializer(row.notification).data
+            payload = self._payload(row)
             for device in outstanding:
-                messages.append((row, device, self._message(device, data)))
+                messages.append((row, device, self._message(device, payload)))
 
         if not messages:
             self.stdout.write(f"{len(pending)} queued, nothing outstanding to send.")
@@ -146,12 +166,97 @@ class Command(BaseCommand):
 
         self._send(messages)
 
-    def _message(self, device, data):
-        """One Expo push message from a serialized notification.
+    def _read_markers(self, pending):
+        """``{(conversation_id, user_id): last_read_at}`` for the message rows in
+        this batch — one query for the lot rather than one per row."""
+        wanted = [row for row in pending if row.message_id]
+        if not wanted:
+            return {}
+        pairs = Q(pk__in=[])
+        for row in wanted:
+            pairs |= Q(
+                conversation_id=row.message.conversation_id,
+                user_id=row.recipient_id,
+            )
+        return {
+            (read.conversation_id, read.user_id): read.last_read_at
+            for read in ConversationRead.objects.filter(pairs)
+        }
 
-        Deliberately carries **no post or comment content** — only the
-        server-phrased line ("Ada replied to your post"). The body transits
-        Expo's servers and Apple's, so it names people but never quotes them.
+    def _should_drop(self, row, read_markers):
+        """Whether this queued *message* push should be dropped instead of sent.
+
+        **Deleted since enqueue.** Message deletion is a *soft* delete — the row
+        stays as a tombstone so the thread doesn't reshuffle — so unlike the
+        notification path there's no cascade to take the queued push with it.
+        Without this check, deleting a message you regret still buzzes everyone
+        up to a timer tick later, and the tap lands on "message deleted". The
+        cascade covers the hard-delete case (conversation → messages → pushes);
+        this covers the soft one, so "a push for deleted content cannot fire"
+        holds either way.
+
+        **Already read.** This is what "don't buzz me for a thread I'm looking
+        at" costs us: almost nothing. Because the send is out-of-band, by the
+        time a drain runs, anyone with the thread open — on the web, or in the
+        app — has polled and pushed their read marker past this message. So a
+        plain comparison against ``ConversationRead`` covers the case without a
+        presence system, a heartbeat, or the app having to tell us anything. It
+        also cleans up after a delayed drain: a message read on another device
+        before the timer fired doesn't buzz the phone in your pocket.
+        """
+        if row.message.deleted_at is not None:
+            return True
+        marker = read_markers.get(
+            (row.message.conversation_id, row.recipient_id)
+        )
+        return marker is not None and marker >= row.message.created_at
+
+    def _payload(self, row):
+        """The ``(text, url, kind, id)`` a push is built from, for either target.
+
+        A notification defers entirely to ``NotificationSerializer`` so the phone
+        and the activity centre read identically. A message has no in-app row to
+        match, so it's phrased here.
+        """
+        if row.notification_id:
+            data = NotificationSerializer(row.notification).data
+            return {
+                "id": data["id"],
+                "kind": data["kind"],
+                "text": data["text"],
+                "url": data["url"],
+            }
+
+        message = row.message
+        convo = message.conversation
+        # sender is a non-null CASCADE FK, so a deleted account takes its
+        # messages (and these rows) with it — no "Someone" fallback needed here,
+        # unlike a Notification's actor, which is SET_NULL on purpose.
+        sender = message.sender.display_name
+        # A group thread says which one, since "New message from Ada" is
+        # ambiguous when Ada is in four of your chats. An untitled group falls
+        # back to the neutral phrasing rather than inventing a name.
+        if convo.kind == convo.Kind.GROUP and convo.title:
+            text = f"{sender} in {convo.title}"
+        else:
+            text = f"New message from {sender}"
+        return {
+            # No notification id: there is no activity-centre row to mark read.
+            # The app keys off `kind` to know that.
+            "id": None,
+            "kind": "message",
+            "text": text,
+            "url": f"/messages/{convo.id}",
+        }
+
+    def _message(self, device, data):
+        """One Expo push message from a payload.
+
+        Deliberately carries **no post, comment or message content** — only the
+        server-phrased line ("Ada replied to your post", "New message from Ada").
+        The body transits Expo's servers and Apple's, so it names people but
+        never quotes them. That rule is what lets message pushes exist at all: a
+        private message's *text* never leaves our infrastructure.
 
         ``data`` is what the app reads on tap to deep-link: ``url`` is the same
         route string the web app uses (e.g. ``/p/12?comment=34``), which the app

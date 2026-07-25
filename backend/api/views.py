@@ -506,6 +506,13 @@ def decorate_conversations(conversations, user):
             must_connect_with(convo, user) if convo.my_status == PENDING_P else []
         )
         convo._group_display = chat_display_for(convo)
+        # Whether *you* have muted this thread's push notifications. Read off
+        # the rows already fetched above rather than re-querying, and false for
+        # a legacy Participant-less direct thread — which has no row to mute.
+        convo.muted = any(
+            row.user_id == user.id and row.muted_at is not None
+            for row in convo.participant_rows
+        )
         if convo.kind == Conversation.Kind.DIRECT:
             convo.other = convo.other_participant(user)
 
@@ -2080,6 +2087,11 @@ class ConversationMessagesView(generics.ListAPIView):
                 user=request.user,
                 defaults={"last_read_at": now},
             )
+            # Buzz the other participants' phones (issue #118). Enqueue only —
+            # the send is out-of-band, so Expo being slow or down can never slow
+            # down or fail sending a message. Who actually gets one (visibility,
+            # mute, coalescing) is decided in one place; see the helper.
+            notifications.enqueue_message_pushes(message)
         out = MessageSerializer(message, context={"request": request})
         return Response(out.data, status=status.HTTP_201_CREATED)
 
@@ -2101,6 +2113,48 @@ class ConversationReadView(APIView):
             defaults={"last_read_at": timezone.now()},
         )
         return Response({"detail": "Marked read."}, status=status.HTTP_200_OK)
+
+
+class ConversationMuteView(APIView):
+    """Mute or unmute this thread's push notifications for *you*
+    (``POST``/``DELETE /conversations/<pk>/mute/``) — issue #118.
+
+    POST mutes, DELETE unmutes; both return the mute state so a client can
+    render from the response without a refetch. Per-participant, so muting a
+    busy group chat is your choice alone and doesn't silence it for anyone else.
+
+    **Mute stops the buzz, not the messages.** The thread keeps accruing unread
+    messages and keeps its badge — see ``Participant.muted_at`` for why that's
+    the deliberate scope rather than hiding the thread.
+
+    Member-only (404 otherwise, like every other conversation endpoint — a
+    thread you're not in doesn't reveal it exists). A ``pending`` member may mute
+    too: they'll be promoted eventually, and pre-emptively silencing a chat you
+    were dragged into is a reasonable thing to want. 404 for a legacy
+    Participant-less direct thread, which has no row to hold the flag; those
+    can't generate message pushes either, so they're already silent.
+    """
+
+    def _participant(self, pk, user):
+        convo = _viewer_conversation_or_404(pk, user)
+        participant = Participant.objects.filter(
+            conversation=convo, user=user, left_at__isnull=True
+        ).first()
+        if participant is None:
+            raise NotFound()
+        return participant
+
+    def _set(self, request, pk, muted_at):
+        participant = self._participant(pk, request.user)
+        participant.muted_at = muted_at
+        participant.save(update_fields=["muted_at"])
+        return Response({"muted": muted_at is not None}, status=status.HTTP_200_OK)
+
+    def post(self, request, pk):
+        return self._set(request, pk, timezone.now())
+
+    def delete(self, request, pk):
+        return self._set(request, pk, None)
 
 
 class MessageDeleteView(APIView):
