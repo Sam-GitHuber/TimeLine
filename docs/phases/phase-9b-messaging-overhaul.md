@@ -737,12 +737,24 @@ milestone runs long, land them one at a time.
    which also keeps it a single opaque blob under E2E. Watch the interaction with
    linkification (M5 #9): one pass producing both, not two passes fighting.
 2. **@mentions in group chats.** Type `@`, pick from the thread's active
-   participants, and the name renders highlighted. **A mention should notify even
-   in a muted thread** — that's the whole point of mentioning someone, and it's
-   the one justified exception to `Participant.muted_at`. Note the tension: it's
-   also a way to punch through someone's mute, so mention-notifications need
-   their own preference (this one *does* belong in `NotificationPreference`, since
-   it's a genuine notification kind — unlike the read-receipt setting in M4).
+   participants, and the name renders highlighted.
+   - **A mention notifies even in a muted thread — but only if you allow it.**
+     That's the whole point of mentioning someone, and it's the one justified
+     exception to `Participant.muted_at`. It's also, unavoidably, a way to punch
+     through the quiet someone deliberately asked for. So the override is
+     **opt-out, per user, in notification settings**, phrased as exactly what it
+     does: *"Let @mentions notify me in muted chats."* Default **on**.
+   - Be precise about what the setting controls — it is **not** a blanket
+     mentions on/off. It governs only whether a mention *overrides mute*. A muted
+     chat with the setting off stays fully silent; an unmuted chat notifies
+     either way. Getting this wrong gives someone a setting that silences
+     mentions they wanted.
+   - **This one belongs in `NotificationPreference`** — it's a genuine
+     notification kind, so it fits the existing per-kind rows and their
+     absence-means-enabled rule. (Contrast M4's read-receipt setting, which lives
+     on `accounts.User` because there's no notification kind behind it. Both
+     placements are deliberate; note them together in the reference doc so the
+     pair reads as a rule rather than an inconsistency.)
    - Store mentions as a real relation, not by parsing display names out of text
      at read time — names change, and text parsing under E2E is impossible
      server-side.
@@ -759,8 +771,9 @@ milestone runs long, land them one at a time.
 
 **Done when**
 - [ ] `*bold*`/`_italic_` render; raw text unchanged in the database.
-- [ ] @mention a group member; they're notified even if the thread is muted, and
-      can turn that off in preferences.
+- [ ] @mention a group member; they're notified even if the thread is muted.
+- [ ] Turning off *"Let @mentions notify me in muted chats"* silences it in muted
+      threads **only** — mentions in unmuted threads still notify.
 - [ ] Select several messages and delete them in one action.
 - [ ] Reply to a message from the notification without opening the app
       (**device-tested**).
