@@ -190,6 +190,12 @@ describe('routeForNotification', () => {
     expect(routeForNotification('/g/42/events/7')).toBe('/events/7');
   });
 
+  it('opens the thread for a new-message push (#118)', () => {
+    // The one push with no activity-centre row behind it — messaging keeps its
+    // own unread badge — so the route is all the tap has to go on.
+    expect(routeForNotification('/messages/12')).toBe('/messages/12');
+  });
+
   it('falls back to the feed for a missing url', () => {
     expect(routeForNotification(undefined)).toBe('/');
     expect(routeForNotification(null)).toBe('/');

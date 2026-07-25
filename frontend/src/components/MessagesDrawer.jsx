@@ -282,6 +282,18 @@ function ConversationThreadView() {
     onSuccess: () => openList(),
   });
 
+  // Silence this thread's *push* notifications (issue #118). Offered on the web
+  // even though the web has no push of its own: the setting is per-participant
+  // and server-side, so this is where someone at a desk turns off the buzzing in
+  // their pocket. Mute never hides the thread or its unread count.
+  const muteMutation = useMutation({
+    mutationFn: (muted) => api.setConversationMuted(conversationId, muted),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    },
+  });
+
   function handleSubmit(event) {
     event.preventDefault();
     const value = text.trim();
@@ -299,22 +311,46 @@ function ConversationThreadView() {
       <PanelHeader
         onBack={openList}
         actions={
-          isGroup &&
           !convoQuery.isError &&
-          !isPending && (
+          !isPending &&
+          detail && (
             <>
+              {/* Mute is offered on every thread, direct or group — unlike Add
+                  and Leave below, which are group-only. A bell, struck through
+                  when muted, so the state reads at a glance. */}
               <IconButton
-                onClick={() => openNew({ addToConversationId: conversationId })}
-                label="Add people"
+                onClick={() => muteMutation.mutate(!detail.muted)}
+                label={
+                  detail.muted ? "Unmute notifications" : "Mute notifications"
+                }
+                pressed={detail.muted}
               >
-                <StrokeIcon path="M16 19v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2 M9 11a4 4 0 100-8 4 4 0 000 8z M19 8v6 M22 11h-6" />
+                <StrokeIcon
+                  path={
+                    detail.muted
+                      ? "M18 8a6 6 0 00-9.33-5 M6.26 6.26A6 6 0 006 8c0 7-3 9-3 9h14 M13.73 21a2 2 0 01-3.46 0 M2 2l20 20"
+                      : "M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9 M13.73 21a2 2 0 01-3.46 0"
+                  }
+                />
               </IconButton>
-              <IconButton
-                onClick={() => leaveMutation.mutate()}
-                label="Leave chat"
-              >
-                <StrokeIcon path="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4 M16 17l5-5-5-5 M21 12H9" />
-              </IconButton>
+              {isGroup && (
+                <>
+                  <IconButton
+                    onClick={() =>
+                      openNew({ addToConversationId: conversationId })
+                    }
+                    label="Add people"
+                  >
+                    <StrokeIcon path="M16 19v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2 M9 11a4 4 0 100-8 4 4 0 000 8z M19 8v6 M22 11h-6" />
+                  </IconButton>
+                  <IconButton
+                    onClick={() => leaveMutation.mutate()}
+                    label="Leave chat"
+                  >
+                    <StrokeIcon path="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4 M16 17l5-5-5-5 M21 12H9" />
+                  </IconButton>
+                </>
+              )}
             </>
           )
         }

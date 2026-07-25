@@ -382,6 +382,11 @@ class ConversationSerializer(serializers.ModelSerializer):
     must_connect_with = AuthorSerializer(source="must_connect", many=True, read_only=True)
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.IntegerField(read_only=True)
+    # Whether *you* have muted this thread's push notifications (issue #118) —
+    # attached per-viewer by ``decorate_conversations``. Mute silences the buzz
+    # only: ``unread_count`` still climbs and the badge still shows, so a muted
+    # thread is quiet, not hidden.
+    muted = serializers.BooleanField(read_only=True, default=False)
     # Whether you can still *send* in this thread (connected/active, not
     # blocked). Set only on the conversation-detail view; ``null`` in the
     # list, which doesn't need it. Renamed from Phase 5's ``can_message``.
@@ -400,6 +405,7 @@ class ConversationSerializer(serializers.ModelSerializer):
             "must_connect_with",
             "last_message",
             "unread_count",
+            "muted",
             "can_send",
             "updated_at",
         )

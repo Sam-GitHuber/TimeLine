@@ -49,13 +49,22 @@ export function StrokeIcon({ path, size = 20 }) {
   );
 }
 
-export function IconButton({ onClick, label, children }) {
+// `pressed` makes this a *toggle* rather than a plain action: it sets
+// `aria-pressed`, which is what tells a screen reader the control has an on/off
+// state at all, and dims the icon so the on state is visible without colour
+// alone. Left undefined (the default) the button stays a plain button — an
+// `aria-pressed="false"` on a one-shot action would announce a state it doesn't
+// have.
+export function IconButton({ onClick, label, children, pressed }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink-soft transition hover:bg-accent-tint hover:text-accent-deep"
+      aria-pressed={pressed}
+      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition hover:bg-accent-tint hover:text-accent-deep ${
+        pressed ? "text-ink-faint" : "text-ink-soft"
+      }`}
     >
       {children}
     </button>

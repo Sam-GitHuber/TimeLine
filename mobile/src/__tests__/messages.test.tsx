@@ -56,6 +56,7 @@ function convo(overrides: Partial<Conversation> & { id: number }): Conversation 
     must_connect_with: [],
     last_message: null,
     unread_count: 0,
+    muted: false,
     can_send: null,
     updated_at: '2026-07-22T10:00:00Z',
     ...overrides,

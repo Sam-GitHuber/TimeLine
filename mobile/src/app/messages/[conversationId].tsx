@@ -124,6 +124,17 @@ export default function ThreadScreen() {
     },
   });
 
+  const muteMutation = useMutation({
+    mutationFn: (muted: boolean) => api.setConversationMuted(id, muted),
+    onSuccess: () => {
+      // The detail query holds `muted`, and the list shows it too, so both are
+      // refetched rather than patched — a mute is a rare, deliberate tap, so
+      // correctness is worth more here than saving a round-trip.
+      queryClient.invalidateQueries({ queryKey: ['conversation', id] });
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    },
+  });
+
   const leaveMutation = useMutation({
     mutationFn: () => api.leaveConversation(id),
     onSuccess: () => {
@@ -207,24 +218,46 @@ export default function ThreadScreen() {
           )}
         </View>
 
-        {isGroup && !loadError && !isPending ? (
+        {!loadError && !isPending && detail ? (
           <View style={styles.headerActions}>
+            {/* Mute is offered on every thread, direct or group — a chatty 1:1
+                is as worth silencing as a busy group. It's the current state as
+                much as the action, so the label reads as the state ("Muted")
+                once set rather than staying an imperative. */}
             <Pressable
-              onPress={() => router.push(`/messages/new?addTo=${id}`)}
-              accessibilityRole="button"
-              accessibilityLabel="Add people"
+              onPress={() => muteMutation.mutate(!detail.muted)}
+              disabled={muteMutation.isPending}
+              accessibilityRole="switch"
+              accessibilityLabel="Mute notifications"
+              accessibilityState={{ checked: detail.muted }}
               hitSlop={8}
             >
-              <Text style={styles.headerAction}>Add</Text>
+              <Text
+                style={detail.muted ? styles.headerActionOn : styles.headerAction}
+              >
+                {detail.muted ? 'Muted' : 'Mute'}
+              </Text>
             </Pressable>
-            <Pressable
-              onPress={confirmLeave}
-              accessibilityRole="button"
-              accessibilityLabel="Leave chat"
-              hitSlop={8}
-            >
-              <Text style={styles.leave}>Leave</Text>
-            </Pressable>
+            {isGroup ? (
+              <>
+                <Pressable
+                  onPress={() => router.push(`/messages/new?addTo=${id}`)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add people"
+                  hitSlop={8}
+                >
+                  <Text style={styles.headerAction}>Add</Text>
+                </Pressable>
+                <Pressable
+                  onPress={confirmLeave}
+                  accessibilityRole="button"
+                  accessibilityLabel="Leave chat"
+                  hitSlop={8}
+                >
+                  <Text style={styles.leave}>Leave</Text>
+                </Pressable>
+              </>
+            ) : null}
           </View>
         ) : (
           // A fixed-width spacer keeps the identity block centred against the
@@ -388,8 +421,15 @@ const styles = StyleSheet.create({
   leave: { fontSize: fontSize.sm, color: colors.danger, fontWeight: '600' },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   headerAction: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '600' },
-  // Roughly the width of the Add + Leave actions, so the identity block stays
-  // centred against the Back button on threads without those actions.
+  // The "on" state of a toggling header action: dimmed rather than accented,
+  // because a muted thread is the quiet state and shouldn't draw the eye.
+  headerActionOn: {
+    fontSize: fontSize.sm,
+    color: colors.inkFaint,
+    fontWeight: '600',
+  },
+  // Roughly the width of the header actions, so the identity block stays
+  // centred against the Back button on threads without them.
   actionSpacer: { width: 72 },
   list: { flex: 1 },
   messagesContent: { padding: spacing.md, flexGrow: 1 },

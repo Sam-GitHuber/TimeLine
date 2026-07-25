@@ -641,7 +641,10 @@ the app is backgrounded (the `focusManager`↔`AppState` wiring already in
 - **Group-scoped "new chat"** launched from a group page (pool = group members ∩
   your connections, chat scoped to the group) **→ E3** (groups). E2's new-chat is
   the plain compose from the Messages tab.
-- **New-message push → issue #118.**
+- **New-message push → issue #118.** *(Since shipped, after Phase 9 — the
+  outbox grew a `Message` target and a per-participant mute. Details in
+  [`docs/reference/messaging.md`](../reference/messaging.md#push-notifications);
+  the notes below record E2's scope at the time, not the current state.)*
 
 **Definition of done (E2):** conversation list + 1:1 and group threads work
 against the real backend (send, delete-your-own, leave, mark-read, unread badges

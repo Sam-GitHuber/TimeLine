@@ -18,13 +18,25 @@ live, so no call site can forget one:
 The ``address_*`` helpers implement the "resolve-elsewhere" half of the unified
 badge: when a connection request or group invite is dealt with on its own page,
 its notification is marked addressed so the badge stops counting it.
+
+``enqueue_message_pushes`` at the bottom is the odd one out and deliberately so:
+a **message** buzzes a phone without ever creating a ``Notification`` row, because
+messaging is not part of the activity centre (it has its own unread badge — see
+docs/reference/messaging.md). It lives in this module anyway so that *every* rule
+about what may reach someone's phone is readable in one file.
 """
 
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import Connection, Notification, NotificationPreference, PushOutbox
+from .models import (
+    Connection,
+    Notification,
+    NotificationPreference,
+    Participant,
+    PushOutbox,
+)
 
 # The content kinds whose actor must be visible to (connected with) the recipient
 # before we notify — so a not-connected replier/reactor on a group post never
@@ -136,8 +148,99 @@ def create_notification(recipient, actor, kind, *, post=None, comment=None,
         # without buzzing the phone again for something the recipient was
         # already told about. Enqueue only — the send happens out-of-band, see
         # PushOutbox.
-        PushOutbox.objects.create(notification=notification)
+        PushOutbox.objects.create(
+            notification=notification, recipient=recipient
+        )
     return notification
+
+
+def enqueue_message_pushes(message):
+    """Queue a push for everyone who should be told about ``message``.
+
+    Returns the ``PushOutbox`` rows created (mostly for tests to assert on).
+    Called from the message-create view inside its transaction, so a failed send
+    can't leave a message that was never announced — and, like every other push,
+    only a *row* is written here; the network call happens out-of-band in
+    ``manage.py send_pushes``.
+
+    **Who gets one.** Every participant who is ``active``, hasn't left, is still
+    an active account, hasn't muted the thread, and — the subtle one — for whom
+    this message is actually *visible*: their ``ParticipantInterval`` must span
+    the message's ``created_at``. That last rule is why this can't just be "the
+    other members": someone sitting at ``pending`` (invited but not yet connected
+    to everyone), or in the gap between two intervals, cannot read the message in
+    the thread, so buzzing them would announce content the app would then refuse
+    to show. The interval test is one ``filter()`` call on purpose — split across
+    two, Django would join the interval table twice and let *different* intervals
+    satisfy the start and end halves, which would let a gap member through.
+
+    The sender is excluded by the same query rather than by a special case: they
+    are simply not someone the message is news to.
+
+    **Mute is checked here, not at send time**, matching how a muted
+    notification kind never reaches the outbox either — one gate, at enqueue,
+    with nothing to keep in sync. The cost is that muting is not retroactive: a
+    push already queued still goes out. That's a second or two of exposure on a
+    timer-driven queue, and the alternative (re-checking at send) means two
+    places to get wrong.
+
+    **Coalescing.** If a recipient already has an *unsent* push queued for this
+    conversation, we don't add another. A burst of ten messages should buzz a
+    phone once and leave the unread badge to carry the count; without this, the
+    outbox would faithfully deliver ten separate buzzes, which is the single
+    fastest way to make someone turn notifications off.
+
+    **A conversation with no ``Participant`` rows produces nothing.** Those are
+    legacy direct threads predating Phase 6a (migration ``0009`` backfilled the
+    real ones; only threads built straight off the model, as Phase 5's tests do,
+    still lack them). Silence is the right failure here — the alternative is
+    guessing at visibility without the interval data that decides it.
+    """
+    convo_id = message.conversation_id
+    when = message.created_at
+
+    recipients = (
+        Participant.objects.filter(
+            conversation_id=convo_id,
+            left_at__isnull=True,
+            status=Participant.Status.ACTIVE,
+            muted_at__isnull=True,
+            user__is_active=True,
+        )
+        .exclude(user_id=message.sender_id)
+        .filter(
+            # One filter() → one join → one interval row must satisfy both
+            # halves. See the docstring.
+            Q(intervals__started_at__lte=when)
+            & (
+                Q(intervals__ended_at__isnull=True)
+                | Q(intervals__ended_at__gt=when)
+            )
+        )
+        .values_list("user_id", flat=True)
+        .distinct()
+    )
+    recipient_ids = set(recipients)
+    if not recipient_ids:
+        return []
+
+    already_queued = set(
+        PushOutbox.objects.filter(
+            sent_at__isnull=True,
+            message__conversation_id=convo_id,
+            recipient_id__in=recipient_ids,
+        ).values_list("recipient_id", flat=True)
+    )
+    outstanding = recipient_ids - already_queued
+    if not outstanding:
+        return []
+
+    return PushOutbox.objects.bulk_create(
+        [
+            PushOutbox(message=message, recipient_id=user_id)
+            for user_id in sorted(outstanding)
+        ]
+    )
 
 
 def address_connection_request(recipient, connection):

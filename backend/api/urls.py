@@ -119,6 +119,11 @@ urlpatterns = [
         name="conversation-read",
     ),
     path(
+        "conversations/<int:pk>/mute/",
+        views.ConversationMuteView.as_view(),
+        name="conversation-mute",
+    ),
+    path(
         "messages/unread-count/",
         views.UnreadMessageCountView.as_view(),
         name="unread-message-count",

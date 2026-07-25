@@ -214,6 +214,8 @@ export type LastMessage = {
  *   - `last_message` / `unread_count` — attached per-viewer on the **list** only.
  *   - `can_send` — whether you may still post; set only on the **detail** view
  *     (`null` in the list). History stays readable even when it's `false`.
+ *   - `muted` — whether *you* silenced this thread's push notifications. Per
+ *     participant, so it says nothing about anyone else's setting.
  */
 export type Conversation = {
   id: number;
@@ -228,6 +230,12 @@ export type Conversation = {
   must_connect_with: Author[];
   last_message: LastMessage | null;
   unread_count: number;
+  /**
+   * Push notifications silenced for you. Mute stops the buzz only — the thread
+   * still accrues `unread_count` and still shows its badge, so a muted chat is
+   * quiet, not hidden.
+   */
+  muted: boolean;
   can_send: boolean | null;
   updated_at: string;
 };
