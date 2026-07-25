@@ -217,6 +217,8 @@ doc and deleted.
 | 8 | Notifications & activity centre | An in-site notification centre (kept, not vanishing on tap; handled ones dulled) with per-type preferences; events for post/comment replies, reactions, connection requests, group invites | done · `reference/notifications.md` |
 | 8b | Group events & planning calendar | Plan group events (title/date/time/location) with advisory date/time/location/custom polls; upcoming events on the group timeline + a month grid + a personal `/calendar` | done · `reference/events.md` |
 | 9 | iPhone app | An installable iOS app hitting the same backend, with push notifications | planned · `phases/phase-9-iphone-app.md` |
+| 9b | Messaging overhaul | Messaging brought up to the standard of a high-end messaging app: long-press menu, edit, reply, reactions, read receipts, photos | planned · `phases/phase-9b-messaging-overhaul.md` |
+| 9c | E2E encrypted messaging | Messages the server genuinely cannot read — the maintainer included | sketch · `phases/phase-9c-e2e-encryption.md` |
 | 10 | Android app | An installable Android app hitting the same backend, with push notifications | planned · `phases/phase-10-android-app.md` |
 | 11 | Migrate to AWS | All beta data (accounts, posts, comments, photos) moved to **AWS Lightsail** with no data loss; same URL, always-on | planned · `phases/phase-11-aws-migration.md` |
 | 12 | Open source & funding | Public repo with license + contribution guide, and a funding channel (e.g. Patreon) | planned · `phases/phase-12-open-source-funding.md` |
@@ -255,6 +257,12 @@ doc and deleted.
   rather than one giant phase that invents the whole notification concept and an
   app at the same time. Same layering as the `django-storages` seam: build the
   hard shared part once, add the platform-specific channel later.
+- **Messaging overhaul (9b) before Android (10).** The first real user feedback
+  from the beta was about messaging, not the feed — people compare a messenger
+  against the one already in their pocket, and hold it to that standard whether
+  or not we do. Fixing that is worth more than a second platform, and doing it
+  *before* Android means Android inherits the finished version rather than
+  porting the rough one and then porting the fix twice.
 - **Apps (9–10) run on the home-server beta, before AWS.** The phone apps are
   just more clients of the same JSON API, so their real dependency is a stable
   public HTTPS backend — which the home server already provides (Phase 7), not
