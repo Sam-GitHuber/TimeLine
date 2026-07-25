@@ -188,12 +188,21 @@ centre exists for. So `PushOutbox` takes a `Message` as an alternative target to
 | Not muted (`Participant.muted_at`) | See below. |
 | No unsent push already queued for that thread | **Coalescing.** Ten rapid messages must be one buzz — the unread badge carries the count. Without it the outbox faithfully delivers ten, which is the fastest way to make someone turn notifications off. |
 
-**Already-read messages are dropped at send time.** Because the send is
-out-of-band, by the time the timer drains the queue anyone with the thread open —
-web or app — has polled and moved their `ConversationRead` marker past the message.
-Comparing against that marker gets "don't buzz me for the thread I'm looking at"
-with no presence system, no heartbeat, and nothing for the app to report. It also
-covers a message read on another device before the timer fired.
+**Two things drop a queued push at send time**, both settled rather than retried
+since neither state is ever undone:
+
+- **Already read.** Because the send is out-of-band, by the time the timer drains
+  the queue anyone with the thread open — web or app — has polled and moved their
+  `ConversationRead` marker past the message. Comparing against that marker gets
+  "don't buzz me for the thread I'm looking at" with no presence system, no
+  heartbeat, and nothing for the app to report. It also covers a message read on
+  another device before the timer fired.
+- **Deleted since enqueue.** Message deletion is *soft* (a tombstone, so the
+  thread doesn't reshuffle), so there's no cascade to take the queued push with
+  it the way there is for a hard delete. Without this check, deleting a message
+  you regret still buzzes everyone up to a tick later and the tap lands on
+  "message deleted". The two together are what make "a push for deleted content
+  cannot fire" true for messages in both senses.
 
 **The body never quotes the message.** It reads `New message from Ada`, or
 `Ada in Book Club` for a titled group. Push bodies transit Expo's servers and

@@ -44,7 +44,10 @@ export function usePushNotificationTaps(): void {
 
     const data = response.notification.request.content.data as {
       url?: string;
-      notificationId?: number;
+      // Explicitly nullable: a message push (issue #118) has no activity-centre
+      // row behind it and sends `null` here. The truthiness guard below is what
+      // keeps that from becoming a request to /notifications/null/addressed/.
+      notificationId?: number | null;
     };
 
     router.push(routeForNotification(data?.url));

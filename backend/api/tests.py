@@ -5316,6 +5316,23 @@ class SendPushesCommandTests(APITestCase):
         # Settled, not retried: it can never become unread again.
         self.assertIsNotNone(PushOutbox.objects.get().sent_at)
 
+    def test_a_message_deleted_before_the_drain_is_not_sent(self):
+        # Message deletion is *soft* (a tombstone, so the thread doesn't
+        # reshuffle), so unlike the notification path there's no cascade to take
+        # the queued push with it. Without an explicit check, deleting a message
+        # you regret still buzzes everyone up to a timer tick later, and the tap
+        # lands on "message deleted".
+        _convo, message = self._queue_message()
+        message.text = ""
+        message.deleted_at = timezone.now()
+        message.save(update_fields=["text", "deleted_at"])
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        # Settled, not retried — a soft delete is never undone.
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
     def test_a_message_read_before_it_arrived_still_sends(self):
         # The guard must compare against *this* message, not merely "has a read
         # marker" — an old marker means the thread was read at some point, which

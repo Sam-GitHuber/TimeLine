@@ -312,8 +312,10 @@ without waking a process every few seconds on a home server.
 - **A push for deleted content cannot fire.** The cascade chain is target →
   `Notification` → `PushOutbox`, so deleting a post takes its queued pushes with
   it. This is what makes the deep-link map safe: no dangling targets to defend
-  against. Message pushes get the same guarantee by the same means —
-  `Conversation` → `Message` → `PushOutbox`.
+  against. Message pushes get the same guarantee from the same cascade
+  (`Conversation` → `Message` → `PushOutbox`) **plus** an explicit check at send
+  time, because message deletion is *soft* and so leaves the row standing — see
+  [messaging.md](messaging.md#push-notifications).
 - **Dedup means one buzz, not several.** The `reaction` / `event_updated` dedup
   path refreshes a still-unread notification instead of creating one, and
   returns before the enqueue — so a re-reaction or a second edit doesn't buzz

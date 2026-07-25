@@ -125,9 +125,11 @@ class Command(BaseCommand):
 
         messages = []
         for row in pending:
-            # A message the recipient has already read needs no buzz — see
-            # _already_read. Settled, not retried: it will never become unread.
-            if row.message_id and self._already_read(row, read_markers):
+            # Two reasons to drop a message push rather than send it, both
+            # settled (not retried) because neither state is ever undone: the
+            # message has since been deleted, or the recipient has already read
+            # it. See _should_drop.
+            if row.message_id and self._should_drop(row, read_markers):
                 if not dry_run:
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
@@ -181,20 +183,29 @@ class Command(BaseCommand):
             for read in ConversationRead.objects.filter(pairs)
         }
 
-    def _already_read(self, row, read_markers):
-        """Whether the recipient has already read this message, making the push
-        pointless.
+    def _should_drop(self, row, read_markers):
+        """Whether this queued *message* push should be dropped instead of sent.
 
-        **This is what "don't buzz me for a thread I'm looking at" costs us:
-        almost nothing.** Because the send is out-of-band, by the time a drain
-        runs, anyone with the thread open — on the web, or in the app — has
-        polled and pushed their read marker past this message. So a plain
-        comparison against ``ConversationRead`` covers the case without a
-        presence system, a heartbeat, or the app having to tell us anything.
+        **Deleted since enqueue.** Message deletion is a *soft* delete — the row
+        stays as a tombstone so the thread doesn't reshuffle — so unlike the
+        notification path there's no cascade to take the queued push with it.
+        Without this check, deleting a message you regret still buzzes everyone
+        up to a timer tick later, and the tap lands on "message deleted". The
+        cascade covers the hard-delete case (conversation → messages → pushes);
+        this covers the soft one, so "a push for deleted content cannot fire"
+        holds either way.
 
-        It also cleans up after a delayed drain: a message read on another device
+        **Already read.** This is what "don't buzz me for a thread I'm looking
+        at" costs us: almost nothing. Because the send is out-of-band, by the
+        time a drain runs, anyone with the thread open — on the web, or in the
+        app — has polled and pushed their read marker past this message. So a
+        plain comparison against ``ConversationRead`` covers the case without a
+        presence system, a heartbeat, or the app having to tell us anything. It
+        also cleans up after a delayed drain: a message read on another device
         before the timer fired doesn't buzz the phone in your pocket.
         """
+        if row.message.deleted_at is not None:
+            return True
         marker = read_markers.get(
             (row.message.conversation_id, row.recipient_id)
         )
@@ -218,7 +229,10 @@ class Command(BaseCommand):
 
         message = row.message
         convo = message.conversation
-        sender = message.sender.display_name if message.sender else "Someone"
+        # sender is a non-null CASCADE FK, so a deleted account takes its
+        # messages (and these rows) with it — no "Someone" fallback needed here,
+        # unlike a Notification's actor, which is SET_NULL on purpose.
+        sender = message.sender.display_name
         # A group thread says which one, since "New message from Ada" is
         # ambiguous when Ada is in four of your chats. An untitled group falls
         # back to the neutral phrasing rather than inventing a name.
