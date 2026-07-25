@@ -42,6 +42,18 @@ release. Remaining housekeeping (not blocking): distil `phase-9-iphone-app.md`
 into `docs/reference/` mobile docs and delete it, per the phase-ships convention
 (the release half already lives in `mobile-release.md`).
 
+**Next up is Phase 9b — the messaging overhaul**, off the first real beta
+feedback (no way to edit a message). It brings messaging up to the standard of a
+high-end messaging app: a long-press action menu, edit, reply, message reactions,
+read receipts + send status, thread mechanics, photos, then web parity. Full plan
+in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
+— read it before touching messaging. Its milestones are written to be picked up
+cold by a fresh session; follow the "How to use this document" section at the top.
+**E2E encryption is a committed goal**, sketched as
+[`docs/phases/phase-9c-e2e-encryption.md`](docs/phases/phase-9c-e2e-encryption.md);
+three 9b decisions are already shaped by it, so read 9b's *Privacy* section
+before making messaging design calls.
+
 Push specifics live in [`docs/reference/notifications.md`](docs/reference/notifications.md);
 release/build steps live in `docs/mobile-release.md`; everything else Phase 9 is
 still in `docs/phases/phase-9-iphone-app.md`, which gets distilled into reference
