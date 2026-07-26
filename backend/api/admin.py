@@ -8,12 +8,16 @@ from .models import (
     ConversationRead,
     Group,
     GroupMembership,
-    Message,
     Notification,
+    Participant,
     Post,
     PostImage,
     Report,
 )
+
+# NOTE: ``Message`` is deliberately **not** imported or registered here. There is
+# no admin route to message text except a ``Report``'s snapshot — see
+# ``ConversationAdmin``. Don't add one.
 
 
 class PostImageInline(admin.TabularInline):
@@ -77,36 +81,90 @@ class CommentAdmin(admin.ModelAdmin):
         return obj.text[:60] + ("…" if len(obj.text) > 60 else "")
 
 
-class MessageInline(admin.TabularInline):
-    """Show a conversation's messages inline so the maintainer can read/moderate
-    a thread (and soft-delete an individual message) from the admin."""
+class ParticipantInline(admin.TabularInline):
+    """A thread's membership — the *metadata* half of what the removed
+    ``MessageInline`` used to show, and the half that's actually useful for
+    support: status (``active``/``pending``), who invited whom, whether they
+    left, whether they've muted it. Read-only; membership is driven by the
+    clique state machine in ``views.py``, never edited by hand."""
 
-    model = Message
+    model = Participant
     extra = 0
-    fields = ("sender", "short_text", "deleted_at", "created_at")
-    readonly_fields = ("sender", "short_text", "created_at")
-    ordering = ("created_at", "id")
+    fields = ("user", "status", "invited_by", "left_at", "muted_at", "created_at")
+    readonly_fields = fields
+    can_delete = False
 
-    @admin.display(description="text")
-    def short_text(self, obj):
-        if obj.is_deleted:
-            return "(deleted)"
-        return obj.text[:60] + ("…" if len(obj.text) > 60 else "")
+    def has_add_permission(self, request, obj):
+        return False
 
 
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
-    """Lets the maintainer read/moderate a 1:1 message thread from the admin.
+    """Conversation **metadata only** — who's in a thread and when it was
+    active. Deliberately no message text (Phase 9b M0).
 
-    Messages are stored in plaintext (not E2E encrypted — see the phase doc's
-    privacy notes), so they're readable here: a deliberate, disclosed property of
-    the current design, not an oversight."""
+    There used to be a ``MessageInline`` here that rendered every message in a
+    thread, and the docstring called that a disclosed design property. It's gone,
+    and it must not come back. Being *able* to browse a private conversation is
+    not a feature: the realistic failure mode isn't an attacker, it's a bored
+    maintainer reading a thread they have no business reading. Nothing in
+    operating the site needs it.
 
-    list_display = ("id", "user_a", "user_b", "updated_at", "created_at")
-    list_select_related = ("user_a", "user_b")
-    search_fields = ("user_a__email", "user_b__email")
+    What's kept, because it answers real support questions ("why can't Dad see
+    this chat?") while revealing no content: the participants, statuses,
+    timestamps and kind. ``Participant`` rows are the useful part — they carry
+    the clique state machine's status/``left_at``, which is what support
+    questions are actually about.
+
+    **The one legitimate reason to read a message is an abuse report**, so that's
+    the only route: a reporter attaches the specific message, ``Report`` stores
+    its own text snapshot (see ``Report`` in ``models.py``), and the maintainer
+    reads *that* in ``ReportAdmin``. Content access is scoped to what someone
+    deliberately showed you.
+
+    This narrows **who looks**, not what's stored — messages are still plaintext
+    rows in Postgres, so anyone with a shell on the box can still read them. Only
+    E2E encryption fixes that; see ``docs/reference/messaging.md``.
+    """
+
+    list_display = (
+        "id",
+        "kind",
+        "title",
+        "participant_names",
+        "group",
+        "updated_at",
+        "created_at",
+    )
+    list_select_related = ("group", "user_a", "user_b")
+    list_filter = ("kind",)
+    search_fields = (
+        "user_a__email",
+        "user_b__email",
+        "participants__user__email",
+        "title",
+    )
     ordering = ("-updated_at",)
-    inlines = (MessageInline,)
+    inlines = (ParticipantInline,)
+
+    def get_queryset(self, request):
+        # Prefetch so the participants column is one extra query for the page,
+        # not one per row.
+        return (
+            super()
+            .get_queryset(request)
+            .prefetch_related("participants__user")
+        )
+
+    @admin.display(description="participants")
+    def participant_names(self, obj):
+        """Who's in the thread — the metadata that makes a support question
+        answerable. Falls back to the legacy 1:1 columns for a pre-Phase-6a
+        thread that never got ``Participant`` rows."""
+        names = [str(p.user) for p in obj.participants.all() if p.left_at is None]
+        if not names and obj.user_a_id:
+            names = [str(u) for u in (obj.user_a, obj.user_b) if u]
+        return ", ".join(names) or "—"
 
 
 @admin.register(Block)
@@ -162,6 +220,17 @@ class ReportAdmin(admin.ModelAdmin):
     Filter to ``open`` reports, open the flagged post/comment (both are
     moderatable in their own admin), delete the content if warranted, then set
     the report's status to ``resolved``/``dismissed`` here to clear the queue.
+
+    **For a reported message this page is the only place its text appears**
+    (Phase 9b M0 removed the conversation message inline). It's the snapshot
+    taken at report time, not a live read of the row — so a sender soft-deleting
+    the message afterwards doesn't empty the report, and nothing here can be used
+    to walk into the rest of the thread. There's no ``Message`` admin to click
+    through to, by design: acting on a message report means acting on the *person*
+    (block/deactivate) or deleting the message via the API as a participant.
+
+    The snapshot is only on the detail page, never the changelist — the queue
+    shouldn't put private text on screen while you're triaging statuses.
     """
 
     list_display = (
@@ -172,15 +241,18 @@ class ReportAdmin(admin.ModelAdmin):
         "short_reason",
         "created_at",
     )
-    list_select_related = ("reporter", "post", "comment")
+    list_select_related = ("reporter", "post", "comment", "message")
     list_filter = ("status", "created_at")
+    # Deliberately not ``message_text``: searching it would turn the queue into a
+    # keyword search over reported private messages.
     search_fields = ("reason", "reporter__email")
     ordering = ("-created_at",)
     list_editable = ("status",)
+    readonly_fields = ("message_text", "created_at")
 
     @admin.display(description="target")
     def target(self, obj):
-        return f"post #{obj.post_id}" if obj.post_id else f"comment #{obj.comment_id}"
+        return obj.target_label()
 
     @admin.display(description="reason")
     def short_reason(self, obj):

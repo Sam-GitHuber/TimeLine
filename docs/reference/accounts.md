@@ -407,11 +407,19 @@ matters.
 ## Reporting & moderation
 
 A quiet **Report** control on posts + comments (hidden on your own) →
-`POST /api/reports/` → a `Report` row (post XOR comment, DB-enforced) surfaced in
-a Django-admin moderation queue (filter to `open`, remove the content, mark
-resolved). Removal itself stays a manual admin action (the maintainer's
-judgement). Chosen over an email-only takedown path so it's self-contained and
-testable. See also the moderation runbook in [deploy.md](../deploy.md).
+`POST /api/reports/` → a `Report` row (exactly one of post / comment / message,
+DB-enforced) surfaced in a Django-admin moderation queue (filter to `open`, remove
+the content, mark resolved). Removal itself stays a manual admin action (the
+maintainer's judgement). Chosen over an email-only takedown path so it's
+self-contained and testable. See also the moderation runbook in
+[deploy.md](../deploy.md).
+
+**Messages are reportable too, and they're the special case** (Phase 9b): the admin
+can no longer read a conversation at all, so a report is the *only* path by which
+message text reaches the maintainer, and the row carries a server-written snapshot
+of the reported text. [messaging.md](messaging.md#moderation-a-report-is-the-only-window)
+owns that story — the visibility gate, the snapshot's rationale, and why deleted
+messages can't be reported.
 
 **Mobile (Phase 9 E4a).** The iOS app surfaces the same controls against the same
 endpoints — App Review requires working report **and** block for a social app. A

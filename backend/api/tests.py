@@ -2809,6 +2809,265 @@ class ReportTests(APITestCase):
         self.assertEqual(Report.objects.count(), 1)
 
 
+# --- Phase 9b M0: reporting a message (the only path to message text) ----------
+
+
+class MessageReportTests(APITestCase):
+    """Flagging a *message*, which after M0 is the only way message text ever
+    reaches the maintainer (the admin can't render a thread any more).
+
+    The gate is the messaging safety gate, not the feed's: interval-clipped, so
+    reporting can't become a back door into history you were clipped out of.
+    """
+
+    def setUp(self):
+        self.reporter = make_user("reporter@example.com", first_name="Rep")
+        self.sender = make_user("sender@example.com", first_name="Sen")
+        make_connection(self.reporter, self.sender)
+        self.convo = Conversation.objects.create(
+            kind=Conversation.Kind.DIRECT,
+            user_a=self.reporter,
+            user_b=self.sender,
+            created_by=self.reporter,
+        )
+        for user in (self.reporter, self.sender):
+            participant = Participant.objects.create(
+                conversation=self.convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=participant,
+                started_at=timezone.now() - timedelta(days=1),
+            )
+        self.message = Message.objects.create(
+            conversation=self.convo, sender=self.sender, text="something awful"
+        )
+        self.client.force_authenticate(self.reporter)
+
+    def test_reporting_a_message_stores_a_text_snapshot(self):
+        resp = self.client.post(
+            REPORTS_URL,
+            {"message": self.message.pk, "reason": "abusive"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        report = Report.objects.get()
+        self.assertEqual(report.message_id, self.message.pk)
+        self.assertIsNone(report.post_id)
+        self.assertIsNone(report.comment_id)
+        self.assertEqual(report.message_text, "something awful")
+        # The snapshot is for the maintainer, not the API: it must not come back
+        # in the response either.
+        self.assertNotIn("message_text", resp.data)
+
+    def test_the_snapshot_survives_the_sender_deleting_the_message(self):
+        """The whole reason the snapshot exists: deletion is *soft* (it blanks
+        the text), so without a copy a sender could empty the evidence a second
+        after being reported."""
+        self.client.post(
+            REPORTS_URL, {"message": self.message.pk}, format="json"
+        )
+        self.client.force_authenticate(self.sender)
+        resp = self.client.delete(
+            f"/api/conversations/{self.convo.pk}/messages/{self.message.pk}/"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.message.refresh_from_db()
+        self.assertEqual(self.message.text, "")
+        self.assertEqual(Report.objects.get().message_text, "something awful")
+
+    def test_the_snapshot_cannot_be_forged_by_the_reporter(self):
+        # A body-supplied snapshot is ignored — it's written from the row.
+        resp = self.client.post(
+            REPORTS_URL,
+            {"message": self.message.pk, "message_text": "words I made up"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Report.objects.get().message_text, "something awful")
+
+    def test_cannot_report_a_message_in_a_thread_you_are_not_in(self):
+        outsider = make_user("outsider@example.com")
+        self.client.force_authenticate(outsider)
+        resp = self.client.post(
+            REPORTS_URL, {"message": self.message.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Report.objects.count(), 0)
+
+    def test_cannot_report_a_message_from_inside_your_gap(self):
+        """The interval-clipping case. A member who was out of a group chat when
+        a message was sent can't see it — and must not be able to launder it into
+        the admin by reporting it."""
+        a = make_user("ga@example.com")
+        b = make_user("gb@example.com")
+        gapper = make_user("gapper@example.com")
+        convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=a
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=2)
+        for user in (a, b):
+            p = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(participant=p, started_at=t0)
+        # gapper was active [t0, t1) and is active again from now — the hour in
+        # between is their gap.
+        gap_p = Participant.objects.create(
+            conversation=convo, user=gapper, status="active"
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=t0, ended_at=t1
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=timezone.now()
+        )
+        in_gap = Message.objects.create(
+            conversation=convo, sender=a, text="said while they were out"
+        )
+        Message.objects.filter(pk=in_gap.pk).update(
+            created_at=t1 + timedelta(minutes=10)
+        )
+
+        self.client.force_authenticate(gapper)
+        resp = self.client.post(
+            REPORTS_URL, {"message": in_gap.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Report.objects.count(), 0)
+
+    def test_a_blocked_pair_cannot_report_each_others_messages(self):
+        Block.objects.create(blocker=self.sender, blocked=self.reporter)
+        resp = self.client.post(
+            REPORTS_URL, {"message": self.message.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cannot_report_an_already_deleted_message(self):
+        self.message.deleted_at = timezone.now()
+        self.message.text = ""
+        self.message.save(update_fields=["deleted_at", "text"])
+        resp = self.client.post(
+            REPORTS_URL, {"message": self.message.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Report.objects.count(), 0)
+
+    def test_reporting_the_same_message_twice_is_idempotent(self):
+        first = self.client.post(
+            REPORTS_URL, {"message": self.message.pk}, format="json"
+        )
+        second = self.client.post(
+            REPORTS_URL, {"message": self.message.pk}, format="json"
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(Report.objects.count(), 1)
+
+    def test_report_needs_exactly_one_target_of_three(self):
+        post = Post.objects.create(author=self.sender, text="a post")
+        both = self.client.post(
+            REPORTS_URL,
+            {"post": post.pk, "message": self.message.pk},
+            format="json",
+        )
+        self.assertEqual(both.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Report.objects.count(), 0)
+
+    def test_a_post_report_still_works_and_snapshots_nothing(self):
+        # The widened target must not disturb the Phase 7 path.
+        post = Post.objects.create(author=self.sender, text="a post")
+        resp = self.client.post(REPORTS_URL, {"post": post.pk}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Report.objects.get().message_text, "")
+
+
+class AdminMessagePrivacyTests(APITestCase):
+    """M0's real guarantee: **no admin page renders message text**, except a
+    report's snapshot.
+
+    Written as a functional test against the actual admin pages rather than an
+    inspection of ``admin.site._registry``, because the thing we care about is
+    what a maintainer can *see* — an inline, a raw_id popup or a search result
+    would each defeat a structural check while still putting the text on screen.
+    """
+
+    SECRET = "zebra-pinecone-confession"
+
+    def setUp(self):
+        self.staff = User.objects.create_superuser(
+            email="admin@example.com", password=PASSWORD
+        )
+        self.a = make_user("aa@example.com", first_name="Aa")
+        self.b = make_user("bb@example.com", first_name="Bb")
+        make_connection(self.a, self.b)
+        self.convo = Conversation.objects.create(
+            kind=Conversation.Kind.DIRECT,
+            user_a=self.a,
+            user_b=self.b,
+            created_by=self.a,
+        )
+        for user in (self.a, self.b):
+            p = Participant.objects.create(
+                conversation=self.convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=timezone.now() - timedelta(days=1)
+            )
+        self.message = Message.objects.create(
+            conversation=self.convo, sender=self.a, text=self.SECRET
+        )
+        self.client.force_login(self.staff)
+
+    def test_message_is_not_registered_in_the_admin(self):
+        from django.contrib import admin as django_admin
+
+        self.assertNotIn(Message, django_admin.site._registry)
+        # …and no Conversation inline sneaks it back in.
+        convo_admin = django_admin.site._registry[Conversation]
+        self.assertNotIn(
+            Message, [inline.model for inline in convo_admin.inlines]
+        )
+
+    def test_no_message_admin_route_exists(self):
+        for url in (
+            "/admin/api/message/",
+            f"/admin/api/message/{self.message.pk}/change/",
+        ):
+            resp = self.client.get(url)
+            self.assertEqual(resp.status_code, 404, url)
+
+    def test_conversation_admin_shows_metadata_but_no_message_text(self):
+        changelist = self.client.get("/admin/api/conversation/")
+        change = self.client.get(
+            f"/admin/api/conversation/{self.convo.pk}/change/"
+        )
+        self.assertEqual(changelist.status_code, 200)
+        self.assertEqual(change.status_code, 200)
+        for resp in (changelist, change):
+            self.assertNotIn(self.SECRET, resp.content.decode())
+        # The metadata support actually needs is still there.
+        self.assertIn("aa@example.com", changelist.content.decode())
+        self.assertIn("active", change.content.decode())
+
+    def test_a_reported_message_is_readable_by_the_maintainer(self):
+        report = Report.objects.create(
+            reporter=self.b,
+            message=self.message,
+            message_text=self.message.text,
+            reason="please look at this",
+        )
+        resp = self.client.get(f"/admin/api/report/{report.pk}/change/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(self.SECRET, resp.content.decode())
+        # …but the triage queue itself doesn't put it on screen.
+        queue = self.client.get("/admin/api/report/")
+        self.assertEqual(queue.status_code, 200)
+        self.assertNotIn(self.SECRET, queue.content.decode())
+        self.assertIn(f"message #{self.message.pk}", queue.content.decode())
+
+
 # --- Phase 7: account deletion (delete-my-data path) --------------------------
 
 DELETE_ACCOUNT_URL = "/api/account/delete/"

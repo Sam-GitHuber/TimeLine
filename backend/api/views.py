@@ -2806,21 +2806,72 @@ class NotificationPreferencesView(APIView):
 # --- Content reports (Phase 7 — takedown path) ---------------------------------
 
 
+def can_view_message(user, message):
+    """Whether ``user`` may see ``message`` — the report gate for a message
+    target, and the exact same rule the thread itself uses.
+
+    Three conditions, all reused rather than re-derived (a second copy of the
+    messaging safety gate would drift from the first):
+
+    1. They're a member of the conversation at all (``_viewer_participant_status``).
+    2. For a direct thread, the pair isn't blocked either way — a blocked thread
+       404s everywhere else, so it must here too.
+    3. The message falls inside one of their access intervals
+       (``_messages_for_viewer``). This is what stops a member who was ``pending``
+       across a gap from reporting — and thereby reading back, via the admin — a
+       message from inside that gap. A never-active member has no interval at all,
+       so they're excluded by the same test with no special case.
+
+    Deliberately **not** gated on being *currently* ``active``, unlike the thread
+    endpoint. Someone who has since dropped to ``pending`` can still report a
+    message from one of their past intervals — i.e. something they genuinely read at
+    the time. Being demoted shouldn't disarm you: the abuse you want to report is
+    often the reason the chat fell apart. Nothing leaks either way, since the
+    snapshot goes to the maintainer and is never returned to the reporter. Someone
+    who *left* is excluded, because ``_viewer_participant_status`` ignores rows with
+    ``left_at`` set.
+    """
+    convo = message.conversation
+    if _viewer_participant_status(convo, user) is None:
+        return False
+    if convo.kind == Conversation.Kind.DIRECT:
+        other = convo.other_participant(user)
+        if is_blocked_between(user, other):
+            return False
+    return _messages_for_viewer(convo, user).filter(pk=message.pk).exists()
+
+
 class ReportCreateView(generics.CreateAPIView):
-    """Flag a post or comment for the maintainer (``POST /api/reports/``).
+    """Flag a post, comment or message for the maintainer
+    (``POST /api/reports/``).
 
     Any logged-in member can raise a report; the reporter is the session user
     (never the body). The report just records the flag — the maintainer reviews
     it in the Django admin (where the reported post/comment is moderatable) and
     removes the content if warranted.
 
-    Two guards beyond the serializer's xor/length checks:
+    **Messages (Phase 9b M0) are the reason this endpoint matters more than it
+    used to.** The admin can no longer render a conversation's messages at all, so
+    a report is now the *only* path by which message text reaches the maintainer —
+    which is the point: they see what someone deliberately showed them. Two
+    message-specific rules:
+
+    - The report stores a **snapshot** of the text, written here from the message
+      row and never from the request body. A reporter must not be able to invent
+      what someone said, and message deletion is soft, so without a snapshot a
+      sender could blank the evidence a second after being reported.
+    - A **deleted** message can't be reported (400). There's no content left to
+      moderate, and the tombstone is all anyone can see anyway.
+
+    Two guards beyond the serializer's exactly-one/length checks:
 
     - **You can only report content you can see.** Without this the endpoint
-      would confirm which post/comment ids exist (a 201-vs-400 oracle) for
+      would confirm which post/comment/message ids exist (a 201-vs-400 oracle) for
       content you have no relationship to — a hole in the same private-by-default
       wall the feed and comments enforce. A non-visible target gets the same 404
-      it gets everywhere else, so existence isn't leaked either way.
+      it gets everywhere else, so existence isn't leaked either way. For a message
+      that check is ``can_view_message``, which is interval-clipped: reporting
+      must not become a way to read history you were clipped out of.
     - **One flag per (reporter, target).** A repeat/double-click returns your
       existing report (200) instead of stacking duplicates in the queue; the
       model's unique constraints are the race-proof backstop.
@@ -2835,6 +2886,7 @@ class ReportCreateView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         post = serializer.validated_data.get("post")
         comment = serializer.validated_data.get("comment")
+        message = serializer.validated_data.get("message")
 
         connected_ids = connected_user_ids(request.user)
         if post is not None and not can_view_post(
@@ -2845,18 +2897,29 @@ class ReportCreateView(generics.CreateAPIView):
             request.user, comment, connected_ids
         ):
             raise NotFound()
+        if message is not None:
+            if not can_view_message(request.user, message):
+                raise NotFound()
+            if message.is_deleted:
+                raise ValidationError(
+                    "That message was deleted, so there's nothing to report."
+                )
 
         # Idempotent: already flagged this item? Return that report, don't stack a
         # duplicate. (The unique constraint still guards against a concurrent race
         # slipping past this check.)
         existing = Report.objects.filter(
-            reporter=request.user, post=post, comment=comment
+            reporter=request.user, post=post, comment=comment, message=message
         ).first()
         if existing is not None:
             data = self.get_serializer(existing).data
             return Response(data, status=status.HTTP_200_OK)
 
-        serializer.save(reporter=request.user)
+        # The snapshot is server-written, from the row — see the docstring.
+        serializer.save(
+            reporter=request.user,
+            message_text=message.text if message is not None else "",
+        )
         headers = self.get_success_headers(serializer.data)
         return Response(
             serializer.data, status=status.HTTP_201_CREATED, headers=headers

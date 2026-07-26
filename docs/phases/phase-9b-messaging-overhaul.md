@@ -60,7 +60,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 
 | | Milestone | Depends on | Size | Done |
 |---|---|---|---|---|
-| **M0** | Close the admin message window | — | **S** | ☐ |
+| **M0** | Close the admin message window | — | **S** | ☑ |
 | **M1** | Long-press menu + edit | — | **S–M** | ☐ |
 | **M2** | Message reactions | M1 | **S** | ☐ |
 | **M3** | Reply / quote | M1 | **M** | ☐ |
@@ -308,11 +308,14 @@ and merge it on its own.
 - Reporting a message stores the snapshot; the report admin shows it.
 - Existing messaging tests still pass (this touches no API path).
 
-**Done when**
-- [ ] Message text cannot be reached from any admin page except via a report.
-- [ ] Conversation metadata is still visible for support.
-- [ ] A reported message is readable by the maintainer, with a test proving it.
-- [ ] `messaging.md` records the new moderation path and repeats — unchanged —
+**Done when** — ✅ all done; `messaging.md` → *Moderation: a report is the only
+window* is the durable record. The one thing M0 deliberately left for M1: the
+**Report** item in the long-press menu (no menu existed yet), so the endpoint and
+both clients' `reportContent({ messageId })` shipped without a UI entry point.
+- [x] Message text cannot be reached from any admin page except via a report.
+- [x] Conversation metadata is still visible for support.
+- [x] A reported message is readable by the maintainer, with a test proving it.
+- [x] `messaging.md` records the new moderation path and repeats — unchanged —
       that messages are still stored in plaintext.
 
 ---
@@ -372,9 +375,14 @@ The reported problem, and the foundation M2 and M3 hang off.
    what makes the gesture feel deliberate rather than accidental. Remember
    `--renew-anon-volumes` after adding it; mobile deps are separate from
    `frontend`'s.
-3. Menu items — own message: **Copy · Edit · Delete**. Someone else's: **Copy**.
-   **Build the item list data-driven**, because M2 and M3 insert React and Reply
-   into this same menu.
+3. Menu items — own message: **Copy · Edit · Delete**. Someone else's: **Copy ·
+   Report**. **Build the item list data-driven**, because M2 and M3 insert React
+   and Reply into this same menu.
+   - **Report is already built end-to-end by M0** — `POST /api/reports/` takes
+     `{ message }`, `api.reportContent({ messageId })` exists in both clients, and
+     `ReportModal` renders the message wording. M1 only has to add the menu item
+     that opens it. (M0 deliberately shipped no UI: backend first, per
+     *Compatibility* below.)
 4. **Edit mode in the composer:** an "Editing message" bar above the input
    showing the original, with an ✕ to cancel; input pre-filled and focused; Send
    becomes a confirm. Escape hatches everywhere — cancelling, or clearing the

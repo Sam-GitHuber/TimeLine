@@ -328,6 +328,16 @@ Members can flag content and delete their own accounts (Phase 7 legal gate).
   breaks the Terms, then set the report’s **status** to `resolved` (or `dismissed`
   if there’s nothing to do) to clear the queue.
 
+- **A reported *message* works differently, on purpose.** You can't open the
+  message or its conversation — the admin shows no message text anywhere else
+  (Phase 9b; see
+  [reference/messaging.md](reference/messaging.md#moderation-a-report-is-the-only-window)).
+  The report itself carries a **snapshot** of the flagged text, taken when it was
+  reported, and that's all you get. So the action isn't “delete the content”
+  (you can't, and deletion is the sender's own soft-delete) — it's judging the
+  **person**: warn them, deactivate the account (`is_active` off in **Accounts ›
+  Users**), or dismiss. Then set the status as above.
+
 - **Account deletion is self-service and permanent.** A member deletes their own
   account from **Settings** (password-reconfirmed). It hard-deletes their account
   and content, removes their uploaded image files from `/srv/timeline/media`, and

@@ -7,6 +7,9 @@
  *   - the post ⋯ menu reports someone else's post and deletes your own (with a
  *     confirm in between, and an owner-gated menu);
  *   - a comment's inline Report flags it, and is hidden on your own comment;
+ *   - a *message* report (Phase 9b M0) posts `{ message: id }` and discloses that
+ *     a copy of the message goes with it — the only route by which message text
+ *     ever reaches the maintainer;
  *   - Block confirms through the shared warning modal then POSTs; Unblock fires
  *     immediately with no warning.
  *
@@ -30,6 +33,7 @@ import { ActionSheetIOS, Alert } from 'react-native';
 import { BlockButton } from '@/components/BlockButton';
 import { CommentThread } from '@/components/CommentThread';
 import { PostMenu } from '@/components/PostMenu';
+import { ReportModal } from '@/components/ReportModal';
 import type { Comment } from '@/types';
 
 // A fixed viewer (pk 1) over the real AuthProvider — the owner checks read it.
@@ -214,6 +218,41 @@ describe('comment Report', () => {
 
     await screen.findByText('Comment 9');
     expect(screen.queryByLabelText('Report comment')).toBeNull();
+  });
+});
+
+describe('ReportModal on a message (Phase 9b M0)', () => {
+  it('flags a message and says what it hands over', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ id: 4 }, 201));
+    await renderWithClient(<ReportModal messageId={31} onClose={() => {}} />);
+
+    // The disclosure is the point of the message variant: a report is the only
+    // way message text reaches the maintainer, so the copy must say so *before*
+    // the user sends it, not after.
+    screen.getByText('Report this message');
+    screen.getByText(/A copy of this message is sent with your report/);
+
+    await fireEvent.changeText(
+      screen.getByLabelText('Reason for reporting this message'),
+      'abusive'
+    );
+    await fireEvent.press(screen.getByText('Send report'));
+
+    await waitFor(() => expect(made(/\/api\/reports\/$/, 'POST')).toBe(true));
+    // `message`, not `post`/`comment` — and no client-supplied snapshot: the
+    // server writes the text from the row.
+    expect(requestBody(/\/api\/reports\/$/, 'POST')).toEqual({
+      message: 31,
+      reason: 'abusive',
+    });
+  });
+
+  it('keeps the post wording (and no message disclosure) for a post', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ id: 5 }, 201));
+    await renderWithClient(<ReportModal postId={7} onClose={() => {}} />);
+
+    screen.getByText('Report this post');
+    expect(screen.queryByText(/A copy of this message is sent/)).toBeNull();
   });
 });
 

@@ -554,12 +554,18 @@ class GroupInviteSerializer(serializers.ModelSerializer):
 
 
 class ReportCreateSerializer(serializers.ModelSerializer):
-    """Flag a post or comment for the maintainer (Phase 7 takedown path).
+    """Flag a post, comment or message for the maintainer (Phase 7 takedown
+    path; ``message`` added in Phase 9b M0).
 
-    The body carries **exactly one** target — ``post`` OR ``comment`` (by id) —
-    plus an optional free-text ``reason``. ``reporter`` and ``status`` are set by
-    the view/model, never the body. The model's check constraint is the ultimate
-    guardrail; validating here too gives a clean 400 instead of a 500.
+    The body carries **exactly one** target — ``post``, ``comment`` or
+    ``message`` (by id) — plus an optional free-text ``reason``. ``reporter`` and
+    ``status`` are set by the view/model, never the body. The model's check
+    constraint is the ultimate guardrail; validating here too gives a clean 400
+    instead of a 500.
+
+    ``message_text`` (the snapshot the maintainer reads) is **not a field here**
+    in either direction: the view writes it from the message row, so a reporter
+    can neither forge it nor read it back.
     """
 
     reason = serializers.CharField(
@@ -571,13 +577,14 @@ class ReportCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Report
-        fields = ("id", "post", "comment", "reason", "created_at")
+        fields = ("id", "post", "comment", "message", "reason", "created_at")
         read_only_fields = ("id", "created_at")
 
     def validate(self, attrs):
-        if bool(attrs.get("post")) == bool(attrs.get("comment")):
+        targets = [attrs.get("post"), attrs.get("comment"), attrs.get("message")]
+        if sum(1 for t in targets if t is not None) != 1:
             raise serializers.ValidationError(
-                "Report exactly one of a post or a comment."
+                "Report exactly one of a post, a comment or a message."
             )
         return attrs
 
