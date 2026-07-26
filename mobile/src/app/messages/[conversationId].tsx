@@ -9,7 +9,8 @@
  *   - polls the messages on the fast cadence (`MESSAGE_POLL_MS`);
  *   - marks the thread read on open and as new messages land, clearing the
  *     per-thread pill and the tab badge;
- *   - sends, and soft-deletes your own message (long-press → confirm);
+ *   - sends, and offers the **long-press action menu** on any bubble — Copy /
+ *     Edit / Delete on your own, Copy / Report on someone else's (Phase 9b M1);
  *   - a *group* header offers Leave; a 1:1 header links to the other's profile;
  *   - a **pending** viewer (added but not yet connected to the whole clique) sees
  *     the locked `PendingChatPanel` instead of the message list;
@@ -26,6 +27,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
+import * as Clipboard from 'expo-clipboard';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -42,17 +44,69 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api, ApiError, MESSAGE_POLL_MS } from '@/api';
+import { api, ApiError, MESSAGE_EDIT_WINDOW_MS, MESSAGE_POLL_MS } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
+import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
+import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
+import { ReportModal } from '@/components/ReportModal';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
 
 /** The composer bar's base vertical padding, before the home-indicator inset. */
 const COMPOSER_PAD = spacing.sm + 2;
+
+/**
+ * What the long-press menu offers for one message.
+ *
+ * A plain function of its inputs (`now` is passed in, not read) so it's decided
+ * at press time rather than at render time — one of the entries expires, and a
+ * menu whose contents depend on when React last redrew would be a subtle bug.
+ * Built as **data** so M2 (react) and M3 (reply) can slot their entries in
+ * without turning the thread screen into a JSX thicket.
+ *
+ * Edit appears only on your own message, only inside the edit window, and only
+ * while you can still send here. The server enforces all three independently;
+ * this just avoids offering an action that's going to come back 403.
+ */
+function messageActions({
+  message,
+  mine,
+  canSend,
+  now,
+  onEdit,
+  onDelete,
+  onReport,
+}: {
+  message: Message;
+  mine: boolean;
+  canSend: boolean;
+  now: number;
+  onEdit: (message: Message) => void;
+  onDelete: (messageId: number) => void;
+  onReport: (messageId: number) => void;
+}): MessageAction[] {
+  const actions: MessageAction[] = [
+    { label: 'Copy', onPress: () => Clipboard.setStringAsync(message.text) },
+  ];
+  if (mine) {
+    const age = now - new Date(message.created_at).getTime();
+    if (canSend && age < MESSAGE_EDIT_WINDOW_MS) {
+      actions.push({ label: 'Edit', onPress: () => onEdit(message) });
+    }
+    actions.push({
+      label: 'Delete',
+      destructive: true,
+      onPress: () => onDelete(message.id),
+    });
+  } else {
+    actions.push({ label: 'Report', onPress: () => onReport(message.id) });
+  }
+  return actions;
+}
 
 export default function ThreadScreen() {
   const { conversationId } = useLocalSearchParams<{ conversationId: string }>();
@@ -62,6 +116,25 @@ export default function ThreadScreen() {
   const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const listRef = useRef<FlatList<Message>>(null);
+  const inputRef = useRef<TextInput>(null);
+
+  // The long-pressed bubble, where it sits on screen, and what the menu offers
+  // for it. Null = no menu open. The actions are decided *at press time* rather
+  // than during render, because one of them depends on the clock (Edit expires
+  // 15 minutes after sending) and a render-time `Date.now()` would make the
+  // component's output depend on when React happened to redraw it.
+  const [menuTarget, setMenuTarget] = useState<{
+    message: Message;
+    mine: boolean;
+    anchor: BubbleAnchor;
+    actions: MessageAction[];
+  } | null>(null);
+  // The message being corrected, if any — the composer doubles as the editor.
+  const [editing, setEditing] = useState<Message | null>(null);
+  // Whatever was half-typed when edit mode started, put back on cancel. Losing
+  // a draft to a typo fix would be its own small betrayal.
+  const [stashedDraft, setStashedDraft] = useState('');
+  const [reportingId, setReportingId] = useState<number | null>(null);
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/messages');
@@ -124,6 +197,19 @@ export default function ThreadScreen() {
     },
   });
 
+  const editMutation = useMutation({
+    mutationFn: ({ messageId, value }: { messageId: number; value: string }) =>
+      api.editMessage(id, messageId, value),
+    onSuccess: () => {
+      stopEditing();
+      queryClient.invalidateQueries({ queryKey: ['messages', id] });
+      // The list preview reads the latest message's text, so a correction to the
+      // most recent message has to refresh it — even though an edit deliberately
+      // doesn't reorder the list.
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    },
+  });
+
   const muteMutation = useMutation({
     mutationFn: (muted: boolean) => api.setConversationMuted(id, muted),
     onSuccess: () => {
@@ -146,10 +232,36 @@ export default function ThreadScreen() {
     },
   });
 
+  const busy = sendMutation.isPending || editMutation.isPending;
+
+  /** Send a new message, or save the one being edited — the composer does both. */
   function handleSend() {
     const value = text.trim();
-    if (!value || sendMutation.isPending) return;
+    if (!value || busy) return;
+    if (editing) {
+      // Saving the original text unchanged is a no-op, not a pointless PATCH
+      // that would stamp the message "Edited" for nothing.
+      if (value === editing.text) stopEditing();
+      else editMutation.mutate({ messageId: editing.id, value });
+      return;
+    }
     sendMutation.mutate(value);
+  }
+
+  function startEditing(message: Message) {
+    setStashedDraft(text);
+    setEditing(message);
+    setText(message.text);
+    editMutation.reset();
+    // Focus after the composer has re-rendered into edit mode.
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
+  /** Leave edit mode and put the pre-edit draft back in the composer. */
+  function stopEditing() {
+    setEditing(null);
+    setText(stashedDraft);
+    setStashedDraft('');
   }
 
   function confirmDelete(messageId: number) {
@@ -319,7 +431,22 @@ export default function ThreadScreen() {
                   message={item}
                   mine={mine}
                   showSender={isGroup && !mine && startsRun}
-                  onRequestDelete={() => confirmDelete(item.id)}
+                  onLongPress={(anchor) =>
+                    setMenuTarget({
+                      message: item,
+                      mine,
+                      anchor,
+                      actions: messageActions({
+                        message: item,
+                        mine,
+                        canSend,
+                        now: Date.now(),
+                        onEdit: startEditing,
+                        onDelete: confirmDelete,
+                        onReport: setReportingId,
+                      }),
+                    })
+                  }
                 />
               );
             }}
@@ -344,32 +471,63 @@ export default function ThreadScreen() {
             ]}
           >
             {canSend ? (
-              <View style={styles.composer}>
-                <TextInput
-                  value={text}
-                  onChangeText={setText}
-                  placeholder="Write a message…"
-                  placeholderTextColor={colors.inkFaint}
-                  multiline
-                  style={styles.input}
-                  accessibilityLabel="Message"
-                />
-                <Pressable
-                  onPress={handleSend}
-                  disabled={!text.trim() || sendMutation.isPending}
-                  accessibilityRole="button"
-                  accessibilityLabel="Send"
-                  style={({ pressed }) => [
-                    styles.send,
-                    (!text.trim() || sendMutation.isPending) && styles.sendDisabled,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text style={styles.sendLabel}>
-                    {sendMutation.isPending ? 'Sending…' : 'Send'}
-                  </Text>
-                </Pressable>
-              </View>
+              <>
+                {/* Edit mode says plainly what's being changed and offers an
+                    obvious way out. Cancelling restores the draft you were
+                    typing — and because an empty composer just disables Send,
+                    there's no path from "editing" to an accidental delete. */}
+                {editing ? (
+                  <View style={styles.editingBar}>
+                    <View style={styles.editingText}>
+                      <Text style={styles.editingLabel}>Editing message</Text>
+                      <Text style={styles.editingOriginal} numberOfLines={1}>
+                        {editing.text}
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={stopEditing}
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel editing"
+                      hitSlop={8}
+                    >
+                      <Text style={styles.editingCancel}>✕</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+                <View style={styles.composer}>
+                  <TextInput
+                    ref={inputRef}
+                    value={text}
+                    onChangeText={setText}
+                    placeholder="Write a message…"
+                    placeholderTextColor={colors.inkFaint}
+                    multiline
+                    style={styles.input}
+                    accessibilityLabel="Message"
+                  />
+                  <Pressable
+                    onPress={handleSend}
+                    disabled={!text.trim() || busy}
+                    accessibilityRole="button"
+                    accessibilityLabel={editing ? 'Save' : 'Send'}
+                    style={({ pressed }) => [
+                      styles.send,
+                      (!text.trim() || busy) && styles.sendDisabled,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text style={styles.sendLabel}>
+                      {editing
+                        ? editMutation.isPending
+                          ? 'Saving…'
+                          : 'Save'
+                        : sendMutation.isPending
+                          ? 'Sending…'
+                          : 'Send'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </>
             ) : (
               <Text style={styles.readonly}>
                 You’re no longer connected with{' '}
@@ -384,9 +542,36 @@ export default function ThreadScreen() {
                   : "Couldn't send. Try again."}
               </Text>
             )}
+            {/* An edit can fail for a reason the menu couldn't rule out — most
+                likely the 15-minute window closing while the menu was open — so
+                say so rather than silently leaving edit mode on. */}
+            {editMutation.isError && (
+              <Text style={styles.sendError}>
+                {editMutation.error instanceof Error
+                  ? editMutation.error.message
+                  : "Couldn't save the edit. Try again."}
+              </Text>
+            )}
           </View>
         </KeyboardAvoidingView>
       )}
+
+      {menuTarget ? (
+        <MessageActionMenu
+          message={menuTarget.message}
+          mine={menuTarget.mine}
+          anchor={menuTarget.anchor}
+          actions={menuTarget.actions}
+          onClose={() => setMenuTarget(null)}
+        />
+      ) : null}
+
+      {reportingId != null ? (
+        <ReportModal
+          messageId={reportingId}
+          onClose={() => setReportingId(null)}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -446,6 +631,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm + 2,
     paddingTop: spacing.sm + 2,
     // paddingBottom is applied inline: COMPOSER_PAD + the home-indicator inset.
+  },
+  // A tinted strip above the input, so edit mode is unmistakable even at a
+  // glance — the accent wash marks it as a state, not another message.
+  editingBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    backgroundColor: colors.accentTint,
+  },
+  editingText: { flex: 1 },
+  editingLabel: {
+    fontSize: fontSize.sm - 1,
+    fontWeight: '700',
+    color: colors.accentDeep,
+  },
+  editingOriginal: { fontSize: fontSize.sm, color: colors.inkSoft },
+  editingCancel: {
+    fontSize: fontSize.base,
+    color: colors.inkSoft,
+    paddingHorizontal: spacing.xs,
   },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
   input: {

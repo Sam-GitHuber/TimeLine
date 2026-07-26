@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import timedelta
 
 from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
@@ -2021,6 +2022,53 @@ class ConversationDetailView(generics.RetrieveAPIView):
         return convo
 
 
+# How long after sending you can still correct a message (Phase 9b M1).
+#
+# *Why a window at all* — a thread is a record two people share. Unlimited
+# editing lets someone rewrite what you already read and replied to, so your
+# reply ends up sitting under words that were never said. Fifteen minutes covers
+# "I typed teh" and excludes "I rewrote yesterday". It is one constant on
+# purpose: if it annoys people more than it protects them, change this line.
+MESSAGE_EDIT_WINDOW = timedelta(minutes=15)
+
+
+def _thread_for_viewer(pk, user):
+    """Resolve a conversation the viewer may *reach*, as ``(convo, my_status)``.
+
+    404 for a thread they're not in, and 404 for a blocked direct pair — a block
+    hides the thread from both sides entirely. This is the gate every per-message
+    route starts from, so that probing a message id can never reveal anything
+    about a conversation you have no business seeing.
+    """
+    convo = _viewer_conversation_or_404(pk, user)
+    my_status = _viewer_participant_status(convo, user)
+    if my_status is None:
+        raise NotFound()
+    if convo.kind == Conversation.Kind.DIRECT:
+        other = convo.other_participant(user)
+        if is_blocked_between(user, other):
+            raise NotFound()
+    return convo, my_status
+
+
+def _assert_can_send(user, convo, my_status):
+    """Raise 403 unless ``user`` may put text into ``convo`` right now.
+
+    The send gate, in one place: for a direct thread the pair must still be able
+    to message (a disconnect or block stops *future* messages though history
+    stays readable), and for a group the viewer must be ``active``. Both sending
+    and **editing** consult it — an edit writes new text into the thread, so
+    someone who has been severed from it must not be able to slip words in via
+    the edit window.
+    """
+    if convo.kind == Conversation.Kind.DIRECT:
+        other = convo.other_participant(user)
+        if not can_message(user, other):
+            raise PermissionDenied("You can no longer message this person.")
+    elif my_status != ACTIVE_P:
+        raise PermissionDenied("Connect with everyone to join this chat.")
+
+
 class ConversationMessagesView(generics.ListAPIView):
     """The messages in a conversation (GET) and sending one (POST) at
     ``/conversations/<pk>/messages/``.
@@ -2039,16 +2087,7 @@ class ConversationMessagesView(generics.ListAPIView):
     serializer_class = MessageSerializer
 
     def _conversation(self):
-        user = self.request.user
-        convo = _viewer_conversation_or_404(self.kwargs["pk"], user)
-        my_status = _viewer_participant_status(convo, user)
-        if my_status is None:
-            raise NotFound()
-        if convo.kind == Conversation.Kind.DIRECT:
-            other = convo.other_participant(user)
-            if is_blocked_between(user, other):
-                raise NotFound()
-        return convo, my_status
+        return _thread_for_viewer(self.kwargs["pk"], self.request.user)
 
     def get_queryset(self):
         convo, my_status = self._conversation()
@@ -2060,16 +2099,7 @@ class ConversationMessagesView(generics.ListAPIView):
 
     def post(self, request, pk):
         convo, my_status = self._conversation()
-        if convo.kind == Conversation.Kind.DIRECT:
-            other = convo.other_participant(request.user)
-            if not can_message(request.user, other):
-                raise PermissionDenied(
-                    "You can no longer message this person."
-                )
-        elif my_status != ACTIVE_P:
-            raise PermissionDenied(
-                "Connect with everyone to join this chat."
-            )
+        _assert_can_send(request.user, convo, my_status)
         serializer = MessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         now = timezone.now()
@@ -2157,15 +2187,57 @@ class ConversationMuteView(APIView):
         return self._set(request, pk, None)
 
 
-class MessageDeleteView(APIView):
-    """Delete your own message
-    (``DELETE /conversations/<pk>/messages/<message_id>/``).
+class MessageDetailView(APIView):
+    """Edit (PATCH) or delete (DELETE) one message at
+    ``/conversations/<pk>/messages/<message_id>/``.
 
-    Soft delete (v1 scope): only the sender can delete, and only their own
-    message. The row stays — blanked, with ``deleted_at`` set — so the thread
-    still renders a "message deleted" placeholder in the right spot rather than
-    silently reshuffling. 404 if it isn't your message or isn't in this thread.
+    **Delete** is a soft delete (v1 scope): only the sender can delete, and only
+    their own message. The row stays — blanked, with ``deleted_at`` set — so the
+    thread still renders a "message deleted" placeholder in the right spot rather
+    than silently reshuffling. 404 if it isn't your message or isn't in this
+    thread.
+
+    **Edit** (Phase 9b M1) answers the first real beta complaint — there was no
+    way to fix a typo. Body ``{ "text": ... }``, validated by exactly the same
+    rules as sending. Four things must hold, and each one is a deliberate answer
+    to "why not just let people edit anything":
+
+    - **You must be the sender** (403, not 404 — unlike delete, which never had a
+      legitimate cross-user caller. The message is right there in the thread, so
+      pretending it doesn't exist would be theatre; the conversation gate above
+      is what actually hides other people's threads).
+    - **Not deleted** (400) — there's no text left to correct, and re-filling a
+      tombstone would resurrect a message the thread already showed as gone.
+    - **Within ``MESSAGE_EDIT_WINDOW``** (403) — see the constant.
+    - **You must still be able to send here** — an edit writes new text into the
+      thread, so a member who was severed or disconnected can't use their
+      unexpired window as a back door.
+
+    Deliberately, an edit does **not** bump ``Conversation.updated_at``: fixing a
+    typo shouldn't jump the thread to the top of everyone's conversation list.
+    The list preview still updates, because it reads the latest message row.
     """
+
+    def patch(self, request, pk, message_id):
+        convo, my_status = _thread_for_viewer(pk, request.user)
+        message = get_object_or_404(Message, pk=message_id, conversation=convo)
+        if message.sender_id != request.user.id:
+            raise PermissionDenied("You can only edit your own messages.")
+        if message.is_deleted:
+            raise ValidationError("This message was deleted.")
+        if timezone.now() - message.created_at > MESSAGE_EDIT_WINDOW:
+            raise PermissionDenied(
+                "It's too late to edit this message."
+            )
+        _assert_can_send(request.user, convo, my_status)
+
+        serializer = MessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        message.text = serializer.validated_data["text"]
+        message.edited_at = timezone.now()
+        message.save(update_fields=["text", "edited_at"])
+        out = MessageSerializer(message, context={"request": request})
+        return Response(out.data, status=status.HTTP_200_OK)
 
     def delete(self, request, pk, message_id):
         message = get_object_or_404(

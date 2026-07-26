@@ -337,6 +337,13 @@ class Message(models.Model):
     dropping the row — which would break the "oldest-first, stable" ordering and
     lose the tombstone — we blank ``text`` and set ``deleted_at``, so the thread
     still renders a "message deleted" placeholder in the right place.
+
+    Edit (Phase 9b M1): a sender can correct their own message for a short window
+    after sending, which stamps ``edited_at``. We keep no revision history — the
+    row holds the current text only. ``edited_at`` exists so the client can mark
+    the bubble "Edited": a thread is a shared record, and silently changing what
+    someone already read would make the record untrustworthy. The *window* is the
+    other half of that guarantee and lives in the view (``MESSAGE_EDIT_WINDOW``).
     """
 
     conversation = models.ForeignKey(
@@ -352,6 +359,10 @@ class Message(models.Model):
     text = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
+    # NULL = never edited. Not ``auto_now``: only an edit stamps it, whereas
+    # ``auto_now`` would also fire on the soft-delete write and mislabel a
+    # deleted message as edited.
+    edited_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         # Oldest-first, like a comment thread — a conversation reads top to
@@ -362,6 +373,10 @@ class Message(models.Model):
     @property
     def is_deleted(self):
         return self.deleted_at is not None
+
+    @property
+    def is_edited(self):
+        return self.edited_at is not None
 
     def __str__(self):
         if self.is_deleted:

@@ -319,19 +319,38 @@ class MessageSerializer(serializers.ModelSerializer):
     thread can align/label each bubble. A soft-deleted message reports
     ``is_deleted: true`` with blank ``text`` — the client renders a "message
     deleted" placeholder in its place, keeping the thread's order intact.
+
+    ``is_edited``/``edited_at`` (Phase 9b M1) let the bubble show an "Edited"
+    marker. Both are *additive* fields: an older client that doesn't know about
+    them simply renders the new text unmarked, which is why M1 was safe to ship
+    to the backend before either client caught up.
     """
 
     sender = AuthorSerializer(read_only=True)
     is_deleted = serializers.BooleanField(read_only=True)
+    is_edited = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Message
-        fields = ("id", "sender", "text", "is_deleted", "created_at")
+        fields = (
+            "id",
+            "sender",
+            "text",
+            "is_deleted",
+            "is_edited",
+            "created_at",
+            "edited_at",
+        )
 
 
 class MessageCreateSerializer(serializers.ModelSerializer):
     """Create a message. ``sender`` and ``conversation`` are set in the view
-    (from the session and the URL), never the body."""
+    (from the session and the URL), never the body.
+
+    **Editing reuses this serializer for validation** rather than defining a
+    near-identical twin: an edit must be held to exactly the same rules as the
+    original send (non-blank after stripping, within ``MESSAGE_MAX_LENGTH``), and
+    two copies of those rules would eventually disagree."""
 
     text = serializers.CharField(max_length=MESSAGE_MAX_LENGTH)
 

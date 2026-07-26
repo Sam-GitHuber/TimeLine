@@ -61,7 +61,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | | Milestone | Depends on | Size | Done |
 |---|---|---|---|---|
 | **M0** | Close the admin message window | — | **S** | ☑ |
-| **M1** | Long-press menu + edit | — | **S–M** | ☐ |
+| **M1** | Long-press menu + edit | — | **S–M** | ☑ |
 | **M2** | Message reactions | M1 | **S** | ☐ |
 | **M3** | Reply / quote | M1 | **M** | ☐ |
 | **M4** | Send status + read receipts | — | **M** | ☐ |
@@ -396,10 +396,36 @@ The reported problem, and the foundation M2 and M3 hang off.
 - Mobile: long-press opens the menu; Edit prefills and `PATCH`es; Cancel restores
   the composer; someone else's message offers no Edit.
 
-**Done when**
-- [ ] Long-press your own message → anchored menu with Copy/Edit/Delete.
-- [ ] Edit within 15 minutes; "Edited" shows; thread doesn't jump the list.
-- [ ] `messaging.md` *API* + *Mobile* sections updated.
+**Done when** — ✅ all done; `messaging.md` → *Editing a message* and *The
+long-press action menu* are the durable record.
+- [x] Long-press your own message → anchored menu with Copy/Edit/Delete.
+- [x] Edit within 15 minutes; "Edited" shows; thread doesn't jump the list.
+- [x] `messaging.md` *API* + *Mobile* sections updated.
+
+**Three decisions M1 made that the plan above didn't anticipate** — read these
+before M2/M3, which build on the same menu:
+
+1. **The edit gate also requires `can_send`.** The plan listed sender / not
+   deleted / in-window; a fourth was needed. Without it the 15 minutes after a
+   disconnect or sever are a back door for writing fresh text into a thread
+   you've lost access to. `_assert_can_send` was extracted so send and edit share
+   one gate rather than two that drift.
+2. **The menu animates with React Native's `Animated`, not Reanimated.** Both are
+   in the app, but Reanimated's worklet runtime can't be loaded by Jest, and the
+   existing workaround elsewhere (`profile.test.tsx`) is to mock the component
+   away — which would have meant mocking away the component under test. A 120ms
+   opacity + scale runs on the native driver either way.
+3. **`src/measure.ts` exists as a seam for `measureInWindow`.** Measuring a view
+   is native; under Node the callback never fires, and RN's Jest preset installs
+   the no-op as a per-instance `jest.fn()` reached through `requireActual`, so it
+   cannot be mocked from outside. A seam we own can be, which is what lets the
+   menu keep the correct measure-then-position shape with no timers or
+   test-shaped fallbacks in the UI. **M2/M3 get this for free** — anything else
+   needing a rect should use it.
+
+Also added, both small: `expo-haptics` (light impact on long-press) and
+`expo-clipboard` (Copy) — `react-native`'s built-in `Clipboard` is deprecated and
+slated for removal, so it wasn't the boring choice it looked like.
 
 ---
 
@@ -835,8 +861,9 @@ Two rules make that safe, and they're the difference between "web is behind" and
    the build.
 
 The one visible degradation is an edited message, which the web renders as its
-new text with no "Edited" marker until M8. Acceptable, and better said out loud
-than discovered.
+new text with no "Edited" marker until **M9** (web parity). Acceptable, and
+better said out loud than discovered — it's now recorded in `messaging.md`'s
+*Frontend* section too.
 
 ## Definition of done (whole phase)
 

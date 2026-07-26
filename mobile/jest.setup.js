@@ -90,6 +90,37 @@ jest.mock('@react-native-community/datetimepicker', () => {
   };
 });
 
+// `expo-haptics` drives the taptic engine — no hardware under Node, and the real
+// module throws on import. The message long-press fires a light impact, so every
+// thread test would fail without this. Assertions never care *that* it buzzed;
+// they care what the gesture opened.
+jest.mock('expo-haptics', () => ({
+  impactAsync: jest.fn(async () => {}),
+  ImpactFeedbackStyle: { Light: 'light', Medium: 'medium', Heavy: 'heavy' },
+}));
+
+// `expo-clipboard` is a native pasteboard bridge. The message action menu's Copy
+// item calls it, so stub it with a spy-able no-op — a test can assert the copied
+// string without a real pasteboard.
+jest.mock('expo-clipboard', () => ({
+  setStringAsync: jest.fn(async () => true),
+  getStringAsync: jest.fn(async () => ''),
+}));
+
+// Measuring a view asks the real layout engine where it ended up on screen —
+// native, and there's no screen here. React Native's own `measureInWindow`
+// doesn't throw under Node, it just never calls back, so a component that waits
+// for the rect before rendering (the message action menu anchors itself under
+// the bubble you long-pressed) would hang forever. RN's Jest preset installs
+// that no-op as a per-instance `jest.fn()` reached via `requireActual`, so it
+// can't be mocked directly — which is why `src/measure.ts` exists as a seam we
+// own. Stand it in with a fixed, plausible rect: tests assert *what the menu
+// offers*, never where it lands, since pixel placement is a device concern.
+jest.mock('@/measure', () => ({
+  measureInWindow: (_node, onMeasured) =>
+    onMeasured({ x: 0, y: 0, width: 240, height: 44 }),
+}));
+
 // Reset between tests so a token stored by one can't leak into the next.
 beforeEach(() => {
   const SecureStore = require('expo-secure-store');

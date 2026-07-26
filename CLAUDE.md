@@ -42,11 +42,14 @@ release. Remaining housekeeping (not blocking): distil `phase-9-iphone-app.md`
 into `docs/reference/` mobile docs and delete it, per the phase-ships convention
 (the release half already lives in `mobile-release.md`).
 
-**Next up is Phase 9b — the messaging overhaul**, off the first real beta
-feedback (no way to edit a message). It brings messaging up to the standard of a
-high-end messaging app: a long-press action menu, edit, reply, message reactions,
-read receipts + send status, thread mechanics, photos, then web parity. Full plan
-in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
+**Phase 9b — the messaging overhaul — is in progress; M0 and M1 are done.** It
+came off the first real beta feedback (no way to edit a message) and brings
+messaging up to the standard of a high-end messaging app: a long-press action
+menu, edit, reply, message reactions, read receipts + send status, thread
+mechanics, photos, then web parity. Shipped so far: the admin can no longer read
+anyone's messages (a report is the only window), and the app has an anchored
+long-press menu with Copy/Edit/Delete/Report plus a 15-minute edit window. Full
+plan in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
 — read it before touching messaging. Its milestones are written to be picked up
 cold by a fresh session; follow the "How to use this document" section at the top.
 **E2E encryption is a committed goal**, sketched as
