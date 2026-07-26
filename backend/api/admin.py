@@ -231,6 +231,20 @@ class ReportAdmin(admin.ModelAdmin):
 
     The snapshot is only on the detail page, never the changelist — the queue
     shouldn't put private text on screen while you're triaging statuses.
+
+    **Triage-only: no add form, and ``status`` is the only editable field.** That
+    isn't tidiness, it's the fix for a hole this class walked straight into. A
+    report's ``message`` is a ForeignKey, so leaving it editable makes Django
+    render a ``<select>`` of **every message in the database**, each labelled by
+    ``Message.__str__`` — which is a 40-character preview of the text. That is
+    strictly worse than the ``MessageInline`` we removed: one thread became every
+    thread. The targets are therefore shown through ``target`` (a bare
+    ``"message #12"``), and the reported text appears exactly once per page, as
+    the snapshot. Nobody hand-writes a report anyway — members raise them through
+    the API.
+
+    The same trap applies to any FK added here later. If you add one, make it
+    readonly and render it by id.
     """
 
     list_display = (
@@ -248,7 +262,12 @@ class ReportAdmin(admin.ModelAdmin):
     search_fields = ("reason", "reporter__email")
     ordering = ("-created_at",)
     list_editable = ("status",)
-    readonly_fields = ("message_text", "created_at")
+    # No raw ``post``/``comment``/``message`` FKs on the form — see the docstring.
+    fields = ("target", "reporter", "reason", "message_text", "status", "created_at")
+    readonly_fields = ("target", "reporter", "reason", "message_text", "created_at")
+
+    def has_add_permission(self, request):
+        return False
 
     @admin.display(description="target")
     def target(self, obj):

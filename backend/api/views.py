@@ -2865,13 +2865,21 @@ class ReportCreateView(generics.CreateAPIView):
 
     Two guards beyond the serializer's exactly-one/length checks:
 
-    - **You can only report content you can see.** Without this the endpoint
-      would confirm which post/comment/message ids exist (a 201-vs-400 oracle) for
-      content you have no relationship to — a hole in the same private-by-default
-      wall the feed and comments enforce. A non-visible target gets the same 404
-      it gets everywhere else, so existence isn't leaked either way. For a message
-      that check is ``can_view_message``, which is interval-clipped: reporting
-      must not become a way to read history you were clipped out of.
+    - **You can only report content you can see.** Without this, reporting would
+      be a way to *act on* — and for a message, read back via the admin — content
+      you have no relationship to, straight through the private-by-default wall the
+      feed and comments enforce. A non-visible target gets the same 404 it gets
+      everywhere else. For a message that check is ``can_view_message``, which is
+      interval-clipped: reporting must not become a way to read history you were
+      clipped out of.
+      - **Known, accepted leak:** a *nonexistent* id 400s (DRF's FK validation)
+        while an *existing but invisible* one 404s, so the pair of status codes
+        does reveal whether an id exists. That's Phase 7 behaviour for posts and
+        comments, inherited here for messages. It leaks row existence and nothing
+        else — no content, no author, no participants — so it's not worth
+        diverging one target from the other two. Closing it means resolving all
+        three targets by hand instead of via ``ModelSerializer`` FK fields; do all
+        three together if it's ever worth doing.
     - **One flag per (reporter, target).** A repeat/double-click returns your
       existing report (200) instead of stacking duplicates in the queue; the
       model's unique constraints are the race-proof backstop.

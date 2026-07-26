@@ -2937,6 +2937,45 @@ class MessageReportTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(Report.objects.count(), 0)
 
+    def test_a_demoted_member_can_still_report_what_they_read(self):
+        """The other half of the interval rule, and deliberate: someone who has
+        since dropped to ``pending`` can still report a message from one of their
+        *past* intervals — something they genuinely read at the time. Being
+        demoted shouldn't disarm you; the abuse is often why the chat fell apart.
+
+        Pinned because it's a design decision, not a side effect — the thread
+        endpoint 403s a pending member, so it would be easy to "tidy" this into an
+        active-only check and silently remove the ability to report.
+        """
+        a = make_user("da@example.com")
+        demoted = make_user("demoted@example.com")
+        convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=a
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=1)
+        p_a = Participant.objects.create(
+            conversation=convo, user=a, status="active"
+        )
+        ParticipantInterval.objects.create(participant=p_a, started_at=t0)
+        p_demoted = Participant.objects.create(
+            conversation=convo, user=demoted, status="pending"
+        )
+        ParticipantInterval.objects.create(
+            participant=p_demoted, started_at=t0, ended_at=t1
+        )
+        seen = Message.objects.create(
+            conversation=convo, sender=a, text="abuse they received"
+        )
+        Message.objects.filter(pk=seen.pk).update(
+            created_at=t0 + timedelta(minutes=5)
+        )
+
+        self.client.force_authenticate(demoted)
+        resp = self.client.post(REPORTS_URL, {"message": seen.pk}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Report.objects.get().message_text, "abuse they received")
+
     def test_a_blocked_pair_cannot_report_each_others_messages(self):
         Block.objects.create(blocker=self.sender, blocked=self.reporter)
         resp = self.client.post(
@@ -2994,6 +3033,10 @@ class AdminMessagePrivacyTests(APITestCase):
     """
 
     SECRET = "zebra-pinecone-confession"
+    # A message in a thread nobody reported. Every admin page must be silent
+    # about it — including the pages that legitimately show a *reported*
+    # message. See ``test_no_report_page_leaks_an_unreported_message``.
+    UNRELATED = "quince-lamplight-grievance"
 
     def setUp(self):
         self.staff = User.objects.create_superuser(
@@ -3017,6 +3060,15 @@ class AdminMessagePrivacyTests(APITestCase):
             )
         self.message = Message.objects.create(
             conversation=self.convo, sender=self.a, text=self.SECRET
+        )
+
+        c = make_user("cc@example.com", first_name="Cc")
+        d = make_user("dd@example.com", first_name="Dd")
+        other_convo = Conversation.objects.create(
+            kind=Conversation.Kind.DIRECT, user_a=c, user_b=d, created_by=c
+        )
+        self.unrelated_message = Message.objects.create(
+            conversation=other_convo, sender=c, text=self.UNRELATED
         )
         self.client.force_login(self.staff)
 
@@ -3051,13 +3103,16 @@ class AdminMessagePrivacyTests(APITestCase):
         self.assertIn("aa@example.com", changelist.content.decode())
         self.assertIn("active", change.content.decode())
 
-    def test_a_reported_message_is_readable_by_the_maintainer(self):
-        report = Report.objects.create(
+    def _report(self):
+        return Report.objects.create(
             reporter=self.b,
             message=self.message,
             message_text=self.message.text,
             reason="please look at this",
         )
+
+    def test_a_reported_message_is_readable_by_the_maintainer(self):
+        report = self._report()
         resp = self.client.get(f"/admin/api/report/{report.pk}/change/")
         self.assertEqual(resp.status_code, 200)
         self.assertIn(self.SECRET, resp.content.decode())
@@ -3066,6 +3121,46 @@ class AdminMessagePrivacyTests(APITestCase):
         self.assertEqual(queue.status_code, 200)
         self.assertNotIn(self.SECRET, queue.content.decode())
         self.assertIn(f"message #{self.message.pk}", queue.content.decode())
+
+    def test_no_report_page_leaks_an_unreported_message(self):
+        """The regression that nearly shipped: ``Report.message`` is a FK, so an
+        editable form field renders a ``<select>`` of **every** message in the
+        database, each labelled by ``Message.__str__`` — a 40-char text preview.
+
+        Asserting only that a *reported* message is visible (the test above) can't
+        catch that, because the leak hides inside a page that's *supposed* to show
+        message text. So this asserts the negative, on every report page, using a
+        message nobody reported.
+        """
+        report = self._report()
+        for url in (
+            "/admin/api/report/",
+            f"/admin/api/report/{report.pk}/change/",
+            "/admin/api/report/add/",
+        ):
+            resp = self.client.get(url)
+            self.assertNotIn(self.UNRELATED, resp.content.decode(), url)
+
+    def test_reports_cannot_be_hand_written_in_the_admin(self):
+        # Members raise reports through the API; the admin only triages them.
+        # (This is also what keeps the add form's FK widgets off the page.)
+        resp = self.client.get("/admin/api/report/add/")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_triage_can_still_resolve_a_report(self):
+        # Locking the form down must not break the one thing it's for.
+        report = self._report()
+        resp = self.client.post(
+            f"/admin/api/report/{report.pk}/change/",
+            {"status": Report.Status.RESOLVED, "_save": "Save"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        report.refresh_from_db()
+        self.assertEqual(report.status, Report.Status.RESOLVED)
+        # The reporter's words and the snapshot are not editable by the
+        # maintainer — the evidence stays as it was submitted.
+        self.assertEqual(report.message_text, self.SECRET)
+        self.assertEqual(report.reason, "please look at this")
 
 
 # --- Phase 7: account deletion (delete-my-data path) --------------------------
