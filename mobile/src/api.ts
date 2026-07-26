@@ -446,19 +446,28 @@ export const api = {
     request<void>(`/api/users/${userId}/block/`, { method: 'DELETE' }),
 
   /**
-   * Flag a post or comment for the maintainer to review (the content-takedown
-   * path). Pass exactly one of `postId` / `commentId`, plus an optional reason.
-   * Idempotent server-side: a repeat flag returns your existing report rather
-   * than stacking duplicates. You can only report content you can see (a
-   * non-visible target 404s, same wall as the feed).
+   * Flag a post, comment or message for the maintainer to review (the
+   * content-takedown path). Pass exactly one of `postId` / `commentId` /
+   * `messageId`, plus an optional reason. Idempotent server-side: a repeat flag
+   * returns your existing report rather than stacking duplicates. You can only
+   * report content you can see (a non-visible target 404s, same wall as the feed
+   * — for a message, the interval-clipped thread gate).
+   *
+   * **A message report is the only route by which message text reaches the
+   * maintainer** (Phase 9b M0 removed the admin's conversation message inline),
+   * so the report stores a server-written snapshot of the text — soft-deleting the
+   * message afterwards doesn't erase the evidence. A message that's *already*
+   * deleted can't be reported (400): there's nothing left to moderate.
    */
   reportContent: ({
     postId,
     commentId,
+    messageId,
     reason = '',
   }: {
     postId?: number;
     commentId?: number;
+    messageId?: number;
     reason?: string;
   }) =>
     request<{ id: number }>('/api/reports/', {
@@ -466,6 +475,7 @@ export const api = {
       body: {
         ...(postId != null ? { post: postId } : {}),
         ...(commentId != null ? { comment: commentId } : {}),
+        ...(messageId != null ? { message: messageId } : {}),
         reason,
       },
     }),

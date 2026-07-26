@@ -214,14 +214,25 @@ export const api = {
       body: { password },
     }),
 
-  // Report a post or comment for the maintainer to review (Phase 7 takedown
-  // path). Pass exactly one of postId / commentId, plus an optional reason.
-  reportContent: ({ postId = null, commentId = null, reason = "" } = {}) =>
+  // Report a post, comment or message for the maintainer to review (Phase 7
+  // takedown path; messages added in Phase 9b M0). Pass exactly one of
+  // postId / commentId / messageId, plus an optional reason.
+  //
+  // Reporting a message is the *only* way its text reaches the maintainer — the
+  // admin can't read a conversation any more (see reference/messaging.md), so the
+  // report stores its own server-written snapshot of the text.
+  reportContent: ({
+    postId = null,
+    commentId = null,
+    messageId = null,
+    reason = "",
+  } = {}) =>
     request("/api/reports/", {
       method: "POST",
       body: {
         ...(postId ? { post: postId } : {}),
         ...(commentId ? { comment: commentId } : {}),
+        ...(messageId ? { message: messageId } : {}),
         reason,
       },
     }),

@@ -148,6 +148,10 @@ Direct and group chats share the endpoints:
   disconnect/block would pull you from, to drive the warning modal.
 - `GET /api/messages/unread-count/` — single number for the nav badge (so it
   doesn't load and sum the paginated list).
+- `POST /api/reports/` with `{ message: <id>, reason? }` — flag a message for the
+  maintainer. Shares the endpoint (and the queue) with post/comment reports; see
+  [Moderation](#moderation-a-report-is-the-only-window) below and
+  [accounts.md](accounts.md).
 
 **Performance:** the conversation-list decorator computes unread + last-message
 without N+1 — one Postgres `DISTINCT ON (conversation_id)` query for each thread's
@@ -284,14 +288,63 @@ mark-read-on-open clears the badge, so the tap path needs nothing special. It's 
 only push with `notificationId: null` and `kind: "message"` — there's no
 activity-centre row behind it. See [Push notifications](#push-notifications).
 
+## Moderation: a report is the only window
+
+**The Django admin cannot render a conversation's messages.** There is no
+`Message` admin, and `ConversationAdmin` shows metadata only — participants,
+their status/`left_at`/`muted_at`, kind, timestamps. That metadata is what support
+questions are actually about ("why can't Dad see this chat?") and it reveals no
+content.
+
+It wasn't always so: a `MessageInline` used to print every message in a thread,
+and the docstring called that a disclosed design property. It was removed in Phase
+9b, because being *able* to browse a private conversation isn't a feature. The
+realistic risk was never an attacker — it was a bored maintainer reading a thread
+they had no business reading, and nothing in operating the site needs that.
+
+**The one legitimate reason to read a message is an abuse report, so that's the
+only route.** A reporter attaches the specific message, and the `Report` row
+stores its own **snapshot** of that text (`Report.message_text`), which the
+maintainer reads in the report's admin page. Four properties make this the right
+shape rather than a loophole:
+
+- **Scoped to what someone chose to show you.** You see the message that was
+  flagged, not the thread around it — and there's no `Message` admin to click
+  through to. Acting on a message report means acting on the *person* (block /
+  deactivate), not browsing their chat.
+- **The snapshot is written server-side from the row, never from the request
+  body** — a reporter can't put words in someone else's mouth in the moderation
+  queue. It also isn't echoed back in the API response.
+- **It survives deletion, which is why it exists.** Message deletion is *soft* (it
+  blanks the text), so without a copy a sender could empty the evidence a second
+  after being reported. Conversely a message that's *already* deleted can't be
+  reported at all (400) — there's nothing left to moderate.
+- **The report gate is the messaging gate, not the feed's.** `can_view_message`
+  reuses membership + the block check + `visible_messages_for`, so reporting can't
+  become a back door into interval-clipped history: a member who was `pending`
+  across a gap gets a 404 on a message from inside it, exactly as the thread does.
+
+The snapshot appears only on a report's **detail** page, never the changelist, and
+`message_text` is deliberately not searchable — the triage queue shouldn't be a
+keyword search over reported private messages.
+
 ## Not end-to-end encrypted (yet)
 
-Messages are stored in the database **in plaintext** and are readable by the
-maintainer via the Django admin — like all app data. Say this plainly in any
-privacy policy; don't imply E2E we don't provide. **E2E is a stated long-term
-goal** but a large, separate undertaking (the server could then never read
-messages, so previews/search/web-reading move client-side; it needs
-client-managed per-device keys, key exchange/verification, and multi-device sync —
-best on a proven protocol like libsignal, once the phone apps exist). Practical
-interim steps: TLS in transit (done), locked-down admin, and possibly
-encryption-at-rest for the messages table.
+Messages are stored in the database **in plaintext** — like all app data. Say this
+plainly in any privacy policy; don't imply E2E we don't provide.
+
+Be precise about what the moderation change above did and didn't achieve. It
+removed **casual** access, which is the honest risk here. It did **not** change
+what's stored: the rows are still plaintext in Postgres, so anyone with a shell on
+the box (the maintainer included) can still read them. Only E2E fixes that, which
+is why `PrivacyPage.jsx`'s wording — messages are plaintext, not end-to-end
+encrypted, accessible to the operator where necessary — **stays as it is until the
+encryption actually ships**.
+
+**E2E is a stated long-term goal** but a large, separate undertaking (the server
+could then never read messages, so previews/search/web-reading move client-side;
+it needs client-managed per-device keys, key exchange/verification, and
+multi-device sync — best on a proven protocol like libsignal, once the phone apps
+exist). Practical interim steps: TLS in transit (done), the locked-down admin
+(done, above), and possibly encryption-at-rest for the messages table — a modest
+improvement, not a substitute, since the key would live on the same box.

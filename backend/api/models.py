@@ -539,8 +539,8 @@ REPORT_REASON_MAX_LENGTH = 1000
 
 
 class Report(models.Model):
-    """A member's report of a post or comment for the maintainer to review
-    (Phase 7 — content-takedown path).
+    """A member's report of a post, comment or message for the maintainer to
+    review (Phase 7 — content-takedown path; messages added in Phase 9b M0).
 
     Required before inviting real people: as an operator we need a way for
     someone to flag content they believe infringes copyright or shouldn't be
@@ -550,11 +550,27 @@ class Report(models.Model):
     (where posts and comments are already moderatable) and deletes it if
     warranted, then marks the report resolved.
 
-    A report targets **exactly one** of a post or a comment (a DB check
-    constraint enforces the xor). ``reporter`` is CASCADE: if someone deletes
+    A report targets **exactly one** of a post, a comment or a message (a DB
+    check constraint enforces it). ``reporter`` is CASCADE: if someone deletes
     their account their open reports go with them (the flag was theirs to make).
     The target FKs are CASCADE too — once the content is gone the report has done
     its job.
+
+    **A reported message is the only way message text reaches the admin**, and
+    the reason ``message_text`` exists. The Django admin deliberately cannot
+    render a conversation's messages (see ``api/admin.py``), so a report has to
+    carry its own copy of what was flagged:
+
+    - Message deletion is *soft* — the sender can blank the text a second after
+      being reported, which would leave the maintainer an empty report about
+      nothing. The snapshot is the evidence, and it's what makes acting on a
+      report possible at all.
+    - It's written **server-side from the message row**, never from the request
+      body: a reporter must not be able to put words in someone else's mouth in
+      the moderation queue.
+    - It is content the reporter *deliberately showed the maintainer*, which is
+      the whole point — access to message text is now scoped to "what was
+      reported", not "whatever the maintainer feels like reading".
     """
 
     class Status(models.TextChoices):
@@ -581,6 +597,17 @@ class Report(models.Model):
         blank=True,
         related_name="reports",
     )
+    message = models.ForeignKey(
+        "Message",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="reports",
+    )
+    # The flagged message's text as it read when reported — see the class
+    # docstring. Empty for a post/comment report (those are readable in their
+    # own admin, so there's nothing to snapshot).
+    message_text = models.TextField(blank=True, default="")
     reason = models.TextField(blank=True, max_length=REPORT_REASON_MAX_LENGTH)
     status = models.CharField(
         max_length=9,
@@ -593,11 +620,27 @@ class Report(models.Model):
     class Meta:
         ordering = ["-created_at", "-id"]
         constraints = [
-            # Exactly one target: a report is about a post XOR a comment.
+            # Exactly one target: a report is about a post, a comment or a
+            # message — never two, never none. Written as three explicit
+            # alternatives rather than counting NULLs so it reads the same on
+            # Postgres and SQLite.
             models.CheckConstraint(
                 condition=(
-                    models.Q(post__isnull=False, comment__isnull=True)
-                    | models.Q(post__isnull=True, comment__isnull=False)
+                    models.Q(
+                        post__isnull=False,
+                        comment__isnull=True,
+                        message__isnull=True,
+                    )
+                    | models.Q(
+                        post__isnull=True,
+                        comment__isnull=False,
+                        message__isnull=True,
+                    )
+                    | models.Q(
+                        post__isnull=True,
+                        comment__isnull=True,
+                        message__isnull=False,
+                    )
                 ),
                 name="report_targets_exactly_one",
             ),
@@ -616,11 +659,23 @@ class Report(models.Model):
                 fields=["reporter", "comment"],
                 name="one_report_per_reporter_comment",
             ),
+            models.UniqueConstraint(
+                fields=["reporter", "message"],
+                name="one_report_per_reporter_message",
+            ),
         ]
 
+    def target_label(self):
+        """Human-readable target, e.g. ``"message #12"`` — shared by ``__str__``
+        and the admin column so the two can't word it differently."""
+        if self.post_id:
+            return f"post #{self.post_id}"
+        if self.comment_id:
+            return f"comment #{self.comment_id}"
+        return f"message #{self.message_id}"
+
     def __str__(self):
-        target = self.post_id and f"post #{self.post_id}" or f"comment #{self.comment_id}"
-        return f"report #{self.pk} on {target} ({self.status})"
+        return f"report #{self.pk} on {self.target_label()} ({self.status})"
 
 
 class Group(models.Model):

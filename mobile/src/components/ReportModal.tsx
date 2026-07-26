@@ -1,15 +1,21 @@
 /**
- * Report a post or comment to the maintainer for review.
+ * Report a post, comment or message to the maintainer for review.
  *
  * Ported from `frontend/src/components/ReportButton.jsx`'s `ReportModal`. Pass
- * exactly one of `postId` / `commentId`. Opens over the screen, takes an optional
- * reason, and POSTs a report the maintainer reviews in the Django admin (the
- * content-takedown path — see accounts.md). Reporting is required for App Review,
- * so it must be reachable from any post and any comment that isn't your own.
+ * exactly one of `postId` / `commentId` / `messageId`. Opens over the screen, takes
+ * an optional reason, and POSTs a report the maintainer reviews in the Django admin
+ * (the content-takedown path — see accounts.md). Reporting is required for App
+ * Review, so it must be reachable from any post and any comment that isn't your own.
  *
- * Two surfaces open it: the post ⋯ menu (`PostMenu`) and the inline "Report"
- * action on a comment (`CommentThread`) — the owner check lives in *those*, so
- * this component just does the reporting.
+ * Surfaces that open it: the post ⋯ menu (`PostMenu`), the inline "Report" action
+ * on a comment (`CommentThread`), and a message's long-press menu — the owner
+ * check lives in *those*, so this component just does the reporting.
+ *
+ * Reporting a **message** carries extra weight (Phase 9b M0): the admin can no
+ * longer read a conversation, so a report is the only way the maintainer ever sees
+ * message text, and the server snapshots the reported text into the report. The
+ * copy says so — someone flagging a private message deserves to know exactly what
+ * they're handing over.
  */
 
 import { useState } from 'react';
@@ -29,10 +35,12 @@ import { colors, fontSize, radius, spacing } from '@/theme';
 export function ReportModal({
   postId,
   commentId,
+  messageId,
   onClose,
 }: {
   postId?: number;
   commentId?: number;
+  messageId?: number;
   onClose: () => void;
 }) {
   const [reason, setReason] = useState('');
@@ -40,14 +48,20 @@ export function ReportModal({
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
-  const target = postId != null ? 'post' : 'comment';
+  const target =
+    postId != null ? 'post' : commentId != null ? 'comment' : 'message';
 
   async function submit() {
     if (submitting) return;
     setError(null);
     setSubmitting(true);
     try {
-      await api.reportContent({ postId, commentId, reason: reason.trim() });
+      await api.reportContent({
+        postId,
+        commentId,
+        messageId,
+        reason: reason.trim(),
+      });
       setDone(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Couldn’t send the report.');
@@ -71,8 +85,9 @@ export function ReportModal({
             <>
               <Text style={styles.title}>Thanks for letting us know</Text>
               <Text style={styles.body}>
-                We’ll review this {target} and take it down if it breaks the
-                rules.
+                {target === 'message'
+                  ? 'We’ll review this message and act on it if it breaks the rules.'
+                  : `We’ll review this ${target} and take it down if it breaks the rules.`}
               </Text>
               <View style={styles.actions}>
                 <Pressable
@@ -92,6 +107,16 @@ export function ReportModal({
                 copyright, or shouldn’t be here. It goes to the site owner to
                 review.
               </Text>
+              {/* Say plainly what reporting a private message hands over. The
+                  site owner can't read conversations any other way, so this is
+                  the one moment message text leaves the chat. */}
+              {target === 'message' ? (
+                <Text style={styles.body}>
+                  A copy of this message is sent with your report. It’s the only
+                  way the site owner can see it — they can’t read your
+                  conversations otherwise.
+                </Text>
+              ) : null}
               <TextInput
                 style={styles.input}
                 value={reason}
