@@ -1787,5 +1787,62 @@ devices available". Fix: `xcrun simctl create "iPhone 16 Pro" <device-type>
 sideloaded by hand (`xcrun simctl install`) — its auto-download died when the CLI
 process exited.
 
+**Simulator setup gotcha, the sequel (2026-07-26, hit during Phase 9b M1).** The
+same class of problem, a different cause, and it cost an hour — so here is the
+whole diagnosis.
+
+`npx expo run:ios` failed with `xcodebuild` error 70, *"Unable to find a
+destination matching the provided destination specifier"*, naming a simulator id
+that `xcrun simctl list devices available` cheerfully listed as present. The
+misleading part is the error text: it complains about the destination, but the
+actual fault is that **Xcode had no matching platform installed at all**.
+
+Diagnose it with the one command that tells the truth:
+
+```bash
+xcodebuild -showdestinations -workspace ios/TimeLine.xcworkspace -scheme TimeLine
+```
+
+If **"Available destinations"** is empty and everything is listed as ineligible
+with *"iOS <version> is not installed"*, that's this. The cause: Xcode updates
+itself to a version shipping a newer SDK (here 26.5) while the machine still only
+has an old **simulator runtime** (18.4). Xcode won't build against a runtime that
+far behind its SDK, so *every* destination — simulators and physical devices
+alike — drops out at once.
+
+```bash
+xcodebuild -downloadPlatform iOS   # ~10GB; may prompt for a password, so run it
+                                   # yourself in a terminal, not from a script.
+                                   # GUI equivalent: Xcode → Settings → Components
+```
+
+**Then the second half, which is easy to miss:** installing the runtime does not
+change which simulator is *booted*, and Expo builds for the booted device. The
+old 18.4 device was still open in Simulator.app, so the build kept failing
+identically. Shut it down and boot one on the new runtime:
+
+```bash
+xcrun simctl shutdown <old-udid>
+xcrun simctl boot <new-udid>          # xcrun simctl list devices available
+npx expo run:ios --device <new-udid>  # --device removes the ambiguity entirely
+```
+
+**Why this keeps ambushing us:** every build since Milestone F happens on **EAS in
+the cloud**, which carries its own toolchain, so the local Xcode setup goes
+unexercised for months and only breaks when someone needs a Simulator run. Expect
+it again after any big Xcode update. Symptom to remember: *error 70 plus an empty
+"Available destinations" list.*
+
+**And a third, unrelated to Xcode:** the app failed to log in with the seeded
+`alice@example.com` because `mobile/.env` still pointed at
+`https://your-timeline.net` — the demo world only exists in the local Docker
+database. `EXPO_PUBLIC_API_URL` is inlined **at bundle time**, so changing it
+requires restarting Metro, not just reloading the app.
+
+**Adding a native module means rebuilding, not restarting.** M1 added
+`expo-haptics` and `expo-clipboard`; `npx expo start` would have loaded the new
+JS into the old native binary and crashed at the first long-press. Check with
+`grep -c ExpoHaptics ios/Podfile.lock` — a 0 means `npx expo run:ios` is required.
+
 **CI:** the new `mobile` job must be added to the **required status checks** in
 the repo's branch-protection settings, or it can't block a merge.
