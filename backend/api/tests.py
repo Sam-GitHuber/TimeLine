@@ -29,8 +29,9 @@ from api.emoji import (
     InvalidEmoji,
     normalise_emoji,
 )
-from api.serializers import NotificationSerializer
+from api.serializers import MESSAGE_MAX_LENGTH, NotificationSerializer
 from api.views import (
+    MESSAGE_EDIT_WINDOW,
     activate,
     active_participant_ids,
     deactivate,
@@ -1415,6 +1416,199 @@ class MessageDeleteTests(MessagingBase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         theirs.refresh_from_db()
         self.assertFalse(theirs.is_deleted)
+
+
+class MessageEditTests(MessagingBase):
+    """Editing your own message (Phase 9b M1).
+
+    The feature exists because a real beta tester had no way to fix a typo. The
+    tests below are mostly about the *limits*, because those are what keep a
+    thread a trustworthy shared record rather than something either side can
+    quietly rewrite.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(
+            user_a=self.me, user_b=self.friend
+        )
+        self.mine = Message.objects.create(
+            conversation=self.convo, sender=self.me, text="teh quick fox"
+        )
+
+    def _edit(self, message, text, convo=None):
+        return self.client.patch(
+            f"/api/conversations/{(convo or self.convo).pk}/messages/{message.pk}/",
+            {"text": text},
+            format="json",
+        )
+
+    def test_sender_can_edit_own_message(self):
+        resp = self._edit(self.mine, "the quick fox")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["text"], "the quick fox")
+        self.assertTrue(resp.data["is_edited"])
+        self.assertIsNotNone(resp.data["edited_at"])
+        self.mine.refresh_from_db()
+        self.assertEqual(self.mine.text, "the quick fox")
+
+    def test_unedited_message_reports_is_edited_false(self):
+        # The marker must mean something: a message nobody touched never claims
+        # to have been edited.
+        thread = self.client.get(messages_url(self.convo))
+        row = thread.data["results"][0]
+        self.assertFalse(row["is_edited"])
+        self.assertIsNone(row["edited_at"])
+
+    def test_cannot_edit_someone_elses_message(self):
+        theirs = Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="theirs"
+        )
+        resp = self._edit(theirs, "words in their mouth")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        theirs.refresh_from_db()
+        self.assertEqual(theirs.text, "theirs")
+
+    def test_cannot_edit_a_deleted_message(self):
+        self.client.delete(
+            f"/api/conversations/{self.convo.pk}/messages/{self.mine.pk}/"
+        )
+        resp = self._edit(self.mine, "back from the dead")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.mine.refresh_from_db()
+        self.assertEqual(self.mine.text, "")
+        self.assertTrue(self.mine.is_deleted)
+
+    def test_cannot_edit_after_the_window_closes(self):
+        # Sent just over the window ago — the point of the window is that you
+        # can't rewrite what someone read and replied to yesterday.
+        Message.objects.filter(pk=self.mine.pk).update(
+            created_at=timezone.now() - MESSAGE_EDIT_WINDOW - timedelta(seconds=1)
+        )
+        resp = self._edit(self.mine, "rewriting history")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.mine.refresh_from_db()
+        self.assertEqual(self.mine.text, "teh quick fox")
+        self.assertFalse(self.mine.is_edited)
+
+    def test_edit_just_inside_the_window_is_allowed(self):
+        Message.objects.filter(pk=self.mine.pk).update(
+            created_at=timezone.now() - MESSAGE_EDIT_WINDOW + timedelta(seconds=30)
+        )
+        resp = self._edit(self.mine, "still in time")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_blank_and_oversized_edits_rejected(self):
+        blank = self._edit(self.mine, "   ")
+        self.assertEqual(blank.status_code, status.HTTP_400_BAD_REQUEST)
+        oversized = self._edit(self.mine, "x" * (MESSAGE_MAX_LENGTH + 1))
+        self.assertEqual(oversized.status_code, status.HTTP_400_BAD_REQUEST)
+        self.mine.refresh_from_db()
+        self.assertEqual(self.mine.text, "teh quick fox")
+
+    def test_edit_does_not_bump_conversation_activity(self):
+        """Fixing a typo must not jump the thread to the top of everyone's
+        conversation list — an edit isn't new activity. This regresses quietly
+        (any stray ``save()`` on the conversation would do it), so it's asserted
+        rather than assumed."""
+        before = Conversation.objects.get(pk=self.convo.pk).updated_at
+        self.assertEqual(
+            self._edit(self.mine, "fixed").status_code, status.HTTP_200_OK
+        )
+        after = Conversation.objects.get(pk=self.convo.pk).updated_at
+        self.assertEqual(before, after)
+
+    def test_list_preview_shows_the_edited_text(self):
+        # The preview is a DISTINCT ON over the latest message, so it picks up
+        # the new text with no bump needed — the pair of properties this and the
+        # test above assert together.
+        self._edit(self.mine, "corrected preview")
+        listing = self.client.get(CONVERSATIONS_URL)
+        self.assertEqual(
+            listing.data["results"][0]["last_message"]["text"],
+            "corrected preview",
+        )
+
+    def test_cannot_edit_in_a_thread_you_can_no_longer_send_to(self):
+        """A disconnect closes the composer, so it must close the edit window
+        too — otherwise the 15 minutes after a severed connection are a back door
+        for putting fresh words into a thread you've lost access to."""
+        self.client.delete(connect_url(self.friend))
+        resp = self._edit(self.mine, "sneaking one in")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.mine.refresh_from_db()
+        self.assertEqual(self.mine.text, "teh quick fox")
+
+    def test_non_participant_gets_404_not_403(self):
+        # Probing a message id from outside must reveal nothing about the
+        # thread — the conversation gate answers first.
+        self.client.force_authenticate(self.stranger)
+        resp = self._edit(self.mine, "intrude")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cannot_probe_a_message_from_inside_your_gap(self):
+        """The interval-clipping case, mirroring
+        ``test_cannot_report_a_message_from_inside_your_gap``.
+
+        A member who was out of a group chat when a message was sent can't see
+        it, so the edit route must not answer questions about it either. The
+        403/404 split is the leak: without clipping the lookup, "not yours" (403)
+        and "no such message" (404) tell a gap member exactly which ids landed in
+        the thread while they were away. Text never leaks — but existence is
+        still theirs to not know, and the report gate already holds this line.
+        """
+        a = make_user("ea@example.com")
+        gapper = make_user("egapper@example.com")
+        convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=a
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=2)
+        p_a = Participant.objects.create(
+            conversation=convo, user=a, status="active"
+        )
+        ParticipantInterval.objects.create(participant=p_a, started_at=t0)
+        gap_p = Participant.objects.create(
+            conversation=convo, user=gapper, status="active"
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=t0, ended_at=t1
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=timezone.now()
+        )
+        in_gap = Message.objects.create(
+            conversation=convo, sender=a, text="said while they were out"
+        )
+        Message.objects.filter(pk=in_gap.pk).update(
+            created_at=t1 + timedelta(minutes=10)
+        )
+
+        self.client.force_authenticate(gapper)
+        resp = self.client.patch(
+            f"/api/conversations/{convo.pk}/messages/{in_gap.pk}/",
+            {"text": "rewriting what I never saw"},
+            format="json",
+        )
+        # 404, not 403: indistinguishable from an id that doesn't exist.
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        in_gap.refresh_from_db()
+        self.assertEqual(in_gap.text, "said while they were out")
+
+        missing = self.client.patch(
+            f"/api/conversations/{convo.pk}/messages/{in_gap.pk + 9999}/",
+            {"text": "nope"},
+            format="json",
+        )
+        self.assertEqual(missing.status_code, resp.status_code)
+
+    def test_editing_sends_no_push(self):
+        """Editing is not news. The push rules are unchanged by M1, and a
+        correction buzzing everyone's phone again is exactly the behaviour that
+        makes people turn notifications off."""
+        PushOutbox.objects.all().delete()
+        self._edit(self.mine, "fixed")
+        self.assertFalse(PushOutbox.objects.exists())
 
 
 class UnreadAndListTests(MessagingBase):

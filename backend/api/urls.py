@@ -110,8 +110,8 @@ urlpatterns = [
     ),
     path(
         "conversations/<int:pk>/messages/<int:message_id>/",
-        views.MessageDeleteView.as_view(),
-        name="message-delete",
+        views.MessageDetailView.as_view(),
+        name="message-detail",
     ),
     path(
         "conversations/<int:pk>/read/",

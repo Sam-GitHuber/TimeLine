@@ -1,6 +1,6 @@
 /**
  * One message row in a thread. Ported from the web's `MessageBubble`, restyled
- * native and with the delete affordance adapted to touch.
+ * native and with the touch affordances a phone needs.
  *
  * Layout mirrors the web: your messages align right with the filled accent,
  * everyone else's align left in a raised bubble. A soft-deleted message leaves a
@@ -16,31 +16,74 @@
  * person it could be), your own messages (right-alignment already says they're
  * yours), and a run's later bubbles.
  *
- * **Delete is a long-press**, not a hover button (a phone has no hover): pressing
- * and holding your own message asks the caller to confirm, via `onRequestDelete`.
- * A deleted message and anyone else's can't be long-pressed to delete.
+ * **Long-press opens the action menu** (Phase 9b M1) — Copy/Edit/Delete on your
+ * own, Copy/Report on someone else's. This replaced a long-press that went
+ * straight to a delete confirm: a gesture that only ever deletes is a trap, and
+ * there was nowhere to put edit. The bubble measures its own screen rect and
+ * hands it up, because the menu anchors itself under the bubble you actually
+ * pressed (see `MessageActionMenu`). A deleted message's tombstone has no menu —
+ * there's nothing left to act on.
  */
 
+import { useRef } from 'react';
+import * as Haptics from 'expo-haptics';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from './Avatar';
+import type { BubbleAnchor } from './MessageActionMenu';
+import { measureInWindow } from '@/measure';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
 import { formatRelativeTime } from '@/utils';
+
+/**
+ * The bubble itself — background, text, timestamp — with no positioning of its
+ * own. Split out from `MessageBubble` so the action menu can redraw the pressed
+ * bubble at its measured position and get *the real thing*, not a lookalike that
+ * drifts the first time this styling changes. It deliberately carries no
+ * `maxWidth`: the wrapper owns that, so a copy rendered into a fixed-width slot
+ * fills it exactly.
+ */
+export function BubbleBody({ message, mine }: { message: Message; mine: boolean }) {
+  return (
+    <View style={[styles.bubble, mine ? styles.mine : styles.theirs]}>
+      <Text style={[styles.text, mine ? styles.mineText : styles.theirsText]}>
+        {message.text}
+      </Text>
+      <Text style={[styles.time, mine ? styles.mineTime : styles.theirsTime]}>
+        {formatRelativeTime(message.created_at)}
+        {/* An edit is disclosed, never silent: a thread is a shared record, and
+            quietly changing what someone already read would make it worthless
+            as one. */}
+        {message.is_edited ? ' · Edited' : ''}
+      </Text>
+    </View>
+  );
+}
 
 export function MessageBubble({
   message,
   mine,
   showSender,
-  onRequestDelete,
+  onLongPress,
 }: {
   message: Message;
   mine: boolean;
   showSender: boolean;
-  /** Called on long-press of your own, non-deleted message. */
-  onRequestDelete: () => void;
+  /** Opens the action menu, anchored to this bubble's rect on screen. */
+  onLongPress: (anchor: BubbleAnchor) => void;
 }) {
-  const deletable = mine && !message.is_deleted;
+  const bubbleRef = useRef<View>(null);
+
+  function handleLongPress() {
+    // A light tap under the finger is most of what makes the gesture feel
+    // deliberate rather than accidental. Fire and forget — a phone without a
+    // taptic engine simply resolves it.
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    // Measure first, open second: the menu positions itself from this rect, so
+    // opening before it lands would put the menu somewhere and then move it.
+    measureInWindow(bubbleRef.current, onLongPress);
+  }
 
   return (
     <View style={styles.row}>
@@ -60,22 +103,21 @@ export function MessageBubble({
           </View>
         ) : (
           <Pressable
-            onLongPress={deletable ? onRequestDelete : undefined}
+            ref={bubbleRef}
+            onLongPress={handleLongPress}
             delayLongPress={350}
             accessibilityRole="text"
-            // The label lets the delete path be driven in tests and read out to
-            // assistive tech, since long-press isn't otherwise discoverable.
+            // The label lets the menu be opened by assistive tech and driven in
+            // tests, since a long-press isn't otherwise discoverable.
             accessibilityLabel={
-              deletable ? `Your message: ${message.text}` : undefined
+              mine
+                ? `Your message: ${message.text}`
+                : `Message from ${message.sender.display_name}: ${message.text}`
             }
-            style={[styles.bubble, mine ? styles.mine : styles.theirs]}
+            accessibilityHint="Press and hold for message actions"
+            style={styles.bubbleWrap}
           >
-            <Text style={[styles.text, mine ? styles.mineText : styles.theirsText]}>
-              {message.text}
-            </Text>
-            <Text style={[styles.time, mine ? styles.mineTime : styles.theirsTime]}>
-              {formatRelativeTime(message.created_at)}
-            </Text>
+            <BubbleBody message={message} mine={mine} />
           </Pressable>
         )}
       </View>
@@ -100,8 +142,8 @@ const styles = StyleSheet.create({
   bubbleRow: { flexDirection: 'row' },
   alignEnd: { justifyContent: 'flex-end' },
   alignStart: { justifyContent: 'flex-start' },
+  bubbleWrap: { maxWidth: '80%' },
   bubble: {
-    maxWidth: '80%',
     paddingHorizontal: spacing.md - 2,
     paddingVertical: spacing.sm,
     borderRadius: radius.lg,

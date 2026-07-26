@@ -245,13 +245,20 @@ export type Conversation = {
  * slice, so the thread can align/attribute each bubble. A soft-deleted message
  * reports `is_deleted: true` with blank `text`; the client renders a "message
  * deleted" tombstone in its place, keeping the thread's order intact.
+ *
+ * `is_edited`/`edited_at` (Phase 9b M1) drive the bubble's "Edited" marker. The
+ * sender can correct a message for 15 minutes after sending it; after that the
+ * PATCH 403s, so the marker is also a promise that nothing older than that
+ * changed under you.
  */
 export type Message = {
   id: number;
   sender: Author;
   text: string;
   is_deleted: boolean;
+  is_edited: boolean;
   created_at: string;
+  edited_at: string | null;
 };
 
 /**

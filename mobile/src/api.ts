@@ -92,6 +92,17 @@ export const CONVERSATION_LIST_POLL_MS = 12000;
 export const NOTIFICATIONS_POLL_MS = 12000;
 
 /**
+ * How long after sending a message you can still correct it (Phase 9b M1).
+ *
+ * **The server is the authority** — `MESSAGE_EDIT_WINDOW` in `api/views.py` — and
+ * it 403s a late PATCH regardless of what the client believes. This copy exists
+ * only so the menu can *hide* an Edit item that would fail, which is much better
+ * than offering an action that errors. The two can drift by a clock skew's worth
+ * without harm: the worst case is an Edit item that 403s and shows its message.
+ */
+export const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
+
+/**
  * A photo chosen from the library, ready to upload. The picker hands us the
  * file's location, its (best-effort) filename, and its MIME type.
  */
@@ -526,6 +537,28 @@ export const api = {
       method: 'POST',
       body: { text },
     }),
+
+  /**
+   * Correct your *own* message (Phase 9b M1) — the beta's first real complaint
+   * was that a typo was permanent.
+   *
+   * Sender-only, and only within the server's 15-minute window (403 after that:
+   * a thread is a shared record, so you can fix "teh", not rewrite what someone
+   * read and replied to yesterday). A deleted message can't be edited (400).
+   *
+   * Deliberately does **not** bump the conversation's activity time — fixing a
+   * typo shouldn't jump the thread to the top of everyone's list — so the
+   * conversation list doesn't need reordering, only the preview text refreshed.
+   */
+  editMessage: (
+    conversationId: number | string,
+    messageId: number | string,
+    text: string
+  ) =>
+    request<Message>(
+      `/api/conversations/${conversationId}/messages/${messageId}/`,
+      { method: 'PATCH', body: { text } }
+    ),
 
   /**
    * Soft-delete your *own* message — it becomes a "message deleted" tombstone

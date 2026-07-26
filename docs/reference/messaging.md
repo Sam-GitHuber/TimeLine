@@ -47,8 +47,11 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
   `started_at`, `ended_at` (null = currently active). Becoming active **opens** an
   interval; dropping to pending / leaving **closes** it; returning opens a new one.
 - **`Message`** — `conversation`, `sender`, `text`, `created_at` (indexed),
-  soft-delete `deleted_at`. `ordering = ["created_at", "id"]` (oldest-first, stable
-  tiebreak).
+  soft-delete `deleted_at`, and `edited_at` (null = never edited).
+  `ordering = ["created_at", "id"]` (oldest-first, stable tiebreak). `edited_at`
+  is deliberately *not* `auto_now`, which would also fire on the soft-delete
+  write and mislabel a deleted message as edited. See
+  [Editing a message](#editing-a-message).
 - **`ConversationRead`** — `(conversation, user, last_read_at)`, unique together.
   Unread for you = visible messages with `created_at > last_read_at` and
   `sender != you`. Its own table (not two timestamps on `Conversation`) is why
@@ -73,6 +76,52 @@ nothing from before them. A block never penalises the person who was blocked. Bo
 the thread and the unread counts (per-thread + the nav badge) count over this
 clipped set — `visible_messages(conversation, viewer)` — so a member never gets an
 unread bump from messages sent during a gap.
+
+## Editing a message
+
+Added in Phase 9b M1, off the first real beta report: *"there's no way to edit
+messages to correct spelling mistakes."* `PATCH` the message with a new `text`;
+`MessageSerializer` then reports `is_edited: true` and `edited_at`, and both
+clients show an **"Edited"** marker beside the timestamp.
+
+**The marker is not decoration — it's the thing that makes editing safe.** A
+thread is a record two people share. An edit that showed no trace would let
+either side change what the other already read, which quietly makes the whole
+history untrustworthy. Disclosure is the price of the feature.
+
+**There's a 15-minute window** (`MESSAGE_EDIT_WINDOW` in `views.py`, one
+constant). Unlimited editing has the same problem in slow motion: someone
+rewrites a message you already replied to, and your reply now sits under words
+that were never said. Fifteen minutes covers "I typed teh" and excludes "I
+rewrote yesterday". The mobile client hides the Edit action past the window so it
+doesn't offer an action that will 403 — `MESSAGE_EDIT_WINDOW_MS` in
+`mobile/src/api.ts` mirrors the constant, and the server stays authoritative.
+
+Five rules, each a deliberate answer rather than an oversight:
+
+| Rule | Why |
+| --- | --- |
+| The message must be **visible to you** (**404**) | The lookup runs through `_messages_for_viewer`, so it's interval-clipped exactly like the thread and like `can_view_message`'s report gate — [the same rule in all three places](#history-is-interval-clipped), never a second copy that drifts. Without it the 403/404 split below becomes an existence oracle: a member who was `pending` across a gap could tell which message ids landed while they were away. No text leaks either way, but existence is still theirs to not know. |
+| Sender only (**403**, not 404) | Within that clipped set the message is visibly there in your thread and you already know who sent it, so 403 leaks nothing and pretending otherwise would be theatre. |
+| Not deleted (**400**) | There's no text left to correct, and refilling a tombstone would resurrect a message the thread already showed as gone. |
+| Inside the window (**403**) | Above. |
+| You must still be able to *send* here (**403**) | An edit writes new text into the thread, so `_assert_can_send` is consulted for both. Without it, the 15 minutes after a disconnect or a sever would be a back door for putting fresh words into a thread you've lost access to. This is the same helper the send path uses — one gate, not two that drift. |
+
+The **404-for-delete / 403-for-edit** asymmetry on the one URL is deliberate and
+settled rather than overlooked: each verb is scoped to what its caller can
+already see, so both are safe, and re-shaping `DELETE`'s long-shipped contract
+purely for symmetry would be churn.
+
+**An edit does not bump `Conversation.updated_at`.** Fixing a typo shouldn't jump
+the thread to the top of everyone's conversation list. The list preview still
+updates, because it's a `DISTINCT ON` over each thread's latest message and so
+reads the new text with no bump needed. Both halves are asserted in
+`MessageEditTests` — the pairing is easy to break by accident.
+
+**No push, no `Notification` row, no re-buzz.** The push rules are untouched: an
+edit is not news, and a correction buzzing everyone's phone a second time is how
+people end up turning notifications off. Nothing had to change for privacy
+either, since [push bodies never quoted message text](#push-notifications).
 
 ## Membership state machine
 
@@ -141,6 +190,10 @@ Direct and group chats share the endpoints:
   message (blanks `text`, sets `deleted_at`, keeps a "message deleted" tombstone in
   place so the thread doesn't silently reshuffle and pagination isn't disturbed;
   deleted messages don't count toward unread).
+- `PATCH /api/conversations/<id>/messages/<msg_id>/` — **edit** your own message,
+  body `{ text }`. Sender-only (403), not deleted (400), within the edit window
+  (403), and only while you could still *send* here (403). Validated by exactly
+  the same rules as sending. See [Editing a message](#editing-a-message).
 - `POST /api/conversations/<id>/participants/` — add people; any active member,
   each an addable connection.
 - `POST /api/conversations/<id>/leave/` — self-leave **or** decline-invite.
@@ -262,6 +315,13 @@ new-message:
   blank screen). It coordinates with the left-docked [groups](groups.md) drawer on
   narrow viewports (opening one closes the other below 800px).
 
+**The web is behind on Phase 9b and that's expected, not broken.** Every 9b
+response field is additive, so the drawer ignores `is_edited`/`edited_at` and
+simply renders an edited message as its new text with no marker. Web parity is
+its own milestone (9b M9), which also splits `MessagesDrawer.jsx` up. The one
+visible degradation until then is that missing marker — worth saying out loud
+rather than having someone discover it.
+
 ## Mobile (Phase 9 E2)
 
 The iPhone app is a **client port of exactly this API — no backend change.** It
@@ -276,10 +336,50 @@ the feed's scroll position beside the chat) for the standard phone shape: a
 per-thread + tab unread badges, pending `PendingChatPanel`, and group
 sender-attribution runs.
 
-Two behaviours differ because the medium does, not the model: **delete-your-own**
-is a long-press → confirm (a phone has no hover for the web's inline Delete), and
-the **Message** button on a profile pushes the thread full-screen rather than
+Two behaviours differ because the medium does, not the model: **message actions**
+are a long-press (a phone has no hover for the web's inline Delete — see below),
+and the **Message** button on a profile pushes the thread full-screen rather than
 opening a drawer alongside.
+
+### The long-press action menu (Phase 9b M1)
+
+Long-pressing a bubble dims the thread, keeps the pressed bubble at full
+brightness, and floats a small menu **directly beneath it** — Copy · Edit ·
+Delete on your own, Copy · Report on someone else's. A deleted message's
+tombstone has no menu; there's nothing left to act on.
+
+**It's deliberately not an `ActionSheetIOS`,** even though `PostMenu` is and
+reusing it would have been less work. A sheet slides up from the bottom of the
+screen detached from the thing it acts on, so if the long-press landed on the
+wrong bubble there is nothing on screen to tell you before you tap Delete. The
+anchored menu makes the target unmistakable, which is the whole justification for
+the extra machinery: `MessageBubble` measures its own rect, `MessageActionMenu`
+renders a transparent `Modal` and re-renders **the same** `BubbleBody` at that
+rect (a real component, not a lookalike that would drift), placing the menu below
+— or above, when the bubble sits too low for it to fit.
+
+Three implementation notes worth keeping:
+
+- **The item list is data** (`messageActions()`), not JSX, because M2 (react) and
+  M3 (reply) insert entries into this same menu.
+- **The actions are decided at press time, not render time** — one of them
+  expires, so a render-time `Date.now()` would make the menu's contents depend on
+  when React last redrew.
+- **`src/measure.ts` is a seam, not indirection.** Measuring a view is native, and
+  under Node the callback never fires — RN's Jest preset installs a per-instance
+  no-op reached via `requireActual`, so it can't be mocked from outside. Owning
+  the seam lets `jest.setup.js` supply a rect, which keeps the menu genuinely
+  testable and keeps timers and fallbacks out of the UI.
+
+**Editing happens in the composer**, which grows an "Editing message" bar showing
+the original with an ✕ to cancel; the input is prefilled and focused and Send
+becomes Save. Cancelling restores whatever you were half-typing before you
+started editing, and an emptied composer just disables Save — there is no path
+from "editing" to an accidental delete.
+
+**Report** was already built end-to-end by M0 (endpoint, `reportContent`,
+`ReportModal`); M1 only added the menu entry that opens it, which is the UI entry
+point M0 deliberately shipped without.
 
 **New-message push** (issue #118) is the one place the app gets something the web
 can't have. A tapped message push deep-links to the thread via `routeForNotification`
