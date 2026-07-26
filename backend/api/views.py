@@ -2202,16 +2202,28 @@ class MessageDetailView(APIView):
     rules as sending. Four things must hold, and each one is a deliberate answer
     to "why not just let people edit anything":
 
+    - **The message must be one you can see** (404) — looked up through
+      ``_messages_for_viewer``, so it's interval-clipped exactly like the thread
+      and like ``can_view_message``'s report gate. A member who was ``pending``
+      across a gap can't so much as learn that a message from inside that gap
+      exists: without this the 403/404 split below would answer that question for
+      them. Same rule in all three places, deliberately — a second copy of the
+      messaging safety gate would drift from the first.
     - **You must be the sender** (403, not 404 — unlike delete, which never had a
-      legitimate cross-user caller. The message is right there in the thread, so
-      pretending it doesn't exist would be theatre; the conversation gate above
-      is what actually hides other people's threads).
+      legitimate cross-user caller. Within the clipped set the message is visibly
+      there in your thread and you already know who sent it, so 403 leaks nothing
+      and pretending it doesn't exist would be theatre).
     - **Not deleted** (400) — there's no text left to correct, and re-filling a
       tombstone would resurrect a message the thread already showed as gone.
     - **Within ``MESSAGE_EDIT_WINDOW``** (403) — see the constant.
     - **You must still be able to send here** — an edit writes new text into the
       thread, so a member who was severed or disconnected can't use their
       unexpired window as a back door.
+
+    *(The 404-for-delete / 403-for-edit asymmetry on one URL is deliberate and
+    settled: both are safe now that each is scoped to what the caller can already
+    see, and re-shaping DELETE's long-shipped contract to match would be churn
+    for symmetry's sake.)*
 
     Deliberately, an edit does **not** bump ``Conversation.updated_at``: fixing a
     typo shouldn't jump the thread to the top of everyone's conversation list.
@@ -2220,7 +2232,12 @@ class MessageDetailView(APIView):
 
     def patch(self, request, pk, message_id):
         convo, my_status = _thread_for_viewer(pk, request.user)
-        message = get_object_or_404(Message, pk=message_id, conversation=convo)
+        # Scoped to the viewer's *visible* messages, not the whole thread — see
+        # the first bullet above. Your own message inside the edit window is
+        # always in this set, so nothing legitimate is excluded.
+        message = get_object_or_404(
+            _messages_for_viewer(convo, request.user), pk=message_id
+        )
         if message.sender_id != request.user.id:
             raise PermissionDenied("You can only edit your own messages.")
         if message.is_deleted:

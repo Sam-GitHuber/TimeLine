@@ -90,7 +90,15 @@ function messageActions({
   onReport: (messageId: number) => void;
 }): MessageAction[] {
   const actions: MessageAction[] = [
-    { label: 'Copy', onPress: () => Clipboard.setStringAsync(message.text) },
+    {
+      label: 'Copy',
+      // Swallow a pasteboard failure rather than leaving a floating rejection:
+      // there's nothing useful to tell someone whose copy didn't take, and an
+      // unhandled rejection is a redbox in dev.
+      onPress: () => {
+        Clipboard.setStringAsync(message.text).catch(() => {});
+      },
+    },
   ];
   if (mine) {
     const age = now - new Date(message.created_at).getTime();
@@ -183,7 +191,10 @@ export default function ThreadScreen() {
   const sendMutation = useMutation({
     mutationFn: (value: string) => api.sendMessage(id, value),
     onSuccess: () => {
-      setText('');
+      // Don't clear the composer if it has since become an *editor*: a send
+      // still in flight when you long-press → Edit would otherwise wipe the
+      // prefilled text out from under you.
+      if (!editing) setText('');
       queryClient.invalidateQueries({ queryKey: ['messages', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
@@ -249,7 +260,10 @@ export default function ThreadScreen() {
   }
 
   function startEditing(message: Message) {
-    setStashedDraft(text);
+    // Only stash on the way *into* edit mode. Switching straight from editing
+    // one message to another would otherwise overwrite the draft with the first
+    // message's text — losing the very thing the stash exists to protect.
+    if (!editing) setStashedDraft(text);
     setEditing(message);
     setText(message.text);
     editMutation.reset();
@@ -262,6 +276,9 @@ export default function ThreadScreen() {
     setEditing(null);
     setText(stashedDraft);
     setStashedDraft('');
+    // Clear any failed-edit error with the mode that produced it, or it lingers
+    // over a composer that's no longer editing anything.
+    editMutation.reset();
   }
 
   function confirmDelete(messageId: number) {

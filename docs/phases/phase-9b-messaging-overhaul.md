@@ -415,7 +415,13 @@ before M2/M3, which build on the same menu:
    existing workaround elsewhere (`profile.test.tsx`) is to mock the component
    away — which would have meant mocking away the component under test. A 120ms
    opacity + scale runs on the native driver either way.
-3. **`src/measure.ts` exists as a seam for `measureInWindow`.** Measuring a view
+3. **The edit lookup is interval-clipped, like the report gate.** Caught in
+   review: the first cut looked the message up in the whole conversation, which
+   let a gap member distinguish 403 ("not yours") from 404 ("no such message")
+   and so learn which ids landed while they were away. `_messages_for_viewer` is
+   the one rule the thread, the report gate and now the edit route all share —
+   **M2 and M3 must resolve a target message the same way.**
+4. **`src/measure.ts` exists as a seam for `measureInWindow`.** Measuring a view
    is native; under Node the callback never fires, and RN's Jest preset installs
    the no-op as a per-instance `jest.fn()` reached through `requireActual`, so it
    cannot be mocked from outside. A seam we own can be, which is what lets the

@@ -445,6 +445,58 @@ it('cancelling an edit restores the draft you were typing', async () => {
   ).toBe(false);
 });
 
+it('keeps the original draft when you switch from one edit to another', async () => {
+  // The stash is a promise that a half-written message survives a typo fix. It
+  // has to survive *two* typo fixes: overwriting it on the second Edit would
+  // quietly swap your draft for the first message's text.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'first of mine' }),
+      message({ id: 8, sender: MINE, text: 'second of mine' }),
+    ],
+  });
+
+  await renderScreen();
+  await fireEvent.changeText(
+    await screen.findByLabelText('Message'),
+    'half-written thought'
+  );
+
+  await openMenu('Your message: first of mine');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  expect(screen.getByLabelText('Message').props.value).toBe('first of mine');
+
+  await openMenu('Your message: second of mine');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  expect(screen.getByLabelText('Message').props.value).toBe('second of mine');
+
+  await fireEvent.press(screen.getByLabelText('Cancel editing'));
+
+  expect(screen.getByLabelText('Message').props.value).toBe(
+    'half-written thought'
+  );
+});
+
+it('saving unchanged text closes edit mode without a PATCH', async () => {
+  // Opening Edit and thinking better of it shouldn't stamp the message
+  // "Edited" — there's nothing to record.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'nothing wrong with this' })],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: nothing wrong with this');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  await fireEvent.press(screen.getByLabelText('Save'));
+
+  await waitFor(() => expect(screen.queryByText('Editing message')).toBeNull());
+  expect(
+    mockFetch.mock.calls.some(([, init]) => init?.method === 'PATCH')
+  ).toBe(false);
+});
+
 it('marks an edited message "Edited"', async () => {
   serve({
     conversation: detail({}),

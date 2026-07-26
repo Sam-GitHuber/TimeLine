@@ -1546,6 +1546,62 @@ class MessageEditTests(MessagingBase):
         resp = self._edit(self.mine, "intrude")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_cannot_probe_a_message_from_inside_your_gap(self):
+        """The interval-clipping case, mirroring
+        ``test_cannot_report_a_message_from_inside_your_gap``.
+
+        A member who was out of a group chat when a message was sent can't see
+        it, so the edit route must not answer questions about it either. The
+        403/404 split is the leak: without clipping the lookup, "not yours" (403)
+        and "no such message" (404) tell a gap member exactly which ids landed in
+        the thread while they were away. Text never leaks — but existence is
+        still theirs to not know, and the report gate already holds this line.
+        """
+        a = make_user("ea@example.com")
+        gapper = make_user("egapper@example.com")
+        convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=a
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=2)
+        p_a = Participant.objects.create(
+            conversation=convo, user=a, status="active"
+        )
+        ParticipantInterval.objects.create(participant=p_a, started_at=t0)
+        gap_p = Participant.objects.create(
+            conversation=convo, user=gapper, status="active"
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=t0, ended_at=t1
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=timezone.now()
+        )
+        in_gap = Message.objects.create(
+            conversation=convo, sender=a, text="said while they were out"
+        )
+        Message.objects.filter(pk=in_gap.pk).update(
+            created_at=t1 + timedelta(minutes=10)
+        )
+
+        self.client.force_authenticate(gapper)
+        resp = self.client.patch(
+            f"/api/conversations/{convo.pk}/messages/{in_gap.pk}/",
+            {"text": "rewriting what I never saw"},
+            format="json",
+        )
+        # 404, not 403: indistinguishable from an id that doesn't exist.
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        in_gap.refresh_from_db()
+        self.assertEqual(in_gap.text, "said while they were out")
+
+        missing = self.client.patch(
+            f"/api/conversations/{convo.pk}/messages/{in_gap.pk + 9999}/",
+            {"text": "nope"},
+            format="json",
+        )
+        self.assertEqual(missing.status_code, resp.status_code)
+
     def test_editing_sends_no_push(self):
         """Editing is not news. The push rules are unchanged by M1, and a
         correction buzzing everyone's phone again is exactly the behaviour that

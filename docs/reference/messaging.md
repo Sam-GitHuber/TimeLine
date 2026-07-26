@@ -97,14 +97,20 @@ rewrote yesterday". The mobile client hides the Edit action past the window so i
 doesn't offer an action that will 403 — `MESSAGE_EDIT_WINDOW_MS` in
 `mobile/src/api.ts` mirrors the constant, and the server stays authoritative.
 
-Four rules, each a deliberate answer rather than an oversight:
+Five rules, each a deliberate answer rather than an oversight:
 
 | Rule | Why |
 | --- | --- |
-| Sender only (**403**, not 404) | The message is visibly right there in the thread, so pretending it doesn't exist would be theatre. The *conversation* gate above already 404s a thread you're not in, which is what actually hides other people's messages — a non-participant probing a message id gets 404, never 403. |
+| The message must be **visible to you** (**404**) | The lookup runs through `_messages_for_viewer`, so it's interval-clipped exactly like the thread and like `can_view_message`'s report gate — [the same rule in all three places](#history-is-interval-clipped), never a second copy that drifts. Without it the 403/404 split below becomes an existence oracle: a member who was `pending` across a gap could tell which message ids landed while they were away. No text leaks either way, but existence is still theirs to not know. |
+| Sender only (**403**, not 404) | Within that clipped set the message is visibly there in your thread and you already know who sent it, so 403 leaks nothing and pretending otherwise would be theatre. |
 | Not deleted (**400**) | There's no text left to correct, and refilling a tombstone would resurrect a message the thread already showed as gone. |
 | Inside the window (**403**) | Above. |
 | You must still be able to *send* here (**403**) | An edit writes new text into the thread, so `_assert_can_send` is consulted for both. Without it, the 15 minutes after a disconnect or a sever would be a back door for putting fresh words into a thread you've lost access to. This is the same helper the send path uses — one gate, not two that drift. |
+
+The **404-for-delete / 403-for-edit** asymmetry on the one URL is deliberate and
+settled rather than overlooked: each verb is scoped to what its caller can
+already see, so both are safe, and re-shaping `DELETE`'s long-shipped contract
+purely for symmetry would be churn.
 
 **An edit does not bump `Conversation.updated_at`.** Fixing a typo shouldn't jump
 the thread to the top of everyone's conversation list. The list preview still

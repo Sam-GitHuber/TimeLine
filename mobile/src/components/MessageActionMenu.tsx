@@ -158,35 +158,40 @@ export function MessageActionMenu({
           },
         ]}
       >
-        {/* A long list (M2/M3 add rows) scrolls rather than overflowing the
-            screen; at M1's three items it never does. */}
-        <ScrollView bounces={false} style={{ maxHeight: screenH * 0.5 }}>
-          {actions.map((action, i) => (
-            <Pressable
-              key={action.label}
-              onPress={() => {
-                // Close first: every action either navigates, opens a modal, or
-                // puts the composer into edit mode, and all three want the
-                // overlay gone before they run.
-                onClose();
-                action.onPress();
-              }}
-              accessibilityRole="button"
-              accessibilityLabel={action.label}
-              style={({ pressed }) => [
-                styles.item,
-                i > 0 && styles.itemDivided,
-                pressed && styles.itemPressed,
-              ]}
-            >
-              <Text
-                style={[styles.itemLabel, action.destructive && styles.destructive]}
+        {/* Rounding + clipping live on an inner view, never on the shadowed one:
+            `overflow: hidden` is `clipsToBounds` on iOS, which clips the shadow
+            away as well as the corners. Two views is the standard fix. */}
+        <View style={styles.menuClip}>
+          {/* A long list (M2/M3 add rows) scrolls rather than overflowing the
+              screen; at M1's three items it never does. */}
+          <ScrollView bounces={false} style={{ maxHeight: screenH * 0.5 }}>
+            {actions.map((action, i) => (
+              <Pressable
+                key={action.label}
+                onPress={() => {
+                  // Close first: every action either navigates, opens a modal,
+                  // or puts the composer into edit mode, and all three want the
+                  // overlay gone before they run.
+                  onClose();
+                  action.onPress();
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={action.label}
+                style={({ pressed }) => [
+                  styles.item,
+                  i > 0 && styles.itemDivided,
+                  pressed && styles.itemPressed,
+                ]}
               >
-                {action.label}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
+                <Text
+                  style={[styles.itemLabel, action.destructive && styles.destructive]}
+                >
+                  {action.label}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
       </Animated.View>
     </Modal>
   );
@@ -204,13 +209,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(28,26,22,0.35)',
   },
   preview: { position: 'absolute' },
+  // The shadow layer. Carries no `overflow: hidden` — see `menuClip`.
   menu: {
     position: 'absolute',
-    paddingVertical: MENU_PADDING,
     borderRadius: radius.md,
-    backgroundColor: colors.raised,
-    borderWidth: 1,
-    borderColor: colors.line,
     // A real shadow, because the menu floats over a dimmed thread and needs to
     // sit visibly above it.
     shadowColor: '#1c1a16',
@@ -218,6 +220,15 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 6 },
     elevation: 8,
+  },
+  // The surface layer: background, border, rounded corners, and the clipping
+  // that keeps a pressed row's tint inside them.
+  menuClip: {
+    paddingVertical: MENU_PADDING,
+    borderRadius: radius.md,
+    backgroundColor: colors.raised,
+    borderWidth: 1,
+    borderColor: colors.line,
     overflow: 'hidden',
   },
   item: {
