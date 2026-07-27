@@ -141,7 +141,11 @@ the details**. What's specific to messaging:
 - **Reacting needs `can_send`, like editing does.** A reaction is content the
   whole thread sees, so being severed or disconnected stops it (403). Reading who
   reacted still works: losing the ability to write is not losing the history.
-  A deleted message can't be reacted to (400) — there's nothing left to react to.
+- **A deleted message is removal-only.** Adding a reaction to a tombstone is a
+  400 — there's nothing left to react to — but taking one *off* still works,
+  because the tombstone keeps showing reactions left before the delete and has no
+  long-press menu to remove them from. See
+  [reactions.md](reactions.md#message-reactions-phase-9b-m2).
 - **No pruning.** Post reactions are pruned per viewer because a reactor might be
   someone you can't see; a chat's active participants are a clique by
   construction, so everyone who can see the message can see every reactor.

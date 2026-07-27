@@ -38,6 +38,56 @@ jest.mock('expo-router', () => ({
   },
 }));
 
+/**
+ * Stand in for the full emoji grid.
+ *
+ * The real `rn-emoji-keyboard` ships PNG icons that Jest can't parse, and none
+ * of its internals are what's under test here. What *is* testable is the
+ * handover: tapping `＋` opens the grid and leaves the action menu mounted but
+ * hidden. (Whether iOS sequences the two modals correctly is a native
+ * behaviour no Node test can reach — that one is a device check.)
+ */
+jest.mock('rn-emoji-keyboard', () => {
+  // require, not import: a jest.mock factory is hoisted above the imports, so it
+  // can't reference module-scope bindings and must pull its deps in itself.
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const React = require('react');
+  const { Pressable, Text } = require('react-native');
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  return {
+    __esModule: true,
+    default: ({
+      open,
+      onClose,
+      onEmojiSelected,
+    }: {
+      open: boolean;
+      onClose: () => void;
+      onEmojiSelected: (picked: { emoji: string }) => void;
+    }) =>
+      open
+        ? React.createElement(
+            React.Fragment,
+            null,
+            React.createElement(Text, null, 'emoji grid'),
+            React.createElement(
+              Pressable,
+              {
+                accessibilityLabel: 'pick 🦖 from the grid',
+                onPress: () => onEmojiSelected({ emoji: '🦖' }),
+              },
+              React.createElement(Text, null, '🦖')
+            ),
+            React.createElement(
+              Pressable,
+              { accessibilityLabel: 'dismiss the grid', onPress: onClose },
+              React.createElement(Text, null, 'x')
+            )
+          )
+        : null,
+  };
+});
+
 const mockFetch = jest.fn();
 
 function jsonResponse(body: unknown, status = 200) {
@@ -691,6 +741,129 @@ it('removes your own reaction from the who-reacted sheet', async () => {
   // The sheet closes on the way out; the pill goes with the reaction.
   await waitFor(() => expect(screen.queryByText('Who reacted')).toBeNull());
   await waitFor(() => expect(screen.queryByLabelText(/^👍/)).toBeNull());
+});
+
+it('hides the menu rather than unmounting it when the emoji grid opens', async () => {
+  // The iOS trap ReactionTray documents: tearing down a presented modal in the
+  // same commit that presents the next one can leave the new one never
+  // appearing. The menu has to stay mounted and merely hidden — so its backdrop
+  // is gone from the tree (Modal renders null when not visible) while the
+  // *screen* still has the menu component alive to be closed afterwards.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('More emoji'));
+
+  // The grid is up...
+  expect(await screen.findByText('emoji grid')).toBeTruthy();
+  // ...the menu's own chrome is hidden (a Modal renders null when not visible)...
+  expect(screen.queryByLabelText('Close message actions')).toBeNull();
+  // ...and nothing was toggled on the way — the grid decides that.
+  expect(reactCalls()).toEqual([]);
+});
+
+it('closes the menu too when the emoji grid is dismissed', async () => {
+  // The menu is only *hidden* while the grid is up, so something has to unmount
+  // it afterwards — otherwise the thread stays dimmed behind an invisible modal
+  // and every tap lands on a backdrop nobody can see.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('More emoji'));
+  await screen.findByText('emoji grid');
+
+  await fireEvent.press(screen.getByLabelText('dismiss the grid'));
+
+  expect(screen.queryByText('emoji grid')).toBeNull();
+  expect(screen.queryByLabelText('Close message actions')).toBeNull();
+  // Back to the thread itself, not a menu waiting to be dismissed again.
+  expect(screen.getByLabelText('Message')).toBeTruthy();
+});
+
+it('reacts with an emoji picked from the full grid', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+    reactionsAfterToggle: [{ emoji: '🦖', count: 1, reacted: true }],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('More emoji'));
+  await fireEvent.press(await screen.findByLabelText('pick 🦖 from the grid'));
+
+  await waitFor(() => expect(reactCalls()).toEqual([['8', '🦖']]));
+  // The grid and the menu both go; the pill lands on the bubble.
+  expect(screen.queryByText('emoji grid')).toBeNull();
+  expect(await screen.findByLabelText(/^🦖, 1/)).toBeTruthy();
+});
+
+it('never shows a stale reactor list after a reaction changes', async () => {
+  // The reactor cache is separate from the thread's and outlives the sheet, so
+  // a toggle has to drop it. Without that, reopening renders the pre-toggle
+  // rows — and since those rows are actionable, a "Tap to remove" for a
+  // reaction you already removed would toggle it straight back on.
+  //
+  // Dropping the entry (rather than just marking it stale) is what makes the
+  // assertion below possible: with no cached data the sheet can only show a
+  // spinner, so there is no window where the wrong row can be tapped.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 8,
+        sender: ADA,
+        text: 'dinner at 7?',
+        // You and Ada both — so removing yours leaves the pill (and the sheet)
+        // reachable afterwards.
+        reactions: [{ emoji: '👍', count: 2, reacted: true }],
+      }),
+    ],
+    reactors: [{ emoji: '👍', count: 2, users: [MINE, ADA] }],
+    reactionsAfterToggle: [{ emoji: '👍', count: 1, reacted: false }],
+  });
+
+  await renderScreen();
+  // Open the sheet once so the reactor list is cached, then close it.
+  await fireEvent.press(await screen.findByLabelText(/^👍, 2/));
+  await screen.findByText('👍 2');
+  expect(screen.getByText('Tap to remove')).toBeTruthy();
+  await fireEvent.press(screen.getByLabelText('Close'));
+
+  // Take the reaction off from the menu instead, so the sheet's own cache is
+  // now describing a world that no longer exists. Ada's 👍 keeps the pill alive,
+  // which is what lets the sheet be reopened at all.
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Remove 👍 reaction'));
+  await waitFor(() => expect(reactCalls()).toEqual([['8', '👍']]));
+
+  // What the server would say now: Ada alone.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 8,
+        sender: ADA,
+        text: 'dinner at 7?',
+        reactions: [{ emoji: '👍', count: 1, reacted: false }],
+      }),
+    ],
+    reactors: [{ emoji: '👍', count: 1, users: [ADA] }],
+  });
+  await fireEvent.press(await screen.findByLabelText(/^👍, 1/));
+
+  // The reopened sheet shows Ada's row, never the cached one with yours in it.
+  await screen.findByText('👍 1');
+  expect(screen.queryByText('Tap to remove')).toBeNull();
+  expect(screen.queryByText('👍 2')).toBeNull();
 });
 
 it('offers no remove on someone else’s row in the sheet', async () => {

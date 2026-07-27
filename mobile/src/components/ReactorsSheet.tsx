@@ -30,9 +30,28 @@ import {
   View,
 } from 'react-native';
 
-import { api } from '@/api';
+import { api, type ReactionTarget } from '@/api';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
+
+/**
+ * The cache key for one target's reactor list.
+ *
+ * Exported because **anything that toggles a reaction has to invalidate it**,
+ * and this cache outlives the sheet: it's filled while the sheet is open and
+ * kept after it unmounts, so the next open renders the old list first (there's
+ * data, so `isLoading` is false) and only flips when the refetch lands. Worse
+ * than the flicker, that stale list is *actionable* — a removed reaction still
+ * showing "Tap to remove" would call the toggle again and silently put it back.
+ * One helper so the key can't be spelled two ways and drift.
+ */
+export function reactorsQueryKey({
+  postId,
+  commentId,
+  messageId,
+}: ReactionTarget) {
+  return ['reactors', postId ?? null, commentId ?? null, messageId ?? null];
+}
 
 export function ReactorsSheet({
   visible,
@@ -71,7 +90,7 @@ export function ReactorsSheet({
         : { messageId };
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['reactors', postId ?? null, commentId ?? null, messageId ?? null],
+    queryKey: reactorsQueryKey({ postId, commentId, messageId }),
     queryFn: () => api.getReactors(target),
     // Only fetch once the sheet is actually open — this is a per-target request
     // and the feed can hold dozens of targets at a time.

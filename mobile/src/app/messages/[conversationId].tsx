@@ -55,7 +55,7 @@ import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
-import { ReactorsSheet } from '@/components/ReactorsSheet';
+import { ReactorsSheet, reactorsQueryKey } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
 import {
   colors,
@@ -284,6 +284,21 @@ export default function ThreadScreen() {
         ['messages', id],
         (cached) => patchReactions(cached, messageId, data.reactions ?? [])
       );
+      // The reactor list is a *separate* cache that outlives the sheet, so it
+      // has to be dealt with too — otherwise the next open renders the
+      // pre-toggle list, and because that list is actionable, a row still
+      // saying "Tap to remove" for a reaction you already removed would toggle
+      // it straight back on.
+      //
+      // `removeQueries`, not `invalidateQueries`: the sheet is closed by now, so
+      // the query is *inactive* and invalidation would only mark it stale —
+      // reopening would still render the stale rows for the length of a round
+      // trip, which is exactly the window in which they can be tapped. Dropping
+      // the entry means the next open has nothing to show but a spinner, and
+      // there is no moment where a wrong row is actionable. The toggle response
+      // carries the aggregate, not the reactor list, so there's nothing better
+      // to write in its place.
+      queryClient.removeQueries({ queryKey: reactorsQueryKey({ messageId }) });
     },
     // Reacting is a one-tap gesture, so a failure has to say so rather than
     // leave the tap looking as though it worked. The server owns the rules that
@@ -354,6 +369,19 @@ export default function ThreadScreen() {
     // Clear any failed-edit error with the mode that produced it, or it lingers
     // over a composer that's no longer editing anything.
     editMutation.reset();
+  }
+
+  /**
+   * Dismiss the emoji grid and the menu it was opened from, in that order.
+   *
+   * The menu is only *hidden* while the grid is up (see its `visible` prop), so
+   * something has to unmount it afterwards or the thread stays dimmed behind an
+   * invisible modal. Both happen in one commit, which is safe in this direction:
+   * the menu is already hidden, so nothing is being torn down mid-presentation.
+   */
+  function closePicker() {
+    setPickerFor(null);
+    setMenuTarget(null);
   }
 
   function confirmDelete(messageId: number) {
@@ -667,21 +695,26 @@ export default function ThreadScreen() {
           onMoreEmoji={
             canSend ? () => setPickerFor(menuTarget.message.id) : undefined
           }
+          // Hidden, not unmounted, while the emoji grid is up — tearing a
+          // presented modal down in the same commit that presents the next one
+          // is the iOS trap `ReactionTray` already documents. `closePicker`
+          // below unmounts it once nothing else is on screen.
+          visible={pickerFor == null}
           onClose={() => setMenuTarget(null)}
         />
       ) : null}
 
       {/* "Any emoji from your keyboard" stays true here too — the same picker the
           feed's ReactionTray opens, so the two clients' reaction sets can't
-          diverge. Rendered at screen level, after the menu has closed. */}
+          diverge. Rendered at screen level so it isn't nested in the menu. */}
       <EmojiPicker
         open={pickerFor != null}
-        onClose={() => setPickerFor(null)}
+        onClose={closePicker}
         onEmojiSelected={(picked: { emoji: string }) => {
           if (pickerFor != null) {
             reactMutation.mutate({ messageId: pickerFor, emoji: picked.emoji });
           }
-          setPickerFor(null);
+          closePicker();
         }}
         enableSearchBar
         theme={emojiPickerTheme}

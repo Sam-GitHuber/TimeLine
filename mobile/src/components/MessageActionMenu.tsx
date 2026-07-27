@@ -24,7 +24,8 @@
  * **The quick-reaction row (Phase 9b M2)** sits above the items rather than in
  * them, because it's a different kind of thing: six one-tap emoji laid out
  * horizontally, not a list of verbs. It's the row your thumb is already heading
- * for, so it goes closest to the bubble.
+ * for, so it goes closest to the bubble. Its `＋` hands over to the caller's full
+ * emoji grid — see the `visible` prop for the handover rule.
  *
  * The grow-and-fade uses React Native's own `Animated`, not Reanimated. Both are
  * in the app, but Reanimated's worklet runtime can't be loaded by Jest, and
@@ -95,6 +96,7 @@ export function MessageActionMenu({
   actions,
   onReact,
   onMoreEmoji,
+  visible = true,
   onClose,
 }: {
   message: Message;
@@ -108,12 +110,21 @@ export function MessageActionMenu({
    */
   onReact?: (emoji: string) => void;
   /**
-   * Open the full emoji grid. Handled by the *caller*, not here, because
-   * `rn-emoji-keyboard` is itself a `Modal` and two visible modals stack badly on
-   * iOS (the same trap `ReactionTray` documents). The caller closes this menu
-   * first and opens the picker in its place.
+   * Open the full emoji grid — the caller's job, because `rn-emoji-keyboard` is
+   * itself a `Modal`. It must **keep this component mounted** and hide it with
+   * `visible={false}` while the grid is up; see that prop.
    */
   onMoreEmoji?: () => void;
+  /**
+   * Hides the menu without unmounting it, for handing over to another modal.
+   *
+   * `ReactionTray` learned this the hard way and it's the same trap here: on iOS
+   * you must not tear down a presented modal in the same commit that presents
+   * the next one, or the new one can fail to appear and leave the screen
+   * unresponsive behind a dismissed one. Toggling `visible` lets RN sequence the
+   * transition itself. The caller unmounts this only once nothing else is up.
+   */
+  visible?: boolean;
   onClose: () => void;
 }) {
   const { width: screenW, height: screenH } = useWindowDimensions();
@@ -162,7 +173,7 @@ export function MessageActionMenu({
   return (
     <Modal
       transparent
-      visible
+      visible={visible}
       animationType="fade"
       onRequestClose={onClose}
       accessibilityViewIsModal
@@ -235,10 +246,10 @@ export function MessageActionMenu({
               })}
               {onMoreEmoji ? (
                 <Pressable
-                  onPress={() => {
-                    onClose();
-                    onMoreEmoji();
-                  }}
+                  // Deliberately does *not* call onClose: the caller hides this
+                  // menu via `visible` and closes it once the grid is done. See
+                  // that prop for why unmounting here would be a bug.
+                  onPress={onMoreEmoji}
                   accessibilityRole="button"
                   accessibilityLabel="More emoji"
                   style={({ pressed }) => [

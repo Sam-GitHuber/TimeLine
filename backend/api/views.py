@@ -1530,7 +1530,7 @@ class PostCommentsView(APIView):
 # --- Reactions (Phase 7b) ------------------------------------------------------
 
 
-def _toggle_reaction(request, target_kwargs, visible_ids):
+def _toggle_reaction(request, target_kwargs, visible_ids, allow_add=True):
     """Add or remove the requesting user's emoji reaction on a target.
 
     ``target_kwargs`` is ``{"post": post}``, ``{"comment": comment}`` or
@@ -1543,6 +1543,14 @@ def _toggle_reaction(request, target_kwargs, visible_ids):
     ``visible_ids`` is the caller's pruning decision, stated rather than assumed:
     ``visible_reactor_ids(user)`` for a post or comment, ``EVERYONE`` for a
     message (a chat is already a clique — see the sentinel).
+
+    ``allow_add=False`` makes this endpoint **removal-only** — the toggle still
+    takes a reaction off, but adding a new one is a 400. A soft-deleted message
+    uses it: there's nothing left to react *to*, but someone who reacted before
+    it was deleted must still be able to take that reaction back, and this is
+    their only route (a tombstone has no long-press menu). Framed as a parameter
+    rather than a check in the view because only the toggle knows which half of
+    the toggle it's about to do.
     """
     raw = request.data.get("emoji", "")
     try:
@@ -1562,6 +1570,10 @@ def _toggle_reaction(request, target_kwargs, visible_ids):
     if existing is not None:
         existing.delete()
     else:
+        if not allow_add:
+            # Removal-only target (a deleted message). Taking a reaction off is
+            # still fine — see the docstring — but putting a new one on isn't.
+            raise ValidationError("This message was deleted.")
         # Count distinct emoji I've put on this target (one row per emoji, by the
         # unique constraint) and refuse once the cap is hit.
         if mine.count() >= MAX_REACTIONS_PER_USER_PER_TARGET:
@@ -1736,9 +1748,12 @@ class MessageReactionView(APIView):
       message can already see everyone who reacted. Clipping happens on the
       message, not on the people.
 
-    A **deleted** message can't be reacted to (400): there's nothing left to
-    react to, and the tombstone has no menu in either client. This matches the
-    edit route and the report gate.
+    A **deleted** message is **removal-only** (400 on an add). There's nothing
+    left to react *to*, so a new reaction is refused the way the edit route
+    refuses a new edit — but taking one *off* has to keep working, because the
+    tombstone still shows reactions left before the delete and has no long-press
+    menu to remove them from. Blocking both would strand someone with a 😂 on a
+    message that no longer exists and no way to retract it.
     """
 
     def _get_message_or_404(self, request, pk):
@@ -1751,13 +1766,16 @@ class MessageReactionView(APIView):
 
     def post(self, request, pk):
         message = self._get_message_or_404(request, pk)
-        if message.is_deleted:
-            raise ValidationError("This message was deleted.")
         convo = message.conversation
         _assert_can_send(
             request.user, convo, _viewer_participant_status(convo, request.user)
         )
-        return _toggle_reaction(request, {"message": message}, EVERYONE)
+        return _toggle_reaction(
+            request,
+            {"message": message},
+            EVERYONE,
+            allow_add=not message.is_deleted,
+        )
 
     def get(self, request, pk):
         return _reactors_grouped(

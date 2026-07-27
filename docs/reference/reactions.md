@@ -105,7 +105,15 @@ existence oracle for history they were clipped out of. See
 **Reacting requires that you could still *send*.** A reaction is content
 everyone else in the thread sees, so someone disconnected or severed from a chat
 gets a **403** — the same reasoning that gates editing. History stays readable
-either way; only writing stops. A **deleted** message can't be reacted to (400).
+either way; only writing stops.
+
+**A deleted message is removal-only** (`allow_add=False` on the shared toggle):
+adding a new reaction is a 400, taking an existing one off still works. Refusing
+both looks tidier and is wrong — a tombstone still shows reactions left before
+the delete, and it has no long-press menu, so the who-reacted sheet is the *only*
+route to remove one. Blocking it would strand someone with a 😂 on a message that
+no longer exists and no way to retract it. Removing isn't adding, so the "nothing
+left to react to" reasoning simply doesn't apply to it.
 
 **The reactor list isn't pruned per viewer.** Post reactions are, because a
 reactor might be someone the viewer can't see. A conversation can't have one: its
@@ -187,6 +195,21 @@ dependency on an auth provider for a feature only the thread uses. Both the
 remove affordance and the menu's emoji row disappear in a thread you can no longer
 send to — the list stays readable and inert, which is the same line the server
 draws.
+
+**Toggling a message reaction drops the reactor-list cache** (`removeQueries` on
+`reactorsQueryKey`, exported from `ReactorsSheet` so the key can't be spelled two
+ways). That cache outlives the sheet, so without it a reopened sheet renders the
+pre-toggle rows — and those rows are *actionable*: a "Tap to remove" for a
+reaction you already removed would call the toggle again and put it back.
+Invalidating isn't enough, because a closed sheet's query is inactive and would
+only be marked stale, leaving exactly that window open. Dropping the entry means
+the next open can only show a spinner.
+
+**Handing over to the full grid keeps the menu mounted** and hides it with
+`visible={false}`, rather than unmounting it. On iOS you must not tear down a
+presented modal in the same commit that presents the next one — the new one can
+fail to appear and leave the screen unresponsive behind a dismissed one. This is
+the shape `ReactionTray` already uses; dismissing the grid then closes both.
 
 The pills sit *outside* `BubbleBody` so the action menu can re-render that
 component at the bubble's measured rect without duplicating them.

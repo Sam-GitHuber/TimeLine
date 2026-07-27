@@ -1798,14 +1798,45 @@ class MessageReactionTests(MessagingBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data[0]["count"], 1)
 
-    def test_cannot_react_to_a_deleted_message(self):
+    def _friend_deletes(self, message):
         self.client.force_authenticate(self.friend)
         self.client.delete(
-            f"/api/conversations/{self.convo.pk}/messages/{self.theirs.pk}/"
+            f"/api/conversations/{self.convo.pk}/messages/{message.pk}/"
         )
         self.client.force_authenticate(self.me)
+
+    def test_cannot_add_a_reaction_to_a_deleted_message(self):
+        self._friend_deletes(self.theirs)
         resp = self._react(self.theirs)
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Reaction.objects.exists())
+
+    def test_can_still_remove_a_reaction_from_a_deleted_message(self):
+        """The other half of the rule above, and the reason it isn't a blanket
+        refusal.
+
+        A tombstone still shows the reactions left before the delete, and it has
+        no long-press menu — so the who-reacted sheet is the *only* way to take
+        one off. Refusing a removal too would strand someone with a 😂 on a
+        message that no longer exists and no way to retract it. Removing isn't
+        adding, so the "nothing left to react to" reasoning doesn't apply to it.
+        """
+        self.assertEqual(self._react(self.theirs).status_code, status.HTTP_200_OK)
+        self._friend_deletes(self.theirs)
+
+        resp = self._react(self.theirs)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["reactions"], [])
+        self.assertFalse(Reaction.objects.exists())
+
+    def test_removing_from_a_deleted_message_cannot_re_add(self):
+        # The toggle must not become a back door: once it's off, it stays off.
+        self.assertEqual(self._react(self.theirs).status_code, status.HTTP_200_OK)
+        self._friend_deletes(self.theirs)
+        self._react(self.theirs)
+
+        again = self._react(self.theirs)
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(Reaction.objects.exists())
 
     def test_invalid_emoji_is_rejected(self):
