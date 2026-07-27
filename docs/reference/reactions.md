@@ -167,11 +167,29 @@ news are the warm answers, and a set that can only be cheerful makes you type a
 whole message to say "oh no". The chat set is 👍 ❤️ 😂 😮 😢 🙏.
 
 Message reactions render as pills hanging off the bubble's lower edge on its near
-side. **Tap toggles; press and hold shows who reacted** — tap-to-toggle matches
-the chips everywhere else and is far and away the common intent ("me too"), while
-"who reacted" is a group-chat question that earns the deliberate gesture. The
-pills sit *outside* `BubbleBody` so the action menu can re-render that component
-at the bubble's measured rect without duplicating them.
+side. **A pill has one gesture: tap opens "who reacted".** It never toggles.
+
+That's a deliberate departure from the feed's chips, which *do* toggle on tap, and
+it was settled by trying both. A pill is a display of what the thread said, so a
+tap should go to the detail of it rather than silently change it — and a target
+that small doing two different things depending on how long you held it is where
+a mis-timed press does the wrong thing. A post has no long-press menu to carry the
+alternative, so its chip has to toggle; a message has two better homes for it:
+
+- **the long-press menu's emoji row** — tapping an emoji you've already used takes
+  it off (it renders as active, and reads "Remove 👍 reaction" to assistive tech);
+- **the sheet itself** — your own row reads **"Tap to remove"**, and tapping it
+  removes the reaction and closes the sheet.
+
+The sheet takes `meId` as a *prop* rather than calling `useAuth()`, so it stays a
+pure renderer of what the server sent and the feed's callers don't inherit a
+dependency on an auth provider for a feature only the thread uses. Both the
+remove affordance and the menu's emoji row disappear in a thread you can no longer
+send to — the list stays readable and inert, which is the same line the server
+draws.
+
+The pills sit *outside* `BubbleBody` so the action menu can re-render that
+component at the bubble's measured rect without duplicating them.
 
 Adding a reaction to a post or comment notifies its author via the activity centre
 (a `reaction` notification, pruned to the same connection boundary and de-duped

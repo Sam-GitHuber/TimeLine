@@ -642,30 +642,10 @@ it('shows an emoji you already used as active, to take it off again', async () =
   await waitFor(() => expect(reactCalls()).toEqual([['8', '👍']]));
 });
 
-it('toggles a reaction by tapping its pill', async () => {
-  // The fast "me too": tapping the pill is the gesture people reach for before
-  // they think about the menu.
-  serve({
-    conversation: detail({}),
-    messages: [
-      message({
-        id: 8,
-        sender: ADA,
-        text: 'dinner at 7?',
-        reactions: [{ emoji: '🎉', count: 2, reacted: false }],
-      }),
-    ],
-    reactionsAfterToggle: [{ emoji: '🎉', count: 3, reacted: true }],
-  });
-
-  await renderScreen();
-  await fireEvent.press(await screen.findByLabelText(/^🎉, 2/));
-
-  await waitFor(() => expect(reactCalls()).toEqual([['8', '🎉']]));
-  expect(await screen.findByLabelText(/^🎉, 3/)).toBeTruthy();
-});
-
-it('holds a pill to see who reacted', async () => {
+it('taps a pill to see who reacted — it never toggles', async () => {
+  // The pill displays what the thread said, so a tap goes to the detail of it
+  // rather than silently changing it. Changing yours has two unambiguous homes:
+  // the menu's emoji row, and this sheet.
   serve({
     conversation: detail({}),
     messages: [
@@ -679,12 +659,60 @@ it('holds a pill to see who reacted', async () => {
   });
 
   await renderScreen();
-  fireEvent(await screen.findByLabelText(/^👍, 1/), 'longPress');
+  await fireEvent.press(await screen.findByLabelText(/^👍, 1/));
 
   expect(await screen.findByText('Who reacted')).toBeTruthy();
   // The sheet's per-emoji heading, from the reactors endpoint. (Ada's *name*
   // isn't a safe assertion here — she's also the person in the thread header.)
   expect(await screen.findByText('👍 1')).toBeTruthy();
+  expect(reactCalls()).toEqual([]);
+});
+
+it('removes your own reaction from the who-reacted sheet', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 8,
+        sender: ADA,
+        text: 'dinner at 7?',
+        reactions: [{ emoji: '👍', count: 1, reacted: true }],
+      }),
+    ],
+    reactors: [{ emoji: '👍', count: 1, users: [MINE] }],
+    reactionsAfterToggle: [],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText(/^👍, 1/));
+  await fireEvent.press(await screen.findByLabelText('Remove your 👍 reaction'));
+
+  await waitFor(() => expect(reactCalls()).toEqual([['8', '👍']]));
+  // The sheet closes on the way out; the pill goes with the reaction.
+  await waitFor(() => expect(screen.queryByText('Who reacted')).toBeNull());
+  await waitFor(() => expect(screen.queryByLabelText(/^👍/)).toBeNull());
+});
+
+it('offers no remove on someone else’s row in the sheet', async () => {
+  // "Tap to remove" on a row that isn't yours would be a button that lies.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 8,
+        sender: ADA,
+        text: 'dinner at 7?',
+        reactions: [{ emoji: '👍', count: 1, reacted: false }],
+      }),
+    ],
+    reactors: [{ emoji: '👍', count: 1, users: [ADA] }],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText(/^👍, 1/));
+
+  await screen.findByText('Who reacted');
+  expect(screen.queryByText('Tap to remove')).toBeNull();
 });
 
 it('drops the count from a lone reaction', async () => {
@@ -718,19 +746,28 @@ it('offers no way to react in a thread you can’t send to', async () => {
         id: 8,
         sender: ADA,
         text: 'dinner at 7?',
-        reactions: [{ emoji: '👍', count: 1, reacted: false }],
+        // One you left earlier, back when you still could.
+        reactions: [{ emoji: '👍', count: 1, reacted: true }],
       }),
     ],
+    reactors: [{ emoji: '👍', count: 1, users: [MINE] }],
   });
 
   await renderScreen();
   // Asserted before the menu opens: a `Modal` makes everything behind it inert,
   // so the pill is genuinely there but unreachable to a query while it's up.
-  expect(await screen.findByLabelText(/^👍, 1/)).toBeTruthy();
+  const pill = await screen.findByLabelText(/^👍, 1/);
 
   await openMenu('Message from Ada Lovelace: dinner at 7?');
   expect(screen.queryByLabelText('React with 👍')).toBeNull();
   expect(screen.queryByLabelText('More emoji')).toBeNull();
+  await fireEvent.press(screen.getByLabelText('Close message actions'));
+
+  // The sheet still opens and still lists everyone — losing the ability to write
+  // isn't losing the history — but your own row can't be tapped to remove.
+  await fireEvent.press(pill);
+  await screen.findByText('Who reacted');
+  expect(screen.queryByText('Tap to remove')).toBeNull();
 });
 
 it('keeps a reaction visible on a deleted message’s tombstone', async () => {

@@ -523,15 +523,6 @@ export default function ThreadScreen() {
                   message={item}
                   mine={mine}
                   showSender={isGroup && !mine && startsRun}
-                  // No toggle in a thread you can't send to: a reaction is
-                  // content everyone sees, so the server 403s it exactly as it
-                  // 403s a message. The pills stay readable, just not tappable.
-                  onToggleReaction={
-                    canSend
-                      ? (emoji) =>
-                          reactMutation.mutate({ messageId: item.id, emoji })
-                      : undefined
-                  }
                   onShowReactors={() => setReactorsFor(item.id)}
                   onLongPress={(anchor) =>
                     setMenuTarget({
@@ -700,6 +691,18 @@ export default function ThreadScreen() {
         <ReactorsSheet
           visible
           messageId={reactorsFor}
+          meId={me?.pk}
+          // Taking your reaction off is one of the two ways out (the other being
+          // the menu's emoji row), so the sheet needs to be able to do it — but
+          // only where you could add one in the first place. In a thread you've
+          // been disconnected from the list stays readable and inert, which is
+          // the same line the server draws.
+          onRemoveReaction={
+            canSend
+              ? (emoji) =>
+                  reactMutation.mutate({ messageId: reactorsFor, emoji })
+              : undefined
+          }
           onClose={() => setReactorsFor(null)}
         />
       ) : null}

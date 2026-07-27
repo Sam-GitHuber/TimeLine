@@ -423,7 +423,11 @@ from "editing" to an accidental delete.
 point M0 deliberately shipped without.
 
 **Reactions render as pills** hanging off the bubble's lower edge on its near
-side — tap to toggle, press and hold for who reacted. The full picker opens at
+side. **Tapping one opens "who reacted"; it never toggles** — a pill displays what
+the thread said, so a tap goes to the detail of it rather than quietly changing it.
+Changing your own reaction has two unambiguous homes instead: the menu's emoji row
+(tapping one you've used takes it off) and that sheet, where your own row reads
+"Tap to remove". The full picker opens at
 *screen* level rather than inside the menu, because `rn-emoji-keyboard` is itself
 a `Modal` and two visible modals stack badly on iOS; the menu closes on its way
 there. There's no optimistic pre-tap update: the toggle endpoint returns the whole

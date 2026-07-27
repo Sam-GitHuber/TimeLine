@@ -25,10 +25,11 @@
  * tombstone has no menu — there's nothing left to act on.
  *
  * **Reaction pills** (Phase 9b M2) hang off the bubble's lower edge on its near
- * side. They sit *outside* `BubbleBody` on purpose: the menu re-renders that
- * component at the bubble's measured rect, and a pill overlapping its edge with a
- * negative margin would both alter the measurement and duplicate the pills over
- * the real ones.
+ * side, and tapping one opens "who reacted" — see `ReactionPills` for why that's
+ * the only gesture on them. They sit *outside* `BubbleBody` on purpose: the menu
+ * re-renders that component at the bubble's measured rect, and a pill overlapping
+ * its edge with a negative margin would both alter the measurement and duplicate
+ * the pills over the real ones.
  */
 
 import { useRef } from 'react';
@@ -70,25 +71,24 @@ export function BubbleBody({ message, mine }: { message: Message; mine: boolean 
 /**
  * The emoji pills under a bubble.
  *
- * **Tap toggles; long-press shows who reacted.** Tap-to-toggle matches the
- * reaction chips everywhere else in the app and is far and away the common
- * intent ("me too"), so it gets the easy gesture. "Who reacted" is a group-chat
- * question — in a 1:1 there are only two candidates — so it takes the deliberate
- * one, with an accessibility hint to make it discoverable.
+ * **One gesture: tap opens "who reacted".** The pill is a *display* of what the
+ * thread said, so a tap goes to the detail of it rather than silently changing
+ * it — and a tiny target that both toggles and, on a longer press, does something
+ * else is exactly where a mis-timed press does the wrong thing.
  *
- * With no `onToggle` (a thread you can no longer send to) a tap falls through to
- * the reactor list instead: the pills stay readable, they just stop being
- * controls.
+ * That leaves two unambiguous places to *change* your own reaction, which is one
+ * more than the pill needed to be: the long-press menu's emoji row (tapping one
+ * you've used takes it off) and the sheet this opens, where your own row reads
+ * "Tap to remove". This deliberately differs from the feed's chips, which do
+ * toggle on tap — a post has no long-press menu to carry the alternative.
  */
 function ReactionPills({
   reactions,
   mine,
-  onToggle,
   onShowReactors,
 }: {
   reactions: Reaction[];
   mine: boolean;
-  onToggle?: (emoji: string) => void;
   onShowReactors?: () => void;
 }) {
   return (
@@ -96,17 +96,13 @@ function ReactionPills({
       {reactions.map((reaction) => (
         <Pressable
           key={reaction.emoji}
-          onPress={() =>
-            onToggle ? onToggle(reaction.emoji) : onShowReactors?.()
-          }
-          onLongPress={onShowReactors}
+          onPress={onShowReactors}
           hitSlop={4}
           accessibilityRole="button"
           accessibilityState={{ selected: reaction.reacted }}
           accessibilityLabel={`${reaction.emoji}, ${reaction.count}${
-            reaction.reacted ? ', you reacted — tap to remove' : ' — tap to react'
-          }`}
-          accessibilityHint="Press and hold to see who reacted"
+            reaction.reacted ? ', including you' : ''
+          } — see who reacted`}
           style={({ pressed }) => [
             styles.pill,
             reaction.reacted && styles.pillMine,
@@ -130,7 +126,6 @@ export function MessageBubble({
   mine,
   showSender,
   onLongPress,
-  onToggleReaction,
   onShowReactors,
 }: {
   message: Message;
@@ -138,9 +133,7 @@ export function MessageBubble({
   showSender: boolean;
   /** Opens the action menu, anchored to this bubble's rect on screen. */
   onLongPress: (anchor: BubbleAnchor) => void;
-  /** Toggle an emoji from the pill row. Absent when you can't send here. */
-  onToggleReaction?: (emoji: string) => void;
-  /** Open "who reacted" for this message. */
+  /** Open "who reacted" for this message — what tapping a pill does. */
   onShowReactors?: () => void;
 }) {
   const bubbleRef = useRef<View>(null);
@@ -200,7 +193,6 @@ export function MessageBubble({
         <ReactionPills
           reactions={reactions}
           mine={mine}
-          onToggle={message.is_deleted ? undefined : onToggleReaction}
           onShowReactors={onShowReactors}
         />
       ) : null}

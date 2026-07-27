@@ -479,14 +479,15 @@ doing both, keep an eye on the spacing together.
 
 **Done when** — ✅ code complete; `reactions.md` → *Message reactions* +
 *Mobile*, and `messaging.md` → *Reacting to a message*, are the durable record.
-- [x] React from the long-press menu; toggle off by re-tapping.
+- [x] React from the long-press menu; toggle off by re-tapping there, or via
+      "Tap to remove" in the who-reacted sheet.
 - [x] Reactor list correct; no push and no `Notification` row (both tested).
 - [x] `messaging.md` + `reactions.md` both updated — reactions.md owns the model,
       messaging.md links to it.
 - [ ] **Then use it for a week** — see the polling trigger above. *(Needs a
       TestFlight build; can't be ticked from the repo.)*
 
-**Four decisions M2 made that the plan above didn't anticipate:**
+**Five decisions M2 made that the plan above didn't anticipate:**
 
 1. **Reacting requires `can_send`, not just visibility.** The plan said "clip on
    whether the message itself is visible". That's necessary but not sufficient: a
@@ -506,7 +507,17 @@ doing both, keep an eye on the spacing together.
    conversation — 😮 and 😢 are the warm replies to someone's news. The chat row
    is 👍 ❤️ 😂 😮 😢 🙏. The full picker's theme moved to `theme.ts`
    (`emojiPickerTheme`) so the two entry points can't drift.
-4. **No optimistic toggle**, deliberately, even though M4 brings optimistic send.
+4. **A pill has one gesture — tap opens "who reacted", it never toggles.** The
+   first cut had tap-toggle plus long-press-for-reactors, matching the feed's
+   chips; **trying it in the simulator settled it the other way**, and the
+   reasoning generalises. A pill is a *display* of what the thread said, so a tap
+   belongs on the detail of it, not on silently changing it — and a target that
+   small doing two things depending on press duration is where a mis-timed press
+   does the wrong thing. A post's chip has to toggle because a post has no
+   long-press menu; a message has two better homes for it (the menu's emoji row,
+   and "Tap to remove" on your own row in the sheet). **M3's swipe-to-reply lands
+   on the same bubble — keep gestures one-per-target there too.**
+5. **No optimistic toggle**, deliberately, even though M4 brings optimistic send.
    Simulating the toggle locally means a second copy of rules the server owns (the
    per-target cap, emoji validation, count-then-emoji ordering) that can show a
    pill and then take it away. The "use it for a week" instruction above is
