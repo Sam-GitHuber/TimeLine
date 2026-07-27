@@ -21,8 +21,10 @@ urlpatterns = [
         views.PostCommentsView.as_view(),
         name="post-comments",
     ),
-    # Reactions (Phase 7b): POST <path>/react/ toggles; GET <path>/reactions/
-    # lists who reacted (both pruned to the viewer's visibility).
+    # Reactions (Phase 7b; messages added in 9b M2): POST <path>/react/ toggles;
+    # GET <path>/reactions/ lists who reacted. Post and comment reactors are
+    # pruned to the viewer's visibility; a message's aren't — see
+    # ``MessageReactionView`` for why a chat needs no pruning.
     path(
         "posts/<int:pk>/react/",
         views.PostReactionView.as_view(),
@@ -42,6 +44,20 @@ urlpatterns = [
         "comments/<int:pk>/reactions/",
         views.CommentReactionView.as_view(),
         name="comment-reactions",
+    ),
+    # Message reactions are keyed on the message id alone, not nested under the
+    # conversation like edit/delete are. The conversation is reachable from the
+    # message and the gate consults it anyway, so a conversation id in the path
+    # would be a second thing to keep consistent and nothing to check against.
+    path(
+        "messages/<int:pk>/react/",
+        views.MessageReactionView.as_view(),
+        name="message-react",
+    ),
+    path(
+        "messages/<int:pk>/reactions/",
+        views.MessageReactionView.as_view(),
+        name="message-reactions",
     ),
     # People
     path("users/", views.UserListView.as_view(), name="user-list"),

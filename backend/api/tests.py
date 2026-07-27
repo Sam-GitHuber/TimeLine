@@ -1611,6 +1611,273 @@ class MessageEditTests(MessagingBase):
         self.assertFalse(PushOutbox.objects.exists())
 
 
+class MessageReactionTests(MessagingBase):
+    """Reacting to a message (Phase 9b M2).
+
+    The toggle mechanics are the post/comment ones — same model, same validator,
+    same endpoint shape — so these tests are almost entirely about the places
+    messaging *differs*: the gate is the messaging gate (interval-clipped, and
+    it consults ``can_send``), the aggregate isn't pruned per viewer, and none of
+    it touches the bell or the push queue.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(
+            user_a=self.me, user_b=self.friend
+        )
+        self.theirs = Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="dinner at 7?"
+        )
+
+    def _react(self, message, emoji="👍"):
+        return self.client.post(
+            f"/api/messages/{message.pk}/react/", {"emoji": emoji}, format="json"
+        )
+
+    def test_reacting_adds_then_toggles_off(self):
+        added = self._react(self.theirs)
+        self.assertEqual(added.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            added.data["reactions"],
+            [{"emoji": "👍", "count": 1, "reacted": True}],
+        )
+
+        removed = self._react(self.theirs)
+        self.assertEqual(removed.status_code, status.HTTP_200_OK)
+        self.assertEqual(removed.data["reactions"], [])
+        self.assertFalse(Reaction.objects.filter(message=self.theirs).exists())
+
+    def test_reactions_ride_on_the_thread_payload(self):
+        # The bubble renders its pills from the message row, so the summary has
+        # to be on the thread listing and not only on the toggle response.
+        self._react(self.theirs, "🎉")
+        thread = self.client.get(messages_url(self.convo))
+        row = thread.data["results"][0]
+        self.assertEqual(
+            row["reactions"], [{"emoji": "🎉", "count": 1, "reacted": True}]
+        )
+
+    def test_a_fresh_message_has_an_empty_reaction_list(self):
+        thread = self.client.get(messages_url(self.convo))
+        self.assertEqual(thread.data["results"][0]["reactions"], [])
+
+    def test_you_can_react_to_your_own_message(self):
+        mine = Message.objects.create(
+            conversation=self.convo, sender=self.me, text="8 works"
+        )
+        self.assertEqual(self._react(mine, "❤️").status_code, status.HTTP_200_OK)
+
+    def test_reactors_endpoint_lists_who_reacted(self):
+        self._react(self.theirs, "😂")
+        self.client.force_authenticate(self.friend)
+        self._react(self.theirs, "😂")
+
+        resp = self.client.get(f"/api/messages/{self.theirs.pk}/reactions/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]["emoji"], "😂")
+        self.assertEqual(resp.data[0]["count"], 2)
+        self.assertEqual(
+            {u["id"] for u in resp.data[0]["users"]}, {self.me.pk, self.friend.pk}
+        )
+
+    def test_message_reactions_are_not_pruned_by_connection(self):
+        """The deliberate difference from post/comment reactions.
+
+        A post prunes reactors to people the viewer may see, because a reactor
+        might be a stranger. A chat can't have one: the active participants are a
+        clique by construction, so anyone who can see the message can already see
+        everyone who reacted. Pruning here would hide reactions for no privacy
+        gain and leave two people in the same thread disagreeing about it.
+
+        The chat below is built straight off the models with *no* ``Connection``
+        rows, which is exactly what a connection-pruned aggregate would filter
+        out — so this fails the moment someone "fixes" message reactions to
+        prune like posts do.
+        """
+        a = make_user("ra@example.com")
+        b = make_user("rb@example.com")
+        convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=a
+        )
+        started = timezone.now() - timedelta(hours=1)
+        for user in (a, b):
+            participant = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=participant, started_at=started
+            )
+        message = Message.objects.create(
+            conversation=convo, sender=a, text="who's in?"
+        )
+
+        self.client.force_authenticate(a)
+        self.assertEqual(self._react(message, "🎉").status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(b)
+        resp = self.client.get(f"/api/messages/{message.pk}/reactions/")
+        self.assertEqual(resp.data[0]["count"], 1)
+        self.assertEqual(resp.data[0]["users"][0]["id"], a.pk)
+
+    def test_non_participant_gets_404(self):
+        # Probing a message id from outside the thread reveals nothing — the
+        # same answer the edit route gives.
+        self.client.force_authenticate(self.stranger)
+        resp = self._react(self.theirs)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Reaction.objects.exists())
+
+    def test_cannot_react_to_a_message_from_inside_your_gap(self):
+        """The interval-clipping case, mirroring the edit and report gates.
+
+        A member who was out of a group chat when a message was sent can't see
+        it, so the reaction route must not answer questions about it either —
+        otherwise 200-vs-404 tells a gap member exactly which ids landed while
+        they were away.
+        """
+        a = make_user("ga@example.com")
+        gapper = make_user("ggapper@example.com")
+        convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=a
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=2)
+        p_a = Participant.objects.create(
+            conversation=convo, user=a, status="active"
+        )
+        ParticipantInterval.objects.create(participant=p_a, started_at=t0)
+        gap_p = Participant.objects.create(
+            conversation=convo, user=gapper, status="active"
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=t0, ended_at=t1
+        )
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=timezone.now()
+        )
+        in_gap = Message.objects.create(
+            conversation=convo, sender=a, text="said while they were out"
+        )
+        Message.objects.filter(pk=in_gap.pk).update(
+            created_at=t1 + timedelta(minutes=10)
+        )
+
+        self.client.force_authenticate(gapper)
+        resp = self._react(in_gap)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        # Indistinguishable from an id that was never in this thread at all.
+        missing = self.client.post(
+            f"/api/messages/{in_gap.pk + 9999}/react/",
+            {"emoji": "👍"},
+            format="json",
+        )
+        self.assertEqual(missing.status_code, resp.status_code)
+        # Reading the reactor list is clipped the same way.
+        listing = self.client.get(f"/api/messages/{in_gap.pk}/reactions/")
+        self.assertEqual(listing.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cannot_react_in_a_thread_you_can_no_longer_send_to(self):
+        """A reaction is content everyone else in the thread sees, so the send
+        gate applies to it exactly as it applies to an edit. Without this, a
+        disconnect closes the composer but leaves a back door open for putting
+        emoji into a thread you've been cut out of."""
+        self.client.delete(connect_url(self.friend))
+        resp = self._react(self.theirs)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Reaction.objects.exists())
+
+    def test_history_stays_readable_after_a_disconnect(self):
+        """The other half of the rule above: losing the ability to *write* must
+        not lose the ability to *read*. Reactions someone already left stay
+        visible in the history, the same way the messages do."""
+        self._react(self.theirs, "👍")
+        self.client.delete(connect_url(self.friend))
+        resp = self.client.get(f"/api/messages/{self.theirs.pk}/reactions/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data[0]["count"], 1)
+
+    def test_cannot_react_to_a_deleted_message(self):
+        self.client.force_authenticate(self.friend)
+        self.client.delete(
+            f"/api/conversations/{self.convo.pk}/messages/{self.theirs.pk}/"
+        )
+        self.client.force_authenticate(self.me)
+        resp = self._react(self.theirs)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Reaction.objects.exists())
+
+    def test_invalid_emoji_is_rejected(self):
+        resp = self._react(self.theirs, "not an emoji")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Reaction.objects.exists())
+
+    def test_reacting_creates_no_notification_and_no_push(self):
+        """Messaging sits outside the bell (messaging.md), and buzzing a phone
+        for a 👍 is how people end up turning notifications off. Both halves are
+        asserted because they're separately easy to reintroduce — the shared
+        toggle helper writes a ``Notification`` for every other target."""
+        PushOutbox.objects.all().delete()
+        Notification.objects.all().delete()
+        self.assertEqual(self._react(self.theirs).status_code, status.HTTP_200_OK)
+        self.assertFalse(Notification.objects.exists())
+        self.assertFalse(PushOutbox.objects.exists())
+
+    def test_reacting_does_not_bump_conversation_activity(self):
+        # Same reasoning as an edit: a reaction isn't new activity, so it must
+        # not jump the thread to the top of everyone's list.
+        before = Conversation.objects.get(pk=self.convo.pk).updated_at
+        self._react(self.theirs)
+        after = Conversation.objects.get(pk=self.convo.pk).updated_at
+        self.assertEqual(before, after)
+
+    def test_per_target_emoji_cap_applies(self):
+        for i in range(MAX_REACTIONS_PER_USER_PER_TARGET):
+            emoji = chr(ord("😀") + i)
+            self.assertEqual(
+                self._react(self.theirs, emoji).status_code, status.HTTP_200_OK
+            )
+        over = self._react(self.theirs, "🎉")
+        self.assertEqual(over.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class MessageReactionConstraintTests(APITestCase):
+    """The database guards behind message reactions — the same belt-and-braces
+    the post/comment targets get, extended to the third target."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        friend = make_user("friend@example.com")
+        convo = Conversation.objects.create(user_a=self.me, user_b=friend)
+        self.message = Message.objects.create(
+            conversation=convo, sender=friend, text="hi"
+        )
+        self.post = Post.objects.create(author=self.me, text="hi")
+
+    def test_a_reaction_cannot_target_both_message_and_post(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Reaction.objects.create(
+                    user=self.me, post=self.post, message=self.message, emoji="👍"
+                )
+
+    def test_same_emoji_twice_on_a_message_is_rejected(self):
+        Reaction.objects.create(user=self.me, message=self.message, emoji="👍")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Reaction.objects.create(
+                    user=self.me, message=self.message, emoji="👍"
+                )
+
+    def test_deleting_a_message_takes_its_reactions_with_it(self):
+        # Soft-delete leaves a tombstone and keeps the row, so this is about a
+        # *hard* delete (a conversation cascade, or an account deletion).
+        Reaction.objects.create(user=self.me, message=self.message, emoji="👍")
+        self.message.delete()
+        self.assertFalse(Reaction.objects.exists())
+
+
 class UnreadAndListTests(MessagingBase):
     def setUp(self):
         super().setUp()

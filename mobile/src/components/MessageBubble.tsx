@@ -17,12 +17,18 @@
  * yours), and a run's later bubbles.
  *
  * **Long-press opens the action menu** (Phase 9b M1) — Copy/Edit/Delete on your
- * own, Copy/Report on someone else's. This replaced a long-press that went
- * straight to a delete confirm: a gesture that only ever deletes is a trap, and
- * there was nowhere to put edit. The bubble measures its own screen rect and
- * hands it up, because the menu anchors itself under the bubble you actually
- * pressed (see `MessageActionMenu`). A deleted message's tombstone has no menu —
- * there's nothing left to act on.
+ * own, Copy/Report on someone else's, plus the quick-reaction row. This replaced
+ * a long-press that went straight to a delete confirm: a gesture that only ever
+ * deletes is a trap, and there was nowhere to put edit. The bubble measures its
+ * own screen rect and hands it up, because the menu anchors itself under the
+ * bubble you actually pressed (see `MessageActionMenu`). A deleted message's
+ * tombstone has no menu — there's nothing left to act on.
+ *
+ * **Reaction pills** (Phase 9b M2) hang off the bubble's lower edge on its near
+ * side. They sit *outside* `BubbleBody` on purpose: the menu re-renders that
+ * component at the bubble's measured rect, and a pill overlapping its edge with a
+ * negative margin would both alter the measurement and duplicate the pills over
+ * the real ones.
  */
 
 import { useRef } from 'react';
@@ -33,7 +39,7 @@ import { Avatar } from './Avatar';
 import type { BubbleAnchor } from './MessageActionMenu';
 import { measureInWindow } from '@/measure';
 import { colors, fontSize, radius, spacing } from '@/theme';
-import type { Message } from '@/types';
+import type { Message, Reaction } from '@/types';
 import { formatRelativeTime } from '@/utils';
 
 /**
@@ -61,19 +67,84 @@ export function BubbleBody({ message, mine }: { message: Message; mine: boolean 
   );
 }
 
+/**
+ * The emoji pills under a bubble.
+ *
+ * **Tap toggles; long-press shows who reacted.** Tap-to-toggle matches the
+ * reaction chips everywhere else in the app and is far and away the common
+ * intent ("me too"), so it gets the easy gesture. "Who reacted" is a group-chat
+ * question — in a 1:1 there are only two candidates — so it takes the deliberate
+ * one, with an accessibility hint to make it discoverable.
+ *
+ * With no `onToggle` (a thread you can no longer send to) a tap falls through to
+ * the reactor list instead: the pills stay readable, they just stop being
+ * controls.
+ */
+function ReactionPills({
+  reactions,
+  mine,
+  onToggle,
+  onShowReactors,
+}: {
+  reactions: Reaction[];
+  mine: boolean;
+  onToggle?: (emoji: string) => void;
+  onShowReactors?: () => void;
+}) {
+  return (
+    <View style={[styles.pillRow, mine ? styles.alignEnd : styles.alignStart]}>
+      {reactions.map((reaction) => (
+        <Pressable
+          key={reaction.emoji}
+          onPress={() =>
+            onToggle ? onToggle(reaction.emoji) : onShowReactors?.()
+          }
+          onLongPress={onShowReactors}
+          hitSlop={4}
+          accessibilityRole="button"
+          accessibilityState={{ selected: reaction.reacted }}
+          accessibilityLabel={`${reaction.emoji}, ${reaction.count}${
+            reaction.reacted ? ', you reacted — tap to remove' : ' — tap to react'
+          }`}
+          accessibilityHint="Press and hold to see who reacted"
+          style={({ pressed }) => [
+            styles.pill,
+            reaction.reacted && styles.pillMine,
+            pressed && styles.pillPressed,
+          ]}
+        >
+          <Text style={styles.pillEmoji}>{reaction.emoji}</Text>
+          {/* A lone reaction needs no "1" beside it — the emoji is the whole
+              message. The count only earns its space once it's ambiguous. */}
+          {reaction.count > 1 ? (
+            <Text style={styles.pillCount}>{reaction.count}</Text>
+          ) : null}
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 export function MessageBubble({
   message,
   mine,
   showSender,
   onLongPress,
+  onToggleReaction,
+  onShowReactors,
 }: {
   message: Message;
   mine: boolean;
   showSender: boolean;
   /** Opens the action menu, anchored to this bubble's rect on screen. */
   onLongPress: (anchor: BubbleAnchor) => void;
+  /** Toggle an emoji from the pill row. Absent when you can't send here. */
+  onToggleReaction?: (emoji: string) => void;
+  /** Open "who reacted" for this message. */
+  onShowReactors?: () => void;
 }) {
   const bubbleRef = useRef<View>(null);
+  const reactions = message.reactions ?? [];
 
   function handleLongPress() {
     // A light tap under the finger is most of what makes the gesture feel
@@ -121,6 +192,18 @@ export function MessageBubble({
           </Pressable>
         )}
       </View>
+
+      {/* Rendered on a tombstone too. A reaction someone left is a thing that
+          happened, and silently dropping it when the message is deleted would
+          make it look as though they never did. */}
+      {reactions.length > 0 ? (
+        <ReactionPills
+          reactions={reactions}
+          mine={mine}
+          onToggle={message.is_deleted ? undefined : onToggleReaction}
+          onShowReactors={onShowReactors}
+        />
+      ) : null}
     </View>
   );
 }
@@ -160,6 +243,30 @@ const styles = StyleSheet.create({
   time: { marginTop: 2, fontSize: 11 },
   mineTime: { color: 'rgba(255,255,255,0.7)' },
   theirsTime: { color: colors.inkFaint },
+  // Pulled up over the bubble's lower edge, the standard chat treatment: the
+  // pill reads as attached to that message rather than as a row of its own.
+  pillRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginTop: -spacing.sm,
+    paddingHorizontal: spacing.sm,
+  },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: spacing.sm - 2,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    backgroundColor: colors.raised,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  pillMine: { backgroundColor: colors.accentTint, borderColor: colors.accent },
+  pillPressed: { opacity: 0.6 },
+  pillEmoji: { fontSize: 13 },
+  pillCount: { fontSize: fontSize.sm - 1, color: colors.inkSoft },
   tombstone: {
     maxWidth: '80%',
     paddingHorizontal: spacing.md - 2,

@@ -51,7 +51,9 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
   `ordering = ["created_at", "id"]` (oldest-first, stable tiebreak). `edited_at`
   is deliberately *not* `auto_now`, which would also fire on the soft-delete
   write and mislabel a deleted message as edited. See
-  [Editing a message](#editing-a-message).
+  [Editing a message](#editing-a-message). Emoji reactions hang off it via the
+  shared `Reaction` model's nullable `message` FK — see
+  [Reacting to a message](#reacting-to-a-message).
 - **`ConversationRead`** — `(conversation, user, last_read_at)`, unique together.
   Unread for you = visible messages with `created_at > last_read_at` and
   `sender != you`. Its own table (not two timestamps on `Conversation`) is why
@@ -122,6 +124,36 @@ reads the new text with no bump needed. Both halves are asserted in
 edit is not news, and a correction buzzing everyone's phone a second time is how
 people end up turning notifications off. Nothing had to change for privacy
 either, since [push bodies never quoted message text](#push-notifications).
+
+## Reacting to a message
+
+Added in Phase 9b M2. The model, the emoji validator and the endpoint shape are
+[the feed's](reactions.md) — `Reaction` was widened with a nullable `message` FK
+rather than forked into a parallel model — so **[reactions.md](reactions.md) owns
+the details**. What's specific to messaging:
+
+- **The gate is this document's gate.** `POST /api/messages/<id>/react/` resolves
+  its target through `can_view_message`, so it's
+  [interval-clipped](#history-is-interval-clipped) exactly like the thread, the
+  report gate and the edit route — one rule in four places, never a fourth copy
+  that drifts. A gap member gets a 404, indistinguishable from an id that never
+  existed.
+- **Reacting needs `can_send`, like editing does.** A reaction is content the
+  whole thread sees, so being severed or disconnected stops it (403). Reading who
+  reacted still works: losing the ability to write is not losing the history.
+  A deleted message can't be reacted to (400) — there's nothing left to react to.
+- **No pruning.** Post reactions are pruned per viewer because a reactor might be
+  someone you can't see; a chat's active participants are a clique by
+  construction, so everyone who can see the message can see every reactor.
+  Everyone in a thread therefore agrees on the counts, which is *not* true of a
+  post.
+- **No push, no `Notification` row** — messaging stays out of the bell for the
+  [reason below](#push-notifications), and a phone buzzing for a 👍 is how people
+  end up turning notifications off. Both are asserted in `MessageReactionTests`,
+  because the shared toggle helper writes a notification for every other target.
+- **A reaction doesn't bump `Conversation.updated_at`**, for the same reason an
+  edit doesn't: it isn't new activity, so it mustn't jump the thread to the top of
+  everyone's list.
 
 ## Membership state machine
 
@@ -201,6 +233,12 @@ Direct and group chats share the endpoints:
   disconnect/block would pull you from, to drive the warning modal.
 - `GET /api/messages/unread-count/` — single number for the nav badge (so it
   doesn't load and sum the paginated list).
+- `POST /api/messages/<id>/react/` — **toggle** your emoji reaction on a message;
+  `GET /api/messages/<id>/reactions/` — who reacted, grouped by emoji. Keyed on
+  the message id alone (not nested under the conversation, unlike edit/delete):
+  the conversation is reachable from the message and the gate consults it anyway,
+  so a conversation id in the path would be a second thing to keep consistent and
+  nothing to check against. See [Reacting to a message](#reacting-to-a-message).
 - `POST /api/reports/` with `{ message: <id>, reason? }` — flag a message for the
   maintainer. Shares the endpoint (and the queue) with post/comment reports; see
   [Moderation](#moderation-a-report-is-the-only-window) below and
@@ -317,10 +355,11 @@ new-message:
 
 **The web is behind on Phase 9b and that's expected, not broken.** Every 9b
 response field is additive, so the drawer ignores `is_edited`/`edited_at` and
-simply renders an edited message as its new text with no marker. Web parity is
-its own milestone (9b M9), which also splits `MessagesDrawer.jsx` up. The one
-visible degradation until then is that missing marker — worth saying out loud
-rather than having someone discover it.
+`reactions`, and simply renders an edited message as its new text with no marker.
+Web parity is its own milestone (9b M9), which also splits `MessagesDrawer.jsx`
+up. Two visible degradations until then — the missing "Edited" marker, and
+message reactions being invisible on the web (they're still stored, and still
+show in the app) — worth saying out loud rather than having someone discover it.
 
 ## Mobile (Phase 9 E2)
 
@@ -344,9 +383,11 @@ opening a drawer alongside.
 ### The long-press action menu (Phase 9b M1)
 
 Long-pressing a bubble dims the thread, keeps the pressed bubble at full
-brightness, and floats a small menu **directly beneath it** — Copy · Edit ·
-Delete on your own, Copy · Report on someone else's. A deleted message's
-tombstone has no menu; there's nothing left to act on.
+brightness, and floats a small menu **directly beneath it** — a quick-reaction
+row across the top (M2), then Copy · Edit · Delete on your own, Copy · Report on
+someone else's. A deleted message's tombstone has no menu; there's nothing left
+to act on. In a thread you can no longer send to, the reaction row is left out
+rather than shown offering something the server would 403.
 
 **It's deliberately not an `ActionSheetIOS`,** even though `PostMenu` is and
 reusing it would have been less work. A sheet slides up from the bottom of the
@@ -380,6 +421,17 @@ from "editing" to an accidental delete.
 **Report** was already built end-to-end by M0 (endpoint, `reportContent`,
 `ReportModal`); M1 only added the menu entry that opens it, which is the UI entry
 point M0 deliberately shipped without.
+
+**Reactions render as pills** hanging off the bubble's lower edge on its near
+side — tap to toggle, press and hold for who reacted. The full picker opens at
+*screen* level rather than inside the menu, because `rn-emoji-keyboard` is itself
+a `Modal` and two visible modals stack badly on iOS; the menu closes on its way
+there. There's no optimistic pre-tap update: the toggle endpoint returns the whole
+fresh aggregate, and simulating it locally would mean a second copy of rules the
+server owns (the per-target emoji cap, emoji validation, count-then-emoji
+ordering) that could show a pill and then take it away. See
+[reactions.md](reactions.md#mobile) for the emoji set and why it differs from the
+feed's.
 
 **New-message push** (issue #118) is the one place the app gets something the web
 can't have. A tapped message push deep-links to the thread via `routeForNotification`

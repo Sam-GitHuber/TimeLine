@@ -21,6 +21,11 @@
  * their own entries into this same menu; a caller builds the array so this file
  * never grows a list of features it has to know about.
  *
+ * **The quick-reaction row (Phase 9b M2)** sits above the items rather than in
+ * them, because it's a different kind of thing: six one-tap emoji laid out
+ * horizontally, not a list of verbs. It's the row your thumb is already heading
+ * for, so it goes closest to the bubble.
+ *
  * The grow-and-fade uses React Native's own `Animated`, not Reanimated. Both are
  * in the app, but Reanimated's worklet runtime can't be loaded by Jest, and
  * mocking it out here would mean mocking away the component under test. A 120ms
@@ -59,9 +64,24 @@ export type MessageAction = {
   destructive?: boolean;
 };
 
-const MENU_WIDTH = 220;
+/**
+ * The one-tap emoji, and the row's whole design brief: cover the replies people
+ * actually send so the `＋` is the exception rather than the route.
+ *
+ * **Deliberately not the same six as the feed's four.** `ReactionTray` keeps its
+ * quick set strictly positive (👍 ❤️ 😂 🎉) because reacting to someone's *post*
+ * with 😢 reads as a verdict on it. In a conversation the opposite is true: "😮"
+ * and "😢" to someone's news are the warm, human answers, and a set that can
+ * only be cheerful makes you type a whole message to say "oh no". Different
+ * context, different set — not an oversight.
+ */
+const QUICK = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const;
+
+const MENU_WIDTH = 268;
 /** Row height + the menu's own vertical padding — used to decide about-facing. */
 const ITEM_HEIGHT = 46;
+/** The quick-reaction row's height, including its divider. */
+const QUICK_HEIGHT = 52;
 const MENU_PADDING = spacing.xs;
 /** Gap between the highlighted bubble and the menu. */
 const GAP = spacing.sm;
@@ -73,12 +93,27 @@ export function MessageActionMenu({
   mine,
   anchor,
   actions,
+  onReact,
+  onMoreEmoji,
   onClose,
 }: {
   message: Message;
   mine: boolean;
   anchor: BubbleAnchor;
   actions: MessageAction[];
+  /**
+   * Toggle an emoji on this message. Omitted when reacting isn't available —
+   * a thread you can no longer send to — and the row is then left out entirely
+   * rather than shown offering an action that would 403.
+   */
+  onReact?: (emoji: string) => void;
+  /**
+   * Open the full emoji grid. Handled by the *caller*, not here, because
+   * `rn-emoji-keyboard` is itself a `Modal` and two visible modals stack badly on
+   * iOS (the same trap `ReactionTray` documents). The caller closes this menu
+   * first and opens the picker in its place.
+   */
+  onMoreEmoji?: () => void;
   onClose: () => void;
 }) {
   const { width: screenW, height: screenH } = useWindowDimensions();
@@ -101,7 +136,17 @@ export function MessageActionMenu({
     }).start();
   }, [reveal]);
 
-  const menuHeight = actions.length * ITEM_HEIGHT + MENU_PADDING * 2;
+  // Emoji you've already put on this message, shown active — tapping one takes
+  // it off, which is the same toggle the pill under the bubble does.
+  const reacted = new Set(
+    (message.reactions ?? []).filter((r) => r.reacted).map((r) => r.emoji)
+  );
+  const showQuick = !!onReact;
+
+  const menuHeight =
+    actions.length * ITEM_HEIGHT +
+    (showQuick ? QUICK_HEIGHT : 0) +
+    MENU_PADDING * 2;
   const below = anchor.y + previewHeight + GAP;
   // Flip above when the menu would run off the bottom. Nothing clever about the
   // threshold: if it doesn't fit under the bubble, it goes over it.
@@ -162,8 +207,54 @@ export function MessageActionMenu({
             `overflow: hidden` is `clipsToBounds` on iOS, which clips the shadow
             away as well as the corners. Two views is the standard fix. */}
         <View style={styles.menuClip}>
-          {/* A long list (M2/M3 add rows) scrolls rather than overflowing the
-              screen; at M1's three items it never does. */}
+          {showQuick ? (
+            <View style={styles.quickRow}>
+              {QUICK.map((emoji) => {
+                const active = reacted.has(emoji);
+                return (
+                  <Pressable
+                    key={emoji}
+                    onPress={() => {
+                      onClose();
+                      onReact?.(emoji);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={
+                      active ? `Remove ${emoji} reaction` : `React with ${emoji}`
+                    }
+                    style={({ pressed }) => [
+                      styles.quickSlot,
+                      active && styles.quickSlotActive,
+                      pressed && styles.quickSlotPressed,
+                    ]}
+                  >
+                    <Text style={styles.quickEmoji}>{emoji}</Text>
+                  </Pressable>
+                );
+              })}
+              {onMoreEmoji ? (
+                <Pressable
+                  onPress={() => {
+                    onClose();
+                    onMoreEmoji();
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="More emoji"
+                  style={({ pressed }) => [
+                    styles.quickSlot,
+                    styles.more,
+                    pressed && styles.quickSlotPressed,
+                  ]}
+                >
+                  <Text style={styles.moreText}>＋</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* A long list (M3 adds Reply) scrolls rather than overflowing the
+              screen; at three or four items it never does. */}
           <ScrollView bounces={false} style={{ maxHeight: screenH * 0.5 }}>
             {actions.map((action, i) => (
               <Pressable
@@ -231,6 +322,29 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     overflow: 'hidden',
   },
+  // The emoji row. `space-between` rather than a gap so the seven slots always
+  // span the menu's width exactly, whatever MENU_WIDTH becomes.
+  quickRow: {
+    height: QUICK_HEIGHT,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  quickSlot: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickSlotActive: { backgroundColor: colors.accentTint },
+  quickSlotPressed: { backgroundColor: colors.line },
+  quickEmoji: { fontSize: 24 },
+  more: { backgroundColor: colors.surface },
+  moreText: { fontSize: 16, color: colors.inkSoft },
   item: {
     height: ITEM_HEIGHT,
     justifyContent: 'center',

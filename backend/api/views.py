@@ -71,6 +71,7 @@ from .models import (
     Report,
 )
 from .serializers import (
+    EVERYONE,
     AuthorSerializer,
     CommentCreateSerializer,
     CommentSerializer,
@@ -1529,14 +1530,19 @@ class PostCommentsView(APIView):
 # --- Reactions (Phase 7b) ------------------------------------------------------
 
 
-def _toggle_reaction(request, target_kwargs):
+def _toggle_reaction(request, target_kwargs, visible_ids):
     """Add or remove the requesting user's emoji reaction on a target.
 
-    ``target_kwargs`` is ``{"post": post}`` or ``{"comment": comment}`` — the
-    caller has already checked the target is visible to the user. Re-adding an
-    emoji you've already used removes it (the toggle). Adding a *new* emoji is
-    capped per user per target to bound abuse. Returns the target's freshly
-    aggregated, viewer-pruned reaction summary so the client can update in place.
+    ``target_kwargs`` is ``{"post": post}``, ``{"comment": comment}`` or
+    ``{"message": message}`` — the caller has already checked the target is
+    visible to the user, and for a message that they may still write to it.
+    Re-adding an emoji you've already used removes it (the toggle). Adding a
+    *new* emoji is capped per user per target to bound abuse. Returns the
+    target's freshly aggregated summary so the client can update in place.
+
+    ``visible_ids`` is the caller's pruning decision, stated rather than assumed:
+    ``visible_reactor_ids(user)`` for a post or comment, ``EVERYONE`` for a
+    message (a chat is already a clique — see the sentinel).
     """
     raw = request.data.get("emoji", "")
     try:
@@ -1584,34 +1590,52 @@ def _toggle_reaction(request, target_kwargs):
         # *add*, never a removal. create_notification dedupes an unread reaction
         # notification per (recipient, actor, target), so react/un-react/re-react
         # or a second emoji bumps one row rather than stacking near-duplicates.
+        #
+        # **Messaging is deliberately excluded.** It sits outside the bell
+        # entirely (see messaging.md: a Notification per message would
+        # double-surface every one of them), and buzzing someone's phone for a 👍
+        # is how people end up turning notifications off. A message reaction is
+        # seen the next time you look at the thread, which is enough.
         reacted_target = target_kwargs.get("post") or target_kwargs.get("comment")
-        notifications.create_notification(
-            recipient=reacted_target.author,
-            actor=request.user,
-            kind=Notification.Kind.REACTION,
-            **target_kwargs,
-        )
+        if reacted_target is not None:
+            notifications.create_notification(
+                recipient=reacted_target.author,
+                actor=request.user,
+                kind=Notification.Kind.REACTION,
+                **target_kwargs,
+            )
 
-    target = target_kwargs.get("post") or target_kwargs.get("comment")
+    target = _reaction_target(target_kwargs)
     summary = summarise_reactions(
-        target.reactions.all(), visible_reactor_ids(request.user), request.user.id
+        target.reactions.all(), visible_ids, request.user.id
     )
     return Response({"reactions": summary})
 
 
-def _reactors_grouped(request, target):
-    """Who reacted to ``target``, grouped by emoji, pruned to people the viewer
-    may see — so a not-connected reactor never appears.
+def _reaction_target(target_kwargs):
+    """The single target out of ``{"post"|"comment"|"message": obj}``."""
+    return (
+        target_kwargs.get("post")
+        or target_kwargs.get("comment")
+        or target_kwargs.get("message")
+    )
+
+
+def _reactors_grouped(request, target, visible_ids):
+    """Who reacted to ``target``, grouped by emoji.
+
+    ``visible_ids`` is the caller's pruning decision, the same one
+    ``_toggle_reaction`` takes and for the same reason: post/comment reactors are
+    pruned to people the viewer may see (so a not-connected reactor never
+    appears), while a message's aren't (the chat is already a clique). It's a
+    required argument in both so neither caller can prune by accident.
 
     Returns ``[{emoji, count, users:[{id, display_name, avatar_thumb}]}]``,
     ordered by count (desc) then emoji, matching the embedded summary's order.
     """
-    visible = visible_reactor_ids(request.user)
-    rows = (
-        target.reactions.filter(user_id__in=visible)
-        .select_related("user")
-        .order_by("created_at", "id")
-    )
+    rows = target.reactions.select_related("user").order_by("created_at", "id")
+    if visible_ids is not EVERYONE:
+        rows = rows.filter(user_id__in=visible_ids)
     grouped = {}
     for reaction in rows:
         grouped.setdefault(reaction.emoji, []).append(reaction.user)
@@ -1645,10 +1669,18 @@ class PostReactionView(APIView):
         return post
 
     def post(self, request, pk):
-        return _toggle_reaction(request, {"post": self._get_post_or_404(request, pk)})
+        return _toggle_reaction(
+            request,
+            {"post": self._get_post_or_404(request, pk)},
+            visible_reactor_ids(request.user),
+        )
 
     def get(self, request, pk):
-        return _reactors_grouped(request, self._get_post_or_404(request, pk))
+        return _reactors_grouped(
+            request,
+            self._get_post_or_404(request, pk),
+            visible_reactor_ids(request.user),
+        )
 
 
 class CommentReactionView(APIView):
@@ -1668,11 +1700,69 @@ class CommentReactionView(APIView):
 
     def post(self, request, pk):
         return _toggle_reaction(
-            request, {"comment": self._get_comment_or_404(request, pk)}
+            request,
+            {"comment": self._get_comment_or_404(request, pk)},
+            visible_reactor_ids(request.user),
         )
 
     def get(self, request, pk):
-        return _reactors_grouped(request, self._get_comment_or_404(request, pk))
+        return _reactors_grouped(
+            request,
+            self._get_comment_or_404(request, pk),
+            visible_reactor_ids(request.user),
+        )
+
+
+class MessageReactionView(APIView):
+    """Toggle your emoji reaction on a message (POST ``/messages/<pk>/react/``)
+    or list who reacted (GET ``/messages/<pk>/reactions/``) — Phase 9b M2.
+
+    The route pair mirrors posts and comments exactly, but the gate is the
+    *messaging* gate rather than the feed's, and it differs in three ways worth
+    stating because each one is a decision:
+
+    - **Visibility is interval-clipped, via ``can_view_message``** — the same
+      rule the thread, the report gate and the edit route use, never a fourth
+      copy. A member who was ``pending`` across a gap gets a 404 for a message
+      from inside it, so reacting can't become an existence oracle for history
+      they were clipped out of.
+    - **Reacting requires that you could still *send* here** (403), for the same
+      reason editing does: a reaction is content you put into a thread that
+      everyone else sees, so someone disconnected or severed from it must not be
+      able to keep adding to it.
+    - **The reactor list is not pruned per viewer.** Post reactions are, because
+      a reactor might be someone the viewer can't see. In a conversation the
+      active participants are a clique by construction, so anyone who can see the
+      message can already see everyone who reacted. Clipping happens on the
+      message, not on the people.
+
+    A **deleted** message can't be reacted to (400): there's nothing left to
+    react to, and the tombstone has no menu in either client. This matches the
+    edit route and the report gate.
+    """
+
+    def _get_message_or_404(self, request, pk):
+        message = get_object_or_404(
+            Message.objects.select_related("sender", "conversation"), pk=pk
+        )
+        if not can_view_message(request.user, message):
+            raise NotFound()
+        return message
+
+    def post(self, request, pk):
+        message = self._get_message_or_404(request, pk)
+        if message.is_deleted:
+            raise ValidationError("This message was deleted.")
+        convo = message.conversation
+        _assert_can_send(
+            request.user, convo, _viewer_participant_status(convo, request.user)
+        )
+        return _toggle_reaction(request, {"message": message}, EVERYONE)
+
+    def get(self, request, pk):
+        return _reactors_grouped(
+            request, self._get_message_or_404(request, pk), EVERYONE
+        )
 
 
 # --- Direct messaging (Phase 5) ------------------------------------------------
@@ -2095,7 +2185,13 @@ class ConversationMessagesView(generics.ListAPIView):
             raise PermissionDenied(
                 "Connect with everyone to join this chat."
             )
-        return _messages_for_viewer(convo, self.request.user)
+        # Prefetch here rather than inside ``_messages_for_viewer``: this is the
+        # one caller that serialises the rows (and so reads each message's
+        # reaction summary). The others count, or look up a single message, and
+        # would pay for a join they never use.
+        return _messages_for_viewer(convo, self.request.user).prefetch_related(
+            "reactions"
+        )
 
     def post(self, request, pk):
         convo, my_status = self._conversation()

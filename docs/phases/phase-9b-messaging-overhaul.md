@@ -62,7 +62,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 |---|---|---|---|---|
 | **M0** | Close the admin message window | — | **S** | ☑ |
 | **M1** | Long-press menu + edit | — | **S–M** | ☑ |
-| **M2** | Message reactions | M1 | **S** | ☐ |
+| **M2** | Message reactions | M1 | **S** | ☑ |
 | **M3** | Reply / quote | M1 | **M** | ☐ |
 | **M4** | Send status + read receipts | — | **M** | ☐ |
 | **M5** | Thread mechanics | — (do before M7) | **M–L** | ☐ |
@@ -477,12 +477,41 @@ slated for removal, so it wasn't the boring choice it looked like.
 **Watch for:** the pill must not make M5's run-grouping go ragged. If you're
 doing both, keep an eye on the spacing together.
 
-**Done when**
-- [ ] React from the long-press menu; toggle off by re-tapping.
-- [ ] Reactor list correct; no push fires (test it).
-- [ ] `messaging.md` + `reactions.md` both updated — reactions.md owns the model,
+**Done when** — ✅ code complete; `reactions.md` → *Message reactions* +
+*Mobile*, and `messaging.md` → *Reacting to a message*, are the durable record.
+- [x] React from the long-press menu; toggle off by re-tapping.
+- [x] Reactor list correct; no push and no `Notification` row (both tested).
+- [x] `messaging.md` + `reactions.md` both updated — reactions.md owns the model,
       messaging.md links to it.
-- [ ] **Then use it for a week** — see the polling trigger above.
+- [ ] **Then use it for a week** — see the polling trigger above. *(Needs a
+      TestFlight build; can't be ticked from the repo.)*
+
+**Four decisions M2 made that the plan above didn't anticipate:**
+
+1. **Reacting requires `can_send`, not just visibility.** The plan said "clip on
+   whether the message itself is visible". That's necessary but not sufficient: a
+   reaction is content everyone in the thread sees, so the same back door M1
+   closed for editing was open here. `_assert_can_send` gates the toggle too;
+   reading the reactor list stays open, because losing the ability to write isn't
+   losing the history. A **deleted** message also can't be reacted to (400),
+   matching the edit route and the report gate.
+2. **The no-pruning opt-out is an explicit `EVERYONE` sentinel**, and
+   `_toggle_reaction` / `_reactors_grouped` now take the pruning decision as a
+   **required** argument. Reusing `visible_ids=None` would have been shorter, but
+   `None` already means the opposite (fail closed, show nothing) — so one
+   forgotten argument would have turned into a silent leak on *posts*. M3 and M7
+   should keep the same shape: make the caller state the privacy decision.
+3. **The chat's quick-emoji set isn't the feed's.** `ReactionTray`'s four are
+   deliberately all positive, which is right for a post and wrong for a
+   conversation — 😮 and 😢 are the warm replies to someone's news. The chat row
+   is 👍 ❤️ 😂 😮 😢 🙏. The full picker's theme moved to `theme.ts`
+   (`emojiPickerTheme`) so the two entry points can't drift.
+4. **No optimistic toggle**, deliberately, even though M4 brings optimistic send.
+   Simulating the toggle locally means a second copy of rules the server owns (the
+   per-target cap, emoji validation, count-then-emoji ordering) that can show a
+   pill and then take it away. The "use it for a week" instruction above is
+   exactly the evidence needed before optimising for the latency — don't pre-empt
+   it.
 
 ---
 

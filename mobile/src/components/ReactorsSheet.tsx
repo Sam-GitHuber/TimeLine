@@ -1,11 +1,16 @@
 /**
  * "Who reacted" — the visible reactor list, grouped by emoji.
  *
- * **Pruned per viewer, server-side.** The list only ever contains people you're
- * connected with (plus yourself), so a reactor you don't know is never named
- * here — reactions can't surface a stranger second-hand. That also means two
- * people can see different lists on the same post, which is correct rather than
- * a bug (reactions.md).
+ * **Pruned per viewer, server-side — for a post or comment.** That list only ever
+ * contains people you're connected with (plus yourself), so a reactor you don't
+ * know is never named here; reactions can't surface a stranger second-hand. Two
+ * people can therefore see different lists on the same post, which is correct
+ * rather than a bug (reactions.md).
+ *
+ * A **message**'s reactors aren't pruned, because a chat's active participants
+ * are a clique by construction — anyone who can see the message can already see
+ * everyone who reacted, so everyone in a thread sees the same list. Nothing here
+ * changes either way: the server decides and this renders what arrives.
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -28,16 +33,23 @@ export function ReactorsSheet({
   onClose,
   postId,
   commentId,
+  messageId,
 }: {
   visible: boolean;
   onClose: () => void;
   postId?: number;
   commentId?: number;
+  messageId?: number;
 }) {
-  const target = postId != null ? { postId } : { commentId };
+  const target =
+    postId != null
+      ? { postId }
+      : commentId != null
+        ? { commentId }
+        : { messageId };
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['reactors', postId ?? null, commentId ?? null],
+    queryKey: ['reactors', postId ?? null, commentId ?? null, messageId ?? null],
     queryFn: () => api.getReactors(target),
     // Only fetch once the sheet is actually open — this is a per-target request
     // and the feed can hold dozens of targets at a time.

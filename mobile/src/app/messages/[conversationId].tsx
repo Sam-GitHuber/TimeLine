@@ -10,7 +10,8 @@
  *   - marks the thread read on open and as new messages land, clearing the
  *     per-thread pill and the tab badge;
  *   - sends, and offers the **long-press action menu** on any bubble — Copy /
- *     Edit / Delete on your own, Copy / Report on someone else's (Phase 9b M1);
+ *     Edit / Delete on your own, Copy / Report on someone else's (Phase 9b M1),
+ *     with a quick-reaction row across the top (Phase 9b M2);
  *   - a *group* header offers Leave; a 1:1 header links to the other's profile;
  *   - a **pending** viewer (added but not yet connected to the whole clique) sees
  *     the locked `PendingChatPanel` instead of the message list;
@@ -21,6 +22,7 @@
  * for a new chat and add-people land with the create half of E2.
  */
 
+import type { InfiniteData } from '@tanstack/react-query';
 import {
   useInfiniteQuery,
   useMutation,
@@ -42,6 +44,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import EmojiPicker from 'rn-emoji-keyboard';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api, ApiError, MESSAGE_EDIT_WINDOW_MS, MESSAGE_POLL_MS } from '@/api';
@@ -52,12 +55,58 @@ import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
+import { ReactorsSheet } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
-import { colors, fontSize, radius, spacing } from '@/theme';
-import type { Message } from '@/types';
+import {
+  colors,
+  emojiPickerTheme,
+  fontSize,
+  radius,
+  spacing,
+} from '@/theme';
+import type { Message, Paginated, Reaction } from '@/types';
 
 /** The composer bar's base vertical padding, before the home-indicator inset. */
 const COMPOSER_PAD = spacing.sm + 2;
+
+/**
+ * Write a message's fresh reaction summary into the cached thread.
+ *
+ * The toggle endpoint returns the target's whole updated aggregate, so there's
+ * nothing to guess at — the pills re-render from server truth without waiting up
+ * to `MESSAGE_POLL_MS` for the next poll.
+ *
+ * **No optimistic pre-tap update, deliberately.** The obvious next step is to
+ * simulate the toggle locally before the response lands, but that means a second
+ * copy of rules the server owns (the per-target emoji cap, emoji validation, the
+ * count-then-emoji ordering) which would drift and show a pill that then
+ * disappears. The round trip is one request against an already-open screen. The
+ * phase plan's instruction is to *use* reactions for a week and see whether the
+ * latency is actually noticeable before optimising for it — so this stays simple
+ * until there's evidence, and optimistic writes land properly in M4.
+ */
+function patchReactions(
+  data: InfiniteData<Paginated<Message>, string> | undefined,
+  messageId: number,
+  reactions: Reaction[]
+) {
+  if (!data?.pages) return data;
+  return {
+    ...data,
+    pages: data.pages.map((page) =>
+      // Rebuild only the page holding the message, so unrelated pages keep their
+      // identity and don't re-render the whole thread on every reaction.
+      page.results.some((m) => m.id === messageId)
+        ? {
+            ...page,
+            results: page.results.map((m) =>
+              m.id === messageId ? { ...m, reactions } : m
+            ),
+          }
+        : page
+    ),
+  };
+}
 
 /**
  * What the long-press menu offers for one message.
@@ -143,6 +192,12 @@ export default function ThreadScreen() {
   // a draft to a typo fix would be its own small betrayal.
   const [stashedDraft, setStashedDraft] = useState('');
   const [reportingId, setReportingId] = useState<number | null>(null);
+  // The message whose full emoji grid is open, and the one whose reactor list is.
+  // Both are separate from `menuTarget` because the menu closes on its way into
+  // either — `rn-emoji-keyboard` is itself a Modal, and two visible modals stack
+  // badly on iOS (the trap `ReactionTray` documents).
+  const [pickerFor, setPickerFor] = useState<number | null>(null);
+  const [reactorsFor, setReactorsFor] = useState<number | null>(null);
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/messages');
@@ -219,6 +274,26 @@ export default function ThreadScreen() {
       // doesn't reorder the list.
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
+  });
+
+  const reactMutation = useMutation({
+    mutationFn: ({ messageId, emoji }: { messageId: number; emoji: string }) =>
+      api.toggleReaction({ messageId, emoji }),
+    onSuccess: (data, { messageId }) => {
+      queryClient.setQueryData<InfiniteData<Paginated<Message>, string>>(
+        ['messages', id],
+        (cached) => patchReactions(cached, messageId, data.reactions ?? [])
+      );
+    },
+    // Reacting is a one-tap gesture, so a failure has to say so rather than
+    // leave the tap looking as though it worked. The server owns the rules that
+    // can reject one (the per-target cap, emoji validation, a closed thread), so
+    // its message is what gets shown — same as the feed's ReactionBar.
+    onError: (error) =>
+      Alert.alert(
+        'Couldn’t react',
+        error instanceof Error ? error.message : 'Something went wrong.'
+      ),
   });
 
   const muteMutation = useMutation({
@@ -448,6 +523,16 @@ export default function ThreadScreen() {
                   message={item}
                   mine={mine}
                   showSender={isGroup && !mine && startsRun}
+                  // No toggle in a thread you can't send to: a reaction is
+                  // content everyone sees, so the server 403s it exactly as it
+                  // 403s a message. The pills stay readable, just not tappable.
+                  onToggleReaction={
+                    canSend
+                      ? (emoji) =>
+                          reactMutation.mutate({ messageId: item.id, emoji })
+                      : undefined
+                  }
+                  onShowReactors={() => setReactorsFor(item.id)}
                   onLongPress={(anchor) =>
                     setMenuTarget({
                       message: item,
@@ -579,7 +664,43 @@ export default function ThreadScreen() {
           mine={menuTarget.mine}
           anchor={menuTarget.anchor}
           actions={menuTarget.actions}
+          onReact={
+            canSend
+              ? (emoji) =>
+                  reactMutation.mutate({
+                    messageId: menuTarget.message.id,
+                    emoji,
+                  })
+              : undefined
+          }
+          onMoreEmoji={
+            canSend ? () => setPickerFor(menuTarget.message.id) : undefined
+          }
           onClose={() => setMenuTarget(null)}
+        />
+      ) : null}
+
+      {/* "Any emoji from your keyboard" stays true here too — the same picker the
+          feed's ReactionTray opens, so the two clients' reaction sets can't
+          diverge. Rendered at screen level, after the menu has closed. */}
+      <EmojiPicker
+        open={pickerFor != null}
+        onClose={() => setPickerFor(null)}
+        onEmojiSelected={(picked: { emoji: string }) => {
+          if (pickerFor != null) {
+            reactMutation.mutate({ messageId: pickerFor, emoji: picked.emoji });
+          }
+          setPickerFor(null);
+        }}
+        enableSearchBar
+        theme={emojiPickerTheme}
+      />
+
+      {reactorsFor != null ? (
+        <ReactorsSheet
+          visible
+          messageId={reactorsFor}
+          onClose={() => setReactorsFor(null)}
         />
       ) : null}
 

@@ -250,6 +250,11 @@ export type Conversation = {
  * sender can correct a message for 15 minutes after sending it; after that the
  * PATCH 403s, so the marker is also a promise that nothing older than that
  * changed under you.
+ *
+ * `reactions` (Phase 9b M2) is the emoji aggregate the bubble's pill row renders.
+ * **Unlike a post's or comment's, it is *not* pruned per viewer** — a chat's
+ * active participants are a clique, so everyone in a thread sees the same counts
+ * (reactions.md). Optional because an older backend won't send it.
  */
 export type Message = {
   id: number;
@@ -259,6 +264,7 @@ export type Message = {
   is_edited: boolean;
   created_at: string;
   edited_at: string | null;
+  reactions?: Reaction[];
 };
 
 /**
