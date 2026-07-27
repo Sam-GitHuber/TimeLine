@@ -27,6 +27,28 @@ User = get_user_model()
 POST_MAX_LENGTH = 5000
 
 
+class _Everyone:
+    """A "no pruning" stand-in for a set of visible reactor ids.
+
+    Used only by **message** reactions (Phase 9b M2), where per-viewer pruning is
+    not just unnecessary but wrong. A conversation's active participants are a
+    clique by construction — everyone active is connected to everyone else — so
+    anyone who can see a message can already see every person who could have
+    reacted to it. Filtering there would hide reactions for no privacy gain and
+    make two people in the same chat disagree about a shared thread.
+
+    A sentinel rather than ``visible_ids=None`` because ``None`` already means
+    the opposite (fail closed, show nothing) and reusing it would turn one
+    forgotten argument into a silent leak on posts.
+    """
+
+    def __contains__(self, _user_id):
+        return True
+
+
+EVERYONE = _Everyone()
+
+
 def summarise_reactions(reactions, visible_ids, me_id):
     """Aggregate a target's reactions into ``[{emoji, count, reacted}]``, pruned
     to who the viewer may see (Phase 7b).
@@ -36,8 +58,9 @@ def summarise_reactions(reactions, visible_ids, me_id):
     connections — mirroring the comment tree's pruning, so a reaction by someone
     the viewer isn't connected with is never counted and can't leak a stranger.
     Fail-closed: if ``visible_ids`` is ``None`` (context wasn't supplied) nothing
-    is shown rather than an unpruned count. ``reacted`` flags the emoji the
-    viewer themselves used, so the UI can highlight their own reaction.
+    is shown rather than an unpruned count. Pass ``EVERYONE`` to opt out
+    deliberately — message reactions do, see that sentinel. ``reacted`` flags the
+    emoji the viewer themselves used, so the UI can highlight their own reaction.
 
     Ordered by count (desc), then by the emoji string, so the display order is
     stable and deterministic (tests, and no jitter between polls).
@@ -321,14 +344,20 @@ class MessageSerializer(serializers.ModelSerializer):
     deleted" placeholder in its place, keeping the thread's order intact.
 
     ``is_edited``/``edited_at`` (Phase 9b M1) let the bubble show an "Edited"
-    marker. Both are *additive* fields: an older client that doesn't know about
-    them simply renders the new text unmarked, which is why M1 was safe to ship
-    to the backend before either client caught up.
+    marker. ``reactions`` (Phase 9b M2) is the aggregate the bubble's pill row
+    renders. All three are *additive* fields: an older client that doesn't know
+    about them simply ignores them, which is why the backend can ship ahead of
+    either client.
+
+    **``reactions`` is deliberately not pruned per viewer**, unlike a post's or a
+    comment's — see the ``EVERYONE`` sentinel. It's the one place the two differ,
+    and it's because a chat's active participants are already a clique.
     """
 
     sender = AuthorSerializer(read_only=True)
     is_deleted = serializers.BooleanField(read_only=True)
     is_edited = serializers.BooleanField(read_only=True)
+    reactions = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -340,7 +369,13 @@ class MessageSerializer(serializers.ModelSerializer):
             "is_edited",
             "created_at",
             "edited_at",
+            "reactions",
         )
+
+    def get_reactions(self, obj):
+        request = self.context.get("request")
+        me_id = request.user.id if request and request.user.is_authenticated else None
+        return summarise_reactions(obj.reactions.all(), EVERYONE, me_id)
 
 
 class MessageCreateSerializer(serializers.ModelSerializer):

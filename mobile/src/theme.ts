@@ -97,3 +97,26 @@ export const fontSize = {
  */
 export const pickerHeight = 216;
 export const pickerThemeVariant = 'light' as const;
+
+/**
+ * `rn-emoji-keyboard`'s theme hooks, mapped onto the tokens above — the same
+ * job the web does with `emoji-picker-element`'s CSS custom properties.
+ *
+ * Shared rather than declared at each call site because two places open the full
+ * grid now: the feed's `ReactionTray` (posts, comments) and a chat thread's
+ * message reactions (Phase 9b M2). A second inline copy would drift, and a
+ * differently-themed picker depending on where you opened it is the kind of
+ * inconsistency people notice without being able to name.
+ */
+export const emojiPickerTheme = {
+  backdrop: 'rgba(28, 26, 22, 0.35)',
+  knob: colors.accent,
+  container: colors.raised,
+  header: colors.inkSoft,
+  category: {
+    icon: colors.inkFaint,
+    iconActive: colors.raised,
+    container: colors.surface,
+    containerActive: colors.accent,
+  },
+} as const;

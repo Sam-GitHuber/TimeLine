@@ -816,22 +816,35 @@ class GroupMembership(models.Model):
 
 
 class Reaction(models.Model):
-    """An emoji reaction by a user on a single post *or* a single comment (7b).
+    """An emoji reaction by a user on a single post, comment **or message**.
 
-    The target is either a ``Post`` or a ``Comment`` — never both, never neither.
-    Rather than a ``GenericForeignKey`` (contenttypes machinery we don't need
-    when both targets are concrete, few, and already exist), it's two nullable
-    FKs guarded by a check constraint. A comment reaction covers replies too,
-    since ``Comment`` already backs both.
+    The target is exactly one of a ``Post``, a ``Comment`` or a ``Message`` —
+    never two, never none. Rather than a ``GenericForeignKey`` (contenttypes
+    machinery we don't need when the targets are concrete, few, and already
+    exist), it's three nullable FKs guarded by a check constraint. A comment
+    reaction covers replies too, since ``Comment`` already backs both.
+
+    ``message`` was added in Phase 9b M2. Widening this model rather than
+    building a parallel ``MessageReaction`` keeps one toggle path, one emoji
+    validator and one aggregation function — three copies of "one row per
+    (user, target, emoji)" would have drifted, and the constraint work is the
+    same either way.
 
     ``emoji`` is a normalised/validated Unicode emoji string (see
     ``api.emoji.normalise_emoji``) — the picker sends real emoji, but the API
     validates server-side and never trusts the client.
 
-    Visibility is **not** stored here: like comments, a reaction is pruned per
-    viewer when served (you only see reactions from yourself + people you may
-    see — connections, or fellow members on a group post), so a not-connected
-    reactor is never surfaced. See the reactions view/serializer.
+    Visibility is **not** stored here, and it differs by target:
+
+    - A post/comment reaction is **pruned per viewer** when served (you only see
+      reactions from yourself + people you may see), so a not-connected reactor
+      is never surfaced.
+    - A *message* reaction needs no pruning: a conversation's active
+      participants are a clique by construction, so anyone who can see the
+      message can already see everyone who could have reacted to it. The clip is
+      on the message itself, not on the reactors.
+
+    See the reactions views/serializers, and ``docs/reference/reactions.md``.
     """
 
     user = models.ForeignKey(
@@ -853,17 +866,34 @@ class Reaction(models.Model):
         null=True,
         blank=True,
     )
+    message = models.ForeignKey(
+        Message,
+        on_delete=models.CASCADE,
+        related_name="reactions",
+        null=True,
+        blank=True,
+    )
     emoji = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
-            # A reaction targets exactly one thing — a post XOR a comment.
+            # A reaction targets exactly one thing — post, comment or message.
+            # Spelled as "one is set and the other two aren't" three times over
+            # rather than something clever: it's the shape Postgres can check
+            # per-row, and it's obvious what a fourth target would need.
             models.CheckConstraint(
-                name="reaction_targets_post_xor_comment",
+                name="reaction_targets_exactly_one",
                 condition=(
-                    models.Q(post__isnull=False, comment__isnull=True)
-                    | models.Q(post__isnull=True, comment__isnull=False)
+                    models.Q(
+                        post__isnull=False, comment__isnull=True, message__isnull=True
+                    )
+                    | models.Q(
+                        post__isnull=True, comment__isnull=False, message__isnull=True
+                    )
+                    | models.Q(
+                        post__isnull=True, comment__isnull=True, message__isnull=False
+                    )
                 ),
             ),
             # One of each emoji per user per target, so re-adding toggles off.
@@ -879,10 +909,20 @@ class Reaction(models.Model):
                 condition=models.Q(comment__isnull=False),
                 name="unique_user_comment_emoji",
             ),
+            models.UniqueConstraint(
+                fields=["user", "message", "emoji"],
+                condition=models.Q(message__isnull=False),
+                name="unique_user_message_emoji",
+            ),
         ]
 
     def __str__(self):
-        target = f"post {self.post_id}" if self.post_id else f"comment {self.comment_id}"
+        if self.post_id:
+            target = f"post {self.post_id}"
+        elif self.comment_id:
+            target = f"comment {self.comment_id}"
+        else:
+            target = f"message {self.message_id}"
         return f"{self.user} · {self.emoji} · {target}"
 
 

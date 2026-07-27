@@ -314,21 +314,29 @@ async function request<T>(
   return data as T;
 }
 
+/** Exactly one of these names the thing being reacted to. */
+export type ReactionTarget = {
+  postId?: number;
+  commentId?: number;
+  messageId?: number;
+};
+
 /**
  * The URL for a reaction action on whichever target was named.
  *
- * Both ids are optional at the type level because the components holding them
- * carry them that way, so "neither was passed" is reachable. Left alone it
+ * Every id is optional at the type level because the components holding them
+ * carry them that way, so "none was passed" is reachable. Left alone it
  * builds `/api/comments/undefined/react/`, which 404s and surfaces to the user
  * as a mystery "Couldn't react" — so it fails loudly here instead.
  */
 function reactionPath(
-  { postId, commentId }: { postId?: number; commentId?: number },
+  { postId, commentId, messageId }: ReactionTarget,
   action: 'react' | 'reactions'
 ): string {
   if (postId != null) return `/api/posts/${postId}/${action}/`;
   if (commentId != null) return `/api/comments/${commentId}/${action}/`;
-  throw new Error('reactionPath needs either a postId or a commentId');
+  if (messageId != null) return `/api/messages/${messageId}/${action}/`;
+  throw new Error('reactionPath needs a postId, commentId or messageId');
 }
 
 export const api = {
@@ -1155,29 +1163,33 @@ export const api = {
     }),
 
   /**
-   * Toggle your emoji reaction on a post or a comment. Pass exactly one target.
+   * Toggle your emoji reaction on a post, comment or message (Phase 9b M2). Pass
+   * exactly one target.
    *
    * **It's a toggle, not an add:** sending an emoji you've already used removes
-   * it. Returns the target's updated pruned summary, so the caller can render
-   * the result instead of guessing at it or refetching the feed.
+   * it. Returns the target's updated summary, so the caller can render the
+   * result instead of guessing at it or refetching.
+   *
+   * A message target has two extra ways to fail, both server-enforced: reacting
+   * needs the same permission as *sending* (403 once you're disconnected — a
+   * reaction is content everyone in the thread sees), and a deleted message
+   * can't be reacted to (400).
    */
-  toggleReaction: ({
-    postId,
-    commentId,
-    emoji,
-  }: {
-    postId?: number;
-    commentId?: number;
-    emoji: string;
-  }) =>
-    request<ReactionSummary>(reactionPath({ postId, commentId }, 'react'), {
+  toggleReaction: ({ emoji, ...target }: ReactionTarget & { emoji: string }) =>
+    request<ReactionSummary>(reactionPath(target, 'react'), {
       method: 'POST',
       body: { emoji },
     }),
 
-  /** Who reacted, grouped by emoji. Pass exactly one target. */
-  getReactors: ({ postId, commentId }: { postId?: number; commentId?: number }) =>
-    request<ReactorGroup[]>(reactionPath({ postId, commentId }, 'reactions')),
+  /**
+   * Who reacted, grouped by emoji. Pass exactly one target.
+   *
+   * Post and comment reactors are pruned to people you may see; a *message*'s
+   * aren't, because a chat's active members are already a clique — so everyone
+   * in a thread sees the same list (reactions.md).
+   */
+  getReactors: (target: ReactionTarget) =>
+    request<ReactorGroup[]>(reactionPath(target, 'reactions')),
 
   /**
    * Register this device for push (Phase 9, Milestone D).

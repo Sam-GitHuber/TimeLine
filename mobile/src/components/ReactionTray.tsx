@@ -37,7 +37,7 @@ import {
 } from 'react-native';
 import EmojiPicker from 'rn-emoji-keyboard';
 
-import { colors, radius, spacing } from '@/theme';
+import { colors, emojiPickerTheme, radius, spacing } from '@/theme';
 
 /** Mirrors the web's `QuickReactionPopover`. */
 const QUICK = ['👍', '❤️', '😂', '🎉'] as const;
@@ -178,18 +178,7 @@ export function ReactionTray({
           onPick(picked.emoji);
         }}
         enableSearchBar
-        theme={{
-          backdrop: 'rgba(28, 26, 22, 0.35)',
-          knob: colors.accent,
-          container: colors.raised,
-          header: colors.inkSoft,
-          category: {
-            icon: colors.inkFaint,
-            iconActive: colors.raised,
-            container: colors.surface,
-            containerActive: colors.accent,
-          },
-        }}
+        theme={emojiPickerTheme}
       />
     </>
   );
