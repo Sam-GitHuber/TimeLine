@@ -121,6 +121,17 @@ jest.mock('@/measure', () => ({
     onMeasured({ x: 0, y: 0, width: 240, height: 44 }),
 }));
 
+// `expo-blur` renders a real native blur layer (UIVisualEffectView on iOS).
+// There's nothing to blur under Node and no native view to build, so stand it in
+// with a plain View that keeps its children in the tree — the focused reply
+// thread (Phase 9b M3) renders *inside* the BlurView, so a null stand-in would
+// make every message in it unqueryable. That it actually blurs is a device
+// check; what a test can prove is what the thread shows and sends.
+jest.mock('expo-blur', () => {
+  const { View } = require('react-native');
+  return { BlurView: View };
+});
+
 // Reset between tests so a token stored by one can't leak into the next.
 beforeEach(() => {
   const SecureStore = require('expo-secure-store');

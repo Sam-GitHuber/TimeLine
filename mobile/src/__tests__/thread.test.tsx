@@ -8,6 +8,11 @@
  * Phase 9b M2 adds reactions: a quick-emoji row across the top of that menu, and
  * pills under the bubble that toggle on tap and reveal who reacted on a hold.
  *
+ * Phase 9b M3 adds reply threads: Reply aims the composer at a message, a reply
+ * renders a quote resolved from messages the client already holds (never text
+ * the server attached to it), and a root's "N replies" opens the focused thread
+ * over a blurred transcript.
+ *
  * What's worth pinning: sending fires the send endpoint and clears the input;
  * group threads attribute a *run* of messages to its sender only once (the first
  * bubble), never on 1:1 or your own; a soft-deleted message shows a tombstone in
@@ -22,6 +27,10 @@ import { Alert } from 'react-native';
 
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
+import {
+  didTriggerReply,
+  shouldStartReplySwipe,
+} from '@/components/MessageBubble';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
@@ -158,11 +167,18 @@ function message(overrides: Partial<Message> & { id: number }): Message {
 function serve({
   conversation,
   messages = [],
+  thread,
   reactionsAfterToggle = [{ emoji: '👍', count: 1, reacted: true }],
   reactors = [{ emoji: '👍', count: 1, users: [ADA] }],
 }: {
   conversation: Conversation;
   messages?: Message[];
+  /**
+   * What `?thread_root=` returns (Phase 9b M3). Its own list, not a filter over
+   * `messages`, because the interesting cases are where the two *differ* — a
+   * viewer clipped out of the root gets replies here and no head.
+   */
+  thread?: Message[];
   reactionsAfterToggle?: { emoji: string; count: number; reacted: boolean }[];
   reactors?: { emoji: string; count: number; users: typeof ADA[] }[];
 }) {
@@ -182,6 +198,17 @@ function serve({
         return jsonResponse({ muted: init?.method === 'POST' });
       }
       if (url.includes('/reports/')) return jsonResponse({ id: 1 }, 201);
+      // Before the bare `/messages/` branch: the focused thread is the same
+      // endpoint with a filter, so the order here mirrors the server's.
+      if (url.includes('thread_root=')) {
+        const results = thread ?? [];
+        return jsonResponse({
+          count: results.length,
+          next: null,
+          previous: null,
+          results,
+        });
+      }
       if (url.includes('/messages/')) {
         if (init?.method === 'POST') {
           return jsonResponse(message({ id: 999, sender: meAuthor, text: 'sent' }));
@@ -963,6 +990,352 @@ it('keeps a reaction visible on a deleted message’s tombstone', async () => {
   await screen.findByText('Message deleted');
 
   expect(screen.getByLabelText(/^👍, 1/)).toBeTruthy();
+});
+
+/* ---- Reply threads (Phase 9b M3) ----------------------------------------- */
+
+/** Every message POST, as `[text, reply_to_id]` pairs. */
+function sendCalls() {
+  return mockFetch.mock.calls
+    .filter(
+      ([url, init]) =>
+        String(url).includes('/api/conversations/5/messages/') &&
+        init?.method === 'POST'
+    )
+    .map(([, init]) => {
+      const body = JSON.parse(init.body);
+      return [body.text, body.reply_to_id];
+    });
+}
+
+describe('the reply swipe’s rules', () => {
+  // `PanResponder` derives its gesture state from native touch history, which
+  // Node has none of — so the wiring is a device check, the same way the emoji
+  // picker's modal sequencing is. The *rule* that decides when a drag counts is
+  // pure, and it's the half with the bugs in it.
+  it('claims only a decidedly rightward drag', () => {
+    expect(shouldStartReplySwipe(30, 4, true)).toBe(true);
+    // A mostly-vertical drag belongs to the thread's scrolling, always.
+    expect(shouldStartReplySwipe(30, 40, true)).toBe(false);
+    // Leftward is left free for a future gesture — see the helper.
+    expect(shouldStartReplySwipe(-30, 2, true)).toBe(false);
+    // A twitch inside the slop isn't a swipe.
+    expect(shouldStartReplySwipe(4, 0, true)).toBe(false);
+    // Nothing at all in a thread you can't send to.
+    expect(shouldStartReplySwipe(30, 4, false)).toBe(false);
+  });
+
+  it('needs a real distance before letting go replies', () => {
+    expect(didTriggerReply(60)).toBe(true);
+    expect(didTriggerReply(20)).toBe(false);
+  });
+});
+
+it('replies to a message from the long-press menu', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+
+  // The composer says who it's aimed at — in a group that's the thing you'd
+  // otherwise get wrong.
+  expect(await screen.findByText('Replying to Ada Lovelace')).toBeTruthy();
+
+  await fireEvent.changeText(screen.getByLabelText('Message'), 'yes, see you');
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  await waitFor(() => expect(sendCalls()).toEqual([['yes, see you', 8]]));
+  // The bar clears itself on success, so the next message isn't silently a
+  // reply to something you'd stopped thinking about.
+  await waitFor(() =>
+    expect(screen.queryByText('Replying to Ada Lovelace')).toBeNull()
+  );
+});
+
+it('cancelling a reply sends an ordinary message', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+  await fireEvent.press(await screen.findByLabelText('Cancel reply'));
+
+  await fireEvent.changeText(screen.getByLabelText('Message'), 'unrelated');
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  await waitFor(() => expect(sendCalls()).toEqual([['unrelated', undefined]]));
+});
+
+it('keeps your draft when you start a reply', async () => {
+  // Unlike Edit, replying doesn't borrow the composer's text — what you were
+  // typing is very often exactly what you meant to reply with.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await fireEvent.changeText(
+    await screen.findByLabelText('Message'),
+    'half-written thought'
+  );
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+
+  expect(screen.getByLabelText('Message').props.value).toBe(
+    'half-written thought'
+  );
+});
+
+it('replying while editing leaves edit mode', async () => {
+  // Both are "the composer is aimed at an existing message". Showing a quote bar
+  // above an editor would leave it ambiguous what Save does.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'teh quick fox' }),
+      message({ id: 8, sender: ADA, text: 'dinner at 7?' }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: teh quick fox');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  expect(screen.getByText('Editing message')).toBeTruthy();
+
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+
+  expect(await screen.findByText('Replying to Ada Lovelace')).toBeTruthy();
+  expect(screen.queryByText('Editing message')).toBeNull();
+});
+
+it('offers no Reply in a thread you can’t send to', async () => {
+  // Same line the server draws, and the same one the reaction row obeys: the
+  // history stays readable, writing to it doesn't.
+  serve({
+    conversation: detail({ can_send: false }),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+
+  expect(screen.queryByLabelText('Reply')).toBeNull();
+  expect(screen.getByLabelText('Copy')).toBeTruthy();
+});
+
+it('renders a reply’s quote from the message it already holds', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 8, sender: ADA, text: 'dinner at 7?' }),
+      message({
+        id: 9,
+        sender: MINE,
+        text: 'yes',
+        reply_to: { id: 8, sender: ADA },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await screen.findByText('yes');
+
+  // The quoted body is resolved locally — the reply's payload carries only
+  // `{ id, sender }`, which is what stops a quote leaking clipped history.
+  expect(screen.getAllByText('dinner at 7?').length).toBeGreaterThan(1);
+});
+
+it('says so honestly when a quoted message isn’t available', async () => {
+  // 🔒 The gap case, from the client's side: the server sends the reply but not
+  // the message it answers, because the viewer was out of the chat when it was
+  // sent. There is nothing to render, and pretending otherwise is the bug.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 9,
+        sender: ADA,
+        text: 'still on for that',
+        reply_to: { id: 8, sender: ADA },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await screen.findByText('still on for that');
+
+  expect(screen.getByText('Original message unavailable')).toBeTruthy();
+});
+
+it('opens the focused thread from a root’s reply count', async () => {
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 2,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root],
+    thread: [
+      root,
+      message({
+        id: 9,
+        sender: MINE,
+        text: 'yes',
+        reply_to: { id: 8, sender: ADA },
+        thread_root_id: 8,
+      }),
+      message({
+        id: 10,
+        sender: ADA,
+        text: 'or 8 if easier',
+        reply_to: { id: 8, sender: ADA },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('2 replies — open thread'));
+
+  // The strand comes forward whole — root and both replies, in order.
+  expect(await screen.findByText('Thread')).toBeTruthy();
+  expect(await screen.findByText('or 8 if easier')).toBeTruthy();
+  expect(screen.getByText('yes')).toBeTruthy();
+  // It asked the same endpoint the transcript uses, filtered to this root.
+  expect(
+    mockFetch.mock.calls.some(([url]) =>
+      String(url).includes('/api/conversations/5/messages/?thread_root=8')
+    )
+  ).toBe(true);
+});
+
+it('sends a reply into the thread from inside the focused view', async () => {
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 1,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root],
+    thread: [
+      root,
+      message({
+        id: 9,
+        sender: ADA,
+        text: 'or 8 if easier',
+        reply_to: { id: 8, sender: ADA },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await screen.findByText('Thread');
+
+  await fireEvent.changeText(
+    screen.getByLabelText('Reply to thread'),
+    '8 works'
+  );
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+
+  // Aimed at the root, which is where the server's flattening would put it
+  // anyway — so it's the honest target rather than a guess.
+  await waitFor(() => expect(sendCalls()).toEqual([['8 works', 8]]));
+});
+
+it('opens a headless thread when the root is one you can’t see', async () => {
+  // 🔒 The other half of the gap case. The replies below are ones this viewer
+  // *is* entitled to, so the thread is genuinely headless rather than empty —
+  // and that's a true statement, not an error.
+  const reply = message({
+    id: 9,
+    sender: ADA,
+    text: 'still on for that',
+    reply_to: { id: 8, sender: ADA },
+    thread_root_id: 8,
+    // Zero, because a reply is not a root — which is exactly why the *quote* has
+    // to be the way in here. With the root clipped away there's no bubble left
+    // in the transcript to carry a reply count.
+    reply_count: 0,
+  });
+  serve({
+    conversation: detail({}),
+    // The transcript shows the reply but never the root.
+    messages: [reply],
+    thread: [reply],
+  });
+
+  await renderScreen();
+  await fireEvent.press(
+    await screen.findByLabelText('In reply to Ada Lovelace — open thread')
+  );
+  // The reply now appears twice — once in the transcript behind the blur, once
+  // in the strand — which is also how we know the thread's fetch has landed.
+  // The strand opens and says plainly why its head is missing. Deliberately
+  // different wording from the quote's "Original message unavailable": a thread
+  // with no beginning is a different thing to tell someone than a quote that
+  // won't resolve, and only one of them is about the message in front of you.
+  expect(
+    await screen.findByText('The start of this thread isn’t available to you')
+  ).toBeTruthy();
+  // Nothing errored, and the transcript still shows the reply behind the blur.
+  expect(screen.getByText('still on for that')).toBeTruthy();
+  // It asked for the thread by the *root's* id, taken from the reply's
+  // `thread_root_id` — a message the viewer can't see and never had to know
+  // anything else about.
+  expect(
+    mockFetch.mock.calls.some(([url]) =>
+      String(url).includes('/api/conversations/5/messages/?thread_root=8')
+    )
+  ).toBe(true);
+});
+
+it('offers no long-press menu inside the focused thread', async () => {
+  // Copy/Edit/Delete/Report all live in a Modal, and presenting one from inside
+  // a presented modal is the iOS trap the emoji picker already documents. Close
+  // the thread and act on the message in the transcript.
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 1,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root],
+    thread: [
+      root,
+      message({
+        id: 9,
+        sender: MINE,
+        text: 'yes',
+        reply_to: { id: 8, sender: ADA },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+
+  fireEvent(await screen.findByLabelText('Your message: yes'), 'longPress');
+  expect(screen.queryByLabelText('Close message actions')).toBeNull();
 });
 
 it('shows a tombstone for a deleted message', async () => {

@@ -63,7 +63,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M0** | Close the admin message window | — | **S** | ☑ |
 | **M1** | Long-press menu + edit | — | **S–M** | ☑ |
 | **M2** | Message reactions | M1 | **S** | ☑ |
-| **M3** | Reply / quote | M1 | **M** | ☐ |
+| **M3** | Reply threads | M1 | **M–L** | ☑ |
 | **M4** | Send status + read receipts | — | **M** | ☐ |
 | **M5** | Thread mechanics | — (do before M7) | **M–L** | ☐ |
 | **M6** | Conversation list + thread info | — | **M** | ☐ |
@@ -178,12 +178,15 @@ confirm it before starting, per the repo convention.
 This is the practical payoff of deciding E2E now rather than later — it stops us
 building things we'd have to demolish.
 
-1. **M3 reply quotes: reference by ID, never embed text server-side.** The client
-   renders the quote from its *own* copy of the original; if it doesn't have one,
-   it shows "Original message unavailable." Under E2E the server couldn't embed
-   quote text even if we wanted it to — and as a bonus this removes the interval
-   -clipping leak described in M3 entirely, because there's no server-side text
-   to leak. Strictly better on both counts.
+1. **M3 reply quotes: reference by ID, never embed text in the reply's payload.**
+   A reply serializes its target as `{ id, sender }` and nothing more; the quote
+   body comes from the client's own copy or from a fetch through the
+   interval-clipped messages endpoint — never from text the server attached to
+   the reply. Under E2E the server couldn't embed quote text even if we wanted it
+   to, and refusing to embed it now removes the interval-clipping leak described
+   in M3 entirely, because there's no server-side text to leak. Strictly better on
+   both counts. **M3's *Visibility rule* section states the exact line** and why
+   fetching through the clipped endpoint sits on the right side of it.
 2. **M7 media: process images on the client, not the server.** Under E2E the
    server stores opaque bytes and cannot EXIF-strip or downscale them. Building
    M7 on the server-side `api/imaging.py` path would mean tearing it out later.
@@ -526,49 +529,164 @@ doing both, keep an eye on the spacing together.
 
 ---
 
-## M3 — Reply / quote
+## M3 — Reply threads
 
-**Branch:** `messaging/m3-reply` · **Depends on:** M1 · **Size:** M
+**Branch:** `messaging/m3-reply` · **Depends on:** M1 · **Size:** M–L
 
 **Read first**
 - [`../reference/messaging.md`](../reference/messaging.md) → *History is
   interval-clipped* — **the diagram, properly**. This milestone is where getting
   it wrong leaks private history.
 - This file's **Privacy** section, decision 1.
+- [`../design-system.md`](../design-system.md) → the branching-line comment
+  thread, and `mobile/src/components/CommentThread.tsx`. The focused view below
+  is that same living line, and should look like it.
 
-**Files:** `backend/api/{models,serializers,views}.py`, a migration,
-`backend/api/tests.py`, `mobile/src/api.ts`, `mobile/src/components/MessageBubble.tsx`,
-`mobile/src/app/messages/[conversationId].tsx`, a new mobile test.
+**The shape: a focused thread, not a collapsed quote.** This milestone was
+re-specified on 2026-07-27 after the original plan (a quote bar attached to each
+reply, and nothing more) was tried against what the user actually wanted. In that
+design a reply shows only the *one* message it answers, so a back-and-forth
+inside a busy thread can never be read as a conversation — you reconstruct it by
+scrolling and matching quotes. Instead: replies still sit in the transcript in
+chronological order, and **tapping into one brings the whole mini-thread
+forward** over a blurred transcript, scrollable, with its own composer. The
+collapsed quote still exists — it's the thing you tap.
 
-**Build**
+**Files:** `backend/api/{models,serializers,views,urls}.py`, a migration,
+`backend/api/tests.py`, `mobile/src/{api,types}.ts`,
+`mobile/src/components/MessageBubble.tsx`, a new
+`mobile/src/components/MessageThreadView.tsx`,
+`mobile/src/app/messages/[conversationId].tsx`, new mobile tests.
+
+**Build — backend first**
+
 1. `Message.reply_to` — self-FK, `null=True`, **`on_delete=SET_NULL`**. Not
-   CASCADE: deleting a quoted message must not delete the replies to it.
-2. `POST messages/` accepts `reply_to_id`; validate it belongs to **this**
-   conversation and is visible to the *sender*.
-3. 🔒 **Serialize the quote as a reference, not embedded text** — `{ id, sender }`
-   and nothing more. The client renders the quote body from its *own* copy of the
-   original, and shows "Original message unavailable" when it doesn't have one.
-   - *Why this shape:* embedding the quoted text server-side walks straight
-     around `visible_messages(conversation, viewer)` — a member who was pending
-     during a gap would read clipped-out history through someone's reply to it.
-     Reference-only makes that leak **structurally impossible** rather than
-     policy-prevented, and it's the only design that survives E2E, where the
-     server can't read the quoted text anyway.
-   - Depth 1 always. Never a quote inside a quote.
-4. **Test it from the gap scenario**, not a happy path: a member who was pending
-   across a range, returned, and now receives a reply quoting a message from
-   inside their gap. They must not see its text.
-5. Mobile: **swipe-right-to-reply** on a bubble (`react-native-gesture-handler`,
-   already a dep) — the gesture people reach for without thinking — plus
-   **Reply** in the M1 menu for discoverability.
-6. Composer shows the quoted bar above the input with an ✕.
-7. Tapping a quote scrolls to the original **if it's in the loaded window**,
-   otherwise no-op. Load-until-found is a follow-up, not a requirement.
+   CASCADE: deleting a quoted message must not delete the replies to it. This
+   holds the message you *actually* replied to, which is what the focused view
+   shows and what the collapsed quote renders.
+2. `Message.thread_root` — a second self-FK, `null=True`, `SET_NULL`, **indexed**,
+   set on save to `reply_to.thread_root_id or reply_to_id`. This is the plan's
+   original "depth 1 always" rule, stored rather than implied.
+   - *Why denormalise:* it's what makes "give me this thread" and "how many
+     replies does this root have" single indexed queries instead of a recursive
+     walk, and it's what flattens a reply-to-a-reply into the same thread rather
+     than growing a tree. **Never render a quote inside a quote.**
+3. `POST messages/` accepts `reply_to_id`; validate it belongs to **this**
+   conversation and is visible to the *sender* — resolve it through
+   `_messages_for_viewer`, never a bare `Message.objects.get`, so an invisible
+   target is a validation error and not a way to test which ids exist.
+4. `MessageSerializer` gains `reply_to` (a **reference**: `{ id, sender }`, no
+   text), `thread_root_id`, and `reply_count` — non-zero only on a root, so the
+   transcript knows which bubbles open a thread.
+5. `GET /api/conversations/<id>/messages/?thread_root=<id>` — the whole
+   mini-thread, root included, **through the same
+   `_messages_for_viewer` queryset** as the transcript. One visibility rule, a
+   fifth call site, never a second copy.
+
+**🔒 The visibility rule, stated once and precisely**
+
+> **Quote text must pass through the same interval clipping as the thread.**
+
+Both the original design ("client renders the quote from its own copy") and this
+one satisfy that. They differ in *where* the text comes from: the client's cache,
+or a fetch through the clipped endpoint. The original plan chose the strictest
+form on the grounds that embedding quote text in the reply's payload **server-side**
+walks straight around `visible_messages(conversation, viewer)` — which is still
+true, and still forbidden. **Never embed the quoted text in the reply's own
+serialization.** But *fetching* the quoted message by id through a clipped
+endpoint doesn't walk around anything; it goes through the front door. So M3
+takes the fetch:
+
+- It fixes a real defect in the strict version — "Original message unavailable"
+  would show whenever the original merely hadn't paged in yet, which is
+  indistinguishable to the user from a genuine privacy clip. Reserve that message
+  for the case where it's *true*.
+- It survives E2E unchanged: the server hands over ciphertext, the client holds
+  the key. Fetching a message by id was never the thing E2E takes away.
+- The focused view needs a thread endpoint regardless, so this costs nothing new.
+
+6. **Test from the gap scenario, not a happy path.** A member who was pending
+   across a range and returned must, for a root inside their gap: not see its
+   text in the transcript, not get it from `?thread_root=`, and see the focused
+   view open with the root missing but their own visible replies intact. Assert
+   at the **API** level that the text is absent from the payload — a UI test
+   proving a bubble didn't render proves nothing about what crossed the wire.
+
+**Build — mobile**
+
+7. **Swipe-right-to-reply** on a bubble (`react-native-gesture-handler`, already a
+   dep) — the gesture people reach for without thinking — plus **Reply** in the
+   M1 menu for discoverability. The menu item list is already data
+   (`messageActions()`), which is what it was built as for exactly this.
+8. Composer grows a quoted bar above the input with an ✕, alongside M1's
+   "Editing message" bar. The two are mutually exclusive states of one composer;
+   don't let both be set at once.
+9. A reply in the transcript renders a small collapsed quote above its bubble. A
+   **root** renders a reply-count affordance ("3 replies") on the branch line.
+10. **The focused thread view** (`MessageThreadView.tsx`) — `expo-blur`'s
+    `BlurView` over the transcript, the thread's messages in their own scrollable
+    list on top, composer pinned below, tap-outside or a close control to dismiss.
+    Sending from here sets `reply_to` to the message you entered from.
+    - `expo-blur` is a **new dependency** — an official Expo SDK module, agreed
+      with the user on 2026-07-27. Remember `--renew-anon-volumes`.
+    - *Why blur rather than a plain dim scrim:* dim-only reads as "a modal over a
+      list". The blur is most of what makes it read as the same conversation
+      brought into focus, which is the entire point of the pattern.
+
+11. **Gesture budget — one gesture per target, the rule M2 settled.** Swipe =
+    reply. Long-press = the M1 menu. **Tap the reply-count affordance** = open the
+    focused view. The bubble's own tap stays free. Do not make the bubble open the
+    thread on tap.
+
+**Two things this supersedes**, so a future session doesn't reinstate them: the
+original item 7 ("tapping a quote scrolls to the original if loaded, else no-op")
+and its load-until-found follow-up. The focused view *is* the answer to "show me
+the context", and it needs neither.
 
 **Done when**
-- [ ] Swipe to reply; quote renders from the client's own copy.
-- [ ] The gap-scenario test passes and is committed.
-- [ ] `messaging.md` documents reference-only quoting **and why**.
+- [x] Swipe to reply, and Reply in the long-press menu, both compose a reply.
+- [x] A root shows its reply count; tapping it opens the focused thread over a
+      blurred transcript, scrollable, and you can reply from inside it.
+- [x] A reply to a reply lands in the same thread — no nesting, anywhere.
+- [x] The gap-scenario test passes at the API level and is committed.
+- [x] `messaging.md` documents `thread_root`, the thread endpoint, and the
+      visibility rule above **with the reason the strict form was relaxed**.
+
+**Five things M3 settled that the plan above didn't anticipate:**
+
+1. **A reply's quote is a second way into the thread, and it's load-bearing.**
+   The plan had one entry point, the root's reply count. A test written for the
+   gap scenario exposed the hole: when the root is clipped out of your view, its
+   replies stand alone in the transcript with **no root to carry a count**, so
+   the strand was unreachable for exactly the person whose view of it was already
+   partial. Tapping the quote opens the thread by `thread_root_id`. This is also
+   what iMessage does, but it was arrived at from the privacy case.
+2. **`reply_count` had to be clipped per viewer**, not `Count("thread_messages")`.
+   A count is small but it's still existence — "3 replies" on a message you can't
+   see tells a gap member how much happened while they were out. `_with_reply_counts`
+   subqueries the viewer's own visible set. Easy to get wrong by writing the
+   obvious annotation, so there's a test for it.
+3. **The swipe is `PanResponder` + RN `Animated`, not gesture-handler +
+   Reanimated**, despite the plan naming the latter. Reanimated's worklet runtime
+   can't load under Jest, so the gesture would have had to be mocked away to test
+   the component. `shouldStartReplySwipe` / `didTriggerReply` are exported pure
+   functions, so the *rule* is tested even though the native plumbing is a device
+   check. Same trade `MessageActionMenu` already made for its animation.
+4. **The focused view has no long-press menu, deliberately.** It's a `Modal`, and
+   `MessageActionMenu` is a `Modal` — presenting one from inside the other is the
+   iOS trap the emoji picker documents. Close the strand and act on the message
+   in the transcript.
+5. **A missing thread head gets different wording from a missing quote.**
+   "Original message unavailable" is right on a quote; on a headless strand it
+   reads as an error, so that says "The start of this thread isn't available to
+   you". Two different things to tell someone, and only one of them is about the
+   message in front of them.
+
+**One debt this leaves, recorded in M5 step 1:** the transcript resolves a
+quote's body from loaded messages, which is complete only because the screen
+still eagerly loads every page. M5 makes paging lazy and must fetch the missing
+message through the clipped endpoint at the same time — or
+"Original message unavailable" starts lying.
 
 ---
 
@@ -663,6 +781,15 @@ highest value — don't skip it.
    messages upward. This also deletes the `scrollToEnd`-on-content-change hack
    and the `flex: 1` comment explaining why the list was fighting the composer.
    Everything below sits on top of this.
+   - 🔒 **This breaks one of M3's assumptions — fix it in the same commit.** The
+     transcript resolves a reply's quoted body from the messages it has already
+     loaded, which is complete *only* because every page is loaded today. Once
+     paging is lazy, a miss also means "not paged in yet", and "Original message
+     unavailable" — which is supposed to mean *you were clipped out of this* —
+     starts lying part of the time. The fix is to fetch the missing message
+     through the same interval-clipped endpoint the focused thread view already
+     uses. **Never widen the reply payload to carry the text**; that's the one
+     thing `messaging.md`'s visibility rule forbids outright.
 2. **Day separators** — "Today" / "Yesterday" / "12 March", matching the feed.
 3. **Clock times, not relative.** `formatRelativeTime` on every bubble is wrong
    for a chat; the convention is `14:32` with the separator carrying the date.
@@ -881,7 +1008,11 @@ milestone runs long, land them one at a time.
    this line — it's a summary, and summaries drift.
 3. The interaction differs because the medium does — the web has hover, so the
    menu is a hover `⋯` on the bubble rather than a long-press, the same way
-   delete already works there.
+   delete already works there. **M3's focused thread is the biggest of these
+   differences**: a phone blurs the transcript because it has one screen, but a
+   desktop has width, so the right shape there is a **side panel beside the
+   transcript**, not a blur over it. Same endpoint, same data, different medium —
+   don't port the blur.
 4. Sanity-check the drawer against the app side by side. The point of this
    milestone is that the two stop diverging.
 

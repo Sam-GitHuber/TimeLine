@@ -1909,6 +1909,291 @@ class MessageReactionConstraintTests(APITestCase):
         self.assertFalse(Reaction.objects.exists())
 
 
+class MessageReplyTests(MessagingBase):
+    """Reply threads (Phase 9b M3).
+
+    Three things are worth testing here and the rest is plumbing: replies flatten
+    to one level (``thread_root``), ``reply_to`` can only name a message the
+    sender can actually see, and — the one that matters — a quote is a
+    *reference*, so it can't become a window into history the viewer was clipped
+    out of. ``MessageReplyGapTests`` below owns that last one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(
+            user_a=self.me, user_b=self.friend
+        )
+        self.root = Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="dinner at 7?"
+        )
+
+    def _reply(self, to, text="yes", convo=None):
+        return self.client.post(
+            messages_url(convo or self.convo),
+            {"text": text, "reply_to_id": to.pk},
+            format="json",
+        )
+
+    def test_replying_sets_reply_to_and_thread_root(self):
+        resp = self._reply(self.root)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        reply = Message.objects.get(pk=resp.data["id"])
+        self.assertEqual(reply.reply_to_id, self.root.pk)
+        # A reply to a root belongs to that root's thread.
+        self.assertEqual(reply.thread_root_id, self.root.pk)
+
+    def test_a_reply_to_a_reply_joins_the_same_thread(self):
+        """Depth 1, always. Replying to a reply must not start a nested thread —
+        it joins the one that reply is already in, which is what keeps the
+        focused thread view a flat scrollable list rather than a tree."""
+        first = Message.objects.get(pk=self._reply(self.root, "yes").data["id"])
+        second = Message.objects.get(pk=self._reply(first, "8 is better").data["id"])
+        # ``reply_to`` still records exactly who was answered…
+        self.assertEqual(second.reply_to_id, first.pk)
+        # …while the thread stays anchored on the original root.
+        self.assertEqual(second.thread_root_id, self.root.pk)
+        self.assertIsNone(self.root.thread_root_id)
+
+    def test_reply_to_is_a_reference_and_never_carries_text(self):
+        """The load-bearing privacy shape. If the quoted body were embedded in
+        the reply's payload it would reach whoever can see the *reply*, which
+        walks straight around interval clipping — see ``MessageReplyGapTests``."""
+        self._reply(self.root)
+        thread = self.client.get(messages_url(self.convo))
+        reply = thread.data["results"][-1]
+        self.assertEqual(reply["reply_to"]["id"], self.root.pk)
+        self.assertEqual(reply["reply_to"]["sender"]["id"], self.friend.pk)
+        self.assertNotIn("text", reply["reply_to"])
+
+    def test_reply_count_appears_on_the_root_only(self):
+        self._reply(self.root, "yes")
+        self._reply(self.root, "or 8?")
+        thread = self.client.get(messages_url(self.convo))
+        by_id = {m["id"]: m for m in thread.data["results"]}
+        self.assertEqual(by_id[self.root.pk]["reply_count"], 2)
+        # A reply is not a root: it carries no count of its own, even though it
+        # sits in a thread with two messages in it.
+        replies = [m for m in thread.data["results"] if m["id"] != self.root.pk]
+        self.assertEqual([m["reply_count"] for m in replies], [0, 0])
+
+    def test_thread_root_filter_returns_the_root_and_its_replies(self):
+        self._reply(self.root, "yes")
+        self._reply(self.root, "or 8?")
+        self.client.post(messages_url(self.convo), {"text": "unrelated"})
+
+        resp = self.client.get(
+            f"{messages_url(self.convo)}?thread_root={self.root.pk}"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        texts = [m["text"] for m in resp.data["results"]]
+        # Root first (it's the oldest), then its replies; the unrelated message
+        # sent afterwards is not part of the thread.
+        self.assertEqual(texts, ["dinner at 7?", "yes", "or 8?"])
+
+    def test_thread_root_filter_rejects_a_non_numeric_id(self):
+        resp = self.client.get(f"{messages_url(self.convo)}?thread_root=abc")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_reply_to_a_message_in_another_conversation(self):
+        """``reply_to_id`` comes from the body, so it's the one field a client
+        could point anywhere. It's resolved against the sender's own visible
+        messages *in this thread*, so a cross-thread id is simply not there."""
+        other_friend = make_user("other@example.com")
+        make_connection(self.me, other_friend, status=ACCEPTED)
+        elsewhere = Conversation.objects.create(
+            user_a=self.me, user_b=other_friend
+        )
+        foreign = Message.objects.create(
+            conversation=elsewhere, sender=other_friend, text="different chat"
+        )
+
+        resp = self._reply(foreign)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Message.objects.filter(reply_to=foreign).count(), 0)
+
+    def test_replying_to_an_unknown_id_is_rejected(self):
+        resp = self.client.post(
+            messages_url(self.convo),
+            {"text": "to nowhere", "reply_to_id": self.root.pk + 9999},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_sending_without_reply_to_still_works(self):
+        # The field is optional, and every client that predates M3 omits it.
+        resp = self.client.post(messages_url(self.convo), {"text": "plain"})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(resp.data["reply_to"])
+        self.assertIsNone(resp.data["thread_root_id"])
+
+    def test_deleting_a_root_keeps_its_replies(self):
+        """Soft-delete leaves the row, so the thread survives a deleted root
+        with a tombstone at its head — the focused view still opens. The
+        ``SET_NULL`` on the FK covers the hard-delete case (an account or
+        conversation cascade) by orphaning replies rather than taking them."""
+        reply = Message.objects.get(pk=self._reply(self.root).data["id"])
+        self.client.force_authenticate(self.friend)
+        self.client.delete(
+            f"{messages_url(self.convo)}{self.root.pk}/"
+        )
+        reply.refresh_from_db()
+        self.assertEqual(reply.thread_root_id, self.root.pk)
+        self.assertTrue(Message.objects.get(pk=self.root.pk).is_deleted)
+
+    def test_a_reply_sends_a_push_like_any_other_message(self):
+        """A reply is still a message. M3 changes nothing about who gets buzzed
+        — the point is that nobody thought to make it an exception."""
+        PushOutbox.objects.all().delete()
+        DevicePushToken.objects.create(
+            user=self.friend,
+            expo_token="ExponentPushToken[reply]",
+            platform="ios",
+        )
+        Participant.objects.filter(conversation=self.convo).delete()
+        for user in (self.me, self.friend):
+            participant = Participant.objects.create(
+                conversation=self.convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=participant,
+                started_at=timezone.now() - timedelta(hours=1),
+            )
+        self._reply(self.root, "on my way")
+        self.assertTrue(PushOutbox.objects.exists())
+
+
+class MessageReplyGapTests(APITestCase):
+    """🔒 The gap scenario for replies (Phase 9b M3).
+
+    A member who was ``pending`` across a range, then returned, must not be able
+    to read a message from inside that gap — and a reply *quoting* it is the
+    newest way to try. This is the test the milestone was written around, and it
+    asserts at the **API level** that the text is absent from the payload: a UI
+    test showing a bubble didn't render would prove nothing about what crossed
+    the wire.
+
+    What they *should* see is the reply itself (sent while they were back) with a
+    quote reference they can't resolve, and a focused thread with its head
+    missing. Mirrors ``test_cannot_probe_a_message_from_inside_your_gap``.
+    """
+
+    def setUp(self):
+        self.author = make_user("gapauthor@example.com")
+        self.gapper = make_user("gapper@example.com")
+        self.convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=self.author
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=2)
+        t2 = timezone.now() - timedelta(minutes=30)
+
+        author_p = Participant.objects.create(
+            conversation=self.convo, user=self.author, status="active"
+        )
+        ParticipantInterval.objects.create(participant=author_p, started_at=t0)
+        gap_p = Participant.objects.create(
+            conversation=self.convo, user=self.gapper, status="active"
+        )
+        # Out between t1 and t2 — the gap.
+        ParticipantInterval.objects.create(
+            participant=gap_p, started_at=t0, ended_at=t1
+        )
+        ParticipantInterval.objects.create(participant=gap_p, started_at=t2)
+
+        # The root lands inside the gap; the reply to it lands after they're back.
+        self.root = Message.objects.create(
+            conversation=self.convo, sender=self.author, text="the secret plan"
+        )
+        Message.objects.filter(pk=self.root.pk).update(
+            created_at=t1 + timedelta(minutes=10)
+        )
+        self.root.refresh_from_db()
+        self.reply = Message.objects.create(
+            conversation=self.convo,
+            sender=self.author,
+            text="still on for that",
+            reply_to=self.root,
+        )
+
+    def test_a_reply_never_reveals_a_quoted_message_from_the_gap(self):
+        self.client.force_authenticate(self.gapper)
+        resp = self.client.get(messages_url(self.convo))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        texts = [m["text"] for m in resp.data["results"]]
+        self.assertIn("still on for that", texts)
+        self.assertNotIn("the secret plan", texts)
+        # The clipped-out text must not appear *anywhere* in the payload — not
+        # in a field, not nested in the quote. Checking the serialised body is
+        # the point: a field-by-field assertion would pass if a future change
+        # embedded the quote somewhere new.
+        self.assertNotIn("the secret plan", json.dumps(resp.data, default=str))
+
+        # The reply still says what it answers, by id and author only. That's
+        # not a leak: it names a message they can't fetch and an author they
+        # already share a thread with.
+        reply = next(m for m in resp.data["results"] if m["id"] == self.reply.pk)
+        self.assertEqual(reply["reply_to"]["id"], self.root.pk)
+        self.assertNotIn("text", reply["reply_to"])
+
+    def test_the_focused_thread_opens_with_its_head_missing(self):
+        """Asking for the thread by root id is the obvious second way in, so it
+        goes through the same clipped queryset. The gap member gets their own
+        visible replies and no root — which is exactly what the app renders as
+        "Original message unavailable"."""
+        self.client.force_authenticate(self.gapper)
+        resp = self.client.get(
+            f"{messages_url(self.convo)}?thread_root={self.root.pk}"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [m["id"] for m in resp.data["results"]]
+        self.assertEqual(ids, [self.reply.pk])
+        self.assertNotIn("the secret plan", json.dumps(resp.data, default=str))
+
+    def test_the_author_sees_the_whole_thread(self):
+        # The control: nothing above is achieved by the thread being broken.
+        self.client.force_authenticate(self.author)
+        resp = self.client.get(
+            f"{messages_url(self.convo)}?thread_root={self.root.pk}"
+        )
+        texts = [m["text"] for m in resp.data["results"]]
+        self.assertEqual(texts, ["the secret plan", "still on for that"])
+
+    def test_reply_count_is_clipped_to_what_the_viewer_can_see(self):
+        """A count is small, but it's still existence. Told "3 replies" on a
+        message they can't see, a gap member learns how much happened while they
+        were out — the same thing the 404-not-403 rules elsewhere refuse to
+        answer. So the count is over *their* visible set, not everyone's."""
+        # A second reply, this one inside the gap.
+        hidden = Message.objects.create(
+            conversation=self.convo,
+            sender=self.author,
+            text="and another thing",
+            reply_to=self.root,
+        )
+        Message.objects.filter(pk=hidden.pk).update(
+            created_at=self.root.created_at + timedelta(minutes=1)
+        )
+
+        self.client.force_authenticate(self.author)
+        mine = self.client.get(messages_url(self.convo))
+        root_row = next(
+            m for m in mine.data["results"] if m["id"] == self.root.pk
+        )
+        self.assertEqual(root_row["reply_count"], 2)
+
+        # The gap member can't see the root at all here, so the count they'd get
+        # is on the thread endpoint — where only their one visible reply counts.
+        self.client.force_authenticate(self.gapper)
+        theirs = self.client.get(
+            f"{messages_url(self.convo)}?thread_root={self.root.pk}"
+        )
+        self.assertEqual(
+            [m["id"] for m in theirs.data["results"]], [self.reply.pk]
+        )
+
+
 class UnreadAndListTests(MessagingBase):
     def setUp(self):
         super().setUp()

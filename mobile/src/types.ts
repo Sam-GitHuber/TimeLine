@@ -265,6 +265,22 @@ export type Message = {
   created_at: string;
   edited_at: string | null;
   reactions?: Reaction[];
+  /**
+   * What this message replies to (Phase 9b M3) — a **reference**, never the
+   * quoted text. The body is looked up from the messages we already hold, or
+   * fetched through the same interval-clipped endpoint as everything else; the
+   * server will not hand it over attached to the reply, because that would route
+   * around the clipping. Render "Original message unavailable" when it can't be
+   * resolved, which is a real state, not just a loading one.
+   */
+  reply_to?: { id: number; sender: Author } | null;
+  /** The head of the reply thread this message is in; null if it's in none. */
+  thread_root_id?: number | null;
+  /**
+   * Replies hanging off this message *that you can see* — non-zero only on a
+   * thread root, which is how the transcript knows to offer "N replies".
+   */
+  reply_count?: number;
 };
 
 /**

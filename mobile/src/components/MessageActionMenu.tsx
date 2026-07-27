@@ -94,6 +94,7 @@ export function MessageActionMenu({
   mine,
   anchor,
   actions,
+  quoted,
   onReact,
   onMoreEmoji,
   visible = true,
@@ -103,6 +104,13 @@ export function MessageActionMenu({
   mine: boolean;
   anchor: BubbleAnchor;
   actions: MessageAction[];
+  /**
+   * The message this one replies to, if the caller resolved it — passed straight
+   * through to the previewed bubble so the highlighted copy carries its quote
+   * like the real one does. Without it the preview would be visibly shorter than
+   * the bubble it's covering.
+   */
+  quoted?: Message;
   /**
    * Toggle an emoji on this message. Omitted when reacting isn't available —
    * a thread you can no longer send to — and the row is then left out entirely
@@ -192,7 +200,7 @@ export function MessageActionMenu({
         style={[styles.preview, { top: anchor.y, left: anchor.x, width: anchor.width }]}
         onLayout={(e) => setPreviewHeight(e.nativeEvent.layout.height)}
       >
-        <BubbleBody message={message} mine={mine} />
+        <BubbleBody message={message} mine={mine} quoted={quoted} />
       </View>
 
       <Animated.View

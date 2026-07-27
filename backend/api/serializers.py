@@ -345,9 +345,10 @@ class MessageSerializer(serializers.ModelSerializer):
 
     ``is_edited``/``edited_at`` (Phase 9b M1) let the bubble show an "Edited"
     marker. ``reactions`` (Phase 9b M2) is the aggregate the bubble's pill row
-    renders. All three are *additive* fields: an older client that doesn't know
-    about them simply ignores them, which is why the backend can ship ahead of
-    either client.
+    renders. ``reply_to``/``thread_root_id``/``reply_count`` (Phase 9b M3) drive
+    the collapsed quote and the focused thread view. All of them are *additive*
+    fields: an older client that doesn't know about them simply ignores them,
+    which is why the backend can ship ahead of either client.
 
     **``reactions`` is deliberately not pruned per viewer**, unlike a post's or a
     comment's — see the ``EVERYONE`` sentinel. It's the one place the two differ,
@@ -358,6 +359,8 @@ class MessageSerializer(serializers.ModelSerializer):
     is_deleted = serializers.BooleanField(read_only=True)
     is_edited = serializers.BooleanField(read_only=True)
     reactions = serializers.SerializerMethodField()
+    reply_to = serializers.SerializerMethodField()
+    reply_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -370,12 +373,60 @@ class MessageSerializer(serializers.ModelSerializer):
             "created_at",
             "edited_at",
             "reactions",
+            "reply_to",
+            "thread_root_id",
+            "reply_count",
         )
 
     def get_reactions(self, obj):
         request = self.context.get("request")
         me_id = request.user.id if request and request.user.is_authenticated else None
         return summarise_reactions(obj.reactions.all(), EVERYONE, me_id)
+
+    def get_reply_to(self, obj):
+        """The message this one answers, as a **reference** — never its text.
+
+        🔒 This is the phase's load-bearing privacy rule for replies. Embedding
+        the quoted body here would hand it to whoever can see the *reply*, which
+        walks straight around ``visible_messages_for``: a member who was
+        ``pending`` across a gap would read clipped-out history through someone
+        else's quote of it. A client that wants the quoted body fetches that
+        message through the interval-clipped endpoint like any other, so the same
+        rule decides it — and under E2E the server couldn't supply the text here
+        anyway, so this is the shape that survives.
+
+        ``sender`` rides along because it's the one thing a quote needs that the
+        client can't derive, and it's not history: you're being told who wrote
+        something you may already be looking at.
+        """
+        if not obj.reply_to_id:
+            return None
+        target = obj.reply_to
+        return {
+            "id": target.id,
+            "sender": AuthorSerializer(target.sender, context=self.context).data,
+        }
+
+    def get_reply_count(self, obj):
+        """How many replies hang off this message, when it's a thread root.
+
+        Non-zero only on a root, which is exactly what the transcript needs to
+        know: it decides which bubbles show a "3 replies" affordance opening the
+        focused thread view.
+
+        The list view annotates this (``_with_reply_counts``) so a page doesn't
+        run a query per bubble — and, more importantly, so the count is over the
+        *viewer's* visible messages. The fallback below is unclipped, which is
+        safe only because it's reached by exactly two callers: the response to
+        your own send (a brand-new message, so zero) and to your own edit (your
+        message, inside a 15-minute window, in a thread you can still send to).
+        **Don't reuse this serializer for a list without annotating** — an
+        unclipped count would leak that replies exist inside someone's gap.
+        """
+        annotated = getattr(obj, "reply_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.thread_messages.count()
 
 
 class MessageCreateSerializer(serializers.ModelSerializer):
@@ -385,13 +436,26 @@ class MessageCreateSerializer(serializers.ModelSerializer):
     **Editing reuses this serializer for validation** rather than defining a
     near-identical twin: an edit must be held to exactly the same rules as the
     original send (non-blank after stripping, within ``MESSAGE_MAX_LENGTH``), and
-    two copies of those rules would eventually disagree."""
+    two copies of those rules would eventually disagree. ``reply_to_id`` is
+    simply absent on an edit — you can't re-target an existing message, which
+    would rewrite a thread someone has already read.
+
+    ``reply_to_id`` (Phase 9b M3) is resolved against ``visible_messages``, a
+    queryset the **view** supplies in context: it's the sender's own
+    interval-clipped set, so you can only reply to a message you can actually
+    see, and an id you can't see is rejected identically to one that doesn't
+    exist. Passing the queryset in rather than importing the clipping helper here
+    keeps one implementation of the rule in ``views.py`` instead of a second copy
+    that drifts."""
 
     text = serializers.CharField(max_length=MESSAGE_MAX_LENGTH)
+    reply_to_id = serializers.IntegerField(
+        required=False, allow_null=True, write_only=True
+    )
 
     class Meta:
         model = Message
-        fields = ("id", "text", "created_at")
+        fields = ("id", "text", "created_at", "reply_to_id")
         read_only_fields = ("id", "created_at")
 
     def validate_text(self, value):
@@ -399,6 +463,24 @@ class MessageCreateSerializer(serializers.ModelSerializer):
         if not stripped:
             raise serializers.ValidationError("A message can't be empty.")
         return stripped
+
+    def validate_reply_to_id(self, value):
+        if value is None:
+            return None
+        visible = self.context.get("visible_messages")
+        if visible is None:
+            # A caller that didn't supply the clipped queryset can't be allowed
+            # to fall through to an unchecked reply — failing loudly here is the
+            # difference between a wiring mistake and a quiet privacy hole.
+            raise serializers.ValidationError("Replies aren't available here.")
+        # Same 404-shaped answer whether the message is in another conversation,
+        # inside the sender's interval gap, or simply not a real id: all three
+        # are "you can't reply to that", and distinguishing them would turn this
+        # field into an existence oracle for messages the sender was clipped out
+        # of.
+        if not visible.filter(pk=value).exists():
+            raise serializers.ValidationError("That message isn't available.")
+        return value
 
 
 class ParticipantSerializer(serializers.Serializer):

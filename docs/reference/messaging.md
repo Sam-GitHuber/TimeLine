@@ -53,7 +53,11 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
   write and mislabel a deleted message as edited. See
   [Editing a message](#editing-a-message). Emoji reactions hang off it via the
   shared `Reaction` model's nullable `message` FK — see
-  [Reacting to a message](#reacting-to-a-message).
+  [Reacting to a message](#reacting-to-a-message). Two nullable self-FKs carry
+  reply threads: `reply_to` (the message answered) and `thread_root` (the head of
+  its thread, denormalised in `save`) — see
+  [Reply threads](#reply-threads). Both are `SET_NULL`: hard-deleting a quoted
+  message must orphan its replies, never take them with it.
 - **`ConversationRead`** — `(conversation, user, last_read_at)`, unique together.
   Unread for you = visible messages with `created_at > last_read_at` and
   `sender != you`. Its own table (not two timestamps on `Conversation`) is why
@@ -159,6 +163,81 @@ the details**. What's specific to messaging:
   edit doesn't: it isn't new activity, so it mustn't jump the thread to the top of
   everyone's list.
 
+## Reply threads
+
+Added in Phase 9b M3. Replying to a message puts your reply in the transcript
+where it belongs chronologically, with a collapsed quote above it — and tapping
+into it brings **the whole strand forward** over a blurred transcript, scrollable,
+with its own composer.
+
+**Why a focused thread and not just a quote.** The cheaper pattern (each reply
+shows the one message it answers, and nothing else) was the original plan and was
+re-specified after trying it: with only quotes, a back-and-forth inside a busy
+chat can't be *read* as a conversation — you reconstruct it by scrolling and
+matching quotes by eye. Bringing the strand forward keeps a side conversation
+legible without the main thread reordering itself around it.
+
+**One level deep, always.** `reply_to` records exactly which message you
+answered; `thread_root` records the head of the thread, derived in
+`Message.save` as `reply_to.thread_root or reply_to`. So replying to a reply
+*joins* that thread rather than nesting inside it. A tree would need recursive
+reads to render and would grow branches nobody can follow on a phone; one flat
+strand per root is where every mainstream messenger landed. The denormalised
+column is also what makes "give me this thread" and "how many replies has this
+got" single indexed queries.
+
+### 🔒 The visibility rule
+
+> **Quote text passes through the same interval clipping as the thread.**
+
+Concretely, two halves:
+
+- **A reply never carries the quoted text.** `MessageSerializer.reply_to` is a
+  *reference* — `{ id, sender }` and nothing more. Embedding the body would hand
+  it to anyone who can see the *reply*, walking straight around
+  [`visible_messages_for`](#history-is-interval-clipped): a member who was
+  `pending` across a gap would read clipped-out history through someone else's
+  quote of it.
+- **The body is fetched, not sent along.** The client renders the quote from a
+  message it already holds, or from the thread endpoint below — both
+  interval-clipped. When it can't be resolved, "Original message unavailable" is
+  a *true* statement about a message the viewer isn't entitled to.
+
+An earlier draft of the plan took the stricter line — render the quote only from
+the client's own cache, never fetch it — on the grounds that this makes the leak
+structurally impossible. It's worth recording why that was relaxed, because the
+strict version *looks* safer: fetching the quoted message through the clipped
+endpoint doesn't route around the clipping, it goes through the front door. The
+strict rule also had a real defect, in that "Original message unavailable" would
+appear whenever the original merely hadn't paged in yet — indistinguishable to
+the user from a genuine privacy clip, which devalues the message in the case
+where it matters. And neither version survives or fails differently under
+[E2E](#not-end-to-end-encrypted-yet): the server hands over ciphertext either
+way, and fetching a message by id was never the thing encryption takes away.
+
+**Reply counts are clipped too.** `reply_count` is annotated over the *viewer's*
+visible messages (`_with_reply_counts`), not with a plain
+`Count("thread_messages")`. A count is small, but it's still existence: telling a
+gap member "3 replies" on a message they can't see reveals how much happened
+while they were out, which is the same thing the 404-not-403 rules elsewhere
+refuse to answer.
+
+### Entering a thread
+
+Two ways in, because one isn't enough:
+
+- **A root shows "N replies"** beneath it — a branch off the bubble, the same
+  living line the feed's comment threads use.
+- **A reply's quote is itself the way in.** This isn't just convenience: when the
+  root is one the viewer was clipped out of, its replies stand alone in the
+  transcript with no root to carry a count, so without it the strand would be
+  unreachable for exactly the person whose view of it is already partial. That
+  view opens headless, saying so.
+
+A reply is otherwise an ordinary message: it bumps `updated_at`, counts toward
+unread, and [pushes](#push-notifications) like any other. Nothing about replying
+was made an exception.
+
 ## Membership state machine
 
 The single invariant (active set is a clique) yields deterministic rules,
@@ -216,8 +295,17 @@ Direct and group chats share the endpoints:
   load.)
 - `GET /api/conversations/<id>/messages/` — oldest-first, paginated, **clipped to
   your intervals**; 403 (locked) while pending.
+  - `?thread_root=<id>` narrows it to **one reply thread** — that root plus every
+    reply hanging off it. A *filter on the same queryset*, deliberately not a
+    route of its own: a second endpoint would be a second home for the
+    visibility rule, and this way a thread can never show a message the
+    transcript wouldn't. A viewer clipped out of the root gets the replies they
+    can see and no head. Non-numeric ids are a 400.
 - `POST /api/conversations/<id>/messages/` — send; active participants only; bumps
-  `updated_at`.
+  `updated_at`. Optional `reply_to_id` makes it a reply
+  ([Reply threads](#reply-threads)); it's validated against **your own**
+  interval-clipped messages, so an id from another thread or from inside a gap
+  is rejected exactly like one that never existed.
 - `POST /api/conversations/<id>/read/` — mark read up to now (clears unread).
 - `POST` / `DELETE /api/conversations/<id>/mute/` — mute / unmute **your** push
   notifications for this thread; returns `{ muted }`. Member-only (404
@@ -358,12 +446,19 @@ new-message:
   narrow viewports (opening one closes the other below 800px).
 
 **The web is behind on Phase 9b and that's expected, not broken.** Every 9b
-response field is additive, so the drawer ignores `is_edited`/`edited_at` and
-`reactions`, and simply renders an edited message as its new text with no marker.
-Web parity is its own milestone (9b M9), which also splits `MessagesDrawer.jsx`
-up. Two visible degradations until then — the missing "Edited" marker, and
-message reactions being invisible on the web (they're still stored, and still
-show in the app) — worth saying out loud rather than having someone discover it.
+response field is additive, so the drawer ignores `is_edited`/`edited_at`,
+`reactions` and `reply_to`/`reply_count`, and simply renders an edited message as
+its new text with no marker and a reply as an ordinary message. Web parity is its
+own milestone (9b M9), which also splits `MessagesDrawer.jsx` up. Three visible
+degradations until then — the missing "Edited" marker, message reactions being
+invisible, and a reply reading as an unattached message — worth saying out loud
+rather than having someone discover it. All three are stored and all three show
+in the app.
+
+When M9 does port replies, **the focused thread should not be a blur on the
+web**: a phone blurs the transcript because it has one screen, a desktop has
+width, so the right shape there is a side panel beside the transcript. Same
+endpoint, same data, different medium.
 
 ## Mobile (Phase 9 E2)
 
@@ -440,6 +535,48 @@ server owns (the per-target emoji cap, emoji validation, count-then-emoji
 ordering) that could show a pill and then take it away. See
 [reactions.md](reactions.md#mobile) for the emoji set and why it differs from the
 feed's.
+
+### Reply threads on the phone (Phase 9b M3)
+
+**Three affordances, one gesture each** — the rule M2 settled, applied to the
+same bubble: **swipe right** to reply, **long-press** for the action menu, **tap
+the branch** (or a reply's quote) to open the thread. The bubble's own tap stays
+free, and should: a target that small doing different things by press duration is
+where a mis-timed press does the wrong thing. Reply is in the menu *as well as*
+on the swipe — the swipe is what people reach for, the menu entry is how anyone
+discovers the swipe exists.
+
+The swipe is `PanResponder` + React Native's own `Animated`, **not**
+gesture-handler + Reanimated, even though both are dependencies. Reanimated's
+worklet runtime can't be loaded under Jest, so building the gesture on it would
+mean mocking away the component under test — the same reasoning that kept
+`MessageActionMenu`'s animation on `Animated`. The gesture claims a touch only
+for a rightward drag that's decidedly more horizontal than vertical, so the list
+keeps every scroll; `shouldStartReplySwipe` / `didTriggerReply` are exported pure
+functions so that rule is tested under Node even though the native plumbing can
+only be checked on a device.
+
+The composer gains a **third mode** beside compose and edit. Reply and edit are
+mutually exclusive — both are "the composer is aimed at an existing message", and
+a quote bar above an editor would leave it ambiguous what Save does. Unlike edit,
+starting a reply **doesn't touch your draft**: what you were typing is very often
+exactly what you meant to reply with.
+
+**The focused view** (`MessageThreadView`) is an `expo-blur` `BlurView` over the
+transcript with the strand floating on it. The blur is doing real work rather
+than decoration: a plain dim scrim reads as "a modal over a list", where the blur
+reads as the same conversation pushed out of focus — you haven't gone anywhere,
+you've narrowed to one strand. **It deliberately offers no long-press menu**:
+`MessageActionMenu` is itself a `Modal`, and presenting a modal from inside a
+presented one is the iOS trap the emoji picker already documents. Close the
+thread and act on the message in the transcript.
+
+One thing **M5 must revisit**: the transcript resolves a quote's body from the
+messages it has already loaded, which is complete today only because this screen
+still eagerly loads every page. M5 replaces that with proper upward paging, at
+which point a miss will also mean "not paged in yet" and "Original message
+unavailable" becomes a lie some of the time. The fix is a fetch through the same
+clipped endpoint (what the focused view already does), never a wider payload.
 
 **New-message push** (issue #118) is the one place the app gets something the web
 can't have. A tapped message push deep-links to the thread via `routeForNotification`

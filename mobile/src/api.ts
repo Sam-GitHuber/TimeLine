@@ -536,14 +536,39 @@ export const api = {
     ),
 
   /**
+   * One reply thread — a root message and every reply hanging off it (Phase 9b
+   * M3). What the focused thread view loads.
+   *
+   * It's the *same* endpoint as `getMessages` with a filter, not a route of its
+   * own, and that's deliberate on the server side: one queryset means a thread
+   * can never show a message the transcript wouldn't. So a viewer who was
+   * clipped out of the root gets the replies they can see and no head, and the
+   * view renders that honestly rather than pretending the thread is broken.
+   */
+  getThread: (conversationId: number | string, rootId: number) =>
+    request<Paginated<Message>>(
+      `/api/conversations/${conversationId}/messages/?thread_root=${rootId}`
+    ),
+
+  /**
    * Send a message. The sender is the authenticated user, never the body — you
    * can't post as someone else. Active participants only (the composer keys off
    * `can_send`, and the backend enforces the same gate).
+   *
+   * `replyToId` makes it a reply (Phase 9b M3). The server validates it against
+   * *your* visible messages, so an id from another thread or from inside a gap
+   * in your membership is rejected exactly like one that doesn't exist. Replies
+   * are one level deep: replying to a reply joins that thread rather than
+   * nesting, which the server derives — the client never has to work out a root.
    */
-  sendMessage: (conversationId: number | string, text: string) =>
+  sendMessage: (
+    conversationId: number | string,
+    text: string,
+    replyToId?: number | null
+  ) =>
     request<Message>(`/api/conversations/${conversationId}/messages/`, {
       method: 'POST',
-      body: { text },
+      body: replyToId ? { text, reply_to_id: replyToId } : { text },
     }),
 
   /**
