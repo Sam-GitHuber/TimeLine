@@ -558,14 +558,46 @@ export const api = {
     request<Conversation>(`/api/conversations/${conversationId}/`),
 
   /**
-   * A thread's messages, oldest-first and paginated, **clipped to your
+   * A thread's messages, **newest-first** and paginated, **clipped to your
    * participation intervals** server-side (a member who left and returned never
    * sees the gap). 403s while you're a pending member — the thread renders the
    * locked panel instead of calling this.
+   *
+   * `?order=desc` is what makes the thread openable in one request (Phase 9b
+   * M5). The endpoint's default is oldest-first, which puts the newest messages
+   * on the *last* page — so the screen used to walk every page on open just to
+   * reach the bottom of the chat. Now page one is the screenful you're looking
+   * at and `next` pages *backwards* into history as you scroll up, which is also
+   * the order an inverted `FlatList` wants its data in.
+   *
+   * The web drawer still reads the default order; the parameter is opt-in
+   * precisely so an old client never meets a reordered payload.
    */
   getMessages: (conversationId: number | string) =>
     request<Paginated<Message>>(
-      `/api/conversations/${conversationId}/messages/`
+      `/api/conversations/${conversationId}/messages/?order=desc`
+    ),
+
+  /**
+   * Specific messages by id, through the same interval-clipped endpoint (Phase
+   * 9b M5).
+   *
+   * 🔒 **This is how a reply's collapsed quote gets its words and its author.**
+   * A reply carries a bare `{ id }` — never the text, never the sender — so both
+   * have to be fetched, and the rule is that they come through the *same* gate
+   * as the thread. Until M5 the transcript could resolve a quote from its own
+   * loaded messages because it eagerly loaded the entire history; with lazy
+   * paging a miss also means "not paged in yet", and "Original message
+   * unavailable" would start lying about messages the viewer is perfectly
+   * entitled to.
+   *
+   * An id the viewer is clipped out of is simply **absent** from the response,
+   * indistinguishable from one that never existed — so a caller learns nothing
+   * from asking, and the unresolved quote renders the honest message.
+   */
+  getMessagesByIds: (conversationId: number | string, ids: number[]) =>
+    request<Paginated<Message>>(
+      `/api/conversations/${conversationId}/messages/?ids=${ids.join(',')}`
     ),
 
   /**

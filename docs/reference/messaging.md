@@ -206,10 +206,11 @@ Concretely, two halves:
   `pending` across a gap would read clipped-out history through someone else's
   quote of it.
 - **The body *and the author* are fetched, not sent along.** The client renders
-  the quote from a message it already holds, or from the thread endpoint below —
-  both interval-clipped. When it can't be resolved, "Original message
-  unavailable" is a *true* statement about a message the viewer isn't entitled
-  to, and it appears with **no name above it**.
+  the quote from a message it already holds, from the thread endpoint below, or
+  by asking for it by id ([`?ids=`](#api), added in M5) — all three
+  interval-clipped, which is the only property that matters. When it can't be
+  resolved, "Original message unavailable" is a *true* statement about a message
+  the viewer isn't entitled to, and it appears with **no name above it**.
 
 **Why the author counts as history.** M3 first shipped `reply_to` as
 `{ id, sender }`, on the reasoning that a name is not a message — you're only
@@ -522,6 +523,19 @@ Direct and group chats share the endpoints:
     **paginates like the transcript**, so a client must follow `next` — a strand
     longer than one page is otherwise silently cut off at its *oldest* messages,
     hiding the newest replies and the one the reader just sent.
+  - `?ids=<a,b,c>` narrows it to **specific messages** (Phase 9b M5) — how a
+    reply's collapsed quote gets its words and its author, now that the app's
+    transcript pages lazily. Same trick, same reason: an id the viewer is clipped
+    out of is simply **absent** from the response, indistinguishable from one
+    that never existed, with no second code path to get wrong. Capped at
+    `MESSAGE_IDS_MAX` (50); an empty list returns nothing rather than everything.
+    See [Reply threads](#reply-threads).
+  - `?order=desc` returns **newest-first** (Phase 9b M5). Without it the newest
+    messages sit on the *last* page, so opening a chat means walking every page
+    to reach the bottom of it — which is exactly what the app used to do. It's
+    an opt-in parameter and not a change of default because the web drawer still
+    reads the thread oldest-first, and an old client meeting a reordered payload
+    is the break the [compatibility rule](#frontend) exists to prevent.
 - `POST /api/conversations/<id>/messages/` — send; active participants only; bumps
   `updated_at`. Optional `reply_to_id` makes it a reply
   ([Reply threads](#reply-threads)); it's validated against **your own**
@@ -823,12 +837,90 @@ you've narrowed to one strand. **It deliberately offers no long-press menu**:
 presented one is the iOS trap the emoji picker already documents. Close the
 thread and act on the message in the transcript.
 
-One thing **M5 must revisit**: the transcript resolves a quote's body from the
-messages it has already loaded, which is complete today only because this screen
-still eagerly loads every page. M5 replaces that with proper upward paging, at
-which point a miss will also mean "not paged in yet" and "Original message
-unavailable" becomes a lie some of the time. The fix is a fetch through the same
-clipped endpoint (what the focused view already does), never a wider payload.
+### The transcript (Phase 9b M5)
+
+The milestone with no new feature in it, and most of the reason the thread felt
+wrong. Everything here is mechanics.
+
+**It loads one page.** The screen used to walk `fetchNextPage` in an effect until
+every page was in memory, so opening a chat pulled its entire history —
+invisible at family scale on day one and worse every month. That wasn't
+carelessness so much as a consequence: the endpoint's default order is
+oldest-first, so the *newest* messages are on the last page and "show me the
+bottom of this chat" genuinely meant loading all of it.
+[`?order=desc`](#api) inverts that, the list is an **inverted `FlatList`**, and
+`onEndReached` — the top, on an inverted list — pages backwards into history.
+
+Inverting the list is what makes several other things stop being workarounds. It
+deleted a `scrollToEnd`-on-every-content-change hack, and it means the newest
+message stays pinned while the keyboard animates rather than being chased back
+into view afterwards.
+
+The known cost, and it's the feed's too: the endpoint pages by page *number*, so
+a message arriving mid-scroll shifts the window and a page can re-send what the
+previous one showed. `toThreadRows` de-duplicates by id — two rows sharing a key
+makes React warn and lets `FlatList` recycle the wrong one — and the four-second
+poll refetches every loaded page, so any gap at a boundary heals itself.
+
+**Reading a transcript, rather than a list of bubbles.** Day separators
+("Today" / "Yesterday" / "12 March", re-derived at local midnight by
+`useDayBoundary` so a chat left open overnight doesn't go on saying "Today");
+**clock times** rather than "5m ago", because the separator above answers *which*
+day and what a bubble has to answer is when in it — the conversation *list* keeps
+relative time, where the question really is how recent something is; and **run
+grouping**, where consecutive messages from one person sit tighter together and
+only the run's last bubble carries the timestamp and the tail corner. A run
+breaks at a divider as well as at a change of sender: one straddling "Yesterday"
+would read as a single sitting.
+
+Two things are **exempt from run grouping's timestamp suppression**, and both are
+load-bearing rather than tidy-ups. An **"Edited" marker** is a disclosure — the
+thing that [makes editing safe at all](#editing-a-message) — so it can't be
+hidden by where a bubble happens to sit in a run. And an **unsent message** shows
+its clock or its failure wherever it lands, or two queued messages would leave
+the first looking sent.
+
+**An unread divider** marks where you stopped reading, so a thread you've been
+away from opens *there*. It's positioned from `unread_count` on the conversation
+detail, captured **once during render** before the mark-read write goes out —
+which is also why that write now waits for the detail to land, since if it won
+the race there'd be nothing left to capture. The count, not your own
+`last_read_at`: the detail withholds every read marker, including yours, when
+you've [turned receipts off](#the-setting-usersend_read_receipts), and a divider
+that quietly stopped working for anyone who opted out of an unrelated setting
+would be a bad trade. When the unread run is longer than the loaded page the
+divider is **left out** rather than placed at the top of what happened to load —
+pointing at the wrong message is worse than pointing at nothing, and it resolves
+itself on the next page.
+
+**Jump-to-latest** appears once you've scrolled away, with a count of what has
+arrived since. The count is the point: a bare arrow is a scroll shortcut, and the
+open thread is the one place a new message doesn't otherwise announce itself.
+
+**Links are tappable** — URLs and email addresses, opened with `Linking.openURL`.
+🔒 This is **not** [link previews](#not-end-to-end-encrypted-yet), which stay on
+the "not building" list: nothing is fetched and nothing is rendered from the
+target, so none of the tracking/SSRF objection applies. The raw text stays the
+source of truth, which also keeps it one opaque blob under E2E. A message that is
+**one to three emoji and nothing else** drops its bubble and renders large.
+
+**Drafts survive leaving the thread** (`drafts.ts`, in memory, keyed by
+conversation, 🔒 cleared on sign-out with the outbox). Deliberately *not* while
+editing: in edit mode the composer holds someone's sent words rather than a draft
+of yours, so persisting them would mean coming back to a message you never wrote.
+
+**Quotes are fetched when they haven't paged in.** This is the debt M3 left, and
+it had to be settled here. The transcript resolved a quote's body and author from
+messages it already held, which was complete *only* because it loaded every page.
+With lazy paging a miss also means "not paged in yet", so "Original message
+unavailable" — which is supposed to mean *you were clipped out of this* — would
+be a lie some of the time, and a message that lies sometimes is worth nothing in
+the case where it's true. `quotes.ts` fetches the misses through
+[`?ids=`](#api), the same interval-clipped endpoint, and **never** a wider
+payload. Each id is asked about **once**: an unresolvable id is a fact about this
+viewer, not a transient failure, so re-asking every poll would be a request that
+can only ever return nothing. 🔒 What it holds is other people's message text, so
+it's cleared on sign-out too.
 
 **New-message push** (issue #118) is the one place the app gets something the web
 can't have. A tapped message push deep-links to the thread via `routeForNotification`

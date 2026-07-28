@@ -2268,6 +2268,36 @@ class ConversationDetailView(generics.RetrieveAPIView):
 # purpose: if it annoys people more than it protects them, change this line.
 MESSAGE_EDIT_WINDOW = timedelta(minutes=15)
 
+# How many ids ``?ids=`` will resolve in one request (Phase 9b M5).
+#
+# The caller is a screenful of collapsed reply quotes, so a handful is the real
+# workload and this is a guard rail rather than a budget. It exists because the
+# parameter is otherwise an unbounded ``IN`` clause built straight from a query
+# string — one page of the transcript can't need more than this, so a request
+# that asks for more is a bug or a probe, and either way 400 is the answer.
+MESSAGE_IDS_MAX = 50
+
+
+def _message_id_param(raw, field):
+    """One id from a query parameter, or a 400.
+
+    **Range-checked, not merely parsed.** Python ints are unbounded but the
+    column is a bigint, so a long enough run of digits reaches Postgres as an
+    out-of-range value and comes back a 500 instead of the "you can't see that"
+    the caller should get. Shared by ``?thread_root=`` and ``?ids=`` so the two
+    can't drift into answering differently.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        # ``from None``: the parse error is noise. The caller sent something
+        # that isn't an id, and chaining a ValueError tells them nothing they
+        # didn't type themselves.
+        raise ValidationError(f"{field} must be a message id.") from None
+    if not -(2**63) <= value < 2**63:
+        raise ValidationError(f"{field} must be a message id.")
+    return value
+
 
 def _thread_for_viewer(pk, user):
     """Resolve a conversation the viewer may *reach*, as ``(convo, my_status)``.
@@ -2326,6 +2356,26 @@ class ConversationMessagesView(generics.ListAPIView):
     not an endpoint of its own: a second route would be a second place for the
     visibility rule to live, and this way a thread can't show a message the
     transcript wouldn't.
+
+    **``?ids=<a,b,c>`` narrows GET to specific messages** (Phase 9b M5) — the
+    same trick for the same reason. The app needs it to render a reply's
+    collapsed quote once the transcript pages lazily: a reply carries a bare
+    ``{id}`` and nothing else, so the words and the author have to be *fetched*,
+    and this is the front door they come through. Being one more filter on this
+    queryset, an id the viewer is clipped out of simply isn't in the response —
+    the same silence as an id that never existed, with no separate code path to
+    get wrong. Capped at ``MESSAGE_IDS_MAX`` per request.
+
+    **``?order=desc`` returns newest-first** (Phase 9b M5), which is what lets a
+    client open a thread without loading its whole history. Oldest-first paging
+    puts the *newest* messages on the last page, so "show me this chat" meant
+    walking every page to reach the bottom — fine at family scale on day one and
+    worse every month. Newest-first makes page 1 the screenful you actually open
+    to, and ``next`` walks backwards into history as you scroll up. It's an
+    opt-in parameter rather than a change of default because the web client
+    (M9 has yet to port any of this) still reads the thread oldest-first, and an
+    old client meeting a reordered payload is exactly the break the phase's
+    *Compatibility* rule exists to prevent.
     """
 
     serializer_class = MessageSerializer
@@ -2353,25 +2403,40 @@ class ConversationMessagesView(generics.ListAPIView):
 
         root_id = self.request.query_params.get("thread_root")
         if root_id is not None:
-            try:
-                root_id = int(root_id)
-            except (TypeError, ValueError):
-                # ``from None``: the parse error is noise here — the caller sent
-                # something that isn't an id, and chaining a ValueError onto the
-                # 400 tells them nothing they didn't type themselves.
-                raise ValidationError("thread_root must be a message id.") from None
-            # Range-checked, not just parsed: Python ints are unbounded but the
-            # column is a bigint, so a long enough string of digits reaches the
-            # database as an out-of-range value and comes back a 500. It's the
-            # same "you can't see that" answer either way.
-            if not -(2**63) <= root_id < 2**63:
-                raise ValidationError("thread_root must be a message id.")
+            root_id = _message_id_param(root_id, "thread_root")
             # The root itself is part of its own thread — it's the first thing
             # the focused view shows. If the viewer is clipped out of the root
             # they simply get the replies they can see and the client renders
             # the missing head; nothing here has to special-case that, because
             # the clipping already did.
             queryset = queryset.filter(Q(pk=root_id) | Q(thread_root_id=root_id))
+
+        # ``?ids=`` (Phase 9b M5) — resolve specific messages, which is how the
+        # app renders a reply's collapsed quote now that the transcript pages
+        # lazily. Composes with ``thread_root`` rather than excluding it: both
+        # are filters on one queryset, so there's nothing to arbitrate.
+        raw_ids = self.request.query_params.get("ids")
+        if raw_ids is not None:
+            # ``"1,,2"`` and a trailing comma are the ordinary shape of a joined
+            # list, not an error worth a 400 — drop the empties and judge what's
+            # left. Anything that isn't a number still fails loudly.
+            parts = [part for part in raw_ids.split(",") if part.strip()]
+            if len(parts) > MESSAGE_IDS_MAX:
+                raise ValidationError(
+                    f"ids takes at most {MESSAGE_IDS_MAX} message ids."
+                )
+            ids = [_message_id_param(part, "ids") for part in parts]
+            # An empty ``ids=`` asks for nothing, and gets it. Falling through to
+            # an unfiltered queryset would quietly hand back the whole thread —
+            # the one wrong answer available here.
+            queryset = queryset.filter(pk__in=ids)
+
+        # Newest-first on request (Phase 9b M5). Mirrors ``Message.Meta.ordering``
+        # exactly, reversed on both terms — the id tiebreak matters as much here
+        # as it does ascending, or two messages sharing a timestamp can swap
+        # places between pages and land in the list twice.
+        if self.request.query_params.get("order") == "desc":
+            queryset = queryset.order_by("-created_at", "-id")
         return queryset
 
     def post(self, request, pk):

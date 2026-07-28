@@ -43,11 +43,22 @@
  * preview shows it), and a message with replies grows a "3 replies" branch
  * beneath it that opens the focused thread view.
  *
+ * **Run grouping and chat typography** (Phase 9b M5). A bubble knows whether it
+ * ends a run (`endsRun`, decided by the caller, which is the only place that can
+ * see the neighbours) and that drives three things at once: the timestamp, the
+ * squared-off tail corner, and the tighter spacing that makes a burst read as
+ * one block. The time itself is now a **clock** ("14:32") rather than "5m ago" —
+ * the day separator above carries the date, so what a bubble has to answer is
+ * when in the day. URLs and email addresses are **tappable**, and a message that
+ * is nothing but one to three emoji drops its bubble and is drawn large.
+ *
  * **One gesture per target**, the rule M2 settled: **long-press** = the action
  * menu (Reply included), **tap the branch** = open the thread. The bubble's own
  * tap does nothing, and should stay that way — a target this size doing
  * different things by press duration is where a mis-timed press does the wrong
- * thing.
+ * thing. A tappable *link* inside the text is the one exception, and it isn't
+ * really one: it's a smaller target with its own affordance, and long-pressing
+ * over it still opens the menu.
  *
  * **There is deliberately no swipe-to-reply.** M3 shipped one and it was taken
  * out after a day of real use: a rightward drag starting on a bubble is also the
@@ -63,16 +74,17 @@
 
 import { useRef } from 'react';
 import * as Haptics from 'expo-haptics';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from './Avatar';
 import { SendStateIcon } from './icons';
 import type { BubbleAnchor } from './MessageActionMenu';
 import { measureInWindow } from '@/measure';
+import { isEmojiOnly, linkify } from '@/messageText';
 import type { SendState } from '@/readReceipts';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message, Reaction } from '@/types';
-import { formatRelativeTime } from '@/utils';
+import { formatMessageTime } from '@/utils';
 
 /**
  * The bubble itself — background, text, timestamp — with no positioning of its
@@ -87,6 +99,7 @@ export function BubbleBody({
   mine,
   quoted,
   status,
+  endsRun = true,
   onQuotePress,
 }: {
   message: Message;
@@ -101,36 +114,137 @@ export function BubbleBody({
    */
   status?: SendState;
   /**
+   * Last bubble of a run (Phase 9b M5) — it carries the timestamp and the
+   * squared-off tail corner. Defaults to true so a bubble drawn on its own (the
+   * action menu's preview, the focused thread view) looks complete.
+   */
+  endsRun?: boolean;
+  /**
    * Open the thread this reply belongs to. Omitted by the action menu's preview
    * — a preview is a picture of the bubble, not a working copy of it.
    */
   onQuotePress?: () => void;
 }) {
+  /**
+   * The meta line goes on the run's last bubble only — that's the whole point of
+   * grouping, and a timestamp repeated down five bubbles sent in one minute is
+   * noise standing where the next message should be.
+   *
+   * **Two exceptions, and both are load-bearing rather than tidy-ups.** An
+   * "Edited" marker is a disclosure: `messaging.md` calls it the thing that
+   * makes editing safe at all, so it can't be suppressed by where a bubble
+   * happens to sit in a run. And an unsent message has to show its clock or its
+   * failure wherever it lands, or two queued messages would leave the first
+   * looking sent.
+   */
+  const unsent = status === 'sending' || status === 'failed';
+  const showMeta = endsRun || message.is_edited || unsent;
+  /**
+   * One to three emoji and nothing else: drop the bubble and draw it large, the
+   * treatment every mainstream messenger gives it. A few lines of code and one
+   * of the most-noticed details in a chat.
+   *
+   * Not for a reply, which has a quote block that needs a bubble to sit in, and
+   * not for a tombstone, which has no text of its own.
+   */
+  const large = !message.reply_to && !message.is_deleted && isEmojiOnly(message.text);
+
   return (
-    <View style={[styles.bubble, mine ? styles.mine : styles.theirs]}>
+    <View
+      style={[
+        large ? styles.bare : styles.bubble,
+        !large && (mine ? styles.mine : styles.theirs),
+        // The tail: the run's last bubble squares off its near-bottom corner, so
+        // a block of messages reads as one shape with a point at the end rather
+        // than a stack of identical lozenges.
+        !large && endsRun && (mine ? styles.tailMine : styles.tailTheirs),
+      ]}
+    >
       {/* Inside the bubble, above the text — the standard treatment, and it
           means the action menu's preview (which re-renders this component)
           shows the quote too, so you can see exactly what you're acting on. */}
       {message.reply_to ? (
         <QuotedMessage quoted={quoted} mine={mine} onPress={onQuotePress} />
       ) : null}
-      <Text style={[styles.text, mine ? styles.mineText : styles.theirsText]}>
-        {message.text}
-      </Text>
+      <MessageText message={message} mine={mine} large={large} />
       {/* The meta line: time, the edited marker, then the tick. A row rather
           than one string because the tick is a glyph, and it has to sit on the
           text's baseline without the emoji-ish drift a font fallback gives. */}
-      <View style={styles.meta}>
-        <Text style={[styles.time, mine ? styles.mineTime : styles.theirsTime]}>
-          {formatRelativeTime(message.created_at)}
-          {/* An edit is disclosed, never silent: a thread is a shared record, and
-              quietly changing what someone already read would make it worthless
-              as one. */}
-          {message.is_edited ? ' · Edited' : ''}
-        </Text>
-        {status && status !== 'failed' ? <SendTick status={status} /> : null}
-      </View>
+      {showMeta ? (
+        <View style={[styles.meta, large && styles.metaBare]}>
+          <Text
+            style={[
+              styles.time,
+              large ? styles.bareTime : mine ? styles.mineTime : styles.theirsTime,
+            ]}
+          >
+            {formatMessageTime(message.created_at)}
+            {/* An edit is disclosed, never silent: a thread is a shared record, and
+                quietly changing what someone already read would make it worthless
+                as one. */}
+            {message.is_edited ? ' · Edited' : ''}
+          </Text>
+          {status && status !== 'failed' ? (
+            <SendTick status={status} onSurface={!large} />
+          ) : null}
+        </View>
+      ) : null}
     </View>
+  );
+}
+
+/**
+ * A message's words, with URLs and email addresses made tappable (Phase 9b M5).
+ *
+ * The cheapest "this feels broken" fix in the whole phase: a link someone sends
+ * was dead text you had to retype by hand. Splitting and styling happens in
+ * `messageText.ts`; this only decides what it looks like and what a tap does.
+ *
+ * 🔒 **Nothing is fetched.** Link *previews* are on the phase's "not building"
+ * list — they'd mean the server retrieving every URL anyone pastes, which is a
+ * tracking leak and an SSRF surface for a thumbnail. An underline and
+ * `Linking.openURL` involve neither.
+ */
+function MessageText({
+  message,
+  mine,
+  large,
+}: {
+  message: Message;
+  mine: boolean;
+  large: boolean;
+}) {
+  const base = [
+    large ? styles.largeEmoji : styles.text,
+    !large && (mine ? styles.mineText : styles.theirsText),
+  ];
+  const segments = linkify(message.text);
+  // The overwhelmingly common case: one run, one Text, no map.
+  if (segments.length === 1 && segments[0].kind === 'text') {
+    return <Text style={base}>{message.text}</Text>;
+  }
+  return (
+    <Text style={base}>
+      {segments.map((segment, index) =>
+        segment.kind === 'link' ? (
+          <Text
+            // Position is a stable key here: the array is derived from an
+            // immutable string, so the same text always splits the same way.
+            key={`link-${index}`}
+            style={mine ? styles.linkMine : styles.linkTheirs}
+            accessibilityRole="link"
+            // Swallowed: a URL the OS has no handler for (a scheme nobody has
+            // installed) rejects, and there is nothing useful to say about it
+            // that the person tapping doesn't already know.
+            onPress={() => Linking.openURL(segment.url).catch(() => {})}
+          >
+            {segment.text}
+          </Text>
+        ) : (
+          <Text key={`text-${index}`}>{segment.text}</Text>
+        )
+      )}
+    </Text>
   );
 }
 
@@ -145,7 +259,20 @@ export function BubbleBody({
  * in the copy the action menu re-renders — so the colours need no near/far
  * pairing of their own.
  */
-function SendTick({ status }: { status: Exclude<SendState, 'failed'> }) {
+function SendTick({
+  status,
+  onSurface = true,
+}: {
+  status: Exclude<SendState, 'failed'>;
+  /**
+   * False for an emoji-only message (Phase 9b M5), which has no accent fill
+   * behind it — white-on-white would be an invisible tick, so it takes the
+   * page's own ink colours instead.
+   */
+  onSurface?: boolean;
+}) {
+  const strong = onSurface ? '#ffffff' : colors.accent;
+  const muted = onSurface ? 'rgba(255,255,255,0.7)' : colors.inkFaint;
   return (
     <View
       accessibilityRole="image"
@@ -156,7 +283,7 @@ function SendTick({ status }: { status: Exclude<SendState, 'failed'> }) {
     >
       <SendStateIcon
         state={status}
-        color={status === 'read' ? '#ffffff' : 'rgba(255,255,255,0.7)'}
+        color={status === 'read' ? strong : muted}
         size={13}
       />
     </View>
@@ -296,6 +423,7 @@ export function MessageBubble({
   message,
   mine,
   showSender,
+  endsRun = true,
   quoted,
   status,
   onLongPress,
@@ -307,6 +435,13 @@ export function MessageBubble({
   message: Message;
   mine: boolean;
   showSender: boolean;
+  /**
+   * Last bubble of a run from this sender (Phase 9b M5). Decided by the caller,
+   * which is the only place that can see the neighbours — it drives the tail
+   * corner, the timestamp, and the tighter spacing that makes a burst read as
+   * one block. Defaults true so a bubble drawn alone looks finished.
+   */
+  endsRun?: boolean;
   /** The message this one replies to, if the caller could resolve it. */
   quoted?: Message;
   /** Its send state (Phase 9b M4) — your own messages only; see `BubbleBody`. */
@@ -344,7 +479,11 @@ export function MessageBubble({
   }
 
   return (
-    <View style={styles.row}>
+    // Tighter inside a run than between them (Phase 9b M5): the gap is what
+    // tells you where one person's burst ends and the next begins, so it has to
+    // mean something. Every bubble spaced equally is the shape the thread had
+    // before, and it read as a wall.
+    <View style={[styles.row, !endsRun && styles.rowInRun]}>
       {showSender && (
         <View style={styles.senderLine}>
           <Avatar user={message.sender} size="xs" />
@@ -380,6 +519,7 @@ export function MessageBubble({
               mine={mine}
               quoted={quoted}
               status={status}
+              endsRun={endsRun}
               onQuotePress={onOpenThread}
             />
           </Pressable>
@@ -452,6 +592,9 @@ export function MessageBubble({
 
 const styles = StyleSheet.create({
   row: { marginBottom: spacing.sm },
+  // Inside a run. Not zero: the bubbles still need a hairline between them, and
+  // at 2px they read as stacked rather than as one very tall message.
+  rowInRun: { marginBottom: 2 },
   senderLine: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -479,15 +622,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
   },
+  // The tail — the run's last bubble only, on the side it's aligned to.
+  tailMine: { borderBottomRightRadius: radius.sm },
+  tailTheirs: { borderBottomLeftRadius: radius.sm },
+  // An emoji-only message has no bubble at all: the glyph is the message, and a
+  // container around it would be a frame around a gesture.
+  bare: { paddingVertical: spacing.xs },
+  largeEmoji: { fontSize: 44, lineHeight: 52 },
   text: { fontSize: fontSize.base - 1, lineHeight: 21 },
   mineText: { color: '#ffffff' },
   theirsText: { color: colors.ink },
+  // Underlined as well as tinted: on the accent fill a lighter shade of white
+  // is not a strong enough signal on its own, and colour alone never is.
+  linkMine: { color: '#ffffff', textDecorationLine: 'underline' },
+  linkTheirs: { color: colors.accentDeep, textDecorationLine: 'underline' },
   meta: {
     marginTop: 2,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
   },
+  // No bubble to sit inside, so the meta line aligns with the emoji above it.
+  metaBare: { marginTop: 0 },
+  bareTime: { color: colors.inkFaint },
   time: { fontSize: 11 },
   mineTime: { color: 'rgba(255,255,255,0.7)' },
   theirsTime: { color: colors.inkFaint },

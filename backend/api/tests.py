@@ -32,6 +32,7 @@ from api.emoji import (
 from api.serializers import MESSAGE_MAX_LENGTH, NotificationSerializer
 from api.views import (
     MESSAGE_EDIT_WINDOW,
+    MESSAGE_IDS_MAX,
     activate,
     active_participant_ids,
     deactivate,
@@ -2073,6 +2074,124 @@ class MessageReplyTests(MessagingBase):
         self.assertTrue(PushOutbox.objects.exists())
 
 
+class MessageIdsFilterTests(MessagingBase):
+    """``?ids=`` on the messages endpoint (Phase 9b M5).
+
+    The app needs it because the transcript pages lazily now: a reply carries a
+    bare ``{id}``, so the collapsed quote's words and author have to be fetched,
+    and this is the front door. It's a filter on the same interval-clipped
+    queryset as the transcript, which is the whole design — ``MessageReplyGapTests``
+    owns the proof that a clipped id stays clipped here.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(user_a=self.me, user_b=self.friend)
+        self.first = Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="dinner at 7?"
+        )
+        self.second = Message.objects.create(
+            conversation=self.convo, sender=self.me, text="works for me"
+        )
+        self.third = Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="see you then"
+        )
+
+    def test_returns_only_the_ids_asked_for(self):
+        resp = self.client.get(
+            f"{messages_url(self.convo)}?ids={self.first.pk},{self.third.pk}"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [m["text"] for m in resp.data["results"]],
+            ["dinner at 7?", "see you then"],
+        )
+
+    def test_an_id_from_another_conversation_is_simply_absent(self):
+        """Not a 400 and not a 404 — the filter runs over *this* thread's visible
+        messages, so a foreign id matches nothing. One code path, and no way to
+        use the response to learn that the id exists somewhere else."""
+        other_friend = make_user("elsewhere@example.com")
+        make_connection(self.me, other_friend, status=ACCEPTED)
+        elsewhere = Conversation.objects.create(user_a=self.me, user_b=other_friend)
+        foreign = Message.objects.create(
+            conversation=elsewhere, sender=other_friend, text="different chat"
+        )
+
+        resp = self.client.get(
+            f"{messages_url(self.convo)}?ids={self.first.pk},{foreign.pk}"
+        )
+        self.assertEqual([m["id"] for m in resp.data["results"]], [self.first.pk])
+        self.assertNotIn("different chat", json.dumps(resp.data, default=str))
+
+    def test_an_empty_ids_parameter_returns_nothing(self):
+        """The one genuinely wrong answer available here would be to treat an
+        empty list as "no filter" and hand back the whole thread."""
+        resp = self.client.get(f"{messages_url(self.convo)}?ids=")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["results"], [])
+
+    def test_rejects_a_non_numeric_id(self):
+        resp = self.client.get(f"{messages_url(self.convo)}?ids={self.first.pk},abc")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rejects_an_id_too_big_for_the_column(self):
+        # Same range check as ``?thread_root=``, shared so the two can't drift:
+        # unbounded Python ints reach a bigint column as a 500 otherwise.
+        resp = self.client.get(f"{messages_url(self.convo)}?ids={2**64}")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rejects_more_ids_than_the_cap(self):
+        """A guard rail, not a budget: the caller is a screenful of quotes. An
+        unbounded ``IN`` clause built from a query string is worth refusing."""
+        ids = ",".join(str(n) for n in range(MESSAGE_IDS_MAX + 1))
+        resp = self.client.get(f"{messages_url(self.convo)}?ids={ids}")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_order_desc_returns_the_newest_first(self):
+        """What lets the app open a thread on one page. Oldest-first paging puts
+        the newest messages on the *last* page, so "show me this chat" meant
+        loading every page — the eager full-history load M5 exists to delete."""
+        resp = self.client.get(f"{messages_url(self.convo)}?order=desc")
+        self.assertEqual(
+            [m["text"] for m in resp.data["results"]],
+            ["see you then", "works for me", "dinner at 7?"],
+        )
+
+    def test_the_default_order_is_unchanged(self):
+        """🔒 The compatibility rule: additive only, and an old client must not
+        meet a reordered payload. The web drawer still reads oldest-first."""
+        resp = self.client.get(messages_url(self.convo))
+        self.assertEqual(
+            [m["text"] for m in resp.data["results"]],
+            ["dinner at 7?", "works for me", "see you then"],
+        )
+
+    def test_an_unrecognised_order_falls_back_to_the_default(self):
+        # Only the one documented value flips it; anything else is the default
+        # rather than a 400, because the parameter is an opt-in shortcut and a
+        # client that misspells it should get a usable thread, not an error.
+        resp = self.client.get(f"{messages_url(self.convo)}?order=sideways")
+        self.assertEqual(
+            [m["text"] for m in resp.data["results"]],
+            ["dinner at 7?", "works for me", "see you then"],
+        )
+
+    def test_a_pending_member_gets_403_not_a_filtered_list(self):
+        """The filter sits *inside* the endpoint, so it inherits the gate rather
+        than bypassing it — a pending member is locked out of the thread and
+        ``?ids=`` is still the thread."""
+        convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=self.friend
+        )
+        Participant.objects.create(
+            conversation=convo, user=self.friend, status="active"
+        )
+        Participant.objects.create(conversation=convo, user=self.me, status="pending")
+        resp = self.client.get(f"{messages_url(convo)}?ids={self.first.pk}")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
 class MessageReplyGapTests(APITestCase):
     """🔒 The gap scenario for replies (Phase 9b M3).
 
@@ -2191,6 +2310,23 @@ class MessageReplyGapTests(APITestCase):
         # Neither the words nor the person who wrote them.
         self.assertNotIn("passing through", body)
         self.assertNotIn(stranger.display_name, body)
+
+    def test_ids_cannot_fetch_a_message_from_inside_your_gap(self):
+        """🔒 ``?ids=`` is the M5 route to a quote's words, so it is also the
+        newest way to try to read history you were clipped out of.
+
+        It's one more filter on the same clipped queryset, so the answer is
+        silence rather than a refusal: the id simply isn't in the response, and
+        the gapper can't tell it from an id that never existed. That
+        indistinguishability is the point — a 403 here would confirm the message
+        is real, which is the existence oracle the edit route closed too."""
+        self.client.force_authenticate(self.gapper)
+        resp = self.client.get(
+            f"{messages_url(self.convo)}?ids={self.root.pk},{self.reply.pk}"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([m["id"] for m in resp.data["results"]], [self.reply.pk])
+        self.assertNotIn("the secret plan", json.dumps(resp.data, default=str))
 
     def test_the_focused_thread_opens_with_its_head_missing(self):
         """Asking for the thread by root id is the obvious second way in, so it

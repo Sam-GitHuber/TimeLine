@@ -63,6 +63,40 @@ export function formatClockTime(isoString: string): {
 }
 
 /**
+ * The clock time on a chat bubble — "14:32", or "2:32 pm" where that's the
+ * local convention (Phase 9b M5).
+ *
+ * **A chat wants the clock, not "3h ago".** The transcript already carries a day
+ * separator above each day's messages, so the date is answered; what a bubble
+ * has to answer is *when in that day*, which is how anyone reads back a
+ * conversation ("you said that at half twelve"). Relative time is right on the
+ * conversation *list*, where the question really is "how recent is this", and
+ * that's why `formatRelativeTime` stays in use there.
+ *
+ * Deliberately locale-driven rather than hard-coded 24-hour: the hour format is
+ * the most obviously *wrong-looking* thing you can impose on someone, and the
+ * platform already knows their answer.
+ */
+export function formatMessageTime(isoString: string): string {
+  const formatted = new Date(isoString).toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  // The two clocks want opposite things about a leading zero, and the platform
+  // won't give both from one set of options: "9:02 am" is right where a
+  // meridiem does the disambiguating, and "09:02" is right where nothing else
+  // does. So the presence of a meridiem is the signal for which convention
+  // we're in — and it's lowercased on the way past, because the design system's
+  // voice is lowercase throughout (see `formatClockTime`) and a shouted AM/PM
+  // beside 11px type reads as an abbreviation gone wrong.
+  const meridiem = /[AP]M$/i.test(formatted);
+  if (meridiem) {
+    return formatted.replace(/\s?([AP])M$/i, (_m, half) => ` ${half.toLowerCase()}m`);
+  }
+  return formatted.replace(/^(\d):/, '0$1:');
+}
+
+/**
  * A stable per-calendar-day key (local time), used to group consecutive posts
  * under a single day divider.
  */
