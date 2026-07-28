@@ -39,7 +39,7 @@ dependencies = [
     # HEVC codec libraries. We only ever *decode*, server-side, for a private
     # family app — the same footing as any Linux photo viewer. Worth revisiting
     # if this ever becomes a commercial distribution.
-    "pillow-heif>=1.4",
+    "pillow-heif>=1.5.0",
     "psycopg[binary]>=3.3.4",
     "requests>=2.34.2",
 ]
@@ -48,7 +48,7 @@ dependencies = [
 # production images can skip them with `uv sync --no-dev`.
 [dependency-groups]
 dev = [
-    "ruff>=0.15.22",
+    "ruff>=0.16.0",
     "bandit>=1.9",
 ]
 
