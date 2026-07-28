@@ -1031,54 +1031,114 @@ describe('the reply swipe’s rules', () => {
   });
 });
 
-it('replies to a message from the long-press menu', async () => {
+it('Reply opens the strand, even on a message with no replies yet', async () => {
+  // The thing that makes replying feel like joining a conversation rather than
+  // annotating a line: you get the exchange on screen while you write. A message
+  // nobody has answered yet opens a strand one bubble long, deliberately.
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
   serve({
     conversation: detail({}),
-    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+    messages: [only],
+    thread: [only],
   });
 
   await renderScreen();
   await openMenu('Message from Ada Lovelace: dinner at 7?');
   await fireEvent.press(screen.getByLabelText('Reply'));
 
-  // The composer says who it's aimed at — in a group that's the thing you'd
-  // otherwise get wrong.
-  expect(await screen.findByText('Replying to Ada Lovelace')).toBeTruthy();
+  // The strand, not the transcript's composer.
+  expect(await screen.findByText('Thread')).toBeTruthy();
+  const input = await screen.findByLabelText('Reply to thread');
+  // Reply put you here, so the keyboard is already up.
+  expect(input.props.autoFocus).toBe(true);
 
-  await fireEvent.changeText(screen.getByLabelText('Message'), 'yes, see you');
-  await fireEvent.press(screen.getByLabelText('Send'));
+  await fireEvent.changeText(input, 'yes, see you');
+  await fireEvent.press(screen.getByLabelText('Send reply'));
 
   await waitFor(() => expect(sendCalls()).toEqual([['yes, see you', 8]]));
-  // The bar clears itself on success, so the next message isn't silently a
-  // reply to something you'd stopped thinking about.
-  await waitFor(() =>
-    expect(screen.queryByText('Replying to Ada Lovelace')).toBeNull()
-  );
 });
 
-it('cancelling a reply sends an ordinary message', async () => {
+it('replying to a reply answers *that* message, still in the one strand', async () => {
+  // Depth stays 1 — the server flattens it into the same strand either way — but
+  // the target is the message you tapped, so the quote names who you actually
+  // answered rather than whoever started the thread.
+  const root = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  const reply = message({
+    id: 9,
+    sender: GRACE,
+    text: 'or 8 if easier',
+    reply_to: { id: 8, sender: ADA },
+    thread_root_id: 8,
+  });
   serve({
     conversation: detail({}),
-    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+    messages: [{ ...root, reply_count: 1 }, reply],
+    thread: [root, reply],
   });
 
   await renderScreen();
-  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await openMenu('Message from Grace Hopper: or 8 if easier');
   await fireEvent.press(screen.getByLabelText('Reply'));
-  await fireEvent.press(await screen.findByLabelText('Cancel reply'));
 
-  await fireEvent.changeText(screen.getByLabelText('Message'), 'unrelated');
-  await fireEvent.press(screen.getByLabelText('Send'));
+  // Named, because it isn't the head of the strand — otherwise the label would
+  // just restate the message at the top of the screen.
+  expect(await screen.findByText('Replying to Grace Hopper')).toBeTruthy();
 
-  await waitFor(() => expect(sendCalls()).toEqual([['unrelated', undefined]]));
+  await fireEvent.changeText(
+    screen.getByLabelText('Reply to thread'),
+    '8 works'
+  );
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+
+  await waitFor(() => expect(sendCalls()).toEqual([['8 works', 9]]));
 });
 
-it('keeps your draft when you start a reply', async () => {
-  // Unlike Edit, replying doesn't borrow the composer's text — what you were
-  // typing is very often exactly what you meant to reply with.
+it('browsing into a strand aims at the root and doesn’t grab the keyboard', async () => {
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 1,
+  });
   serve({
     conversation: detail({}),
-    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+    messages: [root],
+    thread: [
+      root,
+      message({
+        id: 9,
+        sender: GRACE,
+        text: 'or 8 if easier',
+        reply_to: { id: 8, sender: ADA },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+
+  const input = await screen.findByLabelText('Reply to thread');
+  // You came to read, so the keyboard stays down…
+  expect(input.props.autoFocus).toBe(false);
+  // …and there's no "Replying to" label, because the root is already the first
+  // thing on screen.
+  expect(screen.queryByText(/^Replying to/)).toBeNull();
+
+  await fireEvent.changeText(input, 'either works');
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+
+  await waitFor(() => expect(sendCalls()).toEqual([['either works', 8]]));
+});
+
+it('leaves the transcript’s composer alone while you reply', async () => {
+  // The strand has its own composer, so a half-written message in the thread
+  // screen is untouched by replying — and still there when you come back.
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({
+    conversation: detail({}),
+    messages: [only],
+    thread: [only],
   });
 
   await renderScreen();
@@ -1088,21 +1148,23 @@ it('keeps your draft when you start a reply', async () => {
   );
   await openMenu('Message from Ada Lovelace: dinner at 7?');
   await fireEvent.press(screen.getByLabelText('Reply'));
+  await screen.findByText('Thread');
+  await fireEvent.press(screen.getAllByLabelText('Close thread')[0]);
 
   expect(screen.getByLabelText('Message').props.value).toBe(
     'half-written thought'
   );
 });
 
-it('replying while editing leaves edit mode', async () => {
-  // Both are "the composer is aimed at an existing message". Showing a quote bar
-  // above an editor would leave it ambiguous what Save does.
+it('an edit in progress survives a trip into a strand', async () => {
+  // Two composers, two independent modes — replying no longer has to cancel an
+  // edit, because it no longer competes for the same input.
+  const mine = message({ id: 7, sender: MINE, text: 'teh quick fox' });
+  const theirs = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
   serve({
     conversation: detail({}),
-    messages: [
-      message({ id: 7, sender: MINE, text: 'teh quick fox' }),
-      message({ id: 8, sender: ADA, text: 'dinner at 7?' }),
-    ],
+    messages: [mine, theirs],
+    thread: [theirs],
   });
 
   await renderScreen();
@@ -1112,9 +1174,11 @@ it('replying while editing leaves edit mode', async () => {
 
   await openMenu('Message from Ada Lovelace: dinner at 7?');
   await fireEvent.press(screen.getByLabelText('Reply'));
+  await screen.findByText('Thread');
+  await fireEvent.press(screen.getAllByLabelText('Close thread')[0]);
 
-  expect(await screen.findByText('Replying to Ada Lovelace')).toBeTruthy();
-  expect(screen.queryByText('Editing message')).toBeNull();
+  expect(screen.getByText('Editing message')).toBeTruthy();
+  expect(screen.getByLabelText('Message').props.value).toBe('teh quick fox');
 });
 
 it('offers no Reply in a thread you can’t send to', async () => {

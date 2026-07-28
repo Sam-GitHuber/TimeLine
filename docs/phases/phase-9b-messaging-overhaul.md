@@ -618,9 +618,13 @@ takes the fetch:
    dep) — the gesture people reach for without thinking — plus **Reply** in the
    M1 menu for discoverability. The menu item list is already data
    (`messageActions()`), which is what it was built as for exactly this.
-8. Composer grows a quoted bar above the input with an ✕, alongside M1's
-   "Editing message" bar. The two are mutually exclusive states of one composer;
-   don't let both be set at once.
+8. **Reply opens the focused thread** (item 10) rather than aiming this screen's
+   composer at a message — including when the message has no replies yet, which
+   opens a strand one bubble long. *This replaced a "Replying to X" bar above the
+   transcript composer, which was built, used, and rejected:* it shows the one
+   message you're answering and none of the exchange around it, which is the same
+   limitation that made collapsed-quotes-only wrong. The transcript composer
+   therefore keeps its two modes (write, edit) and never competes with replying.
 9. A reply in the transcript renders a small collapsed quote above its bubble. A
    **root** renders a reply-count affordance ("3 replies") on the branch line.
 10. **The focused thread view** (`MessageThreadView.tsx`) — `expo-blur`'s
@@ -637,6 +641,10 @@ takes the fetch:
     reply. Long-press = the M1 menu. **Tap the reply-count affordance** = open the
     focused view. The bubble's own tap stays free. Do not make the bubble open the
     thread on tap.
+    - All three of swipe, the menu's Reply, and the count now *land in the same
+      place*; they differ only in what the strand's composer aims at and whether
+      the keyboard comes up. See `messaging.md` → *Every route to a reply goes
+      through the strand* for the table.
 
 **Two things this supersedes**, so a future session doesn't reinstate them: the
 original item 7 ("tapping a quote scrolls to the original if loaded, else no-op")
@@ -652,7 +660,17 @@ the context", and it needs neither.
 - [x] `messaging.md` documents `thread_root`, the thread endpoint, and the
       visibility rule above **with the reason the strict form was relaxed**.
 
-**Five things M3 settled that the plan above didn't anticipate:**
+**Six things M3 settled that the plan above didn't anticipate:**
+
+0. **Reply opens the strand; there is no reply mode on the transcript's
+   composer.** Built the conventional way first (a quote bar above the composer),
+   used it on a simulator, replaced it. The bar answers "which message is this
+   for" and nothing else, when the reason for the whole milestone was that a
+   reply needs its *conversation* visible. Once every route lands in the strand,
+   the transcript composer goes back to two modes and stops fighting edit mode
+   for the same input. Recorded first because it's the decision a future session
+   is most likely to reverse by accident, reaching for the familiar pattern.
+
 
 1. **A reply's quote is a second way into the thread, and it's load-bearing.**
    The plan had one entry point, the root's reply count. A test written for the

@@ -222,17 +222,41 @@ gap member "3 replies" on a message they can't see reveals how much happened
 while they were out, which is the same thing the 404-not-403 rules elsewhere
 refuse to answer.
 
-### Entering a thread
+### Every route to a reply goes through the strand
 
-Two ways in, because one isn't enough:
+**Replying opens the focused thread** — it does not aim the transcript's composer
+at a message. That holds even when the message has no replies yet, which opens a
+strand one bubble long, on purpose: you reply *inside* the conversation you're
+joining, with the thing you're answering on screen while you write it.
 
-- **A root shows "N replies"** beneath it — a branch off the bubble, the same
-  living line the feed's comment threads use.
-- **A reply's quote is itself the way in.** This isn't just convenience: when the
-  root is one the viewer was clipped out of, its replies stand alone in the
-  transcript with no root to carry a count, so without it the strand would be
-  unreachable for exactly the person whose view of it is already partial. That
-  view opens headless, saying so.
+The first cut did the other thing (a "Replying to X" bar above the transcript's
+composer, the way most messengers do it) and it was replaced after use. It shows
+you the one message you're answering and none of the exchange around it — the
+same limitation that made the collapsed-quote-only design wrong in the first
+place. Having built both, the strand is the answer to both.
+
+So there are three ways in, and they differ only in what the composer aims at:
+
+| Route | Composer answers | Keyboard |
+| --- | --- | --- |
+| **Reply** (swipe right, or the long-press menu) | the message you tapped | up |
+| **"N replies"** on a root | the root | down |
+| **A reply's quote** | the strand's root | down |
+
+Replying to a reply targets *that* reply, not the root. The server flattens it
+into the same strand either way, so this costs nothing and keeps the quote naming
+who you actually answered. The strand names the target above its composer only
+when it isn't the root — otherwise the label would restate the message already
+sitting at the top of the screen.
+
+**The quote being a way in isn't just convenience.** When the root is one the
+viewer was clipped out of, its replies stand alone in the transcript with no root
+to carry a count, so without it the strand would be unreachable for exactly the
+person whose view of it is already partial. It opens headless, saying so.
+
+Because the strand has its own composer, replying no longer competes with
+editing: a half-written message, or an edit in progress, is untouched by a trip
+into a thread and still there when you close it.
 
 A reply is otherwise an ordinary message: it bumps `updated_at`, counts toward
 unread, and [pushes](#push-notifications) like any other. Nothing about replying
@@ -556,11 +580,11 @@ keeps every scroll; `shouldStartReplySwipe` / `didTriggerReply` are exported pur
 functions so that rule is tested under Node even though the native plumbing can
 only be checked on a device.
 
-The composer gains a **third mode** beside compose and edit. Reply and edit are
-mutually exclusive — both are "the composer is aimed at an existing message", and
-a quote bar above an editor would leave it ambiguous what Save does. Unlike edit,
-starting a reply **doesn't touch your draft**: what you were typing is very often
-exactly what you meant to reply with.
+The transcript's composer keeps its **two** modes (write, edit) — replying
+happens in the strand's own composer, so the two never compete. An earlier cut
+gave this screen a third "Replying to X" mode; see
+[Every route to a reply goes through the strand](#every-route-to-a-reply-goes-through-the-strand)
+for why it went.
 
 **The focused view** (`MessageThreadView`) is an `expo-blur` `BlurView` over the
 transcript with the strand floating on it. The blur is doing real work rather

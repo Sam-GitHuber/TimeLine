@@ -1,9 +1,18 @@
 /**
  * The focused reply thread (Phase 9b M3).
  *
- * Tapping "3 replies" under a message blurs the transcript and brings that whole
- * mini-conversation forward: the root at the top, every reply under it, a
- * composer pinned below that sends straight back into the thread.
+ * Blurs the transcript and brings a whole mini-conversation forward: the root at
+ * the top, every reply under it, a composer pinned below that sends straight
+ * back into the thread.
+ *
+ * **Every route to a reply comes through here**, whether you tapped "3 replies"
+ * on a root, tapped a reply's quote, or hit Reply on a message that has no
+ * replies at all — the last of those opens a strand one bubble long, on purpose.
+ * You reply *inside* the conversation you're joining, with the thing you're
+ * answering on screen while you write it. The alternative (aim the transcript's
+ * composer at a message, show a quote bar) was built first and replaced: it
+ * shows you the one message you're answering and none of the exchange around it,
+ * which is the same limitation that made the collapsed-quote design wrong.
  *
  * **Why this rather than a quote bar and nothing else.** The cheaper pattern —
  * each reply carrying a collapsed quote of the one message it answers — was the
@@ -61,6 +70,8 @@ export function threadQueryKey(conversationId: number, rootId: number) {
 export function MessageThreadView({
   conversationId,
   rootId,
+  replyToId,
+  composing = false,
   meId,
   isGroup,
   canSend,
@@ -71,6 +82,15 @@ export function MessageThreadView({
   conversationId: number;
   /** The thread's root message id — what the transcript's branch links to. */
   rootId: number;
+  /**
+   * The message a reply will answer. Defaults to the root, which is right when
+   * you got here by browsing; **Reply** passes the message you actually tapped,
+   * so a reply to a reply quotes the person you meant rather than whoever
+   * happened to start the strand.
+   */
+  replyToId?: number;
+  /** Reply brought you here, so open with the keyboard already up. */
+  composing?: boolean;
   meId?: number;
   isGroup: boolean;
   canSend: boolean;
@@ -96,14 +116,18 @@ export function MessageThreadView({
   const messages = threadQuery.data?.results ?? [];
   const byId = new Map(messages.map((m) => [m.id, m]));
   const root = byId.get(rootId);
+  const target = replyToId ?? rootId;
+  // Named only when it isn't the head of the strand — otherwise the label would
+  // just restate the message sitting at the top of the screen.
+  const answering = target === rootId ? undefined : byId.get(target);
 
   function handleSend() {
     const value = text.trim();
     if (!value || sending) return;
-    // Replies from in here answer the *root*, which is what the flattening rule
-    // would resolve them to anyway — the server derives `thread_root` from
-    // whatever we send, so this is the honest target rather than a guess.
-    onSend(value, rootId);
+    // Whichever message got you here. The server flattens it into this strand
+    // either way (`thread_root` is derived, one level deep), so naming the real
+    // target costs nothing and keeps the quote honest.
+    onSend(value, target);
     setText('');
   }
 
@@ -193,32 +217,43 @@ export function MessageThreadView({
             pointerEvents="auto"
           >
             {canSend ? (
-              <View style={styles.composer}>
-                <TextInput
-                  value={text}
-                  onChangeText={setText}
-                  placeholder="Reply to thread…"
-                  placeholderTextColor={colors.inkFaint}
-                  multiline
-                  style={styles.input}
-                  accessibilityLabel="Reply to thread"
-                />
-                <Pressable
-                  onPress={handleSend}
-                  disabled={!text.trim() || sending}
-                  accessibilityRole="button"
-                  accessibilityLabel="Send reply"
-                  style={({ pressed }) => [
-                    styles.send,
-                    (!text.trim() || sending) && styles.sendDisabled,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text style={styles.sendLabel}>
-                    {sending ? 'Sending…' : 'Send'}
+              <>
+                {answering ? (
+                  <Text style={styles.answering} numberOfLines={1}>
+                    Replying to {answering.sender.display_name}
                   </Text>
-                </Pressable>
-              </View>
+                ) : null}
+                <View style={styles.composer}>
+                  <TextInput
+                    value={text}
+                    onChangeText={setText}
+                    placeholder="Reply to thread…"
+                    placeholderTextColor={colors.inkFaint}
+                    multiline
+                    // Reply put you here, so don't make the keyboard a second
+                    // tap. Browsing in from a reply count doesn't, because you
+                    // came to read.
+                    autoFocus={composing}
+                    style={styles.input}
+                    accessibilityLabel="Reply to thread"
+                  />
+                  <Pressable
+                    onPress={handleSend}
+                    disabled={!text.trim() || sending}
+                    accessibilityRole="button"
+                    accessibilityLabel="Send reply"
+                    style={({ pressed }) => [
+                      styles.send,
+                      (!text.trim() || sending) && styles.sendDisabled,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text style={styles.sendLabel}>
+                      {sending ? 'Sending…' : 'Send'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </>
             ) : (
               <Text style={styles.readonly}>
                 You can’t send messages in this conversation.
@@ -268,6 +303,13 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     paddingHorizontal: spacing.sm + 2,
     paddingTop: spacing.sm + 2,
+  },
+  answering: {
+    marginBottom: spacing.xs,
+    paddingHorizontal: spacing.xs,
+    fontSize: fontSize.sm - 1,
+    fontWeight: '600',
+    color: colors.inkSoft,
   },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
   input: {

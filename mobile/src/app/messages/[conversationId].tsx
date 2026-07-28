@@ -198,13 +198,26 @@ export default function ThreadScreen() {
   } | null>(null);
   // The message being corrected, if any — the composer doubles as the editor.
   const [editing, setEditing] = useState<Message | null>(null);
-  // The message being replied to, if any — the composer's third mode (M3).
-  // Mutually exclusive with `editing`: both are "the composer is aimed at an
-  // existing message", and letting them overlap would put a quote bar above an
-  // editor and leave it ambiguous what Save would do.
-  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
-  // The thread root whose focused view is open. Null = the transcript.
-  const [threadRootId, setThreadRootId] = useState<number | null>(null);
+  /**
+   * The open focused thread, or null for the transcript (M3).
+   *
+   * **Replying always opens the strand**, rather than aiming the transcript's
+   * composer at a message — even when the message has no replies yet and the
+   * strand is one bubble long. You reply *inside* the conversation you're
+   * joining, so the context you're answering is on screen while you type it,
+   * which was the whole reason for building the focused view. It also leaves the
+   * transcript's composer doing exactly two things (write, edit) instead of
+   * three.
+   *
+   * `replyToId` is the message you actually tapped Reply on, which is only the
+   * root when you got here by browsing — see `MessageThreadView`.
+   */
+  const [thread, setThread] = useState<{
+    rootId: number;
+    replyToId: number;
+    /** Reply put you here, so the keyboard should already be up. */
+    composing: boolean;
+  } | null>(null);
   // Whatever was half-typed when edit mode started, put back on cancel. Losing
   // a draft to a typo fix would be its own small betrayal.
   const [stashedDraft, setStashedDraft] = useState('');
@@ -284,12 +297,12 @@ export default function ThreadScreen() {
       // still in flight when you long-press → Edit would otherwise wipe the
       // prefilled text out from under you.
       if (!editing) setText('');
-      setReplyingTo(null);
       queryClient.invalidateQueries({ queryKey: ['messages', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
-      // The focused view reads its own query, so a reply sent from either place
-      // has to refresh it — otherwise the strand you're looking at is a poll
-      // cycle behind the transcript underneath it.
+      // The focused view reads its own query, so a reply sent from in there has
+      // to refresh it — otherwise the strand you're looking at is a poll cycle
+      // behind the transcript underneath it, and the reply you just sent
+      // wouldn't appear in the very view you sent it from.
       queryClient.invalidateQueries({ queryKey: ['thread', id] });
     },
   });
@@ -375,9 +388,8 @@ export default function ThreadScreen() {
   const busy = sendMutation.isPending || editMutation.isPending;
 
   /**
-   * Send a new message, save the one being edited, or send a reply — the one
-   * composer does all three, and its mode is whichever of `editing` /
-   * `replyingTo` is set.
+   * Send a new message, or save the one being edited — the transcript's composer
+   * does both. Replies are sent from inside the focused thread, not from here.
    */
   function handleSend() {
     const value = text.trim();
@@ -389,7 +401,7 @@ export default function ThreadScreen() {
       else editMutation.mutate({ messageId: editing.id, value });
       return;
     }
-    sendMutation.mutate({ value, replyToId: replyingTo?.id });
+    sendMutation.mutate({ value });
   }
 
   function startEditing(message: Message) {
@@ -397,8 +409,6 @@ export default function ThreadScreen() {
     // one message to another would otherwise overwrite the draft with the first
     // message's text — losing the very thing the stash exists to protect.
     if (!editing) setStashedDraft(text);
-    // Edit and reply are mutually exclusive composer modes.
-    setReplyingTo(null);
     setEditing(message);
     setText(message.text);
     editMutation.reset();
@@ -407,16 +417,24 @@ export default function ThreadScreen() {
   }
 
   /**
-   * Aim the composer at a message (M3) — from a right-swipe or the menu's Reply.
+   * Reply to a message (M3) — from a right-swipe or the menu's Reply.
    *
-   * Unlike editing, this doesn't touch the draft: what you were typing is very
-   * often *exactly* what you meant to reply with, so replacing or stashing it
-   * would be wrong in the common case.
+   * Opens the strand rather than aiming this screen's composer at the message,
+   * so you can read what you're joining while you write. A message with no
+   * replies yet opens a strand one bubble long, which is the point: the thread
+   * is where a reply lives, whether or not one exists yet.
+   *
+   * `rootId` is the thread's head, `replyToId` the message actually tapped — the
+   * two differ when you reply to something that's already a reply, and keeping
+   * both is what lets the quote name who you answered rather than who started
+   * the strand.
    */
   function startReplying(message: Message) {
-    if (editing) stopEditing();
-    setReplyingTo(message);
-    setTimeout(() => inputRef.current?.focus(), 0);
+    setThread({
+      rootId: message.thread_root_id ?? message.id,
+      replyToId: message.id,
+      composing: true,
+    });
   }
 
   /** Leave edit mode and put the pre-edit draft back in the composer. */
@@ -614,13 +632,16 @@ export default function ThreadScreen() {
                   }
                   onShowReactors={() => setReactorsFor(item.id)}
                   onReply={canSend ? () => startReplying(item) : undefined}
-                  // The thread's *root*, not the bubble you tapped: a root
-                  // opens its own strand, a reply opens the one it belongs to.
-                  // The server owns the flattening, so this is a read of it,
-                  // never a second copy of the rule.
-                  onOpenThread={() =>
-                    setThreadRootId(item.thread_root_id ?? item.id)
-                  }
+                  // Browsing into the strand rather than replying to a
+                  // particular message, so the composer aims at the root. The
+                  // thread's *root*, not the bubble you tapped: a root opens its
+                  // own strand, a reply opens the one it belongs to. The server
+                  // owns the flattening, so this is a read of it, never a second
+                  // copy of the rule.
+                  onOpenThread={() => {
+                    const rootId = item.thread_root_id ?? item.id;
+                    setThread({ rootId, replyToId: rootId, composing: false });
+                  }}
                   onLongPress={(anchor) =>
                     setMenuTarget({
                       message: item,
@@ -686,32 +707,6 @@ export default function ThreadScreen() {
                   </View>
                 ) : null}
 
-                {/* The reply bar (M3) — same slot as the editing bar and never
-                    shown with it, since the two are exclusive modes. It names
-                    who you're answering because in a group that's the thing
-                    you'd otherwise get wrong. */}
-                {replyingTo ? (
-                  <View style={styles.replyBar}>
-                    <View style={styles.editingText}>
-                      <Text style={styles.replyLabel}>
-                        Replying to {replyingTo.sender.display_name}
-                      </Text>
-                      <Text style={styles.editingOriginal} numberOfLines={1}>
-                        {replyingTo.is_deleted
-                          ? 'Message deleted'
-                          : replyingTo.text}
-                      </Text>
-                    </View>
-                    <Pressable
-                      onPress={() => setReplyingTo(null)}
-                      accessibilityRole="button"
-                      accessibilityLabel="Cancel reply"
-                      hitSlop={8}
-                    >
-                      <Text style={styles.editingCancel}>✕</Text>
-                    </Pressable>
-                  </View>
-                ) : null}
                 <View style={styles.composer}>
                   <TextInput
                     ref={inputRef}
@@ -776,11 +771,14 @@ export default function ThreadScreen() {
 
       {/* The focused thread (M3). Mounted at screen level, over everything —
           it blurs the transcript rather than replacing it, because you haven't
-          left the conversation, only narrowed to a strand of it. */}
-      {threadRootId != null ? (
+          left the conversation, only narrowed to a strand of it. Both replying
+          and browsing land here; `composing` is the difference. */}
+      {thread ? (
         <MessageThreadView
           conversationId={id}
-          rootId={threadRootId}
+          rootId={thread.rootId}
+          replyToId={thread.replyToId}
+          composing={thread.composing}
           meId={me?.pk}
           isGroup={isGroup}
           canSend={canSend}
@@ -788,7 +786,7 @@ export default function ThreadScreen() {
           onSend={(value, replyToId) =>
             sendMutation.mutate({ value, replyToId })
           }
-          onClose={() => setThreadRootId(null)}
+          onClose={() => setThread(null)}
         />
       ) : null}
 
@@ -943,25 +941,6 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm - 1,
     fontWeight: '700',
     color: colors.accentDeep,
-  },
-  // The reply bar reads as quieter than the editing bar on purpose: replying is
-  // an ordinary send, editing changes a record two people share.
-  replyBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
-    borderLeftWidth: 2,
-    borderLeftColor: colors.accent,
-    backgroundColor: colors.surface,
-  },
-  replyLabel: {
-    fontSize: fontSize.sm - 1,
-    fontWeight: '700',
-    color: colors.inkSoft,
   },
   editingOriginal: { fontSize: fontSize.sm, color: colors.inkSoft },
   editingCancel: {
