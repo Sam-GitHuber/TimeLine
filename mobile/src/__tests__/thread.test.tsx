@@ -116,6 +116,7 @@ const ME = {
   avatar_url: null,
   avatar_thumb: null,
   is_staff: false,
+  send_read_receipts: true,
 };
 
 const ADA = { id: 2, display_name: 'Ada Lovelace', avatar_thumb: null };
@@ -304,8 +305,197 @@ it('sends a message and clears the input', async () => {
       )
     ).toBe(true)
   );
-  // The input is a controlled component keyed off state cleared on success.
+  // The input is a controlled component keyed off state cleared on dispatch.
   await waitFor(() => expect(input.props.value).toBe(''));
+});
+
+// --- Phase 9b M4: optimistic send + read receipts ----------------------------
+
+it('shows the message immediately, before the server has it', async () => {
+  // The heart of the milestone. On a polling app the round trip is the entire
+  // perceived latency of sending, and this is what removes it: the bubble is
+  // there with a clock on it the instant you tap Send.
+  let release: () => void = () => {};
+  const inFlight = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      await inFlight;
+    }
+    return base(url, init);
+  });
+
+  await renderScreen();
+  await fireEvent.changeText(
+    await screen.findByLabelText('Message'),
+    'Hello there'
+  );
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  // On screen while the POST is still open, wearing the clock.
+  expect(await screen.findByText('Hello there')).toBeTruthy();
+  expect(screen.getByLabelText('Sending')).toBeTruthy();
+  // And no action menu on it: every action needs a server id it hasn't got.
+  await fireEvent(
+    screen.getByLabelText('Your message: Hello there'),
+    'longPress'
+  );
+  expect(screen.queryByText('Delete')).toBeNull();
+
+  release();
+  await waitFor(() => expect(screen.queryByLabelText('Sending')).toBeNull());
+});
+
+it('keeps a failed message in place with Retry and Discard', async () => {
+  // Never drop text somebody typed. A failed send stays exactly where it was,
+  // dimmed, and the two ways out are on the bubble itself.
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      return jsonResponse({ detail: 'Nope.' }, 500);
+    }
+    return base(url, init);
+  });
+
+  await renderScreen();
+  await fireEvent.changeText(await screen.findByLabelText('Message'), 'lost?');
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  expect(screen.getByText('lost?')).toBeTruthy();
+  expect(screen.getByLabelText('Try sending again')).toBeTruthy();
+
+  // Discard is the *only* way it leaves, and it has to be the user's tap.
+  await fireEvent.press(screen.getByLabelText('Discard this message'));
+  await waitFor(() => expect(screen.queryByText('lost?')).toBeNull());
+});
+
+it('lets you send again while one is still in flight', async () => {
+  // The composer no longer blocks on a send. Two quick messages in a row is the
+  // ordinary case in a chat, and waiting for the first is exactly the lag this
+  // milestone exists to remove.
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  const base = mockFetch.getMockImplementation()!;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      await gate;
+    }
+    return base(url, init);
+  });
+
+  await renderScreen();
+  const input = await screen.findByLabelText('Message');
+  await fireEvent.changeText(input, 'first');
+  await fireEvent.press(screen.getByLabelText('Send'));
+  await fireEvent.changeText(input, 'second');
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  expect(await screen.findByText('first')).toBeTruthy();
+  expect(screen.getByText('second')).toBeTruthy();
+  expect(screen.getAllByLabelText('Sending')).toHaveLength(2);
+
+  // Let both settle, so the test doesn't leave two requests pending in the
+  // shared mock for whatever runs next.
+  release();
+  await waitFor(() => expect(screen.queryByLabelText('Sending')).toBeNull());
+});
+
+it('shows two ticks once everyone has read your message', async () => {
+  const sent = '2026-07-22T10:00:00Z';
+  serve({
+    conversation: detail({
+      participants: [
+        {
+          id: ME.pk,
+          display_name: ME.display_name,
+          avatar_thumb: null,
+          status: 'active',
+          active_since: '2026-07-01T00:00:00Z',
+          last_read_at: '2026-07-22T11:00:00Z',
+        },
+        {
+          ...ADA,
+          status: 'active',
+          active_since: '2026-07-01T00:00:00Z',
+          last_read_at: '2026-07-22T11:00:00Z',
+        },
+      ],
+    }),
+    messages: [message({ id: 1, sender: MINE, text: 'read me', created_at: sent })],
+  });
+
+  await renderScreen();
+  expect(await screen.findByLabelText('Read')).toBeTruthy();
+});
+
+it('shows one tick while they haven’t caught up', async () => {
+  const sent = '2026-07-22T10:00:00Z';
+  serve({
+    conversation: detail({
+      participants: [
+        {
+          ...ADA,
+          status: 'active',
+          active_since: '2026-07-01T00:00:00Z',
+          // Before the message: they've been in the thread, just not since.
+          last_read_at: '2026-07-22T09:00:00Z',
+        },
+      ],
+    }),
+    messages: [message({ id: 1, sender: MINE, text: 'unread', created_at: sent })],
+  });
+
+  await renderScreen();
+  expect(await screen.findByLabelText('Sent')).toBeTruthy();
+  expect(screen.queryByLabelText('Read')).toBeNull();
+});
+
+it('shows no ticks at all when you’ve turned receipts off', async () => {
+  // The server withholds every marker when *you* opt out, so there's nothing to
+  // draw. A column frozen on one tick would read as "nobody ever opens these",
+  // which is a worse lie than showing nothing.
+  serve({
+    conversation: detail({
+      participants: [{ ...ADA, status: 'active' }],
+    }),
+    messages: [message({ id: 1, sender: MINE, text: 'quiet' })],
+  });
+
+  await renderScreen();
+  await screen.findByText('quiet');
+  expect(screen.queryByLabelText('Sent')).toBeNull();
+  expect(screen.queryByLabelText('Read')).toBeNull();
+});
+
+it('never puts a tick on someone else’s message', async () => {
+  // A tick reports what *your* message did. On an incoming one it would be
+  // telling you that you read it, which you plainly know.
+  serve({
+    conversation: detail({
+      participants: [
+        {
+          ...ADA,
+          status: 'active',
+          active_since: '2026-07-01T00:00:00Z',
+          last_read_at: '2026-07-22T11:00:00Z',
+        },
+      ],
+    }),
+    messages: [message({ id: 1, sender: ADA, text: 'theirs' })],
+  });
+
+  await renderScreen();
+  await screen.findByText('theirs');
+  expect(screen.queryByLabelText('Read')).toBeNull();
+  expect(screen.queryByLabelText('Sent')).toBeNull();
 });
 
 it('mutes the thread from the header (#118)', async () => {
@@ -1206,10 +1396,13 @@ it('keeps the transcript’s draft when a reply is actually sent', async () => {
   );
 });
 
-it('keeps a failed reply in the box and says why', async () => {
-  // Clearing on dispatch rather than on success loses the words outright when
-  // the send fails, and the transcript's error line is behind the blur where
-  // nobody can read it. The strand has to answer for its own send.
+it('keeps a failed reply on screen, with a way to send it again', async () => {
+  // The words a person typed are never dropped on their behalf — but since M4
+  // they're kept as a *failed bubble in the strand* rather than as text sitting
+  // in the composer. That's the better home for two reasons: the bubble is
+  // where the failure actually happened, and it still works when two replies
+  // are in flight and only one of them fell over. The composer clears, so the
+  // same message can't be sent twice by accident.
   const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
   serve({
     conversation: detail({}),
@@ -1231,13 +1424,47 @@ it('keeps a failed reply in the box and says why', async () => {
   await fireEvent.changeText(input, 'yes, see you');
   await fireEvent.press(screen.getByLabelText('Send reply'));
 
-  expect(
-    await screen.findByText('You can no longer message this person.')
-  ).toBeTruthy();
-  // Still there to retry or copy out of — the words are the user's, not ours.
-  expect(screen.getByLabelText('Reply to thread').props.value).toBe(
+  // The reply is still on screen, in the strand, marked as not sent.
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  expect(screen.getAllByText('yes, see you').length).toBeGreaterThan(0);
+  expect(screen.getByLabelText('Try sending again')).toBeTruthy();
+  // And the composer is empty, so tapping Send again can't duplicate it.
+  expect(screen.getByLabelText('Reply to thread').props.value).toBe('');
+});
+
+it('sends a failed reply again when you retry it', async () => {
+  // Retry is the whole point of keeping the failed bubble — without it the
+  // message is preserved but stuck, and the only way out is retyping it.
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({ conversation: detail({}), messages: [only], thread: [only] });
+  const ok = mockFetch.getMockImplementation()!;
+  let failNext = true;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST' && failNext) {
+      failNext = false;
+      return jsonResponse({ detail: 'Something went wrong.' }, 500);
+    }
+    return ok(url, init);
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+  await fireEvent.changeText(
+    await screen.findByLabelText('Reply to thread'),
     'yes, see you'
   );
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+  await screen.findByText('Not sent');
+
+  await fireEvent.press(screen.getByLabelText('Try sending again'));
+
+  // Two POSTs for one message: the failure and the retry. The second lands, so
+  // the failed state clears rather than the bubble sticking around beside a
+  // duplicate.
+  await waitFor(() => expect(sendCalls()).toHaveLength(2));
+  expect(sendCalls()[1]).toEqual(['yes, see you', 8]);
+  await waitFor(() => expect(screen.queryByText('Not sent')).toBeNull());
 });
 
 it('offers no Reply in a thread you can’t send to', async () => {

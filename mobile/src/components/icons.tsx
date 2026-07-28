@@ -121,6 +121,67 @@ export function KebabIcon({ color, size = 20 }: IconProps) {
   );
 }
 
+/**
+ * The send-state glyph beside your own message's timestamp (Phase 9b M4):
+ * a clock while it's in flight, one tick once the server has it, two once
+ * everyone it was for has read it.
+ *
+ * **Three states, not four** — see `src/readReceipts.ts`. There is no
+ * "delivered" tick because nothing in our stack honestly reports one.
+ *
+ * Drawn at this size rather than reused from a set so the two ticks nest with a
+ * consistent overlap: at 14px a stock check glyph doubled up reads as a smudge.
+ * The strokes are deliberately lighter than the tab icons' — this sits inside a
+ * bubble beside 11px text and must not out-shout the message.
+ */
+export function SendStateIcon({
+  state,
+  color,
+  size = 14,
+}: IconProps & { state: 'sending' | 'sent' | 'read' }) {
+  if (state === 'sending') {
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Circle cx={12} cy={12} r={8.5} stroke={color} strokeWidth={2} />
+        {/* Hands at roughly ten-past-ten: legible as a clock even at 14px,
+            where a vertical-plus-horizontal pair just reads as a cross. */}
+        <Path
+          d="M12 7.5V12l3 2"
+          stroke={color}
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </Svg>
+    );
+  }
+  return (
+    <Svg
+      width={state === 'read' ? size * 1.4 : size}
+      height={size}
+      viewBox={state === 'read' ? '0 0 34 24' : '0 0 24 24'}
+      fill="none"
+    >
+      <Path
+        d="M4 13l5 5L20 7"
+        stroke={color}
+        strokeWidth={2.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {state === 'read' ? (
+        <Path
+          d="M14 13l5 5L30 7"
+          stroke={color}
+          strokeWidth={2.4}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ) : null}
+    </Svg>
+  );
+}
+
 /** A toothed cog — settings (the E4b entry point on your own profile). */
 export function SettingsIcon({ color, size = 24 }: IconProps) {
   return (

@@ -31,6 +31,13 @@
  * its edge with a negative margin would both alter the measurement and duplicate
  * the pills over the real ones.
  *
+ * **Send state** (Phase 9b M4) shows on your own bubbles: a clock while the
+ * message is still in the outbox, one tick once the server has it, two accented
+ * ticks once everyone it was for has read it. A send that *failed* keeps its
+ * place, dimmed, with Retry and Discard beneath — text someone typed is never
+ * thrown away on their behalf. What "read" means lives in `src/readReceipts.ts`,
+ * not here; this component only draws what it's handed.
+ *
  * **Replies** (Phase 9b M3) add two things. A reply carries a collapsed quote
  * *inside* the bubble (`QuotedMessage`, and so inside `BubbleBody`, so the menu's
  * preview shows it), and a message with replies grows a "3 replies" branch
@@ -59,8 +66,10 @@ import * as Haptics from 'expo-haptics';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from './Avatar';
+import { SendStateIcon } from './icons';
 import type { BubbleAnchor } from './MessageActionMenu';
 import { measureInWindow } from '@/measure';
+import type { SendState } from '@/readReceipts';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message, Reaction } from '@/types';
 import { formatRelativeTime } from '@/utils';
@@ -77,12 +86,20 @@ export function BubbleBody({
   message,
   mine,
   quoted,
+  status,
   onQuotePress,
 }: {
   message: Message;
   mine: boolean;
   /** The message this one replies to, if the caller could resolve it. */
   quoted?: Message;
+  /**
+   * The send state to show beside the timestamp (Phase 9b M4). Only ever passed
+   * for your own messages — a tick on someone else's would be meaningless — and
+   * omitted entirely when receipts can't be shown, so the row of permanent
+   * single ticks that would otherwise imply "nobody reads these" never appears.
+   */
+  status?: SendState;
   /**
    * Open the thread this reply belongs to. Omitted by the action menu's preview
    * — a preview is a picture of the bubble, not a working copy of it.
@@ -100,13 +117,48 @@ export function BubbleBody({
       <Text style={[styles.text, mine ? styles.mineText : styles.theirsText]}>
         {message.text}
       </Text>
-      <Text style={[styles.time, mine ? styles.mineTime : styles.theirsTime]}>
-        {formatRelativeTime(message.created_at)}
-        {/* An edit is disclosed, never silent: a thread is a shared record, and
-            quietly changing what someone already read would make it worthless
-            as one. */}
-        {message.is_edited ? ' · Edited' : ''}
-      </Text>
+      {/* The meta line: time, the edited marker, then the tick. A row rather
+          than one string because the tick is a glyph, and it has to sit on the
+          text's baseline without the emoji-ish drift a font fallback gives. */}
+      <View style={styles.meta}>
+        <Text style={[styles.time, mine ? styles.mineTime : styles.theirsTime]}>
+          {formatRelativeTime(message.created_at)}
+          {/* An edit is disclosed, never silent: a thread is a shared record, and
+              quietly changing what someone already read would make it worthless
+              as one. */}
+          {message.is_edited ? ' · Edited' : ''}
+        </Text>
+        {status && status !== 'failed' ? <SendTick status={status} /> : null}
+      </View>
+    </View>
+  );
+}
+
+/**
+ * The tick (Phase 9b M4). Only one of the three states is worth noticing, so
+ * only one is drawn at full strength: **read** goes to solid white against the
+ * accent fill, while sending and sent sit at the same muted opacity as the
+ * timestamp beside them. A tick that shouts on every message is a tick nobody
+ * reads.
+ *
+ * It's always on your own bubble — which is always the accent fill, including
+ * in the copy the action menu re-renders — so the colours need no near/far
+ * pairing of their own.
+ */
+function SendTick({ status }: { status: Exclude<SendState, 'failed'> }) {
+  return (
+    <View
+      accessibilityRole="image"
+      accessibilityLabel={
+        status === 'sending' ? 'Sending' : status === 'read' ? 'Read' : 'Sent'
+      }
+      style={styles.tick}
+    >
+      <SendStateIcon
+        state={status}
+        color={status === 'read' ? '#ffffff' : 'rgba(255,255,255,0.7)'}
+        size={13}
+      />
     </View>
   );
 }
@@ -245,25 +297,36 @@ export function MessageBubble({
   mine,
   showSender,
   quoted,
+  status,
   onLongPress,
   onShowReactors,
   onOpenThread,
+  onRetry,
+  onDiscard,
 }: {
   message: Message;
   mine: boolean;
   showSender: boolean;
   /** The message this one replies to, if the caller could resolve it. */
   quoted?: Message;
+  /** Its send state (Phase 9b M4) — your own messages only; see `BubbleBody`. */
+  status?: SendState;
   /**
    * Opens the action menu, anchored to this bubble's rect on screen. Omitted
    * inside the focused thread view, which is deliberately menu-less — see
-   * `MessageThreadView`.
+   * `MessageThreadView`. Also omitted while a message is still in the outbox:
+   * every action on it (edit, delete, react, report) needs a server id it
+   * hasn't got yet.
    */
   onLongPress?: (anchor: BubbleAnchor) => void;
   /** Open "who reacted" for this message — what tapping a pill does. */
   onShowReactors?: () => void;
   /** Open the focused thread view — what the reply-count affordance does. */
   onOpenThread?: () => void;
+  /** Send it again — offered under a `failed` bubble, with `onDiscard`. */
+  onRetry?: () => void;
+  /** Give up on a failed send and drop it. The only way text ever leaves. */
+  onDiscard?: () => void;
 }) {
   const bubbleRef = useRef<View>(null);
   const reactions = message.reactions ?? [];
@@ -310,17 +373,45 @@ export function MessageBubble({
                 : `Message from ${message.sender.display_name}: ${message.text}`
             }
             accessibilityHint="Press and hold for message actions"
-            style={styles.bubbleWrap}
+            style={[styles.bubbleWrap, status === 'failed' && styles.unsent]}
           >
             <BubbleBody
               message={message}
               mine={mine}
               quoted={quoted}
+              status={status}
               onQuotePress={onOpenThread}
             />
           </Pressable>
         )}
       </View>
+
+      {/* A failed send stays exactly where you left it, dimmed, with the two
+          ways out beside the reason. **It is never dropped for you** — the text
+          is something a person typed, and silently losing it is the one
+          outcome this whole path exists to prevent. Discard is right there so
+          "get rid of it" is still one tap, but it has to be your tap. */}
+      {status === 'failed' ? (
+        <View style={[styles.failedRow, styles.alignEnd]}>
+          <Text style={styles.failedText}>Not sent</Text>
+          <Pressable
+            onPress={onRetry}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Try sending again"
+          >
+            <Text style={styles.failedAction}>Retry</Text>
+          </Pressable>
+          <Pressable
+            onPress={onDiscard}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Discard this message"
+          >
+            <Text style={styles.failedDiscard}>Discard</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {/* Rendered on a tombstone too. A reaction someone left is a thing that
           happened, and silently dropping it when the message is deleted would
@@ -391,9 +482,36 @@ const styles = StyleSheet.create({
   text: { fontSize: fontSize.base - 1, lineHeight: 21 },
   mineText: { color: '#ffffff' },
   theirsText: { color: colors.ink },
-  time: { marginTop: 2, fontSize: 11 },
+  meta: {
+    marginTop: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  time: { fontSize: 11 },
   mineTime: { color: 'rgba(255,255,255,0.7)' },
   theirsTime: { color: colors.inkFaint },
+  // Nudged down a hair: the glyph's optical centre sits above its box, so
+  // aligning the boxes leaves the tick floating over the timestamp's baseline.
+  tick: { marginTop: 1 },
+  // A send that hasn't landed is faded rather than restyled — it's the same
+  // message, just not there yet, and a different colour would read as a
+  // different kind of thing.
+  unsent: { opacity: 0.55 },
+  failedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.sm,
+  },
+  failedText: { fontSize: fontSize.sm - 1, color: colors.danger },
+  failedAction: {
+    fontSize: fontSize.sm - 1,
+    fontWeight: '700',
+    color: colors.accent,
+  },
+  failedDiscard: { fontSize: fontSize.sm - 1, color: colors.inkFaint },
   // Pulled up over the bubble's lower edge, the standard chat treatment: the
   // pill reads as attached to that message rather than as a row of its own.
   pillRow: {

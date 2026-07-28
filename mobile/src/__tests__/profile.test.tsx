@@ -102,6 +102,7 @@ function resetMe() {
     avatar_url: null,
     avatar_thumb: null,
     is_staff: false,
+    send_read_receipts: true,
   };
 }
 

@@ -56,6 +56,23 @@ class User(AbstractUser):
         upload_to=avatar_thumb_upload_to, null=True, blank=True
     )
 
+    # Whether *you* share read receipts in messaging (Phase 9b M4).
+    #
+    # **It lives here, not in ``NotificationPreference``**, and that placement is
+    # deliberate rather than convenient: a preference row is keyed by a
+    # notification *kind*, and there is no "someone read your message"
+    # notification to hang this off — nothing is ever created, sent or buzzed.
+    # Same reasoning that put ``Participant.muted_at`` on the participant rather
+    # than in the preference table. (Contrast the M8 mentions-override setting,
+    # which *is* a notification kind and so does belong there.)
+    #
+    # **Default on.** It's what people arriving from any mainstream messenger
+    # expect, and a feature nobody discovers is a feature nobody has. Turning it
+    # off is **symmetric and enforced server-side**: your read marker is left out
+    # of everyone else's payload *and* theirs out of yours — you stop reporting
+    # and stop being told, in one switch. See ``docs/reference/messaging.md``.
+    send_read_receipts = models.BooleanField(default=True)
+
     # When this person accepted the Terms of Service + privacy policy (Phase 7).
     # Stamped at sign-up (registration is gated on ticking the box) — a defensible
     # record of consent, which we need as a data controller under UK GDPR. Nullable

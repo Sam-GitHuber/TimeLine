@@ -574,6 +574,81 @@ def decorate_conversations(conversations, user):
     return conversations
 
 
+def attach_read_receipts(convo, viewer):
+    """Attach each participant's read state to ``convo.participant_rows``
+    (Phase 9b M4), for the conversation **detail** payload only.
+
+    Two timestamps per member, and they are what the clients' ticks are computed
+    from — ``last_read_at`` (their ``ConversationRead`` marker, ``None`` if they
+    have never opened the thread) and ``active_since`` (the start of their
+    *currently open* participation interval).
+
+    🔒 **The setting is symmetric and enforced here, not in the client.** A row's
+    receipt is attached only when **both** the viewer and that member have
+    ``send_read_receipts`` on, so turning it off means your marker is absent from
+    everyone else's payload *and* theirs from yours. The client must never
+    *receive* what the setting says it shouldn't have — hiding a tick that was
+    rendered from data already on the device would be theatre. Absent, not
+    ``None``: see ``ParticipantSerializer`` for why that distinction matters.
+
+    **Why ``active_since`` and not the raw interval history.** A tick has to mean
+    "everyone this message was *for* has read it", and someone added to a group
+    yesterday was not in the audience for last week's message — without their
+    join time the client would either wait on them forever (a tick that never
+    completes) or credit them with reading something they were never shown. The
+    open interval's start is the smallest fact that answers that, and it's
+    already visible-in-kind: active members are a clique who can all see the
+    member list.
+
+    It is deliberately **not** a second copy of ``visible_messages_for``: the
+    ticks are a *display* heuristic and nothing about access control leans on
+    them. The one place the two diverge is a member who left and came back — the
+    client sees only their current interval, so a message from before their gap
+    doesn't wait on them. That's unknowable anyway (their read marker moved on
+    while they were away) and it errs toward not stalling the tick. The
+    authoritative predicate stays where it belongs, in
+    ``enqueue_message_pushes`` and ``visible_messages_for``.
+    """
+    rows = getattr(convo, "participant_rows", None)
+    if not rows:
+        return convo
+    # A ``pending`` viewer is in the waiting room and can't read a single message
+    # here, so they get no read state either. It isn't message content, but "who
+    # has been active in this thread and when" is still activity in a
+    # conversation they haven't been let into — and the locked panel has nothing
+    # to render it with anyway.
+    if getattr(convo, "my_status", None) != ACTIVE_P:
+        return convo
+    # Your own switch is checked once, up front: with it off there is nothing to
+    # attach to anybody, including yourself.
+    if not viewer.send_read_receipts:
+        return convo
+
+    sharing = [row for row in rows if row.user.send_read_receipts]
+    if not sharing:
+        return convo
+
+    read_at_by_user = dict(
+        ConversationRead.objects.filter(
+            conversation=convo, user_id__in=[row.user_id for row in sharing]
+        ).values_list("user_id", "last_read_at")
+    )
+    # The open interval per participant — ``ended_at IS NULL`` is what "active
+    # right now" means in the interval model, so a member who is between spans
+    # simply has no start to report and is left out of the audience.
+    open_since = dict(
+        ParticipantInterval.objects.filter(
+            participant__in=sharing, ended_at__isnull=True
+        ).values_list("participant_id", "started_at")
+    )
+    for row in sharing:
+        row._read_receipt = {
+            "last_read_at": read_at_by_user.get(row.user_id),
+            "active_since": open_since.get(row.id),
+        }
+    return convo
+
+
 def visible_posts(user, author=None, connected_ids=None, group=None):
     """The posts ``user`` is allowed to see on a timeline, newest-first.
 
@@ -2137,6 +2212,13 @@ class ConversationDetailView(generics.RetrieveAPIView):
     load/refresh, not only when arriving from the list. Participant-scoped —
     404 if you're not a member at all, or (direct only) if the pair is blocked
     either way.
+
+    It's also where **read receipts** live (Phase 9b M4): each participant's
+    read marker rides on the ``participants`` list here and nowhere else, so the
+    ticks cost one small field on a payload the thread screen already loads —
+    rather than anything per message. The conversation *list* deliberately
+    doesn't carry them: a row shows an unread count, not who's read what, and
+    the extra queries would be paid once per row.
     """
 
     serializer_class = ConversationSerializer
@@ -2147,6 +2229,7 @@ class ConversationDetailView(generics.RetrieveAPIView):
         decorate_conversations([convo], user)
         if convo.my_status is None:
             raise NotFound()
+        attach_read_receipts(convo, user)
         if convo.kind == Conversation.Kind.DIRECT:
             other = convo.other_participant(user)
             if is_blocked_between(user, other):

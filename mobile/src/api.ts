@@ -386,6 +386,26 @@ export const api = {
   },
 
   /**
+   * Turn read receipts on or off (Phase 9b M4).
+   *
+   * Its own call rather than a field on `updateProfile`, because that one is
+   * multipart (it can carry an avatar) and a boolean over multipart is a string
+   * the server then has to un-guess. Same endpoint, JSON body — PATCH, so
+   * nothing else on the profile is touched.
+   *
+   * The switch is **symmetric and enforced server-side**: with it off your read
+   * marker is withheld from everyone else's payload and theirs from yours. So
+   * flipping it changes what the conversation-detail endpoint *sends*, which is
+   * why the caller has to invalidate open conversation queries rather than
+   * hiding ticks locally.
+   */
+  setReadReceipts: (enabled: boolean) =>
+    request<User>('/api/auth/user/', {
+      method: 'PATCH',
+      body: { send_read_receipts: enabled },
+    }),
+
+  /**
    * A single person's public profile by numeric id — the header for `/u/[id]`.
    *
    * Returns `connection_status` and `is_blocked` relative to you, so the screen

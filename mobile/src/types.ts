@@ -21,6 +21,14 @@ export type User = {
   avatar_thumb: string | null;
   /** Read-only; gates maintainer-only UI. Not a security control. */
   is_staff: boolean;
+  /**
+   * Whether you share read receipts in messaging (Phase 9b M4). Default on.
+   *
+   * Symmetric: off means your read marker is withheld from everyone else *and*
+   * theirs from you. It lives on the user rather than in the notification
+   * preferences because nothing is ever notified — see messaging.md.
+   */
+  send_read_receipts: boolean;
 };
 
 /**
@@ -184,6 +192,31 @@ export type Participant = {
   display_name: string;
   avatar_thumb: string | null;
   status: 'active' | 'pending';
+  /**
+   * When they last marked this thread read (Phase 9b M4) — the conversation
+   * **detail** payload only, and what the ticks are computed from.
+   *
+   * 🔒 **Absent and `null` mean different things**, which is why this is
+   * optional rather than nullable-only:
+   *   - *key missing* — either you or they have read receipts turned off, so
+   *     the server didn't send it. The setting is symmetric and enforced there,
+   *     not here; the client never receives what it isn't entitled to.
+   *   - *`null`* — they share receipts and have simply never opened the thread.
+   *
+   * Read it through `src/readReceipts.ts`, never inline: treating a missing key
+   * as "hasn't read" would show a stalled tick for someone who opted out.
+   */
+  last_read_at?: string | null;
+  /**
+   * The start of their *current* stretch of membership — gated by the same
+   * setting as `last_read_at`, and `null` when they're between intervals (a
+   * member who's dropped to pending can't read at all right now).
+   *
+   * It's what stops a late arrival stalling the tick on every message sent
+   * before they were added: someone who joined yesterday was not in the
+   * audience for last week's message, so they aren't waited on for it.
+   */
+  active_since?: string | null;
 };
 
 /**

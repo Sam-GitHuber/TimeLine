@@ -1,4 +1,5 @@
 import NotificationPreferencesSection from "../components/NotificationPreferencesSection.jsx";
+import PrivacySection from "../components/PrivacySection.jsx";
 import ChangePasswordSection from "../components/ChangePasswordSection.jsx";
 import DeleteAccountSection from "../components/DeleteAccountSection.jsx";
 
@@ -14,6 +15,8 @@ export default function SettingsPage() {
       </h1>
 
       <NotificationPreferencesSection />
+
+      <PrivacySection />
 
       <ChangePasswordSection />
 

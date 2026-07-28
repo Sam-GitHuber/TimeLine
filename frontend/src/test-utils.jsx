@@ -13,6 +13,8 @@ export const fakeUser = {
   bio: "",
   avatar_thumb: null,
   is_staff: false,
+  // Default on, like the server's (Phase 9b M4).
+  send_read_receipts: true,
 };
 
 // Render `ui` inside a router, an auth context, and a fresh QueryClient (pages

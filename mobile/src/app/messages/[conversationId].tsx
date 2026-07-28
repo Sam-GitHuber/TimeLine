@@ -58,6 +58,10 @@ import { MessageThreadView } from '@/components/MessageThreadView';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
 import { ReactorsSheet, reactorsQueryKey } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
+import type { Outgoing } from '@/outbox';
+import { asMessage, newOutgoing } from '@/outbox';
+import type { SendState } from '@/readReceipts';
+import { readStateFor, receiptsVisible } from '@/readReceipts';
 import {
   colors,
   emojiPickerTheme,
@@ -65,7 +69,7 @@ import {
   radius,
   spacing,
 } from '@/theme';
-import type { Message, Paginated, Reaction } from '@/types';
+import type { Author, Message, Paginated, Reaction } from '@/types';
 
 /** The composer bar's base vertical padding, before the home-indicator inset. */
 const COMPOSER_PAD = spacing.sm + 2;
@@ -107,6 +111,37 @@ function patchReactions(
         : page
     ),
   };
+}
+
+/** What one send needs to carry, including which outbox entry it belongs to. */
+type SendVars = { value: string; replyToId?: number; tempId: number };
+
+/**
+ * Put an accepted message into the cached thread, if it isn't there already.
+ *
+ * Bridges the gap between "the POST returned" and "the refetch has landed": for
+ * that second or two the outbox entry is gone and the poll hasn't run, so
+ * without this the bubble would blink out and back. Appended to the last page
+ * because the transcript is oldest-first and this is, by construction, the
+ * newest thing in it.
+ *
+ * The guard matters — a poll can land *between* the response and this write, so
+ * the message may already be present, and appending blind would show it twice.
+ */
+function appendMessage(
+  data: InfiniteData<Paginated<Message>, string> | undefined,
+  message: Message
+) {
+  if (!data?.pages.length) return data;
+  if (data.pages.some((page) => page.results.some((m) => m.id === message.id))) {
+    return data;
+  }
+  const pages = data.pages.map((page, index) =>
+    index === data.pages.length - 1
+      ? { ...page, results: [...page.results, message] }
+      : page
+  );
+  return { ...data, pages };
 }
 
 /**
@@ -222,6 +257,12 @@ export default function ThreadScreen() {
   // a draft to a typo fix would be its own small betrayal.
   const [stashedDraft, setStashedDraft] = useState('');
   const [reportingId, setReportingId] = useState<number | null>(null);
+  /**
+   * Messages sent but not yet accepted by the server (M4). Rendered after the
+   * loaded ones, oldest-first like everything else. See `Outgoing` for why this
+   * isn't an optimistic write into the query cache.
+   */
+  const [outbox, setOutbox] = useState<Outgoing[]>([]);
   // The message whose full emoji grid is open, and the one whose reactor list is.
   // Both are separate from `menuTarget` because the menu closes on its way into
   // either — `rn-emoji-keyboard` is itself a Modal, and two visible modals stack
@@ -260,8 +301,64 @@ export default function ThreadScreen() {
     if (hasNextPage && !isFetchingNextPage) fetchNextPage();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  const messages = messagesQuery.data?.pages.flatMap((page) => page.results) ?? [];
-  const messageCount = messages.length;
+  const loaded = messagesQuery.data?.pages.flatMap((page) => page.results) ?? [];
+  const messageCount = loaded.length;
+
+  /**
+   * What the list renders: everything the server has, then everything it
+   * doesn't yet (M4). Concatenating rather than merging by timestamp is
+   * correct *and* simpler — an unsent message is by definition newer than every
+   * accepted one, since it hasn't been accepted.
+   */
+  const meAsAuthor: Author = {
+    id: me?.pk ?? -1,
+    display_name: me?.display_name ?? '',
+    avatar_thumb: me?.avatar_thumb ?? null,
+  };
+  const messages = [
+    ...loaded,
+    ...outbox.map((entry) => asMessage(entry, meAsAuthor)),
+  ];
+  const outboxById = new Map(outbox.map((entry) => [entry.tempId, entry]));
+
+  /**
+   * Read receipts (M4) — the participants carry them, so the ticks come from
+   * the *detail* query, not the message list.
+   *
+   * `showReceipts` being false means **you** turned them off, and the whole
+   * column of ticks disappears rather than freezing on "sent": a permanent
+   * single tick would read as "nobody is ever reading these", where showing
+   * nothing says the true thing, which is that you asked out of this.
+   */
+  const participants = detail?.participants ?? [];
+  const showReceipts = receiptsVisible(participants);
+
+  /**
+   * The tick (or clock) for one bubble — the single answer for both the
+   * transcript and the strand, so a reply can't show one state in one place and
+   * another in the other.
+   *
+   * Never on someone else's message: a tick reports what *your* message did.
+   */
+  function statusFor(message: Message): SendState | undefined {
+    if (message.sender.id !== me?.pk) return undefined;
+    const pending = outboxById.get(message.id);
+    if (pending) return pending.status;
+    if (!showReceipts) return undefined;
+    return readStateFor(message, participants, me?.pk);
+  }
+
+  /** Give up on a failed send. The only way outbox text is ever thrown away. */
+  function discardSend(message: Message) {
+    setOutbox((entries) => entries.filter((e) => e.tempId !== message.id));
+  }
+
+  /** Send a failed message again, from either the transcript or a strand. */
+  function retryMessage(message: Message) {
+    const entry = outboxById.get(message.id);
+    if (entry) retrySend(entry);
+  }
+
   /**
    * Resolve a quoted message from what we've already loaded (M3).
    *
@@ -277,8 +374,11 @@ export default function ThreadScreen() {
    * yet" and the honest message becomes a lie some of the time. The fix is a
    * fetch through the same clipped endpoint (which is what the focused thread
    * view already does), not a wider payload.
+   *
+   * Built from `loaded` and not `messages`: an outbox entry has no server id, so
+   * nothing can be quoting it yet.
    */
-  const messagesById = new Map(messages.map((m) => [m.id, m]));
+  const messagesById = new Map(loaded.map((m) => [m.id, m]));
 
   // Mark read on open and as new messages land, clearing the tab badge and this
   // thread's pill. Guarded on error so a failed load doesn't clear the badge.
@@ -291,18 +391,24 @@ export default function ThreadScreen() {
   }, [id, messageCount, convoQuery.isError, isPending, queryClient]);
 
   const sendMutation = useMutation({
-    mutationFn: ({ value, replyToId }: { value: string; replyToId?: number }) =>
+    mutationFn: ({ value, replyToId }: SendVars) =>
       api.sendMessage(id, value, replyToId),
-    onSuccess: (_message, { replyToId }) => {
-      // Clear *this* screen's composer, and only when the send came from it.
-      // A reply is sent from the strand's own composer, which clears itself —
-      // clearing here too would wipe a half-typed message in the transcript
-      // underneath, which is the same betrayal `stashedDraft` exists to
-      // prevent, just triggered by someone replying instead of editing.
-      // Don't clear it if it has since become an *editor* either: a send still
-      // in flight when you long-press → Edit would wipe the prefilled text out
-      // from under you.
-      if (!replyToId && !editing) setText('');
+    onSuccess: (message, { tempId }) => {
+      // Write the accepted message into the cache *before* dropping the outbox
+      // entry, so the bubble is never absent for the frame between the two.
+      // React batches both, but the ordering is what makes that true rather
+      // than incidental.
+      queryClient.setQueryData<InfiniteData<Paginated<Message>, string>>(
+        ['messages', id],
+        (cached) => appendMessage(cached, message)
+      );
+      setOutbox((entries) => entries.filter((e) => e.tempId !== tempId));
+      // **The composer is not touched here** — it was cleared the moment the
+      // message went into the outbox. Clearing on the response was right when
+      // the response was the first sign anything had happened; now it would
+      // wipe whatever you'd started typing in the seconds since, which is the
+      // exact draft-loss `stashedDraft` exists to prevent, just triggered by
+      // your own previous message landing.
       queryClient.invalidateQueries({ queryKey: ['messages', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
       // The focused view reads its own query, so a reply sent from in there has
@@ -311,7 +417,60 @@ export default function ThreadScreen() {
       // wouldn't appear in the very view you sent it from.
       queryClient.invalidateQueries({ queryKey: ['thread', id] });
     },
+    // The message stays put and goes to `failed`; the bubble grows Retry and
+    // Discard. Nothing is thrown away, and there's no alert — the failure is
+    // already visible on the thing that failed, which is a better place to say
+    // it than a modal you have to dismiss before you can act.
+    onError: (_error, { tempId }) =>
+      setOutbox((entries) =>
+        entries.map((e) =>
+          e.tempId === tempId ? { ...e, status: 'failed' as const } : e
+        )
+      ),
   });
+
+  /**
+   * Send, showing the message immediately (M4).
+   *
+   * Everything that sends in this screen goes through here — the composer and
+   * the strand alike — so there's one place that knows an unsent message exists
+   * and one place that decides what happens when it doesn't land.
+   */
+  function queueSend({
+    value,
+    replyToId,
+    rootId,
+  }: {
+    value: string;
+    replyToId?: number;
+    rootId?: number;
+  }) {
+    const entry = newOutgoing({ text: value, replyToId, rootId });
+    setOutbox((entries) => [...entries, entry]);
+    return sendMutation.mutateAsync({
+      value,
+      replyToId,
+      tempId: entry.tempId,
+    });
+  }
+
+  function retrySend(entry: Outgoing) {
+    setOutbox((entries) =>
+      entries.map((e) =>
+        e.tempId === entry.tempId ? { ...e, status: 'sending' as const } : e
+      )
+    );
+    // Swallowed because the mutation's own `onError` has already put the entry
+    // back into `failed` — the rejection here is the same failure a second
+    // time, and letting it float would be an unhandled rejection for nothing.
+    sendMutation
+      .mutateAsync({
+        value: entry.text,
+        replyToId: entry.replyToId,
+        tempId: entry.tempId,
+      })
+      .catch(() => {});
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (messageId: number) => api.deleteMessage(id, messageId),
@@ -391,7 +550,17 @@ export default function ThreadScreen() {
     },
   });
 
-  const busy = sendMutation.isPending || editMutation.isPending;
+  /**
+   * Only an *edit* blocks the composer now (M4).
+   *
+   * Sending used to disable it until the round trip finished, which meant firing
+   * off two quick messages made you wait for the first — the single most
+   * noticeable way a polling app feels slower than it is. With an outbox there's
+   * nothing to wait for: each send gets its own entry and they land in the order
+   * the server accepts them. An edit still blocks, because it targets one
+   * specific message and two saves racing on it would be genuinely ambiguous.
+   */
+  const busy = editMutation.isPending;
 
   /**
    * Send a new message, or save the one being edited — the transcript's composer
@@ -407,7 +576,13 @@ export default function ThreadScreen() {
       else editMutation.mutate({ messageId: editing.id, value });
       return;
     }
-    sendMutation.mutate({ value });
+    // Clear the composer *now*, not on the response: the message is already on
+    // screen as a bubble, so leaving the text sitting in the input as well
+    // would read as though the send hadn't happened. A failure puts it back in
+    // front of you as a failed bubble with Retry, which is a better home for it
+    // than a composer you'd have to remember to re-send from.
+    setText('');
+    queueSend({ value }).catch(() => {});
   }
 
   function startEditing(message: Message) {
@@ -628,6 +803,7 @@ export default function ThreadScreen() {
               // message still starts a run, so its tombstone stays attributed.
               const startsRun =
                 messages[index - 1]?.sender.id !== item.sender.id;
+              const pending = outboxById.get(item.id);
               return (
                 <MessageBubble
                   message={item}
@@ -636,6 +812,9 @@ export default function ThreadScreen() {
                   quoted={
                     item.reply_to ? messagesById.get(item.reply_to.id) : undefined
                   }
+                  status={statusFor(item)}
+                  onRetry={pending ? () => retryMessage(item) : undefined}
+                  onDiscard={pending ? () => discardSend(item) : undefined}
                   onShowReactors={() => setReactorsFor(item.id)}
                   // Browsing into the strand rather than replying to a
                   // particular message, so the composer aims at the root. The
@@ -647,22 +826,28 @@ export default function ThreadScreen() {
                     const rootId = item.thread_root_id ?? item.id;
                     setThread({ rootId, replyToId: rootId, composing: false });
                   }}
-                  onLongPress={(anchor) =>
-                    setMenuTarget({
-                      message: item,
-                      mine,
-                      anchor,
-                      actions: messageActions({
-                        message: item,
-                        mine,
-                        canSend,
-                        now: Date.now(),
-                        onReply: startReplying,
-                        onEdit: startEditing,
-                        onDelete: confirmDelete,
-                        onReport: setReportingId,
-                      }),
-                    })
+                  // No menu on an unsent message: every action it offers —
+                  // edit, delete, react, report — needs a server id this one
+                  // hasn't got. Retry and Discard are on the bubble instead.
+                  onLongPress={
+                    pending
+                      ? undefined
+                      : (anchor) =>
+                          setMenuTarget({
+                            message: item,
+                            mine,
+                            anchor,
+                            actions: messageActions({
+                              message: item,
+                              mine,
+                              canSend,
+                              now: Date.now(),
+                              onReply: startReplying,
+                              onEdit: startEditing,
+                              onDelete: confirmDelete,
+                              onReport: setReportingId,
+                            }),
+                          })
                   }
                 />
               );
@@ -734,14 +919,16 @@ export default function ThreadScreen() {
                       pressed && styles.pressed,
                     ]}
                   >
+                    {/* No "Sending…" state any more: the message is already a
+                        bubble in the thread wearing a clock, so the button
+                        saying so as well would be the same news twice — and it
+                        has to stay tappable for the next message anyway. */}
                     <Text style={styles.sendLabel}>
                       {editing
                         ? editMutation.isPending
                           ? 'Saving…'
                           : 'Save'
-                        : sendMutation.isPending
-                          ? 'Sending…'
-                          : 'Send'}
+                        : 'Send'}
                     </Text>
                   </Pressable>
                 </View>
@@ -753,13 +940,11 @@ export default function ThreadScreen() {
                 messages.
               </Text>
             )}
-            {sendMutation.isError && (
-              <Text style={styles.sendError}>
-                {sendMutation.error instanceof Error
-                  ? sendMutation.error.message
-                  : "Couldn't send. Try again."}
-              </Text>
-            )}
+            {/* A failed send no longer reports itself down here. It reports on
+                the bubble that failed, next to Retry and Discard — which is
+                both nearer the thing that went wrong and the only place that
+                works once several messages are in flight and only one of them
+                fell over. */}
             {/* An edit can fail for a reason the menu couldn't rule out — most
                 likely the 15-minute window closing while the menu was open — so
                 say so rather than silently leaving edit mode on. */}
@@ -787,11 +972,22 @@ export default function ThreadScreen() {
           meId={me?.pk}
           isGroup={isGroup}
           canSend={canSend}
-          sending={sendMutation.isPending}
-          // `mutateAsync`, so the strand can wait for the send to land before
-          // clearing its input — and keep what you wrote if it doesn't.
+          // The strand's own unsent replies, so a reply appears the moment you
+          // send it and a failed one is recoverable *here* rather than only in
+          // the transcript behind the blur.
+          outgoing={outbox
+            .filter((entry) => entry.rootId === thread.rootId)
+            .map((entry) => asMessage(entry, meAsAuthor))}
+          statusFor={statusFor}
+          onRetry={retryMessage}
+          onDiscard={discardSend}
+          // Replies go through the same outbox as everything else (M4), so a
+          // reply that fails is a failed bubble in the transcript with Retry on
+          // it, rather than text that existed only inside a view you've since
+          // closed. `mutateAsync` still, so the strand can keep what you wrote
+          // if the send doesn't land while you're looking at it.
           onSend={(value, replyToId) =>
-            sendMutation.mutateAsync({ value, replyToId })
+            queueSend({ value, replyToId, rootId: thread.rootId })
           }
           onClose={() => setThread(null)}
         />

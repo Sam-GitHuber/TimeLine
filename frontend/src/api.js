@@ -112,6 +112,21 @@ export const api = {
   // "Who am I" — resolves to the user, or throws (401) when logged out.
   getCurrentUser: () => request("/api/auth/user/"),
 
+  // Turn read receipts on or off (Phase 9b M4). Its own call rather than a field
+  // on updateProfile, which is multipart (it can carry an avatar) and would turn
+  // a boolean into a string the server has to un-guess.
+  //
+  // The switch is symmetric and enforced server-side: with it off your read
+  // marker is withheld from everyone else's conversation payload and theirs from
+  // yours. The web doesn't draw ticks until M9, but the *setting* belongs on
+  // both clients — a web-only member must be able to opt out of a disclosure
+  // that's happening either way.
+  setReadReceipts: (enabled) =>
+    request("/api/auth/user/", {
+      method: "PATCH",
+      body: { send_read_receipts: enabled },
+    }),
+
   login: (email, password) =>
     request("/api/auth/login/", { method: "POST", body: { email, password } }),
 

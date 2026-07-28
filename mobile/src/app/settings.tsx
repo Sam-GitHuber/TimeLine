@@ -28,6 +28,7 @@ import { ChangePasswordSection } from '@/components/settings/ChangePasswordSecti
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
+import { PrivacySection } from '@/components/settings/PrivacySection';
 import { colors, fontSize, spacing } from '@/theme';
 
 export default function SettingsScreen() {
@@ -54,6 +55,7 @@ export default function SettingsScreen() {
       >
         <FeedPreferencesSection />
         <NotificationPreferencesSection />
+        <PrivacySection />
         <ChangePasswordSection />
         <LegalSection />
         <DeleteAccountSection />
