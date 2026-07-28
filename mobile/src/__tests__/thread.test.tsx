@@ -25,12 +25,14 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
-import { Alert } from 'react-native';
+import { Alert, FlatList, Linking } from 'react-native';
 
 import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
+import { clearDrafts } from '@/drafts';
 import { clearOutbox } from '@/outbox';
+import { clearQuotes } from '@/quotes';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
@@ -129,6 +131,27 @@ const MINE = { id: ME.pk, display_name: ME.display_name, avatar_thumb: null };
  *  the real endpoint serves it. */
 const PAGE_SIZE = 20;
 
+/**
+ * A local wall-clock time today, as the server would send it (Phase 9b M5).
+ *
+ * Local, not UTC: day separators and clock times are both derived in local time,
+ * so a fixture pinned to a UTC instant would land on a different day — and read
+ * a different hour — depending on where CI happens to be.
+ */
+function todayAt(hour: number, minute: number) {
+  const when = new Date();
+  when.setHours(hour, minute, 0, 0);
+  return when.toISOString();
+}
+
+/** Midday yesterday, local — far enough from midnight to stay yesterday. */
+function yesterday() {
+  const when = new Date();
+  when.setDate(when.getDate() - 1);
+  when.setHours(12, 0, 0, 0);
+  return when.toISOString();
+}
+
 function detail(overrides: Partial<Conversation>): Conversation {
   return {
     id: 5,
@@ -172,10 +195,12 @@ function serve({
   conversation,
   messages = [],
   thread,
+  quotable,
   reactionsAfterToggle = [{ emoji: '👍', count: 1, reacted: true }],
   reactors = [{ emoji: '👍', count: 1, users: [ADA] }],
 }: {
   conversation: Conversation;
+  /** The transcript, **oldest-first** — the order the model has them in. */
   messages?: Message[];
   /**
    * What `?thread_root=` returns (Phase 9b M3). Its own list, not a filter over
@@ -183,6 +208,16 @@ function serve({
    * viewer clipped out of the root gets replies here and no head.
    */
   thread?: Message[];
+  /**
+   * What `?ids=` can resolve (Phase 9b M5), if it isn't just `messages`.
+   *
+   * Its own list for the same reason `thread` is: the case worth testing is
+   * where a quoted message is **not** in the loaded transcript — the whole
+   * point of the id fetch — and a fixture that filters `messages` couldn't
+   * stage it. Anything absent from here is a message the viewer was clipped
+   * out of, which is exactly how the server answers.
+   */
+  quotable?: Message[];
   reactionsAfterToggle?: { emoji: string; count: number; reacted: boolean }[];
   reactors?: { emoji: string; count: number; users: typeof ADA[] }[];
 }) {
@@ -238,11 +273,50 @@ function serve({
           );
         }
         if (init?.method === 'DELETE') return jsonResponse(null, 204);
+
+        // `?ids=` (Phase 9b M5) — how a collapsed quote gets its words and its
+        // author now that the transcript pages lazily.
+        //
+        // **Paged like every other list**, because it is one: `?ids=` is a
+        // filter on the transcript's own queryset, so a request for more ids
+        // than fit in a page comes back short with a `next`. A mock that always
+        // answered in full would hide the case where the client retires an id it
+        // never actually got an answer about.
+        const idsParam = url.match(/[?&]ids=([^&]*)/);
+        if (idsParam) {
+          const wanted = decodeURIComponent(idsParam[1])
+            .split(',')
+            .filter(Boolean)
+            .map(Number);
+          const pool = quotable ?? messages;
+          const found = pool.filter((m) => wanted.includes(m.id));
+          return jsonResponse({
+            count: found.length,
+            next: found.length > PAGE_SIZE ? `${url}&page=2` : null,
+            previous: null,
+            results: found.slice(0, PAGE_SIZE),
+          });
+        }
+
+        // Paged like the real endpoint. **This matters more than it looks**:
+        // the transcript's whole M5 change is that it stops loading every page,
+        // so a fixture that always answers in full couldn't tell a lazy screen
+        // from an eager one — and `?order=desc` returning the same oldest-first
+        // array would make the run-grouping assertions pass upside down.
+        const desc = url.includes('order=desc');
+        const all = desc ? [...messages].reverse() : messages;
+        const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1);
+        const results = all.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+        const base = url.replace(/[?&]page=\d+/, '');
         return jsonResponse({
-          count: messages.length,
-          next: null,
+          count: all.length,
+          // Absolute, like DRF's — `getPage` re-bases it on BASE_URL.
+          next:
+            all.length > page * PAGE_SIZE
+              ? `${base}${base.includes('?') ? '&' : '?'}page=${page + 1}`
+              : null,
           previous: null,
-          results: messages,
+          results,
         });
       }
       if (url.includes('/api/conversations/')) return jsonResponse(conversation);
@@ -251,14 +325,30 @@ function serve({
   );
 }
 
-async function renderScreen() {
-  await saveTokens({ access: 'a', refresh: 'r' });
-  const queryClient = new QueryClient({
+/**
+ * A client whose cache survives an unmount, which one test needs — see
+ * `renderScreen`. `gcTime` has to be non-zero for that: the default here drops a
+ * query the moment its last observer goes.
+ */
+function warmClient() {
+  return new QueryClient({
     defaultOptions: {
-      queries: { retry: false, gcTime: 0 },
+      queries: { retry: false, gcTime: Infinity },
       mutations: { gcTime: 0 },
     },
   });
+}
+
+async function renderScreen(client?: QueryClient) {
+  await saveTokens({ access: 'a', refresh: 'r' });
+  const queryClient =
+    client ??
+    new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
   return render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
@@ -288,8 +378,10 @@ beforeEach(() => {
   mockParams.conversationId = '5';
   // The outbox is module state now (it has to outlive the screen, or tapping
   // back would throw away a failed message), so it also outlives a test unless
-  // it's emptied here.
+  // it's emptied here. Drafts (M5) are the same shape for the same reason.
   clearOutbox();
+  clearDrafts();
+  clearQuotes();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -1961,4 +2053,495 @@ it('replaces the composer with a read-only note when you can’t send', async ()
 
   expect(screen.queryByLabelText('Send')).toBeNull();
   expect(screen.getByText(/no longer connected/)).toBeTruthy();
+});
+
+/* ---- Thread mechanics (Phase 9b M5) -------------------------------------- */
+
+/** Every GET of the transcript, as the URLs they were fetched with. */
+function transcriptCalls() {
+  return mockFetch.mock.calls
+    .filter(
+      ([url, init]) =>
+        String(url).includes('/api/conversations/5/messages/') &&
+        String(url).includes('order=desc') &&
+        (init?.method ?? 'GET') === 'GET'
+    )
+    .map(([url]) => String(url));
+}
+
+/** A long thread, oldest-first, so paging is more than one page deep. */
+function longThread(count: number) {
+  return Array.from({ length: count }, (_, index) =>
+    message({
+      id: index + 1,
+      sender: index % 2 === 0 ? ADA : MINE,
+      text: `Message ${index + 1}`,
+    })
+  );
+}
+
+/**
+ * Scroll the transcript. `y` is distance from the newest — the list is inverted.
+ *
+ * The layout and content-size events come first because `VirtualizedList` learns
+ * its metrics only from events, and under Node nothing measures itself: a bare
+ * scroll arrives at a list that believes it is zero pixels tall, and the
+ * `onEndReached` guard bails before it looks at anything.
+ */
+async function scrollTranscript(y: number) {
+  const list = screen.getByTestId('transcript');
+  await fireEvent(list, 'layout', {
+    nativeEvent: { layout: { height: 800, width: 400, x: 0, y: 0 } },
+  });
+  await fireEvent(list, 'contentSizeChange', 400, 2000);
+  await fireEvent.scroll(list, {
+    nativeEvent: {
+      contentOffset: { y, x: 0 },
+      contentSize: { height: 2000, width: 400 },
+      layoutMeasurement: { height: 800, width: 400 },
+    },
+  });
+}
+
+it('opens on one page instead of loading the whole history', async () => {
+  // The defect M5 exists for. The screen used to walk `fetchNextPage` in an
+  // effect until every page was in memory, so opening a chat pulled all of it —
+  // invisible at today's volumes and worse every month.
+  serve({ conversation: detail({}), messages: longThread(45) });
+
+  await renderScreen();
+  // The newest is on screen (`?order=desc` puts it on page one)…
+  expect(await screen.findByText('Message 45')).toBeTruthy();
+
+  // …and nothing has asked for a second page.
+  expect(transcriptCalls().some((url) => url.includes('page='))).toBe(false);
+  expect(screen.queryByText('Message 1')).toBeNull();
+});
+
+it('pages older messages in when you reach the top', async () => {
+  /**
+   * Served in pages of **four**, not the real endpoint's twenty, and that isn't
+   * laziness about the fixture. `VirtualizedList` only fires `onEndReached` once
+   * the last cell has actually been laid out
+   * (`cellsAroundViewport.last === count - 1`) — and under Node nothing lays
+   * anything out, so that stays wherever `initialNumToRender` (10) left it. A
+   * first page of twenty bubbles is therefore permanently "not at the end" and
+   * no sequence of synthetic scrolls can reach it.
+   *
+   * A short page keeps the row count inside that window, which lets the *real*
+   * trigger be exercised — a scroll, through the list's own edge detection —
+   * rather than the handler being called by hand. What's under test is that
+   * reaching the top follows `next` and puts older messages on screen; the
+   * server's page size is not part of that.
+   */
+  const all = longThread(9);
+  serve({ conversation: detail({}), messages: all });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('order=desc') && (init?.method ?? 'GET') === 'GET') {
+      const newestFirst = [...all].reverse();
+      const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1);
+      const results = newestFirst.slice((page - 1) * 4, page * 4);
+      const stripped = url.replace(/[?&]page=\d+/, '');
+      return jsonResponse({
+        count: all.length,
+        next:
+          all.length > page * 4 ? `${stripped}&page=${page + 1}` : null,
+        previous: null,
+        results,
+      });
+    }
+    return base(url, init);
+  });
+
+  /**
+   * Rendered **twice against one query client**, which is the other half of
+   * making this reachable. `VirtualizedList` decides how many cells exist at
+   * construction and `_constrainToItemCount` only ever shrinks that afterwards,
+   * so a list that mounts empty — as it does on a cold thread, while the query
+   * is still in flight — sits at "no cells" forever under Node and can never
+   * report having reached its end. Warming the cache first means the second
+   * mount has its rows from the first frame, exactly as a real list does once
+   * it has laid itself out.
+   */
+  const client = warmClient();
+  const cold = await renderScreen(client);
+  await screen.findByText('Message 9');
+  cold.unmount();
+  await renderScreen(client);
+  await screen.findByText('Message 9');
+  // Page one only: the four newest, and nothing older.
+  expect(screen.queryByText('Message 5')).toBeNull();
+
+  // The "end" of an inverted list is the top of the history.
+  await scrollTranscript(1900);
+
+  await waitFor(() =>
+    expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
+  );
+  expect(await screen.findByText('Message 5')).toBeTruthy();
+});
+
+it('fetches a quoted message that hasn’t paged in yet', async () => {
+  // 🔒 The M3 debt this milestone had to settle. A reply carries a bare `{id}`,
+  // so the quote's words come from messages the client holds — which was
+  // complete only while the screen loaded *every* page. With lazy paging a miss
+  // also means "not paged in yet", so the honest "Original message unavailable"
+  // would become a lie some of the time. The fix is a fetch through the same
+  // interval-clipped endpoint, never a wider payload.
+  const old = message({ id: 1, sender: ADA, text: 'the original plan' });
+  const reply = message({
+    id: 2,
+    sender: GRACE,
+    text: 'still on for that',
+    reply_to: { id: 1 },
+    thread_root_id: 1,
+  });
+  serve({
+    conversation: detail({}),
+    // Only the reply is in the transcript — the message it quotes is older than
+    // the loaded page.
+    messages: [reply],
+    quotable: [old],
+  });
+
+  await renderScreen();
+
+  expect(await screen.findByText('the original plan')).toBeTruthy();
+  expect(
+    mockFetch.mock.calls.some(([url]) =>
+      String(url).includes('/api/conversations/5/messages/?ids=1')
+    )
+  ).toBe(true);
+});
+
+it('still says a quote is unavailable when it genuinely is', async () => {
+  // The other half of the test above, and the reason it matters: the fetch must
+  // not turn "you were clipped out of this" into a spinner that never resolves.
+  // An id the viewer isn't entitled to comes back absent, exactly as the server
+  // answers it, and the honest message stands.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 2,
+        sender: GRACE,
+        text: 'still on for that',
+        reply_to: { id: 1 },
+        thread_root_id: 1,
+      }),
+    ],
+    quotable: [],
+  });
+
+  await renderScreen();
+
+  expect(await screen.findByText('Original message unavailable')).toBeTruthy();
+});
+
+it('asks about an unresolvable quote once, not on every poll', async () => {
+  // A clipped id is a *fact* about this viewer, not a transient failure. Without
+  // remembering that it was asked, the 4-second poll would re-request it forever
+  // — a request every four seconds that can only ever return nothing.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 2,
+        sender: GRACE,
+        text: 'still on for that',
+        reply_to: { id: 1 },
+        thread_root_id: 1,
+      }),
+    ],
+    quotable: [],
+  });
+
+  await renderScreen();
+  await screen.findByText('Original message unavailable');
+  const asked = () =>
+    mockFetch.mock.calls.filter(([url]) => String(url).includes('?ids=')).length;
+  const first = asked();
+
+  // Let a couple of poll cycles go by.
+  await waitFor(() => expect(transcriptCalls().length).toBeGreaterThan(1), {
+    timeout: 15000,
+  });
+  expect(asked()).toBe(first);
+});
+
+it('separates the days and shows a clock time, not "5m ago"', async () => {
+  // A chat's bubbles answer *when in the day*; the separator above them answers
+  // which day. Relative time stays on the conversation list, where the question
+  // really is how recent something is.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 1, sender: ADA, text: 'yesterday', created_at: yesterday() }),
+      message({ id: 2, sender: ADA, text: 'today', created_at: todayAt(14, 32) }),
+    ],
+  });
+
+  await renderScreen();
+  await screen.findByText('today');
+
+  // The label is uppercased with `textTransform`, which is a style — the text
+  // node itself still reads "Today".
+  expect(screen.getByText('Today')).toBeTruthy();
+  expect(screen.getByText('Yesterday')).toBeTruthy();
+  // 24-hour or 12-hour depending on the runner's locale — both are a clock, and
+  // neither is "just now", which is what this replaced.
+  expect(screen.getByText(/^(14:32|2:32 pm)$/)).toBeTruthy();
+});
+
+it('times a run once, on its last bubble', async () => {
+  // The whole point of grouping. A timestamp repeated down five bubbles sent in
+  // one minute is noise standing where the next message should be.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 1, sender: ADA, text: 'one', created_at: todayAt(9, 0) }),
+      message({ id: 2, sender: ADA, text: 'two', created_at: todayAt(9, 1) }),
+      message({ id: 3, sender: ADA, text: 'three', created_at: todayAt(9, 2) }),
+    ],
+  });
+
+  await renderScreen();
+  await screen.findByText('three');
+
+  expect(screen.queryByText(/^(09:00|9:00 am)$/)).toBeNull();
+  expect(screen.queryByText(/^(09:01|9:01 am)$/)).toBeNull();
+  expect(screen.getByText(/^(09:02|9:02 am)$/)).toBeTruthy();
+});
+
+it('keeps the "Edited" marker on a bubble in the middle of a run', async () => {
+  // 🔒 Not a tidy-up. `messaging.md` calls the marker the thing that makes
+  // editing safe at all — a thread is a shared record, and an edit that showed
+  // no trace would let either side change what the other already read. It
+  // cannot be suppressed by where a bubble happens to sit in a run.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 1,
+        sender: ADA,
+        text: 'corrected',
+        created_at: todayAt(9, 0),
+        is_edited: true,
+        edited_at: todayAt(9, 1),
+      }),
+      message({ id: 2, sender: ADA, text: 'and then', created_at: todayAt(9, 2) }),
+    ],
+  });
+
+  await renderScreen();
+  await screen.findByText('and then');
+
+  expect(screen.getByText(/· Edited$/)).toBeTruthy();
+});
+
+it('marks where you stopped reading', async () => {
+  serve({
+    conversation: detail({ unread_count: 2 }),
+    messages: [
+      message({ id: 1, sender: ADA, text: 'read this one' }),
+      message({ id: 2, sender: ADA, text: 'missed this one' }),
+      message({ id: 3, sender: ADA, text: 'and this one' }),
+    ],
+  });
+
+  await renderScreen();
+
+  expect(await screen.findByText('2 unread messages')).toBeTruthy();
+});
+
+it('keeps the unread divider after the thread is marked read', async () => {
+  // The divider is captured once, before the mark-read write lands — otherwise
+  // it would appear and then vanish a moment later, which is worse than never
+  // showing it. The two race on open, which is why the read POST waits for the
+  // detail.
+  serve({
+    conversation: detail({ unread_count: 1 }),
+    messages: [message({ id: 1, sender: ADA, text: 'missed this one' })],
+  });
+
+  await renderScreen();
+  await screen.findByText('1 unread message');
+
+  // The mark-read has gone out by now; the divider stays for as long as you're
+  // on the screen.
+  await waitFor(() =>
+    expect(
+      mockFetch.mock.calls.some(([url]) => String(url).includes('/read/'))
+    ).toBe(true)
+  );
+  expect(screen.getByText('1 unread message')).toBeTruthy();
+});
+
+it('keeps the divider where you stopped, not where the newest message is', async () => {
+  // The divider is placed by counting back from the newest message, and the
+  // newest message keeps changing — so the *count* being captured on open isn't
+  // enough on its own. Left live, every message that arrives while you're
+  // reading pushes a fixed count one further down and slides the marker past the
+  // very messages it was put there to mark.
+  const messages = [
+    message({ id: 1, sender: ADA, text: 'read this one' }),
+    message({ id: 2, sender: ADA, text: 'missed this one' }),
+    message({ id: 3, sender: ADA, text: 'and this one' }),
+  ];
+  serve({ conversation: detail({ unread_count: 2 }), messages });
+
+  await renderScreen();
+  await screen.findByText('2 unread messages');
+
+  // Someone sends another one while you're reading. The mock serves from the
+  // array, so pushing to it is what the next poll finds.
+  messages.push(message({ id: 4, sender: ADA, text: 'newly arrived' }));
+  await waitFor(() => expect(screen.getByText('newly arrived')).toBeTruthy(), {
+    timeout: 15000,
+  });
+
+  // Rendered order is the list's own — newest first, since it's inverted — so
+  // this is where the divider *sits*, which is the whole assertion. It belongs
+  // above "missed this one", the oldest message you hadn't read on open.
+  const order = screen
+    .getAllByText(
+      /^(newly arrived|and this one|missed this one|read this one|2 unread messages)$/
+    )
+    .map((node) => node.props.children);
+  expect(order).toEqual([
+    'newly arrived',
+    'and this one',
+    'missed this one',
+    '2 unread messages',
+    'read this one',
+  ]);
+});
+
+it('opens the thread at the unread divider rather than at the bottom', async () => {
+  // What the divider is for: a marker you have to go and find is decoration.
+  const scrollToIndex = jest
+    .spyOn(FlatList.prototype, 'scrollToIndex')
+    .mockImplementation(() => {});
+  try {
+    serve({
+      conversation: detail({ unread_count: 2 }),
+      messages: [
+        message({ id: 1, sender: ADA, text: 'read this one' }),
+        message({ id: 2, sender: ADA, text: 'missed this one' }),
+        message({ id: 3, sender: ADA, text: 'and this one' }),
+      ],
+    });
+
+    await renderScreen();
+    await screen.findByText('2 unread messages');
+
+    // Rows newest-first: [3, 2, divider, 1, day separator]. `viewPosition: 1` is
+    // the top of the screen on an inverted list, so the divider goes up there
+    // and the unread messages fill in beneath it.
+    await waitFor(() =>
+      expect(scrollToIndex).toHaveBeenCalledWith({
+        index: 2,
+        viewPosition: 1,
+        animated: false,
+      })
+    );
+  } finally {
+    scrollToIndex.mockRestore();
+  }
+});
+
+it('leaves a thread with nothing unread at the bottom, where it opened', async () => {
+  const scrollToIndex = jest
+    .spyOn(FlatList.prototype, 'scrollToIndex')
+    .mockImplementation(() => {});
+  try {
+    serve({ conversation: detail({ unread_count: 0 }), messages: longThread(6) });
+
+    await renderScreen();
+    await screen.findByText('Message 6');
+
+    expect(scrollToIndex).not.toHaveBeenCalled();
+  } finally {
+    scrollToIndex.mockRestore();
+  }
+});
+
+it('offers a jump back to the latest once you’ve scrolled away', async () => {
+  serve({ conversation: detail({}), messages: longThread(10) });
+
+  await renderScreen();
+  await screen.findByText('Message 10');
+  expect(screen.queryByLabelText(/^Jump to latest/)).toBeNull();
+
+  await scrollTranscript(600);
+  expect(await screen.findByLabelText(/^Jump to latest/)).toBeTruthy();
+
+  // And it goes again once you're back at the bottom, rather than sitting there
+  // permanently — a control that's always there is one nobody reads.
+  await scrollTranscript(0);
+  await waitFor(() =>
+    expect(screen.queryByLabelText(/^Jump to latest/)).toBeNull()
+  );
+});
+
+it('opens a link in the message instead of leaving it as dead text', async () => {
+  // The cheapest "this feels broken" fix in the phase: a link someone sent used
+  // to be text you had to retype by hand.
+  const openURL = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 1, sender: ADA, text: 'recipe here https://example.com/x' }),
+    ],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByText('https://example.com/x'));
+
+  expect(openURL).toHaveBeenCalledWith('https://example.com/x');
+  openURL.mockRestore();
+});
+
+it('keeps a half-written message when you leave the thread and come back', async () => {
+  // The composer's text used to die with the screen, so the most ordinary
+  // navigation in the app silently ate a draft.
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+
+  const first = await renderScreen();
+  await fireEvent.changeText(
+    await screen.findByLabelText('Message'),
+    'half-written thought'
+  );
+  first.unmount();
+
+  await renderScreen();
+  expect((await screen.findByLabelText('Message')).props.value).toBe(
+    'half-written thought'
+  );
+});
+
+it('does not leave a message you were editing sitting in the composer', async () => {
+  // The one case the draft store must *not* remember: in edit mode the composer
+  // holds someone's sent words, not a draft of yours. Persisting them would mean
+  // coming back to a message you never wrote.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+  });
+
+  const first = await renderScreen();
+  await fireEvent.changeText(
+    await screen.findByLabelText('Message'),
+    'half-written thought'
+  );
+  await openMenu('Your message: teh quick fox');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  expect(screen.getByLabelText('Message').props.value).toBe('teh quick fox');
+  first.unmount();
+
+  await renderScreen();
+  expect((await screen.findByLabelText('Message')).props.value).toBe(
+    'half-written thought'
+  );
 });

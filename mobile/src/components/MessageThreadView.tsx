@@ -130,16 +130,20 @@ export function MessageThreadView({
    * Polled like the transcript, so a reply someone else sends while you're
    * reading the strand appears in it rather than only behind the blur.
    *
-   * **Paged, and every page pulled**, exactly as the transcript does it. The
-   * thread endpoint is the ordinary message list with a filter, so it paginates
-   * like every list — and a single page is 20. Reading only the first would
-   * silently cut a strand off at its *oldest* 20 messages (they come
-   * oldest-first), which hides the newest replies and, worse, the one you just
-   * sent from the composer right there. The root's "N replies" count would go on
-   * climbing past what the strand showed, with nothing on screen to explain it.
+   * **Paged, and every page pulled.** The thread endpoint is the ordinary
+   * message list with a filter, so it paginates like every list — and a single
+   * page is 20. Reading only the first would silently cut a strand off at its
+   * *oldest* 20 messages (they come oldest-first), which hides the newest
+   * replies and, worse, the one you just sent from the composer right there.
+   * The root's "N replies" count would go on climbing past what the strand
+   * showed, with nothing on screen to explain it.
    *
-   * A strand is short at family scale, which is the same reason the transcript
-   * pulls its history eagerly rather than on scroll.
+   * **The transcript no longer does this, and that's the difference between the
+   * two views rather than an inconsistency** (Phase 9b M5). A transcript is
+   * unbounded and grows forever, so it reads `?order=desc` and pages lazily
+   * upward; a strand is one exchange inside it, bounded by how much anyone says
+   * in reply to a single message. Loading a short list whole is right here and
+   * was wrong there.
    */
   const threadQuery = useInfiniteQuery({
     queryKey: threadQueryKey(conversationId, rootId),

@@ -65,7 +65,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M2** | Message reactions | M1 | **S** | ☑ |
 | **M3** | Reply threads | M1 | **M–L** | ☑ |
 | **M4** | Send status + read receipts | — | **M** | ☑ |
-| **M5** | Thread mechanics | — (do before M7) | **M–L** | ☐ |
+| **M5** | Thread mechanics | — (do before M7) | **M–L** | ☑ |
 | **M6** | Conversation list + thread info | — | **M** | ☐ |
 | **M7** | Photo messages | M5 | **L** | ☐ |
 | **M8** | Text, mentions & quick actions | M1 | **M** | ☐ |
@@ -887,12 +887,60 @@ highest value — don't skip it.
     with the screen. Keep drafts keyed by conversation id (in-memory is enough to
     start; persist across app restarts if it's cheap).
 
-**Done when**
-- [ ] Opening a thread loads **one page**; older messages page in on scroll-up.
-- [ ] Day separators, clock times, grouped runs, unread divider, jump-to-latest.
-- [ ] Links are tappable; emoji-only messages render large; drafts survive
+**Done when** — ✅ all done; `messaging.md` → *The transcript (Phase 9b M5)* is
+the durable record, with the two new query parameters in *API*.
+- [x] Opening a thread loads **one page**; older messages page in on scroll-up.
+- [x] Day separators, clock times, grouped runs, unread divider, jump-to-latest.
+- [x] Links are tappable; emoji-only messages render large; drafts survive
       leaving and returning to a thread.
-- [ ] `messaging.md` *Mobile* section rewritten to match.
+- [x] `messaging.md` *Mobile* section rewritten to match.
+
+**Five things M5 settled that the plan above didn't anticipate:**
+
+1. **It needed a backend change, which the plan didn't budget for.** "Replace
+   with an inverted `FlatList` where `onEndReached` pages *older* messages
+   upward" isn't reachable from the endpoint as it stood: the thread is served
+   **oldest-first**, so the newest messages are on the *last* page and the eager
+   full-history load wasn't laziness, it was the only way to reach the bottom of
+   a chat. `?order=desc` fixes it as one more filter on the same clipped
+   queryset — opt-in, because the web still reads the default order and
+   *Compatibility* forbids reordering a payload under an old client.
+2. **The quote fix is a second query parameter, `?ids=`, not a thread fetch.**
+   Step 1's sub-bullet says to fetch the missing message "through the same
+   interval-clipped endpoint the focused thread view already uses", which reads
+   like `?thread_root=`. That would work — a quoted message is always in the
+   quoting reply's strand — but it means pulling a whole paginated strand to
+   render two lines, and chasing pages until the one id turns up, which is the
+   load-until-found pattern M3 explicitly superseded. A batch id filter is one
+   request for every unresolved quote on screen. **Each id is asked about once**:
+   an unresolvable id is a *fact* about this viewer, so re-asking every poll
+   would be a request every four seconds that can only ever return nothing.
+3. **The unread divider is positioned from `unread_count`, not `last_read_at`.**
+   The plan says to capture your `last_read_at` on open. You can't reliably: the
+   conversation detail withholds **every** read marker, your own included, when
+   you have receipts off (M4's symmetry rule), so the divider would silently stop
+   working for anyone who opted out of an unrelated setting. The count is on the
+   same payload and always present. It also forced a real ordering fix — the
+   mark-read POST fired on mount and raced the detail it now depends on, so it
+   waits for it. **Capturing the count is not enough on its own**: it locates the
+   divider by counting back from the newest message, so re-deriving the position
+   on every render slides the marker one further down for each message that
+   arrives while you're reading. The anchor is latched too, and the label is the
+   number that was waiting on open rather than the run re-counted.
+4. **Run grouping has two exemptions from hiding the timestamp**, and one is a
+   privacy-adjacent rule rather than a nicety: the **"Edited" marker** is the
+   disclosure that makes editing safe (`messaging.md` says so in as many words),
+   so it cannot be suppressed by where a bubble sits in a run. The other is an
+   unsent message, which must show its clock or its failure wherever it lands.
+5. **`onEndReached` is not reachable from React Native Testing Library**, and the
+   workaround is worth knowing before someone burns an afternoon on it.
+   `VirtualizedList` only fires it once the last cell has been **laid out**
+   (`cellsAroundViewport.last === count - 1`), and that number is fixed at
+   construction and can only ever *shrink* — so a list that mounts empty, as
+   every query-backed list does, sits at "no cells" forever under Node. The test
+   renders the screen twice against one `QueryClient` so the second mount has its
+   rows from the first frame, and serves a short page so the row count stays
+   inside `initialNumToRender`. Both are documented at the test.
 
 ---
 
