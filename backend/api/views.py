@@ -2258,7 +2258,10 @@ class ConversationMessagesView(generics.ListAPIView):
             try:
                 root_id = int(root_id)
             except (TypeError, ValueError):
-                raise ValidationError("thread_root must be a message id.")
+                # ``from None``: the parse error is noise here — the caller sent
+                # something that isn't an id, and chaining a ValueError onto the
+                # 400 tells them nothing they didn't type themselves.
+                raise ValidationError("thread_root must be a message id.") from None
             # Range-checked, not just parsed: Python ints are unbounded but the
             # column is a bigint, so a long enough string of digits reaches the
             # database as an out-of-range value and comes back a 500. It's the
