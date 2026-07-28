@@ -529,7 +529,12 @@ Direct and group chats share the endpoints:
     out of is simply **absent** from the response, indistinguishable from one
     that never existed, with no second code path to get wrong. Capped at
     `MESSAGE_IDS_MAX` (50); an empty list returns nothing rather than everything.
-    See [Reply threads](#reply-threads).
+    It **paginates like the rest of the endpoint**, and the cap is deliberately
+    above the page size — so a batch bigger than a page comes back short, and
+    "absent" then means *clipped **or** on a later page*. A client must follow
+    `next` before reading anything into a missing id, or it will tell someone a
+    message is unavailable when it was only unasked-for. See
+    [Reply threads](#reply-threads).
   - `?order=desc` returns **newest-first** (Phase 9b M5). Without it the newest
     messages sit on the *last* page, so opening a chat means walking every page
     to reach the bottom of it — which is exactly what the app used to do. It's
@@ -880,18 +885,30 @@ hidden by where a bubble happens to sit in a run. And an **unsent message** show
 its clock or its failure wherever it lands, or two queued messages would leave
 the first looking sent.
 
-**An unread divider** marks where you stopped reading, so a thread you've been
-away from opens *there*. It's positioned from `unread_count` on the conversation
-detail, captured **once during render** before the mark-read write goes out —
-which is also why that write now waits for the detail to land, since if it won
-the race there'd be nothing left to capture. The count, not your own
-`last_read_at`: the detail withholds every read marker, including yours, when
+**An unread divider** marks where you stopped reading, and the thread **opens
+there** rather than at the bottom — that's what the divider is for, and why it's
+accented while the day separators aren't. It's positioned from `unread_count` on
+the conversation detail, captured **once during render** before the mark-read
+write goes out — which is also why that write now waits for the detail to land,
+since if it won the race there'd be nothing left to capture. The count, not your
+own `last_read_at`: the detail withholds every read marker, including yours, when
 you've [turned receipts off](#the-setting-usersend_read_receipts), and a divider
 that quietly stopped working for anyone who opted out of an unrelated setting
 would be a bad trade. When the unread run is longer than the loaded page the
 divider is **left out** rather than placed at the top of what happened to load —
 pointing at the wrong message is worse than pointing at nothing, and it resolves
 itself on the next page.
+
+**Both the position and the label are latched, not re-derived.** The count locates
+the divider by counting back from the newest message, and the newest message keeps
+changing: left live, every message arriving while you read pushes a fixed count
+one further down and slides the marker past the messages it was placed to mark,
+while the label climbs and describes a thread you're sitting and watching as five
+unread. So the anchor is fixed the first render it can be worked out and the
+label is the number that was waiting when you opened it. The opening scroll is
+likewise once-only — re-running it on the four-second poll would yank the list
+back up under someone who had scrolled away — and after it, jump-to-latest is how
+you get to the bottom.
 
 **Jump-to-latest** appears once you've scrolled away, with a count of what has
 arrived since. The count is the point: a bare arrow is a scroll shortcut, and the

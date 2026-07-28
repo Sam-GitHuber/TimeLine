@@ -922,7 +922,11 @@ the durable record, with the two new query parameters in *API*.
    working for anyone who opted out of an unrelated setting. The count is on the
    same payload and always present. It also forced a real ordering fix — the
    mark-read POST fired on mount and raced the detail it now depends on, so it
-   waits for it.
+   waits for it. **Capturing the count is not enough on its own**: it locates the
+   divider by counting back from the newest message, so re-deriving the position
+   on every render slides the marker one further down for each message that
+   arrives while you're reading. The anchor is latched too, and the label is the
+   number that was waiting on open rather than the run re-counted.
 4. **Run grouping has two exemptions from hiding the timestamp**, and one is a
    privacy-adjacent rule rather than a nicety: the **"Edited" marker** is the
    disclosure that makes editing safe (`messaging.md` says so in as many words),

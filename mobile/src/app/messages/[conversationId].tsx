@@ -447,9 +447,35 @@ export default function ThreadScreen() {
   if (unreadOnOpen === null && detail) {
     setUnreadOnOpen(detail.unread_count ?? 0);
   }
-  const unreadFrom = useMemo(
-    () => (unreadOnOpen ? firstUnreadId(loaded, unreadOnOpen, me?.pk) : null),
-    [loaded, unreadOnOpen, me?.pk]
+  /**
+   * Which message the divider sits above — latched the *first time it can be
+   * worked out*, and never recomputed after.
+   *
+   * **The count alone isn't enough to hold it still.** `firstUnreadId` counts
+   * back from the newest message, and the newest message keeps changing: every
+   * message that arrives while you're reading pushes a fixed count one further
+   * down the list, so a live re-derivation slides the divider past the very
+   * messages it was placed to mark. The count is what's captured on open; *this*
+   * is what the divider is drawn from.
+   *
+   * Latched during render like the count above it, and state rather than a ref
+   * for the same reason: this *is* render data — the row it produces is built in
+   * the same pass — and a ref read during render is both the thing React's lint
+   * rule forbids and a real hazard, since nothing would re-render when it
+   * changed. Staying `null` is deliberate and stays live: it means the unread run
+   * is longer than what has loaded, which resolves itself as pages come in.
+   */
+  const [unreadFrom, setUnreadFrom] = useState<number | null>(null);
+  if (unreadFrom === null && unreadOnOpen) {
+    const anchor = firstUnreadId(loaded, unreadOnOpen, me?.pk);
+    if (anchor !== null) setUnreadFrom(anchor);
+  }
+  const unread = useMemo(
+    () =>
+      unreadFrom !== null && unreadOnOpen
+        ? { fromId: unreadFrom, count: unreadOnOpen }
+        : null,
+    [unreadFrom, unreadOnOpen]
   );
 
   /**
@@ -477,10 +503,78 @@ export default function ThreadScreen() {
           ...loaded,
         ],
         meId: me?.pk,
-        unreadFrom,
+        unread,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see `today` above
-    [loaded, outbox, meAsAuthor, me?.pk, unreadFrom, today]
+    [loaded, outbox, meAsAuthor, me?.pk, unread, today]
+  );
+
+  /**
+   * Open the thread **at the unread divider**, not at the bottom (M5).
+   *
+   * This is what the divider is *for*. A marker you have to go and find is a
+   * decoration; a thread that opens where you stopped reading is the thing that
+   * makes coming back to twenty messages tractable, and it's why the divider is
+   * accented while the day separators aren't.
+   *
+   * Once, on the first render that can place it — the `rows` array is rebuilt on
+   * every four-second poll, and re-running this would yank the list back up
+   * under someone who had scrolled away from it. After that the jump-to-latest
+   * control (which the scroll itself brings up) is how you get to the bottom,
+   * which is the right way round: the newest message is one tap away, and the
+   * one you left off at is already on screen.
+   *
+   * `viewPosition: 1` is the *top* of the screen on an inverted list — the
+   * divider goes up there with the unread messages filling in beneath it. When
+   * there are only a couple the computed offset is past the end and the list
+   * clamps it, so a barely-scrolled thread stays put rather than lurching.
+   */
+  const openedAtUnread = useRef(false);
+  const unreadRowIndex = rows.findIndex((row) => row.kind === 'unread');
+  useEffect(() => {
+    if (openedAtUnread.current || unreadRowIndex < 0) return;
+    openedAtUnread.current = true;
+    listRef.current?.scrollToIndex({
+      index: unreadRowIndex,
+      viewPosition: 1,
+      animated: false,
+    });
+  }, [unreadRowIndex]);
+
+  /**
+   * The list has no `getItemLayout` — bubbles are as tall as their words — so a
+   * divider outside the cells laid out so far has no measured offset to scroll
+   * to, and `scrollToIndex` hands the problem back here rather than guessing.
+   *
+   * Estimate, let that render the cells around it, then land exactly. Bounded,
+   * because the retry can fail the same way: two goes gets there from any
+   * realistic starting point, and giving up leaves the thread at the estimate —
+   * a few bubbles out, never broken.
+   */
+  const scrollAttempts = useRef(0);
+  const settleOnRow = useCallback(
+    ({
+      index,
+      averageItemLength,
+    }: {
+      index: number;
+      averageItemLength: number;
+    }) => {
+      listRef.current?.scrollToOffset({
+        offset: index * averageItemLength,
+        animated: false,
+      });
+      if (scrollAttempts.current >= 2) return;
+      scrollAttempts.current += 1;
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToIndex({
+          index,
+          viewPosition: 1,
+          animated: false,
+        });
+      });
+    },
+    []
   );
 
   /**
@@ -1035,141 +1129,144 @@ export default function ThreadScreen() {
               out between it and the composer — where it would push the thread
               up and down as it appeared and vanished. */}
           <View style={styles.fill}>
-          <FlatList
-            ref={listRef}
-            // The one handle a test has on the transcript. Scrolling is what
-            // drives both the upward paging and the jump-to-latest control, and
-            // neither is reachable through an accessibility label.
-            testID="transcript"
-            data={rows}
-            keyExtractor={(row) => row.key}
-            /**
-             * The shape of a chat (M5): newest at the bottom, history paging in
-             * above. Inversion is what makes that a *list* behaviour rather than
-             * a pile of workarounds — it replaced a `scrollToEnd` on every
-             * content-size change, and it means the newest message stays pinned
-             * while the keyboard animates instead of being chased back into
-             * view afterwards.
-             *
-             * Off when there's nothing to show, because an inverted list flips
-             * its `ListEmptyComponent` too and "say hello" upside down is a
-             * memorable bug to ship.
-             */
-            inverted={rows.length > 0}
-            // `flex: 1` constrains the list to the gap between the header and the
-            // composer. Without it a FlatList sizes to its content, so the newest
-            // messages run *under* the composer.
-            style={styles.list}
-            contentContainerStyle={styles.messagesContent}
-            // The "end" of an inverted list is the top of the history.
-            onEndReached={loadOlder}
-            onEndReachedThreshold={0.5}
-            onScroll={handleScroll}
-            scrollEventThrottle={16}
-            // Drag the keyboard away rather than having to tap elsewhere first,
-            // and let a tap on a bubble or a link through while it's up.
-            keyboardDismissMode="interactive"
-            keyboardShouldPersistTaps="handled"
-            // Renders at the *top* on an inverted list — which is where the
-            // older messages being fetched are about to appear.
-            ListFooterComponent={
-              isFetchingNextPage ? (
-                <ActivityIndicator color={colors.accent} style={styles.spinner} />
-              ) : null
-            }
-            renderItem={({ item }) => {
-              if (item.kind === 'day') return <DaySeparator label={item.label} />;
-              if (item.kind === 'unread') {
-                return <UnreadDivider count={item.count} />;
+            <FlatList
+              ref={listRef}
+              // The one handle a test has on the transcript. Scrolling is what
+              // drives both the upward paging and the jump-to-latest control, and
+              // neither is reachable through an accessibility label.
+              testID="transcript"
+              data={rows}
+              keyExtractor={(row) => row.key}
+              /**
+               * The shape of a chat (M5): newest at the bottom, history paging in
+               * above. Inversion is what makes that a *list* behaviour rather than
+               * a pile of workarounds — it replaced a `scrollToEnd` on every
+               * content-size change, and it means the newest message stays pinned
+               * while the keyboard animates instead of being chased back into
+               * view afterwards.
+               *
+               * Off when there's nothing to show, because an inverted list flips
+               * its `ListEmptyComponent` too and "say hello" upside down is a
+               * memorable bug to ship.
+               */
+              inverted={rows.length > 0}
+              // `flex: 1` constrains the list to the gap between the header and the
+              // composer. Without it a FlatList sizes to its content, so the newest
+              // messages run *under* the composer.
+              style={styles.list}
+              contentContainerStyle={styles.messagesContent}
+              // The "end" of an inverted list is the top of the history.
+              onEndReached={loadOlder}
+              onEndReachedThreshold={0.5}
+              onScroll={handleScroll}
+              scrollEventThrottle={16}
+              // How the open-at-the-unread-divider scroll finds a row it hasn't
+              // measured yet. See `settleOnRow`.
+              onScrollToIndexFailed={settleOnRow}
+              // Drag the keyboard away rather than having to tap elsewhere first,
+              // and let a tap on a bubble or a link through while it's up.
+              keyboardDismissMode="interactive"
+              keyboardShouldPersistTaps="handled"
+              // Renders at the *top* on an inverted list — which is where the
+              // older messages being fetched are about to appear.
+              ListFooterComponent={
+                isFetchingNextPage ? (
+                  <ActivityIndicator color={colors.accent} style={styles.spinner} />
+                ) : null
               }
-              const message = item.message;
-              const mine = message.sender.id === me?.pk;
-              const pending = outboxById.get(message.id);
-              return (
-                <MessageBubble
-                  message={message}
-                  mine={mine}
-                  // Only the run's first bubble is attributed (group threads
-                  // only). A deleted message still starts a run, so its
-                  // tombstone stays attributed.
-                  showSender={isGroup && !mine && item.startsRun}
-                  endsRun={item.endsRun}
-                  quoted={
-                    message.reply_to
-                      ? resolveQuote(message.reply_to.id)
-                      : undefined
-                  }
-                  status={statusFor(message)}
-                  onRetry={pending ? () => retryMessage(message) : undefined}
-                  onDiscard={pending ? () => discardSend(message) : undefined}
-                  onShowReactors={() => setReactorsFor(message.id)}
-                  // Browsing into the strand rather than replying to a
-                  // particular message, so the composer aims at the root. The
-                  // thread's *root*, not the bubble you tapped: a root opens its
-                  // own strand, a reply opens the one it belongs to. The server
-                  // owns the flattening, so this is a read of it, never a second
-                  // copy of the rule.
-                  onOpenThread={() => {
-                    const rootId = message.thread_root_id ?? message.id;
-                    setThread({ rootId, replyToId: rootId, composing: false });
-                  }}
-                  // No menu on an unsent message: every action it offers —
-                  // edit, delete, react, report — needs a server id this one
-                  // hasn't got. Retry and Discard are on the bubble instead.
-                  onLongPress={
-                    pending
-                      ? undefined
-                      : (anchor) =>
-                          setMenuTarget({
-                            message,
-                            mine,
-                            anchor,
-                            actions: messageActions({
+              renderItem={({ item }) => {
+                if (item.kind === 'day') return <DaySeparator label={item.label} />;
+                if (item.kind === 'unread') {
+                  return <UnreadDivider count={item.count} />;
+                }
+                const message = item.message;
+                const mine = message.sender.id === me?.pk;
+                const pending = outboxById.get(message.id);
+                return (
+                  <MessageBubble
+                    message={message}
+                    mine={mine}
+                    // Only the run's first bubble is attributed (group threads
+                    // only). A deleted message still starts a run, so its
+                    // tombstone stays attributed.
+                    showSender={isGroup && !mine && item.startsRun}
+                    endsRun={item.endsRun}
+                    quoted={
+                      message.reply_to
+                        ? resolveQuote(message.reply_to.id)
+                        : undefined
+                    }
+                    status={statusFor(message)}
+                    onRetry={pending ? () => retryMessage(message) : undefined}
+                    onDiscard={pending ? () => discardSend(message) : undefined}
+                    onShowReactors={() => setReactorsFor(message.id)}
+                    // Browsing into the strand rather than replying to a
+                    // particular message, so the composer aims at the root. The
+                    // thread's *root*, not the bubble you tapped: a root opens its
+                    // own strand, a reply opens the one it belongs to. The server
+                    // owns the flattening, so this is a read of it, never a second
+                    // copy of the rule.
+                    onOpenThread={() => {
+                      const rootId = message.thread_root_id ?? message.id;
+                      setThread({ rootId, replyToId: rootId, composing: false });
+                    }}
+                    // No menu on an unsent message: every action it offers —
+                    // edit, delete, react, report — needs a server id this one
+                    // hasn't got. Retry and Discard are on the bubble instead.
+                    onLongPress={
+                      pending
+                        ? undefined
+                        : (anchor) =>
+                            setMenuTarget({
                               message,
                               mine,
-                              canSend,
-                              now: Date.now(),
-                              onReply: startReplying,
-                              onEdit: startEditing,
-                              onDelete: confirmDelete,
-                              onReport: setReportingId,
-                            }),
-                          })
-                  }
-                />
-              );
-            }}
-            ListEmptyComponent={
-              messagesQuery.isLoading ? (
-                <ActivityIndicator color={colors.accent} style={styles.spinner} />
-              ) : (
-                <Text style={styles.emptyThread}>No messages yet — say hello.</Text>
-              )
-            }
-          />
-
-          {/* Floating over the list, just above the composer. Only while you're
-              actually away from the bottom — a control that's always there is
-              one nobody reads. */}
-          {scrolledUp ? (
-            <Pressable
-              onPress={jumpToLatest}
-              accessibilityRole="button"
-              accessibilityLabel={
-                missed > 0
-                  ? `Jump to latest, ${missed} new ${
-                      missed === 1 ? 'message' : 'messages'
-                    }`
-                  : 'Jump to latest'
+                              anchor,
+                              actions: messageActions({
+                                message,
+                                mine,
+                                canSend,
+                                now: Date.now(),
+                                onReply: startReplying,
+                                onEdit: startEditing,
+                                onDelete: confirmDelete,
+                                onReport: setReportingId,
+                              }),
+                            })
+                    }
+                  />
+                );
+              }}
+              ListEmptyComponent={
+                messagesQuery.isLoading ? (
+                  <ActivityIndicator color={colors.accent} style={styles.spinner} />
+                ) : (
+                  <Text style={styles.emptyThread}>No messages yet — say hello.</Text>
+                )
               }
-              style={({ pressed }) => [styles.jump, pressed && styles.pressed]}
-            >
-              <Text style={styles.jumpArrow}>↓</Text>
-              {missed > 0 ? (
-                <Text style={styles.jumpCount}>{missed} new</Text>
-              ) : null}
-            </Pressable>
-          ) : null}
+            />
+
+            {/* Floating over the list, just above the composer. Only while you're
+                actually away from the bottom — a control that's always there is
+                one nobody reads. */}
+            {scrolledUp ? (
+              <Pressable
+                onPress={jumpToLatest}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  missed > 0
+                    ? `Jump to latest, ${missed} new ${
+                        missed === 1 ? 'message' : 'messages'
+                      }`
+                    : 'Jump to latest'
+                }
+                style={({ pressed }) => [styles.jump, pressed && styles.pressed]}
+              >
+                <Text style={styles.jumpArrow}>↓</Text>
+                {missed > 0 ? (
+                  <Text style={styles.jumpCount}>{missed} new</Text>
+                ) : null}
+              </Pressable>
+            ) : null}
           </View>
 
           {/* Pad the bar past the home-indicator inset so the composer and Send

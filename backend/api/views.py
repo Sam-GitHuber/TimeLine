@@ -2275,6 +2275,12 @@ MESSAGE_EDIT_WINDOW = timedelta(minutes=15)
 # parameter is otherwise an unbounded ``IN`` clause built straight from a query
 # string — one page of the transcript can't need more than this, so a request
 # that asks for more is a bug or a probe, and either way 400 is the answer.
+#
+# **It is not how many come back.** The response is paginated like every list
+# here, at ``PAGE_SIZE`` (20), so asking for more ids than fit in a page is
+# answered short with a ``next`` — a caller that ignores it has silently not
+# resolved the rest. Deliberately not lowered to the page size: the two numbers
+# answer different questions, and a caller has to cope with pagination anyway.
 MESSAGE_IDS_MAX = 50
 
 
@@ -2364,7 +2370,10 @@ class ConversationMessagesView(generics.ListAPIView):
     and this is the front door they come through. Being one more filter on this
     queryset, an id the viewer is clipped out of simply isn't in the response —
     the same silence as an id that never existed, with no separate code path to
-    get wrong. Capped at ``MESSAGE_IDS_MAX`` per request.
+    get wrong. Capped at ``MESSAGE_IDS_MAX`` per request, and **paginated like
+    the rest of this endpoint**: absent from the response means "clipped *or*
+    on a later page", so a caller asking for more than a page must follow
+    ``next`` before it can read anything into a missing id.
 
     **``?order=desc`` returns newest-first** (Phase 9b M5), which is what lets a
     client open a thread without loading its whole history. Oldest-first paging

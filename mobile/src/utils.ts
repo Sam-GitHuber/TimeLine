@@ -77,6 +77,19 @@ export function formatClockTime(isoString: string): {
  * the most obviously *wrong-looking* thing you can impose on someone, and the
  * platform already knows their answer.
  */
+/**
+ * A trailing meridiem in the shapes the platform actually emits: `AM`, `am`, and
+ * the dotted `a.m.` that en-CA (among others) uses. Matching only the first of
+ * those is a trap worth naming — the miss doesn't look like a missing meridiem,
+ * it looks like the *other* branch running, so the time comes out zero-padded
+ * **and** still carrying its "a.m.": `09:02 a.m.`.
+ *
+ * A leading meridiem (ko-KR's `오전 9:02`) is left exactly as the platform wrote
+ * it. There's nothing to normalise there and no zero to pad — the marker in
+ * front already does the disambiguating.
+ */
+const TRAILING_MERIDIEM = /\s?([ap])\.?m\.?$/i;
+
 export function formatMessageTime(isoString: string): string {
   const formatted = new Date(isoString).toLocaleTimeString(undefined, {
     hour: 'numeric',
@@ -86,12 +99,14 @@ export function formatMessageTime(isoString: string): string {
   // won't give both from one set of options: "9:02 am" is right where a
   // meridiem does the disambiguating, and "09:02" is right where nothing else
   // does. So the presence of a meridiem is the signal for which convention
-  // we're in — and it's lowercased on the way past, because the design system's
-  // voice is lowercase throughout (see `formatClockTime`) and a shouted AM/PM
-  // beside 11px type reads as an abbreviation gone wrong.
-  const meridiem = /[AP]M$/i.test(formatted);
-  if (meridiem) {
-    return formatted.replace(/\s?([AP])M$/i, (_m, half) => ` ${half.toLowerCase()}m`);
+  // we're in — and it's lowercased and de-dotted on the way past, because the
+  // design system's voice is lowercase throughout (see `formatClockTime`) and a
+  // shouted AM/PM beside 11px type reads as an abbreviation gone wrong.
+  if (TRAILING_MERIDIEM.test(formatted)) {
+    return formatted.replace(
+      TRAILING_MERIDIEM,
+      (_m, half: string) => ` ${half.toLowerCase()}m`
+    );
   }
   return formatted.replace(/^(\d):/, '0$1:');
 }

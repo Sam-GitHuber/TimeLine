@@ -25,7 +25,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
-import { Alert, Linking } from 'react-native';
+import { Alert, FlatList, Linking } from 'react-native';
 
 import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
@@ -275,8 +275,13 @@ function serve({
         if (init?.method === 'DELETE') return jsonResponse(null, 204);
 
         // `?ids=` (Phase 9b M5) — how a collapsed quote gets its words and its
-        // author now that the transcript pages lazily. One page: the caller
-        // asks for a handful of ids and the server caps it.
+        // author now that the transcript pages lazily.
+        //
+        // **Paged like every other list**, because it is one: `?ids=` is a
+        // filter on the transcript's own queryset, so a request for more ids
+        // than fit in a page comes back short with a `next`. A mock that always
+        // answered in full would hide the case where the client retires an id it
+        // never actually got an answer about.
         const idsParam = url.match(/[?&]ids=([^&]*)/);
         if (idsParam) {
           const wanted = decodeURIComponent(idsParam[1])
@@ -287,9 +292,9 @@ function serve({
           const found = pool.filter((m) => wanted.includes(m.id));
           return jsonResponse({
             count: found.length,
-            next: null,
+            next: found.length > PAGE_SIZE ? `${url}&page=2` : null,
             previous: null,
-            results: found,
+            results: found.slice(0, PAGE_SIZE),
           });
         }
 
@@ -2371,6 +2376,95 @@ it('keeps the unread divider after the thread is marked read', async () => {
     ).toBe(true)
   );
   expect(screen.getByText('1 unread message')).toBeTruthy();
+});
+
+it('keeps the divider where you stopped, not where the newest message is', async () => {
+  // The divider is placed by counting back from the newest message, and the
+  // newest message keeps changing — so the *count* being captured on open isn't
+  // enough on its own. Left live, every message that arrives while you're
+  // reading pushes a fixed count one further down and slides the marker past the
+  // very messages it was put there to mark.
+  const messages = [
+    message({ id: 1, sender: ADA, text: 'read this one' }),
+    message({ id: 2, sender: ADA, text: 'missed this one' }),
+    message({ id: 3, sender: ADA, text: 'and this one' }),
+  ];
+  serve({ conversation: detail({ unread_count: 2 }), messages });
+
+  await renderScreen();
+  await screen.findByText('2 unread messages');
+
+  // Someone sends another one while you're reading. The mock serves from the
+  // array, so pushing to it is what the next poll finds.
+  messages.push(message({ id: 4, sender: ADA, text: 'newly arrived' }));
+  await waitFor(() => expect(screen.getByText('newly arrived')).toBeTruthy(), {
+    timeout: 15000,
+  });
+
+  // Rendered order is the list's own — newest first, since it's inverted — so
+  // this is where the divider *sits*, which is the whole assertion. It belongs
+  // above "missed this one", the oldest message you hadn't read on open.
+  const order = screen
+    .getAllByText(
+      /^(newly arrived|and this one|missed this one|read this one|2 unread messages)$/
+    )
+    .map((node) => node.props.children);
+  expect(order).toEqual([
+    'newly arrived',
+    'and this one',
+    'missed this one',
+    '2 unread messages',
+    'read this one',
+  ]);
+});
+
+it('opens the thread at the unread divider rather than at the bottom', async () => {
+  // What the divider is for: a marker you have to go and find is decoration.
+  const scrollToIndex = jest
+    .spyOn(FlatList.prototype, 'scrollToIndex')
+    .mockImplementation(() => {});
+  try {
+    serve({
+      conversation: detail({ unread_count: 2 }),
+      messages: [
+        message({ id: 1, sender: ADA, text: 'read this one' }),
+        message({ id: 2, sender: ADA, text: 'missed this one' }),
+        message({ id: 3, sender: ADA, text: 'and this one' }),
+      ],
+    });
+
+    await renderScreen();
+    await screen.findByText('2 unread messages');
+
+    // Rows newest-first: [3, 2, divider, 1, day separator]. `viewPosition: 1` is
+    // the top of the screen on an inverted list, so the divider goes up there
+    // and the unread messages fill in beneath it.
+    await waitFor(() =>
+      expect(scrollToIndex).toHaveBeenCalledWith({
+        index: 2,
+        viewPosition: 1,
+        animated: false,
+      })
+    );
+  } finally {
+    scrollToIndex.mockRestore();
+  }
+});
+
+it('leaves a thread with nothing unread at the bottom, where it opened', async () => {
+  const scrollToIndex = jest
+    .spyOn(FlatList.prototype, 'scrollToIndex')
+    .mockImplementation(() => {});
+  try {
+    serve({ conversation: detail({ unread_count: 0 }), messages: longThread(6) });
+
+    await renderScreen();
+    await screen.findByText('Message 6');
+
+    expect(scrollToIndex).not.toHaveBeenCalled();
+  } finally {
+    scrollToIndex.mockRestore();
+  }
 });
 
 it('offers a jump back to the latest once you’ve scrolled away', async () => {

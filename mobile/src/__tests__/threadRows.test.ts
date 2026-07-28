@@ -134,7 +134,7 @@ describe('toThreadRows', () => {
         message({ id: 1, sender: ME }),
       ],
       meId: ME.id,
-      unreadFrom: 2,
+      unread: { fromId: 2, count: 2 },
     });
 
     const divider = rows.find((row) => row.kind === 'unread');
@@ -150,9 +150,27 @@ describe('toThreadRows', () => {
     const rows = toThreadRows({
       messages: [message({ id: 1 })],
       meId: ME.id,
-      unreadFrom: null,
+      unread: null,
     });
     expect(rows.some((row) => row.kind === 'unread')).toBe(false);
+  });
+
+  it('says what was waiting when you opened it, not what has arrived since', () => {
+    // The count belongs to the boundary, not to the run below it. Re-derived on
+    // every render it would climb while you sat watching the messages land,
+    // describing a thread you're reading right now as five unread.
+    const rows = toThreadRows({
+      messages: [
+        message({ id: 4, sender: ADA }),
+        message({ id: 3, sender: ADA }),
+        message({ id: 2, sender: ADA }),
+        message({ id: 1, sender: ME }),
+      ],
+      meId: ME.id,
+      unread: { fromId: 2, count: 2 },
+    });
+
+    expect(rows.find((row) => row.kind === 'unread')).toMatchObject({ count: 2 });
   });
 });
 

@@ -44,13 +44,20 @@ import { useQuery } from '@tanstack/react-query';
 import { useCallback, useMemo, useSyncExternalStore } from 'react';
 
 import { api } from './api';
-import type { Message } from './types';
+import type { Message, Paginated } from './types';
 
 /**
  * Mirrors `MESSAGE_IDS_MAX` in `api/views.py`, which 400s above it. A screenful
  * of quotes is a handful, so this only ever bites if something goes wrong —
  * slicing rather than sending 51 ids means the fetch degrades to "resolve most
  * of them" instead of failing outright.
+ *
+ * **It is not the number that comes back.** `?ids=` is a filter on the ordinary
+ * message list, so it *paginates* like one: a request for more ids than fit in a
+ * page (20) is answered short, with a `next`. `remember` is where that's dealt
+ * with, deliberately rather than by capping this at the page size here — the
+ * server's cap is a number this file can point at, and its page size is one it
+ * would have to guess and then silently get wrong if it ever moved.
  */
 const IDS_PER_REQUEST = 50;
 
@@ -95,18 +102,34 @@ function useResolved(conversationId: number): ReadonlyMap<number, Message> {
 }
 
 /** Fold one `?ids=` response in and tell the screen. */
-function remember(conversationId: number, ids: number[], found: Message[]) {
+function remember(
+  conversationId: number,
+  ids: number[],
+  page: Paginated<Message>
+) {
   // A *new* map, because the snapshot is compared by identity — mutating the
   // existing one would leave every subscriber convinced nothing had changed.
   const next = new Map(resolvedFor(conversationId));
-  for (const message of found) next.set(message.id, message);
+  for (const message of page.results) next.set(message.id, message);
   resolved.set(conversationId, next);
 
+  // Normally every id asked for, not every id that answered: the ones that
+  // *didn't* come back are the clipped ones, and marking them is what stops the
+  // poll asking again.
+  //
+  // **Unless the response was truncated**, which `next` is the only evidence of.
+  // The endpoint paginates, so a request bigger than a page comes back short —
+  // and marking an id that was never *looked* at would retire it permanently,
+  // turning "you were clipped out of this" into a message that also gets shown
+  // to people who weren't. That's the one lie this module exists to stop
+  // telling, so a truncated response only retires what it answered and the rest
+  // go round again on the next pass (a shorter list, so a different query key
+  // and a real refetch rather than a cache hit).
+  const answered = new Set(page.results.map((message) => message.id));
   const tried = asked.get(conversationId) ?? new Set<number>();
-  // Every id asked for, not every id that answered: the ones that *didn't* come
-  // back are the clipped ones, and marking them is what stops the poll asking
-  // again.
-  for (const id of ids) tried.add(id);
+  for (const id of ids) {
+    if (!page.next || answered.has(id)) tried.add(id);
+  }
   asked.set(conversationId, tried);
 
   listeners.get(conversationId)?.forEach((notify) => notify());
@@ -156,7 +179,7 @@ export function useQuotedMessages(
     queryKey: ['quotedMessages', conversationId, wanted.join(',')],
     queryFn: async () => {
       const page = await api.getMessagesByIds(conversationId, wanted);
-      remember(conversationId, wanted, page.results);
+      remember(conversationId, wanted, page);
       return page;
     },
     enabled: wanted.length > 0,

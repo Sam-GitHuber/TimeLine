@@ -77,14 +77,22 @@ export function firstUnreadId(
 export function toThreadRows({
   messages,
   meId,
-  unreadFrom,
+  unread,
   now,
 }: {
   /** Newest-first: outbox entries, then loaded pages. */
   messages: Message[];
   meId: number | undefined;
-  /** The id from `firstUnreadId`, or null for no divider. */
-  unreadFrom?: number | null;
+  /**
+   * Where the unread divider goes and what it says, or null for no divider.
+   *
+   * **Both captured on open, and neither re-derived here.** `fromId` is the
+   * message from `firstUnreadId`; `count` is how many were waiting at the time.
+   * Counting the run again on every render would make the label climb as
+   * messages arrive — describing a thread you're sitting and watching as five
+   * unread — when what the divider means is "this is where you came back to".
+   */
+  unread?: { fromId: number; count: number } | null;
   now?: Date;
 }): ThreadRow[] {
   // Oldest-first for the walk. De-duplicated on the way, because the endpoint
@@ -103,15 +111,6 @@ export function toThreadRows({
 
   const rows: ThreadRow[] = [];
   let lastDay: string | null = null;
-  let unreadCount = 0;
-  if (unreadFrom != null) {
-    const from = ordered.findIndex((m) => m.id === unreadFrom);
-    if (from >= 0) {
-      unreadCount = ordered
-        .slice(from)
-        .filter((m) => m.sender.id !== meId && !m.is_deleted).length;
-    }
-  }
 
   ordered.forEach((message, index) => {
     // A divider between two bubbles breaks the run whatever the sender: a run
@@ -129,9 +128,9 @@ export function toThreadRows({
         label: dayHeading(message.created_at, now).label,
       });
     }
-    if (unreadCount > 0 && message.id === unreadFrom) {
+    if (unread && unread.count > 0 && message.id === unread.fromId) {
       divided = true;
-      rows.push({ kind: 'unread', key: 'unread', count: unreadCount });
+      rows.push({ kind: 'unread', key: 'unread', count: unread.count });
     }
 
     const previous = ordered[index - 1];
