@@ -66,13 +66,14 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M3** | Reply threads | M1 | **M–L** | ☑ |
 | **M4** | Send status + read receipts | — | **M** | ☑ |
 | **M5** | Thread mechanics | — (do before M7) | **M–L** | ☑ |
-| **M6** | Conversation list + thread info | — | **M** | ☐ |
+| **M6** | Conversation list + thread info | — | **M** | ☑ |
 | **M7** | Photo messages | M5 | **L** | ☐ |
 | **M8** | Text, mentions & quick actions | M1 | **M** | ☐ |
 | **M9** | Web parity | M1–M8 | **L** | ☐ |
 
 M0/M1 first. After that only the listed dependencies bind — M4, M5, M6 and M8 can
-be done in any order.
+be done in any order. **M6's media gallery is the one piece left behind**: it
+needs M7's photos, so build it as part of M7 rather than reopening M6.
 
 ---
 
@@ -976,10 +977,46 @@ the durable record, with the two new query parameters in *API*.
    anyone looks for a picture someone sent last week. *(Do this after M7, or
    leave the section out until the photos exist.)*
 
-**Done when**
-- [ ] Info screen exists with all actions moved into it; header is clean.
-- [ ] Group chats can be renamed; list rows swipe to mute and mark-unread.
-- [ ] `messaging.md` *API* + *Mobile* updated.
+**Done when** — ✅ all done bar the media gallery, which waits on M7 (there are
+no photo messages to put in it). `messaging.md` → *Renaming a group chat*,
+*Marking a thread unread*, *The conversation list* and *The info screen* are the
+durable record.
+- [x] Info screen exists with all actions moved into it; header is clean.
+- [x] Group chats can be renamed; list rows swipe to mute and mark-unread.
+- [x] `messaging.md` *API* + *Mobile* updated.
+- [ ] Media gallery — **deferred to M7**, per step 6.
+
+**Four things M6 settled that the plan above didn't anticipate:**
+
+1. **"Mark unread" is not a `DELETE` of the read row**, which is what step 5
+   says it is ("effectively"). Dropping the marker means *every* message in the
+   thread counts as unread, so flagging a chat you'd read to the end returns it
+   wearing "99+" — the badge stops meaning "waiting for you" in exactly the
+   moment someone reached for it as a to-do list. The marker moves to a
+   microsecond behind the newest **visible, incoming, undeleted** message
+   instead, so it comes back as one. All three adjectives are load-bearing:
+   your own messages and tombstones don't count toward unread (so aiming at one
+   is a silent no-op), and a message from inside an interval gap would give a
+   gap member an unread count for something the thread then refuses to show.
+   Nothing to aim at is a 400, and the clients hide the action rather than
+   offering something that errors.
+2. **The swipe uses gesture-handler's *deprecated* `Swipeable`, deliberately**,
+   behind a `SwipeableRow` seam. `ReanimatedSwipeable` is the current component
+   and it cannot be imported under Jest — Reanimated's worklet runtime fails at
+   `require` — so the only way to use it is `jest.mock`-ing the swipe away,
+   which here would mock away *the actions*, leaving nothing to prove that Leave
+   leaves. Same trade M1 made for the menu's animation. Worth also recording
+   that **M3's swipe lesson doesn't apply here**: the list is a tab root, so
+   there's no back gesture to race.
+3. **Search needed a threshold, and it's keyed off the *unfiltered* count.**
+   Below six threads a search field is chrome that makes the screen busier
+   without making anything findable. Keying its presence off the filtered list
+   instead would pull the field out from under whoever was typing the moment a
+   query matched nothing — which is precisely when you need to correct a typo.
+4. **Leaving from the info screen can't just `goBack()`.** The thread's Leave
+   did, because the thread was one screen from the list; from the info screen
+   going back lands on the thread of a conversation you're no longer in. It
+   dismisses to the list instead.
 
 ---
 
@@ -1015,6 +1052,11 @@ Sequenced last of the feature work: biggest chunk, nothing depends on it.
 5. Bubble renders via the existing `AuthedImage`; tap opens the existing
    `PhotoLightbox`.
 6. List preview: "📷 Photo".
+   - **Also finish M6's media gallery here** — a grid of this chat's photos in
+     the info screen (`mobile/src/app/messages/[conversationId]/info.tsx`),
+     tapping into the same `PhotoLightbox`. M6 shipped without it on purpose:
+     an empty grid promising a feature that doesn't exist is worse than the
+     absence.
 7. **Push body: `"Ada sent a photo"`** — names the sender, says nothing about
    content, consistent with the existing rule.
 8. **Storage needs no new decision** — it rides the `django-storages` seam: local

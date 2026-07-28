@@ -452,6 +452,83 @@ the one from their last active spell, and it isn't ours to hand over while
 they're in the waiting room. The clients skip pending rows when computing ticks
 anyway; withholding server-side is the half that doesn't depend on them doing so.
 
+## Renaming a group chat
+
+Added in Phase 9b M6. `PATCH /api/conversations/<id>/` with `{ title }`. Until
+then a title could only be set at creation, so "Weekend plans" outlived the
+weekend — and an ad-hoc group started from a profile could never be named at all.
+
+Four rules, each a decision rather than a default:
+
+| Rule | Why |
+| --- | --- |
+| **Group chats only** (400) | A 1:1's name *is* the other person, resolved per-viewer — there is no shared title to change, and letting one side rename the other would be a small act of vandalism. |
+| **Any active member** (403 otherwise) | Chats have no admin role at all (see the [membership state machine](#membership-state-machine)), and inventing one for a text field would be the wrong place to start. A `pending` member is excluded for the same reason they can't send: they haven't been let in. |
+| **Blank clears it** | Both clients then fall back to a comma-joined list of the other members, which is a better name for an ad-hoc chat than a stale one. Whitespace is stripped, so a "name" of spaces can't render as an untitled chat with the fallback suppressed. |
+| **It doesn't bump `updated_at`** | A rename isn't activity, so it mustn't jump the thread to the top of everyone's list — the same rule an [edit](#editing-a-message) and a reaction follow. `update_fields=["title"]` is what makes that true. Asserted in `ConversationRenameTests`, because the pairing (name changes everywhere / order doesn't) is easy to break by accident. |
+
+**Nobody is told.** There is no "Sam renamed this chat" system message, because
+there is no system-message concept in the model and inventing one for this is a
+bigger change than the feature. Recorded as a real gap rather than an oversight:
+the name simply changes for everyone the next time they look.
+
+## Marking a thread unread
+
+Added in Phase 9b M6. `DELETE /api/conversations/<id>/read/` — for the people
+who use the badge as a to-do list ("I'll reply properly later").
+
+**It moves your read marker to just behind the newest message you didn't send —
+it does not delete the read row.** Deleting is the obvious reading of "un-read
+this" and it's wrong: with no marker, [every message in the thread's history
+counts as unread](#history-is-interval-clipped), so a chat you had read to the
+end and flagged for later would come back wearing "99+". The count is supposed to
+mean "this many are waiting for you", so the smallest edit that makes the thread
+unread is the honest one, and it lands at **one**.
+
+Three details behind that, each of which would otherwise be a silent no-op:
+
+- **Interval-clipped**, through `_messages_for_viewer` like everything else here.
+  A member with a gap in their membership must not have their marker parked
+  against a message they were never shown — that would hand them a permanent
+  unread count for something the thread then refuses to display.
+- **Not your own message, and not a tombstone.** Neither counts toward unread, so
+  aiming at one would produce a thread that reads as *read* the moment anything
+  refreshes it.
+- **A microsecond behind**, since the unread rule is strictly
+  `created_at > last_read_at` and Postgres stores microsecond precision.
+
+**400 when there's nothing to mark unread** — an empty thread, or one where every
+visible message is yours. It aims at the newest qualifying message *anywhere* in
+the thread, not at the last one, so a chat you replied to marks unread fine —
+the marker lands past your own trailing messages.
+
+The mobile list's swipe gate is **narrower than that**, and knowingly: a list row
+carries only `last_message`, so "I replied last" and "I've been talking to myself
+since I opened this chat" look identical from there, and only the second is a
+400. It offers the action when the newest message is incoming and undeleted, and
+leaves the rest to the thread screen. Widen it if a row ever grows a
+"has incoming history" flag.
+
+### 🔒 It retracts your read receipt, and that's the intended reading
+
+`last_read_at` is one column, and [the ticks](#send-state--read-receipts) are
+served from it. So marking a thread unread flips the sender's ✓✓ back to ✓ on the
+message you just un-read — they stop being told you've read it, because you've
+just said you haven't dealt with it.
+
+This is deliberate rather than a side effect. The alternative is a second,
+never-decreasing column for receipts, which buys a tick that survives the badge
+at the cost of letting the two disagree about whether you read something — the
+exact drift the single `unread_count_for` implementation exists to prevent. And
+where the two readings conflict, a privacy-first app should err toward **fewer**
+claims about what someone has read, not more: the retraction is the option that
+tells the other person less. Pinned by
+`MarkConversationUnreadTests.test_marking_unread_retracts_the_read_receipt`, so
+it can't quietly change.
+
+The blast radius is one message: the marker only moves behind the newest incoming
+one, so everything older stays read and stays ticked.
+
 ## Membership state machine
 
 The single invariant (active set is a clique) yields deterministic rules,
@@ -512,6 +589,8 @@ Direct and group chats share the endpoints:
     a list row shows an unread count, not who's read what, and putting them there
     would pay the extra queries once per row. See
     [Send state & read receipts](#send-state--read-receipts).
+- `PATCH /api/conversations/<id>/` — **rename a group chat** (Phase 9b M6), body
+  `{ title }`. See [Renaming a group chat](#renaming-a-group-chat).
 - `GET /api/conversations/<id>/messages/` — oldest-first, paginated, **clipped to
   your intervals**; 403 (locked) while pending.
   - `?thread_root=<id>` narrows it to **one reply thread** — that root plus every
@@ -546,7 +625,9 @@ Direct and group chats share the endpoints:
   ([Reply threads](#reply-threads)); it's validated against **your own**
   interval-clipped messages, so an id from another thread or from inside a gap
   is rejected exactly like one that never existed.
-- `POST /api/conversations/<id>/read/` — mark read up to now (clears unread).
+- `POST /api/conversations/<id>/read/` — mark read up to now (clears unread);
+  `DELETE` marks it **unread** again (Phase 9b M6). See
+  [Marking a thread unread](#marking-a-thread-unread).
 - `POST` / `DELETE /api/conversations/<id>/mute/` — mute / unmute **your** push
   notifications for this thread; returns `{ muted }`. Member-only (404
   otherwise). The state also rides on the conversation payload as `muted`.
@@ -701,6 +782,14 @@ unattached message, and no ticks or optimistic send — worth saying out loud
 rather than having someone discover them. All four are stored and all four show
 in the app.
 
+M6 adds nothing the drawer renders *wrongly*, only things it doesn't offer yet:
+[renaming a group](#renaming-a-group-chat) and
+[marking a thread unread](#marking-a-thread-unread) are new endpoints an old
+client simply never calls, and the drawer keeps Mute/Add/Leave in its thread
+header rather than moving them to an info panel. A chat renamed from the app
+shows its new name on the web immediately, because the title was always on the
+payload.
+
 **The read-receipts *setting* is the exception, and is on the web now** (a
 Privacy section on `/settings`). The disclosure happens whether or not this
 browser draws the ticks, so a member who only ever uses the web still has to be
@@ -730,6 +819,73 @@ Two behaviours differ because the medium does, not the model: **message actions*
 are a long-press (a phone has no hover for the web's inline Delete — see below),
 and the **Message** button on a profile pushes the thread full-screen rather than
 opening a drawer alongside.
+
+### The conversation list (Phase 9b M6)
+
+**Swipe a row for its actions**, the shape every mainstream messenger's list has
+and the reason people are surprised when a row doesn't move. It follows iOS's own
+convention so it needs no teaching: **swipe right** for the read/unread toggle,
+**swipe left** for mute and leave.
+
+- **Mark unread** is the one people came for — the write-up is
+  [above](#marking-a-thread-unread). It's offered only where the server would
+  accept it (an incoming message you've already read), because an action that
+  reliably comes back a 400 is worse than one that isn't there. The mirror,
+  **Mark read**, appears when the thread *has* unread.
+- **Mute** reads as its state ("Unmute" once silenced), like the thread's control
+  does — the whole risk of muting is forgetting you did.
+- **Leave** confirms first, and on an invitation you haven't accepted it is
+  **Decline**: the same endpoint, and a very different sentence.
+
+**Why a swipe is safe here when [M3's swipe-to-reply wasn't](#reply-threads-on-the-phone-phase-9b-m3).**
+That one raced the navigator's interactive back gesture and usually lost. The
+conversation list is a **tab root** — there's nothing to go back to and no
+competing responder — so the same gesture is unambiguous here. Worth saying,
+because "we removed a swipe once" otherwise reads as "swipes don't work in this
+app".
+
+The row is built on `react-native-gesture-handler`'s **deprecated** `Swipeable`
+rather than its current `ReanimatedSwipeable`, behind our own `SwipeableRow`
+seam. Same trade `MessageActionMenu` made in M1: **Reanimated's worklet runtime
+can't load under Jest**, so importing the current one fails the suite at
+`require` time and the only way past is mocking the swipe away — which here would
+mock away the actions, so no test could prove that Leave leaves. When RNGH
+eventually drops the old component, one file changes.
+
+**Search is by name, and deliberately not by message content.** It appears once
+the list is long enough to need it (six threads), matches a group's title *and*
+its members' names — an untitled group is displayed as its members, so you should
+be able to find a chat by the name on the screen in front of you — and it lives
+in the list header so it scrolls away rather than permanently narrowing the
+screen. 🔒 Searching *messages* is the obvious next thought and is on the
+[not-building list](#not-end-to-end-encrypted-yet): server-side search dies under
+E2E, so building toward it means building something to tear out. Matching the
+previews that happen to be loaded would also be a half-feature that silently
+searches only each thread's newest message.
+
+### The info screen (Phase 9b M6)
+
+`/messages/[conversationId]/info` — everything *about* a chat, as opposed to what
+was said in it: the participant list (with a **Pending** badge, which means
+[waiting on connections](#membership-state-machine) rather than ignoring an
+invitation), mute, add people, leave, block on a 1:1, and the rename control.
+
+**It exists because the thread header had grown three text buttons** — Mute, Add,
+Leave — competing with the name of the person you're talking to, which is the one
+thing a chat header is for. The header is now identity + `⋯`, with one exception:
+a **muted** thread still says "Muted" up there, because the whole risk of muting
+is forgetting you did, so it has to be visible somewhere you'd notice.
+
+Renaming happens **in place** rather than on a screen of its own — it's one
+field, and a round trip through a form would be more navigation than the change
+deserves. The response is the fresh conversation, written straight into the
+`['conversation', id]` cache the thread header reads, so the new name is up before
+any refetch lands.
+
+**The media gallery isn't here yet.** It's the natural home for "the picture
+someone sent last week" and it's in M6's plan, but there are no photo messages
+until M7 — an empty grid promising a feature that doesn't exist is worse than the
+absence.
 
 ### The long-press action menu (Phase 9b M1)
 

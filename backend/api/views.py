@@ -74,11 +74,13 @@ from .models import (
     Report,
 )
 from .serializers import (
+    CONVERSATION_TITLE_MAX_LENGTH,
     EVERYONE,
     AuthorSerializer,
     CommentCreateSerializer,
     CommentSerializer,
     ConnectionRequestSerializer,
+    ConversationRenameSerializer,
     ConversationSerializer,
     DevicePushTokenDeleteSerializer,
     DevicePushTokenSerializer,
@@ -2076,7 +2078,9 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         ids = request.data.get("participant_ids") or []
         if not isinstance(ids, list) or not ids:
             raise ValidationError({"participant_ids": "Pick at least one connection."})
-        title = (request.data.get("title") or "").strip()[:100]
+        title = (request.data.get("title") or "").strip()[
+            :CONVERSATION_TITLE_MAX_LENGTH
+        ]
         group_id = request.data.get("group_id")
         group = None
         if group_id is not None:
@@ -2221,7 +2225,7 @@ class ConversationDetailView(generics.RetrieveAPIView):
     """A single conversation (``GET /conversations/<pk>/``) — the other person
     (direct) or the member list (group), last-message preview, your unread
     count, and ``my_status``/``must_connect_with`` (drives a group's locked
-    pending panel).
+    pending panel). ``PATCH`` renames a group chat (Phase 9b M6).
 
     Drives the thread page's header so it's correct even on a cold page
     load/refresh, not only when arriving from the list. Participant-scoped —
@@ -2237,6 +2241,45 @@ class ConversationDetailView(generics.RetrieveAPIView):
     """
 
     serializer_class = ConversationSerializer
+
+    def patch(self, request, *args, **kwargs):
+        """Rename a group chat (Phase 9b M6) — body ``{title}``.
+
+        Until now a title could only be set when the chat was created, which
+        made "Weekend plans" permanent long after the weekend. Four rules, each
+        a decision:
+
+        - **Group chats only** (400). A 1:1's name *is* the other person,
+          resolved per-viewer — there is no shared title to change, and letting
+          one side rename the other would be a small act of vandalism.
+        - **Any active member**, no admin role (403 otherwise). Chats have no
+          admin concept at all (see ``messaging.md``'s membership state machine)
+          and inventing one for a text field would be the wrong first place to
+          start. A ``pending`` member is excluded for the same reason they can't
+          send: they haven't been let in yet.
+        - **It does not bump ``updated_at``.** A rename isn't activity, so it
+          mustn't jump the thread to the top of everyone's list — the same rule
+          an edit and a reaction follow. ``update_fields`` is what makes that
+          true, since ``updated_at`` is written explicitly by the send path.
+        - **Nobody is told.** There's no system message ("Sam renamed this
+          chat") because there's no system-message concept in the model, and
+          inventing one for this is a bigger change than the feature.
+          Acknowledged as a real gap rather than an oversight: the name simply
+          changes for everyone next time they look.
+        """
+        convo = self.get_object()
+        if convo.kind != Conversation.Kind.GROUP:
+            raise ValidationError({"title": "Only a group chat can be renamed."})
+        if convo.my_status != ACTIVE_P:
+            raise PermissionDenied("Only an active member can rename this chat.")
+        serializer = ConversationRenameSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        convo.title = serializer.validated_data["title"]
+        convo.save(update_fields=["title"])
+        # Re-serialize the decorated instance the gate already fetched, so the
+        # caller gets the same payload shape as a GET and doesn't need a second
+        # round trip to refresh the header it just changed.
+        return Response(self.get_serializer(convo).data)
 
     def get_object(self):
         user = self.request.user
@@ -2488,12 +2531,16 @@ class ConversationMessagesView(generics.ListAPIView):
 
 
 class ConversationReadView(APIView):
-    """Mark a conversation read up to now (``POST /conversations/<pk>/read/``),
-    which clears your unread count for it. Participant-only (404 otherwise) —
-    resolved via ``_viewer_conversation_or_404`` so this works for a group chat
-    member (any non-left status) too, not just a legacy direct pair; a pending
-    member marking read is harmless (they can't see any messages yet anyway,
-    since ``visible_messages_for`` clips to their intervals)."""
+    """Your read marker for one thread. ``POST`` marks it read up to now, which
+    clears your unread count; ``DELETE`` marks it **unread** again (Phase 9b
+    M6).
+
+    Participant-only (404 otherwise) — resolved via
+    ``_viewer_conversation_or_404`` so this works for a group chat member (any
+    non-left status) too, not just a legacy direct pair; a pending member
+    marking read is harmless (they can't see any messages yet anyway, since
+    ``visible_messages_for`` clips to their intervals).
+    """
 
     def post(self, request, pk):
         user = request.user
@@ -2504,6 +2551,71 @@ class ConversationReadView(APIView):
             defaults={"last_read_at": timezone.now()},
         )
         return Response({"detail": "Marked read."}, status=status.HTTP_200_OK)
+
+    def delete(self, request, pk):
+        """Mark the thread unread — for the people who use the badge as a
+        to-do list ("I'll reply properly later").
+
+        **It moves the marker to just behind the newest message you didn't
+        send, rather than deleting the row.** Deleting is the obvious reading of
+        "un-read this" and it's wrong: with no marker at all, *every* message in
+        the thread's history counts as unread, so a chat you have read to the
+        end and flagged for later would come back wearing "99+". The count is
+        supposed to mean "this many are waiting for you", so the smallest edit
+        that makes the thread unread is the honest one — and it lands at 1,
+        because everything after the newest incoming message is your own.
+
+        Three details, each load-bearing:
+
+        - **Interval-clipped**, through ``_messages_for_viewer`` like everything
+          else here. A member with a gap in their membership must not have their
+          marker parked against a message they were never shown, which would
+          hand them a permanent unread count for something they can't open.
+        - **Not your own message, and not a tombstone** — neither counts toward
+          unread (see ``unread_count_for``), so aiming at one would produce a
+          thread that says it's read the moment you refresh.
+        - **A microsecond behind**, because the unread rule is strictly
+          ``created_at > last_read_at``. Postgres stores microsecond precision,
+          so this is the smallest representable step rather than an arbitrary
+          nudge.
+
+        🔒 **It retracts your read receipt too, and that is the intended
+        reading.** ``last_read_at`` is one column and ``attach_read_receipts``
+        serves the ticks from it, so moving the marker back flips the sender's
+        ✓✓ to ✓ on the message you just un-read. Deliberately not given a second
+        never-decreasing column: two markers would mean the badge and the tick
+        could disagree about whether you read something, which is the drift this
+        module keeps closing everywhere else. Saying "actually, I haven't dealt
+        with this" to yourself and to them is one honest statement — and on a
+        privacy-first app the direction to err is *fewer* claims about what
+        someone has read, not more. Pinned by
+        ``test_marking_unread_retracts_the_read_receipt``.
+
+        400 when there's nothing to mark unread (an empty thread, or one where
+        every visible message is yours). The clients hide the action in that
+        case; saying so plainly beats a 200 that visibly does nothing.
+        """
+        user = request.user
+        convo = _viewer_conversation_or_404(pk, user)
+        target = (
+            _messages_for_viewer(convo, user)
+            .filter(deleted_at__isnull=True)
+            .exclude(sender=user)
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        if target is None:
+            raise ValidationError(
+                {"detail": "There's nothing here to mark unread."}
+            )
+        last_read_at = target.created_at - timedelta(microseconds=1)
+        ConversationRead.objects.update_or_create(
+            conversation=convo, user=user, defaults={"last_read_at": last_read_at},
+        )
+        return Response(
+            {"unread_count": unread_count_for(convo, user, last_read_at)},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ConversationMuteView(APIView):

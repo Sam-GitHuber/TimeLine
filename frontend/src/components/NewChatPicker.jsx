@@ -151,6 +151,11 @@ export default function NewChatPicker({ prefill }) {
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Chat name (optional, for a group)"
             aria-label="Chat name"
+            // The column's width. Without it the create endpoint silently
+            // truncates at 100 and you'd never be told which half you kept —
+            // the rename field has capped it since M6, and this is the same
+            // field a day earlier.
+            maxLength={100}
             className="w-full rounded-xl border border-line-strong bg-raised px-3.5 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
           />
         )}

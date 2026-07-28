@@ -15,7 +15,10 @@
  *   - sends, and offers the **long-press action menu** on any bubble — Copy /
  *     Edit / Delete on your own, Copy / Report on someone else's (Phase 9b M1),
  *     with a quick-reaction row across the top (Phase 9b M2);
- *   - a *group* header offers Leave; a 1:1 header links to the other's profile;
+ *   - carries a `⋯` through to the **info screen** (Phase 9b M6), which is
+ *     where mute / add people / leave / rename now live — they used to be text
+ *     buttons crowding this header;
+ *   - a 1:1 header links to the other person's profile;
  *   - a **pending** viewer (added but not yet connected to the whole clique) sees
  *     the locked `PendingChatPanel` instead of the message list;
  *   - a viewer who can no longer send (disconnected) gets a read-only footer.
@@ -871,28 +874,6 @@ export default function ThreadScreen() {
       ),
   });
 
-  const muteMutation = useMutation({
-    mutationFn: (muted: boolean) => api.setConversationMuted(id, muted),
-    onSuccess: () => {
-      // The detail query holds `muted`, and the list shows it too, so both are
-      // refetched rather than patched — a mute is a rare, deliberate tap, so
-      // correctness is worth more here than saving a round-trip.
-      queryClient.invalidateQueries({ queryKey: ['conversation', id] });
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
-    },
-  });
-
-  const leaveMutation = useMutation({
-    mutationFn: () => api.leaveConversation(id),
-    onSuccess: () => {
-      // Drop the just-left chat off the list (and its unread out of the tab
-      // badge) immediately, rather than waiting up to a poll cycle for it.
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
-      queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
-      goBack();
-    },
-  });
-
   /**
    * Only an *edit* blocks the composer now (M4).
    *
@@ -995,17 +976,6 @@ export default function ThreadScreen() {
     ]);
   }
 
-  function confirmLeave() {
-    Alert.alert('Leave chat?', 'You’ll stop receiving messages here.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Leave',
-        style: 'destructive',
-        onPress: () => leaveMutation.mutate(),
-      },
-    ]);
-  }
-
   const other = detail?.other;
   const loadError = convoQuery.isError;
   const notAvailable =
@@ -1050,47 +1020,23 @@ export default function ThreadScreen() {
           )}
         </View>
 
+        {/* One control, not three (M6). Mute, Add and Leave used to sit here as
+            text buttons competing with the name of the person you're talking
+            to — which is the one thing a chat header is for. They live on the
+            info screen now, where they have room to say what they do; this is
+            the door to it, and the muted state still shows here because a
+            silenced chat has to say so somewhere you'll see it. */}
         {!loadError && !isPending && detail ? (
-          <View style={styles.headerActions}>
-            {/* Mute is offered on every thread, direct or group — a chatty 1:1
-                is as worth silencing as a busy group. It's the current state as
-                much as the action, so the label reads as the state ("Muted")
-                once set rather than staying an imperative. */}
-            <Pressable
-              onPress={() => muteMutation.mutate(!detail.muted)}
-              disabled={muteMutation.isPending}
-              accessibilityRole="switch"
-              accessibilityLabel="Mute notifications"
-              accessibilityState={{ checked: detail.muted }}
-              hitSlop={8}
-            >
-              <Text
-                style={detail.muted ? styles.headerActionOn : styles.headerAction}
-              >
-                {detail.muted ? 'Muted' : 'Mute'}
-              </Text>
-            </Pressable>
-            {isGroup ? (
-              <>
-                <Pressable
-                  onPress={() => router.push(`/messages/new?addTo=${id}`)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Add people"
-                  hitSlop={8}
-                >
-                  <Text style={styles.headerAction}>Add</Text>
-                </Pressable>
-                <Pressable
-                  onPress={confirmLeave}
-                  accessibilityRole="button"
-                  accessibilityLabel="Leave chat"
-                  hitSlop={8}
-                >
-                  <Text style={styles.leave}>Leave</Text>
-                </Pressable>
-              </>
-            ) : null}
-          </View>
+          <Pressable
+            onPress={() => router.push(`/messages/${id}/info`)}
+            accessibilityRole="button"
+            accessibilityLabel="Conversation details"
+            hitSlop={8}
+            style={styles.headerActions}
+          >
+            {detail.muted ? <Text style={styles.headerActionOn}>Muted</Text> : null}
+            <Text style={styles.headerAction}>⋯</Text>
+          </Pressable>
         ) : (
           // A fixed-width spacer keeps the identity block centred against the
           // Back button whether or not header actions are present.
@@ -1506,19 +1452,27 @@ const styles = StyleSheet.create({
     color: colors.ink,
   },
   headerLoading: { fontSize: fontSize.sm, color: colors.inkFaint },
-  leave: { fontSize: fontSize.sm, color: colors.danger, fontWeight: '600' },
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
-  headerAction: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '600' },
-  // The "on" state of a toggling header action: dimmed rather than accented,
-  // because a muted thread is the quiet state and shouldn't draw the eye.
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: spacing.xs,
+    minWidth: 24,
+  },
+  // The ⋯ itself: larger than body text, because it's a target as well as a
+  // glyph and three dots at 14px are hard to hit and harder to see.
+  headerAction: { fontSize: fontSize.lg, color: colors.accent, fontWeight: '700' },
+  // The muted state riding beside it: dimmed rather than accented, because a
+  // muted thread is the quiet state and shouldn't draw the eye.
   headerActionOn: {
     fontSize: fontSize.sm,
     color: colors.inkFaint,
     fontWeight: '600',
   },
-  // Roughly the width of the header actions, so the identity block stays
-  // centred against the Back button on threads without them.
-  actionSpacer: { width: 72 },
+  // The same width as the ⋯ control, so the identity block doesn't shift
+  // sideways between a thread that has one and a loading/pending one that
+  // doesn't.
+  actionSpacer: { width: 24 },
   list: { flex: 1 },
   messagesContent: { padding: spacing.md, flexGrow: 1 },
   spinner: { marginTop: spacing.xl },
