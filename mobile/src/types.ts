@@ -266,14 +266,17 @@ export type Message = {
   edited_at: string | null;
   reactions?: Reaction[];
   /**
-   * What this message replies to (Phase 9b M3) — a **reference**, never the
-   * quoted text. The body is looked up from the messages we already hold, or
-   * fetched through the same interval-clipped endpoint as everything else; the
-   * server will not hand it over attached to the reply, because that would route
-   * around the clipping. Render "Original message unavailable" when it can't be
-   * resolved, which is a real state, not just a loading one.
+   * What this message replies to (Phase 9b M3) — **a bare id**, never the quoted
+   * text and never its author. Both are looked up from the message itself, which
+   * we either already hold or fetch through the same interval-clipped endpoint
+   * as everything else; the server will not hand either over attached to the
+   * reply, because that would route around the clipping. (The author matters as
+   * much as the words: in a group, someone can join, post and leave inside your
+   * interval gap, and a quote was the one place their name would have reached
+   * you.) Render "Original message unavailable" when it can't be resolved, which
+   * is a real state, not just a loading one.
    */
-  reply_to?: { id: number; sender: Author } | null;
+  reply_to?: { id: number } | null;
   /** The head of the reply thread this message is in; null if it's in none. */
   thread_root_id?: number | null;
   /**

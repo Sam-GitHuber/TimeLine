@@ -152,10 +152,10 @@ function messageActions({
       },
     },
   ];
-  // Reply is in the menu *as well as* on the swipe (M3). The swipe is the
-  // gesture people reach for without thinking; the menu entry is how anyone
-  // discovers that the swipe exists at all. Left out where the server would
-  // refuse the send anyway, like the reaction row.
+  // The only way to reply (M3). A swipe-to-reply shipped alongside this and was
+  // removed — it raced the navigator's back gesture and usually lost, closing
+  // the conversation instead of starting a reply; see `MessageBubble`. Left out
+  // where the server would refuse the send anyway, like the reaction row.
   if (canSend) {
     actions.push({ label: 'Reply', onPress: () => onReply(message) });
   }
@@ -265,10 +265,11 @@ export default function ThreadScreen() {
   /**
    * Resolve a quoted message from what we've already loaded (M3).
    *
-   * 🔒 The quote's *text* is never sent with the reply — only `{ id, sender }` —
-   * so it has to be found in messages that came through the interval-clipped
-   * endpoint. That's the point: a quote can't show what the thread wouldn't. A
-   * miss therefore renders "Original message unavailable", which today means
+   * 🔒 Nothing about the quoted message is sent with the reply — it carries a
+   * bare `{ id }`, not the text and not the author — so both have to be found in
+   * messages that came through the interval-clipped endpoint. That's the point:
+   * a quote can't show what the thread wouldn't. A miss therefore renders
+   * "Original message unavailable" with no name above it, which today means
    * genuinely clipped, because this screen still loads every page.
    *
    * **M5 has to revisit this.** It replaces the eager full-history load with
@@ -292,11 +293,16 @@ export default function ThreadScreen() {
   const sendMutation = useMutation({
     mutationFn: ({ value, replyToId }: { value: string; replyToId?: number }) =>
       api.sendMessage(id, value, replyToId),
-    onSuccess: () => {
-      // Don't clear the composer if it has since become an *editor*: a send
-      // still in flight when you long-press → Edit would otherwise wipe the
-      // prefilled text out from under you.
-      if (!editing) setText('');
+    onSuccess: (_message, { replyToId }) => {
+      // Clear *this* screen's composer, and only when the send came from it.
+      // A reply is sent from the strand's own composer, which clears itself —
+      // clearing here too would wipe a half-typed message in the transcript
+      // underneath, which is the same betrayal `stashedDraft` exists to
+      // prevent, just triggered by someone replying instead of editing.
+      // Don't clear it if it has since become an *editor* either: a send still
+      // in flight when you long-press → Edit would wipe the prefilled text out
+      // from under you.
+      if (!replyToId && !editing) setText('');
       queryClient.invalidateQueries({ queryKey: ['messages', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
       // The focused view reads its own query, so a reply sent from in there has
@@ -417,7 +423,7 @@ export default function ThreadScreen() {
   }
 
   /**
-   * Reply to a message (M3) — from a right-swipe or the menu's Reply.
+   * Reply to a message (M3) — from the long-press menu's Reply, the only route.
    *
    * Opens the strand rather than aiming this screen's composer at the message,
    * so you can read what you're joining while you write. A message with no
@@ -631,7 +637,6 @@ export default function ThreadScreen() {
                     item.reply_to ? messagesById.get(item.reply_to.id) : undefined
                   }
                   onShowReactors={() => setReactorsFor(item.id)}
-                  onReply={canSend ? () => startReplying(item) : undefined}
                   // Browsing into the strand rather than replying to a
                   // particular message, so the composer aims at the root. The
                   // thread's *root*, not the bubble you tapped: a root opens its
@@ -783,8 +788,10 @@ export default function ThreadScreen() {
           isGroup={isGroup}
           canSend={canSend}
           sending={sendMutation.isPending}
+          // `mutateAsync`, so the strand can wait for the send to land before
+          // clearing its input — and keep what you wrote if it doesn't.
           onSend={(value, replyToId) =>
-            sendMutation.mutate({ value, replyToId })
+            sendMutation.mutateAsync({ value, replyToId })
           }
           onClose={() => setThread(null)}
         />

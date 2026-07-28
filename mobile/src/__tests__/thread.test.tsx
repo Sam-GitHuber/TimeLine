@@ -8,10 +8,12 @@
  * Phase 9b M2 adds reactions: a quick-emoji row across the top of that menu, and
  * pills under the bubble that toggle on tap and reveal who reacted on a hold.
  *
- * Phase 9b M3 adds reply threads: Reply aims the composer at a message, a reply
- * renders a quote resolved from messages the client already holds (never text
- * the server attached to it), and a root's "N replies" opens the focused thread
- * over a blurred transcript.
+ * Phase 9b M3 adds reply threads: Reply in that menu opens a focused strand over
+ * a blurred transcript with its own composer, a reply renders a quote resolved
+ * from messages the client already holds (never anything the server attached to
+ * it — not the text and not the author), and a root's "N replies" opens the same
+ * strand. Reply is a menu item and nothing else: the swipe that shipped with M3
+ * fought the navigator's back gesture and was removed.
  *
  * What's worth pinning: sending fires the send endpoint and clears the input;
  * group threads attribute a *run* of messages to its sender only once (the first
@@ -27,10 +29,6 @@ import { Alert } from 'react-native';
 
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
-import {
-  didTriggerReply,
-  shouldStartReplySwipe,
-} from '@/components/MessageBubble';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
@@ -124,6 +122,9 @@ const ADA = { id: 2, display_name: 'Ada Lovelace', avatar_thumb: null };
 const GRACE = { id: 3, display_name: 'Grace Hopper', avatar_thumb: null };
 /** `ME` as a message sender — the author slice, not the account. */
 const MINE = { id: ME.pk, display_name: ME.display_name, avatar_thumb: null };
+/** The server's `PAGE_SIZE` (`config/settings.py`), so paging is served here as
+ *  the real endpoint serves it. */
+const PAGE_SIZE = 20;
 
 function detail(overrides: Partial<Conversation>): Conversation {
   return {
@@ -201,10 +202,19 @@ function serve({
       // Before the bare `/messages/` branch: the focused thread is the same
       // endpoint with a filter, so the order here mirrors the server's.
       if (url.includes('thread_root=')) {
-        const results = thread ?? [];
+        // Paged like the real endpoint, because it *is* the real endpoint with
+        // a filter on it — a strand longer than one page is the case the view
+        // used to get wrong, and a mock that always answers in full can't catch
+        // it. Short threads still come back in one page with `next: null`, so
+        // every other test here is unaffected.
+        const all = thread ?? [];
+        const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1);
+        const results = all.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+        const base = url.replace(/[?&]page=\d+/, '');
         return jsonResponse({
-          count: results.length,
-          next: null,
+          count: all.length,
+          // Absolute, like DRF's — `getPage` re-bases it on BASE_URL.
+          next: all.length > page * PAGE_SIZE ? `${base}&page=${page + 1}` : null,
           previous: null,
           results,
         });
@@ -1008,29 +1018,6 @@ function sendCalls() {
     });
 }
 
-describe('the reply swipe’s rules', () => {
-  // `PanResponder` derives its gesture state from native touch history, which
-  // Node has none of — so the wiring is a device check, the same way the emoji
-  // picker's modal sequencing is. The *rule* that decides when a drag counts is
-  // pure, and it's the half with the bugs in it.
-  it('claims only a decidedly rightward drag', () => {
-    expect(shouldStartReplySwipe(30, 4, true)).toBe(true);
-    // A mostly-vertical drag belongs to the thread's scrolling, always.
-    expect(shouldStartReplySwipe(30, 40, true)).toBe(false);
-    // Leftward is left free for a future gesture — see the helper.
-    expect(shouldStartReplySwipe(-30, 2, true)).toBe(false);
-    // A twitch inside the slop isn't a swipe.
-    expect(shouldStartReplySwipe(4, 0, true)).toBe(false);
-    // Nothing at all in a thread you can't send to.
-    expect(shouldStartReplySwipe(30, 4, false)).toBe(false);
-  });
-
-  it('needs a real distance before letting go replies', () => {
-    expect(didTriggerReply(60)).toBe(true);
-    expect(didTriggerReply(20)).toBe(false);
-  });
-});
-
 it('Reply opens the strand, even on a message with no replies yet', async () => {
   // The thing that makes replying feel like joining a conversation rather than
   // annotating a line: you get the exchange on screen while you write. A message
@@ -1067,7 +1054,7 @@ it('replying to a reply answers *that* message, still in the one strand', async 
     id: 9,
     sender: GRACE,
     text: 'or 8 if easier',
-    reply_to: { id: 8, sender: ADA },
+    reply_to: { id: 8 },
     thread_root_id: 8,
   });
   serve({
@@ -1109,7 +1096,7 @@ it('browsing into a strand aims at the root and doesn’t grab the keyboard', as
         id: 9,
         sender: GRACE,
         text: 'or 8 if easier',
-        reply_to: { id: 8, sender: ADA },
+        reply_to: { id: 8 },
         thread_root_id: 8,
       }),
     ],
@@ -1181,6 +1168,78 @@ it('an edit in progress survives a trip into a strand', async () => {
   expect(screen.getByLabelText('Message').props.value).toBe('teh quick fox');
 });
 
+it('keeps the transcript’s draft when a reply is actually sent', async () => {
+  // The stronger version of the test above, and the one that was missing: not
+  // just opening and closing the strand, but *sending* from it. Both composers
+  // run off one mutation, so a careless `setText('')` in its success handler
+  // clears the transcript's box as well — you'd lose a half-written message to
+  // someone else's thread.
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({
+    conversation: detail({}),
+    messages: [only],
+    thread: [only],
+  });
+
+  await renderScreen();
+  await fireEvent.changeText(
+    await screen.findByLabelText('Message'),
+    'half-written thought'
+  );
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+  await fireEvent.changeText(
+    await screen.findByLabelText('Reply to thread'),
+    'yes, see you'
+  );
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+  await waitFor(() => expect(sendCalls()).toEqual([['yes, see you', 8]]));
+
+  // The strand's own composer empties, because that send *was* its send…
+  await waitFor(() =>
+    expect(screen.getByLabelText('Reply to thread').props.value).toBe('')
+  );
+  // …and the transcript's is untouched underneath.
+  await fireEvent.press(screen.getAllByLabelText('Close thread')[0]);
+  expect(screen.getByLabelText('Message').props.value).toBe(
+    'half-written thought'
+  );
+});
+
+it('keeps a failed reply in the box and says why', async () => {
+  // Clearing on dispatch rather than on success loses the words outright when
+  // the send fails, and the transcript's error line is behind the blur where
+  // nobody can read it. The strand has to answer for its own send.
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({
+    conversation: detail({}),
+    messages: [only],
+    thread: [only],
+  });
+  const ok = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      return jsonResponse({ detail: 'You can no longer message this person.' }, 403);
+    }
+    return ok(url, init);
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+  const input = await screen.findByLabelText('Reply to thread');
+  await fireEvent.changeText(input, 'yes, see you');
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+
+  expect(
+    await screen.findByText('You can no longer message this person.')
+  ).toBeTruthy();
+  // Still there to retry or copy out of — the words are the user's, not ours.
+  expect(screen.getByLabelText('Reply to thread').props.value).toBe(
+    'yes, see you'
+  );
+});
+
 it('offers no Reply in a thread you can’t send to', async () => {
   // Same line the server draws, and the same one the reaction row obeys: the
   // history stays readable, writing to it doesn't.
@@ -1205,7 +1264,7 @@ it('renders a reply’s quote from the message it already holds', async () => {
         id: 9,
         sender: MINE,
         text: 'yes',
-        reply_to: { id: 8, sender: ADA },
+        reply_to: { id: 8 },
         thread_root_id: 8,
       }),
     ],
@@ -1215,7 +1274,7 @@ it('renders a reply’s quote from the message it already holds', async () => {
   await screen.findByText('yes');
 
   // The quoted body is resolved locally — the reply's payload carries only
-  // `{ id, sender }`, which is what stops a quote leaking clipped history.
+  // a bare `{ id }`, which is what stops a quote leaking clipped history.
   expect(screen.getAllByText('dinner at 7?').length).toBeGreaterThan(1);
 });
 
@@ -1230,7 +1289,7 @@ it('says so honestly when a quoted message isn’t available', async () => {
         id: 9,
         sender: ADA,
         text: 'still on for that',
-        reply_to: { id: 8, sender: ADA },
+        reply_to: { id: 8 },
         thread_root_id: 8,
       }),
     ],
@@ -1258,14 +1317,14 @@ it('opens the focused thread from a root’s reply count', async () => {
         id: 9,
         sender: MINE,
         text: 'yes',
-        reply_to: { id: 8, sender: ADA },
+        reply_to: { id: 8 },
         thread_root_id: 8,
       }),
       message({
         id: 10,
         sender: ADA,
         text: 'or 8 if easier',
-        reply_to: { id: 8, sender: ADA },
+        reply_to: { id: 8 },
         thread_root_id: 8,
       }),
     ],
@@ -1302,7 +1361,7 @@ it('sends a reply into the thread from inside the focused view', async () => {
         id: 9,
         sender: ADA,
         text: 'or 8 if easier',
-        reply_to: { id: 8, sender: ADA },
+        reply_to: { id: 8 },
         thread_root_id: 8,
       }),
     ],
@@ -1331,7 +1390,7 @@ it('opens a headless thread when the root is one you can’t see', async () => {
     id: 9,
     sender: ADA,
     text: 'still on for that',
-    reply_to: { id: 8, sender: ADA },
+    reply_to: { id: 8 },
     thread_root_id: 8,
     // Zero, because a reply is not a root — which is exactly why the *quote* has
     // to be the way in here. With the root clipped away there's no bubble left
@@ -1346,8 +1405,14 @@ it('opens a headless thread when the root is one you can’t see', async () => {
   });
 
   await renderScreen();
+  // 🔒 Unnamed, and that's the fix: the quote reference is a bare id, so an
+  // unresolved quote can't name its author either. Otherwise a group member who
+  // joined, posted and left inside your gap would reach you here — through the
+  // one payload that used to carry a name for a message you can't see.
   await fireEvent.press(
-    await screen.findByLabelText('In reply to Ada Lovelace — open thread')
+    await screen.findByLabelText(
+      'In reply to a message you can’t see — open thread'
+    )
   );
   // The reply now appears twice — once in the transcript behind the blur, once
   // in the strand — which is also how we know the thread's fetch has landed.
@@ -1370,6 +1435,55 @@ it('opens a headless thread when the root is one you can’t see', async () => {
   ).toBe(true);
 });
 
+it('follows the strand past its first page to the newest reply', async () => {
+  // The thread endpoint is the message list with a filter, so it paginates like
+  // every list — and messages come oldest-first. Reading only page one would cut
+  // a busy strand off at its oldest 20 and hide precisely the end of it: the
+  // newest replies, and the one you just sent from the composer in this view.
+  const root = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  const replies = Array.from({ length: PAGE_SIZE + 4 }, (_, i) =>
+    message({
+      id: 100 + i,
+      sender: i % 2 ? MINE : GRACE,
+      text: `reply ${i + 1}`,
+      reply_to: { id: 8 },
+      thread_root_id: 8,
+    })
+  );
+  serve({
+    conversation: detail({ kind: 'group' }),
+    messages: [{ ...root, reply_count: replies.length }],
+    thread: [root, ...replies],
+  });
+
+  await renderScreen();
+  await fireEvent.press(
+    await screen.findByLabelText(`${replies.length} replies — open thread`)
+  );
+  await screen.findByText('Thread');
+
+  // Asserted on the requests rather than on a bubble: `FlatList` virtualises,
+  // so under Jest — with no layout and no scrolling — only the first batch of
+  // items is ever rendered, and the tail of a long strand can't be queried for
+  // however well it loaded. What *is* provable here is the thing that was
+  // broken: the view follows the paginator to the end of the strand.
+  const threadPages = () =>
+    mockFetch.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.includes('thread_root=8'));
+  await waitFor(() =>
+    expect(threadPages().some((url) => url.includes('page=2'))).toBe(true)
+  );
+  // …and stops there. Two pages hold 25 messages, so a request for a third
+  // would mean the eager pull had lost its stopping condition.
+  expect(threadPages().some((url) => url.includes('page=3'))).toBe(false);
+  // Page one is on screen throughout — this pages the strand, it doesn't
+  // replace one window with another. (The root twice: once in the transcript
+  // behind the blur, once at the head of the strand.)
+  expect(screen.getAllByText('dinner at 7?').length).toBeGreaterThan(1);
+  expect(screen.getByText('reply 1')).toBeTruthy();
+});
+
 it('offers no long-press menu inside the focused thread', async () => {
   // Copy/Edit/Delete/Report all live in a Modal, and presenting one from inside
   // a presented modal is the iOS trap the emoji picker already documents. Close
@@ -1389,7 +1503,7 @@ it('offers no long-press menu inside the focused thread', async () => {
         id: 9,
         sender: MINE,
         text: 'yes',
-        reply_to: { id: 8, sender: ADA },
+        reply_to: { id: 8 },
         thread_root_id: 8,
       }),
     ],

@@ -49,9 +49,9 @@ menu, edit, reply, message reactions, read receipts + send status, thread
 mechanics, photos, then web parity. Shipped so far: the admin can no longer read
 anyone's messages (a report is the only window); the app has an anchored
 long-press menu with Copy/Edit/Delete/Report plus a 15-minute edit window;
-messages can be reacted to with any emoji; and **reply threads** — swipe to
-reply, and a focused strand that blurs the transcript and brings the whole
-back-and-forth forward (mobile only until M9). Full
+messages can be reacted to with any emoji; and **reply threads** — Reply in the
+long-press menu opens a focused strand that blurs the transcript and brings the
+whole back-and-forth forward (mobile only until M9). Full
 plan in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
 — read it before touching messaging. Its milestones are written to be picked up
 cold by a fresh session; follow the "How to use this document" section at the top.

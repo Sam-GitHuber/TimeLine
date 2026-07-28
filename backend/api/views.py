@@ -2245,12 +2245,11 @@ class ConversationMessagesView(generics.ListAPIView):
         # one caller that serialises the rows (and so reads each message's
         # reaction summary). The others count, or look up a single message, and
         # would pay for a join they never use.
-        visible = (
-            _messages_for_viewer(convo, self.request.user)
-            .prefetch_related("reactions")
-            # The quote reference names its sender, so without this every reply
-            # in the page costs two more queries.
-            .select_related("reply_to__sender")
+        # No ``select_related`` for the quote: ``reply_to`` serialises to a bare
+        # id (see ``MessageSerializer.get_reply_to``), so the quoted row is never
+        # fetched at all — cheaper *and* nothing there to leak.
+        visible = _messages_for_viewer(convo, self.request.user).prefetch_related(
+            "reactions"
         )
         queryset = _with_reply_counts(visible)
 
@@ -2259,6 +2258,12 @@ class ConversationMessagesView(generics.ListAPIView):
             try:
                 root_id = int(root_id)
             except (TypeError, ValueError):
+                raise ValidationError("thread_root must be a message id.")
+            # Range-checked, not just parsed: Python ints are unbounded but the
+            # column is a bigint, so a long enough string of digits reaches the
+            # database as an out-of-range value and comes back a 500. It's the
+            # same "you can't see that" answer either way.
+            if not -(2**63) <= root_id < 2**63:
                 raise ValidationError("thread_root must be a message id.")
             # The root itself is part of its own thread — it's the first thing
             # the focused view shows. If the viewer is clipped out of the root

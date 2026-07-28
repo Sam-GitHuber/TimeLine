@@ -31,29 +31,32 @@
  * its edge with a negative margin would both alter the measurement and duplicate
  * the pills over the real ones.
  *
- * **Replies** (Phase 9b M3) add two things and one gesture. A reply carries a
- * collapsed quote *inside* the bubble (`QuotedMessage`, and so inside
- * `BubbleBody`, so the menu's preview shows it), and a message with replies
- * grows a "3 replies" branch beneath it that opens the focused thread view.
+ * **Replies** (Phase 9b M3) add two things. A reply carries a collapsed quote
+ * *inside* the bubble (`QuotedMessage`, and so inside `BubbleBody`, so the menu's
+ * preview shows it), and a message with replies grows a "3 replies" branch
+ * beneath it that opens the focused thread view.
  *
- * **One gesture per target**, the rule M2 settled and the reason there are three
- * distinct affordances here rather than one overloaded bubble: **swipe right** =
- * reply, **long-press** = the action menu, **tap the branch** = open the thread.
- * The bubble's own tap does nothing, and should stay that way — a target this
- * size doing different things by press duration is where a mis-timed press does
- * the wrong thing.
+ * **One gesture per target**, the rule M2 settled: **long-press** = the action
+ * menu (Reply included), **tap the branch** = open the thread. The bubble's own
+ * tap does nothing, and should stay that way — a target this size doing
+ * different things by press duration is where a mis-timed press does the wrong
+ * thing.
+ *
+ * **There is deliberately no swipe-to-reply.** M3 shipped one and it was taken
+ * out after a day of real use: a rightward drag starting on a bubble is also the
+ * navigator's back gesture, so the swipe raced the screen it was swiping on and
+ * usually lost — you'd land back on the conversation list with no reply started.
+ * That's a clash a threshold can't tune away, because both gestures are
+ * legitimately claiming the same drag; the loser is whichever responder happens
+ * to win the touch. Long-press → Reply is one unambiguous route and it never
+ * fights the navigator. If a swipe ever comes back it needs the screen's own
+ * back gesture disabled while a bubble owns the touch, which is a bigger change
+ * than the affordance is worth.
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useRef } from 'react';
 import * as Haptics from 'expo-haptics';
-import {
-  Animated,
-  PanResponder,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from './Avatar';
 import type { BubbleAnchor } from './MessageActionMenu';
@@ -61,34 +64,6 @@ import { measureInWindow } from '@/measure';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message, Reaction } from '@/types';
 import { formatRelativeTime } from '@/utils';
-
-/** How far right you must drag before letting go fires a reply. */
-const SWIPE_TRIGGER = 56;
-/** The bubble stops moving here, so the gesture never turns into a drag. */
-const SWIPE_MAX = 76;
-
-/**
- * Should a drag of `(dx, dy)` become a reply swipe?
- *
- * Exported and pure so the *decision* is testable under Node. `PanResponder`
- * derives its gesture state from native touch history, which a Jest environment
- * has none of — so the wiring is a device check (as the emoji-picker handover
- * already is), but the rule that decides when a swipe counts is not, and it's
- * the part with the bugs in it.
- *
- * Rightward only, and only when the drag is decidedly more horizontal than
- * vertical, so the thread's own scrolling always wins a close call. Left is left
- * free deliberately — that's where a future peek or delete would go, and a
- * gesture that does the same thing both ways can't be extended.
- */
-export function shouldStartReplySwipe(dx: number, dy: number, enabled: boolean) {
-  return enabled && dx > 8 && Math.abs(dx) > Math.abs(dy) * 1.5;
-}
-
-/** Did a released drag travel far enough to count as a reply? */
-export function didTriggerReply(dx: number) {
-  return dx >= SWIPE_TRIGGER;
-}
 
 /**
  * The bubble itself — background, text, timestamp — with no positioning of its
@@ -120,12 +95,7 @@ export function BubbleBody({
           means the action menu's preview (which re-renders this component)
           shows the quote too, so you can see exactly what you're acting on. */}
       {message.reply_to ? (
-        <QuotedMessage
-          reference={message.reply_to}
-          quoted={quoted}
-          mine={mine}
-          onPress={onQuotePress}
-        />
+        <QuotedMessage quoted={quoted} mine={mine} onPress={onQuotePress} />
       ) : null}
       <Text style={[styles.text, mine ? styles.mineText : styles.theirsText]}>
         {message.text}
@@ -198,21 +168,25 @@ function ReactionPills({
  * The collapsed quote above a reply (Phase 9b M3) — who was answered, and a line
  * of what they said.
  *
- * **The text is resolved by the caller, never sent with the reply.** A reply's
- * payload carries only `{ id, sender }`; the body comes from a message the
- * client already holds, or from the focused thread's own fetch, both of which go
- * through the server's interval clipping. That's what stops a quote becoming a
- * window into history the viewer was clipped out of. When it can't be resolved,
+ * **Both come from the resolved message, never from the reply.** A reply's
+ * payload carries a bare `{ id }`; the body *and the author* come from a message
+ * the client already holds, or from the focused thread's own fetch, both of
+ * which go through the server's interval clipping. That's what stops a quote
+ * becoming a window into history the viewer was clipped out of — including the
+ * narrow version where the words stay hidden but the name doesn't, which matters
+ * in a group where someone can join, post and leave inside your gap.
+ *
+ * So an unresolved quote shows no name at all, and that's the honest rendering:
  * "Original message unavailable" is a *true* statement about a message the
- * viewer isn't entitled to — not a loading state.
+ * viewer isn't entitled to, not a loading state, and there is nothing further to
+ * say about it.
  */
 function QuotedMessage({
-  reference,
   quoted,
   mine,
   onPress,
 }: {
-  reference: NonNullable<Message['reply_to']>;
+  /** The message being answered, if the caller could resolve it. */
   quoted?: Message;
   mine: boolean;
   /**
@@ -234,20 +208,24 @@ function QuotedMessage({
       accessibilityRole={onPress ? 'button' : undefined}
       accessibilityLabel={
         onPress
-          ? `In reply to ${reference.sender.display_name} — open thread`
+          ? quoted
+            ? `In reply to ${quoted.sender.display_name} — open thread`
+            : 'In reply to a message you can’t see — open thread'
           : undefined
       }
       style={[styles.quote, mine ? styles.quoteMine : styles.quoteTheirs]}
     >
-      <Text
-        style={[
-          styles.quoteName,
-          mine ? styles.quoteNameMine : styles.quoteNameTheirs,
-        ]}
-        numberOfLines={1}
-      >
-        {reference.sender.display_name}
-      </Text>
+      {quoted ? (
+        <Text
+          style={[
+            styles.quoteName,
+            mine ? styles.quoteNameMine : styles.quoteNameTheirs,
+          ]}
+          numberOfLines={1}
+        >
+          {quoted.sender.display_name}
+        </Text>
+      ) : null}
       <Text
         style={[
           styles.quoteText,
@@ -269,7 +247,6 @@ export function MessageBubble({
   quoted,
   onLongPress,
   onShowReactors,
-  onReply,
   onOpenThread,
 }: {
   message: Message;
@@ -285,9 +262,6 @@ export function MessageBubble({
   onLongPress?: (anchor: BubbleAnchor) => void;
   /** Open "who reacted" for this message — what tapping a pill does. */
   onShowReactors?: () => void;
-  /** Start a reply to this message — what a right-swipe does. Omitted in a
-   *  thread you can no longer send to, which also disables the gesture. */
-  onReply?: () => void;
   /** Open the focused thread view — what the reply-count affordance does. */
   onOpenThread?: () => void;
 }) {
@@ -295,76 +269,14 @@ export function MessageBubble({
   const reactions = message.reactions ?? [];
   const replyCount = message.reply_count ?? 0;
 
-  /**
-   * Swipe right to reply.
-   *
-   * **`PanResponder` + RN's `Animated`, not gesture-handler + Reanimated**, even
-   * though both are dependencies. Reanimated's worklet runtime can't be loaded
-   * under Jest, so building the gesture on it would mean mocking away the
-   * component under test — the same reasoning that kept `MessageActionMenu`'s
-   * animation on `Animated`. A horizontal drag with a spring back is exactly
-   * what `PanResponder` is for, and nothing about the feel is lost.
-   *
-   * The responder claims the touch **only for a rightward drag that's more
-   * horizontal than vertical**, so the FlatList keeps every scroll. It's also
-   * strictly one-directional: dragging left does nothing, because a left-swipe
-   * is where a future delete or a peek at timestamps would live and a gesture
-   * that does one thing in both directions can't be extended.
-   */
-  // `useState` with an initialiser rather than a ref: the value is read during
-  // render (it drives a style), and a ref read in render is exactly what React
-  // tells you not to do — the same call `MessageActionMenu` makes for its own
-  // Animated.Value.
-  const [dragX] = useState(() => new Animated.Value(0));
-
-  // Rebuilt whenever `onReply` changes identity, which it does on every render
-  // of the thread screen. That's deliberate and it isn't wasteful: `create` only
-  // assembles a config object (the gesture state itself lives in RN's responder
-  // system), and the alternative — build it once, reach for the latest handler
-  // through a ref — would close over a stale `startReplying` and consult a stale
-  // idea of what the composer was doing.
-  const pan = useMemo(
-    () => {
-      const springBack = () => {
-        Animated.spring(dragX, {
-          toValue: 0,
-          useNativeDriver: true,
-          bounciness: 0,
-        }).start();
-      };
-      return PanResponder.create({
-        onMoveShouldSetPanResponder: (_e, { dx, dy }) =>
-          shouldStartReplySwipe(dx, dy, !!onReply),
-        onPanResponderMove: (_e, { dx }) => {
-          // Clamped, so it reads as an affordance nudging open rather than the
-          // bubble being dragged around the screen.
-          dragX.setValue(Math.min(Math.max(dx, 0), SWIPE_MAX));
-        },
-        onPanResponderRelease: (_e, { dx }) => {
-          if (didTriggerReply(dx)) {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
-              () => {}
-            );
-            onReply?.();
-          }
-          springBack();
-        },
-        // A cancelled gesture (a call arriving, a modal opening) must put the
-        // bubble back too, or it stays parked mid-swipe.
-        onPanResponderTerminate: springBack,
-      });
-    },
-    [dragX, onReply]
-  );
-
   function handleLongPress() {
+    if (!onLongPress) return;
     // A light tap under the finger is most of what makes the gesture feel
     // deliberate rather than accidental. Fire and forget — a phone without a
     // taptic engine simply resolves it.
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     // Measure first, open second: the menu positions itself from this rect, so
     // opening before it lands would put the menu somewhere and then move it.
-    if (!onLongPress) return;
     measureInWindow(bubbleRef.current, onLongPress);
   }
 
@@ -379,14 +291,7 @@ export function MessageBubble({
         </View>
       )}
 
-      <Animated.View
-        style={[
-          styles.bubbleRow,
-          mine ? styles.alignEnd : styles.alignStart,
-          { transform: [{ translateX: dragX }] },
-        ]}
-        {...pan.panHandlers}
-      >
+      <View style={[styles.bubbleRow, mine ? styles.alignEnd : styles.alignStart]}>
         {message.is_deleted ? (
           <View style={styles.tombstone}>
             <Text style={styles.tombstoneText}>Message deleted</Text>
@@ -415,7 +320,7 @@ export function MessageBubble({
             />
           </Pressable>
         )}
-      </Animated.View>
+      </View>
 
       {/* Rendered on a tombstone too. A reaction someone left is a thing that
           happened, and silently dropping it when the message is deleted would

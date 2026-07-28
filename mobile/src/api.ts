@@ -544,6 +544,10 @@ export const api = {
    * can never show a message the transcript wouldn't. So a viewer who was
    * clipped out of the root gets the replies they can see and no head, and the
    * view renders that honestly rather than pretending the thread is broken.
+   *
+   * Being that same endpoint, it **paginates like every list** — this is the
+   * first page (oldest-first), and the caller follows `next` with `getPage`.
+   * Reading only what this returns would cut a strand off at its oldest 20.
    */
   getThread: (conversationId: number | string, rootId: number) =>
     request<Paginated<Message>>(

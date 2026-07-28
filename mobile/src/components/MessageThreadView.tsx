@@ -42,9 +42,9 @@
  * error, because nothing has gone wrong — see `messaging.md`.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { BlurView } from 'expo-blur';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -62,6 +62,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageBubble } from './MessageBubble';
 import { api, MESSAGE_POLL_MS } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
+import type { Message } from '@/types';
 
 export function threadQueryKey(conversationId: number, rootId: number) {
   return ['thread', conversationId, rootId] as const;
@@ -99,21 +100,50 @@ export function MessageThreadView({
    * Send into this thread. The caller owns the mutation (and so the cache
    * invalidation), because a reply is an ordinary message and has to land in the
    * transcript as well as here.
+   *
+   * **Resolves when the send lands and rejects when it doesn't**, which is what
+   * lets the composer below clear only on success. The caller's own error line
+   * is no use to us — it's rendered in the transcript, behind the blur.
    */
-  onSend: (text: string, replyToId: number) => void;
+  onSend: (text: string, replyToId: number) => Promise<unknown>;
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
+  const listRef = useRef<FlatList<Message>>(null);
   const [text, setText] = useState('');
+  const [sendError, setSendError] = useState('');
 
-  // Polled like the transcript, so a reply someone else sends while you're
-  // reading the strand appears in it rather than only behind the blur.
-  const threadQuery = useQuery({
+  /**
+   * Polled like the transcript, so a reply someone else sends while you're
+   * reading the strand appears in it rather than only behind the blur.
+   *
+   * **Paged, and every page pulled**, exactly as the transcript does it. The
+   * thread endpoint is the ordinary message list with a filter, so it paginates
+   * like every list — and a single page is 20. Reading only the first would
+   * silently cut a strand off at its *oldest* 20 messages (they come
+   * oldest-first), which hides the newest replies and, worse, the one you just
+   * sent from the composer right there. The root's "N replies" count would go on
+   * climbing past what the strand showed, with nothing on screen to explain it.
+   *
+   * A strand is short at family scale, which is the same reason the transcript
+   * pulls its history eagerly rather than on scroll.
+   */
+  const threadQuery = useInfiniteQuery({
     queryKey: threadQueryKey(conversationId, rootId),
-    queryFn: () => api.getThread(conversationId, rootId),
+    queryFn: ({ pageParam }) =>
+      pageParam
+        ? api.getPage<Message>(pageParam)
+        : api.getThread(conversationId, rootId),
+    initialPageParam: '' as string,
+    getNextPageParam: (lastPage) => lastPage.next ?? undefined,
     refetchInterval: MESSAGE_POLL_MS,
   });
-  const messages = threadQuery.data?.results ?? [];
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = threadQuery;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  const messages = threadQuery.data?.pages.flatMap((page) => page.results) ?? [];
   const byId = new Map(messages.map((m) => [m.id, m]));
   const root = byId.get(rootId);
   const target = replyToId ?? rootId;
@@ -121,14 +151,24 @@ export function MessageThreadView({
   // just restate the message sitting at the top of the screen.
   const answering = target === rootId ? undefined : byId.get(target);
 
-  function handleSend() {
+  async function handleSend() {
     const value = text.trim();
     if (!value || sending) return;
-    // Whichever message got you here. The server flattens it into this strand
-    // either way (`thread_root` is derived, one level deep), so naming the real
-    // target costs nothing and keeps the quote honest.
-    onSend(value, target);
-    setText('');
+    setSendError('');
+    try {
+      // Whichever message got you here. The server flattens it into this strand
+      // either way (`thread_root` is derived, one level deep), so naming the
+      // real target costs nothing and keeps the quote honest.
+      await onSend(value, target);
+      // Cleared here and not before: a reply that failed on the way out has to
+      // still be in the box, or the words are simply gone. The transcript's
+      // composer has always worked this way.
+      setText('');
+    } catch (error) {
+      setSendError(
+        error instanceof Error ? error.message : "Couldn't send. Try again."
+      );
+    }
   }
 
   return (
@@ -172,10 +212,18 @@ export function MessageThreadView({
             <ActivityIndicator color={colors.accent} style={styles.spinner} />
           ) : (
             <FlatList
+              ref={listRef}
               data={messages}
               style={styles.list}
               contentContainerStyle={styles.listContent}
               keyExtractor={(m) => String(m.id)}
+              // Oldest-first, like the transcript — so keep the newest reply in
+              // view as later pages land and as replies arrive. Without this a
+              // strand longer than the screen opens at the root and the reply
+              // you just sent is off the bottom.
+              onContentSizeChange={() =>
+                listRef.current?.scrollToEnd({ animated: false })
+              }
               ListHeaderComponent={
                 // Only when the root itself is clipped out — the replies below
                 // are ones this viewer *is* entitled to, so the thread is
@@ -202,9 +250,19 @@ export function MessageThreadView({
                 />
               )}
               ListEmptyComponent={
-                <Text style={styles.missingRoot}>
-                  The start of this thread isn’t available to you
-                </Text>
+                // Only claim the thread is clipped when we actually heard back.
+                // A failed fetch is a different thing entirely, and telling
+                // someone they aren't entitled to a message when the network
+                // merely dropped devalues the message where it's true.
+                threadQuery.isError ? (
+                  <Text style={styles.missingRoot}>
+                    Couldn’t load this thread. Close and try again.
+                  </Text>
+                ) : (
+                  <Text style={styles.missingRoot}>
+                    The start of this thread isn’t available to you
+                  </Text>
+                )
               }
             />
           )}
@@ -253,6 +311,9 @@ export function MessageThreadView({
                     </Text>
                   </Pressable>
                 </View>
+                {sendError ? (
+                  <Text style={styles.sendError}>{sendError}</Text>
+                ) : null}
               </>
             ) : (
               <Text style={styles.readonly}>
@@ -333,6 +394,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
   },
   sendDisabled: { opacity: 0.4 },
+  sendError: {
+    marginTop: spacing.xs,
+    fontSize: fontSize.sm,
+    color: colors.danger,
+  },
   sendLabel: { fontSize: fontSize.sm, fontWeight: '600', color: '#ffffff' },
   readonly: {
     textAlign: 'center',

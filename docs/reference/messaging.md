@@ -188,20 +188,34 @@ got" single indexed queries.
 
 ### 🔒 The visibility rule
 
-> **Quote text passes through the same interval clipping as the thread.**
+> **Everything about a quoted message passes through the same interval clipping
+> as the thread — its words and its author alike.**
 
 Concretely, two halves:
 
-- **A reply never carries the quoted text.** `MessageSerializer.reply_to` is a
-  *reference* — `{ id, sender }` and nothing more. Embedding the body would hand
-  it to anyone who can see the *reply*, walking straight around
+- **A reply carries a bare id and nothing else.** `MessageSerializer.reply_to` is
+  `{ id }`. Embedding the body would hand it to anyone who can see the *reply*,
+  walking straight around
   [`visible_messages_for`](#history-is-interval-clipped): a member who was
   `pending` across a gap would read clipped-out history through someone else's
   quote of it.
-- **The body is fetched, not sent along.** The client renders the quote from a
-  message it already holds, or from the thread endpoint below — both
-  interval-clipped. When it can't be resolved, "Original message unavailable" is
-  a *true* statement about a message the viewer isn't entitled to.
+- **The body *and the author* are fetched, not sent along.** The client renders
+  the quote from a message it already holds, or from the thread endpoint below —
+  both interval-clipped. When it can't be resolved, "Original message
+  unavailable" is a *true* statement about a message the viewer isn't entitled
+  to, and it appears with **no name above it**.
+
+**Why the author counts as history.** M3 first shipped `reply_to` as
+`{ id, sender }`, on the reasoning that a name is not a message — you're only
+being told who wrote something you may already be looking at. That's wrong in a
+group. Someone can join, post, and leave again entirely inside your interval gap,
+and `participants` lists only *current* members, so a later reply quoting them was
+the one payload that would hand you a name and an avatar for a person you were
+never in a chat with. Dropping `sender` costs nothing: a client that resolved the
+quoted message has its author already, and a client that couldn't isn't entitled
+to the author any more than to the words. One rule, and no per-viewer branch to
+get wrong — **if you can't see the message, all you learn is that your reply-mate
+answered something.**
 
 An earlier draft of the plan took the stricter line — render the quote only from
 the client's own cache, never fetch it — on the grounds that this makes the leak
@@ -239,7 +253,7 @@ So there are three ways in, and they differ only in what the composer aims at:
 
 | Route | Composer answers | Keyboard |
 | --- | --- | --- |
-| **Reply** (swipe right, or the long-press menu) | the message you tapped | up |
+| **Reply** in the long-press menu | the message you tapped | up |
 | **"N replies"** on a root | the root | down |
 | **A reply's quote** | the strand's root | down |
 
@@ -324,7 +338,10 @@ Direct and group chats share the endpoints:
     route of its own: a second endpoint would be a second home for the
     visibility rule, and this way a thread can never show a message the
     transcript wouldn't. A viewer clipped out of the root gets the replies they
-    can see and no head. Non-numeric ids are a 400.
+    can see and no head. Non-numeric ids are a 400. Being the same endpoint it
+    **paginates like the transcript**, so a client must follow `next` — a strand
+    longer than one page is otherwise silently cut off at its *oldest* messages,
+    hiding the newest replies and the one the reader just sent.
 - `POST /api/conversations/<id>/messages/` — send; active participants only; bumps
   `updated_at`. Optional `reply_to_id` makes it a reply
   ([Reply threads](#reply-threads)); it's validated against **your own**
@@ -562,23 +579,23 @@ feed's.
 
 ### Reply threads on the phone (Phase 9b M3)
 
-**Three affordances, one gesture each** — the rule M2 settled, applied to the
-same bubble: **swipe right** to reply, **long-press** for the action menu, **tap
-the branch** (or a reply's quote) to open the thread. The bubble's own tap stays
-free, and should: a target that small doing different things by press duration is
-where a mis-timed press does the wrong thing. Reply is in the menu *as well as*
-on the swipe — the swipe is what people reach for, the menu entry is how anyone
-discovers the swipe exists.
+**Two affordances, one gesture each** — the rule M2 settled, applied to the same
+bubble: **long-press** for the action menu (Reply lives in it), **tap the branch**
+(or a reply's quote) to open the thread. The bubble's own tap stays free, and
+should: a target that small doing different things by press duration is where a
+mis-timed press does the wrong thing.
 
-The swipe is `PanResponder` + React Native's own `Animated`, **not**
-gesture-handler + Reanimated, even though both are dependencies. Reanimated's
-worklet runtime can't be loaded under Jest, so building the gesture on it would
-mean mocking away the component under test — the same reasoning that kept
-`MessageActionMenu`'s animation on `Animated`. The gesture claims a touch only
-for a rightward drag that's decidedly more horizontal than vertical, so the list
-keeps every scroll; `shouldStartReplySwipe` / `didTriggerReply` are exported pure
-functions so that rule is tested under Node even though the native plumbing can
-only be checked on a device.
+**There is no swipe-to-reply, and that's a decision, not an omission.** M3 first
+shipped a rightward swipe on the bubble and it was pulled after a day of real
+use. A rightward drag starting near the left of a screen is also the navigator's
+interactive back gesture, so the two raced for the same touch and the navigator
+usually won: you'd swipe a bubble and land back on the conversation list with no
+reply started. No threshold tunes that away, because both gestures are
+legitimately claiming the drag — the loser is whichever responder happens to win
+the touch on the day. Long-press → Reply is one unambiguous route that never
+fights the navigator. Bringing the swipe back would mean disabling the screen's
+own back gesture while a bubble owns the touch, which is more machinery than the
+affordance is worth.
 
 The transcript's composer keeps its **two** modes (write, edit) — replying
 happens in the strand's own composer, so the two never compete. An earlier cut

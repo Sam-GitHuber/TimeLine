@@ -346,7 +346,8 @@ class MessageSerializer(serializers.ModelSerializer):
     ``is_edited``/``edited_at`` (Phase 9b M1) let the bubble show an "Edited"
     marker. ``reactions`` (Phase 9b M2) is the aggregate the bubble's pill row
     renders. ``reply_to``/``thread_root_id``/``reply_count`` (Phase 9b M3) drive
-    the collapsed quote and the focused thread view. All of them are *additive*
+    the collapsed quote and the focused thread view — and ``reply_to`` is a bare
+    id, for the reason spelled out on its getter. All of them are *additive*
     fields: an older client that doesn't know about them simply ignores them,
     which is why the backend can ship ahead of either client.
 
@@ -384,7 +385,7 @@ class MessageSerializer(serializers.ModelSerializer):
         return summarise_reactions(obj.reactions.all(), EVERYONE, me_id)
 
     def get_reply_to(self, obj):
-        """The message this one answers, as a **reference** — never its text.
+        """The message this one answers, as a **bare id** — no text, no author.
 
         🔒 This is the phase's load-bearing privacy rule for replies. Embedding
         the quoted body here would hand it to whoever can see the *reply*, which
@@ -395,17 +396,26 @@ class MessageSerializer(serializers.ModelSerializer):
         rule decides it — and under E2E the server couldn't supply the text here
         anyway, so this is the shape that survives.
 
-        ``sender`` rides along because it's the one thing a quote needs that the
-        client can't derive, and it's not history: you're being told who wrote
-        something you may already be looking at.
+        **The author doesn't ride along either**, which an earlier cut of M3 got
+        wrong. It looked harmless — you're only being told who wrote a message
+        you may already be looking at — but in a group it isn't: someone can
+        join, post, and leave again entirely inside your interval gap, and
+        ``participants`` only ever lists current members. A later reply quoting
+        them would then hand you a name and an avatar for a person you were
+        never in a chat with, which is the same existence leak the clipped
+        ``reply_count`` below refuses to make, only with a face on it.
+
+        Nothing is lost by dropping it. A client that resolved the quoted message
+        has its ``sender`` already; a client that couldn't isn't entitled to the
+        author any more than to the words. One rule, no per-viewer branch to get
+        wrong: **if you can't see the message, you learn nothing about it but
+        that your reply-mate answered something.**
         """
         if not obj.reply_to_id:
             return None
-        target = obj.reply_to
-        return {
-            "id": target.id,
-            "sender": AuthorSerializer(target.sender, context=self.context).data,
-        }
+        # ``reply_to_id`` and not ``reply_to`` — deliberately no fetch of the
+        # quoted row at all, so there's nothing here to leak by accident later.
+        return {"id": obj.reply_to_id}
 
     def get_reply_count(self, obj):
         """How many replies hang off this message, when it's a thread root.

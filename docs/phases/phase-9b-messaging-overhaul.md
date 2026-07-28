@@ -84,7 +84,7 @@ messenger can't be: if it's missing the affordances muscle memory expects,
 "missing" reads as "broken."
 
 The bar is **as good as any high-end messaging app**: long-press a bubble for a
-menu, swipe to reply, react with an emoji, edit a typo, see when it was read.
+menu, reply into a thread, react with an emoji, edit a typo, see when it was read.
 These are conventions the whole category has converged on, and users arrive
 already knowing them. We match that *interaction grammar* while keeping our own
 data model, our safety gate, and our own look
@@ -179,9 +179,9 @@ This is the practical payoff of deciding E2E now rather than later — it stops 
 building things we'd have to demolish.
 
 1. **M3 reply quotes: reference by ID, never embed text in the reply's payload.**
-   A reply serializes its target as `{ id, sender }` and nothing more; the quote
-   body comes from the client's own copy or from a fetch through the
-   interval-clipped messages endpoint — never from text the server attached to
+   A reply serializes its target as a bare `{ id }` — not the text, and not even
+   the author; both come from the client's own copy or from a fetch through the
+   interval-clipped messages endpoint, never from anything the server attached to
    the reply. Under E2E the server couldn't embed quote text even if we wanted it
    to, and refusing to embed it now removes the interval-clipping leak described
    in M3 entirely, because there's no server-side text to leak. Strictly better on
@@ -518,7 +518,7 @@ doing both, keep an eye on the spacing together.
    small doing two things depending on press duration is where a mis-timed press
    does the wrong thing. A post's chip has to toggle because a post has no
    long-press menu; a message has two better homes for it (the menu's emoji row,
-   and "Tap to remove" on your own row in the sheet). **M3's swipe-to-reply lands
+   and "Tap to remove" on your own row in the sheet). **M3 puts more affordances
    on the same bubble — keep gestures one-per-target there too.**
 5. **No optimistic toggle**, deliberately, even though M4 brings optimistic send.
    Simulating the toggle locally means a second copy of rules the server owns (the
@@ -575,9 +575,9 @@ collapsed quote still exists — it's the thing you tap.
    conversation and is visible to the *sender* — resolve it through
    `_messages_for_viewer`, never a bare `Message.objects.get`, so an invisible
    target is a validation error and not a way to test which ids exist.
-4. `MessageSerializer` gains `reply_to` (a **reference**: `{ id, sender }`, no
-   text), `thread_root_id`, and `reply_count` — non-zero only on a root, so the
-   transcript knows which bubbles open a thread.
+4. `MessageSerializer` gains `reply_to` (a **bare id**: `{ id }` — no text and no
+   author, see settled point 6), `thread_root_id`, and `reply_count` — non-zero
+   only on a root, so the transcript knows which bubbles open a thread.
 5. `GET /api/conversations/<id>/messages/?thread_root=<id>` — the whole
    mini-thread, root included, **through the same
    `_messages_for_viewer` queryset** as the transcript. One visibility rule, a
@@ -614,9 +614,9 @@ takes the fetch:
 
 **Build — mobile**
 
-7. **Swipe-right-to-reply** on a bubble (`react-native-gesture-handler`, already a
-   dep) — the gesture people reach for without thinking — plus **Reply** in the
-   M1 menu for discoverability. The menu item list is already data
+7. ~~**Swipe-right-to-reply** on a bubble~~ — **built and removed; do not
+   reinstate.** See settled point 3 below. **Reply** lives in the M1 menu and
+   that is the only route. The menu item list is already data
    (`messageActions()`), which is what it was built as for exactly this.
 8. **Reply opens the focused thread** (item 10) rather than aiming this screen's
    composer at a message — including when the message has no replies yet, which
@@ -637,14 +637,13 @@ takes the fetch:
       list". The blur is most of what makes it read as the same conversation
       brought into focus, which is the entire point of the pattern.
 
-11. **Gesture budget — one gesture per target, the rule M2 settled.** Swipe =
-    reply. Long-press = the M1 menu. **Tap the reply-count affordance** = open the
-    focused view. The bubble's own tap stays free. Do not make the bubble open the
-    thread on tap.
-    - All three of swipe, the menu's Reply, and the count now *land in the same
-      place*; they differ only in what the strand's composer aims at and whether
-      the keyboard comes up. See `messaging.md` → *Every route to a reply goes
-      through the strand* for the table.
+11. **Gesture budget — one gesture per target, the rule M2 settled.** Long-press =
+    the M1 menu (Reply is in it). **Tap the reply-count affordance** or a reply's
+    quote = open the focused view. The bubble's own tap stays free. Do not make
+    the bubble open the thread on tap, and do not add a swipe (point 3 below).
+    - All routes *land in the same place*; they differ only in what the strand's
+      composer aims at and whether the keyboard comes up. See `messaging.md` →
+      *Every route to a reply goes through the strand* for the table.
 
 **Two things this supersedes**, so a future session doesn't reinstate them: the
 original item 7 ("tapping a quote scrolls to the original if loaded, else no-op")
@@ -652,7 +651,8 @@ and its load-until-found follow-up. The focused view *is* the answer to "show me
 the context", and it needs neither.
 
 **Done when**
-- [x] Swipe to reply, and Reply in the long-press menu, both compose a reply.
+- [x] Reply in the long-press menu composes a reply. (A swipe was built too, and
+      removed — point 3 below.)
 - [x] A root shows its reply count; tapping it opens the focused thread over a
       blurred transcript, scrollable, and you can reply from inside it.
 - [x] A reply to a reply lands in the same thread — no nesting, anywhere.
@@ -660,7 +660,7 @@ the context", and it needs neither.
 - [x] `messaging.md` documents `thread_root`, the thread endpoint, and the
       visibility rule above **with the reason the strict form was relaxed**.
 
-**Six things M3 settled that the plan above didn't anticipate:**
+**Eight things M3 settled that the plan above didn't anticipate:**
 
 0. **Reply opens the strand; there is no reply mode on the transcript's
    composer.** Built the conventional way first (a quote bar above the composer),
@@ -684,12 +684,19 @@ the context", and it needs neither.
    see tells a gap member how much happened while they were out. `_with_reply_counts`
    subqueries the viewer's own visible set. Easy to get wrong by writing the
    obvious annotation, so there's a test for it.
-3. **The swipe is `PanResponder` + RN `Animated`, not gesture-handler +
-   Reanimated**, despite the plan naming the latter. Reanimated's worklet runtime
-   can't load under Jest, so the gesture would have had to be mocked away to test
-   the component. `shouldStartReplySwipe` / `didTriggerReply` are exported pure
-   functions, so the *rule* is tested even though the native plumbing is a device
-   check. Same trade `MessageActionMenu` already made for its animation.
+3. **Swipe-to-reply was built, used on a real phone, and removed. Don't bring it
+   back.** A rightward drag starting on a bubble is also the navigator's
+   interactive back gesture, and the two raced for the same touch: in practice
+   the swipe usually lost, closing the conversation instead of starting a reply.
+   No threshold fixes that — both gestures legitimately claim the drag, so the
+   winner is whichever responder takes the touch on the day. Long-press → Reply
+   is one unambiguous route that never fights the navigator, and the affordance
+   isn't worth disabling the screen's back gesture to reclaim. (The
+   implementation, since it's the part a future session would redo: it was
+   `PanResponder` + RN `Animated` rather than gesture-handler + Reanimated,
+   because Reanimated's worklet runtime can't load under Jest — the same trade
+   `MessageActionMenu` made for its animation. That reasoning still holds if a
+   *non-conflicting* gesture is ever wanted here.)
 4. **The focused view has no long-press menu, deliberately.** It's a `Modal`, and
    `MessageActionMenu` is a `Modal` — presenting one from inside the other is the
    iOS trap the emoji picker documents. Close the strand and act on the message
@@ -699,12 +706,33 @@ the context", and it needs neither.
    reads as an error, so that says "The start of this thread isn't available to
    you". Two different things to tell someone, and only one of them is about the
    message in front of them.
+6. 🔒 **The quote reference dropped `sender` too.** M3 first shipped
+   `{ id, sender }`, reasoning that naming an author isn't handing over history.
+   In a group it is: someone can join, post and leave entirely inside your
+   interval gap, and `participants` lists only *current* members — so a reply
+   quoting them was the one payload carrying a name and an avatar for a person
+   you were never in a chat with. It costs nothing to drop, because a client that
+   resolved the quoted message already has its author, and one that couldn't
+   isn't entitled to either. An unresolved quote now renders with no name above
+   it. `MessageReplyGapTests` has the test, and it fails loudly against the old
+   serializer.
+7. **The strand pages, and its composer clears on success, not on send.** Two
+   bugs from the same habit of treating the focused view as a small thing rather
+   than a screen. `?thread_root=` is the ordinary message list with a filter, so
+   it paginates at 20 like everything else — reading only page one cut a busy
+   strand off at its *oldest* 20 and hid the reply you'd just sent. And both
+   composers run off one mutation, so clearing text in its success handler wiped
+   a half-typed message in the transcript underneath, while clearing the strand's
+   own box on dispatch lost a failed reply outright. The strand now awaits the
+   send, keeps the words when it fails, and shows why — the transcript's error
+   line is behind the blur where nobody can read it.
 
 **One debt this leaves, recorded in M5 step 1:** the transcript resolves a
 quote's body from loaded messages, which is complete only because the screen
 still eagerly loads every page. M5 makes paging lazy and must fetch the missing
 message through the clipped endpoint at the same time — or
-"Original message unavailable" starts lying.
+"Original message unavailable" starts lying. Note this now costs the *author*
+too, not just the body (point 6), so the fetch is the only way to get either.
 
 ---
 

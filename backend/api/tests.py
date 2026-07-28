@@ -1955,16 +1955,18 @@ class MessageReplyTests(MessagingBase):
         self.assertEqual(second.thread_root_id, self.root.pk)
         self.assertIsNone(self.root.thread_root_id)
 
-    def test_reply_to_is_a_reference_and_never_carries_text(self):
+    def test_reply_to_is_a_bare_id_and_carries_nothing_else(self):
         """The load-bearing privacy shape. If the quoted body were embedded in
         the reply's payload it would reach whoever can see the *reply*, which
-        walks straight around interval clipping — see ``MessageReplyGapTests``."""
+        walks straight around interval clipping — see ``MessageReplyGapTests``.
+
+        Not the author either: a message you can't see tells you nothing, not
+        even who wrote it. The client renders the name from the message it
+        resolved, and if it resolved nothing there's no name to render."""
         self._reply(self.root)
         thread = self.client.get(messages_url(self.convo))
         reply = thread.data["results"][-1]
-        self.assertEqual(reply["reply_to"]["id"], self.root.pk)
-        self.assertEqual(reply["reply_to"]["sender"]["id"], self.friend.pk)
-        self.assertNotIn("text", reply["reply_to"])
+        self.assertEqual(reply["reply_to"], {"id": self.root.pk})
 
     def test_reply_count_appears_on_the_root_only(self):
         self._reply(self.root, "yes")
@@ -1993,6 +1995,14 @@ class MessageReplyTests(MessagingBase):
 
     def test_thread_root_filter_rejects_a_non_numeric_id(self):
         resp = self.client.get(f"{messages_url(self.convo)}?thread_root=abc")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_thread_root_filter_rejects_an_id_too_big_for_the_column(self):
+        """Python ints are unbounded, the column is a bigint. Without a range
+        check a long enough number parses fine and then blows up in the database
+        — a 500 where the honest answer is the same 400 as any other id that
+        can't name a message."""
+        resp = self.client.get(f"{messages_url(self.convo)}?thread_root={2**64}")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_cannot_reply_to_a_message_in_another_conversation(self):
@@ -2130,12 +2140,57 @@ class MessageReplyGapTests(APITestCase):
         # embedded the quote somewhere new.
         self.assertNotIn("the secret plan", json.dumps(resp.data, default=str))
 
-        # The reply still says what it answers, by id and author only. That's
-        # not a leak: it names a message they can't fetch and an author they
-        # already share a thread with.
+        # All the reply says is *that* it answers something, by an id they can't
+        # fetch. Not the words, and not the author — see the next test.
         reply = next(m for m in resp.data["results"] if m["id"] == self.reply.pk)
-        self.assertEqual(reply["reply_to"]["id"], self.root.pk)
-        self.assertNotIn("text", reply["reply_to"])
+        self.assertEqual(reply["reply_to"], {"id": self.root.pk})
+
+    def test_a_quote_never_names_the_author_of_a_message_from_the_gap(self):
+        """🔒 The narrower half of the same leak, and the one an earlier cut of
+        M3 shipped: a quote used to carry ``sender``.
+
+        Somebody can join a group, post, and leave again entirely inside your
+        gap, and ``participants`` lists only current members — so the quote was
+        the one place their name and avatar reached a person who was never in a
+        chat with them. Here the quoted author is a stranger by construction:
+        the gapper shares no connection with them and can't see the message.
+        """
+        stranger = make_user(
+            "stranger@example.com", first_name="Mallory", last_name="Quinn"
+        )
+        stranger_p = Participant.objects.create(
+            conversation=self.convo, user=stranger, status="active"
+        )
+        # In and out entirely inside the gapper's gap.
+        ParticipantInterval.objects.create(
+            participant=stranger_p,
+            started_at=timezone.now() - timedelta(hours=2),
+            ended_at=timezone.now() - timedelta(minutes=45),
+        )
+        hidden = Message.objects.create(
+            conversation=self.convo, sender=stranger, text="passing through"
+        )
+        Message.objects.filter(pk=hidden.pk).update(
+            created_at=timezone.now() - timedelta(minutes=50)
+        )
+        visible_reply = Message.objects.create(
+            conversation=self.convo,
+            sender=self.author,
+            text="agreed",
+            reply_to=hidden,
+        )
+
+        self.client.force_authenticate(self.gapper)
+        resp = self.client.get(messages_url(self.convo))
+        body = json.dumps(resp.data, default=str)
+
+        quoter = next(
+            m for m in resp.data["results"] if m["id"] == visible_reply.pk
+        )
+        self.assertEqual(quoter["reply_to"], {"id": hidden.pk})
+        # Neither the words nor the person who wrote them.
+        self.assertNotIn("passing through", body)
+        self.assertNotIn(stranger.display_name, body)
 
     def test_the_focused_thread_opens_with_its_head_missing(self):
         """Asking for the thread by root id is the obvious second way in, so it
