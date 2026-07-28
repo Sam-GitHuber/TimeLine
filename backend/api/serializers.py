@@ -336,7 +336,16 @@ MESSAGE_MAX_LENGTH = POST_MAX_LENGTH
 
 # A group chat's title, matching ``Conversation.title``'s column width. Named
 # rather than repeated so the create path (which clipped to a literal 100) and
-# the rename path (Phase 9b M6) can't drift into disagreeing about what fits.
+# the rename path (Phase 9b M6) can't drift about *what fits*.
+#
+# They still differ in what they do *at* the limit, and it's worth knowing which
+# is which: **create truncates silently, rename rejects with a 400.** Create has
+# behaved that way since Phase 6a, so it's left alone rather than tightened into
+# a behaviour change on a shipped endpoint; both clients now cap the field at
+# this length (M6 — they didn't before), which is what makes the truncation
+# unreachable by anyone not hand-rolling a request. Rename is new, so it can
+# afford to be strict, and a rename that stored something other than what you
+# typed would be worse than an error.
 CONVERSATION_TITLE_MAX_LENGTH = 100
 
 

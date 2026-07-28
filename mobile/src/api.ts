@@ -695,9 +695,17 @@ export const api = {
    * didn't send, rather than dropping it: with no marker the *whole history*
    * counts as unread, so a chat you'd read to the end would come back wearing
    * "99+". It comes back as one, which is what "waiting for you" means here.
-   * 400 when there's nothing to mark unread (an empty thread, or one where the
-   * last word was yours) — which is why the list only offers it on a row that
-   * has an incoming message to aim at.
+   *
+   * It aims at the newest **visible, incoming, undeleted** message *anywhere*
+   * in the thread, not at the last one — so a chat you replied to marks unread
+   * fine, landing past your own trailing messages. 400 only when there's
+   * genuinely nothing to aim at: an empty thread, or one where every visible
+   * message is yours or a tombstone. The list's swipe gate is narrower than
+   * that (see `leadingActions`) because a row carries only `last_message` and
+   * can't tell the two apart.
+   *
+   * 🔒 **It also retracts your read receipt** for that message, since ticks and
+   * unread counts are the same marker — see messaging.md.
    */
   markConversationUnread: (conversationId: number | string) =>
     request<{ unread_count: number }>(

@@ -121,6 +121,11 @@ export default function MessagesScreen() {
       // Mark-unread and leave both move the tab badge, and it's the number
       // someone is watching when they flag a chat to come back to.
       queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
+      // And the thread's own payload, which holds `muted` and `unread_count`
+      // too. Its poll would heal this within a cycle, but opening a chat you
+      // just swiped and finding the header disagreeing with the row you
+      // swiped is exactly the kind of small lie that reads as a bug.
+      queryClient.invalidateQueries({ queryKey: ['conversation'] });
     },
     onError: (error) =>
       Alert.alert(
@@ -148,11 +153,22 @@ export default function MessagesScreen() {
    *
    * "Mark unread" is the one people actually came for: it's how you say "I'll
    * reply properly later" without leaving the thread unopened, and it's why the
-   * badge is trustworthy as a to-do list. It's offered only when there's
-   * something to aim at — an incoming message you've already read — because the
-   * server refuses the rest (an empty thread, or one where the last word was
-   * yours) and offering an action that comes back 400 is worse than not
-   * offering it. A `pending` invite has no readable history at all.
+   * badge is trustworthy as a to-do list.
+   *
+   * **The gate here is narrower than the server's, on purpose.** The server
+   * aims at the newest *visible, incoming, undeleted* message anywhere in the
+   * thread, so it happily marks unread a chat you replied to (it lands past
+   * your trailing messages — see `MarkConversationUnreadTests`). This list
+   * can't tell that case apart: a row carries only `last_message`, so "I
+   * replied last" and "I've been talking to myself since I started this chat"
+   * look identical from here, and the second is a 400. Offering an action that
+   * sometimes comes back an error is worse than offering it slightly less
+   * often, and the thread screen is one tap away when you do want it. If a row
+   * ever grows a "has incoming history" flag, widen this.
+   *
+   * A tombstone doesn't count either — a deleted message isn't a target for the
+   * marker, so a thread whose only incoming message has been deleted is the
+   * same 400. A `pending` invite has no readable history at all.
    */
   function leadingActions(convo: Conversation): SwipeAction[] {
     if (convo.my_status === 'pending') return [];
@@ -167,7 +183,9 @@ export default function MessagesScreen() {
       ];
     }
     const incoming =
-      !!convo.last_message && convo.last_message.sender_id !== me?.pk;
+      !!convo.last_message &&
+      !convo.last_message.is_deleted &&
+      convo.last_message.sender_id !== me?.pk;
     if (!incoming) return [];
     return [
       {
@@ -287,9 +305,12 @@ export default function MessagesScreen() {
         ListEmptyComponent={
           query.isLoading ? (
             <ListMessage>Loading…</ListMessage>
-          ) : needle ? (
-            <ListMessage>No conversations match “{search.trim()}”.</ListMessage>
-          ) : query.isError ? (
+          ) : // The error comes before the search miss: react-query keeps the
+          // last good data through a failed refetch, so a search can still be
+          // filtering a stale list when the reload breaks. "No conversations
+          // match" would then be a confident answer drawn from data we no
+          // longer trust.
+          query.isError ? (
             <View style={styles.centre}>
               <Text style={[styles.messageText, styles.error]}>
                 {errorMessage}
@@ -302,6 +323,8 @@ export default function MessagesScreen() {
                 <Text style={styles.retryText}>Try again</Text>
               </Pressable>
             </View>
+          ) : needle ? (
+            <ListMessage>No conversations match “{search.trim()}”.</ListMessage>
           ) : (
             <View style={styles.centre}>
               <Text style={styles.emptyTitle}>No conversations yet</Text>

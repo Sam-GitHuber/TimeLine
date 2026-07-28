@@ -6991,6 +6991,38 @@ class MarkConversationUnreadTests(APITestCase):
         self.assertLess(marker, seen.created_at)
         self.assertEqual(resp.data["unread_count"], 1)
 
+    def test_marking_unread_retracts_the_read_receipt(self):
+        """🔒 The tick and the badge are the same marker, on purpose.
+
+        Moving it back flips the sender's ✓✓ to ✓ on the message you just
+        un-read. That's the intended reading rather than a side effect: a second
+        never-decreasing column would let the badge and the tick disagree about
+        whether you read something, and on a privacy-first app the direction to
+        err is fewer claims about what someone has read.
+        """
+        sent = Message.objects.create(
+            conversation=self.convo, sender=self.bea, text="are you free?"
+        )
+        self.client.post(self.url)
+
+        def bea_sees_ada_read():
+            self.client.force_authenticate(self.bea)
+            rows = self.client.get(f"/api/conversations/{self.convo.id}/").data[
+                "participants"
+            ]
+            ada_row = [r for r in rows if r["id"] == self.ada.id][0]
+            self.client.force_authenticate(self.ada)
+            # ``attach_read_receipts`` puts the raw datetime on the row, so this
+            # is still a datetime here — it only becomes a string at render.
+            read_at = ada_row["last_read_at"]
+            return read_at is not None and read_at >= sent.created_at
+
+        self.assertTrue(bea_sees_ada_read())
+
+        self.client.delete(self.url)
+
+        self.assertFalse(bea_sees_ada_read())
+
     def test_a_non_member_gets_404(self):
         outsider = make_user("unread-outsider@example.com")
         self.client.force_authenticate(outsider)

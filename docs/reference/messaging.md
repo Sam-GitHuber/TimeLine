@@ -498,8 +498,36 @@ Three details behind that, each of which would otherwise be a silent no-op:
   `created_at > last_read_at` and Postgres stores microsecond precision.
 
 **400 when there's nothing to mark unread** — an empty thread, or one where every
-visible message is yours. The clients don't offer the action in that case; a 200
-that visibly does nothing would be worse.
+visible message is yours. It aims at the newest qualifying message *anywhere* in
+the thread, not at the last one, so a chat you replied to marks unread fine —
+the marker lands past your own trailing messages.
+
+The mobile list's swipe gate is **narrower than that**, and knowingly: a list row
+carries only `last_message`, so "I replied last" and "I've been talking to myself
+since I opened this chat" look identical from there, and only the second is a
+400. It offers the action when the newest message is incoming and undeleted, and
+leaves the rest to the thread screen. Widen it if a row ever grows a
+"has incoming history" flag.
+
+### 🔒 It retracts your read receipt, and that's the intended reading
+
+`last_read_at` is one column, and [the ticks](#send-state--read-receipts) are
+served from it. So marking a thread unread flips the sender's ✓✓ back to ✓ on the
+message you just un-read — they stop being told you've read it, because you've
+just said you haven't dealt with it.
+
+This is deliberate rather than a side effect. The alternative is a second,
+never-decreasing column for receipts, which buys a tick that survives the badge
+at the cost of letting the two disagree about whether you read something — the
+exact drift the single `unread_count_for` implementation exists to prevent. And
+where the two readings conflict, a privacy-first app should err toward **fewer**
+claims about what someone has read, not more: the retraction is the option that
+tells the other person less. Pinned by
+`MarkConversationUnreadTests.test_marking_unread_retracts_the_read_receipt`, so
+it can't quietly change.
+
+The blast radius is one message: the marker only moves behind the newest incoming
+one, so everything older stays read and stays ticked.
 
 ## Membership state machine
 

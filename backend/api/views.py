@@ -2579,6 +2579,18 @@ class ConversationReadView(APIView):
           so this is the smallest representable step rather than an arbitrary
           nudge.
 
+        🔒 **It retracts your read receipt too, and that is the intended
+        reading.** ``last_read_at`` is one column and ``attach_read_receipts``
+        serves the ticks from it, so moving the marker back flips the sender's
+        ✓✓ to ✓ on the message you just un-read. Deliberately not given a second
+        never-decreasing column: two markers would mean the badge and the tick
+        could disagree about whether you read something, which is the drift this
+        module keeps closing everywhere else. Saying "actually, I haven't dealt
+        with this" to yourself and to them is one honest statement — and on a
+        privacy-first app the direction to err is *fewer* claims about what
+        someone has read, not more. Pinned by
+        ``test_marking_unread_retracts_the_read_receipt``.
+
         400 when there's nothing to mark unread (an empty thread, or one where
         every visible message is yours). The clients hide the action in that
         case; saying so plainly beats a 200 that visibly does nothing.

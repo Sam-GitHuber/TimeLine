@@ -196,6 +196,11 @@ export default function NewChatScreen() {
               placeholderTextColor={colors.inkFaint}
               style={styles.titleInput}
               accessibilityLabel="Chat name"
+              // The column's width. Without it the create endpoint silently
+              // truncates at 100 and you'd never be told which half you kept —
+              // the rename field has capped it since M6, and this is the same
+              // field a day earlier.
+              maxLength={100}
             />
           )}
           <View style={styles.footerRow}>

@@ -385,10 +385,23 @@ it.each([
   ],
   ['an empty thread', convo({ id: 21, last_message: null })],
   ['an invite you haven’t accepted', convo({ id: 22, my_status: 'pending' })],
+  [
+    'a thread whose last message has been deleted',
+    convo({
+      id: 25,
+      last_message: {
+        text: '',
+        is_deleted: true,
+        sender_id: 2,
+        created_at: '2026-07-22T10:00:00Z',
+      },
+    }),
+  ],
 ])('offers no unread toggle on %s', async (_label, row) => {
-  // The server refuses all three (400 — there's nothing to aim the marker at),
-  // and offering an action that comes back an error is worse than not offering
-  // it at all.
+  // A tombstone is incoming but isn't a target — the marker can't be parked on
+  // a deleted message, so a thread with nothing else incoming is a 400. The row
+  // only knows its newest message, so it errs toward not offering an action
+  // that would come back an error.
   serve([row]);
 
   await renderScreen();
