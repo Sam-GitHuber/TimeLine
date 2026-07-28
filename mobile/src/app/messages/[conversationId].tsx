@@ -54,6 +54,7 @@ import { AvatarStack } from '@/components/AvatarStack';
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
+import { MessageThreadView } from '@/components/MessageThreadView';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
 import { ReactorsSheet, reactorsQueryKey } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
@@ -126,6 +127,7 @@ function messageActions({
   mine,
   canSend,
   now,
+  onReply,
   onEdit,
   onDelete,
   onReport,
@@ -134,6 +136,7 @@ function messageActions({
   mine: boolean;
   canSend: boolean;
   now: number;
+  onReply: (message: Message) => void;
   onEdit: (message: Message) => void;
   onDelete: (messageId: number) => void;
   onReport: (messageId: number) => void;
@@ -149,6 +152,13 @@ function messageActions({
       },
     },
   ];
+  // The only way to reply (M3). A swipe-to-reply shipped alongside this and was
+  // removed — it raced the navigator's back gesture and usually lost, closing
+  // the conversation instead of starting a reply; see `MessageBubble`. Left out
+  // where the server would refuse the send anyway, like the reaction row.
+  if (canSend) {
+    actions.push({ label: 'Reply', onPress: () => onReply(message) });
+  }
   if (mine) {
     const age = now - new Date(message.created_at).getTime();
     if (canSend && age < MESSAGE_EDIT_WINDOW_MS) {
@@ -188,6 +198,26 @@ export default function ThreadScreen() {
   } | null>(null);
   // The message being corrected, if any — the composer doubles as the editor.
   const [editing, setEditing] = useState<Message | null>(null);
+  /**
+   * The open focused thread, or null for the transcript (M3).
+   *
+   * **Replying always opens the strand**, rather than aiming the transcript's
+   * composer at a message — even when the message has no replies yet and the
+   * strand is one bubble long. You reply *inside* the conversation you're
+   * joining, so the context you're answering is on screen while you type it,
+   * which was the whole reason for building the focused view. It also leaves the
+   * transcript's composer doing exactly two things (write, edit) instead of
+   * three.
+   *
+   * `replyToId` is the message you actually tapped Reply on, which is only the
+   * root when you got here by browsing — see `MessageThreadView`.
+   */
+  const [thread, setThread] = useState<{
+    rootId: number;
+    replyToId: number;
+    /** Reply put you here, so the keyboard should already be up. */
+    composing: boolean;
+  } | null>(null);
   // Whatever was half-typed when edit mode started, put back on cancel. Losing
   // a draft to a typo fix would be its own small betrayal.
   const [stashedDraft, setStashedDraft] = useState('');
@@ -232,6 +262,23 @@ export default function ThreadScreen() {
 
   const messages = messagesQuery.data?.pages.flatMap((page) => page.results) ?? [];
   const messageCount = messages.length;
+  /**
+   * Resolve a quoted message from what we've already loaded (M3).
+   *
+   * 🔒 Nothing about the quoted message is sent with the reply — it carries a
+   * bare `{ id }`, not the text and not the author — so both have to be found in
+   * messages that came through the interval-clipped endpoint. That's the point:
+   * a quote can't show what the thread wouldn't. A miss therefore renders
+   * "Original message unavailable" with no name above it, which today means
+   * genuinely clipped, because this screen still loads every page.
+   *
+   * **M5 has to revisit this.** It replaces the eager full-history load with
+   * proper upward paging, at which point a miss will also mean "not paged in
+   * yet" and the honest message becomes a lie some of the time. The fix is a
+   * fetch through the same clipped endpoint (which is what the focused thread
+   * view already does), not a wider payload.
+   */
+  const messagesById = new Map(messages.map((m) => [m.id, m]));
 
   // Mark read on open and as new messages land, clearing the tab badge and this
   // thread's pill. Guarded on error so a failed load doesn't clear the badge.
@@ -244,14 +291,25 @@ export default function ThreadScreen() {
   }, [id, messageCount, convoQuery.isError, isPending, queryClient]);
 
   const sendMutation = useMutation({
-    mutationFn: (value: string) => api.sendMessage(id, value),
-    onSuccess: () => {
-      // Don't clear the composer if it has since become an *editor*: a send
-      // still in flight when you long-press → Edit would otherwise wipe the
-      // prefilled text out from under you.
-      if (!editing) setText('');
+    mutationFn: ({ value, replyToId }: { value: string; replyToId?: number }) =>
+      api.sendMessage(id, value, replyToId),
+    onSuccess: (_message, { replyToId }) => {
+      // Clear *this* screen's composer, and only when the send came from it.
+      // A reply is sent from the strand's own composer, which clears itself —
+      // clearing here too would wipe a half-typed message in the transcript
+      // underneath, which is the same betrayal `stashedDraft` exists to
+      // prevent, just triggered by someone replying instead of editing.
+      // Don't clear it if it has since become an *editor* either: a send still
+      // in flight when you long-press → Edit would wipe the prefilled text out
+      // from under you.
+      if (!replyToId && !editing) setText('');
       queryClient.invalidateQueries({ queryKey: ['messages', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      // The focused view reads its own query, so a reply sent from in there has
+      // to refresh it — otherwise the strand you're looking at is a poll cycle
+      // behind the transcript underneath it, and the reply you just sent
+      // wouldn't appear in the very view you sent it from.
+      queryClient.invalidateQueries({ queryKey: ['thread', id] });
     },
   });
 
@@ -335,7 +393,10 @@ export default function ThreadScreen() {
 
   const busy = sendMutation.isPending || editMutation.isPending;
 
-  /** Send a new message, or save the one being edited — the composer does both. */
+  /**
+   * Send a new message, or save the one being edited — the transcript's composer
+   * does both. Replies are sent from inside the focused thread, not from here.
+   */
   function handleSend() {
     const value = text.trim();
     if (!value || busy) return;
@@ -346,7 +407,7 @@ export default function ThreadScreen() {
       else editMutation.mutate({ messageId: editing.id, value });
       return;
     }
-    sendMutation.mutate(value);
+    sendMutation.mutate({ value });
   }
 
   function startEditing(message: Message) {
@@ -359,6 +420,27 @@ export default function ThreadScreen() {
     editMutation.reset();
     // Focus after the composer has re-rendered into edit mode.
     setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
+  /**
+   * Reply to a message (M3) — from the long-press menu's Reply, the only route.
+   *
+   * Opens the strand rather than aiming this screen's composer at the message,
+   * so you can read what you're joining while you write. A message with no
+   * replies yet opens a strand one bubble long, which is the point: the thread
+   * is where a reply lives, whether or not one exists yet.
+   *
+   * `rootId` is the thread's head, `replyToId` the message actually tapped — the
+   * two differ when you reply to something that's already a reply, and keeping
+   * both is what lets the quote name who you answered rather than who started
+   * the strand.
+   */
+  function startReplying(message: Message) {
+    setThread({
+      rootId: message.thread_root_id ?? message.id,
+      replyToId: message.id,
+      composing: true,
+    });
   }
 
   /** Leave edit mode and put the pre-edit draft back in the composer. */
@@ -551,7 +633,20 @@ export default function ThreadScreen() {
                   message={item}
                   mine={mine}
                   showSender={isGroup && !mine && startsRun}
+                  quoted={
+                    item.reply_to ? messagesById.get(item.reply_to.id) : undefined
+                  }
                   onShowReactors={() => setReactorsFor(item.id)}
+                  // Browsing into the strand rather than replying to a
+                  // particular message, so the composer aims at the root. The
+                  // thread's *root*, not the bubble you tapped: a root opens its
+                  // own strand, a reply opens the one it belongs to. The server
+                  // owns the flattening, so this is a read of it, never a second
+                  // copy of the rule.
+                  onOpenThread={() => {
+                    const rootId = item.thread_root_id ?? item.id;
+                    setThread({ rootId, replyToId: rootId, composing: false });
+                  }}
                   onLongPress={(anchor) =>
                     setMenuTarget({
                       message: item,
@@ -562,6 +657,7 @@ export default function ThreadScreen() {
                         mine,
                         canSend,
                         now: Date.now(),
+                        onReply: startReplying,
                         onEdit: startEditing,
                         onDelete: confirmDelete,
                         onReport: setReportingId,
@@ -615,6 +711,7 @@ export default function ThreadScreen() {
                     </Pressable>
                   </View>
                 ) : null}
+
                 <View style={styles.composer}>
                   <TextInput
                     ref={inputRef}
@@ -677,12 +774,40 @@ export default function ThreadScreen() {
         </KeyboardAvoidingView>
       )}
 
+      {/* The focused thread (M3). Mounted at screen level, over everything —
+          it blurs the transcript rather than replacing it, because you haven't
+          left the conversation, only narrowed to a strand of it. Both replying
+          and browsing land here; `composing` is the difference. */}
+      {thread ? (
+        <MessageThreadView
+          conversationId={id}
+          rootId={thread.rootId}
+          replyToId={thread.replyToId}
+          composing={thread.composing}
+          meId={me?.pk}
+          isGroup={isGroup}
+          canSend={canSend}
+          sending={sendMutation.isPending}
+          // `mutateAsync`, so the strand can wait for the send to land before
+          // clearing its input — and keep what you wrote if it doesn't.
+          onSend={(value, replyToId) =>
+            sendMutation.mutateAsync({ value, replyToId })
+          }
+          onClose={() => setThread(null)}
+        />
+      ) : null}
+
       {menuTarget ? (
         <MessageActionMenu
           message={menuTarget.message}
           mine={menuTarget.mine}
           anchor={menuTarget.anchor}
           actions={menuTarget.actions}
+          quoted={
+            menuTarget.message.reply_to
+              ? messagesById.get(menuTarget.message.reply_to.id)
+              : undefined
+          }
           onReact={
             canSend
               ? (emoji) =>

@@ -344,6 +344,13 @@ class Message(models.Model):
     the bubble "Edited": a thread is a shared record, and silently changing what
     someone already read would make the record untrustworthy. The *window* is the
     other half of that guarantee and lives in the view (``MESSAGE_EDIT_WINDOW``).
+
+    Reply threads (Phase 9b M3): ``reply_to`` is the message this one answers and
+    ``thread_root`` the head of the thread it belongs to — see ``save``. The
+    reply's *text* is never carried on the quoting message; a client that wants
+    the quoted body fetches it through the interval-clipped messages endpoint
+    like any other message, which is what keeps a reply from becoming a window
+    into history the viewer was clipped out of.
     """
 
     conversation = models.ForeignKey(
@@ -363,12 +370,56 @@ class Message(models.Model):
     # ``auto_now`` would also fire on the soft-delete write and mislabel a
     # deleted message as edited.
     edited_at = models.DateTimeField(null=True, blank=True)
+    # Phase 9b M3. The message this one answers — what the collapsed quote and
+    # the focused thread view render. ``SET_NULL``, not CASCADE: deleting a
+    # quoted message must not delete the replies to it (and message deletion is
+    # soft anyway, so the row usually survives — this covers a hard delete).
+    reply_to = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="replies",
+    )
+    # The message at the head of the reply thread this one belongs to — NULL on
+    # a message that isn't part of one. Denormalised in ``save`` below.
+    thread_root = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_index=True,
+        related_name="thread_messages",
+    )
 
     class Meta:
         # Oldest-first, like a comment thread — a conversation reads top to
         # bottom in send order. ``id`` breaks ties within a clock tick so paging
         # is stable.
         ordering = ["created_at", "id"]
+
+    def save(self, *args, **kwargs):
+        """Keep ``thread_root`` in step with ``reply_to``.
+
+        **Reply threads are one level deep, always.** Replying to a reply joins
+        the thread that reply is already in rather than starting a nested one —
+        so ``thread_root`` is the *reply target's* root if it has one, else the
+        target itself. A tree would need recursive reads to render and would let
+        a conversation grow branches nobody can follow on a phone screen; one
+        flat thread per root is the shape every mainstream messenger settled on.
+
+        Derived here rather than in the view so it can't be forgotten by a second
+        write path (an import, a management command, a future bulk send). The
+        column exists at all because it turns "give me this thread" and "how many
+        replies has this got" into single indexed queries instead of a recursive
+        walk.
+        """
+        # Only on insert. Later writes pass ``update_fields`` (the edit and
+        # soft-delete paths both do), so recomputing here would silently not be
+        # persisted — better to derive it once, where it's true.
+        if self._state.adding and self.reply_to_id and not self.thread_root_id:
+            self.thread_root_id = self.reply_to.thread_root_id or self.reply_to_id
+        super().save(*args, **kwargs)
 
     @property
     def is_deleted(self):

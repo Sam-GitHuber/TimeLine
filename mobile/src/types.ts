@@ -265,6 +265,25 @@ export type Message = {
   created_at: string;
   edited_at: string | null;
   reactions?: Reaction[];
+  /**
+   * What this message replies to (Phase 9b M3) — **a bare id**, never the quoted
+   * text and never its author. Both are looked up from the message itself, which
+   * we either already hold or fetch through the same interval-clipped endpoint
+   * as everything else; the server will not hand either over attached to the
+   * reply, because that would route around the clipping. (The author matters as
+   * much as the words: in a group, someone can join, post and leave inside your
+   * interval gap, and a quote was the one place their name would have reached
+   * you.) Render "Original message unavailable" when it can't be resolved, which
+   * is a real state, not just a loading one.
+   */
+  reply_to?: { id: number } | null;
+  /** The head of the reply thread this message is in; null if it's in none. */
+  thread_root_id?: number | null;
+  /**
+   * Replies hanging off this message *that you can see* — non-zero only on a
+   * thread root, which is how the transcript knows to offer "N replies".
+   */
+  reply_count?: number;
 };
 
 /**

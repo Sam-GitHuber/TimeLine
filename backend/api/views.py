@@ -8,11 +8,14 @@ from django.db.models import (
     Case,
     Count,
     Exists,
+    IntegerField,
     OuterRef,
     Q,
+    Subquery,
     Value,
     When,
 )
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_time
@@ -397,6 +400,34 @@ def visible_messages_for(convo, user):
             span &= Q(created_at__lt=ended_at)
         window |= span
     return convo.messages.filter(window).select_related("sender")
+
+
+def _with_reply_counts(visible):
+    """Annotate ``reply_count`` — replies to each message **that this viewer can
+    see** (Phase 9b M3).
+
+    Counted over the caller's already-clipped queryset rather than with a plain
+    ``Count("thread_messages")``, and that distinction is the whole point of the
+    helper. An unclipped count would tell a member who was ``pending`` across a
+    gap that three replies landed on a message while they were away — no text,
+    but the existence of history they were deliberately clipped out of, which is
+    the same leak the 404-not-403 rules elsewhere in this module exist to close.
+
+    A correlated subquery, not a join + ``GROUP BY``: the outer queryset is
+    paginated and grouping it would fight the pagination.
+    """
+    counts = (
+        visible.filter(thread_root=OuterRef("pk"))
+        .order_by()
+        .values("thread_root")
+        .annotate(n=Count("pk"))
+        .values("n")
+    )
+    return visible.annotate(
+        reply_count=Coalesce(
+            Subquery(counts, output_field=IntegerField()), Value(0)
+        )
+    )
 
 
 def unread_count_for(convo, user, read_at):
@@ -2190,6 +2221,13 @@ class ConversationMessagesView(generics.ListAPIView):
     or dropping to pending (group) stops *future* messages even though history
     stays visible — takes the sender from the session, bumps the
     conversation's activity time, and marks it read for you.
+
+    **``?thread_root=<id>`` narrows GET to one reply thread** (Phase 9b M3) —
+    that root plus every reply hanging off it, which is what the app's focused
+    thread view loads. It's a *filter on the same clipped queryset*, deliberately
+    not an endpoint of its own: a second route would be a second place for the
+    visibility rule to live, and this way a thread can't show a message the
+    transcript wouldn't.
     """
 
     serializer_class = MessageSerializer
@@ -2207,14 +2245,48 @@ class ConversationMessagesView(generics.ListAPIView):
         # one caller that serialises the rows (and so reads each message's
         # reaction summary). The others count, or look up a single message, and
         # would pay for a join they never use.
-        return _messages_for_viewer(convo, self.request.user).prefetch_related(
+        # No ``select_related`` for the quote: ``reply_to`` serialises to a bare
+        # id (see ``MessageSerializer.get_reply_to``), so the quoted row is never
+        # fetched at all — cheaper *and* nothing there to leak.
+        visible = _messages_for_viewer(convo, self.request.user).prefetch_related(
             "reactions"
         )
+        queryset = _with_reply_counts(visible)
+
+        root_id = self.request.query_params.get("thread_root")
+        if root_id is not None:
+            try:
+                root_id = int(root_id)
+            except (TypeError, ValueError):
+                # ``from None``: the parse error is noise here — the caller sent
+                # something that isn't an id, and chaining a ValueError onto the
+                # 400 tells them nothing they didn't type themselves.
+                raise ValidationError("thread_root must be a message id.") from None
+            # Range-checked, not just parsed: Python ints are unbounded but the
+            # column is a bigint, so a long enough string of digits reaches the
+            # database as an out-of-range value and comes back a 500. It's the
+            # same "you can't see that" answer either way.
+            if not -(2**63) <= root_id < 2**63:
+                raise ValidationError("thread_root must be a message id.")
+            # The root itself is part of its own thread — it's the first thing
+            # the focused view shows. If the viewer is clipped out of the root
+            # they simply get the replies they can see and the client renders
+            # the missing head; nothing here has to special-case that, because
+            # the clipping already did.
+            queryset = queryset.filter(Q(pk=root_id) | Q(thread_root_id=root_id))
+        return queryset
 
     def post(self, request, pk):
         convo, my_status = self._conversation()
         _assert_can_send(request.user, convo, my_status)
-        serializer = MessageCreateSerializer(data=request.data)
+        visible = _messages_for_viewer(convo, request.user)
+        serializer = MessageCreateSerializer(
+            data=request.data,
+            # The sender's own clipped set decides what they may reply to — see
+            # the serializer. Sending it in keeps the clipping rule in this
+            # module, where its four other callers already live.
+            context={"visible_messages": visible},
+        )
         serializer.is_valid(raise_exception=True)
         now = timezone.now()
         with transaction.atomic():
@@ -2222,6 +2294,9 @@ class ConversationMessagesView(generics.ListAPIView):
                 conversation=convo,
                 sender=request.user,
                 text=serializer.validated_data["text"],
+                # ``thread_root`` is derived from this in ``Message.save`` — one
+                # level deep, always.
+                reply_to_id=serializer.validated_data.get("reply_to_id"),
             )
             # Bump activity so the thread rises to the top of both lists.
             Conversation.objects.filter(pk=convo.pk).update(updated_at=now)
