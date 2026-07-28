@@ -15,17 +15,24 @@
  * The header's compose button and the empty-state CTA both open the new-chat
  * picker (`messages/new`, E2b). You can also start a 1:1 from a person's profile
  * (the Message button).
+ *
+ * **Phase 9b M6** adds the two things a list this size starts to need: a
+ * **search field** (by name — see `matchesSearch`, and note what it deliberately
+ * doesn't search) and **swipe actions** on a row, so mute / mark-unread / leave
+ * don't require opening a thread you were trying to deal with in passing.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -35,20 +42,92 @@ import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import { ComposeIcon } from '@/components/icons';
+import type { SwipeAction } from '@/components/SwipeableRow';
+import { SwipeableRow } from '@/components/SwipeableRow';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation } from '@/types';
 import { formatRelativeTime } from '@/utils';
 
+/**
+ * How many conversations before the search field is worth its space.
+ *
+ * Below this you can see every chat you have, so a search box is chrome that
+ * only makes the screen busier. It lives in the list header rather than the
+ * screen header for the same reason: it scrolls away with the content instead
+ * of permanently narrowing the thing you came here to read.
+ */
+const SEARCH_FROM = 6;
+
+/**
+ * Does this conversation match what you typed?
+ *
+ * 🔒 **Names only — never the message previews.** Searching message *content* is
+ * the obvious next thought and it's deliberately not built: it dies under
+ * end-to-end encryption (the server won't have the words, and the client won't
+ * have the history), so building toward it now means building something to tear
+ * out. See the phase plan's Privacy section. Matching the preview text that
+ * happens to be on screen would also be a half-feature that quietly searches
+ * only the newest message in each thread, which is worse than not searching.
+ *
+ * A group matches on its title *and* its members' names, because an untitled
+ * group is displayed as its members and you should be able to find a chat by
+ * what it's called on the screen in front of you.
+ */
+function matchesSearch(convo: Conversation, needle: string, meId?: number) {
+  const names = [
+    convo.title,
+    convo.other?.display_name ?? '',
+    ...convo.participants
+      .filter((p) => p.id !== meId)
+      .map((p) => p.display_name),
+  ];
+  return names.some((name) => name.toLowerCase().includes(needle));
+}
+
 export default function MessagesScreen() {
   const { user: me } = useAuth();
+  const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
+  const [search, setSearch] = useState('');
 
   const query = useQuery({
     queryKey: ['conversations'],
     queryFn: api.getConversations,
     refetchInterval: CONVERSATION_LIST_POLL_MS,
   });
-  const conversations = query.data?.results ?? [];
+  const all = useMemo(() => query.data?.results ?? [], [query.data]);
+  const needle = search.trim().toLowerCase();
+  const conversations = useMemo(
+    () =>
+      needle
+        ? all.filter((convo) => matchesSearch(convo, needle, me?.pk))
+        : all,
+    [all, needle, me?.pk]
+  );
+
+  /**
+   * The row actions, all three sharing one mutation.
+   *
+   * Everything a swipe can do is a small write followed by the same
+   * invalidations, so one mutation with the call passed in keeps the row's
+   * handlers to a line each — the shape `groups/[groupId]/members.tsx` already
+   * uses. A failure gets an alert because a swipe closes on its own: without
+   * one, a mute that didn't take would look exactly like a mute that did.
+   */
+  const rowAction = useMutation({
+    mutationFn: (call: () => Promise<unknown>) => call(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      // Mark-unread and leave both move the tab badge, and it's the number
+      // someone is watching when they flag a chat to come back to.
+      queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
+    },
+    onError: (error) =>
+      Alert.alert(
+        'Couldn’t do that',
+        error instanceof Error ? error.message : 'Something went wrong.'
+      ),
+  });
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -63,6 +142,83 @@ export default function MessagesScreen() {
     query.error instanceof Error
       ? query.error.message
       : "Couldn't load your messages.";
+
+  /**
+   * Swipe **right** — the read/unread toggle, where iOS puts it.
+   *
+   * "Mark unread" is the one people actually came for: it's how you say "I'll
+   * reply properly later" without leaving the thread unopened, and it's why the
+   * badge is trustworthy as a to-do list. It's offered only when there's
+   * something to aim at — an incoming message you've already read — because the
+   * server refuses the rest (an empty thread, or one where the last word was
+   * yours) and offering an action that comes back 400 is worse than not
+   * offering it. A `pending` invite has no readable history at all.
+   */
+  function leadingActions(convo: Conversation): SwipeAction[] {
+    if (convo.my_status === 'pending') return [];
+    if (convo.unread_count > 0) {
+      return [
+        {
+          label: 'Mark read',
+          tint: colors.accent,
+          onPress: () =>
+            rowAction.mutate(() => api.markConversationRead(convo.id)),
+        },
+      ];
+    }
+    const incoming =
+      !!convo.last_message && convo.last_message.sender_id !== me?.pk;
+    if (!incoming) return [];
+    return [
+      {
+        label: 'Mark unread',
+        tint: colors.accent,
+        onPress: () =>
+          rowAction.mutate(() => api.markConversationUnread(convo.id)),
+      },
+    ];
+  }
+
+  /**
+   * Swipe **left** — the ones with consequences.
+   *
+   * Mute reads as its current state ("Unmute" once silenced) rather than
+   * staying an imperative, the same way the thread's control does. Leave is
+   * destructive and confirms first; on an invite you haven't accepted it is
+   * *Decline*, which is the same endpoint and a very different sentence.
+   */
+  function trailingActions(convo: Conversation): SwipeAction[] {
+    const leaving = convo.my_status === 'pending';
+    return [
+      {
+        label: convo.muted ? 'Unmute' : 'Mute',
+        onPress: () =>
+          rowAction.mutate(() =>
+            api.setConversationMuted(convo.id, !convo.muted)
+          ),
+      },
+      {
+        label: leaving ? 'Decline' : 'Leave',
+        destructive: true,
+        onPress: () =>
+          Alert.alert(
+            leaving ? 'Decline invite?' : 'Leave chat?',
+            leaving
+              ? 'You won’t join this conversation.'
+              : 'You’ll stop receiving messages here.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: leaving ? 'Decline' : 'Leave',
+                style: 'destructive',
+                onPress: () =>
+                  rowAction.mutate(() => api.leaveConversation(convo.id)),
+              },
+            ]
+          ),
+      },
+    ];
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -86,6 +242,9 @@ export default function MessagesScreen() {
         // and error states too — same guard the People lists use.
         alwaysBounceVertical
         contentContainerStyle={styles.listContent}
+        // Let a tap on a row through while the search keyboard is up, rather
+        // than spending the first tap on dismissing it.
+        keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -93,16 +252,43 @@ export default function MessagesScreen() {
             tintColor={colors.accent}
           />
         }
+        // Keyed off the *unfiltered* count, so filtering down to one result
+        // doesn't pull the field out from under what you just typed.
+        ListHeaderComponent={
+          all.length >= SEARCH_FROM ? (
+            <View style={styles.searchBar}>
+              <TextInput
+                value={search}
+                onChangeText={setSearch}
+                placeholder="Search names"
+                placeholderTextColor={colors.inkFaint}
+                accessibilityLabel="Search conversations"
+                autoCorrect={false}
+                autoCapitalize="none"
+                clearButtonMode="while-editing"
+                returnKeyType="search"
+                style={styles.searchInput}
+              />
+            </View>
+          ) : null
+        }
         renderItem={({ item }) => (
-          <ConversationRow
-            convo={item}
-            meId={me?.pk}
-            onOpen={() => router.push(`/messages/${item.id}`)}
-          />
+          <SwipeableRow
+            leftActions={leadingActions(item)}
+            rightActions={trailingActions(item)}
+          >
+            <ConversationRow
+              convo={item}
+              meId={me?.pk}
+              onOpen={() => router.push(`/messages/${item.id}`)}
+            />
+          </SwipeableRow>
         )}
         ListEmptyComponent={
           query.isLoading ? (
             <ListMessage>Loading…</ListMessage>
+          ) : needle ? (
+            <ListMessage>No conversations match “{search.trim()}”.</ListMessage>
           ) : query.isError ? (
             <View style={styles.centre}>
               <Text style={[styles.messageText, styles.error]}>
@@ -241,6 +427,21 @@ const styles = StyleSheet.create({
   title: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink },
   // Plain icon button in the header — no pill, the iOS nav-action pattern.
   compose: { padding: spacing.xs },
+  searchBar: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xs,
+  },
+  searchInput: {
+    height: 36,
+    borderRadius: radius.md,
+    backgroundColor: colors.raised,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+    paddingHorizontal: spacing.sm + 2,
+    fontSize: fontSize.sm,
+    color: colors.ink,
+  },
   primaryBtn: {
     marginTop: spacing.sm,
     paddingHorizontal: spacing.lg,
@@ -254,6 +455,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
+    // Opaque on purpose: the swipe actions sit *behind* the row, so a
+    // transparent row would let them show through before it moves.
+    backgroundColor: colors.surface,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md - 2,
     borderBottomWidth: 1,

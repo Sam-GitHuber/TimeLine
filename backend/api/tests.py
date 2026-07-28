@@ -29,7 +29,11 @@ from api.emoji import (
     InvalidEmoji,
     normalise_emoji,
 )
-from api.serializers import MESSAGE_MAX_LENGTH, NotificationSerializer
+from api.serializers import (
+    CONVERSATION_TITLE_MAX_LENGTH,
+    MESSAGE_MAX_LENGTH,
+    NotificationSerializer,
+)
 from api.views import (
     MESSAGE_EDIT_WINDOW,
     MESSAGE_IDS_MAX,
@@ -6718,6 +6722,279 @@ class ConversationMuteTests(APITestCase):
         self.client.force_authenticate(outsider)
 
         self.assertEqual(self.client.post(self.url).status_code, 404)
+
+
+class ConversationRenameTests(APITestCase):
+    """Renaming a group chat (Phase 9b M6).
+
+    A title used to be settable only at creation, so "Weekend plans" outlived
+    the weekend. The rules are the interesting part: who may, what may be
+    renamed, and — the one that regresses quietly — that it doesn't reorder
+    anyone's conversation list.
+    """
+
+    def setUp(self):
+        self.ada = make_user("rename-ada@example.com")
+        self.bea = make_user("rename-bea@example.com")
+        self.cal = make_user("rename-cal@example.com")
+        make_connection(self.ada, self.bea)
+        make_connection(self.ada, self.cal)
+        self.client.force_authenticate(self.ada)
+        self.convo_id = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.bea.id, self.cal.id], "title": "Weekend plans"},
+            format="json",
+        ).data["id"]
+        self.url = f"/api/conversations/{self.convo_id}/"
+
+    def _rename(self, title):
+        return self.client.patch(self.url, {"title": title}, format="json")
+
+    def test_an_active_member_renames_the_chat(self):
+        resp = self._rename("Sunday lunch")
+        self.assertEqual(resp.status_code, 200)
+        # The response is the same payload a GET returns, so the header the
+        # caller just changed needs no second round trip to refresh.
+        self.assertEqual(resp.data["title"], "Sunday lunch")
+        self.assertEqual(
+            Conversation.objects.get(pk=self.convo_id).title, "Sunday lunch"
+        )
+
+    def test_any_active_member_may_rename_not_only_the_creator(self):
+        # Chats have no admin role at all, and inventing one for a text field
+        # would be the wrong place to start.
+        self.client.force_authenticate(self.bea)
+        self.assertEqual(self._rename("Bea's idea").status_code, 200)
+
+    def test_a_pending_member_cannot_rename(self):
+        # Cal is pending (not connected to Bea) — the waiting room can't write
+        # to the thread, and a title is writing to the thread.
+        self.client.force_authenticate(self.cal)
+        resp = self._rename("Let me in")
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(
+            Conversation.objects.get(pk=self.convo_id).title, "Weekend plans"
+        )
+
+    def test_a_non_member_gets_404(self):
+        outsider = make_user("rename-outsider@example.com")
+        self.client.force_authenticate(outsider)
+        self.assertEqual(self._rename("mine now").status_code, 404)
+
+    def test_a_direct_chat_cannot_be_renamed(self):
+        """A 1:1's name *is* the other person, resolved per-viewer — there's no
+        shared title, and letting one side rename the other would be a small
+        act of vandalism."""
+        direct = self.client.post(
+            CONVERSATIONS_URL, {"user_id": self.bea.id}, format="json"
+        ).data["id"]
+        resp = self.client.patch(
+            f"/api/conversations/{direct}/", {"title": "Nope"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Conversation.objects.get(pk=direct).title, "")
+
+    def test_a_blank_title_clears_it(self):
+        # Clearing is a real thing to want: both clients then fall back to the
+        # members' names, which beats a stale title.
+        self.assertEqual(self._rename("").status_code, 200)
+        self.assertEqual(Conversation.objects.get(pk=self.convo_id).title, "")
+
+    def test_whitespace_only_is_stored_as_blank(self):
+        # Otherwise a "name" of spaces renders as an untitled chat with the
+        # members-names fallback suppressed — blank-looking, and unfixable
+        # without noticing why.
+        self.assertEqual(self._rename("   ").status_code, 200)
+        self.assertEqual(Conversation.objects.get(pk=self.convo_id).title, "")
+
+    def test_an_oversized_title_is_rejected(self):
+        resp = self._rename("x" * (CONVERSATION_TITLE_MAX_LENGTH + 1))
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            Conversation.objects.get(pk=self.convo_id).title, "Weekend plans"
+        )
+
+    def test_renaming_does_not_bump_the_thread_up_the_list(self):
+        """The pairing that regresses quietly, like the edit route's.
+
+        A rename isn't activity, so it must not jump the thread to the top of
+        everyone's conversation list — while the *name* has to update
+        everywhere, which it does because the list re-reads it per request.
+        """
+        convo = Conversation.objects.get(pk=self.convo_id)
+        before = convo.updated_at
+
+        self._rename("Sunday lunch")
+
+        convo.refresh_from_db()
+        self.assertEqual(convo.updated_at, before)
+        row = [
+            c
+            for c in self.client.get(CONVERSATIONS_URL).data["results"]
+            if c["id"] == self.convo_id
+        ][0]
+        self.assertEqual(row["title"], "Sunday lunch")
+
+
+class MarkConversationUnreadTests(APITestCase):
+    """Marking a thread unread again (Phase 9b M6) — ``DELETE
+    /conversations/<id>/read/``.
+
+    Used constantly by people who treat the badge as a to-do list. The tests
+    are mostly about *where the marker lands*, because the obvious
+    implementation (drop the read row) makes a fully-read thread come back
+    claiming its entire history is unread.
+    """
+
+    def setUp(self):
+        self.ada = make_user("unread-ada@example.com")
+        self.bea = make_user("unread-bea@example.com")
+        make_connection(self.ada, self.bea)
+        self.convo = Conversation.objects.create(
+            kind="direct", user_a=self.ada, user_b=self.bea
+        )
+        for user in (self.ada, self.bea):
+            p = Participant.objects.create(
+                conversation=self.convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=self.convo.created_at
+            )
+        self.url = f"/api/conversations/{self.convo.id}/read/"
+        self.client.force_authenticate(self.ada)
+
+    def _unread_count(self):
+        return self.client.get(f"/api/conversations/{self.convo.id}/").data[
+            "unread_count"
+        ]
+
+    def test_marks_a_read_thread_unread_again(self):
+        Message.objects.create(
+            conversation=self.convo, sender=self.bea, text="are you free?"
+        )
+        self.client.post(self.url)
+        self.assertEqual(self._unread_count(), 0)
+
+        resp = self.client.delete(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["unread_count"], 1)
+        self.assertEqual(self._unread_count(), 1)
+
+    def test_a_long_read_thread_comes_back_as_one_unread_not_all_of_it(self):
+        """The whole reason this isn't a delete of the read row.
+
+        With no marker at all, every message in the history counts as unread, so
+        flagging a chat you've read to the end would return it wearing "99+".
+        The count means "this many are waiting for you", so it has to be one.
+        """
+        for i in range(12):
+            Message.objects.create(
+                conversation=self.convo, sender=self.bea, text=f"message {i}"
+            )
+        self.client.post(self.url)
+
+        self.client.delete(self.url)
+        self.assertEqual(self._unread_count(), 1)
+
+    def test_it_aims_past_your_own_trailing_messages(self):
+        """Your own messages never count toward unread, so parking the marker
+        behind one would produce a thread that says it's read the moment
+        anything refreshes it."""
+        Message.objects.create(
+            conversation=self.convo, sender=self.bea, text="are you free?"
+        )
+        Message.objects.create(
+            conversation=self.convo, sender=self.ada, text="just a sec"
+        )
+        self.client.post(self.url)
+
+        self.client.delete(self.url)
+        self.assertEqual(self._unread_count(), 1)
+
+    def test_a_tombstone_is_not_the_target(self):
+        # A deleted message doesn't count toward unread either — aiming at one
+        # would be the same silent no-op as aiming at your own.
+        keeper = Message.objects.create(
+            conversation=self.convo, sender=self.bea, text="are you free?"
+        )
+        deleted = Message.objects.create(
+            conversation=self.convo, sender=self.bea, text="ignore me"
+        )
+        self.client.force_authenticate(self.bea)
+        self.client.delete(
+            f"/api/conversations/{self.convo.id}/messages/{deleted.pk}/"
+        )
+        self.client.force_authenticate(self.ada)
+        self.client.post(self.url)
+
+        self.client.delete(self.url)
+        self.assertEqual(self._unread_count(), 1)
+        marker = ConversationRead.objects.get(
+            conversation=self.convo, user=self.ada
+        ).last_read_at
+        self.assertLess(marker, keeper.created_at)
+
+    def test_nothing_to_mark_unread_is_a_400(self):
+        # An empty thread, or one where every message is yours. A 200 that
+        # visibly does nothing is worse than saying so.
+        self.assertEqual(self.client.delete(self.url).status_code, 400)
+
+        Message.objects.create(
+            conversation=self.convo, sender=self.ada, text="anyone there?"
+        )
+        self.assertEqual(self.client.delete(self.url).status_code, 400)
+
+    def test_a_message_from_inside_your_gap_is_not_the_target(self):
+        """🔒 Interval clipping, the rule everything in this file goes through.
+
+        A member with a gap in their membership can't see what was said while
+        they were out, so the marker must not be parked against one of those
+        messages — that would hand them an unread count for a thread that then
+        shows them nothing.
+        """
+        group = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=self.bea
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=2)
+        p_bea = Participant.objects.create(
+            conversation=group, user=self.bea, status="active"
+        )
+        ParticipantInterval.objects.create(participant=p_bea, started_at=t0)
+        p_ada = Participant.objects.create(
+            conversation=group, user=self.ada, status="active"
+        )
+        # Ada was in, then out, and is not back yet — so the newest message in
+        # the thread is one she was never shown.
+        ParticipantInterval.objects.create(
+            participant=p_ada, started_at=t0, ended_at=t1
+        )
+        seen = Message.objects.create(
+            conversation=group, sender=self.bea, text="while she was here"
+        )
+        Message.objects.filter(pk=seen.pk).update(
+            created_at=t0 + timedelta(minutes=1)
+        )
+        seen.refresh_from_db()
+        in_gap = Message.objects.create(
+            conversation=group, sender=self.bea, text="while she was out"
+        )
+        Message.objects.filter(pk=in_gap.pk).update(
+            created_at=t1 + timedelta(minutes=1)
+        )
+
+        resp = self.client.delete(f"/api/conversations/{group.id}/read/")
+        self.assertEqual(resp.status_code, 200)
+        marker = ConversationRead.objects.get(
+            conversation=group, user=self.ada
+        ).last_read_at
+        self.assertLess(marker, seen.created_at)
+        self.assertEqual(resp.data["unread_count"], 1)
+
+    def test_a_non_member_gets_404(self):
+        outsider = make_user("unread-outsider@example.com")
+        self.client.force_authenticate(outsider)
+        self.assertEqual(self.client.delete(self.url).status_code, 404)
 
 
 @override_settings(EXPO_ACCESS_TOKEN="", EXPO_PUSH_RETENTION_DAYS=14)

@@ -42,7 +42,7 @@ release. Remaining housekeeping (not blocking): distil `phase-9-iphone-app.md`
 into `docs/reference/` mobile docs and delete it, per the phase-ships convention
 (the release half already lives in `mobile-release.md`).
 
-**Phase 9b — the messaging overhaul — is in progress; M0–M5 are done.**
+**Phase 9b — the messaging overhaul — is in progress; M0–M6 are done.**
 It came off the first real beta feedback (no way to edit a message) and brings
 messaging up to the standard of a high-end messaging app: a long-press action
 menu, edit, reply, message reactions, read receipts + send status, thread
@@ -58,8 +58,12 @@ symmetric `send_read_receipts` setting (the toggle is on both clients; the ticks
 are mobile-only until M9); and **thread mechanics** — the transcript now opens on
 one page and pages history in as you scroll up (it used to load a chat's *entire*
 history), with day separators, clock times, grouped runs, an unread divider,
-jump-to-latest, tappable links, large emoji-only messages and per-chat drafts.
-**M6 (conversation list + thread info) is next.** Full plan in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
+jump-to-latest, tappable links, large emoji-only messages and per-chat drafts;
+and **the conversation list + a thread info screen** — rows swipe for
+mute/mark-unread/leave, the list searches by name, and Mute/Add/Leave moved off
+the cramped thread header into `/messages/[id]/info`, which also renames a group
+chat. **M7 (photo messages) is next** — and it carries M6's one deferred piece,
+the media gallery in that info screen. Full plan in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
 — read it before touching messaging. Its milestones are written to be picked up
 cold by a fresh session; follow the "How to use this document" section at the top.
 **E2E encryption is a committed goal**, sketched as

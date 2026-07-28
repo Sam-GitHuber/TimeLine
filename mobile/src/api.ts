@@ -688,6 +688,42 @@ export const api = {
     }),
 
   /**
+   * Put the badge back on a thread you've read (Phase 9b M6) — for the people
+   * who use it as a to-do list.
+   *
+   * The server moves your read marker to just behind the newest message you
+   * didn't send, rather than dropping it: with no marker the *whole history*
+   * counts as unread, so a chat you'd read to the end would come back wearing
+   * "99+". It comes back as one, which is what "waiting for you" means here.
+   * 400 when there's nothing to mark unread (an empty thread, or one where the
+   * last word was yours) — which is why the list only offers it on a row that
+   * has an incoming message to aim at.
+   */
+  markConversationUnread: (conversationId: number | string) =>
+    request<{ unread_count: number }>(
+      `/api/conversations/${conversationId}/read/`,
+      { method: 'DELETE' }
+    ),
+
+  /**
+   * Rename a group chat (Phase 9b M6). Until now a title could only be set when
+   * the chat was created, so "Weekend plans" outlived the weekend.
+   *
+   * Any *active* member may — chats have no admin role, and inventing one for a
+   * text field would be the wrong place to start. Group chats only (400 on a
+   * 1:1, whose name is the other person). Blank clears it, and both clients
+   * then fall back to the members' names, which beats a stale title.
+   *
+   * It deliberately doesn't bump the thread's activity time, so renaming
+   * doesn't jump it to the top of everyone's list — same rule as an edit.
+   */
+  renameConversation: (conversationId: number | string, title: string) =>
+    request<Conversation>(`/api/conversations/${conversationId}/`, {
+      method: 'PATCH',
+      body: { title },
+    }),
+
+  /**
    * Total unread messages across all conversations — one number for the Messages
    * tab badge, so it doesn't have to load and sum the paginated list. Polled on
    * the same slow cadence as the list.

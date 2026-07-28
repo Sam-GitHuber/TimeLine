@@ -706,53 +706,29 @@ it('turns one tick into two when they read it, without leaving the thread', asyn
   jest.useRealTimers();
 });
 
-it('mutes the thread from the header (#118)', async () => {
+it('carries a single ⋯ through to the info screen (M6)', async () => {
+  // Mute, Add and Leave used to sit here as three text buttons crowding the
+  // name of the person you're talking to. They live on the info screen now —
+  // this header has one control, and it's a door rather than an action.
   serve({ conversation: detail({}), messages: [message({ id: 1 })] });
 
   await renderScreen();
-  await fireEvent.press(await screen.findByLabelText('Mute notifications'));
+  await fireEvent.press(await screen.findByLabelText('Conversation details'));
 
-  await waitFor(() =>
-    expect(
-      mockFetch.mock.calls.some(
-        ([url, init]) =>
-          String(url).includes('/api/conversations/5/mute/') &&
-          init?.method === 'POST'
-      )
-    ).toBe(true)
-  );
+  expect(mockPush).toHaveBeenCalledWith('/messages/5/info');
+  expect(screen.queryByLabelText('Mute notifications')).toBeNull();
+  expect(screen.queryByLabelText('Leave chat')).toBeNull();
+  expect(screen.queryByLabelText('Add people')).toBeNull();
 });
 
-it('unmutes an already-muted thread with a DELETE', async () => {
-  // The same control both ways — so the label has to reflect state, not just
-  // offer an action, or a muted thread would look identical to a live one.
+it('still says a thread is muted, without carrying the toggle', async () => {
+  // The one piece of state that stays in the header: the whole risk of muting
+  // a chat is forgetting you did, so it has to be visible where you'd notice.
   serve({ conversation: detail({ muted: true }), messages: [message({ id: 1 })] });
 
   await renderScreen();
-  const toggle = await screen.findByLabelText('Mute notifications');
-  expect(screen.getByText('Muted')).toBeTruthy();
-  await fireEvent.press(toggle);
 
-  await waitFor(() =>
-    expect(
-      mockFetch.mock.calls.some(
-        ([url, init]) =>
-          String(url).includes('/api/conversations/5/mute/') &&
-          init?.method === 'DELETE'
-      )
-    ).toBe(true)
-  );
-});
-
-it('offers mute on a 1:1 thread, not only on groups', async () => {
-  // Mute lives beside Add/Leave, which are group-only — it must not inherit
-  // that gating: a chatty 1:1 is as worth silencing as a busy group.
-  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
-
-  await renderScreen();
-
-  expect(await screen.findByLabelText('Mute notifications')).toBeTruthy();
-  expect(screen.queryByLabelText('Leave chat')).toBeNull();
+  expect(await screen.findByText('Muted')).toBeTruthy();
 });
 
 it('marks the thread read on open', async () => {

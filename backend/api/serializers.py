@@ -334,6 +334,11 @@ class CommentCreateSerializer(serializers.ModelSerializer):
 # while still bounding what a single row can write to the database.
 MESSAGE_MAX_LENGTH = POST_MAX_LENGTH
 
+# A group chat's title, matching ``Conversation.title``'s column width. Named
+# rather than repeated so the create path (which clipped to a literal 100) and
+# the rename path (Phase 9b M6) can't drift into disagreeing about what fits.
+CONVERSATION_TITLE_MAX_LENGTH = 100
+
 
 class MessageSerializer(serializers.ModelSerializer):
     """A single message in a conversation thread.
@@ -612,6 +617,31 @@ class ConversationSerializer(serializers.ModelSerializer):
             "sender_id": message.sender_id,
             "created_at": message.created_at,
         }
+
+
+class ConversationRenameSerializer(serializers.Serializer):
+    """The one writable field on a conversation: a group chat's ``title``
+    (Phase 9b M6).
+
+    Deliberately its own tiny serializer rather than making
+    ``ConversationSerializer`` writable. Almost every field there is a
+    ``SerializerMethodField`` decorated per-viewer by the view, so a partial
+    update through it would be a wide, mostly-read-only surface with one field
+    that happens to stick — the sort of shape where a later addition becomes
+    writable by accident. This one states exactly what a client may change.
+
+    **Blank is allowed, and means "no name".** Clearing a title is a real thing
+    to want: both clients fall back to a comma-joined list of the other members,
+    which is a better name for an ad-hoc chat than a stale one. Whitespace is
+    stripped so a "name" made of spaces can't render as an untitled chat with
+    the fallback suppressed.
+    """
+
+    title = serializers.CharField(
+        max_length=CONVERSATION_TITLE_MAX_LENGTH,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
 
 
 # --- Groups (Phase 6) --------------------------------------------------------
