@@ -27,8 +27,10 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react-nativ
 import * as Clipboard from 'expo-clipboard';
 import { Alert } from 'react-native';
 
+import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
+import { clearOutbox } from '@/outbox';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
@@ -284,6 +286,10 @@ beforeEach(() => {
   mockPush.mockReset();
   mockBack.mockReset();
   mockParams.conversationId = '5';
+  // The outbox is module state now (it has to outlive the screen, or tapping
+  // back would throw away a failed message), so it also outlives a test unless
+  // it's emptied here.
+  clearOutbox();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -408,6 +414,68 @@ it('lets you send again while one is still in flight', async () => {
   await waitFor(() => expect(screen.queryByLabelText('Sending')).toBeNull());
 });
 
+it('still has the failed message when you leave and come back', async () => {
+  // The promise the outbox makes is that text a person typed is never dropped
+  // for them, and tapping back is not "discard". Held as screen state it was:
+  // the failed message went with the component, silently, on the most ordinary
+  // gesture in the app. The outbox is a store outside the screen for this.
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      return jsonResponse({ detail: 'Nope.' }, 500);
+    }
+    return base(url, init);
+  });
+
+  const first = await renderScreen();
+  await fireEvent.changeText(await screen.findByLabelText('Message'), 'keep me');
+  await fireEvent.press(screen.getByLabelText('Send'));
+  await screen.findByText('Not sent');
+
+  first.unmount();
+  await renderScreen();
+
+  expect(await screen.findByText('keep me')).toBeTruthy();
+  expect(screen.getByText('Not sent')).toBeTruthy();
+  expect(screen.getByLabelText('Try sending again')).toBeTruthy();
+});
+
+it('settles a send that was still in flight when you left', async () => {
+  // The other half of an outbox that outlives the screen. A `sending` entry
+  // nobody ever clears would now *persist*, so you'd come back to the message
+  // twice — once from the server and once wearing a clock that never stops.
+  // It doesn't happen, because TanStack captures a mutation's options when it
+  // starts and runs them whether or not the observer is still mounted. That's
+  // load-bearing rather than incidental now, so it's pinned here.
+  let release: () => void = () => {};
+  const inFlight = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      await inFlight;
+    }
+    return base(url, init);
+  });
+
+  const first = await renderScreen();
+  await fireEvent.changeText(await screen.findByLabelText('Message'), 'in flight');
+  await fireEvent.press(screen.getByLabelText('Send'));
+  await screen.findByLabelText('Sending');
+
+  // Leave while the POST is still open, then let it land.
+  first.unmount();
+  release();
+
+  await renderScreen();
+  await screen.findByText('Message 1');
+  expect(screen.queryByLabelText('Sending')).toBeNull();
+  expect(screen.queryByText('in flight')).toBeNull();
+});
+
 it('shows two ticks once everyone has read your message', async () => {
   const sent = '2026-07-22T10:00:00Z';
   serve({
@@ -496,6 +564,54 @@ it('never puts a tick on someone else’s message', async () => {
   await screen.findByText('theirs');
   expect(screen.queryByLabelText('Read')).toBeNull();
   expect(screen.queryByLabelText('Sent')).toBeNull();
+});
+
+it('turns one tick into two when they read it, without leaving the thread', async () => {
+  // The bug this guards: the receipts ride on the conversation *detail*, which
+  // used to be fetched once at mount. A marker read at mount is by construction
+  // older than any message you send afterwards, so the second tick could only
+  // ever appear after leaving the thread and coming back — the one moment
+  // nobody is watching for it. The detail is polled now.
+  jest.useFakeTimers();
+  const sent = '2026-07-22T10:00:00Z';
+  // Behind the message to begin with: they've been in the thread, just not since.
+  let readAt = '2026-07-22T09:00:00Z';
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 1, sender: MINE, text: 'read me', created_at: sent })],
+  });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.match(/\/api\/conversations\/\d+\/$/)) {
+      return jsonResponse(
+        detail({
+          participants: [
+            {
+              ...ADA,
+              status: 'active',
+              active_since: '2026-07-01T00:00:00Z',
+              last_read_at: readAt,
+            },
+          ],
+        })
+      );
+    }
+    return base(url, init);
+  });
+
+  await renderScreen();
+  expect(await screen.findByLabelText('Sent')).toBeTruthy();
+
+  // They open the thread. Nothing on this screen changes, and nothing here
+  // re-mounts it — only the next poll of the detail can carry the news.
+  readAt = '2026-07-22T11:00:00Z';
+  // Past one `CONVERSATION_DETAIL_POLL_MS` of *fake* time, so this waits on the
+  // poll rather than on the wall clock.
+  await waitFor(() => expect(screen.getByLabelText('Read')).toBeTruthy(), {
+    timeout: CONVERSATION_DETAIL_POLL_MS * 2,
+  });
+
+  jest.useRealTimers();
 });
 
 it('mutes the thread from the header (#118)', async () => {
@@ -1607,6 +1723,58 @@ it('sends a reply into the thread from inside the focused view', async () => {
   // Aimed at the root, which is where the server's flattening would put it
   // anyway — so it's the honest target rather than a guess.
   await waitFor(() => expect(sendCalls()).toEqual([['8 works', 8]]));
+});
+
+it('keeps a sent reply in the strand while its refetch is still coming', async () => {
+  // The transcript writes an accepted message straight into its cache so the
+  // bubble doesn't blink out between the response landing and the refetch
+  // returning. The strand reads a *different* query, so it needs the same write
+  // or it gets exactly the flicker the transcript was careful to avoid — the
+  // reply vanishing from the view you sent it from.
+  const root = message({ id: 8, sender: ADA, text: 'dinner at 7?', reply_count: 1 });
+  serve({ conversation: detail({}), messages: [root], thread: [root] });
+  const base = mockFetch.getMockImplementation()!;
+  let posted = false;
+  let release: () => void = () => {};
+  const refetch = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      // Hold the strand's refetch open once the send has landed, so the window
+      // this test is about is observable rather than a single frame.
+      if (url.includes('thread_root=') && posted) await refetch;
+      if (url.includes('/messages/') && init?.method === 'POST') {
+        posted = true;
+        // Echoing the text and the strand it was flattened into, as the real
+        // endpoint does — the default mock answers with neither, and
+        // `thread_root_id` is what tells the screen which strand to write to.
+        return jsonResponse(
+          message({
+            id: 99,
+            sender: MINE,
+            text: JSON.parse(init.body ?? '{}').text,
+            reply_to: { id: 8 },
+            thread_root_id: 8,
+          })
+        );
+      }
+      return base(url, init);
+    }
+  );
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await screen.findByText('Thread');
+  await fireEvent.changeText(screen.getByLabelText('Reply to thread'), 'perfect');
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+
+  // The outbox entry is gone by now (the send succeeded) and the strand's own
+  // data hasn't come back, so what's on screen is the cache write under test.
+  await waitFor(() => expect(sendCalls()).toEqual([['perfect', 8]]));
+  expect(await screen.findByText('perfect')).toBeTruthy();
+
+  release();
 });
 
 it('opens a headless thread when the root is one you can’t see', async () => {

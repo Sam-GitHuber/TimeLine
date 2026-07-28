@@ -18,7 +18,19 @@
  * It lives in its own module because the transcript and the focused thread view
  * both render from it — a reply is an ordinary message, so one that fails on its
  * way out of a strand has to be recoverable from the transcript too.
+ *
+ * **And it outlives the screen**, which is the whole point rather than a detail.
+ * Held as component state it was lost the moment you tapped back, so a failed
+ * message — the one case this exists for — was silently thrown away by an
+ * ordinary navigation, exactly the "never drop text you typed" promise it makes.
+ * A module-level store keyed by conversation id survives that; the thread
+ * subscribes to its own conversation's slice and re-renders when it moves.
+ *
+ * 🔒 It is **cleared on sign-out** (`auth.tsx`). Unsent text is one person's
+ * words, and the next person to use the phone is not that person.
  */
+
+import { useCallback, useSyncExternalStore } from 'react';
 
 import type { Author, Message } from '@/types';
 
@@ -35,6 +47,83 @@ export type Outgoing = {
 };
 
 let nextTempId = -1;
+
+/**
+ * Unsent messages per conversation. A `Map` keyed by conversation id, so two
+ * threads open in the same session can't spill into one another and a thread
+ * you return to still has what you left in it.
+ */
+const byConversation = new Map<number, Outgoing[]>();
+const listeners = new Map<number, Set<() => void>>();
+
+/**
+ * One shared empty array, not a fresh `[]` per call. `useSyncExternalStore`
+ * compares snapshots by identity, so returning a new array for an empty outbox
+ * would re-render on every check and eventually throw.
+ */
+const NONE: Outgoing[] = [];
+
+/** What's unsent in this conversation right now. */
+export function outboxFor(conversationId: number): Outgoing[] {
+  return byConversation.get(conversationId) ?? NONE;
+}
+
+/**
+ * Replace one conversation's outbox and tell its subscribers.
+ *
+ * Takes a function of the current list rather than the list itself, so callers
+ * can't act on a stale copy — the same reason a state setter takes an updater.
+ */
+export function updateOutbox(
+  conversationId: number,
+  update: (entries: Outgoing[]) => Outgoing[]
+) {
+  const next = update(outboxFor(conversationId));
+  if (next.length === 0) byConversation.delete(conversationId);
+  else byConversation.set(conversationId, next);
+  listeners.get(conversationId)?.forEach((notify) => notify());
+}
+
+/**
+ * Subscribe to one conversation's outbox. Returns the current entries and
+ * re-renders on every change to them — the store's half of `useState`.
+ */
+export function useOutbox(conversationId: number): Outgoing[] {
+  // Both memoised on the conversation id. `useSyncExternalStore` resubscribes
+  // whenever `subscribe` changes identity, and the thread re-renders on every
+  // poll — so an inline closure would tear the subscription down and build it
+  // back up several times a second for nothing.
+  const subscribe = useCallback(
+    (notify: () => void) => {
+      const forThis = listeners.get(conversationId) ?? new Set<() => void>();
+      forThis.add(notify);
+      listeners.set(conversationId, forThis);
+      return () => {
+        forThis.delete(notify);
+        if (forThis.size === 0) listeners.delete(conversationId);
+      };
+    },
+    [conversationId]
+  );
+  const snapshot = useCallback(() => outboxFor(conversationId), [conversationId]);
+  return useSyncExternalStore(subscribe, snapshot);
+}
+
+/**
+ * Throw away every unsent message, everywhere.
+ *
+ * 🔒 Called on sign-out, and that's the point of it: now that the outbox
+ * outlives the screen it would otherwise outlive the *session* too, leaving one
+ * person's unsent words on a phone the next person is holding. Also used to
+ * reset the module between tests.
+ */
+export function clearOutbox() {
+  const conversations = [...byConversation.keys()];
+  byConversation.clear();
+  conversations.forEach((id) =>
+    listeners.get(id)?.forEach((notify) => notify())
+  );
+}
 
 /** A fresh outbox entry for text just handed to `sendMessage`. */
 export function newOutgoing({

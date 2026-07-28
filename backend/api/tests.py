@@ -2440,10 +2440,40 @@ class GroupReadReceiptTests(APITestCase):
             self.assertNotIn("last_read_at", row)
             self.assertNotIn("active_since", row)
 
-    def test_a_member_between_intervals_reports_no_join_time(self):
-        """Someone who has dropped to pending has no open interval, so there's
-        no ``active_since`` to give — and the client leaves them out of the
-        audience rather than waiting on a member who currently can't read."""
+    def test_a_pending_member_is_reported_to_nobody(self):
+        """🔒 The other side of the rule above. A member still in the waiting
+        room can't read a message here, so their read state isn't ours to hand
+        out — and it can be a *real* timestamp, because someone who drops back
+        to pending keeps the marker from their last active spell. The clients
+        skip pending rows when computing ticks anyway; this asserts the half
+        that doesn't depend on them doing so."""
+        self.client.force_authenticate(self.c)
+        self.client.post(read_url(self.convo))
+        self.assertTrue(
+            ConversationRead.objects.filter(
+                conversation=self.convo, user=self.c
+            ).exists()
+        )
+        Participant.objects.filter(pk=self.c_row.pk).update(status="pending")
+        ParticipantInterval.objects.filter(participant=self.c_row).update(
+            ended_at=timezone.now()
+        )
+
+        self.client.force_authenticate(self.a)
+        rows = {p["id"]: p for p in self.detail().data["participants"]}
+        self.assertEqual(rows[self.c.pk]["status"], "pending")
+        self.assertNotIn("last_read_at", rows[self.c.pk])
+        self.assertNotIn("active_since", rows[self.c.pk])
+        # The rest of the group is unaffected — one person's state going quiet
+        # isn't a reason to stop reporting everyone else's.
+        self.assertIn("last_read_at", rows[self.b.pk])
+
+    def test_an_active_member_between_intervals_reports_no_join_time(self):
+        """An active member whose interval has been closed has no
+        ``active_since`` to give — so the client leaves them out of the audience
+        rather than waiting on someone who currently can't read. (Contrast the
+        test above: dropping to *pending* withholds the whole receipt, not just
+        the join time.)"""
         ParticipantInterval.objects.filter(participant=self.c_row).update(
             ended_at=timezone.now()
         )

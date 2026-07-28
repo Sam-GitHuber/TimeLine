@@ -82,6 +82,19 @@ export const BASE_URL =
  */
 export const MESSAGE_POLL_MS = 4000;
 export const CONVERSATION_LIST_POLL_MS = 12000;
+/**
+ * The open thread's *detail* — the payload carrying the participants, and with
+ * them the read receipts (Phase 9b M4). It has to be polled, not just fetched on
+ * mount: `last_read_at` taken at mount is by construction older than any message
+ * you send afterwards, so without this the second tick could never appear while
+ * you were watching for it — only after leaving the thread and coming back.
+ *
+ * Slower than `MESSAGE_POLL_MS` on purpose. The detail endpoint costs several
+ * per-conversation queries (unread count, the last visible message, the two
+ * receipt lookups) where the message poll is one cheap page, and a tick landing
+ * within ~12s reads as prompt. A message arriving 12s late would not.
+ */
+export const CONVERSATION_DETAIL_POLL_MS = 12000;
 
 /**
  * The activity-centre bell badge polls the cheap unread-count endpoint on the

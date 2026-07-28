@@ -591,6 +591,12 @@ def attach_read_receipts(convo, viewer):
     rendered from data already on the device would be theatre. Absent, not
     ``None``: see ``ParticipantSerializer`` for why that distinction matters.
 
+    🔒 **Active members only, on both sides.** A ``pending`` viewer gets nothing,
+    and a ``pending`` *member* is reported to nobody — they can't read a message
+    in this thread, so their marker (which may survive from an earlier active
+    spell) isn't ours to hand over. The clients skip pending rows when computing
+    ticks anyway; this is the half that doesn't depend on them doing so.
+
     **Why ``active_since`` and not the raw interval history.** A tick has to mean
     "everyone this message was *for* has read it", and someone added to a group
     yesterday was not in the audience for last week's message — without their
@@ -624,7 +630,16 @@ def attach_read_receipts(convo, viewer):
     if not viewer.send_read_receipts:
         return convo
 
-    sharing = [row for row in rows if row.user.send_read_receipts]
+    # Active members only, and for the same reason a pending *viewer* gets
+    # nothing above: someone still in the waiting room can't read a message
+    # here, so their read state is not ours to hand out. It can be a real
+    # timestamp — a member who dropped back to pending keeps the marker from
+    # their last active spell — and while every client ignores a pending row
+    # when computing ticks, "the client ignores it" is not the same guarantee as
+    # "the server never sent it". This is the one that holds.
+    sharing = [
+        row for row in rows if row.status == ACTIVE_P and row.user.send_read_receipts
+    ]
     if not sharing:
         return convo
 

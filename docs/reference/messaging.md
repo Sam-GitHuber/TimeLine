@@ -322,6 +322,26 @@ Consequences, each deliberate:
 - **An unsent message has no long-press menu.** Every action it offers (edit,
   delete, react, report) needs a server id it hasn't got.
 
+**The store outlives the screen**, keyed by conversation id. It began as
+component state, which meant tapping back threw away the failed message — the
+one thing the outbox exists to hold on to — on the most ordinary gesture in the
+app, silently. Two things follow. Sign-out calls `clearOutbox()`: unsent text is
+one person's words, and the next person to pick the phone up isn't them. And a
+send still in flight when you leave settles itself, because TanStack captures a
+mutation's options when it starts and runs them whether or not the screen is
+still mounted — otherwise you'd come back to the message twice, once from the
+server and once wearing a clock that never stops.
+
+**One honest gap: Retry can duplicate.** There's no idempotency key, so a POST
+the server committed but whose response never reached the phone — a timeout, a
+tunnel — lands as `failed`, and retrying it sends the text a second time. Two
+identical messages, with nothing to tell them apart. Solving it properly means a
+client-generated id the server dedupes on, which is a schema change and a real
+piece of protocol for a case that needs a lost response rather than a lost
+request. Recorded rather than fixed, because the alternative failure — dropping
+what someone typed, or not offering Retry at all — is worse, and a duplicate is
+visible and deletable where a lost message isn't.
+
 ### Ticks: three states, not four
 
 Clock (sending) → one tick (sent) → **two accented ticks (read)**. There is no
@@ -342,13 +362,23 @@ compares them against each message's `created_at` in
 loads, and **zero per-message cost** — which is why it isn't computed
 server-side per message.
 
+**The detail is therefore polled**, on `CONVERSATION_DETAIL_POLL_MS` (12s), and
+that's structural rather than a nicety. A marker fetched once when the thread
+opened is by construction older than every message you send afterwards, so a
+mount-time snapshot can only ever say "sent" about the message you're actually
+watching — the second tick would appear only after leaving the thread and coming
+back, which is the one moment nobody is looking. Slower than the message poll on
+purpose: the detail endpoint costs several per-conversation queries where the
+message poll is one cheap page, and a tick landing within ~12s reads as prompt
+where a *message* 12s late would not.
+
 The audience for a message excludes three groups, each answering a way the tick
 would otherwise be wrong:
 
 | Excluded | Why |
 | --- | --- |
 | **You** | Sending is self-evidently reading. |
-| **`pending` members** | They genuinely can't read the thread, so waiting on one means a tick that never completes for as long as an invitation sits unanswered. |
+| **`pending` members** | They genuinely can't read the thread, so waiting on one means a tick that never completes for as long as an invitation sits unanswered. The server doesn't send their marker at all, so this holds even if a client forgets to check. |
 | **Anyone not reporting** — opted out, or with no open interval | See the setting below. Excluding rather than *blocking* is what stops one person's opt-out silently disabling ticks for a whole group. |
 
 `active_since` (the start of their **currently open** `ParticipantInterval`) is
@@ -412,9 +442,14 @@ When *you* have it off the thread shows **no ticks at all**, rather than a colum
 frozen on one tick — which would read as "nobody is ever opening these", a worse
 lie than showing nothing.
 
-A **`pending`** viewer gets no read state either, regardless of settings. They
-can't read a message in the thread, and "who's been active here and when" is
-still activity in a conversation they haven't been let into.
+**`pending` members are out of it on both sides**, regardless of settings. A
+pending *viewer* gets no read state at all: they can't read a message here, and
+"who's been active in this thread and when" is still activity in a conversation
+they haven't been let into. And a pending *member* is reported to nobody — their
+marker can be a real timestamp, because someone who drops back to pending keeps
+the one from their last active spell, and it isn't ours to hand over while
+they're in the waiting room. The clients skip pending rows when computing ticks
+anyway; withholding server-side is the half that doesn't depend on them doing so.
 
 ## Membership state machine
 
@@ -744,10 +779,14 @@ Only **read** is drawn at full strength — sending and sent sit at the
 timestamp's opacity, because a tick that shouts on every message is a tick
 nobody reads.
 
-The outbox is the screen's own state, shared with the focused thread view by
-props (`outgoing`, `statusFor`, `onRetry`, `onDiscard`) — the strand renders its
-own unsent replies rather than leaving them visible only in the transcript
-behind the blur.
+The outbox is a store in `outbox.ts` rather than the screen's state (see
+[above](#optimistic-send-the-outbox)); the screen subscribes to its own
+conversation's slice with `useOutbox(id)` and hands the focused thread view what
+it needs by props (`outgoing`, `statusFor`, `onRetry`, `onDiscard`), so the
+strand renders its own unsent replies rather than leaving them visible only in
+the transcript behind the blur. The strand asks the *status* whether a bubble is
+unsent rather than testing its id for a negative sign — the temp id is the
+outbox's business, and that view doesn't own the outbox.
 
 ### Reply threads on the phone (Phase 9b M3)
 

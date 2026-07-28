@@ -6,7 +6,10 @@
  * What it does:
  *   - loads the conversation detail (the header identity + `can_send` +
  *     `my_status`, which the messages list doesn't carry) and the messages;
- *   - polls the messages on the fast cadence (`MESSAGE_POLL_MS`);
+ *   - polls the messages on the fast cadence (`MESSAGE_POLL_MS`), and the
+ *     detail on a slower one (`CONVERSATION_DETAIL_POLL_MS`) — that payload
+ *     carries the read receipts, so a snapshot taken at mount would freeze
+ *     every tick at "sent";
  *   - marks the thread read on open and as new messages land, clearing the
  *     per-thread pill and the tab badge;
  *   - sends, and offers the **long-press action menu** on any bubble — Copy /
@@ -31,7 +34,7 @@ import {
 } from '@tanstack/react-query';
 import * as Clipboard from 'expo-clipboard';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -47,19 +50,25 @@ import {
 import EmojiPicker from 'rn-emoji-keyboard';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api, ApiError, MESSAGE_EDIT_WINDOW_MS, MESSAGE_POLL_MS } from '@/api';
+import {
+  api,
+  ApiError,
+  CONVERSATION_DETAIL_POLL_MS,
+  MESSAGE_EDIT_WINDOW_MS,
+  MESSAGE_POLL_MS,
+} from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
-import { MessageThreadView } from '@/components/MessageThreadView';
+import { MessageThreadView, threadQueryKey } from '@/components/MessageThreadView';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
 import { ReactorsSheet, reactorsQueryKey } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
 import type { Outgoing } from '@/outbox';
-import { asMessage, newOutgoing } from '@/outbox';
+import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
 import {
@@ -259,10 +268,17 @@ export default function ThreadScreen() {
   const [reportingId, setReportingId] = useState<number | null>(null);
   /**
    * Messages sent but not yet accepted by the server (M4). Rendered after the
-   * loaded ones, oldest-first like everything else. See `Outgoing` for why this
-   * isn't an optimistic write into the query cache.
+   * loaded ones, oldest-first like everything else. See `outbox.ts` for why this
+   * isn't an optimistic write into the query cache — and why it's a store
+   * outside this component rather than `useState`: as screen state it was thrown
+   * away by tapping back, which silently lost exactly the failed message the
+   * outbox exists to hold on to.
    */
-  const [outbox, setOutbox] = useState<Outgoing[]>([]);
+  const outbox = useOutbox(id);
+  const setOutbox = useCallback(
+    (update: (entries: Outgoing[]) => Outgoing[]) => updateOutbox(id, update),
+    [id]
+  );
   // The message whose full emoji grid is open, and the one whose reactor list is.
   // Both are separate from `menuTarget` because the menu closes on its way into
   // either — `rn-emoji-keyboard` is itself a Modal, and two visible modals stack
@@ -273,9 +289,25 @@ export default function ThreadScreen() {
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/messages');
 
+  /**
+   * The thread's header, membership — and, since M4, the participants' read
+   * markers, which is why this is **polled and not merely fetched on mount**.
+   *
+   * `last_read_at` read once at mount is by construction older than every
+   * message you send afterwards, so a snapshot can only ever say "sent" about
+   * the message you're actually watching. The second tick would appear only
+   * after leaving the thread and coming back, which is the one moment nobody is
+   * looking. Slower than the message poll deliberately — see
+   * `CONVERSATION_DETAIL_POLL_MS`.
+   *
+   * It runs while you're pending too, and usefully: the locked panel lifts by
+   * itself when the last person accepts, rather than waiting for a manual
+   * reopen.
+   */
   const convoQuery = useQuery({
     queryKey: ['conversation', id],
     queryFn: () => api.getConversation(id),
+    refetchInterval: CONVERSATION_DETAIL_POLL_MS,
   });
   const detail = convoQuery.data;
   const isGroup = detail?.kind === 'group';
@@ -390,6 +422,16 @@ export default function ThreadScreen() {
     });
   }, [id, messageCount, convoQuery.isError, isPending, queryClient]);
 
+  /**
+   * Send one message and settle its outbox entry.
+   *
+   * These handlers are safe to leave on the mutation even though the outbox now
+   * outlives the screen: TanStack captures a mutation's options when it starts,
+   * so `onSuccess`/`onError` still run if you navigate away mid-send. Tapping
+   * back on a message in flight settles it exactly as staying would — which
+   * matters more than it used to, because a stranded entry would now persist
+   * rather than dying with the component.
+   */
   const sendMutation = useMutation({
     mutationFn: ({ value, replyToId }: SendVars) =>
       api.sendMessage(id, value, replyToId),
@@ -402,6 +444,19 @@ export default function ThreadScreen() {
         ['messages', id],
         (cached) => appendMessage(cached, message)
       );
+      // And into the strand it belongs to, if it's a reply. The focused view
+      // reads its own query, so without this a reply sent from in there blinks
+      // out of the strand between the response landing and the refetch below
+      // coming back — the very flicker the write above exists to prevent, just
+      // in the other view. `thread_root_id` comes off the server's copy rather
+      // than the client's guess: the server decides which strand a reply
+      // flattens into.
+      if (message.thread_root_id) {
+        queryClient.setQueryData<InfiniteData<Paginated<Message>, string>>(
+          threadQueryKey(id, message.thread_root_id),
+          (cached) => appendMessage(cached, message)
+        );
+      }
       setOutbox((entries) => entries.filter((e) => e.tempId !== tempId));
       // **The composer is not touched here** — it was cleared the moment the
       // message went into the outbox. Clearing on the response was right when

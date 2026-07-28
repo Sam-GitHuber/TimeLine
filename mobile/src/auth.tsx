@@ -25,6 +25,7 @@ import {
 } from 'react';
 
 import { api, ApiError, setSessionExpiredHandler } from './api';
+import { clearOutbox } from './outbox';
 import { forgetLocalPushToken, registerForPush, unregisterPush } from './push';
 import { clearTokens, getAccessToken } from './tokens';
 import type { User } from './types';
@@ -134,6 +135,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // upsert-on-token rule exists to prevent, and this is its other half.
     await unregisterPush();
     await api.logout();
+    // 🔒 Unsent messages live in a module-level store now (M4), so they'd
+    // otherwise survive into the next person's session on a shared phone. The
+    // words are one person's and go out with them.
+    clearOutbox();
     setUser(null);
     setStatus('signedOut');
   }, []);

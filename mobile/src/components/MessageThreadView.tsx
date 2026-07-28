@@ -251,26 +251,35 @@ export function MessageThreadView({
                   </Text>
                 ) : null
               }
-              renderItem={({ item }) => (
-                // No onLongPress and no onOpenThread: see the file docblock.
-                // You're already in the thread, and the menu is a modal.
-                <MessageBubble
-                  message={item}
-                  mine={item.sender.id === meId}
-                  // Every bubble in here is attributed in a group, including
-                  // runs: the strand is short and read out of its chronological
-                  // context, so "who said this" is worth the repetition.
-                  showSender={isGroup && item.sender.id !== meId}
-                  quoted={
-                    item.reply_to ? byId.get(item.reply_to.id) : undefined
-                  }
-                  status={statusFor?.(item)}
-                  // Offered only on a reply that's still in the outbox — a
-                  // loaded one has nothing to retry.
-                  onRetry={item.id < 0 ? () => onRetry?.(item) : undefined}
-                  onDiscard={item.id < 0 ? () => onDiscard?.(item) : undefined}
-                />
-              )}
+              renderItem={({ item }) => {
+                const status = statusFor?.(item);
+                // Retry and Discard belong to a reply the server hasn't taken
+                // yet, and the status says so — `sending` and `failed` are the
+                // outbox's two states, where anything loaded is `sent`, `read`
+                // or nothing at all. Asking the status beats testing the id's
+                // sign: the negative temp id is the outbox's own business, and
+                // this view doesn't own the outbox.
+                const unsent = status === 'sending' || status === 'failed';
+                return (
+                  // No onLongPress and no onOpenThread: see the file docblock.
+                  // You're already in the thread, and the menu is a modal.
+                  <MessageBubble
+                    message={item}
+                    mine={item.sender.id === meId}
+                    // Every bubble in here is attributed in a group, including
+                    // runs: the strand is short and read out of its
+                    // chronological context, so "who said this" is worth the
+                    // repetition.
+                    showSender={isGroup && item.sender.id !== meId}
+                    quoted={
+                      item.reply_to ? byId.get(item.reply_to.id) : undefined
+                    }
+                    status={status}
+                    onRetry={unsent ? () => onRetry?.(item) : undefined}
+                    onDiscard={unsent ? () => onDiscard?.(item) : undefined}
+                  />
+                );
+              }}
               ListEmptyComponent={
                 // Only claim the thread is clipped when we actually heard back.
                 // A failed fetch is a different thing entirely, and telling
