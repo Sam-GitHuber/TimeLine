@@ -2249,6 +2249,238 @@ class MessageReplyGapTests(APITestCase):
         )
 
 
+class MessageReadReceiptTests(APITestCase):
+    """Read receipts on the conversation detail (Phase 9b M4).
+
+    The ticks themselves are drawn client-side by comparing each participant's
+    ``last_read_at`` against a message's ``created_at``, so everything worth
+    testing is about **what crosses the wire**: the marker is there when both
+    people share receipts, and *absent* — not merely nulled — when either has
+    turned them off. Asserting at this level is the point of the milestone's
+    privacy half; a UI test showing a tick didn't render would prove nothing
+    about what the server handed over.
+    """
+
+    def setUp(self):
+        self.me = make_user("receipts-me@example.com")
+        self.friend = make_user("receipts-friend@example.com")
+        make_connection(self.me, self.friend, status=ACCEPTED)
+        self.client.force_authenticate(self.me)
+        # Through the API, so the thread gets real Participant + interval rows
+        # rather than the legacy Phase 5 shape.
+        self.convo = Conversation.objects.get(
+            pk=self.client.post(
+                CONVERSATIONS_URL, {"user_id": self.friend.pk}, format="json"
+            ).data["id"]
+        )
+
+    def detail(self, as_user=None):
+        if as_user is not None:
+            self.client.force_authenticate(as_user)
+        return self.client.get(f"{CONVERSATIONS_URL}{self.convo.pk}/")
+
+    def participant(self, resp, user):
+        return next(p for p in resp.data["participants"] if p["id"] == user.pk)
+
+    def test_default_is_on(self):
+        # A feature nobody discovers is a feature nobody has — the expectation
+        # people arrive with is that receipts are on.
+        self.assertTrue(self.me.send_read_receipts)
+
+    def test_a_participants_read_marker_rides_on_the_detail_payload(self):
+        self.client.post(messages_url(self.convo), {"text": "hello"})
+        self.client.force_authenticate(self.friend)
+        self.client.post(read_url(self.convo))
+
+        resp = self.detail(as_user=self.me)
+        row = self.participant(resp, self.friend)
+        self.assertIsNotNone(row["last_read_at"])
+        # The audience half: when they joined, so the client can tell a message
+        # they were never shown from one they've simply not got to.
+        self.assertIsNotNone(row["active_since"])
+
+    def test_never_opened_is_null_not_absent(self):
+        """The distinction the serializer exists to preserve. ``null`` means
+        "they've not read this thread", which is real information the setting
+        permits; a *missing* key means "we're not telling you". Collapsing the
+        two would let a client read an opt-out as someone who never opened the
+        chat."""
+        resp = self.detail()
+        row = self.participant(resp, self.friend)
+        self.assertIn("last_read_at", row)
+        self.assertIsNone(row["last_read_at"])
+
+    def test_turning_it_off_removes_your_marker_from_their_payload(self):
+        self.client.post(messages_url(self.convo), {"text": "hi"})
+        self.client.force_authenticate(self.friend)
+        self.client.post(read_url(self.convo))
+        User.objects.filter(pk=self.friend.pk).update(send_read_receipts=False)
+
+        resp = self.detail(as_user=self.me)
+        row = self.participant(resp, self.friend)
+        self.assertNotIn("last_read_at", row)
+        self.assertNotIn("active_since", row)
+
+    def test_turning_it_off_also_stops_you_seeing_theirs(self):
+        """🔒 Symmetric, and enforced server-side. Turning receipts off is one
+        switch: you stop reporting *and* you stop being told. Anything else is a
+        one-way mirror, which is exactly the shape a privacy setting must not
+        have."""
+        self.client.force_authenticate(self.friend)
+        self.client.post(read_url(self.convo))
+        User.objects.filter(pk=self.me.pk).update(send_read_receipts=False)
+
+        resp = self.detail(as_user=User.objects.get(pk=self.me.pk))
+        for row in resp.data["participants"]:
+            self.assertNotIn("last_read_at", row)
+            self.assertNotIn("active_since", row)
+
+    def test_the_conversation_list_never_carries_receipts(self):
+        """A row shows an unread count, not who's read what. Keeping receipts to
+        the detail is what makes the feature cost one field on a payload the
+        thread already loads, instead of extra queries per row."""
+        self.client.force_authenticate(self.friend)
+        self.client.post(read_url(self.convo))
+        resp = self.detail(as_user=self.me)
+        self.assertIn("last_read_at", self.participant(resp, self.friend))
+
+        listing = self.client.get(CONVERSATIONS_URL)
+        for convo in listing.data["results"]:
+            for row in convo["participants"]:
+                self.assertNotIn("last_read_at", row)
+
+    def test_the_setting_round_trips_through_the_user_endpoint(self):
+        resp = self.client.patch(
+            "/api/auth/user/", {"send_read_receipts": False}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data["send_read_receipts"])
+        self.me.refresh_from_db()
+        self.assertFalse(self.me.send_read_receipts)
+
+
+class GroupReadReceiptTests(APITestCase):
+    """Receipts in a group chat, where "read" means *everyone else who was
+    there*. The rules that matter are about who counts, so the fixture is a
+    three-person chat with one member added late.
+
+    Groups are **not** carved out of the setting. "You can't turn this off in
+    groups" is precisely the exception that makes a privacy toggle
+    untrustworthy, so the same symmetric rule applies here.
+    """
+
+    def setUp(self):
+        self.a = make_user("g-a@example.com")
+        self.b = make_user("g-b@example.com")
+        self.c = make_user("g-c@example.com")
+        for pair in ((self.a, self.b), (self.a, self.c), (self.b, self.c)):
+            make_connection(*pair, status=ACCEPTED)
+        self.convo = Conversation.objects.create(
+            kind=Conversation.Kind.GROUP, created_by=self.a
+        )
+        joined = timezone.now() - timedelta(hours=2)
+        for user in (self.a, self.b):
+            row = Participant.objects.create(
+                conversation=self.convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(participant=row, started_at=joined)
+        # C arrives an hour later — the case that decides whether a tick can
+        # ever complete on a message sent before they were added.
+        self.c_row = Participant.objects.create(
+            conversation=self.convo, user=self.c, status="active"
+        )
+        self.c_joined = timezone.now() - timedelta(hours=1)
+        ParticipantInterval.objects.create(
+            participant=self.c_row, started_at=self.c_joined
+        )
+        self.client.force_authenticate(self.a)
+
+    def detail(self):
+        return self.client.get(f"{CONVERSATIONS_URL}{self.convo.pk}/")
+
+    def test_every_member_reports_their_own_join_time(self):
+        """``active_since`` is what stops a late arrival stalling the tick on
+        every message sent before them — without it the client either waits on
+        someone who was never shown the message, or credits them with reading
+        it."""
+        rows = {p["id"]: p for p in self.detail().data["participants"]}
+        self.assertEqual(
+            rows[self.c.pk]["active_since"].replace(microsecond=0),
+            self.c_joined.replace(microsecond=0),
+        )
+        self.assertLess(
+            rows[self.b.pk]["active_since"], rows[self.c.pk]["active_since"]
+        )
+
+    def test_one_member_opting_out_hides_only_their_own_marker(self):
+        """The rest of the group keeps working. A single opt-out silently
+        disabling ticks for everyone would make the setting antisocial to use —
+        so a member who doesn't report is simply not counted, and the tick means
+        "everyone who shares read state has read it"."""
+        User.objects.filter(pk=self.c.pk).update(send_read_receipts=False)
+        rows = {p["id"]: p for p in self.detail().data["participants"]}
+        self.assertIn("last_read_at", rows[self.b.pk])
+        self.assertNotIn("last_read_at", rows[self.c.pk])
+
+    def test_a_pending_viewer_gets_no_read_state_at_all(self):
+        """They're in the waiting room and can't read a single message here. It
+        isn't message content, but "who's been active in this thread and when"
+        is still activity in a conversation they haven't been let into — and the
+        locked panel has nothing to render it with anyway."""
+        newcomer = make_user("g-d@example.com")
+        make_connection(self.a, newcomer, status=ACCEPTED)
+        Participant.objects.create(
+            conversation=self.convo, user=newcomer, status="pending"
+        )
+
+        self.client.force_authenticate(newcomer)
+        resp = self.detail()
+        self.assertEqual(resp.data["my_status"], "pending")
+        for row in resp.data["participants"]:
+            self.assertNotIn("last_read_at", row)
+            self.assertNotIn("active_since", row)
+
+    def test_a_pending_member_is_reported_to_nobody(self):
+        """🔒 The other side of the rule above. A member still in the waiting
+        room can't read a message here, so their read state isn't ours to hand
+        out — and it can be a *real* timestamp, because someone who drops back
+        to pending keeps the marker from their last active spell. The clients
+        skip pending rows when computing ticks anyway; this asserts the half
+        that doesn't depend on them doing so."""
+        self.client.force_authenticate(self.c)
+        self.client.post(read_url(self.convo))
+        self.assertTrue(
+            ConversationRead.objects.filter(
+                conversation=self.convo, user=self.c
+            ).exists()
+        )
+        Participant.objects.filter(pk=self.c_row.pk).update(status="pending")
+        ParticipantInterval.objects.filter(participant=self.c_row).update(
+            ended_at=timezone.now()
+        )
+
+        self.client.force_authenticate(self.a)
+        rows = {p["id"]: p for p in self.detail().data["participants"]}
+        self.assertEqual(rows[self.c.pk]["status"], "pending")
+        self.assertNotIn("last_read_at", rows[self.c.pk])
+        self.assertNotIn("active_since", rows[self.c.pk])
+        # The rest of the group is unaffected — one person's state going quiet
+        # isn't a reason to stop reporting everyone else's.
+        self.assertIn("last_read_at", rows[self.b.pk])
+
+    def test_an_active_member_between_intervals_reports_no_join_time(self):
+        """An active member whose interval has been closed has no
+        ``active_since`` to give — so the client leaves them out of the audience
+        rather than waiting on someone who currently can't read. (Contrast the
+        test above: dropping to *pending* withholds the whole receipt, not just
+        the join time.)"""
+        ParticipantInterval.objects.filter(participant=self.c_row).update(
+            ended_at=timezone.now()
+        )
+        rows = {p["id"]: p for p in self.detail().data["participants"]}
+        self.assertIsNone(rows[self.c.pk]["active_since"])
+
+
 class UnreadAndListTests(MessagingBase):
     def setUp(self):
         super().setUp()

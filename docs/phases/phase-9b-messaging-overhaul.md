@@ -64,7 +64,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M1** | Long-press menu + edit | — | **S–M** | ☑ |
 | **M2** | Message reactions | M1 | **S** | ☑ |
 | **M3** | Reply threads | M1 | **M–L** | ☑ |
-| **M4** | Send status + read receipts | — | **M** | ☐ |
+| **M4** | Send status + read receipts | — | **M** | ☑ |
 | **M5** | Thread mechanics | — (do before M7) | **M–L** | ☐ |
 | **M6** | Conversation list + thread info | — | **M** | ☐ |
 | **M7** | Photo messages | M5 | **L** | ☐ |
@@ -796,10 +796,33 @@ response. A UI test that checks a tick isn't rendered proves nothing about what
 was sent over the wire.
 
 **Done when**
-- [ ] Message appears instantly on send; failure offers retry.
-- [ ] Ticks show sending/sent/read.
-- [ ] Setting off ⇒ field absent both directions, proven by an API test.
-- [ ] `messaging.md` documents receipts + the setting's home and rationale.
+- [x] Message appears instantly on send; failure offers retry.
+- [x] Ticks show sending/sent/read.
+- [x] Setting off ⇒ field absent both directions, proven by an API test.
+- [x] `messaging.md` documents receipts + the setting's home and rationale.
+
+**Two things came out differently from the sketch above — both settled, and
+recorded here because the reasoning matters more than the instruction did:**
+
+1. **The optimistic send is an outbox in component state, not a `onMutate`
+   write into the query cache.** The plan's shape doesn't survive contact with
+   the poll: a refetch *replaces* an infinite query's pages, so anything written
+   optimistically lives about four seconds. Fine for the in-flight moment, fatal
+   for a *failed* send, which is precisely the message that must not be lost.
+   `mobile/src/outbox.ts` holds unsent messages outside server truth, and the two
+   never need reconciling.
+2. **The "who has read this" predicate is computed client-side, from two fields
+   per participant** (`last_read_at` + `active_since`), rather than by reusing
+   `enqueue_message_pushes` server-side. Reuse isn't literally available: the
+   plan also required zero per-message cost, and the push predicate is
+   per-message by construction. What's reused is the *definition* — one place on
+   the client (`readReceipts.ts`, unit-tested), one place on the server
+   (`attach_read_receipts`), and the ticks are explicitly a display heuristic
+   that no access control leans on. `active_since` is the smallest fact that
+   keeps a late arrival from stalling the tick forever.
+
+Both are written up in `messaging.md` with the trade-offs stated (notably: the
+double tick means "everyone who *shares read state* has read it").
 
 ---
 

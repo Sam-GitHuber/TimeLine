@@ -150,6 +150,11 @@ class UserDetailsSerializer(BaseUserDetailsSerializer):
     ``is_staff`` is exposed (read-only) so the frontend can show maintainer-only
     UI like the admin link. It's not a security control — the Django admin
     enforces staff access server-side; this just decides whether to render it.
+
+    ``send_read_receipts`` (Phase 9b M4) rides here rather than getting an
+    endpoint of its own: it's a plain flag on the user, and this is already the
+    "who am I / change my settings" payload both clients hold, so the Settings
+    toggle needs no extra fetch to render its current state.
     """
 
     bio = serializers.CharField(
@@ -173,6 +178,7 @@ class UserDetailsSerializer(BaseUserDetailsSerializer):
             "avatar_thumb",
             "remove_avatar",
             "is_staff",
+            "send_read_receipts",
         )
         read_only_fields = ("pk", "email", "display_name", "is_staff")
 

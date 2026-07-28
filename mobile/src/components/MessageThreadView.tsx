@@ -61,6 +61,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MessageBubble } from './MessageBubble';
 import { api, MESSAGE_POLL_MS } from '@/api';
+import type { SendState } from '@/readReceipts';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
 
@@ -76,8 +77,11 @@ export function MessageThreadView({
   meId,
   isGroup,
   canSend,
-  sending,
+  outgoing,
+  statusFor,
   onSend,
+  onRetry,
+  onDiscard,
   onClose,
 }: {
   conversationId: number;
@@ -95,23 +99,32 @@ export function MessageThreadView({
   meId?: number;
   isGroup: boolean;
   canSend: boolean;
-  sending: boolean;
   /**
-   * Send into this thread. The caller owns the mutation (and so the cache
-   * invalidation), because a reply is an ordinary message and has to land in the
-   * transcript as well as here.
+   * Replies to this strand still in the caller's outbox (Phase 9b M4), already
+   * dressed as messages. Rendered after the loaded ones, so a reply appears the
+   * instant you send it and a failed one stays put with somewhere to act on it —
+   * rather than only existing in the transcript behind the blur, where you
+   * can't see it.
+   */
+  outgoing?: Message[];
+  /** The tick/clock for a bubble. The caller owns it; see the thread screen. */
+  statusFor?: (message: Message) => SendState | undefined;
+  /**
+   * Send into this thread. The caller owns the mutation (and so the outbox and
+   * the cache invalidation), because a reply is an ordinary message and has to
+   * land in the transcript as well as here.
    *
-   * **Resolves when the send lands and rejects when it doesn't**, which is what
-   * lets the composer below clear only on success. The caller's own error line
-   * is no use to us — it's rendered in the transcript, behind the blur.
+   * Resolves when the send lands and rejects when it doesn't; the composer
+   * doesn't wait on either, since the message is already on screen.
    */
   onSend: (text: string, replyToId: number) => Promise<unknown>;
+  onRetry?: (message: Message) => void;
+  onDiscard?: (message: Message) => void;
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const listRef = useRef<FlatList<Message>>(null);
   const [text, setText] = useState('');
-  const [sendError, setSendError] = useState('');
 
   /**
    * Polled like the transcript, so a reply someone else sends while you're
@@ -143,32 +156,36 @@ export function MessageThreadView({
     if (hasNextPage && !isFetchingNextPage) fetchNextPage();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  const messages = threadQuery.data?.pages.flatMap((page) => page.results) ?? [];
-  const byId = new Map(messages.map((m) => [m.id, m]));
+  const loaded = threadQuery.data?.pages.flatMap((page) => page.results) ?? [];
+  // Unsent replies go last: one that hasn't been accepted is by definition
+  // newer than every reply that has.
+  const messages = [...loaded, ...(outgoing ?? [])];
+  // Quotes resolve against *loaded* messages only — nothing can be quoting a
+  // reply the server hasn't given an id to yet.
+  const byId = new Map(loaded.map((m) => [m.id, m]));
   const root = byId.get(rootId);
   const target = replyToId ?? rootId;
   // Named only when it isn't the head of the strand — otherwise the label would
   // just restate the message sitting at the top of the screen.
   const answering = target === rootId ? undefined : byId.get(target);
 
-  async function handleSend() {
+  function handleSend() {
     const value = text.trim();
-    if (!value || sending) return;
-    setSendError('');
-    try {
-      // Whichever message got you here. The server flattens it into this strand
-      // either way (`thread_root` is derived, one level deep), so naming the
-      // real target costs nothing and keeps the quote honest.
-      await onSend(value, target);
-      // Cleared here and not before: a reply that failed on the way out has to
-      // still be in the box, or the words are simply gone. The transcript's
-      // composer has always worked this way.
-      setText('');
-    } catch (error) {
-      setSendError(
-        error instanceof Error ? error.message : "Couldn't send. Try again."
-      );
-    }
+    if (!value) return;
+    // Cleared immediately (M4). It used to be held until the send resolved, so
+    // that a failure left the words in the box — but the reply is now a bubble
+    // in the strand the moment you tap Send, and a failure turns *that* into a
+    // failed bubble with Retry beside it. Keeping the text in the composer as
+    // well would show the same message twice and make it possible to send it
+    // twice.
+    setText('');
+    // Whichever message got you here. The server flattens it into this strand
+    // either way (`thread_root` is derived, one level deep), so naming the real
+    // target costs nothing and keeps the quote honest.
+    //
+    // The rejection is handled by the caller's mutation, which is what owns the
+    // outbox entry — catching here only stops an unhandled rejection.
+    onSend(value, target).catch(() => {});
   }
 
   return (
@@ -234,21 +251,35 @@ export function MessageThreadView({
                   </Text>
                 ) : null
               }
-              renderItem={({ item }) => (
-                // No onLongPress and no onOpenThread: see the file docblock.
-                // You're already in the thread, and the menu is a modal.
-                <MessageBubble
-                  message={item}
-                  mine={item.sender.id === meId}
-                  // Every bubble in here is attributed in a group, including
-                  // runs: the strand is short and read out of its chronological
-                  // context, so "who said this" is worth the repetition.
-                  showSender={isGroup && item.sender.id !== meId}
-                  quoted={
-                    item.reply_to ? byId.get(item.reply_to.id) : undefined
-                  }
-                />
-              )}
+              renderItem={({ item }) => {
+                const status = statusFor?.(item);
+                // Retry and Discard belong to a reply the server hasn't taken
+                // yet, and the status says so — `sending` and `failed` are the
+                // outbox's two states, where anything loaded is `sent`, `read`
+                // or nothing at all. Asking the status beats testing the id's
+                // sign: the negative temp id is the outbox's own business, and
+                // this view doesn't own the outbox.
+                const unsent = status === 'sending' || status === 'failed';
+                return (
+                  // No onLongPress and no onOpenThread: see the file docblock.
+                  // You're already in the thread, and the menu is a modal.
+                  <MessageBubble
+                    message={item}
+                    mine={item.sender.id === meId}
+                    // Every bubble in here is attributed in a group, including
+                    // runs: the strand is short and read out of its
+                    // chronological context, so "who said this" is worth the
+                    // repetition.
+                    showSender={isGroup && item.sender.id !== meId}
+                    quoted={
+                      item.reply_to ? byId.get(item.reply_to.id) : undefined
+                    }
+                    status={status}
+                    onRetry={unsent ? () => onRetry?.(item) : undefined}
+                    onDiscard={unsent ? () => onDiscard?.(item) : undefined}
+                  />
+                );
+              }}
               ListEmptyComponent={
                 // Only claim the thread is clipped when we actually heard back.
                 // A failed fetch is a different thing entirely, and telling
@@ -295,25 +326,28 @@ export function MessageThreadView({
                     style={styles.input}
                     accessibilityLabel="Reply to thread"
                   />
+                  {/* Never disabled by a send in flight (M4): each reply gets
+                      its own outbox entry, so a quick second one doesn't have
+                      to wait for the first to come back. */}
                   <Pressable
                     onPress={handleSend}
-                    disabled={!text.trim() || sending}
+                    disabled={!text.trim()}
                     accessibilityRole="button"
                     accessibilityLabel="Send reply"
                     style={({ pressed }) => [
                       styles.send,
-                      (!text.trim() || sending) && styles.sendDisabled,
+                      !text.trim() && styles.sendDisabled,
                       pressed && styles.pressed,
                     ]}
                   >
-                    <Text style={styles.sendLabel}>
-                      {sending ? 'Sending…' : 'Send'}
-                    </Text>
+                    <Text style={styles.sendLabel}>Send</Text>
                   </Pressable>
                 </View>
-                {sendError ? (
-                  <Text style={styles.sendError}>{sendError}</Text>
-                ) : null}
+                {/* No error line here any more (M4). A reply that fails says so
+                    on the bubble it failed as, next to Retry and Discard —
+                    which is nearer the thing that went wrong, and the only
+                    place that still works when two replies are in flight and
+                    just one of them fell over. */}
               </>
             ) : (
               <Text style={styles.readonly}>
@@ -394,11 +428,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
   },
   sendDisabled: { opacity: 0.4 },
-  sendError: {
-    marginTop: spacing.xs,
-    fontSize: fontSize.sm,
-    color: colors.danger,
-  },
   sendLabel: { fontSize: fontSize.sm, fontWeight: '600', color: '#ffffff' },
   readonly: {
     textAlign: 'center',

@@ -61,7 +61,13 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
 - **`ConversationRead`** — `(conversation, user, last_read_at)`, unique together.
   Unread for you = visible messages with `created_at > last_read_at` and
   `sender != you`. Its own table (not two timestamps on `Conversation`) is why
-  per-member unread "just works" for N participants.
+  per-member unread "just works" for N participants. Phase 9b M4 gave it a second
+  job: it's also what the **read receipt** ticks are computed from — see
+  [Send state & read receipts](#send-state--read-receipts). No new model was
+  needed, because "when did you last read this" was already stored.
+- **`accounts.User.send_read_receipts`** — boolean, default `True`. Whether you
+  share read state. On the *user*, not in `NotificationPreference`; see
+  [the setting](#the-setting-usersend_read_receipts) for why.
 - **`Block`** — `(blocker, blocked)`, directional, unique together. A block in
   **either** direction hides the pair from each other and bars messaging +
   connecting.
@@ -276,6 +282,175 @@ A reply is otherwise an ordinary message: it bumps `updated_at`, counts toward
 unread, and [pushes](#push-notifications) like any other. Nothing about replying
 was made an exception.
 
+## Send state & read receipts
+
+Added in Phase 9b M4. Two halves that ship together but stand alone: a message
+appears **the instant you send it**, and your own bubbles carry a tick saying how
+far it has got.
+
+### Optimistic send: the outbox
+
+A message used to appear only after the round trip, which on a polling app is
+the entire perceived latency of sending. Now it's rendered immediately with a
+clock, and reconciled when the server answers.
+
+**It lives in an outbox (`mobile/src/outbox.ts`), not in the TanStack cache** —
+the one non-obvious decision here, and the plan originally said the opposite.
+The thread refetches `['messages', id]` every `MESSAGE_POLL_MS`, and a refetch
+*replaces* an infinite query's pages, so an optimistic write survives at most
+four seconds. Tolerable for the in-flight moment; fatal for a **failed** send,
+which has to sit there until the person decides what to do with it. Keeping
+unsent messages outside the server-truth cache means the two never have to be
+reconciled: the cache holds exactly what the server said, the outbox exactly
+what it hasn't accepted.
+
+Consequences, each deliberate:
+
+- **A failed send keeps its place**, dimmed, with **Retry** and **Discard** on
+  the bubble. Text someone typed is never dropped for them; Discard is one tap,
+  but it has to be *their* tap.
+- **The failure is reported on the bubble, not in a banner** under the composer.
+  It's nearer the thing that went wrong, and it's the only thing that works when
+  two messages are in flight and one of them fell over.
+- **The composer clears on dispatch and never blocks.** Sending two quick
+  messages in a row is ordinary, and waiting for the first is exactly the lag
+  this removes. An *edit* still blocks, because it targets one specific message
+  and two saves racing on it would be genuinely ambiguous.
+- **Replies go through the same outbox**, so a reply that fails inside a strand
+  is recoverable both there and in the transcript — rather than existing only
+  inside a view you've since closed.
+- **An unsent message has no long-press menu.** Every action it offers (edit,
+  delete, react, report) needs a server id it hasn't got.
+
+**The store outlives the screen**, keyed by conversation id. It began as
+component state, which meant tapping back threw away the failed message — the
+one thing the outbox exists to hold on to — on the most ordinary gesture in the
+app, silently. Two things follow. Sign-out calls `clearOutbox()`: unsent text is
+one person's words, and the next person to pick the phone up isn't them. And a
+send still in flight when you leave settles itself, because TanStack captures a
+mutation's options when it starts and runs them whether or not the screen is
+still mounted — otherwise you'd come back to the message twice, once from the
+server and once wearing a clock that never stops.
+
+**One honest gap: Retry can duplicate.** There's no idempotency key, so a POST
+the server committed but whose response never reached the phone — a timeout, a
+tunnel — lands as `failed`, and retrying it sends the text a second time. Two
+identical messages, with nothing to tell them apart. Solving it properly means a
+client-generated id the server dedupes on, which is a schema change and a real
+piece of protocol for a case that needs a lost response rather than a lost
+request. Recorded rather than fixed, because the alternative failure — dropping
+what someone typed, or not offering Retry at all — is worse, and a duplicate is
+visible and deletable where a lost message isn't.
+
+### Ticks: three states, not four
+
+Clock (sending) → one tick (sent) → **two accented ticks (read)**. There is no
+"delivered" tick, and that's a decision rather than a gap: nothing in our stack
+reports that a device received a message. We could infer one from an Expo push
+receipt, but that means *"we handed it to Apple"*, which is emphatically not what
+anyone reads a tick as. Better one fewer state, honestly.
+
+Ticks appear on **your own** messages only — on an incoming one a tick would be
+telling you that you read it.
+
+### How "read" is decided
+
+`last_read_at` and `active_since` ride on each entry of the **conversation
+detail**'s `participants` list (`attach_read_receipts` in `views.py`); the client
+compares them against each message's `created_at` in
+`mobile/src/readReceipts.ts`. One small field on a payload the thread already
+loads, and **zero per-message cost** — which is why it isn't computed
+server-side per message.
+
+**The detail is therefore polled**, on `CONVERSATION_DETAIL_POLL_MS` (12s), and
+that's structural rather than a nicety. A marker fetched once when the thread
+opened is by construction older than every message you send afterwards, so a
+mount-time snapshot can only ever say "sent" about the message you're actually
+watching — the second tick would appear only after leaving the thread and coming
+back, which is the one moment nobody is looking. Slower than the message poll on
+purpose: the detail endpoint costs several per-conversation queries where the
+message poll is one cheap page, and a tick landing within ~12s reads as prompt
+where a *message* 12s late would not.
+
+The audience for a message excludes three groups, each answering a way the tick
+would otherwise be wrong:
+
+| Excluded | Why |
+| --- | --- |
+| **You** | Sending is self-evidently reading. |
+| **`pending` members** | They genuinely can't read the thread, so waiting on one means a tick that never completes for as long as an invitation sits unanswered. The server doesn't send their marker at all, so this holds even if a client forgets to check. |
+| **Anyone not reporting** — opted out, or with no open interval | See the setting below. Excluding rather than *blocking* is what stops one person's opt-out silently disabling ticks for a whole group. |
+
+`active_since` (the start of their **currently open** `ParticipantInterval`) is
+what stops a late arrival stalling the tick on every message sent before them:
+someone added yesterday was not in the audience for last week's message. Without
+it the client would either wait on them forever or credit them with reading
+something they were never shown.
+
+**This is a display heuristic, and nothing about access control leans on it.**
+The authoritative predicate stays in `visible_messages_for` and
+`enqueue_message_pushes`; the ticks read data the server already chose to send.
+The one place the two diverge is a member who left and came back — the client
+sees only their current interval, so a message from before their gap doesn't
+wait on them. That's unknowable anyway (their read marker moved on while they
+were away) and it errs toward not stalling the tick.
+
+Two honest trade-offs, recorded so they aren't mistaken for bugs:
+
+- The double tick means "everyone **who shares read state** has read it", which
+  is a slightly weaker claim than "everyone".
+- An empty audience stays at one tick. Nobody to have read it, so claiming
+  otherwise would be a lie.
+
+### The setting: `User.send_read_receipts`
+
+**Default on** — it's what people arriving from any mainstream messenger expect,
+and a feature nobody discovers is a feature nobody has. Exposed on
+`GET`/`PATCH /api/auth/user/` and surfaced in a **Privacy** section of Settings
+on both clients.
+
+**Symmetric, and enforced server-side.** With it off your read marker is omitted
+from everyone else's payload *and* theirs from yours — you stop reporting and
+stop being told, in one switch. Anything else is a one-way mirror, which is the
+shape a privacy setting must not have. The client never *receives* what the
+setting says it shouldn't have; hiding a tick drawn from data already on the
+device would be theatre. `MessageReadReceiptTests` asserts the field is **absent
+from the response**, because a UI test showing a tick didn't render proves
+nothing about what crossed the wire.
+
+**Absent and `null` mean different things**, and the distinction is load-bearing:
+
+- *key missing* — "we're not telling you" (one of the two has receipts off);
+- *`null`* — "they have never read this thread", which is real information the
+  setting permits.
+
+Collapsing the two would let a client read an opt-out as someone who never
+opened the chat.
+
+**It lives on `accounts.User`, not in `NotificationPreference`.** A preference
+row is keyed by a notification *kind*, and there is no "someone read your
+message" notification to hang this off — nothing is created, sent or buzzed. The
+same reasoning put `Participant.muted_at` on the participant. (Contrast the
+planned M8 mentions-override, which *is* a notification kind and so does belong
+there. The pair reads as a rule, not an inconsistency.)
+
+**Groups are not carved out.** Some messengers exempt them; we don't — "you
+can't turn this off in group chats" is precisely the exception that makes a
+privacy toggle untrustworthy.
+
+When *you* have it off the thread shows **no ticks at all**, rather than a column
+frozen on one tick — which would read as "nobody is ever opening these", a worse
+lie than showing nothing.
+
+**`pending` members are out of it on both sides**, regardless of settings. A
+pending *viewer* gets no read state at all: they can't read a message here, and
+"who's been active in this thread and when" is still activity in a conversation
+they haven't been let into. And a pending *member* is reported to nobody — their
+marker can be a real timestamp, because someone who drops back to pending keeps
+the one from their last active spell, and it isn't ours to hand over while
+they're in the waiting room. The clients skip pending rows when computing ticks
+anyway; withholding server-side is the half that doesn't depend on them doing so.
+
 ## Membership state machine
 
 The single invariant (active set is a clique) yields deterministic rules,
@@ -331,6 +506,11 @@ Direct and group chats share the endpoints:
   of message access. (This detail endpoint exists because the messages endpoint
   doesn't carry the *other participant* — the thread header needs it on a cold
   load.)
+  - Each participant also carries **`last_read_at` + `active_since`** (Phase 9b
+    M4), omitted entirely when either party has receipts off. **Detail only** —
+    a list row shows an unread count, not who's read what, and putting them there
+    would pay the extra queries once per row. See
+    [Send state & read receipts](#send-state--read-receipts).
 - `GET /api/conversations/<id>/messages/` — oldest-first, paginated, **clipped to
   your intervals**; 403 (locked) while pending.
   - `?thread_root=<id>` narrows it to **one reply thread** — that root plus every
@@ -372,6 +552,11 @@ Direct and group chats share the endpoints:
   the conversation is reachable from the message and the gate consults it anyway,
   so a conversation id in the path would be a second thing to keep consistent and
   nothing to check against. See [Reacting to a message](#reacting-to-a-message).
+- `PATCH /api/auth/user/` with `{ send_read_receipts }` — turn read receipts on
+  or off (Phase 9b M4). Not a messaging route: it's a flag on the user, and this
+  is already the "who am I / change my settings" payload both clients hold, so
+  the Settings toggle needs no extra fetch. See
+  [the setting](#the-setting-usersend_read_receipts).
 - `POST /api/reports/` with `{ message: <id>, reason? }` — flag a message for the
   maintainer. Shares the endpoint (and the queue) with post/comment reports; see
   [Moderation](#moderation-a-report-is-the-only-window) below and
@@ -488,13 +673,20 @@ new-message:
 
 **The web is behind on Phase 9b and that's expected, not broken.** Every 9b
 response field is additive, so the drawer ignores `is_edited`/`edited_at`,
-`reactions` and `reply_to`/`reply_count`, and simply renders an edited message as
-its new text with no marker and a reply as an ordinary message. Web parity is its
-own milestone (9b M9), which also splits `MessagesDrawer.jsx` up. Three visible
-degradations until then — the missing "Edited" marker, message reactions being
-invisible, and a reply reading as an unattached message — worth saying out loud
-rather than having someone discover it. All three are stored and all three show
+`reactions`, `reply_to`/`reply_count` and the participants' `last_read_at`, and
+simply renders an edited message as its new text with no marker and a reply as an
+ordinary message. Web parity is its own milestone (9b M9), which also splits
+`MessagesDrawer.jsx` up. Four visible degradations until then — the missing
+"Edited" marker, message reactions being invisible, a reply reading as an
+unattached message, and no ticks or optimistic send — worth saying out loud
+rather than having someone discover them. All four are stored and all four show
 in the app.
+
+**The read-receipts *setting* is the exception, and is on the web now** (a
+Privacy section on `/settings`). The disclosure happens whether or not this
+browser draws the ticks, so a member who only ever uses the web still has to be
+able to opt out of it. A setting that exists only where the feature is visible
+would be a setting half the members can't reach.
 
 When M9 does port replies, **the focused thread should not be a blur on the
 web**: a phone blurs the transcript because it has one screen, a desktop has
@@ -576,6 +768,25 @@ server owns (the per-target emoji cap, emoji validation, count-then-emoji
 ordering) that could show a pill and then take it away. See
 [reactions.md](reactions.md#mobile) for the emoji set and why it differs from the
 feed's.
+
+### Send state on the phone (Phase 9b M4)
+
+`MessageBubble` draws the clock/tick beside the timestamp inside `BubbleBody`,
+so the action menu's re-render of the pressed bubble shows it too. The glyphs are
+hand-drawn SVG (`SendStateIcon` in `icons.tsx`) rather than text: at 13px a font
+check doubled up reads as a smudge, and the two ticks need a consistent overlap.
+Only **read** is drawn at full strength — sending and sent sit at the
+timestamp's opacity, because a tick that shouts on every message is a tick
+nobody reads.
+
+The outbox is a store in `outbox.ts` rather than the screen's state (see
+[above](#optimistic-send-the-outbox)); the screen subscribes to its own
+conversation's slice with `useOutbox(id)` and hands the focused thread view what
+it needs by props (`outgoing`, `statusFor`, `onRetry`, `onDiscard`), so the
+strand renders its own unsent replies rather than leaving them visible only in
+the transcript behind the blur. The strand asks the *status* whether a bubble is
+unsent rather than testing its id for a negative sign — the temp id is the
+outbox's business, and that view doesn't own the outbox.
 
 ### Reply threads on the phone (Phase 9b M3)
 

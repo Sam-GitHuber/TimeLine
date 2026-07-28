@@ -28,11 +28,22 @@ import { ChangePasswordSection } from '@/components/settings/ChangePasswordSecti
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
+import { PrivacySection } from '@/components/settings/PrivacySection';
 
 const mockSignOut = jest.fn();
+const mockRefreshUser = jest.fn();
+// `send_read_receipts` comes off the auth user rather than its own fetch — it
+// rides on the "who am I" payload the app already holds (Phase 9b M4).
+let mockUser: { send_read_receipts: boolean } | null = {
+  send_read_receipts: true,
+};
 jest.mock('@/auth', () => ({
   ...jest.requireActual('@/auth'),
-  useAuth: () => ({ signOut: mockSignOut }),
+  useAuth: () => ({
+    signOut: mockSignOut,
+    refreshUser: mockRefreshUser,
+    user: mockUser,
+  }),
 }));
 
 const mockSetIncludeGroups = jest.fn();
@@ -86,7 +97,9 @@ beforeEach(() => {
   mockFetch.mockReset();
   mockSignOut.mockReset();
   mockSetIncludeGroups.mockReset();
+  mockRefreshUser.mockReset();
   mockIncludeGroups = false;
+  mockUser = { send_read_receipts: true };
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -241,5 +254,49 @@ describe('FeedPreferencesSection', () => {
     await act(async () => fireEvent(toggle, 'valueChange', true));
 
     expect(mockSetIncludeGroups).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('PrivacySection (Phase 9b M4)', () => {
+  it('renders the current setting from the auth user, with no fetch', async () => {
+    // It rides on the "who am I" payload the app already holds, so opening
+    // Settings costs nothing extra to show the right state.
+    mockUser = { send_read_receipts: false };
+    await renderWithClient(<PrivacySection />);
+
+    expect(screen.getByLabelText('Send read receipts').props.value).toBe(false);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('PATCHes the user endpoint and refreshes', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ send_read_receipts: false }));
+    await renderWithClient(<PrivacySection />);
+
+    await act(async () =>
+      fireEvent(screen.getByLabelText('Send read receipts'), 'valueChange', false)
+    );
+
+    expect(made(/\/api\/auth\/user\//, 'PATCH')).toBe(true);
+    expect(requestBody(/\/api\/auth\/user\//, 'PATCH')).toEqual({
+      send_read_receipts: false,
+    });
+    // The auth user is the source of truth for the switch, so it has to be
+    // re-read rather than assumed.
+    expect(mockRefreshUser).toHaveBeenCalled();
+  });
+
+  it('says so when the save fails, and leaves the switch where it was', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Nope.' }, 500));
+    await renderWithClient(<PrivacySection />);
+
+    await act(async () =>
+      fireEvent(screen.getByLabelText('Send read receipts'), 'valueChange', false)
+    );
+
+    expect(await screen.findByText('Couldn’t save that. Please try again.')).toBeTruthy();
+    // Not optimistic, deliberately: this one decides what the server discloses
+    // about you, so showing it as off while it's still on would be the wrong
+    // way round to be wrong.
+    expect(screen.getByLabelText('Send read receipts').props.value).toBe(true);
   });
 });

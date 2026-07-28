@@ -82,6 +82,19 @@ export const BASE_URL =
  */
 export const MESSAGE_POLL_MS = 4000;
 export const CONVERSATION_LIST_POLL_MS = 12000;
+/**
+ * The open thread's *detail* — the payload carrying the participants, and with
+ * them the read receipts (Phase 9b M4). It has to be polled, not just fetched on
+ * mount: `last_read_at` taken at mount is by construction older than any message
+ * you send afterwards, so without this the second tick could never appear while
+ * you were watching for it — only after leaving the thread and coming back.
+ *
+ * Slower than `MESSAGE_POLL_MS` on purpose. The detail endpoint costs several
+ * per-conversation queries (unread count, the last visible message, the two
+ * receipt lookups) where the message poll is one cheap page, and a tick landing
+ * within ~12s reads as prompt. A message arriving 12s late would not.
+ */
+export const CONVERSATION_DETAIL_POLL_MS = 12000;
 
 /**
  * The activity-centre bell badge polls the cheap unread-count endpoint on the
@@ -384,6 +397,26 @@ export const api = {
     if (removeAvatar) form.append('remove_avatar', 'true');
     return request<User>('/api/auth/user/', { method: 'PATCH', body: form });
   },
+
+  /**
+   * Turn read receipts on or off (Phase 9b M4).
+   *
+   * Its own call rather than a field on `updateProfile`, because that one is
+   * multipart (it can carry an avatar) and a boolean over multipart is a string
+   * the server then has to un-guess. Same endpoint, JSON body — PATCH, so
+   * nothing else on the profile is touched.
+   *
+   * The switch is **symmetric and enforced server-side**: with it off your read
+   * marker is withheld from everyone else's payload and theirs from yours. So
+   * flipping it changes what the conversation-detail endpoint *sends*, which is
+   * why the caller has to invalidate open conversation queries rather than
+   * hiding ticks locally.
+   */
+  setReadReceipts: (enabled: boolean) =>
+    request<User>('/api/auth/user/', {
+      method: 'PATCH',
+      body: { send_read_receipts: enabled },
+    }),
 
   /**
    * A single person's public profile by numeric id — the header for `/u/[id]`.

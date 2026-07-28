@@ -497,12 +497,34 @@ class ParticipantSerializer(serializers.Serializer):
     """One member of a group chat (or an implicit 1:1 side) for the
     ``participants`` list on a conversation — id, display name, avatar thumb,
     and their membership ``status`` (``"active"``/``"pending"``), enough to
-    render the member list and explain a pending-lock panel."""
+    render the member list and explain a pending-lock panel.
+
+    🔒 **Read receipts (Phase 9b M4) ride here, and are omitted rather than
+    nulled when they mustn't be shared.** The conversation-detail view attaches
+    ``_read_receipt`` to the rows whose read state may flow to this viewer (see
+    ``attach_read_receipts``); everyone else's row simply doesn't carry the
+    keys. That distinction is load-bearing and worth stating once:
+
+    - **key absent** — "we're not telling you", because one of the two people
+      involved has ``send_read_receipts`` off;
+    - **key present, ``null``** — "they have never read this thread", which is
+      real information the setting permits.
+
+    Nulling both cases would collapse them and let a client mistake an opt-out
+    for someone who never opened the chat.
+    """
 
     id = serializers.IntegerField(source="user.id")
     display_name = serializers.CharField(source="user.display_name")
     avatar_thumb = serializers.ImageField(source="user.avatar_thumb", allow_null=True)
     status = serializers.CharField()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        receipt = getattr(instance, "_read_receipt", None)
+        if receipt is not None:
+            data.update(receipt)
+        return data
 
 
 class ConversationSerializer(serializers.ModelSerializer):

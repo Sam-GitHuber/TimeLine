@@ -152,6 +152,24 @@ hide something you must act
 on — and with the badges unified, the bell is the only signal. A `PATCH` that tries
 to mute an always-on kind is a 400.
 
+**What does *not* belong here, and why the boundary is worth stating.** A row is
+keyed by a notification *kind*, so a preference only lives here if there is
+something being created and delivered to switch off. Two settings deliberately
+sit elsewhere:
+
+- **`Participant.muted_at`** — silencing one conversation. Per-thread, and there
+  is no "message" notification kind (messaging stays out of the bell entirely —
+  see [messaging.md](messaging.md#push-notifications)).
+- **`accounts.User.send_read_receipts`** — whether you share read state. Nothing
+  is ever notified when someone reads a message; the setting governs a *payload
+  field*, not a delivery. See
+  [messaging.md](messaging.md#the-setting-usersend_read_receipts).
+
+Both are on the object the setting actually describes rather than in a preference
+table that would have to invent a fake kind to hold them. The rule is simply: if
+switching it off doesn't stop a `Notification` or a push, it isn't a notification
+preference.
+
 ## API
 
 All endpoints are `IsAuthenticated` and **scoped to `request.user`** as recipient
