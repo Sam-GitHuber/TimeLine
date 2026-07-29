@@ -109,6 +109,7 @@ export function BubbleBody({
   endsRun = true,
   onQuotePress,
   onPhotoPress,
+  onPhotoLongPress,
 }: {
   message: Message;
   mine: boolean;
@@ -138,6 +139,12 @@ export function BubbleBody({
    * until the upload lands.
    */
   onPhotoPress?: (photo: MessageAttachment) => void;
+  /**
+   * Open the action menu from a press-and-hold over a photo (Phase 9b M7).
+   * Separate from `onPhotoPress` because a photo is its own touch responder and
+   * has to re-offer the gesture itself — see `MessagePhoto`.
+   */
+  onPhotoLongPress?: () => void;
 }) {
   /**
    * The meta line goes on the run's last bubble only — that's the whole point of
@@ -194,6 +201,7 @@ export function BubbleBody({
               key={photo.id}
               photo={photo}
               onPress={onPhotoPress ? () => onPhotoPress(photo) : undefined}
+              onLongPress={onPhotoLongPress}
             />
           ))}
         </View>
@@ -263,9 +271,19 @@ const PHOTO_MIN_HEIGHT = 96;
 function MessagePhoto({
   photo,
   onPress,
+  onLongPress,
 }: {
   photo: MessageAttachment;
   onPress?: () => void;
+  /**
+   * Opens the bubble's action menu. **Must be re-offered here rather than left
+   * to the bubble**: this `Pressable` becomes the touch responder for anything
+   * starting on the photo, so a press-and-hold never reaches the wrapper's
+   * `onLongPress` at all. Without this the gesture fell through to `onPress` on
+   * release and a long-press opened the lightbox — Reply and the rest were
+   * unreachable from a photo.
+   */
+  onLongPress?: () => void;
 }) {
   const ratio = photo.height > 0 ? photo.height / photo.width : 1;
   const height = Math.min(
@@ -279,10 +297,18 @@ function MessagePhoto({
       // A tap on a photo opening it is the one place the bubble's own "tap does
       // nothing" rule gives way, and it doesn't really break it: a photo is its
       // own target with its own obvious affordance, exactly like a link in the
-      // text. Long-press over it still opens the action menu, because this
-      // Pressable doesn't claim long presses.
+      // text. Long-press keeps its meaning by being forwarded to the bubble's
+      // menu — and passing `onLongPress` is also what stops `onPress` firing on
+      // release, so the hold no longer opens the lightbox on the way out.
+      onLongPress={onLongPress}
+      // Matches the wrapper's, so the hold feels identical over a photo and over
+      // the caption beside it.
+      delayLongPress={350}
       accessibilityRole={onPress ? 'imagebutton' : 'image'}
       accessibilityLabel={onPress ? 'Photo, tap to open' : 'Photo'}
+      accessibilityHint={
+        onLongPress ? 'Press and hold for message actions' : undefined
+      }
       style={{ width: PHOTO_WIDTH, height }}
     >
       <AuthedImage
@@ -632,6 +658,11 @@ export function MessageBubble({
               endsRun={endsRun}
               onQuotePress={onOpenThread}
               onPhotoPress={onPhotoPress}
+              // The same handler the wrapper uses, so the menu anchors to the
+              // whole bubble either way — a menu that jumped to the photo's rect
+              // when you happened to hold over the picture would read as a
+              // different menu.
+              onPhotoLongPress={onLongPress ? handleLongPress : undefined}
             />
           </Pressable>
         )}

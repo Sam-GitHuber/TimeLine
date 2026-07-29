@@ -553,6 +553,24 @@ path that forgot.
   exception to the bubble's "tap does nothing" rule (a link is the first), and
   for the same reason: it's a smaller target with its own affordance, and a
   long-press over it still opens the action menu.
+
+  **The photo has to re-offer the long-press itself, and this was shipped
+  wrong.** M7 assumed a `Pressable` with only an `onPress` "doesn't claim long
+  presses", so the hold would fall through to the bubble's handler. It doesn't:
+  the photo becomes the touch responder for anything starting on it, so the
+  bubble's `onLongPress` never fired, and the hold instead ran `onPress` on
+  release — press-and-hold opened the lightbox and Reply/React/Report were
+  unreachable from a photo message. The fix threads the bubble's own handler
+  down to `MessagePhoto` (`onPhotoLongPress`), which both restores the menu and
+  suppresses the tap, since RN skips `onPress` once a long press has been
+  dispatched. It anchors to the *whole bubble*, not the photo's rect, so the
+  menu doesn't move depending on where your finger landed.
+
+  Note that **no Node test can catch this class of bug**: RNTL bubbles a
+  `longPress` event up to the nearest ancestor handler, so the menu opens under
+  test whether or not the photo carries its own. The regression test asserts the
+  *wiring* (via the accessibility hint, which is rendered only when the handler
+  is present); the gesture itself needs a simulator.
 - **The composer** offers **camera and library**, not just the library. Sending a
   picture of what's in front of you is at least half of what a photo in a chat is
   for, and routing someone out to the camera app and back is the friction that

@@ -2703,6 +2703,31 @@ it('shows a received photo in the bubble and opens it full-screen', async () => 
   await screen.findByLabelText('Close photo viewer');
 });
 
+it('offers the action menu on a photo rather than swallowing the long-press', async () => {
+  // A photo is its own `Pressable`, so it becomes the touch responder and the
+  // bubble's `onLongPress` never sees the gesture. It has to re-offer the
+  // gesture itself, or Reply/React/Report are unreachable from a photo message
+  // and the hold falls through to `onPress` on release — which opened the
+  // lightbox instead of the menu.
+  //
+  // **Asserted through the hint, not by firing a long-press**, and that's not
+  // laziness: RNTL bubbles a `longPress` event up to the nearest ancestor
+  // handler, so the menu opens under test whether or not the photo carries its
+  // own — the bug reproduces on a device and cannot reproduce here. The hint is
+  // rendered only when the handler is wired, so it stands in for the wiring
+  // that the responder conflict actually turns on. If you're changing this,
+  // verify the gesture on a simulator too; no Node test can cover it.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 1, sender: ADA, text: '', attachments: [photo(9)] })],
+  });
+
+  await renderScreen();
+
+  const image = await screen.findByLabelText('Photo, tap to open');
+  expect(image.props.accessibilityHint).toBe('Press and hold for message actions');
+});
+
 it('announces a captionless photo as a photo, not as an empty message', async () => {
   // A bubble with no text would otherwise read out as nothing at all, which is
   // how a screen reader reports "there's nothing here".
