@@ -7732,6 +7732,26 @@ class SendPushesCommandTests(APITestCase):
         # read — it keys off `kind` instead.
         self.assertIsNone(message["data"]["notificationId"])
 
+    def test_a_message_push_carries_the_reply_category(self):
+        # What puts a Reply field on a pulled-down push (Phase 9b M8). The name
+        # must match the app's `MESSAGE_CATEGORY`: iOS silently ignores a
+        # category it doesn't know, which looks exactly like the feature not
+        # existing — so this pins the string on the wire.
+        self._queue_message()
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["categoryId"], "message")
+
+    def test_a_notification_push_carries_no_category(self):
+        # Replying to "Ada replied to your post" would mean posting a comment
+        # from the lock screen — a different feature and a different endpoint.
+        self._queue()
+
+        urlopen = self._run()
+
+        self.assertNotIn("categoryId", self._sent_body(urlopen)[0])
+
     def test_a_message_push_never_carries_the_message_text(self):
         # The body crosses Expo's servers and Apple's. Naming the sender is the
         # most we ever say; quoting a private message would be a real leak.

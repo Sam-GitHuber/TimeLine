@@ -11,7 +11,15 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 
 import { api } from '@/api';
-import { registerForPush, routeForNotification, unregisterPush } from '@/push';
+import {
+  conversationIdFromUrl,
+  configureNotificationCategories,
+  MESSAGE_CATEGORY,
+  registerForPush,
+  REPLY_ACTION,
+  routeForNotification,
+  unregisterPush,
+} from '@/push';
 
 // A getter, not a plain value: the module namespace object a test imports is
 // read-only under babel's ESM interop, so assigning `Device.isDevice = false`
@@ -29,6 +37,7 @@ jest.mock('expo-notifications', () => ({
   requestPermissionsAsync: jest.fn(),
   getExpoPushTokenAsync: jest.fn(),
   setNotificationHandler: jest.fn(),
+  setNotificationCategoryAsync: jest.fn(async () => ({})),
 }));
 
 jest.mock('expo-constants', () => ({
@@ -199,5 +208,36 @@ describe('routeForNotification', () => {
   it('falls back to the feed for a missing url', () => {
     expect(routeForNotification(undefined)).toBe('/');
     expect(routeForNotification(null)).toBe('/');
+  });
+});
+
+
+describe('configureNotificationCategories', () => {
+  it('registers a Reply action with a text field, that does not open the app', () => {
+    // The three things that make replying from a notification work at all: the
+    // category name the backend sends, a text input to type into, and *not*
+    // foregrounding the app — which is the whole point of answering from the
+    // lock screen.
+    configureNotificationCategories();
+
+    const [category, actions] =
+      mockNotifications.setNotificationCategoryAsync.mock.calls[0];
+    expect(category).toBe(MESSAGE_CATEGORY);
+    expect(actions[0].identifier).toBe(REPLY_ACTION);
+    expect(actions[0].textInput).toBeTruthy();
+    expect(actions[0].options?.opensAppToForeground).toBe(false);
+  });
+});
+
+describe('conversationIdFromUrl', () => {
+  it('reads the thread a message push points at', () => {
+    // The reply path needs the id, not a route — taken from the same `url` the
+    // deep link uses, so there's only one shape on the wire.
+    expect(conversationIdFromUrl('/messages/12')).toBe(12);
+  });
+
+  it('is null for anything that isn’t a thread', () => {
+    expect(conversationIdFromUrl('/p/42')).toBeNull();
+    expect(conversationIdFromUrl(undefined)).toBeNull();
   });
 });

@@ -52,6 +52,11 @@ jest.mock('expo-notifications', () => ({
   requestPermissionsAsync: jest.fn(async () => ({ granted: false })),
   getExpoPushTokenAsync: jest.fn(async () => ({ data: null })),
   setNotificationHandler: jest.fn(),
+  // Registers the Reply action on a message push (Phase 9b M8). Resolved
+  // rather than a bare jest.fn(): `configureNotificationCategories` attaches a
+  // `.catch`, and a mock returning undefined would throw at import time in
+  // every suite that pulls the module in.
+  setNotificationCategoryAsync: jest.fn(async () => ({})),
   useLastNotificationResponse: jest.fn(() => null),
 }));
 

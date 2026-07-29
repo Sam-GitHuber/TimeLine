@@ -1,10 +1,16 @@
 /**
- * Tapping a push notification (Phase 9, Milestone D).
+ * Acting on a push notification (Phase 9, Milestone D; Phase 9b M8).
  *
  * The cold-start path is the one the plan calls out as easy to get wrong and
  * easy to miss, so it is covered explicitly here rather than left to the
  * on-device pass: a cold-start tap resolves *before* the auth check finishes,
  * and navigating at that moment races the auth gate's redirect to /login.
+ *
+ * M8 adds **replying from the notification**. What can be tested here is the
+ * decision — send this text to that conversation, navigate nowhere, and keep
+ * the words if the send fails. Whether iOS actually draws a text field on a
+ * pulled-down push is a device check (the category is registered natively), and
+ * the plan says so.
  */
 
 import * as Notifications from 'expo-notifications';
@@ -14,6 +20,8 @@ import { Text } from 'react-native';
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { clearOutbox, outboxFor } from '@/outbox';
+import { REPLY_ACTION } from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
 
 jest.mock('expo-router', () => ({
@@ -34,8 +42,20 @@ function response({
   identifier = 'notif-1',
   url = '/p/42',
   notificationId = 7,
-}: { identifier?: string; url?: string; notificationId?: number } = {}) {
+  actionIdentifier,
+  userText,
+}: {
+  identifier?: string;
+  url?: string;
+  notificationId?: number;
+  /** Set for an action response — `REPLY_ACTION` for a reply (M8). */
+  actionIdentifier?: string;
+  /** What was typed into the notification's text field. */
+  userText?: string;
+} = {}) {
   return {
+    actionIdentifier,
+    userText,
     notification: {
       request: {
         identifier,
@@ -57,6 +77,7 @@ beforeEach(() => {
   jest
     .spyOn(api, 'markNotificationAddressed')
     .mockResolvedValue(undefined as never);
+  clearOutbox();
 });
 
 afterEach(() => {
@@ -181,4 +202,64 @@ it('opens the app rather than crashing when the target has no screen yet', async
   await render(<Probe />);
 
   await waitFor(() => expect(router.push).toHaveBeenCalledWith('/'));
+});
+
+
+it('sends a reply typed into the notification, without opening the app', async () => {
+  // The whole point of answering from the lock screen is that you don't end up
+  // in the app — so this navigates nowhere.
+  const send = jest.spyOn(api, 'sendMessage').mockResolvedValue({} as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      notificationId: undefined,
+      actionIdentifier: REPLY_ACTION,
+      userText: '  on my way  ',
+    })
+  );
+
+  await render(<Probe />);
+
+  // Trimmed, like every other send.
+  await waitFor(() => expect(send).toHaveBeenCalledWith(12, 'on my way'));
+  expect(router.push).not.toHaveBeenCalled();
+});
+
+it('keeps a reply that fails to send', async () => {
+  // There's no screen to report on — by construction the app isn't in front of
+  // anyone — so it goes into the outbox and shows up as a failed bubble with
+  // Retry the next time the thread is opened. "We never drop text you typed"
+  // applies to text typed into a notification too.
+  jest.spyOn(api, 'sendMessage').mockRejectedValue(new Error('offline'));
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  await render(<Probe />);
+
+  await waitFor(() => {
+    const [pending] = outboxFor(12);
+    expect(pending?.text).toBe('on my way');
+    expect(pending?.status).toBe('failed');
+  });
+});
+
+it('sends nothing for an empty reply', async () => {
+  const send = jest.spyOn(api, 'sendMessage').mockResolvedValue({} as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      actionIdentifier: REPLY_ACTION,
+      userText: '   ',
+    })
+  );
+
+  await render(<Probe />);
+
+  expect(send).not.toHaveBeenCalled();
+  expect(router.push).not.toHaveBeenCalled();
 });

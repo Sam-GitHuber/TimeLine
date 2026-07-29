@@ -24,6 +24,10 @@ The flow per drain:
    registration. See ``PushReceipt`` for why that would otherwise be silent.
 6. Prune delivered rows older than the retention window.
 
+A **message** push also carries a **category** (Phase 9b M8), which is what
+gives it a Reply field when it's pulled down on iOS. The reply itself comes back
+through the ordinary send endpoint from the app; nothing here receives it.
+
 A **notification** row's wording and deep-link come straight from
 ``NotificationSerializer`` — the same ``text`` and ``url`` the web activity
 centre renders, so a push and the in-app row can never drift apart. A
@@ -279,6 +283,14 @@ class Command(BaseCommand):
             "kind": "message",
             "text": text,
             "url": f"/messages/{convo.id}",
+            # The iOS notification category (Phase 9b M8), which is what puts a
+            # **Reply** field on a pulled-down message push. Only messages carry
+            # one: replying to "Ada replied to your post" would mean posting a
+            # comment from the lock screen, which is a different feature and a
+            # different endpoint. The name must match the app's
+            # ``MESSAGE_CATEGORY`` — iOS ignores a category it doesn't know,
+            # which looks exactly like the feature not existing.
+            "category": "message",
         }
 
     def _message(self, device, data):
@@ -294,7 +306,7 @@ class Command(BaseCommand):
         route string the web app uses (e.g. ``/p/12?comment=34``), which the app
         maps onto its native route.
         """
-        return {
+        message = {
             "to": device.expo_token,
             "title": "TimeLine",
             "body": data["text"],
@@ -305,6 +317,12 @@ class Command(BaseCommand):
                 "url": data["url"],
             },
         }
+        # Expo's field name for APNs' ``category``. Sent only where there's an
+        # action to offer, so a notification kind that grows one later opts in
+        # by adding it to its payload rather than by changing this.
+        if data.get("category"):
+            message["categoryId"] = data["category"]
+        return message
 
     def _send(self, messages):
         """POST every message, then settle each row by what happened to it.

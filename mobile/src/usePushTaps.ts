@@ -1,5 +1,5 @@
 /**
- * Open the right screen when a push notification is tapped (Phase 9, D).
+ * What happens when you act on a push notification (Phase 9, D; Phase 9b M8).
  *
  * Its own module rather than living in `_layout.tsx` so it can be tested
  * directly — the cold-start path is the one the plan singles out as easy to
@@ -11,6 +11,12 @@
  * (`addNotificationResponseReceivedListener`) misses the cold start entirely —
  * the response fires before any listener is mounted — which is the classic way
  * this ships broken.
+ *
+ * **Two kinds of response now** (Phase 9b M8). A plain tap opens a screen, as it
+ * always has. A **Reply** — typed into the notification itself, without the app
+ * coming to the foreground — sends a message and navigates nowhere: opening the
+ * thread would defeat the point of answering without leaving what you were
+ * doing.
  */
 
 import * as Notifications from 'expo-notifications';
@@ -19,7 +25,8 @@ import { useEffect, useRef } from 'react';
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
-import { routeForNotification } from '@/push';
+import { newOutgoing, updateOutbox } from '@/outbox';
+import { conversationIdFromUrl, REPLY_ACTION, routeForNotification } from '@/push';
 
 export function usePushNotificationTaps(): void {
   const { status } = useAuth();
@@ -34,6 +41,11 @@ export function usePushNotificationTaps(): void {
     //    does, and navigating now would race the auth gate's redirect to
     //    /login and lose the deep link;
     //  - the router isn't ready, where navigation silently no-ops.
+    //
+    // The router guard applies to a *reply* too, even though it navigates
+    // nowhere. Waiting costs nothing (the response is still here on the next
+    // render) and it keeps one definition of "the app is ready to act on this",
+    // rather than two that can disagree about a half-started app.
     if (!response || status !== 'signedIn' || !navigationState?.key) return;
 
     const { identifier } = response.notification.request;
@@ -50,6 +62,16 @@ export function usePushNotificationTaps(): void {
       notificationId?: number | null;
     };
 
+    // Replied to from the notification (Phase 9b M8) — send it and stop. No
+    // navigation: the whole value of answering from the lock screen is that you
+    // don't end up in the app.
+    if (response.actionIdentifier === REPLY_ACTION) {
+      const text = response.userText?.trim();
+      const conversationId = conversationIdFromUrl(data?.url);
+      if (text && conversationId) sendReply(conversationId, text);
+      return;
+    }
+
     router.push(routeForNotification(data?.url));
 
     // Tapping a push counts as dealing with it, exactly as clicking a row in
@@ -60,4 +82,29 @@ export function usePushNotificationTaps(): void {
       api.markNotificationAddressed(data.notificationId).catch(() => {});
     }
   }, [response, status, navigationState?.key]);
+}
+
+/**
+ * Send a reply typed into a notification, and **keep it if it doesn't land**.
+ *
+ * The failure path is the interesting half. There is no screen to report on: by
+ * construction the app isn't in front of anyone, and a second notification
+ * saying "couldn't send" would be a poor apology for having eaten what they
+ * wrote. So a failed reply goes into the same outbox an in-app send uses, where
+ * it shows up as a failed bubble with Retry the next time the thread is opened —
+ * exactly what happens to a message that fails while you're looking at it. The
+ * promise the outbox exists to keep is "we never drop text you typed", and text
+ * typed into a notification is no different.
+ *
+ * Not marked read: sending marks the thread read server-side, which is the right
+ * answer and needs nothing from here. Nothing is invalidated either — the app
+ * refetches on foreground.
+ */
+function sendReply(conversationId: number, text: string) {
+  api.sendMessage(conversationId, text).catch(() => {
+    updateOutbox(conversationId, (entries) => [
+      ...entries,
+      { ...newOutgoing({ text }), status: 'failed' as const },
+    ]);
+  });
 }

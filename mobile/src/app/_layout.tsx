@@ -24,7 +24,10 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AuthProvider, useAuth } from '@/auth';
 import { PreferencesProvider } from '@/preferences';
-import { configureNotificationHandler } from '@/push';
+import {
+  configureNotificationCategories,
+  configureNotificationHandler,
+} from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
 import { colors } from '@/theme';
 
@@ -32,6 +35,10 @@ import { colors } from '@/theme';
 // arrives while the app is foregrounded is shown at all, and it has to be set
 // before any notification can be delivered.
 configureNotificationHandler();
+// Likewise at module scope, and for a closely related reason: the Reply action
+// (Phase 9b M8) has to be registered with iOS before a notification carrying
+// its category can arrive, which can be before anyone signs in on this launch.
+configureNotificationCategories();
 
 /**
  * Created once at module scope, not inside the component: a QueryClient holds
