@@ -1209,12 +1209,10 @@ A test asserts the wording, because the failure mode is a dialog that looks righ
 and reports nothing.
 
 **The web is still behind on Phase 9b, and that's expected, not broken.** Every
-9b response field is additive, so the drawer ignores `reactions`,
-`reply_to`/`reply_count` and the participants' `last_read_at`, rendering a reply
-as an ordinary message. Three visible degradations remain until M9c–M9f land:
-message reactions are invisible, a reply reads as an unattached message, and
-there are no ticks or optimistic send. All three are stored and all three show in
-the app.
+9b response field is additive, so the drawer still ignores `reply_to`/
+`reply_count`, rendering a reply as an ordinary message, and photos get the
+stopgap thumbnail M7 left rather than the app's sized bubble and lightbox. Both
+land in M9d and M9e; both are stored, and both show properly in the app.
 
 M6 adds nothing the drawer renders *wrongly*, only things it doesn't offer yet:
 [renaming a group](#renaming-a-group-chat) and
@@ -1224,16 +1222,87 @@ header rather than moving them to an info panel. A chat renamed from the app
 shows its new name on the web immediately, because the title was always on the
 payload.
 
-**The read-receipts *setting* is the exception, and is on the web now** (a
-Privacy section on `/settings`). The disclosure happens whether or not this
-browser draws the ticks, so a member who only ever uses the web still has to be
-able to opt out of it. A setting that exists only where the feature is visible
-would be a setting half the members can't reach.
+The read-receipts *setting* shipped on the web (a Privacy section on
+`/settings`) **a milestone before the ticks it governs** — deliberately, because
+the disclosure happens whether or not this browser draws them, so a member who
+only ever uses the web had to be able to opt out either way. A setting that
+exists only where the feature is visible would be a setting half the members
+can't reach.
 
-When M9 does port replies, **the focused thread should not be a blur on the
-web**: a phone blurs the transcript because it has one screen, a desktop has
-width, so the right shape there is a side panel beside the transcript. Same
-endpoint, same data, different medium.
+When M9d ports replies, **the focused thread should not be a blur on the web**: a
+phone blurs the transcript because it has one screen, a desktop has width, so the
+right shape there is a side panel beside the transcript. Same endpoint, same
+data, different medium.
+
+### Reactions, send state and ticks on the web (Phase 9b M9c)
+
+M9c brought [reactions](#reacting-to-a-message) and
+[send state](#send-state--read-receipts) across. `readReceipts.js` and
+`outbox.js` are ports of the app's modules, comments and unit tests included —
+same rule about not letting them diverge.
+
+**Reactions live in the ⋯ menu, on the pill, and nowhere else.** The menu grows a
+quick row of **the chat's six** (👍 ❤️ 😂 😮 😢 🙏 — not the feed's four; a set
+that can only be cheerful makes you type a whole message to say "oh no") with a
+`＋` that **expands the panel in place** into the existing code-split
+`emoji-picker-element`. One popover, one anchor, and no moment where two are on
+screen fighting over the same outside-click. Reacting is dropped entirely — row
+and all — in a thread you can no longer send to, because a reaction is content
+everyone sees and the server 403s it exactly as it does a message.
+
+🔒 **A pill has one gesture: it opens "who reacted", it never toggles.** That's a
+deliberate departure from the feed's chips, and the reasoning is
+[M2's](reactions.md#message-reactions-phase-9b-m2): a pill is a *display* of what
+the thread said, so a click belongs on the detail of it. Removing happens in the
+two unambiguous places — the menu's emoji row (an emoji you've used reads as
+active and clicking it takes it off) and **"tap to remove"** on your own row in
+the list, which `ReactorsPopover` grew along with `messageId` and a `meId` prop.
+`meId` is a prop rather than a `useAuth()` call so the popover stays a pure
+renderer and the feed's callers don't inherit an auth dependency for a feature
+only the drawer uses.
+
+There is **no optimistic reaction toggle** (M2's fifth decision holds here): the
+pill is what the server answered with, written into the cached page by
+`patchReactions`. A toggle also **drops the reactor-list cache** with
+`removeQueries` — not `invalidateQueries`, because the popover is closed by then
+and an inactive query would only be marked stale, leaving a window in which a
+stale "tap to remove" row is still clickable and would put the reaction back.
+`reactorsQueryKey` is exported so the key can't be spelled two ways.
+
+**Sending is instant, and a failed send keeps its place.** The composer clears on
+dispatch and never blocks; the bubble appears immediately with a clock, and on
+failure it sits there dimmed with **Not sent · Retry · Discard**. The failure is
+reported on the bubble rather than under the composer — nearer the thing that
+went wrong, and the only place that can say *which* of two messages in flight
+fell over. An unsent message has no ⋯ menu: every action it offers needs a server
+id it hasn't got.
+
+🔒 **The outbox is a module-level store, not a cache write** — the same decision,
+for the same reason, as [the app's](#optimistic-send-the-outbox). A poll
+*replaces* an infinite query's pages, so an optimistic write survives about four
+seconds, which is fatal for the one message that has to sit and wait for a
+decision. It also has to outlive the *view*: the drawer switches between the list
+and a thread without a route change, so component state would throw a failed send
+away on the most ordinary click there is. It is **cleared on sign-out** in
+`auth.jsx`, beside the drafts store and for the same reason. On success the
+accepted message is written into the cache *before* the outbox entry is dropped,
+so the bubble is never absent for the frame between the two.
+
+**Ticks are three states, not four**, and appear on your own messages only.
+`readStateFor` decides them from each participant's `last_read_at` and
+`active_since`; when *you* have receipts off the server withholds every marker
+including your own, `receiptsVisible` is false, and the whole column disappears
+rather than freezing on one tick. Nothing is hidden client-side — the field
+simply isn't on the payload, and hiding data already in the browser would be
+theatre.
+
+⚠️ **The conversation detail is polled now** (`CONVERSATION_DETAIL_POLL_MS`,
+12s), where the drawer fetched it once. It carries the read markers, and a marker
+taken when the thread opened is by construction older than every message you send
+afterwards — so a mount-time snapshot could only ever say "sent" about the
+message you're actually watching. Slower than the message poll on purpose: the
+detail costs several per-conversation queries where a message poll is one cheap
+page.
 
 ## Mobile (Phase 9 E2)
 

@@ -26,6 +26,24 @@ export const CONVERSATION_LIST_POLL_MS = 12000;
 // note as messaging applies (docs/phases/phase-8-notifications.md).
 export const NOTIFICATIONS_POLL_MS = 12000;
 
+/**
+ * How often an open thread re-reads its conversation *detail* (Phase 9b M9c) —
+ * the payload that carries each participant's read marker, and so the payload
+ * the ticks are computed from.
+ *
+ * **Polled at all** because a marker fetched once when the thread opened is by
+ * construction older than every message you send afterwards: a mount-time
+ * snapshot can only ever say "sent" about the message you're actually watching,
+ * and the second tick would appear only after leaving and coming back — the one
+ * moment nobody is looking.
+ *
+ * **Slower than `MESSAGE_POLL_MS`** on purpose: the detail endpoint costs
+ * several per-conversation queries where a message poll is one cheap page, and a
+ * tick landing within ~12s reads as prompt where a *message* 12s late would not.
+ * Mirrors the app's `CONVERSATION_DETAIL_POLL_MS`.
+ */
+export const CONVERSATION_DETAIL_POLL_MS = 12000;
+
 // How long after sending a message you can still correct it (Phase 9b M9b) — a
 // mirror of `MESSAGE_EDIT_WINDOW` in `backend/api/views.py`, and of the app's
 // `MESSAGE_EDIT_WINDOW_MS`. The server stays authoritative; this only keeps the
@@ -107,6 +125,27 @@ function firstErrorMessage(data) {
   if (!firstKey) return null;
   const value = data[firstKey];
   return Array.isArray(value) ? value[0] : String(value);
+}
+
+/**
+ * The URL for a reaction action on whichever target was named (Phase 9b M9c) —
+ * a post, a comment, or now a message.
+ *
+ * A helper rather than a ternary at each call site because there are three
+ * targets, and because "none was passed" is genuinely reachable: the components
+ * holding these ids carry them as optional props. Left alone that would build
+ * `/api/comments/undefined/react/`, which 404s and surfaces as a mystery
+ * "Couldn't react" — so it fails loudly here instead. Mirrors the app's
+ * `reactionPath` in `mobile/src/api.ts`.
+ */
+function reactionPath(
+  { postId = null, commentId = null, messageId = null },
+  action
+) {
+  if (postId != null) return `/api/posts/${postId}/${action}/`;
+  if (commentId != null) return `/api/comments/${commentId}/${action}/`;
+  if (messageId != null) return `/api/messages/${messageId}/${action}/`;
+  throw new Error("reactionPath needs a postId, commentId or messageId");
 }
 
 export const api = {
@@ -315,28 +354,26 @@ export const api = {
       body: parent ? { text, parent } : { text },
     }),
 
-  // --- Reactions (Phase 7b) ------------------------------------------------
+  // --- Reactions (Phase 7b; messages added in Phase 9b M9c) ----------------
 
-  // Toggle your emoji reaction on a post or comment: adds it, or removes it if
-  // you'd already used that emoji. Returns the target's fresh, viewer-pruned
+  // Toggle your emoji reaction on a post, comment or message: adds it, or
+  // removes it if you'd already used that emoji. Returns the target's fresh
   // reaction summary (`{ reactions: [{ emoji, count, reacted }] }`). Pass
-  // exactly one of postId / commentId.
-  toggleReaction: ({ postId = null, commentId = null, emoji }) =>
-    request(
-      postId
-        ? `/api/posts/${postId}/react/`
-        : `/api/comments/${commentId}/react/`,
-      { method: "POST", body: { emoji } },
-    ),
+  // exactly one of postId / commentId / messageId.
+  toggleReaction: ({ emoji, ...target }) =>
+    request(reactionPath(target, "react"), {
+      method: "POST",
+      body: { emoji },
+    }),
 
-  // Who reacted, grouped by emoji (pruned to people you may see) — for the
-  // "who reacted" popover. Pass exactly one of postId / commentId.
-  getReactors: ({ postId = null, commentId = null }) =>
-    request(
-      postId
-        ? `/api/posts/${postId}/reactions/`
-        : `/api/comments/${commentId}/reactions/`,
-    ),
+  // Who reacted, grouped by emoji — for the "who reacted" popover. Pass exactly
+  // one of postId / commentId / messageId.
+  //
+  // Post and comment reactors are pruned server-side to people you may see; a
+  // *message*'s aren't, because a chat's active participants are already a
+  // clique by construction, so everyone in a thread sees the same list
+  // (docs/reference/reactions.md).
+  getReactors: (target) => request(reactionPath(target, "reactions")),
 
   // People to connect with — everyone else, each with your connection_status.
   listUsers: () => request("/api/users/"),

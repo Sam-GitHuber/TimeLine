@@ -110,7 +110,12 @@ describe("ReactionBar", () => {
     await userEvent.click(screen.getByRole("button", { name: /who reacted/i }));
 
     expect(await screen.findByText("Alice")).toBeInTheDocument();
-    expect(api.getReactors).toHaveBeenCalledWith({ postId: 7, commentId: null });
+    // `messageId: null` since Phase 9b M9c widened the target to three kinds.
+    expect(api.getReactors).toHaveBeenCalledWith({
+      postId: 7,
+      commentId: null,
+      messageId: null,
+    });
   });
 
   it("offers no 'who reacted' control when there are no reactions", () => {

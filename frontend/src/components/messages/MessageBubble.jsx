@@ -1,6 +1,9 @@
+import { useRef, useState } from "react";
 import Avatar from "../Avatar.jsx";
+import DrawerPopover from "./DrawerPopover.jsx";
 import MessageMenu from "./MessageMenu.jsx";
 import MessageText from "./MessageText.jsx";
+import ReactorsPopover from "../ReactorsPopover.jsx";
 import { isEmojiOnly } from "../../messageText.js";
 import { formatClockTime } from "../../utils.js";
 
@@ -19,7 +22,8 @@ import { formatClockTime } from "../../utils.js";
 // "5m ago" (the separator above answers *which day*, so what a bubble has to
 // answer is when in it), run grouping, an "Edited" marker, links you can click,
 // emoji-only messages drawn large, and the ⋯ menu that replaced the inline
-// Delete.
+// Delete. M9c added reaction pills, and — on your own messages — a clock while
+// a send is in flight, a tick when it lands, and Retry/Discard when it doesn't.
 export default function MessageBubble({
   message,
   mine,
@@ -27,18 +31,44 @@ export default function MessageBubble({
   startsRun = true,
   endsRun = true,
   getActions,
+  /**
+   * `sending` / `failed` (from the outbox) or `sent` / `read` (computed from
+   * participants' read markers) — and `undefined` on everyone else's messages,
+   * where a tick would be telling you that you read it, and on your own when
+   * either side has read receipts off.
+   */
+  status,
+  /**
+   * Toggle an emoji on this message. Absent in a thread you can no longer send
+   * to, which drops both the menu's quick row and "tap to remove" in the
+   * who-reacted list — the list stays readable and inert, the same line the
+   * server draws.
+   */
+  onReact,
+  /** Which row in the who-reacted list is yours, so it can offer to undo. */
+  meId,
+  /** Send a failed message again, and give up on it. Both only on `failed`. */
+  onRetry,
+  onDiscard,
 }) {
+  const reactions = message.reactions ?? [];
+  const [whoOpen, setWhoOpen] = useState(false);
+  const pillsRef = useRef(null);
+
   /**
    * The timestamp is shown on the run's **last** bubble only. Five messages sent
    * in one minute don't each need the same clock time standing where the next
    * message should be.
    *
-   * One exception, and it's load-bearing rather than a tidy-up: an **"Edited"**
-   * marker is a *disclosure* — `messaging.md` calls it the thing that makes
-   * editing safe at all — so it can't be suppressed by where a bubble happens to
-   * sit in a run.
+   * Two exceptions, and both are load-bearing rather than tidy-ups. An
+   * **"Edited"** marker is a *disclosure* — `messaging.md` calls it the thing
+   * that makes editing safe at all — so it can't be suppressed by where a bubble
+   * happens to sit in a run. And an **unsent** message has to show its clock or
+   * its failure wherever it lands, or two queued messages would leave the first
+   * looking sent.
    */
-  const showMeta = endsRun || message.is_edited;
+  const unsent = status === "sending" || status === "failed";
+  const showMeta = endsRun || message.is_edited || unsent;
   /**
    * One to three emoji and nothing else: drop the bubble and draw it large, the
    * treatment every mainstream messenger gives it. Not for a tombstone (no text
@@ -74,11 +104,20 @@ export default function MessageBubble({
           mine ? "justify-end" : "justify-start"
         }`}
       >
-        {/* No menu on a tombstone: there's nothing left to act on. The trigger
-            sits on the far side of the bubble from the panel edge so it never
-            covers the text it belongs to. */}
-        {!message.is_deleted && getActions && (
-          <MessageMenu getActions={() => getActions(message)} mine={mine} />
+        {/* No menu on a tombstone: there's nothing left to act on. And none on
+            an **unsent** message either — every action it offers (edit, delete,
+            react, report) needs a server id it hasn't got yet. The trigger sits
+            on the far side of the bubble from the panel edge so it never covers
+            the text it belongs to. */}
+        {!message.is_deleted && !unsent && getActions && (
+          <MessageMenu
+            getActions={() => getActions(message)}
+            mine={mine}
+            onReact={onReact}
+            reactedEmojis={
+              new Set(reactions.filter((r) => r.reacted).map((r) => r.emoji))
+            }
+          />
         )}
         {message.is_deleted ? (
           <span className="rounded-2xl bg-ink/[0.03] px-3.5 py-2 text-sm italic text-ink-faint">
@@ -86,7 +125,7 @@ export default function MessageBubble({
           </span>
         ) : (
           <div
-            className={
+            className={`${status === "failed" ? "opacity-60" : ""} ${
               large
                 ? "max-w-[78%]"
                 : `max-w-[78%] rounded-2xl px-3.5 py-2 ${
@@ -94,7 +133,7 @@ export default function MessageBubble({
                       ? "bg-accent text-white"
                       : "bg-raised text-ink ring-1 ring-line"
                   }`
-            }
+            }`}
           >
             {/* Photos (Phase 9b M7). **A deliberate stopgap, not the finished
                 treatment** — M9e ports the app's version (a sized bubble that
@@ -129,8 +168,11 @@ export default function MessageBubble({
               <MessageText text={message.text} mine={mine} large={large} />
             )}
             {showMeta && (
+              // The meta line: time, the edited marker, then the tick. A row
+              // rather than one string because the tick is a glyph and has to
+              // sit on the text's baseline.
               <span
-                className={`mt-0.5 block font-mono text-[0.65rem] ${
+                className={`mt-0.5 flex items-center gap-1 font-mono text-[0.65rem] ${
                   large
                     ? "text-ink-faint"
                     : mine
@@ -139,17 +181,165 @@ export default function MessageBubble({
                 }`}
                 title={message.created_at}
               >
-                {clock.time}
-                {clock.meridiem}
-                {/* An edit is disclosed, never silent: a thread is a shared
-                    record, and quietly changing what someone already read would
-                    make it worthless as one. */}
-                {message.is_edited ? " · Edited" : ""}
+                <span>
+                  {clock.time}
+                  {clock.meridiem}
+                  {/* An edit is disclosed, never silent: a thread is a shared
+                      record, and quietly changing what someone already read
+                      would make it worthless as one. */}
+                  {message.is_edited ? " · Edited" : ""}
+                </span>
+                {status && status !== "failed" && (
+                  <SendTick status={status} onSurface={mine && !large} />
+                )}
               </span>
             )}
           </div>
         )}
       </div>
+
+      {/* A failed send stays exactly where you left it, dimmed, with the two
+          things you might want: send it again, or let it go. Nothing is thrown
+          away without a click, because losing text someone typed is the outcome
+          this whole path exists to prevent. */}
+      {status === "failed" && (
+        <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-xs">
+          <span className="text-red-600">Not sent</span>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="font-medium text-accent-deep transition hover:underline"
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            onClick={onDiscard}
+            aria-label="Discard this message"
+            className="text-ink-faint transition hover:text-ink"
+          >
+            Discard
+          </button>
+        </div>
+      )}
+
+      {/* The pills, hanging off the bubble's lower edge on its near side.
+          **One gesture: a click opens "who reacted", it never toggles.** A pill
+          is a *display* of what the thread said, so a click goes to the detail
+          of it rather than silently changing it — deliberately unlike the feed's
+          chips, which do toggle, because a post has no ⋯ menu to carry the
+          alternative and a message has two better homes for it (the menu's emoji
+          row, and "tap to remove" in the list this opens). */}
+      {reactions.length > 0 && (
+        <div
+          ref={pillsRef}
+          className={`-mt-1 flex flex-wrap gap-1 ${
+            mine ? "justify-end pr-1" : "justify-start pl-1"
+          }`}
+        >
+          {reactions.map((reaction) => (
+            <button
+              key={reaction.emoji}
+              type="button"
+              onClick={() => setWhoOpen(true)}
+              aria-label={`${reaction.emoji}, ${reaction.count}${
+                reaction.reacted ? ", including you" : ""
+              } — see who reacted`}
+              className={`inline-flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-xs transition ${
+                reaction.reacted
+                  ? "border-accent bg-accent-tint text-accent-deep"
+                  : "border-line bg-raised text-ink-faint hover:border-line-strong"
+              }`}
+            >
+              <span aria-hidden="true" className="leading-none">
+                {reaction.emoji}
+              </span>
+              {/* A lone reaction needs no "1" beside it — the emoji is the whole
+                  message. The count only earns its space once it's ambiguous. */}
+              {reaction.count > 1 && (
+                <span className="font-mono tabular-nums">{reaction.count}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      {whoOpen && (
+        <DrawerPopover
+          anchorRef={pillsRef}
+          width={256}
+          height={288}
+          bare
+          onClose={() => setWhoOpen(false)}
+        >
+          <ReactorsPopover
+            messageId={message.id}
+            meId={meId}
+            onRemoveReaction={onReact}
+            onClose={() => setWhoOpen(false)}
+            ignoreRef={pillsRef}
+          />
+        </DrawerPopover>
+      )}
     </li>
+  );
+}
+
+/**
+ * The tick (Phase 9b M4, on the web in M9c). Only one of the three states is
+ * worth noticing, so only one is drawn at full strength: **read** goes solid
+ * against the accent fill, while sending and sent sit at the same muted opacity
+ * as the timestamp beside them. A tick that shouts on every message is a tick
+ * nobody reads.
+ */
+function SendTick({ status, onSurface }) {
+  // `onSurface` is false for an emoji-only message, which has no accent fill
+  // behind it — white-on-white would be an invisible tick, so it takes the
+  // page's own ink colours instead.
+  const colour = onSurface
+    ? status === "read"
+      ? "text-white"
+      : "text-white/70"
+    : status === "read"
+      ? "text-accent"
+      : "text-ink-faint";
+  const label =
+    status === "sending" ? "Sending" : status === "read" ? "Read" : "Sent";
+
+  return (
+    <span role="img" aria-label={label} className={`inline-flex ${colour}`}>
+      {status === "sending" ? (
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          aria-hidden="true"
+          className="h-3 w-3"
+        >
+          <circle cx="12" cy="12" r="8.5" strokeWidth="2" />
+          {/* Hands at roughly ten-past-ten: legible as a clock even this small,
+              where a vertical-plus-horizontal pair just reads as a cross. */}
+          <path
+            d="M12 7.5V12l3 2"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ) : (
+        <svg
+          viewBox={status === "read" ? "0 0 34 24" : "0 0 24 24"}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          className={status === "read" ? "h-3 w-[1.05rem]" : "h-3 w-3"}
+        >
+          <path d="M4 13l5 5L20 7" />
+          {status === "read" && <path d="M14 13l5 5L30 7" />}
+        </svg>
+      )}
+    </span>
   );
 }

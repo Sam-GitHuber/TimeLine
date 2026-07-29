@@ -159,6 +159,32 @@ Recorded here so a future session doesn't discover it and assume it was missed.
   own chip toggles it off; a count reveals the visible "who reacted" list.
   TanStack Query with an optimistic toggle.
 
+**In the messages drawer (Phase 9b M9c)** the same components serve a different
+grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️ 😂 😮 😢
+🙏, not the feed's four, for the reason under *Mobile* below — and it lives inside
+the message's `⋯` menu rather than on a button of its own; the `＋`
+expands that same panel into the full picker in place. Pills hang off the
+bubble's lower edge and 🔒 **a pill never toggles — it opens "who reacted"**,
+which is where your own row offers *"tap to remove"*. There is **no optimistic
+toggle** here, unlike the feed's chips: see *Message reactions* above.
+
+Two mechanical differences worth knowing before touching either:
+
+- **The drawer's popovers position in *viewport* coordinates (`position: fixed`)
+  and close on scroll**, where the feed's use page coordinates. The drawer is
+  itself `fixed` over a page that stays scrollable, so a document-positioned
+  popover drifts off its bubble the moment anything scrolls. `DrawerPopover`
+  (`components/messages/`) is the drawer's version; don't reach for the feed's.
+- **`ReactorsPopover` takes an optional `messageId`, `meId` and
+  `onRemoveReaction`.** `meId` is a prop rather than a `useAuth()` call so the
+  component stays a pure renderer of what the server sent and the feed's callers
+  don't inherit an auth dependency for a feature only the drawer uses. It also
+  exports `reactorsQueryKey`, because anything that toggles a reaction must
+  **`removeQueries`** that cache — the list outlives the popover and a stale
+  "tap to remove" row is *actionable*, so invalidating (which only marks an
+  inactive query stale) would leave exactly the window in which it can be
+  clicked back on.
+
 ## Mobile
 
 The app has the same two tiers on the feed (`ReactionBar` → `ReactionTray` → the
@@ -221,6 +247,4 @@ notifies nobody**, deliberately; see above.
 
 ## Out of scope
 
-- Message reactions **on the web** — they're mobile-only until Phase 9b M9 (web
-  parity). The field is additive, so the drawer simply ignores it.
 - Custom/uploaded emoji or emoji packs.
