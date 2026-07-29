@@ -1609,9 +1609,9 @@ the clock.
       and an unresolved quote renders with **no author name** (M3's point 6).
 - [x] `messaging.md` *Frontend* updated → *Reply threads on the web (Phase 9b
       M9d)*.
-- [x] `messaging.test.jsx` green (64 tests), whole frontend suite 260.
+- [x] `messaging.test.jsx` green (67 tests), whole frontend suite 263.
 
-**Five things M9d settled that the plan above didn't anticipate** — read these
+**Six things M9d settled that the plan above didn't anticipate** — read these
 before M9e/M9f, which share the bubble and the drawer:
 
 1. ⚠️ **The "widen the drawer" half of the plan was wrong, and was reversed
@@ -1657,6 +1657,17 @@ before M9e/M9f, which share the bubble and the drawer:
    bubbles are which) and is the client's own guess; the *cache* write uses
    `thread_root_id` off the server's copy, because the server is what decides
    which strand a reply flattens into.
+6. ⚠️ **The strand is a second cache, and every message mutation has to reach
+   it** — `['thread', id, rootId]` beside the transcript's `['messages', id]`.
+   Reached by the send path first, and *missed* on the review pass by the
+   reaction patch and the delete invalidation, which is the shape of the mistake
+   worth remembering: neither showed anything wrong, because the transcript
+   holding the right answer is hidden while a strand is open, so both just looked
+   like a click that did nothing until the next poll. **M9e and M9f both add
+   mutations here** (a photo reply, an edit-adjacent mentions write, multi-select
+   delete) — check each against the strand, not only the transcript. Reactions go
+   in via `setQueriesData` on the `['thread', id]` prefix rather than the open
+   strand's key, so a cached strand can't come back holding a stale pill.
 
 **Rendered and checked**, the way M9c's note asks for: the bubble markup and the
 whole drawer were rendered from the real components into a static harness against

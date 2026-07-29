@@ -1721,6 +1721,110 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // a message; the menu just doesn't offer what would come back 403.
     expect(screen.queryByRole("button", { name: "Reply" })).toBeNull();
   });
+
+  // The next three are all one point: the strand reads a query of its *own*
+  // (`['thread', id, rootId]`), so anything the thread view does to a message
+  // has to reach that cache as well as the transcript's `['messages', id]`.
+  // Reaching only the transcript isn't wrong-looking in the transcript — it's
+  // invisible, because the transcript is hidden while a strand is open. The
+  // click just appears to do nothing until the next poll.
+  it("shows a reaction made inside the strand without waiting for a poll", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?" });
+    api.getMessages.mockResolvedValue(page([root]));
+    api.getThread.mockResolvedValue(page([root]));
+    api.toggleReaction.mockResolvedValue({
+      reactions: [{ emoji: "👍", count: 1, reacted: true }],
+    });
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    const bubble = within(strand()).getByText("dinner?").closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    await user.click(screen.getByRole("button", { name: "React with 👍" }));
+
+    await waitFor(() =>
+      expect(api.toggleReaction).toHaveBeenCalledWith({
+        messageId: 5,
+        emoji: "👍",
+      })
+    );
+    // M2's fifth decision is that there's no *optimistic* write — the server
+    // owns the rules — which is only tolerable because the response is written
+    // straight in. In here that means writing it into the strand's cache too.
+    expect(
+      await within(strand()).findByRole("button", {
+        name: /👍, 1, including you/,
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("clears a message from the strand when you delete it there", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, sender: mineSender, text: "dinner?" });
+    const reply = msg({
+      id: 6,
+      sender: mineSender,
+      text: "actually no",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([reply, root]));
+    api.getThread.mockResolvedValue(page([root, reply]));
+    api.deleteMessage.mockResolvedValue({});
+
+    renderAt("/messages/7");
+    // In from the reply rather than the root: the root's words are also in the
+    // reply's quote, so "dinner?" is on screen twice.
+    await openMenu(user, "actually no");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    const bubble = within(strand()).getByText("actually no").closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    // What the strand's re-read comes back with once the delete has landed.
+    api.getThread.mockResolvedValue(
+      page([root, { ...reply, is_deleted: true, text: "" }])
+    );
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(api.deleteMessage).toHaveBeenCalledWith(7, 6));
+    expect(
+      await within(strand()).findByText("Message deleted")
+    ).toBeInTheDocument();
+  });
+
+  it("closes the strand on Escape rather than the whole drawer", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+    api.getThread.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+    expect(strand()).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+
+    // The nearer thing wins — the same call the composer's Escape already makes
+    // for edit mode. Losing the whole panel (and the draft and edit the strand
+    // is hidden *over*) because you wanted to leave a thread would be a
+    // surprise, and Escape is the only key anyone tries first.
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Reply thread" })).toBeNull()
+    );
+    expect(screen.getByRole("dialog", { name: "Messages" })).toBeInTheDocument();
+    // And focus comes back into the transcript. The element it was on has just
+    // unmounted, so left alone it falls to `<body>` — and the drawer is
+    // deliberately not a focus trap, so the next Tab would start at the top of
+    // the page, outside the panel entirely.
+    expect(screen.getByPlaceholderText(/write a message/i)).toHaveFocus();
+  });
 });
 
 describe("Profile messaging + block controls", () => {

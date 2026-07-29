@@ -453,6 +453,25 @@ export default function ConversationThreadView() {
   }, [conversationId, text, editing]);
 
   /**
+   * Put focus back in the composer when a strand closes (M9d).
+   *
+   * Whatever focus was on — the strand's Close button, or its composer — has
+   * just unmounted, so without this focus falls to `<body>` and the next Tab
+   * starts at the top of the *page*, outside a drawer that is deliberately not a
+   * focus trap. A keyboard user who opened a thread and left it again would be
+   * put out of the panel for their trouble.
+   *
+   * In an effect rather than in the close handler because the composer is inside
+   * a `display: none` subtree until that render commits, and `.focus()` on a
+   * hidden element does nothing at all.
+   */
+  const hadStrand = useRef(false);
+  useEffect(() => {
+    if (hadStrand.current && !strand) inputRef.current?.focus();
+    hadStrand.current = !!strand;
+  }, [strand]);
+
+  /**
    * Send one message and settle its outbox entry (M9c).
    *
    * The composer is **not** touched here — it was cleared the moment the message
@@ -563,6 +582,21 @@ export default function ConversationThreadView() {
       queryClient.setQueryData(["messages", conversationId], (cached) =>
         patchReactions(cached, messageId, data.reactions ?? [])
       );
+      // And into any open strand (M9d), which reads a cache of its own. Writing
+      // only the transcript's isn't a *wrong* pill in here, it's no pill at all
+      // until the next poll — up to `MESSAGE_POLL_MS` of a one-click gesture
+      // looking as though it did nothing, and unnoticeable in review because the
+      // transcript holding the right answer is hidden while a strand is open.
+      // Deliberately no optimistic write, still: this is the server's answer,
+      // arriving in both places at once (see `messageCache.js`).
+      //
+      // `setQueriesData` on the prefix rather than one key, because the reacted
+      // message's strand isn't necessarily the open one — a cached strand left
+      // behind by an earlier visit must not come back holding a stale pill.
+      queryClient.setQueriesData(
+        { queryKey: ["thread", conversationId] },
+        (cached) => patchReactions(cached, messageId, data.reactions ?? [])
+      );
       // The reactor list is a *separate* cache that outlives the popover, so it
       // has to be dealt with too — otherwise the next open renders the
       // pre-toggle list, and because that list is actionable, a row still
@@ -595,6 +629,10 @@ export default function ConversationThreadView() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["messages", conversationId] });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      // Delete is offered inside the strand as well (M9d), and the strand reads
+      // its own query — so without this the message you just deleted sits there
+      // until the next poll, in the one view that's on screen at the time.
+      queryClient.invalidateQueries({ queryKey: ["thread", conversationId] });
     },
   });
 

@@ -170,6 +170,23 @@ export default function MessageStrandPanel({
   return (
     <section
       aria-label="Reply thread"
+      // Escape leaves the strand rather than closing the drawer — the nearer
+      // thing wins, the same call the transcript's composer already makes for
+      // edit mode. Losing the whole panel, and with it the sight of the draft
+      // and the edit this strand is hidden *over*, because you wanted to leave a
+      // thread would be a surprise, and Escape is the key anyone tries first.
+      // `stopPropagation` is what keeps it from reaching the drawer's own
+      // document-level handler (`MessagesDrawer`).
+      //
+      // On the section rather than the composer so it works wherever focus is in
+      // here — the composer takes it on open, but a click on a bubble's ⋯ or on
+      // Close moves it.
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
       className="flex min-w-0 flex-1 flex-col bg-surface"
     >
       <div className="flex items-center justify-between border-b border-line px-3 py-2">

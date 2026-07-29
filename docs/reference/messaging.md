@@ -1418,6 +1418,28 @@ caches, the transcript's and the strand's, using `thread_root_id` off the
 server's copy rather than the client's guess: the server decides which strand a
 reply flattens into.
 
+⚠️ **Everything that changes a message has to reach both caches**, and that send
+is only the first case of it. The strand reads `['thread', id, rootId]` where the
+transcript reads `['messages', id]`, so a reaction patched into the transcript
+alone, or a delete that only invalidates it, is *invisible* rather than
+wrong-looking: the transcript holding the right answer is hidden while a strand
+is open, so the click looks as though it did nothing until the next poll — up to
+`MESSAGE_POLL_MS` later. Reactions are written into every cached strand of the
+conversation (`setQueriesData` on the `['thread', id]` prefix, not just the open
+one, so a strand you come back to can't return holding a stale pill); delete
+invalidates the same prefix. An edit needs neither: it isn't offered in the
+strand, and reopening one refetches it.
+
+**Escape closes the strand, not the drawer**, handled on the strand's own section
+so it works wherever focus is in there. Same rule as the composer's Escape
+leaving edit mode: the nearer thing wins, and losing the whole panel — along with
+the sight of the draft and the edit the strand is hidden *over* — because you
+wanted to step out of a thread would be a surprise. Closing a strand by either
+route then puts focus back in the transcript's composer, because the element it
+was on has just unmounted and the drawer is deliberately not a focus trap: left
+alone, focus falls to `<body>` and the next Tab starts at the top of the page,
+outside the panel entirely.
+
 ## Mobile (Phase 9 E2)
 
 The iPhone app is a **client port of exactly this API — no backend change.** It
