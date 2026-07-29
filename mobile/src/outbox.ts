@@ -56,6 +56,13 @@ export type Outgoing = {
    * after a round trip.
    */
   photo?: OutgoingPhoto;
+  /**
+   * Who it names with `@` (Phase 9b M8), as user ids — kept with the entry so a
+   * **retry sends the same mentions**. Without it a failed message that named
+   * someone would quietly stop naming them on the second attempt, and the one
+   * thing a mention does (reach a muted thread) would silently not happen.
+   */
+  mentionIds?: number[];
 };
 
 export type OutgoingPhoto = PreparedChatPhoto & { previewUri: string };
@@ -146,11 +153,13 @@ export function newOutgoing({
   replyToId,
   rootId,
   photo,
+  mentionIds,
 }: {
   text: string;
   replyToId?: number;
   rootId?: number;
   photo?: OutgoingPhoto;
+  mentionIds?: number[];
 }): Outgoing {
   return {
     tempId: nextTempId--,
@@ -158,6 +167,7 @@ export function newOutgoing({
     replyToId,
     rootId,
     photo,
+    mentionIds,
     // The device clock, only ever used to sort this bubble to the bottom of the
     // list until the server's own timestamp replaces it wholesale.
     createdAt: new Date().toISOString(),
@@ -187,6 +197,10 @@ export function asMessage(entry: Outgoing, me: Author): Message {
     reply_to: entry.replyToId ? { id: entry.replyToId } : null,
     thread_root_id: entry.rootId ?? null,
     reply_count: 0,
+    // Highlighted from the moment it appears (M8), rather than only once the
+    // server's copy lands — an in-flight bubble that renders differently from
+    // the one that replaces it is the flicker the outbox exists to avoid.
+    mentions: entry.mentionIds ?? [],
     // The local file stands in for the server's copy until it lands (Phase 9b
     // M7). A negative `id` matching the entry's `tempId` keeps it distinct from
     // any real attachment, and both URLs point at the on-device thumbnail: the

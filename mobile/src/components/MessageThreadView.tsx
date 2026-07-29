@@ -59,8 +59,11 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { MentionSuggestions } from './MentionSuggestions';
 import { MessageBubble } from './MessageBubble';
 import { api, MESSAGE_POLL_MS } from '@/api';
+import type { Mentionable } from '@/mentions';
+import { useMentions } from '@/mentions';
 import type { SendState } from '@/readReceipts';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
@@ -77,6 +80,8 @@ export function MessageThreadView({
   meId,
   isGroup,
   canSend,
+  mentionable = [],
+  mentionNames,
   outgoing,
   statusFor,
   onSend,
@@ -100,6 +105,15 @@ export function MessageThreadView({
   isGroup: boolean;
   canSend: boolean;
   /**
+   * Who can be named with `@` from in here (Phase 9b M8) — the same group
+   * members the transcript offers. A reply is where you'd most often name
+   * someone ("@Ada what do you think?"), so the strand gets the picker too
+   * rather than being the one composer that quietly doesn't.
+   */
+  mentionable?: Mentionable[];
+  /** Names for the mention ids on these messages; see `MessageBubble`. */
+  mentionNames?: Map<number, string>;
+  /**
    * Replies to this strand still in the caller's outbox (Phase 9b M4), already
    * dressed as messages. Rendered after the loaded ones, so a reply appears the
    * instant you send it and a failed one stays put with somewhere to act on it —
@@ -117,7 +131,11 @@ export function MessageThreadView({
    * Resolves when the send lands and rejects when it doesn't; the composer
    * doesn't wait on either, since the message is already on screen.
    */
-  onSend: (text: string, replyToId: number) => Promise<unknown>;
+  onSend: (
+    text: string,
+    replyToId: number,
+    mentionIds?: number[]
+  ) => Promise<unknown>;
   onRetry?: (message: Message) => void;
   onDiscard?: (message: Message) => void;
   onClose: () => void;
@@ -125,6 +143,7 @@ export function MessageThreadView({
   const insets = useSafeAreaInsets();
   const listRef = useRef<FlatList<Message>>(null);
   const [text, setText] = useState('');
+  const mentions = useMentions({ people: mentionable, text, setText });
 
   /**
    * Polled like the transcript, so a reply someone else sends while you're
@@ -182,14 +201,16 @@ export function MessageThreadView({
     // failed bubble with Retry beside it. Keeping the text in the composer as
     // well would show the same message twice and make it possible to send it
     // twice.
+    const mentionIds = mentions.idsFor(value);
     setText('');
+    mentions.reset();
     // Whichever message got you here. The server flattens it into this strand
     // either way (`thread_root` is derived, one level deep), so naming the real
     // target costs nothing and keeps the quote honest.
     //
     // The rejection is handled by the caller's mutation, which is what owns the
     // outbox entry — catching here only stops an unhandled rejection.
-    onSend(value, target).catch(() => {});
+    onSend(value, target, mentionIds).catch(() => {});
   }
 
   return (
@@ -288,6 +309,7 @@ export function MessageThreadView({
                       item.reply_to ? byId.get(item.reply_to.id) : undefined
                     }
                     status={status}
+                    mentionNames={mentionNames}
                     onRetry={unsent ? () => onRetry?.(item) : undefined}
                     onDiscard={unsent ? () => onDiscard?.(item) : undefined}
                   />
@@ -325,10 +347,19 @@ export function MessageThreadView({
                     Replying to {answering.sender.display_name}
                   </Text>
                 ) : null}
+                <MentionSuggestions
+                  people={mentions.suggestions}
+                  onChoose={mentions.choose}
+                />
                 <View style={styles.composer}>
                   <TextInput
                     value={text}
-                    onChangeText={setText}
+                    onChangeText={mentions.onChangeText}
+                    onSelectionChange={(event) =>
+                      mentions.onSelectionChange(
+                        event.nativeEvent.selection.start
+                      )
+                    }
                     placeholder="Reply to thread…"
                     placeholderTextColor={colors.inkFaint}
                     multiline

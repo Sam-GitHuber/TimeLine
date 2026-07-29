@@ -61,6 +61,7 @@ from .models import (
     GroupMembership,
     Message,
     MessageAttachment,
+    MessageMention,
     Notification,
     NotificationPreference,
     Participant,
@@ -2481,6 +2482,195 @@ class MessageReplyTests(MessagingBase):
             )
         self._reply(self.root, "on my way")
         self.assertTrue(PushOutbox.objects.exists())
+
+
+class MessageMentionTests(APITestCase):
+    """@mentions in a group chat (Phase 9b M8).
+
+    Three questions, and only the third is really about mentions:
+
+    1. **Are they stored as a relation?** A name matched out of the text would
+       stop working the day someone changes theirs, and can't work at all once
+       the text is ciphertext.
+    2. **Can you only name people in the room?** A mention is the one thing in
+       messaging that beats mute, so an unchecked id here would be a way to buzz
+       a stranger's phone — exactly what the clique invariant forbids.
+    3. **Does the mute override behave as advertised?** The setting governs
+       *only* whether a mention beats mute, and getting that wrong silences
+       mentions someone wanted (or punches through a quiet they asked for).
+    """
+
+    def setUp(self):
+        self.ada = make_user("mention-ada@example.com", first_name="Ada")
+        self.bea = make_user("mention-bea@example.com", first_name="Bea")
+        self.cal = make_user("mention-cal@example.com", first_name="Cal")
+        for a, b in [
+            (self.ada, self.bea),
+            (self.ada, self.cal),
+            (self.bea, self.cal),
+        ]:
+            make_connection(a, b)
+        self.convo = Conversation.objects.create(
+            kind="group", created_by=self.ada, title="Book club"
+        )
+        for user in (self.ada, self.bea, self.cal):
+            participant = Participant.objects.create(
+                conversation=self.convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=participant, started_at=timezone.now()
+            )
+        self.client.force_authenticate(self.ada)
+
+    def _send(self, mention_ids, text="@Bea can you bring the book?"):
+        return self.client.post(
+            messages_url(self.convo),
+            {"text": text, "mention_ids": mention_ids},
+            format="json",
+        )
+
+    def _mute(self, user):
+        Participant.objects.filter(conversation=self.convo, user=user).update(
+            muted_at=timezone.now()
+        )
+
+    def _queued_for(self, user):
+        return PushOutbox.objects.filter(recipient=user, sent_at__isnull=True)
+
+    def test_a_mention_is_stored_as_a_row_and_returned_as_a_bare_id(self):
+        resp = self._send([self.bea.pk])
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        message = Message.objects.get(pk=resp.data["id"])
+        self.assertEqual(
+            list(message.mentions.values_list("user_id", flat=True)), [self.bea.pk]
+        )
+        # Ids and nothing else — no name, no avatar. The client resolves the id
+        # against the participants payload it already holds, which is also the
+        # only thing that can work once the words are ciphertext.
+        self.assertEqual(resp.data["mentions"], [self.bea.pk])
+
+    def test_mentions_come_back_on_the_thread(self):
+        self._send([self.bea.pk, self.cal.pk])
+
+        thread = self.client.get(messages_url(self.convo))
+
+        self.assertEqual(
+            thread.data["results"][-1]["mentions"], [self.bea.pk, self.cal.pk]
+        )
+
+    def test_a_message_without_mentions_reports_an_empty_list(self):
+        self.client.post(messages_url(self.convo), {"text": "hello"})
+
+        thread = self.client.get(messages_url(self.convo))
+
+        self.assertEqual(thread.data["results"][-1]["mentions"], [])
+
+    def test_cannot_mention_someone_outside_the_conversation(self):
+        """🔒 The load-bearing check. A mention beats mute, so an unchecked id
+        would make this endpoint a way to buzz someone you have no thread with."""
+        outsider = make_user("mention-outsider@example.com")
+
+        resp = self._send([outsider.pk])
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Message.objects.filter(text__contains="book").exists())
+        self.assertEqual(MessageMention.objects.count(), 0)
+
+    def test_cannot_mention_a_pending_member(self):
+        # They can't read a line of the thread yet, so naming them would
+        # announce something the app would immediately refuse to show.
+        dee = make_user("mention-dee@example.com")
+        make_connection(self.ada, dee)
+        Participant.objects.create(
+            conversation=self.convo, user=dee, status="pending"
+        )
+
+        resp = self._send([dee.pk])
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_naming_someone_twice_is_one_mention(self):
+        resp = self._send([self.bea.pk, self.bea.pk])
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(MessageMention.objects.count(), 1)
+
+    def test_a_tombstone_carries_no_mentions(self):
+        message_id = self._send([self.bea.pk]).data["id"]
+        self.client.delete(f"{messages_url(self.convo)}{message_id}/")
+
+        thread = self.client.get(messages_url(self.convo))
+
+        tombstone = thread.data["results"][-1]
+        self.assertTrue(tombstone["is_deleted"])
+        self.assertEqual(tombstone["mentions"], [])
+
+    def test_a_mention_notifies_through_a_muted_thread(self):
+        """The whole point of naming someone, and the one justified exception to
+        ``Participant.muted_at``."""
+        self._mute(self.bea)
+        self._mute(self.cal)
+
+        self._send([self.bea.pk])
+
+        self.assertTrue(self._queued_for(self.bea).exists())
+        # And only for the person named: muting still holds for everyone else,
+        # or one mention would un-mute the thread for the whole group.
+        self.assertFalse(self._queued_for(self.cal).exists())
+
+    def test_the_override_can_be_turned_off(self):
+        NotificationPreference.objects.create(
+            user=self.bea, kind=Notification.Kind.MENTION, enabled=False
+        )
+        self._mute(self.bea)
+
+        self._send([self.bea.pk])
+
+        self.assertFalse(self._queued_for(self.bea).exists())
+
+    def test_turning_the_override_off_does_not_silence_mentions_generally(self):
+        """The precise reading of the setting: it governs *only* whether a
+        mention beats mute. In an unmuted thread a mention notifies either way —
+        via the ordinary message push — and someone who turned the override off
+        has not asked to stop hearing their own name."""
+        NotificationPreference.objects.create(
+            user=self.bea, kind=Notification.Kind.MENTION, enabled=False
+        )
+
+        self._send([self.bea.pk])
+
+        self.assertTrue(self._queued_for(self.bea).exists())
+
+    def test_a_mention_cannot_beat_interval_clipping(self):
+        """Mute is the *only* rule a mention overrides. A member whose access
+        interval is closed can't read the message, so naming them must not
+        announce it — the push and the thread have to agree."""
+        participant = Participant.objects.get(
+            conversation=self.convo, user=self.bea
+        )
+        deactivate(participant, timezone.now())
+
+        self._send([self.bea.pk])
+
+        self.assertFalse(self._queued_for(self.bea).exists())
+
+    def test_the_push_body_says_who_named_you_and_nothing_else(self):
+        """A silenced chat that suddenly buzzes owes you an explanation — and
+        the explanation still quotes no part of the message."""
+        self._mute(self.bea)
+        DevicePushToken.objects.create(
+            user=self.bea, expo_token="ExponentPushToken[mention]", platform="ios"
+        )
+        self._send([self.bea.pk], text="@Bea what did you think of chapter 4?")
+
+        from .management.commands.send_pushes import Command as SendPushes
+
+        row = self._queued_for(self.bea).get()
+        body = SendPushes()._payload(row)["text"]
+
+        self.assertEqual(body, "Ada mentioned you in Book club")
+        self.assertNotIn("chapter 4", body)
 
 
 class MessageIdsFilterTests(MessagingBase):

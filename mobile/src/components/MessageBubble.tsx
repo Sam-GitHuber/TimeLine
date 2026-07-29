@@ -122,6 +122,7 @@ export function BubbleBody({
   quoted,
   status,
   endsRun = true,
+  mentionNames,
   onQuotePress,
   onPhotoPress,
   onPhotoLongPress,
@@ -130,6 +131,13 @@ export function BubbleBody({
   mine: boolean;
   /** The message this one replies to, if the caller could resolve it. */
   quoted?: Message;
+  /**
+   * Display names for the ids in `message.mentions` (Phase 9b M8), so an
+   * `@Ada` in the text can be highlighted. Supplied by the screen, which is
+   * where the participant list lives; omitted, the names still read fine as
+   * ordinary words — the sender typed them into the message.
+   */
+  mentionNames?: Map<number, string>;
   /**
    * The send state to show beside the timestamp (Phase 9b M4). Only ever passed
    * for your own messages — a tick on someone else's would be meaningless — and
@@ -222,7 +230,12 @@ export function BubbleBody({
         </View>
       ) : null}
       {message.text ? (
-        <MessageText message={message} mine={mine} large={large} />
+        <MessageText
+          message={message}
+          mine={mine}
+          large={large}
+          mentionNames={mentionNames}
+        />
       ) : null}
       {/* The meta line: time, the edited marker, then the tick. A row rather
           than one string because the tick is a glyph, and it has to sit on the
@@ -381,16 +394,27 @@ function MessageText({
   message,
   mine,
   large,
+  mentionNames,
 }: {
   message: Message;
   mine: boolean;
   large: boolean;
+  mentionNames?: Map<number, string>;
 }) {
   const base = [
     large ? styles.largeEmoji : styles.text,
     !large && (mine ? styles.mineText : styles.theirsText),
   ];
-  const segments = parseMessageText(message.text);
+  // 🔒 Resolved here, from names the *viewer* already has. The message carries
+  // bare ids, so an id belonging to someone this viewer can't see resolves to
+  // nothing and its `@Ada` simply renders as the words the sender typed — which
+  // is the honest outcome, and the same rule an unresolvable reply quote follows.
+  const mentions = mentionNames
+    ? (message.mentions ?? [])
+        .map((id) => mentionNames.get(id))
+        .filter((name): name is string => !!name)
+    : [];
+  const segments = parseMessageText(message.text, { mentions });
   // The overwhelmingly common case: one unmarked run, one Text, no map.
   if (segments.length === 1 && segments[0].kind === 'text' && !segments[0].marks) {
     return <Text style={base}>{message.text}</Text>;
@@ -412,6 +436,16 @@ function MessageText({
             // installed) rejects, and there is nothing useful to say about it
             // that the person tapping doesn't already know.
             onPress={() => Linking.openURL(segment.url).catch(() => {})}
+          >
+            {segment.text}
+          </Text>
+        ) : segment.kind === 'mention' ? (
+          <Text
+            key={`mention-${index}`}
+            style={[
+              markStyles(segment.marks),
+              mine ? styles.mentionMine : styles.mentionTheirs,
+            ]}
           >
             {segment.text}
           </Text>
@@ -607,6 +641,7 @@ export function MessageBubble({
   endsRun = true,
   quoted,
   status,
+  mentionNames,
   onLongPress,
   onShowReactors,
   onOpenThread,
@@ -628,6 +663,8 @@ export function MessageBubble({
   quoted?: Message;
   /** Its send state (Phase 9b M4) — your own messages only; see `BubbleBody`. */
   status?: SendState;
+  /** Names for this message's mention ids (Phase 9b M8); see `BubbleBody`. */
+  mentionNames?: Map<number, string>;
   /**
    * Opens the action menu, anchored to this bubble's rect on screen. Omitted
    * inside the focused thread view, which is deliberately menu-less — see
@@ -706,6 +743,7 @@ export function MessageBubble({
               quoted={quoted}
               status={status}
               endsRun={endsRun}
+              mentionNames={mentionNames}
               onQuotePress={onOpenThread}
               onPhotoPress={onPhotoPress}
               // The same handler the wrapper uses, so the menu anchors to the
@@ -841,6 +879,12 @@ const styles = StyleSheet.create({
   // is not a strong enough signal on its own, and colour alone never is.
   linkMine: { color: '#ffffff', textDecorationLine: 'underline' },
   linkTheirs: { color: colors.accentDeep, textDecorationLine: 'underline' },
+  // A mention is weighted rather than underlined (M8): it isn't tappable, and
+  // an underline is this app's promise that something opens. Weight plus tint
+  // is enough to find a name at a glance in a busy group, which is all a
+  // mention has to do.
+  mentionMine: { color: '#ffffff', fontWeight: '700' },
+  mentionTheirs: { color: colors.accentDeep, fontWeight: '700' },
   meta: {
     marginTop: 2,
     flexDirection: 'row',

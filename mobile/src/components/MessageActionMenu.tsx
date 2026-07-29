@@ -95,6 +95,7 @@ export function MessageActionMenu({
   anchor,
   actions,
   quoted,
+  mentionNames,
   onReact,
   onMoreEmoji,
   visible = true,
@@ -111,6 +112,13 @@ export function MessageActionMenu({
    * the bubble it's covering.
    */
   quoted?: Message;
+  /**
+   * Names for this message's mention ids (Phase 9b M8), passed through for the
+   * same reason `quoted` is: the preview re-renders the *real* bubble, so a
+   * highlighted `@Ada` that lost its highlight under the menu would give the
+   * game away that it's a copy.
+   */
+  mentionNames?: Map<number, string>;
   /**
    * Toggle an emoji on this message. Omitted when reacting isn't available —
    * a thread you can no longer send to — and the row is then left out entirely
@@ -200,7 +208,12 @@ export function MessageActionMenu({
         style={[styles.preview, { top: anchor.y, left: anchor.x, width: anchor.width }]}
         onLayout={(e) => setPreviewHeight(e.nativeEvent.layout.height)}
       >
-        <BubbleBody message={message} mine={mine} quoted={quoted} />
+        <BubbleBody
+          message={message}
+          mine={mine}
+          quoted={quoted}
+          mentionNames={mentionNames}
+        />
       </View>
 
       <Animated.View

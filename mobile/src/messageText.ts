@@ -29,7 +29,22 @@ export type Mark = 'bold' | 'italic' | 'strike' | 'mono';
 
 export type TextSegment =
   | { kind: 'text'; text: string; marks?: Mark[] }
-  | { kind: 'link'; text: string; url: string; marks?: Mark[] };
+  | { kind: 'link'; text: string; url: string; marks?: Mark[] }
+  | { kind: 'mention'; text: string; marks?: Mark[] };
+
+/**
+ * What a parse needs to know beyond the string itself.
+ *
+ * Only mentions, and only their **names** — the caller resolves the message's
+ * mention *ids* against the participants it holds and hands over what to look
+ * for. That's the division the wire format forces (the server sends bare ids,
+ * see `Message.mentions`) and it's the right one anyway: this module knows
+ * about characters, the screen knows about people.
+ */
+export type ParseOptions = {
+  /** Display names to highlight where they appear after an `@`. */
+  mentions?: string[];
+};
 
 /**
  * A URL or an email address inside ordinary prose.
@@ -160,7 +175,7 @@ function scan(
   text: string,
   marks: Mark[],
   out: TextSegment[],
-  { links }: { links: boolean }
+  { links, mentions }: { links: boolean; mentions: string[] }
 ): void {
   let plainFrom = 0;
   let i = 0;
@@ -172,6 +187,25 @@ function scan(
   }
 
   while (i < text.length) {
+    // Mentions before links, because an `@` is where an email address would
+    // otherwise start matching and "@Ada" is not one. Longest name first, so
+    // "@Ada Lovelace" isn't cut down to "@Ada" by a second Ada in the room.
+    if (text[i] === '@') {
+      const name = mentions.find(
+        (candidate) =>
+          text.startsWith(candidate, i + 1) &&
+          // Not mid-word: "@Ada" must not match inside "@Adam".
+          !isWordChar(text[i + 1 + candidate.length])
+      );
+      if (name) {
+        flush(i);
+        push(out, { kind: 'mention', text: `@${name}` }, marks);
+        i += name.length + 1;
+        plainFrom = i;
+        continue;
+      }
+    }
+
     if (links) {
       LINK_AT.lastIndex = i;
       const match = LINK_AT.exec(text);
@@ -205,7 +239,7 @@ function scan(
         if (mark === 'mono') {
           push(out, { kind: 'text', text: inner }, [...marks, 'mono']);
         } else {
-          scan(inner, [...marks, mark], out, { links });
+          scan(inner, [...marks, mark], out, { links, mentions });
         }
         i = close + 1;
         plainFrom = i;
@@ -252,9 +286,15 @@ function push(
  * Returns a single `text` segment when there's nothing to mark up, which is the
  * overwhelmingly common case and the one the bubble fast-paths on.
  */
-export function parseMessageText(text: string): TextSegment[] {
+export function parseMessageText(
+  text: string,
+  { mentions = [] }: ParseOptions = {}
+): TextSegment[] {
   const segments: TextSegment[] = [];
-  scan(text, [], segments, { links: true });
+  // Longest first: two people in a group can be "Ada" and "Ada Lovelace", and
+  // matching the shorter one first would leave half the second name as prose.
+  const names = [...mentions].sort((a, b) => b.length - a.length);
+  scan(text, [], segments, { links: true, mentions: names });
   return segments.length > 0 ? segments : [{ kind: 'text', text }];
 }
 

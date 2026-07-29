@@ -104,6 +104,11 @@ class Command(BaseCommand):
             "message",
             "message__sender",
             "message__conversation",
+        ).prefetch_related(
+            # Whether *this* recipient was named decides the wording (Phase 9b
+            # M8), and a muted thread's push is only here at all because they
+            # were — so the line has to be able to say so.
+            "message__mentions",
         )
         if not dry_run:
             # skip_locked: a concurrent run takes different rows rather than
@@ -242,11 +247,24 @@ class Command(BaseCommand):
         # Said whenever there's an attachment, caption or not: the photo is the
         # notable thing, and a caption is content we wouldn't quote anyway.
         photo = message.attachments.exists()
+        # Named with an @ (Phase 9b M8). Said first because it's the *reason*
+        # this push exists whenever the thread is muted — a silenced chat that
+        # suddenly buzzes owes you an explanation, and "Ada mentioned you" is it.
+        # Still names the person and nothing else: a mention quotes no more of
+        # the message than any other push body does.
+        mentioned = any(
+            mention.user_id == row.recipient_id
+            for mention in message.mentions.all()
+        )
         # A group thread says which one, since "New message from Ada" is
         # ambiguous when Ada is in four of your chats. An untitled group falls
         # back to the neutral phrasing rather than inventing a name.
         named_group = convo.kind == convo.Kind.GROUP and convo.title
-        if photo:
+        if mentioned:
+            text = f"{sender} mentioned you"
+            if named_group:
+                text += f" in {convo.title}"
+        elif photo:
             text = f"{sender} sent a photo"
             if named_group:
                 text += f" in {convo.title}"

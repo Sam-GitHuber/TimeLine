@@ -375,6 +375,13 @@ MESSAGE_ATTACHMENTS_MAX = 1
 # the bubble an aspect ratio that computes to a zero-height or mile-tall row.
 MESSAGE_ATTACHMENT_MAX_EDGE = 10_000
 
+# --- mentions (Phase 9b M8) ---------------------------------------------------
+# How many people one message may name. Far above what anyone types by hand in a
+# family-sized group, and low enough that a hostile client can't turn one send
+# into a fan-out that overrides everybody's mute at once — which is the only way
+# this list can do damage, since a mention's whole power is beating mute.
+MESSAGE_MENTIONS_MAX = 20
+
 
 def _human_bytes(count):
     """A byte cap as a person would say it, for a validation message they'll read.
@@ -444,6 +451,7 @@ class MessageSerializer(serializers.ModelSerializer):
     reply_to = serializers.SerializerMethodField()
     reply_count = serializers.SerializerMethodField()
     attachments = serializers.SerializerMethodField()
+    mentions = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -460,6 +468,7 @@ class MessageSerializer(serializers.ModelSerializer):
             "thread_root_id",
             "reply_count",
             "attachments",
+            "mentions",
         )
 
     def get_reactions(self, obj):
@@ -537,6 +546,30 @@ class MessageSerializer(serializers.ModelSerializer):
             obj.attachments.all(), many=True, context=self.context
         ).data
 
+    def get_mentions(self, obj):
+        """Who this message names, as **bare user ids** (Phase 9b M8).
+
+        Ids and nothing else, for the same reason ``reply_to`` is a bare id: a
+        name and an avatar attached here would be content the server supplied
+        about a *person*, and the client can resolve an id against the
+        participants payload it already has. Under E2E the client is the only
+        side that can match an id to the ``@Ada`` in the text anyway, so this is
+        the shape that survives.
+
+        **Not pruned per viewer**, and that's considered rather than skipped: a
+        mention id is inert on its own, and anyone reading this message can
+        already read the ``@Ada`` in its text — the name was typed *into* the
+        words. So there is nothing here that the message body doesn't already
+        say, which is exactly the test the reply-quote rule applies.
+
+        A tombstone reports none. Its text is gone, so a highlight would have
+        nothing to highlight, and "who was named in a message that no longer
+        exists" isn't a question a deleted message should still answer.
+        """
+        if obj.is_deleted:
+            return []
+        return [mention.user_id for mention in obj.mentions.all()]
+
 
 class MessageCreateSerializer(serializers.ModelSerializer):
     """Create a message. ``sender`` and ``conversation`` are set in the view
@@ -581,6 +614,12 @@ class MessageCreateSerializer(serializers.ModelSerializer):
     reply_to_id = serializers.IntegerField(
         required=False, allow_null=True, write_only=True
     )
+    mention_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        write_only=True,
+        max_length=MESSAGE_MENTIONS_MAX,
+    )
     attachments = serializers.ListField(
         child=serializers.FileField(),
         required=False,
@@ -619,6 +658,7 @@ class MessageCreateSerializer(serializers.ModelSerializer):
             "text",
             "created_at",
             "reply_to_id",
+            "mention_ids",
             "attachments",
             "attachment_thumbnails",
             "attachment_widths",
@@ -628,6 +668,49 @@ class MessageCreateSerializer(serializers.ModelSerializer):
 
     def validate_text(self, value):
         return value.strip()
+
+    def validate_mention_ids(self, value):
+        """🔒 Only people who are actually in the room may be named.
+
+        The check is against ``mentionable_ids`` — the conversation's *active*
+        participants, supplied by the view for the same reason
+        ``visible_messages`` is: the membership rules live in ``views.py`` and a
+        second copy here would drift from them.
+
+        It matters because a mention is the one thing in messaging that beats
+        mute. Accepting an arbitrary id would turn this field into a way to buzz
+        someone's phone about a conversation they aren't part of — a stranger
+        push, which is precisely what the clique invariant exists to make
+        impossible. A pending member is excluded too: they can't read a line of
+        the thread yet, so naming them would announce something the app would
+        then refuse to show them.
+
+        Duplicates are collapsed rather than rejected. Naming someone twice in
+        one message is one mention of them, and it's the sort of thing a client
+        does by accident with no user intent behind it worth erroring over.
+        """
+        if not value:
+            return []
+        mentionable = self.context.get("mentionable_ids")
+        if mentionable is None:
+            # A caller that didn't supply the participant set can't be allowed to
+            # fall through to unchecked mentions — the same fail-loudly rule
+            # ``reply_to_id`` follows, and for a closely related reason.
+            raise serializers.ValidationError("Mentions aren't available here.")
+        # Order-preserving dedupe: the ids are a client's reading of its own
+        # composer, so keeping their order keeps the stored rows in the order the
+        # names appear, which is the least surprising thing for anything that
+        # later reads them back.
+        seen = []
+        for user_id in value:
+            if user_id not in seen:
+                seen.append(user_id)
+        unknown = [user_id for user_id in seen if user_id not in mentionable]
+        if unknown:
+            raise serializers.ValidationError(
+                "You can only mention people in this conversation."
+            )
+        return seen
 
     def validate_attachments(self, value):
         return self._check_sizes(value, MESSAGE_ATTACHMENT_MAX_BYTES, "photo")

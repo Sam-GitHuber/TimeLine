@@ -2779,3 +2779,105 @@ it('offers no attach button while editing a message', async () => {
 
   expect(screen.queryByLabelText('Add a photo')).toBeNull();
 });
+
+/**
+ * @mentions (Phase 9b M8). Three things worth pinning at screen level: the
+ * picker appears while you're typing an `@`, choosing someone puts their whole
+ * name in and sends their **id**, and a name that got deleted before you hit
+ * send isn't sent at all. Everything about *matching* is a string question and
+ * lives in `mentions.test.ts`.
+ */
+function groupWithMentions(messages: Message[] = []) {
+  serve({
+    conversation: detail({
+      kind: 'group',
+      other: null,
+      title: 'Hikers',
+      participants: [
+        { ...ADA, status: 'active' },
+        { ...GRACE, status: 'active' },
+        { id: ME.pk, display_name: ME.display_name, avatar_thumb: null, status: 'active' },
+      ],
+    }),
+    messages,
+  });
+}
+
+it('offers people to mention and sends the chosen one as an id', async () => {
+  groupWithMentions();
+  await renderScreen();
+
+  const input = await screen.findByLabelText('Message');
+  await fireEvent.changeText(input, 'can @ad');
+
+  // The picker is a strip above the composer, not a modal: you're still writing.
+  await fireEvent.press(await screen.findByLabelText('Mention Ada Lovelace'));
+  // The half-typed query is replaced by the whole name, so the text says who
+  // you meant even for a client that can't resolve the id.
+  expect(screen.getByLabelText('Message').props.value).toBe('can @Ada Lovelace ');
+
+  await fireEvent.changeText(
+    screen.getByLabelText('Message'),
+    'can @Ada Lovelace bring the map?'
+  );
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  await waitFor(() => {
+    const send = mockFetch.mock.calls.find(
+      ([url, init]: [string, { method?: string; body?: string }]) =>
+        url.includes('/messages/') && init?.method === 'POST'
+    );
+    expect(JSON.parse(send[1].body).mention_ids).toEqual([ADA.id]);
+  });
+});
+
+it('does not name someone whose name was deleted before sending', async () => {
+  // Picked, then thought better of it. Sending the id anyway would buzz a muted
+  // thread about a message that doesn't mention her — the app talking behind
+  // your back.
+  groupWithMentions();
+  await renderScreen();
+
+  const input = await screen.findByLabelText('Message');
+  await fireEvent.changeText(input, '@ad');
+  await fireEvent.press(await screen.findByLabelText('Mention Ada Lovelace'));
+  await fireEvent.changeText(screen.getByLabelText('Message'), 'never mind');
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  await waitFor(() => {
+    const send = mockFetch.mock.calls.find(
+      ([url, init]: [string, { method?: string; body?: string }]) =>
+        url.includes('/messages/') && init?.method === 'POST'
+    );
+    expect(JSON.parse(send[1].body).mention_ids).toBeUndefined();
+  });
+});
+
+it('offers no mention picker in a 1:1', async () => {
+  // One person it could mean, so the picker would be ceremony around a word.
+  serve({ conversation: detail({}), messages: [] });
+  await renderScreen();
+
+  await fireEvent.changeText(await screen.findByLabelText('Message'), '@');
+
+  expect(screen.queryByLabelText('Mention Ada Lovelace')).toBeNull();
+});
+
+it('highlights a mention by resolving its id against the participants', async () => {
+  // The server sends bare ids — no names, no faces — so the highlight exists
+  // only because the client can match an id to someone it already knows about.
+  groupWithMentions([
+    message({
+      id: 1,
+      sender: GRACE,
+      text: '@Ada Lovelace can you bring the map?',
+      mentions: [ADA.id],
+    }),
+  ]);
+
+  await renderScreen();
+
+  // The name is its own run inside the bubble, split out of the sentence — which
+  // is what being styled differently means here.
+  expect(await screen.findByText('@Ada Lovelace')).toBeTruthy();
+});

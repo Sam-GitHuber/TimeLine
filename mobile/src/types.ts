@@ -330,6 +330,19 @@ export type Message = {
    * never an attachment to draw beside "Message deleted".
    */
   attachments?: MessageAttachment[];
+  /**
+   * Who this message names with `@` (Phase 9b M8) — **bare user ids**, like
+   * `reply_to`, and for the same reason: a name and a face attached by the
+   * server would be content about a *person*, and the client can resolve an id
+   * against the participants it already holds. (It's also the only shape that
+   * works once the words are ciphertext, since matching an id to the `@Ada` in
+   * the text is then something only the client can do.)
+   *
+   * They're stored as a relation server-side because a mention is what decides
+   * whether a *muted* thread still buzzes someone's phone — see
+   * `messaging.md`. Empty on a tombstone.
+   */
+  mentions?: number[];
 };
 
 /**

@@ -61,6 +61,7 @@ from .models import (
     GroupMembership,
     Message,
     MessageAttachment,
+    MessageMention,
     Notification,
     NotificationPreference,
     Participant,
@@ -403,6 +404,37 @@ def visible_messages_for(convo, user):
             span &= Q(created_at__lt=ended_at)
         window |= span
     return convo.messages.filter(window).select_related("sender")
+
+
+def _mentionable_user_ids(convo, sender):
+    """🔒 Who may be named with ``@`` in ``convo`` (Phase 9b M8).
+
+    The conversation's **active, present** members, minus the sender (naming
+    yourself is a no-op the push path would drop anyway). A ``pending`` member is
+    excluded deliberately: they can't read a line of the thread yet, so a mention
+    would buzz their phone about something the app would then refuse to show
+    them.
+
+    The legacy branch mirrors ``_messages_for_viewer``'s: a direct conversation
+    predating Phase 6a has no ``Participant`` rows, so the other side of the pair
+    is the whole membership. Neither client offers mentions in a 1:1 — there's
+    exactly one person it could mean — but the *rule* has to be complete, because
+    what this returns is what the server will accept.
+    """
+    ids = set(
+        Participant.objects.filter(
+            conversation=convo,
+            status=ACTIVE_P,
+            left_at__isnull=True,
+            user__is_active=True,
+        )
+        .exclude(user=sender)
+        .values_list("user_id", flat=True)
+    )
+    if ids:
+        return ids
+    other = convo.user_b_id if convo.user_a_id == sender.id else convo.user_a_id
+    return {other} if other else set()
 
 
 def _with_reply_counts(visible):
@@ -2459,7 +2491,7 @@ class ConversationMessagesView(generics.ListAPIView):
         # id (see ``MessageSerializer.get_reply_to``), so the quoted row is never
         # fetched at all — cheaper *and* nothing there to leak.
         visible = _messages_for_viewer(convo, self.request.user).prefetch_related(
-            "reactions", "attachments"
+            "reactions", "attachments", "mentions"
         )
         queryset = _with_reply_counts(visible)
 
@@ -2524,10 +2556,16 @@ class ConversationMessagesView(generics.ListAPIView):
         visible = _messages_for_viewer(convo, request.user)
         serializer = MessageCreateSerializer(
             data=request.data,
-            # The sender's own clipped set decides what they may reply to — see
-            # the serializer. Sending it in keeps the clipping rule in this
-            # module, where its four other callers already live.
-            context={"visible_messages": visible},
+            context={
+                # The sender's own clipped set decides what they may reply to —
+                # see the serializer. Sending it in keeps the clipping rule in
+                # this module, where its four other callers already live.
+                "visible_messages": visible,
+                # And who they may *name* (Phase 9b M8), for the same reason:
+                # membership is decided here, so the serializer is handed the
+                # answer rather than working it out a second way.
+                "mentionable_ids": _mentionable_user_ids(convo, request.user),
+            },
         )
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -2567,6 +2605,16 @@ class ConversationMessagesView(generics.ListAPIView):
                     width=width,
                     height=height,
                 )
+            # Mentions (Phase 9b M8). Written *before* the push enqueue below,
+            # which reads them to decide who a muted thread still has to reach —
+            # the ordering inside the transaction is what makes the override
+            # work on the very message that does the mentioning.
+            MessageMention.objects.bulk_create(
+                [
+                    MessageMention(message=message, user_id=user_id)
+                    for user_id in data.get("mention_ids") or []
+                ]
+            )
             # Bump activity so the thread rises to the top of both lists.
             Conversation.objects.filter(pk=convo.pk).update(updated_at=now)
             # Sending implies you've read everything up to now.
