@@ -72,8 +72,11 @@ markup), `@mentions` in a group notify **through a muted thread** unless you tur
 that override off, several messages can be selected for one Copy/Delete, and a
 message push can be **replied to from the notification** (built and unit-tested;
 the on-device pass is the one M8 item still outstanding, since it needs a
-TestFlight build). **M9 (web parity) is next** — and it's the big one: every
-mobile-only feature above lands on the web.
+TestFlight build). **M9 (web parity) is in progress** — the big one: every
+mobile-only feature above lands on the web. It's split into **six PRs, M9a–M9f**,
+each written up in the phase doc to be picked up cold. **M9a is done**: the
+602-line `MessagesDrawer.jsx` is now a shell over `frontend/src/components/messages/`,
+a pure code move with no behaviour change.
 Full plan in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
 — read it before touching messaging. Its milestones are written to be picked up
 cold by a fresh session; follow the "How to use this document" section at the top.
