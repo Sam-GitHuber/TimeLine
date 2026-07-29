@@ -1044,6 +1044,30 @@ describe("Messages drawer — reactions, send state and ticks (Phase 9b M9c)", (
     };
   }
 
+  it("keeps the ⋯ inside the bubble, so the pills line up under it", async () => {
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({
+          id: 3,
+          text: "big news",
+          reactions: [{ emoji: "👍", count: 1, reacted: false }],
+        }),
+      ])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("big news");
+
+    // Beside the bubble the trigger was a flex sibling taking real width, so
+    // every actionable bubble sat pushed in off the panel edge — and the pills,
+    // which hang off the bubble's own edge, stopped lining up under it.
+    const bubble = screen.getByText("big news").closest(".msg-menu-host");
+    expect(bubble).not.toBeNull();
+    expect(
+      within(bubble).getByRole("button", { name: "Message options" })
+    ).toBeInTheDocument();
+  });
+
   it("reacts from the ⋯ menu and shows the pill the server sends back", async () => {
     const user = userEvent.setup();
     api.getMessages.mockResolvedValue(page([msg({ id: 3, text: "big news" })]));

@@ -1489,10 +1489,10 @@ the web (Phase 9b M9c)* and `reactions.md` → *Frontend* are the durable record
 - [x] Ticks show sending/sent/read, and are absent when either party has receipts
       off (the field simply isn't on the payload — don't hide it client-side).
 - [x] `messaging.md` *Frontend* updated; `reactions.md` mentions the web.
-- [x] `messaging.test.jsx` green (53 tests), plus `readReceipts.test.js` ported
-      alongside the module; whole frontend suite 249.
+- [x] `messaging.test.jsx` green (54 tests), plus `readReceipts.test.js` ported
+      alongside the module; whole frontend suite 250.
 
-**Five things M9c settled that the plan above didn't anticipate** — read these
+**Six things M9c settled that the plan above didn't anticipate** — read these
 before M9d, which renders reactions and ticks inside its strand:
 
 1. ⚠️ **Optimistic send made every message animate twice, and the fix has to
@@ -1507,7 +1507,18 @@ before M9d, which renders reactions and ticks inside its strand:
    will need the same answer. Worth knowing generally — an arrival animation and
    an optimistic bubble are a bad pair anywhere the key changes underneath.
 
-2. **The `⋯` menu's portal became a shared component, because the pills need the
+2. **The pills forced the `⋯` back inside the bubble.** M9b put the trigger
+   *beside* the bubble as a flex sibling, which was fine while nothing else hung
+   off a bubble's edge. Pills do, and a trigger taking real width held every
+   actionable bubble in off the panel edge, so the pills stopped lining up under
+   the thing they belong to. It's now absolutely positioned in the bubble's
+   top-right corner. **The cost is one more rule in `index.css`, and it's the
+   same cascade trap M9b recorded, pointing the other way**: the bubble's
+   horizontal padding had to leave Tailwind (`px-3.5` → `.msg-bubble-body`),
+   because where nothing can hover the trigger is permanently visible and the
+   bubble must reserve that corner — and a `@media (hover: none)` rule in
+   `@layer components` can override a component class but never a utility.
+3. **The `⋯` menu's portal became a shared component, because the pills need the
    same one.** M9b's `MenuPanel` was private to `MessageMenu`; the who-reacted
    list off a pill needs identical behaviour (viewport coordinates, close on
    scroll, portal to `<body>`), and the *wrong* thing to reach for is the feed's
@@ -1517,20 +1528,20 @@ before M9d, which renders reactions and ticks inside its strand:
    for anything it anchors. Its `bare` prop exists because both the emoji picker
    and `ReactorsPopover` draw their own frame — a wrapper that also drew one
    gave two borders around one popover.
-3. **The full picker expands the menu panel in place rather than opening beside
+4. **The full picker expands the menu panel in place rather than opening beside
    it.** The app hands over to a separate modal (and has to keep the menu mounted
    while it does, an iOS constraint); the web has no such constraint, and one
    portal means one anchor and one outside-click owner. The panel's measured size
    is a prop, so switching modes re-measures — a menu-sized position under a
    400px picker hangs off the bottom of the window.
-4. **`sendMutation` no longer disables the composer, and the send-error banner
+5. **`sendMutation` no longer disables the composer, and the send-error banner
    under it is gone.** Both were right when the response was the first sign
    anything had happened. Now the bubble is already on screen: blocking would
    re-introduce exactly the lag the outbox removes, and a banner can't say
    *which* of two messages in flight fell over. The failure lives on the bubble.
    `handleSubmit` clears the composer on dispatch — **not** in `onSuccess`, which
    would wipe whatever you'd started typing in the seconds since.
-5. **The conversation detail had to start polling.** It was a one-shot `useQuery`,
+6. **The conversation detail had to start polling.** It was a one-shot `useQuery`,
    which is fine for identity and permissions and useless for read markers: a
    marker fetched on open is older than every message you send afterwards, so the
    second tick would only ever appear after leaving the thread and coming back.

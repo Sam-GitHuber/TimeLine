@@ -109,42 +109,50 @@ export default function MessageBubble({
         </span>
       )}
 
-      <div
-        className={`flex items-end gap-1 ${
-          mine ? "justify-end" : "justify-start"
-        }`}
-      >
-        {/* No menu on a tombstone: there's nothing left to act on. And none on
-            an **unsent** message either — every action it offers (edit, delete,
-            react, report) needs a server id it hasn't got yet. The trigger sits
-            on the far side of the bubble from the panel edge so it never covers
-            the text it belongs to. */}
-        {!message.is_deleted && !unsent && getActions && (
-          <MessageMenu
-            getActions={() => getActions(message)}
-            mine={mine}
-            onReact={onReact}
-            reactedEmojis={
-              new Set(reactions.filter((r) => r.reacted).map((r) => r.emoji))
-            }
-          />
-        )}
+      <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
         {message.is_deleted ? (
-          <span className="rounded-2xl bg-ink/[0.03] px-3.5 py-2 text-sm italic text-ink-faint">
+          <span className="msg-bubble-body rounded-2xl bg-ink/[0.03] py-2 text-sm italic text-ink-faint">
             Message deleted
           </span>
         ) : (
+          // `msg-menu-host` is what makes the corner the menu's: it's the
+          // positioning context, and on an input that can't hover — where the
+          // trigger is permanently visible — it reserves the space so the ⋯
+          // never sits on the words. Applied to every live bubble rather than
+          // only those that currently have a menu, so a bubble doesn't change
+          // width underneath you the moment a send settles.
           <div
-            className={`${status === "failed" ? "opacity-60" : ""} ${
+            className={`msg-menu-host ${status === "failed" ? "opacity-60" : ""} ${
               large
                 ? "max-w-[78%]"
-                : `max-w-[78%] rounded-2xl px-3.5 py-2 ${
+                : `msg-bubble-body max-w-[78%] rounded-2xl py-2 ${
                     mine
                       ? "bg-accent text-white"
                       : "bg-raised text-ink ring-1 ring-line"
                   }`
             }`}
           >
+            {/* Inside the bubble, in its top-right corner. It used to sit
+                *beside* the bubble, which pushed the whole bubble in off the
+                panel edge — and left the reaction pills, which hang off the
+                bubble's own edge, no longer lined up under it. A message's
+                actions belong on the message.
+
+                No menu on a tombstone: there's nothing left to act on. And none
+                on an **unsent** message either — every action it offers (edit,
+                delete, react, report) needs a server id it hasn't got yet. */}
+            {!unsent && getActions && (
+              <MessageMenu
+                getActions={() => getActions(message)}
+                onFill={mine && !large}
+                onReact={onReact}
+                reactedEmojis={
+                  new Set(
+                    reactions.filter((r) => r.reacted).map((r) => r.emoji)
+                  )
+                }
+              />
+            )}
             {/* Photos (Phase 9b M7). **A deliberate stopgap, not the finished
                 treatment** — M9e ports the app's version (a sized bubble that
                 doesn't reflow as it loads, opening in the shared `Lightbox`).

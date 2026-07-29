@@ -29,6 +29,13 @@ const CHAT_QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 // is revealed by the bubble row's `group-hover` — and by `:focus-visible`, so a
 // keyboard reaches every action a mouse can.
 //
+// **It lives in the bubble's top-right corner, not beside the bubble.** Beside
+// it, the trigger was a flex sibling taking real width, so every bubble that
+// could be acted on sat pushed in off the panel edge — and the reaction pills,
+// which hang off the bubble's *own* edge, no longer lined up under it. The
+// corner is also simply where a message's own actions belong. The caller makes
+// the bubble the positioning context (`msg-menu-host`).
+//
 // **The items are data, not JSX** (`messageActions` in ConversationThreadView),
 // for the same reason the app's are: M9d inserts Reply, M9f inserts Select, and
 // a menu built out of conditional JSX would have to be re-read from scratch by
@@ -45,7 +52,13 @@ const CHAT_QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 // page-coordinate portal.
 export default function MessageMenu({
   getActions,
-  mine,
+  /**
+   * True when the trigger sits on your own bubble's accent fill, which needs
+   * light dots on the fill's own colour rather than the ink palette. An
+   * emoji-only message has no fill, so it takes the ink one even when it's
+   * yours.
+   */
+  onFill,
   /**
    * Toggle an emoji on this message. **Omitted when reacting isn't available**
    * — a thread you can no longer send to — and the row is then left out
@@ -89,8 +102,16 @@ export default function MessageMenu({
         // until the bubble is hovered, and always visible on an input that
         // can't hover — a phone browser — where hiding it would make the whole
         // menu an invisible button nobody could find.
-        className={`msg-menu-trigger mb-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep ${
-          mine ? "order-first" : ""
+        //
+        // Absolutely positioned in the bubble's top-right corner, over its own
+        // background rather than transparent: the corner is where a line of
+        // text ends, so an unbacked trigger would have glyphs showing through
+        // the gaps between the dots. Where nothing can hover the bubble reserves
+        // this space (`msg-menu-host`), so the two never actually overlap.
+        className={`msg-menu-trigger absolute right-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full transition ${
+          onFill
+            ? "bg-accent text-white/70 hover:bg-white/25 hover:text-white"
+            : "bg-raised text-ink-faint hover:bg-accent-tint hover:text-accent-deep"
         }`}
       >
         <svg

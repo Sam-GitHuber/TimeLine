@@ -1164,6 +1164,19 @@ reaches every action a mouse can, and it portals to `<body>` like `PostMenu`
 because the transcript is an `overflow-y-auto` scroller that would otherwise clip
 it.
 
+**It sits in the bubble's top-right corner, inside it.** It began as a flex
+sibling *beside* the bubble, which cost real width: every bubble that could be
+acted on sat pushed in off the panel edge, and once M9c hung reaction pills off
+the bubble's own edge the two no longer lined up. The corner is also where a
+message's own actions belong. `msg-menu-host` on the bubble is the positioning
+context, and 🔒 **where nothing can hover it also reserves the corner**
+(`padding-right`), because there the trigger is permanently visible and would
+otherwise sit on the end of the first line for good. That padding lives in
+`index.css` for the same cascade reason the visibility rules do — a
+`@media (hover: none)` rule in `@layer components` can override
+`.msg-bubble-body`, but could never override a `px-3.5` utility. Both halves in
+CSS, or neither works.
+
 ⚠️ **It positions in *viewport* coordinates (`position: fixed`), unlike
 `PostMenu`, and closes on any scroll.** `PostMenu` is anchored to a post in the
 normal page flow, so a document-positioned portal scrolls along with it. This
@@ -1249,6 +1262,12 @@ that can only be cheerful makes you type a whole message to say "oh no") with a
 screen fighting over the same outside-click. Reacting is dropped entirely — row
 and all — in a thread you can no longer send to, because a reaction is content
 everyone sees and the server 403s it exactly as it does a message.
+
+Pills sit on the bubble's lower edge on its near side — **which is what moved the
+`⋯` inside the bubble.** Beside it, the trigger took real width and held the
+bubble in off the panel edge, so the pills hanging off the bubble's own edge no
+longer lined up under it; see the transcript section above for where it went and
+what that cost in CSS.
 
 🔒 **A pill has one gesture: it opens "who reacted", it never toggles.** That's a
 deliberate departure from the feed's chips, and the reasoning is
