@@ -4,7 +4,7 @@
  * Mirrors the web app's Vitest + RTL setup so the mental model carries over.
  * There is deliberately **no Detox/Maestro E2E suite**: it would mean a second
  * tool, simulator infrastructure in CI, and a well-known flakiness tax that
- * isn't worth it at this scale (docs/phases/phase-9-iphone-app.md).
+ * isn't worth it at this scale (docs/reference/mobile-app.md).
  */
 
 module.exports = {

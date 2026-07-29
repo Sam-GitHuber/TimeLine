@@ -15,12 +15,15 @@ content was distilled into these files; the phase-by-phase history lives in git.
 | [reactions.md](reactions.md) | Emoji reactions on posts/comments/replies and their per-viewer pruning |
 | [notifications.md](notifications.md) | The unified activity centre: the `Notification` model, three read-states, per-type preferences, event generation, and the push-ready payload |
 | [events.md](events.md) | Group events + planning calendar: advisory date/time/location/custom polls, the organiser-anchored connection gate (complete counts, gated names), RSVPs, the forward-mirror calendar + month grid, and the five event notification kinds |
+| [mobile-app.md](mobile-app.md) | The Expo/React Native app: repo layout, running it, tests + CI, the design translation, the React Native traps that cost real time, and the unbuilt OTA plan |
 
 **Not here (kept as their own topic docs):**
 
 - [`../SHARED.md`](../SHARED.md) — mission, principles, tech stack, roadmap, repo
   conventions, codebase layout. Read this first.
 - [`../design-system.md`](../design-system.md) — the "living line" design system.
+- [`../mobile-release.md`](../mobile-release.md) — how to build and ship an app
+  version (EAS, TestFlight). Read it before any app release.
 - [`../deploy.md`](../deploy.md) — the home-server production runbook **and** the
   "why it's built this way" for ops (Caddy, DDNS, continuous deploy, security
   hardening, cost).
@@ -28,5 +31,5 @@ content was distilled into these files; the phase-by-phase history lives in git.
   tested restore.
 
 **Future work** still lives phase-by-phase in [`../phases/`](../phases/) — those
-are forward-looking plans (9 iPhone app → 12 open-source/funding), not
-reference. When one is built, distil it into a topic doc here and delete the plan.
+are forward-looking plans (10 Android → 13 short video clips), not reference. When
+one is built, distil it into a topic doc here and delete the plan.

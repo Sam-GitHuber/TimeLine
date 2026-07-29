@@ -3,7 +3,7 @@
  * `frontend/src/utils.js` (the `formatEvent*` / `parseEventDate` helpers).
  *
  * **This is a deliberate copy, not an import** — same reasoning as `utils.ts`:
- * the repo-layout decision in docs/phases/phase-9-iphone-app.md rejected a
+ * the repo-layout decision in docs/reference/mobile-app.md rejected a
  * shared web/mobile package. **If you fix a bug here, fix it in
  * `frontend/src/utils.js` too**, or an event's "when" reads differently on
  * phone and web.

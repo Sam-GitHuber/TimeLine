@@ -2051,10 +2051,86 @@ is why `PrivacyPage.jsx`'s wording — messages are plaintext, not end-to-end
 encrypted, accessible to the operator where necessary — **stays as it is until the
 encryption actually ships**.
 
-**E2E is a stated long-term goal** but a large, separate undertaking (the server
-could then never read messages, so previews/search/web-reading move client-side;
-it needs client-managed per-device keys, key exchange/verification, and
-multi-device sync — best on a proven protocol like libsignal, once the phone apps
-exist). Practical interim steps: TLS in transit (done), the locked-down admin
-(done, above), and possibly encryption-at-rest for the messages table — a modest
-improvement, not a substitute, since the key would live on the same box.
+**E2E is a stated long-term goal** but a large, separate undertaking — comparable
+in size to the entire iPhone app, and the highest-risk work in the project,
+because the failure modes are *permanently unreadable messages* and *a false sense
+of security*, both worse than the status quo. The server could then never read
+messages, so previews/search/web-reading move client-side; it needs per-device
+keys, key exchange and verification, multi-device sync, group key rotation on
+every membership change (and the clique state machine churns membership a *lot*),
+and an answer for the web client that doesn't amount to "trust the server that
+serves you the JavaScript". Best built on a proven protocol like libsignal.
+Sketched as [`../phases/phase-9c-e2e-encryption.md`](../phases/phase-9c-e2e-encryption.md);
+flesh it out and confirm it before starting, per the repo convention.
+
+**Encryption at rest for the message column: a modest, honest improvement, not a
+priority.** Off-box backups are *already* encrypted before they leave the house
+(`deploy/backup.sh`, rclone `crypt`), so the headline benefit is banked. Column
+encryption would additionally cover locally staged dumps, direct `psql` access and
+a stolen disk — but the key would live in the environment **on the same box**, so
+anyone who can read the database can almost certainly read the key. It also costs
+a non-additive migration (rewriting every row) and makes key loss equal permanent
+message loss.
+
+### Three things in the current design are shaped by E2E being the goal
+
+Deciding E2E now rather than later stopped us building things we'd have to
+demolish. **Don't undo these for convenience:**
+
+1. **A reply quote is a reference, never embedded text.** A reply serializes its
+   target as a bare `{ id }` — not the text, not even the author; both come from
+   the client's own copy or a fetch through the interval-clipped messages
+   endpoint, never from anything the server attached to the reply. Under E2E the
+   server *couldn't* embed quote text, and refusing to embed it now also removes
+   an interval-clipping leak entirely, because there's no server-side text to
+   leak. See *🔒 The visibility rule* above for the exact line.
+2. **Photos are processed on the client, not the server.** Under E2E the server
+   stores opaque bytes and cannot EXIF-strip or downscale them, so building on the
+   server-side `api/imaging.py` path would mean tearing it out later. The server
+   still enforces byte-size and count limits, which work fine on opaque blobs. See
+   *🔒 The photo is processed on the client* above.
+3. **Reactions stay server-side plaintext — a knowing exception.** Encrypting them
+   would kill server-side aggregation for very little gain: a bare emoji, detached
+   from the message it's on, reveals close to nothing. A deliberate carve-out, not
+   an oversight.
+
+Two things need no change at all: **read receipts are metadata** and survive E2E
+untouched, and **push bodies already never quote message text**.
+
+## What messaging deliberately doesn't have
+
+Stated explicitly, because "as good as the big messengers" is otherwise unbounded.
+These are decisions, not gaps — reopen one only with a reason.
+
+| Not built | Why |
+| --- | --- |
+| **Typing indicators / "online" / "last seen"** | Presence is a surveillance feature with a much worse value-to-creepiness ratio than read receipts, and on polling it needs a write per keystroke-ish plus a poll to read it. Revisit only alongside real-time. |
+| **Forwarding** | It's the mechanic that makes chain messages and misinformation move. Nobody in a friends-and-family app needs one-tap broadcast; copy and paste still exists. |
+| **Ephemeral broadcast ("stories"/"status")** | A different product. We have a timeline. |
+| **Disappearing messages** | Sounds privacy-first, isn't: it implies a deletion guarantee we can't make (the server reads plaintext, backups exist, screenshots exist). Promising it would be dishonest. |
+| **Starred messages, archive, chat wallpaper** | Real features, low value at family scale. Cheap to add later if anyone asks. |
+| **Link previews** | The server would fetch every URL anyone pastes — a tracking leak and an SSRF surface, for a thumbnail. |
+| **Voice notes, calls** | Separate phases with real infra (media pipeline, WebRTC). |
+| **Server-side message search** | Dies under E2E anyway. Don't build toward it. |
+| **Stickers / GIF search** | GIF search means a third-party API on every keystroke — a tracker in the composer, straight against the privacy principle. Emoji and photos cover the need. |
+| **Video in chat** | Not "never" — it's **Phase 13** (`../phases/phase-13-video-clips.md`), which builds the whole video pipeline. The attachment model was shaped to let a second media type slot in. |
+| **A "delivered" tick** | The category shows sending → sent → **delivered** → read; we do three states, not four. Delivery means a device acknowledged receipt, and with polling + push nothing reports that. Faking it from the push receipt would be a lie with a tick on it. See *Ticks: three states, not four*. |
+
+## Open questions
+
+Settled if and when someone actually asks, not before.
+
+- **Edit window length.** 15 minutes matches the common default and is a guess for
+  us. One constant; revisit after real use.
+- **Delete for me vs delete for everyone.** The category generally has both; we
+  have only "delete for everyone" (soft-delete + tombstone). Two-mode deletion is
+  more concept than it's worth at family scale unless someone asks.
+- **Adaptive polling.** Only if the cadence feels laggy in real use — see
+  *Real-time = polling* above.
+- **Pinned chats.** Deliberately left out: it's user-controlled ordering, not an
+  algorithm, so it doesn't offend the principles — it's just low value until
+  someone has enough conversations to lose one.
+- **Search within a conversation.** Client-side over loaded messages is possible
+  and survives E2E; server-side doesn't.
+- **Per-person read state in a group** ("message info"). The data exists; it's a
+  small screen if anyone asks for it.

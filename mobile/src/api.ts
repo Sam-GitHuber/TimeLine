@@ -1,7 +1,7 @@
 /**
  * The app's one HTTP client. Written fresh for Bearer auth rather than shared
  * with `frontend/src/api.js`, which is cookie + CSRF based — see the repo-layout
- * decision in docs/phases/phase-9-iphone-app.md.
+ * decision in docs/reference/mobile-app.md.
  *
  * What this file owns:
  *   - attaching `Authorization: Bearer <access>` to every request;

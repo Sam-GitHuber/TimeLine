@@ -2,7 +2,7 @@
  * Timestamp helpers, ported from `frontend/src/utils.js`.
  *
  * **This is a deliberate copy, not an import.** The repo-layout decision in
- * docs/phases/phase-9-iphone-app.md weighed extracting a shared web/mobile
+ * docs/reference/mobile-app.md weighed extracting a shared web/mobile
  * package for ~1k lines and rejected it: npm workspaces, a build step, and Metro
  * config is real permanent complexity for two consumers. These functions are the
  * bulk of what's genuinely shareable.
