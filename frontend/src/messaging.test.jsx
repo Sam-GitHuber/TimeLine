@@ -8,6 +8,7 @@ import { MessagingProvider } from "./messaging.jsx";
 import { clearDrafts } from "./drafts.js";
 import { clearOutbox } from "./outbox.js";
 import { clearQuotes } from "./quotes.js";
+import { prepareChatPhoto } from "./chatPhotos.js";
 import NewChatPicker from "./components/NewChatPicker.jsx";
 
 // Phase 5 messaging is a companion drawer (not a route): the nav "Messages"
@@ -40,6 +41,10 @@ vi.mock("./api.js", () => ({
     deleteMessage: vi.fn(),
     reportContent: vi.fn(),
     markConversationRead: vi.fn(),
+    markConversationUnread: vi.fn(),
+    renameConversation: vi.fn(),
+    setConversationMuted: vi.fn(),
+    getConversationMedia: vi.fn(),
     getUnreadMessageCount: vi.fn(),
     getGroupInvites: vi.fn(),
     blockUser: vi.fn(),
@@ -60,6 +65,29 @@ vi.mock("./api.js", () => ({
   NOTIFICATIONS_POLL_MS: 1_000_000,
   MESSAGE_EDIT_WINDOW_MS: 15 * 60 * 1000,
 }));
+
+/**
+ * The photo pipeline is stubbed, because jsdom has no image decoder and no
+ * `canvas.toBlob` — there is nothing for `prepareChatPhoto` to do in here and
+ * nothing it could prove. What *is* testable is that the drawer runs a picked
+ * file through it and sends the result rather than the raw file, which is the
+ * privacy-relevant half (see `chatPhotos.js`), and that's what the tests below
+ * assert. Its own arithmetic is unit-tested in `chatPhotos.test.js`, and the
+ * EXIF strip needs a real browser and a real photo — the one check M9e's
+ * "Done when" leaves to a human.
+ */
+vi.mock("./chatPhotos.js", () => ({
+  prepareChatPhoto: vi.fn(),
+}));
+
+/** What the stub hands back — the shape `api.sendMessage` expects. */
+const preparedPhoto = {
+  photo: new File(["photo"], "photo-1.jpg", { type: "image/jpeg" }),
+  thumbnail: new File(["thumb"], "thumb-1.jpg", { type: "image/jpeg" }),
+  width: 1200,
+  height: 900,
+  previewUrl: "blob:preview",
+};
 
 function page(results, next = null) {
   return { results, count: results.length, next };
@@ -142,6 +170,18 @@ function groupConvoDetail(overrides = {}) {
 
 async function openDrawer(user) {
   await user.click(await screen.findByRole("button", { name: /Messages/ }));
+}
+
+/** The thread header's ⋯ (Phase 9b M9e) — Details · Mute · Add · Leave. */
+async function openHeaderMenu(user) {
+  await user.click(
+    screen.getByRole("button", { name: "Conversation options" })
+  );
+}
+
+/** A conversation row's ⋯ (M9e) — Mark read/unread · Mute · Leave. */
+async function openRowMenu(user, name) {
+  await user.click(screen.getByRole("button", { name: `Options for ${name}` }));
 }
 
 beforeEach(() => {
@@ -415,7 +455,9 @@ describe("Messages drawer — thread", () => {
 
     renderAt("/");
     await openDrawer(user);
-    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+    await user.click(await screen.findByRole("button", {
+      name: /Open conversation with Priya/,
+    }));
 
     expect(await screen.findByText("hey there")).toBeInTheDocument();
     expect(screen.getByText("hello!")).toBeInTheDocument();
@@ -438,7 +480,9 @@ describe("Messages drawer — thread", () => {
 
     renderAt("/");
     await openDrawer(user);
-    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+    await user.click(await screen.findByRole("button", {
+      name: /Open conversation with Priya/,
+    }));
 
     const box = await screen.findByPlaceholderText(/write a message/i);
     await user.type(box, "yo");
@@ -447,7 +491,7 @@ describe("Messages drawer — thread", () => {
     // The explicit `null` is "not a reply" (Phase 9b M9d) — the transcript's
     // composer never sends one; replying goes through the strand.
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "yo", null)
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "yo", null, null)
     );
   });
 
@@ -458,7 +502,9 @@ describe("Messages drawer — thread", () => {
 
     renderAt("/");
     await openDrawer(user);
-    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+    await user.click(await screen.findByRole("button", {
+      name: /Open conversation with Priya/,
+    }));
 
     expect(await screen.findByText(/no longer connected/i)).toBeInTheDocument();
     expect(
@@ -508,7 +554,9 @@ describe("Messages drawer — thread", () => {
 
     renderAt("/");
     await openDrawer(user);
-    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+    await user.click(await screen.findByRole("button", {
+      name: /Open conversation with Priya/,
+    }));
 
     expect(await screen.findByText("Message deleted")).toBeInTheDocument();
   });
@@ -543,6 +591,7 @@ describe("Messages drawer — group thread", () => {
   });
 
   it("shows the title, participant avatars, and composer for an active group chat", async () => {
+    const user = userEvent.setup();
     api.getConversation.mockResolvedValue(groupConvoDetail());
     api.getMessages.mockResolvedValue(page([]));
 
@@ -552,10 +601,14 @@ describe("Messages drawer — group thread", () => {
     expect(
       await screen.findByPlaceholderText(/write a message/i)
     ).toBeInTheDocument();
+    // Since M9e the header is identity + ⋯ — Add and Leave live in the menu,
+    // and Details opens the info panel that holds the rest.
+    await openHeaderMenu(user);
     expect(
       screen.getByRole("button", { name: /add people/i })
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /leave/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Details" })).toBeInTheDocument();
   });
 
   it("attributes each incoming sender, collapsing runs and leaving your own bubbles unlabelled", async () => {
@@ -621,7 +674,13 @@ describe("Messages drawer — group thread", () => {
     renderAt("/messages/11");
     await screen.findByText("Book Club");
 
+    // Leaving confirms first now that it's a menu item (M9e) — a one-click
+    // "leave" sitting in a list of ordinary actions is too easy to hit.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await openHeaderMenu(user);
     await user.click(screen.getByRole("button", { name: /leave/i }));
+    expect(confirm).toHaveBeenCalled();
+    confirm.mockRestore();
 
     await waitFor(() => expect(api.leaveConversation).toHaveBeenCalledWith(11));
     expect(await screen.findByText(/No conversations yet/i)).toBeInTheDocument();
@@ -639,6 +698,7 @@ describe("Messages drawer — group thread", () => {
     renderAt("/messages/11");
     await screen.findByText("Book Club");
 
+    await openHeaderMenu(user);
     await user.click(screen.getByRole("button", { name: /add people/i }));
 
     await user.click(await screen.findByRole("checkbox", { name: "Nadia" }));
@@ -840,14 +900,18 @@ describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
 
     renderAt("/");
     await openDrawer(user);
-    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+    await user.click(await screen.findByRole("button", {
+      name: /Open conversation with Priya/,
+    }));
 
     await user.type(
       await screen.findByPlaceholderText(/write a message/i),
       "half a thought"
     );
     await user.click(screen.getByRole("button", { name: /back/i }));
-    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+    await user.click(await screen.findByRole("button", {
+      name: /Open conversation with Priya/,
+    }));
 
     expect(await screen.findByPlaceholderText(/write a message/i)).toHaveValue(
       "half a thought"
@@ -1296,8 +1360,12 @@ describe("Messages drawer — reactions, send state and ticks (Phase 9b M9c)", (
     // change, so held in the view a failed send — the one message this exists
     // to keep — would be thrown away by the most ordinary click there is.
     await user.click(screen.getByRole("button", { name: /back/i }));
-    await screen.findByRole("button", { name: /Priya/ });
-    await user.click(screen.getByRole("button", { name: /Priya/ }));
+    await screen.findByRole("button", {
+      name: /Open conversation with Priya/,
+    });
+    await user.click(screen.getByRole("button", {
+      name: /Open conversation with Priya/,
+    }));
 
     expect(await screen.findByText("don’t lose me")).toBeInTheDocument();
     expect(screen.getByText("Not sent")).toBeInTheDocument();
@@ -1480,7 +1548,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     await user.click(within(strand()).getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "yes!", 5)
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "yes!", 5, null)
     );
     // And it lands in the strand you sent it from, not only in the transcript.
     expect(await within(strand()).findByText("yes!")).toBeInTheDocument();
@@ -1540,7 +1608,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     await user.type(within(strand()).getByLabelText("Reply to thread"), "the usual");
     await user.click(within(strand()).getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "the usual", 6)
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "the usual", 6, null)
     );
   });
 
@@ -1684,7 +1752,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // ⚠️ Still a reply. The `replyToId` is kept on the outbox entry precisely so
     // a retry can't quietly turn a failed reply into an ordinary message.
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenLastCalledWith(7, "yes!", 5)
+      expect(api.sendMessage).toHaveBeenLastCalledWith(7, "yes!", 5, null)
     );
   });
 
@@ -1824,6 +1892,769 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // deliberately not a focus trap, so the next Tab would start at the top of
     // the page, outside the panel entirely.
     expect(screen.getByPlaceholderText(/write a message/i)).toHaveFocus();
+  });
+});
+
+// Phase 9b M9e — photos, the conversation list's search and row actions, and
+// the info panel. The web's half of M7 + M6.
+describe("Messages drawer — photos (Phase 9b M9e)", () => {
+  function photoMessage(overrides = {}) {
+    return {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "",
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+      attachments: [
+        {
+          id: 44,
+          kind: "image",
+          url: "/media/messages/full.jpg",
+          thumbnail: "/media/messages/thumb.jpg",
+          width: 1200,
+          height: 900,
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  it("runs a picked file through the client-side pipeline and sends what comes out", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    api.sendMessage.mockResolvedValue(photoMessage({ id: 9, text: "look" }));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+
+    const file = new File(["raw"], "IMG_4686.jpg", { type: "image/jpeg" });
+    await user.upload(screen.getByTestId("chat-photo-input"), file);
+
+    // The preview appears once the photo is prepared, and the attach button
+    // closes: one attachment per message, which is the server's cap.
+    expect(await screen.findByAltText("Photo to send")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add a photo" })).toBeDisabled();
+
+    await user.type(screen.getByPlaceholderText(/write a message/i), "look");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // 🔒 The *prepared* photo, never the file off the input. The server doesn't
+    // open a chat attachment, so this pass is the only thing that strips the
+    // EXIF — including the GPS a phone stamps on every shot.
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "look", null, preparedPhoto)
+    );
+    expect(prepareChatPhoto).toHaveBeenCalledWith(file);
+    // And the composer is empty again — the photo went with the message rather
+    // than staying queued for the next one.
+    await waitFor(() =>
+      expect(screen.queryByAltText("Photo to send")).toBeNull()
+    );
+  });
+
+  it("sends a photo with no caption at all", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    api.sendMessage.mockResolvedValue(photoMessage({ id: 9 }));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+
+    // Send is dead with an empty composer and nothing attached…
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+
+    // …and live once a photo is attached: a picture with no words is an
+    // ordinary message, and the server agrees.
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "", null, preparedPhoto)
+    );
+  });
+
+  it("takes a queued photo back off the composer", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+
+    await user.click(screen.getByRole("button", { name: "Remove photo" }));
+
+    expect(screen.queryByAltText("Photo to send")).toBeNull();
+    expect(screen.getByRole("button", { name: "Add a photo" })).toBeEnabled();
+  });
+
+  it("frees an abandoned photo's preview when the thread goes away", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversations.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    expect(revoke).not.toHaveBeenCalled();
+
+    // Back to the list unmounts the thread with the photo still queued. An
+    // object URL is a document-lifetime reference, so left alone every
+    // abandoned pick pins its thumbnail's bytes until the tab closes.
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    await waitFor(() =>
+      expect(revoke).toHaveBeenCalledWith(preparedPhoto.previewUrl)
+    );
+    revoke.mockRestore();
+  });
+
+  it("does not free the preview when the photo is handed to the outbox", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    // Left in flight, so the entry — and the URL its bubble is drawing — stays.
+    api.sendMessage.mockReturnValue(new Promise(() => {}));
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // ⚠️ Ownership passes to the outbox on send, and revoking here would blank
+    // the in-flight bubble now drawing it — which is why the composer clears its
+    // state without revoking, and why the unmount cleanup is keyed on nothing.
+    await waitFor(() =>
+      expect(screen.queryByAltText("Photo to send")).toBeNull()
+    );
+    expect(revoke).not.toHaveBeenCalled();
+    revoke.mockRestore();
+  });
+
+  it("says so when a photo can't be prepared, and sends nothing", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockRejectedValue(new Error("nope"));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "broken.jpg", { type: "image/jpeg" })
+    );
+
+    // It never reached the outbox, so there's no bubble to fail on — the
+    // composer is the only place left to say it.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn’t use that photo/i
+    );
+    expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("draws the thumbnail at the size the sender declared, and opens it full-size", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([photoMessage()]));
+
+    renderAt("/messages/7");
+
+    const thumb = await screen.findByAltText("Photo");
+    expect(thumb).toHaveAttribute("src", "/media/messages/thumb.jpg");
+    // 1200×900 fitted into the bubble's 224px of content width — the point being
+    // that the box exists *before* the image loads, so a photo arriving while
+    // you're scrolled back doesn't shove what you were reading.
+    expect(thumb).toHaveAttribute("width", "224");
+    expect(thumb).toHaveAttribute("height", "168");
+
+    await user.click(screen.getByRole("button", { name: "Open photo" }));
+
+    // The shared viewer, on the full-size file rather than the thumbnail.
+    const viewer = await screen.findByRole("dialog", { name: "Photo viewer" });
+    expect(within(viewer).getByRole("img")).toHaveAttribute(
+      "src",
+      "/media/messages/full.jpg"
+    );
+  });
+
+  it("retries a failed photo send *with the photo*, not the caption alone", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    api.sendMessage.mockRejectedValue(new Error("offline"));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    await user.type(screen.getByPlaceholderText(/write a message/i), "look");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Not sent")).toBeInTheDocument();
+
+    api.sendMessage.mockResolvedValue(photoMessage({ id: 9, text: "look" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    // ⚠️ The photo comes off the *entry*, not recomputed — a retry that dropped
+    // it would send the caption alone and silently lose the picture, which is
+    // the one thing this whole path exists to prevent. (The same reason a
+    // retried reply keeps its `replyToId`.)
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenLastCalledWith(
+        7,
+        "look",
+        null,
+        preparedPhoto
+      )
+    );
+  });
+
+  it("shows the server's reason on a send it will never accept", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    api.sendMessage.mockRejectedValue(
+      new Error("Each photo must be under 4 MB.")
+    );
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "huge.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // Beside "Not sent", never instead of it: a refusal will fail again however
+    // often it's retried, so without the reason Retry is a button that can only
+    // disappoint.
+    expect(await screen.findByText("Not sent")).toBeInTheDocument();
+    expect(
+      screen.getByText("Each photo must be under 4 MB.")
+    ).toBeInTheDocument();
+  });
+
+  it("won't let a queued photo turn an emptied edit into a PATCH", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 5,
+          sender: { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
+          text: "teh plan",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+
+    renderAt("/messages/7");
+    await screen.findByText("teh plan");
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByPlaceholderText(/edit your message/i));
+
+    // ⚠️ The queued photo made `!value` false, so the send-side guard let an
+    // empty edit through — a `PATCH` the server answers "A message can't be
+    // empty". A `PATCH` can't carry an attachment, so the composer's photo has
+    // nothing to do with whether an edit has something to say.
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.keyboard("{Enter}");
+    expect(api.editMessage).not.toHaveBeenCalled();
+  });
+
+  it("lets a photo message's caption be edited away, as the server does", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        photoMessage({
+          id: 5,
+          text: "look",
+          sender: { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
+        }),
+      ])
+    );
+    api.editMessage.mockResolvedValue({});
+
+    renderAt("/messages/7");
+    await screen.findByText("look");
+
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByPlaceholderText(/edit your message/i));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    // A photo with no caption is an ordinary message, so editing one down to
+    // nothing is legitimate — `MessageSerializer.validate` allows exactly this
+    // via `has_attachments`, and the composer mustn't be stricter than it.
+    await waitFor(() => expect(api.editMessage).toHaveBeenCalledWith(7, 5, ""));
+  });
+
+  it("closes the photo on Escape without taking the drawer with it", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([photoMessage()]));
+
+    renderAt("/messages/7");
+    await screen.findByAltText("Photo");
+    await user.click(screen.getByRole("button", { name: "Open photo" }));
+    await screen.findByRole("dialog", { name: "Photo viewer" });
+
+    await user.keyboard("{Escape}");
+
+    // ⚠️ Both listen on `document`, so before M9e made the viewer capture the
+    // key, one press shut the photo *and* the panel behind it — dumping you back
+    // on the timeline for wanting to stop looking at a picture.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Photo viewer" })).toBeNull()
+    );
+    expect(screen.getByRole("dialog", { name: "Messages" })).toBeInTheDocument();
+  });
+
+  it("previews a captionless photo in the list as “📷 Photo”", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      page([
+        convoRow({
+          last_message: {
+            text: "",
+            is_deleted: false,
+            sender_id: 2,
+            attachment_count: 1,
+            created_at: new Date().toISOString(),
+          },
+        }),
+      ])
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+
+    // A count, not a rendered string: the phrasing is the client's, and a count
+    // is the one fact about an attachment that survives the server not being
+    // able to see it. Without this the row would be a blank line.
+    expect(await screen.findByText("📷 Photo")).toBeInTheDocument();
+  });
+});
+
+describe("Messages drawer — list search and row actions (Phase 9b M9e)", () => {
+  function manyConversations() {
+    return page([
+      convoRow({ id: 1, other: { id: 21, display_name: "Priya", avatar_thumb: null } }),
+      convoRow({ id: 2, other: { id: 22, display_name: "Sanjay", avatar_thumb: null } }),
+      convoRow({ id: 3, other: { id: 23, display_name: "Amara", avatar_thumb: null } }),
+      convoRow({ id: 4, other: { id: 24, display_name: "Nadia", avatar_thumb: null } }),
+      convoRow({ id: 5, other: { id: 25, display_name: "Tom", avatar_thumb: null } }),
+      convoRow({
+        id: 6,
+        kind: "group",
+        title: "",
+        other: null,
+        participants: [
+          { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
+          { id: 26, display_name: "Rosa", avatar_thumb: null },
+        ],
+      }),
+    ]);
+  }
+
+  it("offers search once the list is long enough, matching names and group members", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(manyConversations());
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    const search = screen.getByRole("searchbox", {
+      name: "Search conversations",
+    });
+    await user.type(search, "sanj");
+    expect(screen.getByText("Sanjay")).toBeInTheDocument();
+    expect(screen.queryByText("Priya")).toBeNull();
+
+    // An *untitled* group is displayed as its members, so it has to be findable
+    // by the name on the screen in front of you.
+    await user.clear(search);
+    await user.type(search, "rosa");
+    expect(screen.getByText("Rosa")).toBeInTheDocument();
+    expect(screen.queryByText("Sanjay")).toBeNull();
+
+    await user.clear(search);
+    await user.type(search, "zzz");
+    expect(screen.getByText(/No conversations match/)).toBeInTheDocument();
+  });
+
+  it("keeps the search field out of a short list", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    // Below six you can see every chat you have, so the box is chrome.
+    expect(
+      screen.queryByRole("searchbox", { name: "Search conversations" })
+    ).toBeNull();
+  });
+
+  it("marks a read thread unread from the row menu", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      page([convoRow({ unread_count: 0 })])
+    );
+    api.markConversationUnread.mockResolvedValue({ unread_count: 1 });
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await openRowMenu(user, "Priya");
+    await user.click(screen.getByRole("button", { name: "Mark unread" }));
+
+    await waitFor(() =>
+      expect(api.markConversationUnread).toHaveBeenCalledWith(7)
+    );
+  });
+
+  it("offers Mark read instead when the thread already has unread", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.markConversationRead.mockResolvedValue({});
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await openRowMenu(user, "Priya");
+    expect(screen.queryByRole("button", { name: "Mark unread" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Mark read" }));
+
+    await waitFor(() =>
+      expect(api.markConversationRead).toHaveBeenCalledWith(7)
+    );
+  });
+
+  it("doesn't offer Mark unread on a thread whose last message is yours", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      page([
+        convoRow({
+          last_message: {
+            text: "on my way",
+            is_deleted: false,
+            sender_id: fakeUser.pk,
+            created_at: new Date().toISOString(),
+          },
+        }),
+      ])
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    // The row carries only `last_message`, so it can't tell "I replied last"
+    // from "I've been talking to myself" — and the second is a 400. An action
+    // that sometimes errors is worse than one offered slightly less often.
+    await openRowMenu(user, "Priya");
+    expect(screen.queryByRole("button", { name: "Mark unread" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Mute" })).toBeInTheDocument();
+  });
+
+  it("mutes from the row, and the row then reads as muted", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValueOnce(page([convoRow()]));
+    api.getConversations.mockResolvedValue(page([convoRow({ muted: true })]));
+    api.setConversationMuted.mockResolvedValue({});
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await openRowMenu(user, "Priya");
+    await user.click(screen.getByRole("button", { name: "Mute" }));
+
+    await waitFor(() =>
+      expect(api.setConversationMuted).toHaveBeenCalledWith(7, true)
+    );
+
+    // The success invalidates the list, so the refetch below is what the row
+    // redraws from — the same round trip a real mute makes.
+    await waitFor(() =>
+      expect(api.getConversations).toHaveBeenCalledTimes(2)
+    );
+
+    // Mute reads as its *state* on the second open, not as an imperative — the
+    // whole risk of muting is forgetting you did.
+    await openRowMenu(user, "Priya");
+    expect(
+      await screen.findByRole("button", { name: "Unmute" })
+    ).toBeInTheDocument();
+  });
+
+  it("clears a failed row action when the next menu opens", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.markConversationRead.mockRejectedValue(new Error("Couldn’t do that."));
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await openRowMenu(user, "Priya");
+    await user.click(screen.getByRole("button", { name: "Mark read" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn’t do that/i
+    );
+
+    // One mutation is shared by every row, so without a reset a single failure
+    // left a red line over the list until some *other* action happened to
+    // succeed — long after it had stopped being true.
+    await openRowMenu(user, "Priya");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("confirms before leaving from the row", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.leaveConversation.mockResolvedValue({});
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await openRowMenu(user, "Priya");
+    await user.click(screen.getByRole("button", { name: "Leave" }));
+
+    // Declined at the prompt: nothing happens at all.
+    expect(confirm).toHaveBeenCalled();
+    expect(api.leaveConversation).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+});
+
+describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
+  async function openInfo(user) {
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: "Details" }));
+  }
+
+  it("lists the participants, badging anyone still pending", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(
+      groupConvoDetail({
+        participants: [
+          { id: fakeUser.pk, display_name: "you", avatar_thumb: null, status: "active" },
+          { id: 2, display_name: "Priya", avatar_thumb: null, status: "active" },
+          { id: 3, display_name: "Sanjay", avatar_thumb: null, status: "pending" },
+        ],
+      })
+    );
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+
+    expect(await screen.findByText("3 people")).toBeInTheDocument();
+    expect(screen.getByText("you (you)")).toBeInTheDocument();
+    // A pending member is waiting on *connections* (the clique invariant), not
+    // ignoring an invitation — so the badge is a fact, not a nudge.
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
+  it("renames a group in place and shows the new name in the thread header", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.renameConversation.mockResolvedValue(
+      groupConvoDetail({ title: "Reading Club" })
+    );
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+
+    await user.click(await screen.findByRole("button", { name: "Rename" }));
+    const field = screen.getByRole("textbox", { name: "Chat name" });
+    await user.clear(field);
+    await user.type(field, "Reading Club");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(api.renameConversation).toHaveBeenCalledWith(11, "Reading Club")
+    );
+    // The response is written straight into the `['conversation', id]` cache the
+    // thread header reads, so the new name is up before any refetch lands —
+    // which is what this asserts: the panel is still showing the *old* mocked
+    // payload from the server's point of view.
+    expect(await screen.findByText("Reading Club")).toBeInTheDocument();
+
+    api.getConversation.mockResolvedValue(
+      groupConvoDetail({ title: "Reading Club" })
+    );
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByText("Reading Club")).toBeInTheDocument();
+  });
+
+  it("offers no rename on a 1:1 — its name is the other person", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: false,
+      bio: "",
+    });
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+
+    expect(await screen.findByText("In this chat")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+    // Block belongs here as much as on a profile: the moment you want to block
+    // someone is usually the moment you're looking at what they sent.
+    expect(
+      await screen.findByRole("button", { name: "Block" })
+    ).toBeInTheDocument();
+  });
+
+  it("shows the chat's photos, newest first, and opens them as a gallery", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue({
+      count: 42,
+      next: null,
+      results: [
+        {
+          id: 2,
+          attachments: [
+            {
+              id: 91,
+              kind: "image",
+              url: "/media/new-full.jpg",
+              thumbnail: "/media/new-thumb.jpg",
+              width: 800,
+              height: 600,
+            },
+          ],
+        },
+        {
+          id: 1,
+          attachments: [
+            {
+              id: 90,
+              kind: "image",
+              url: "/media/old-full.jpg",
+              thumbnail: "/media/old-thumb.jpg",
+              width: 800,
+              height: 600,
+            },
+          ],
+        },
+      ],
+    });
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+
+    // The heading counts what the *chat* holds, not what fits on a page —
+    // telling someone with forty-two photos that they have two, confidently,
+    // would be worse than saying nothing.
+    expect(await screen.findByText("42 photos")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Photo 1 of 2" }));
+    const viewer = await screen.findByRole("dialog", { name: "Photo viewer" });
+    expect(within(viewer).getByRole("img")).toHaveAttribute(
+      "src",
+      "/media/new-full.jpg"
+    );
+    // Here the viewer *is* a gallery — you flip between the chat's photos,
+    // which is what you came to this panel to do.
+    await user.click(within(viewer).getByRole("button", { name: "Next photo" }));
+    expect(within(viewer).getByRole("img")).toHaveAttribute(
+      "src",
+      "/media/old-full.jpg"
+    );
+  });
+
+  it("renders no gallery at all in a chat with no photos", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+
+    // A heading over an empty grid is a feature announcing it has nothing for
+    // you. The section appears the first time a photo is sent, and not before.
+    expect(await screen.findByText("3 people")).toBeInTheDocument();
+    expect(screen.queryByText(/^\d+ photos?$/)).toBeNull();
+  });
+
+  it("keeps “Muted” visible in the thread header", async () => {
+    api.getConversation.mockResolvedValue(convoDetail({ muted: true }));
+    api.getMessages.mockResolvedValue(page([]));
+
+    renderAt("/messages/7");
+
+    // The one thing that stayed beside the name when the header emptied into a
+    // menu: mute is a *state*, and the whole risk of it is forgetting you did.
+    expect(await screen.findByText("Muted")).toBeInTheDocument();
   });
 });
 

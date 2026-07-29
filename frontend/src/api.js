@@ -484,11 +484,59 @@ export const api = {
   // in your membership is rejected exactly like one that doesn't exist. Replies
   // are one level deep: replying to a reply joins that strand rather than
   // nesting, which the server derives — the client never works out a root.
-  sendMessage: (conversationId, text, replyToId = null) =>
-    request(`/api/conversations/${conversationId}/messages/`, {
-      method: "POST",
-      body: { text, ...(replyToId ? { reply_to_id: replyToId } : {}) },
-    }),
+  //
+  /**
+   * `photo` attaches a picture (Phase 9b M9e) and switches the request to
+   * multipart.
+   *
+   * 🔒 **Send only what came out of `prepareChatPhoto`.** The server does *not*
+   * open the file — it can't, because this same path has to work when it's
+   * handed ciphertext — so the resizing and EXIF stripping that helper does is
+   * the *only* processing that happens to a chat photo. Handing the raw `File`
+   * off the input straight to here would ship the photo's GPS coordinates to
+   * everyone in the chat.
+   */
+  sendMessage: (conversationId, text, replyToId = null, photo = null) => {
+    const path = `/api/conversations/${conversationId}/messages/`;
+    if (!photo) {
+      return request(path, {
+        method: "POST",
+        body: { text, ...(replyToId ? { reply_to_id: replyToId } : {}) },
+      });
+    }
+    const form = new FormData();
+    // Blank is legal *with* a photo and only then — a photo with no caption is
+    // an ordinary thing to send, an empty message is not. The server enforces
+    // the same rule; this just doesn't get in its way.
+    form.append("text", text);
+    if (replyToId) form.append("reply_to_id", String(replyToId));
+    // Parallel lists, one entry each. Plural because the server accepts a list
+    // (capped at one for now — `MESSAGE_ATTACHMENTS_MAX`), so allowing several
+    // photos per message later is a server constant rather than a wire change.
+    form.append("attachments", photo.photo);
+    form.append("attachment_thumbnails", photo.thumbnail);
+    // Client-declared, and layout hints only: the bubble reserves space from
+    // them so the transcript doesn't reflow as photos load. The server
+    // bounds-checks them rather than trusting them, because it can't measure the
+    // file itself.
+    form.append("attachment_widths", String(photo.width));
+    form.append("attachment_heights", String(photo.height));
+    return request(path, { method: "POST", body: form });
+  },
+
+  /**
+   * Every photo in this chat, newest first (Phase 9b M9e) — the media gallery on
+   * the info panel.
+   *
+   * Another filter on the messages endpoint rather than a route of its own, for
+   * the third time and the same reason as `thread_root` and `ids`: the gallery
+   * must not be able to show a photo the transcript wouldn't, and the surest way
+   * to guarantee that is for both to be the same interval-clipped queryset.
+   */
+  getConversationMedia: (conversationId) =>
+    request(
+      `/api/conversations/${conversationId}/messages/?media=1&order=desc`
+    ),
 
   // Correct your own message (Phase 9b M9b). The reported problem that started
   // the whole messaging overhaul was that a typo was permanent.
@@ -515,6 +563,45 @@ export const api = {
   // Mark a conversation read up to now, clearing its unread count.
   markConversationRead: (conversationId) =>
     request(`/api/conversations/${conversationId}/read/`, { method: "POST" }),
+
+  /**
+   * Put the badge back on a thread you've read (Phase 9b M9e) — for the people
+   * who use it as a to-do list.
+   *
+   * The server moves your read marker to just behind the newest message you
+   * didn't send, rather than dropping it: with no marker the *whole history*
+   * counts as unread, so a chat you'd read to the end would come back wearing
+   * "99+". It comes back as one, which is what "waiting for you" means here.
+   *
+   * It aims at the newest **visible, incoming, undeleted** message *anywhere* in
+   * the thread, not at the last one — so a chat you replied to marks unread
+   * fine, landing past your own trailing messages. 400 only when there's
+   * genuinely nothing to aim at: an empty thread, or one where every visible
+   * message is yours or a tombstone.
+   *
+   * 🔒 **It also retracts your read receipt** for that message, since ticks and
+   * unread counts are read off the same marker — see messaging.md.
+   */
+  markConversationUnread: (conversationId) =>
+    request(`/api/conversations/${conversationId}/read/`, { method: "DELETE" }),
+
+  /**
+   * Rename a group chat (Phase 9b M9e). Until M6 a title could only be set when
+   * the chat was created, so "Weekend plans" outlived the weekend.
+   *
+   * Any *active* member may — chats have no admin role, and inventing one for a
+   * text field would be the wrong place to start. Group chats only (400 on a
+   * 1:1, whose name is the other person). Blank clears it, and both clients then
+   * fall back to the members' names, which beats a stale title.
+   *
+   * It deliberately doesn't bump the thread's activity time, so renaming doesn't
+   * jump it to the top of everyone's list — same rule as an edit.
+   */
+  renameConversation: (conversationId, title) =>
+    request(`/api/conversations/${conversationId}/`, {
+      method: "PATCH",
+      body: { title },
+    }),
 
   // Total unread messages across all conversations, for the nav badge.
   getUnreadMessageCount: () => request("/api/messages/unread-count/"),
