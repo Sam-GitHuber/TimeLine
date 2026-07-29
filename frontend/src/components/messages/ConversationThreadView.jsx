@@ -796,10 +796,13 @@ export default function ConversationThreadView() {
   // Memoised, not a bare `?? []`: the detail is re-fetched every
   // `CONVERSATION_DETAIL_POLL_MS` now, and a fresh empty array each time would
   // rebuild everything keyed off it on every tick.
-  const participants = useMemo(
-    () => detail?.participants ?? [],
-    [detail?.participants]
-  );
+  // Keyed on `detail` rather than on `detail?.participants`: an optional chain
+  // in a dependency array is something the React Compiler's lint can't match to
+  // the plain member access it infers, so it gives up on the whole component
+  // (`Compilation Skipped`) rather than optimise it. React Query's structural
+  // sharing means `detail` keeps its identity when a poll comes back unchanged,
+  // so this is the same memo either way.
+  const participants = useMemo(() => detail?.participants ?? [], [detail]);
   // Renamed from Phase 5's `can_message` — see ConversationSerializer.
   const canSend = detail?.can_send ?? false;
 
