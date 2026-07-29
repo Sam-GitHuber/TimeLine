@@ -46,7 +46,7 @@ once the product is solid — see the Roadmap below.
 | Python packaging | uv | Fast, modern Python package/venv manager |
 | Photo storage | S3-compatible object storage (via `django-storages`) | Built via `django-storages` from Phase 4, but backed by a **local disk volume** through the home-server beta (Phase 7); switches to an S3 bucket at the AWS migration (Phase 11) as a config change, not a rewrite |
 | Local dev / packaging | Docker Compose | Three services: `frontend`, `backend`, `postgres` |
-| CI | GitHub Actions | Runs tests automatically on push (`.github/workflows/`) |
+| CI | GitHub Actions | Runs tests automatically on push (`.github/workflows/`). Frontend + mobile + the security scans run on every PR; the backend suite is path-filtered to `backend/**` in its own `backend.yml`, and is the one check that isn't required to merge — check it yourself on a backend PR |
 | Hosting (future) | Home server first, then AWS Lightsail | Phase 7 self-hosts the finished app on a wiped spare PC for a cheap, reversible friends/family beta; Phase 11 migrates all data to AWS Lightsail once it's proven |
 
 ### Add later — only when actually needed (do NOT build these now)
