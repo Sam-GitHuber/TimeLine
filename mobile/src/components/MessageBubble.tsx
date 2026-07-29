@@ -64,9 +64,15 @@
  * and open full-screen on tap. A message may be a photo with no caption at all —
  * which is why the text is now rendered conditionally rather than always.
  *
+ * **Select mode** (Phase 9b M8) is the one state where a bubble's own tap does
+ * something: it ticks the message, and the row takes an accent wash. That's a
+ * suspension of the rule below rather than an exception to it — while selecting,
+ * a tap means exactly one thing everywhere on screen, so there's nothing to
+ * mistake it for.
+ *
  * **One gesture per target**, the rule M2 settled: **long-press** = the action
  * menu (Reply included), **tap the branch** = open the thread. The bubble's own
- * tap does nothing, and should stay that way — a target this size doing
+ * tap does nothing outside select mode, and should stay that way — a target this size doing
  * different things by press duration is where a mis-timed press does the wrong
  * thing. A tappable *link* inside the text is one exception and **a photo is the
  * other**; neither really breaks the rule, because both are smaller targets with
@@ -642,6 +648,8 @@ export function MessageBubble({
   quoted,
   status,
   mentionNames,
+  selected,
+  onPress,
   onLongPress,
   onShowReactors,
   onOpenThread,
@@ -665,6 +673,15 @@ export function MessageBubble({
   status?: SendState;
   /** Names for this message's mention ids (Phase 9b M8); see `BubbleBody`. */
   mentionNames?: Map<number, string>;
+  /** Ticked in select mode (Phase 9b M8) — the row takes an accent wash. */
+  selected?: boolean;
+  /**
+   * What a plain tap does. **Only ever passed in select mode**: outside it the
+   * bubble's tap deliberately does nothing, for the reason in this file's
+   * header. In select mode a tap means one thing everywhere on the screen,
+   * which is why the rule can be suspended without becoming ambiguous.
+   */
+  onPress?: () => void;
   /**
    * Opens the action menu, anchored to this bubble's rect on screen. Omitted
    * inside the focused thread view, which is deliberately menu-less — see
@@ -704,7 +721,16 @@ export function MessageBubble({
     // tells you where one person's burst ends and the next begins, so it has to
     // mean something. Every bubble spaced equally is the shape the thread had
     // before, and it read as a wall.
-    <View style={[styles.row, !endsRun && styles.rowInRun]}>
+    <View
+      style={[
+        styles.row,
+        !endsRun && styles.rowInRun,
+        // The wash is on the whole row, not the bubble: it has to read as "this
+        // message is picked" rather than as a new kind of bubble, and it has to
+        // be visible on a tombstone and behind reaction pills too.
+        selected && styles.rowSelected,
+      ]}
+    >
       {showSender && (
         <View style={styles.senderLine}>
           <Avatar user={message.sender} size="xs" />
@@ -722,9 +748,11 @@ export function MessageBubble({
         ) : (
           <Pressable
             ref={bubbleRef}
+            onPress={onPress}
             onLongPress={onLongPress ? handleLongPress : undefined}
             delayLongPress={350}
             accessibilityRole="text"
+            accessibilityState={onPress ? { selected: !!selected } : undefined}
             // The label lets the menu be opened by assistive tech and driven in
             // tests, since a long-press isn't otherwise discoverable.
             // A photo with no caption would otherwise announce itself as an
@@ -822,6 +850,10 @@ export function MessageBubble({
 
 const styles = StyleSheet.create({
   row: { marginBottom: spacing.sm },
+  // Full-bleed by design: the row is inset by the list's padding, and a wash
+  // that stopped at the bubble's edge would read as a selected *bubble* rather
+  // than a selected message.
+  rowSelected: { backgroundColor: colors.accentTint },
   // Inside a run. Not zero: the bubbles still need a hairline between them, and
   // at 2px they read as stacked rather than as one very tall message.
   rowInRun: { marginBottom: 2 },

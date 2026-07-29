@@ -15,6 +15,12 @@
  *   - sends, and offers the **long-press action menu** on any bubble — Copy /
  *     Edit / Delete on your own, Copy / Report on someone else's (Phase 9b M1),
  *     with a quick-reaction row across the top (Phase 9b M2);
+ *   - **@mentions** in a group (Phase 9b M8): typing `@` offers the thread's
+ *     active members, and the ids of whoever you picked ride along with the
+ *     send — which is what lets a mention reach a muted thread;
+ *   - **multi-select** (Phase 9b M8): Select in that menu turns the header into
+ *     a count and the composer into Copy / Delete, so a burst of messages can
+ *     be dealt with in one action rather than one long-press at a time;
  *   - carries a `⋯` through to the **info screen** (Phase 9b M6), which is
  *     where mute / add people / leave / rename now live — they used to be text
  *     buttons crowding this header;
@@ -244,6 +250,7 @@ function messageActions({
   onEdit,
   onDelete,
   onReport,
+  onSelect,
 }: {
   message: Message;
   mine: boolean;
@@ -253,6 +260,7 @@ function messageActions({
   onEdit: (message: Message) => void;
   onDelete: (messageId: number) => void;
   onReport: (messageId: number) => void;
+  onSelect: (message: Message) => void;
 }): MessageAction[] {
   const actions: MessageAction[] = [
     {
@@ -264,6 +272,12 @@ function messageActions({
         Clipboard.setStringAsync(message.text).catch(() => {});
       },
     },
+    // The way into select mode (M8), which is where it belongs: this menu is
+    // already the answer to "do something with this message", and the second
+    // message you want is the one you long-press *after* deciding there's more
+    // than one. Starting with the pressed message selected means the common
+    // case — this one and the next two — is three taps rather than four.
+    { label: 'Select', onPress: () => onSelect(message) },
   ];
   // The only way to reply (M3). A swipe-to-reply shipped alongside this and was
   // removed — it raced the navigator's back gesture and usually lost, closing
@@ -371,6 +385,17 @@ export default function ThreadScreen() {
   const [preparing, setPreparing] = useState(false);
   /** The photo open in the full-screen viewer, if any. */
   const [lightbox, setLightbox] = useState<MessageAttachment | null>(null);
+  /**
+   * Multi-select (M8): the ids ticked, or `null` when we're not selecting at
+   * all.
+   *
+   * One piece of state for both questions — *are we in select mode* and *what's
+   * ticked* — because an empty selection is a real state you can sit in (you
+   * un-ticked the message you started from) and a separate boolean would be a
+   * second thing to keep in step with it.
+   */
+  const [selected, setSelected] = useState<Set<number> | null>(null);
+  const selecting = selected !== null;
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/messages');
@@ -896,6 +921,35 @@ export default function ThreadScreen() {
     },
   });
 
+  /**
+   * Delete several at once (M8).
+   *
+   * Sequential rather than `Promise.all`: each one is a soft delete the server
+   * settles independently, and firing five at a thread you're also polling is
+   * a burst for no gain — nobody is waiting on the round trip, because the
+   * bubbles are already gone from the selection. One invalidation at the end,
+   * so the transcript redraws once rather than five times.
+   */
+  const deleteManyMutation = useMutation({
+    mutationFn: async (messageIds: number[]) => {
+      for (const messageId of messageIds) {
+        await api.deleteMessage(id, messageId);
+      }
+    },
+    onSettled: () => {
+      // On settle, not on success: a partial failure still deleted some of
+      // them, and leaving those on screen until the next poll would look like
+      // the whole action failed.
+      queryClient.invalidateQueries({ queryKey: ['messages', id] });
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    },
+    onError: () =>
+      Alert.alert(
+        'Couldn’t delete everything',
+        'Some messages are still there. Try again.'
+      ),
+  });
+
   const editMutation = useMutation({
     mutationFn: ({ messageId, value }: { messageId: number; value: string }) =>
       api.editMessage(id, messageId, value),
@@ -1135,6 +1189,79 @@ export default function ThreadScreen() {
     setMenuTarget(null);
   }
 
+  /**
+   * Enter select mode with the long-pressed message already ticked (M8).
+   *
+   * Deleting a burst one long-press at a time is the irritation this exists to
+   * remove, and a burst is exactly where you know you want the *next* few too —
+   * so the message you pressed comes with you rather than making you tap it
+   * again in a mode you just entered.
+   */
+  function startSelecting(message: Message) {
+    setSelected(new Set([message.id]));
+  }
+
+  function toggleSelected(messageId: number) {
+    setSelected((current) => {
+      const next = new Set(current ?? []);
+      if (!next.delete(messageId)) next.add(messageId);
+      return next;
+    });
+  }
+
+  /**
+   * The selected messages, oldest-first — the order they were said in, which is
+   * the only order a copied transcript reads correctly in.
+   *
+   * `loaded` is newest-first (the transcript reads `?order=desc`), so this
+   * reverses rather than sorting: the list is already in order, just backwards.
+   */
+  function selectedMessages(): Message[] {
+    if (!selected) return [];
+    return [...loaded].reverse().filter((m) => selected.has(m.id));
+  }
+
+  /**
+   * Copy the lot as text.
+   *
+   * A group prefixes each line with who said it, because a copied exchange
+   * between three people is unreadable otherwise; a 1:1 doesn't, since pasting
+   * "Me Myself: yes" into a note about a conversation you were in adds nothing.
+   * Messages with no words (a photo on its own) are skipped rather than
+   * rendered as a placeholder — the pasteboard takes text, and "📷 Photo" is
+   * not something anyone wants in their notes.
+   */
+  function copySelected() {
+    const lines = selectedMessages()
+      .filter((m) => m.text && !m.is_deleted)
+      .map((m) =>
+        isGroup ? `${m.sender.display_name}: ${m.text}` : m.text
+      );
+    if (lines.length > 0) {
+      Clipboard.setStringAsync(lines.join('\n')).catch(() => {});
+    }
+    setSelected(null);
+  }
+
+  function confirmDeleteSelected() {
+    const ids = selectedMessages().map((m) => m.id);
+    Alert.alert(
+      ids.length === 1 ? 'Delete message?' : `Delete ${ids.length} messages?`,
+      'This can’t be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            deleteManyMutation.mutate(ids);
+            setSelected(null);
+          },
+        },
+      ]
+    );
+  }
+
   function confirmDelete(messageId: number) {
     Alert.alert('Delete message?', 'This can’t be undone.', [
       { text: 'Cancel', style: 'cancel' },
@@ -1151,8 +1278,37 @@ export default function ThreadScreen() {
   const notAvailable =
     convoQuery.error instanceof ApiError && convoQuery.error.status === 404;
 
+  /** Whether every ticked message is one you could delete — Delete is offered
+   * only then. A bulk action that silently did *part* of what it says (yours,
+   * quietly skipping theirs) is worse than one that isn't offered. */
+  const deletableSelection =
+    selected !== null &&
+    selected.size > 0 &&
+    selectedMessages().every((m) => m.sender.id === me?.pk && !m.is_deleted);
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
+      {/* Select mode takes over the header (M8): the identity of who you're
+          talking to is not what you need while picking messages, and a count
+          plus a way out is. The transcript below stays exactly where it was. */}
+      {selecting ? (
+        <View style={styles.topBar}>
+          <Pressable
+            onPress={() => setSelected(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel selection"
+            hitSlop={8}
+          >
+            <Text style={styles.back}>Cancel</Text>
+          </Pressable>
+          <View style={styles.identity}>
+            <Text style={styles.headerName}>
+              {selected.size} selected
+            </Text>
+          </View>
+          <View style={styles.actionSpacer} />
+        </View>
+      ) : (
       <View style={styles.topBar}>
         <Pressable
           onPress={goBack}
@@ -1213,6 +1369,7 @@ export default function ThreadScreen() {
           <View style={styles.actionSpacer} />
         )}
       </View>
+      )}
 
       {loadError ? (
         <View style={styles.centre}>
@@ -1314,6 +1471,18 @@ export default function ThreadScreen() {
                     }
                     status={statusFor(message)}
                     mentionNames={mentionNames}
+                    // Select mode is the one time a tap on a bubble does
+                    // something (M8) — and it doesn't break the "one gesture
+                    // per target" rule so much as suspend it: while selecting,
+                    // a tap means exactly one thing everywhere on the screen.
+                    // An unsent message stays untappable: every bulk action
+                    // needs a server id it hasn't got.
+                    selected={selected?.has(message.id)}
+                    onPress={
+                      selecting && !pending
+                        ? () => toggleSelected(message.id)
+                        : undefined
+                    }
                     // No viewer for an in-flight photo: the only copy is the
                     // local thumbnail standing in for it, so "open full size"
                     // has nothing to open until the upload lands.
@@ -1335,7 +1504,7 @@ export default function ThreadScreen() {
                     // edit, delete, react, report — needs a server id this one
                     // hasn't got. Retry and Discard are on the bubble instead.
                     onLongPress={
-                      pending
+                      pending || selecting
                         ? undefined
                         : (anchor) =>
                             setMenuTarget({
@@ -1351,6 +1520,7 @@ export default function ThreadScreen() {
                                 onEdit: startEditing,
                                 onDelete: confirmDelete,
                                 onReport: setReportingId,
+                                onSelect: startSelecting,
                               }),
                             })
                     }
@@ -1401,7 +1571,46 @@ export default function ThreadScreen() {
               { paddingBottom: COMPOSER_PAD + insets.bottom },
             ]}
           >
-            {canSend ? (
+            {/* While selecting, the composer's slot holds the bulk actions
+                instead (M8). Same place, so your thumb doesn't move, and there
+                is never both a composer and an action bar competing for the
+                bottom of the screen. */}
+            {selecting ? (
+              <View style={styles.bulkBar}>
+                <Pressable
+                  onPress={copySelected}
+                  disabled={selected.size === 0}
+                  accessibilityRole="button"
+                  accessibilityLabel="Copy selected messages"
+                  style={({ pressed }) => [pressed && styles.pressed]}
+                >
+                  <Text
+                    style={[
+                      styles.bulkAction,
+                      selected.size === 0 && styles.bulkDisabled,
+                    ]}
+                  >
+                    Copy
+                  </Text>
+                </Pressable>
+                {/* Only when every ticked message is one you can delete — see
+                    `deletableSelection`. Absent rather than disabled: a
+                    permanently greyed Delete beside someone else's message
+                    reads as a bug, where nothing at all reads as "not yours". */}
+                {deletableSelection ? (
+                  <Pressable
+                    onPress={confirmDeleteSelected}
+                    accessibilityRole="button"
+                    accessibilityLabel="Delete selected messages"
+                    style={({ pressed }) => [pressed && styles.pressed]}
+                  >
+                    <Text style={[styles.bulkAction, styles.bulkDestructive]}>
+                      Delete
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : canSend ? (
               <>
                 {/* Edit mode says plainly what's being changed and offers an
                     obvious way out. Cancelling restores the draft you were
@@ -1778,6 +1987,23 @@ const styles = StyleSheet.create({
     paddingTop: spacing.sm + 2,
     // paddingBottom is applied inline: COMPOSER_PAD + the home-indicator inset.
   },
+  // The bulk action row (M8), in the composer's slot. Spaced apart rather than
+  // side by side: Copy and Delete are a harmless action and an irreversible one,
+  // and they should not be neighbours your thumb can confuse.
+  bulkBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  bulkAction: {
+    fontSize: fontSize.base,
+    fontWeight: '600',
+    color: colors.accent,
+  },
+  bulkDestructive: { color: colors.danger },
+  bulkDisabled: { opacity: 0.4 },
   // A tinted strip above the input, so edit mode is unmistakable even at a
   // glance — the accent wash marks it as a state, not another message.
   editingBar: {

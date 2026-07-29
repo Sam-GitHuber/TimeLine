@@ -2881,3 +2881,115 @@ it('highlights a mention by resolving its id against the participants', async ()
   // is what being styled differently means here.
   expect(await screen.findByText('@Ada Lovelace')).toBeTruthy();
 });
+
+/**
+ * Multi-select (Phase 9b M8). Deleting a burst one long-press at a time is the
+ * irritation this removes, so what's worth pinning is that the mode is
+ * reachable, that a tap ticks rather than doing nothing, that Delete acts on
+ * everything ticked — and that it isn't offered for someone else's messages,
+ * where a bulk action could only ever half-work.
+ */
+it('selects several messages and deletes them in one action', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'one' }),
+      message({ id: 8, sender: MINE, text: 'two' }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+
+  // The pressed message comes with you — the common case is "this one and the
+  // next few", so entering the mode with nothing ticked would waste a tap.
+  await screen.findByText('1 selected');
+  await fireEvent.press(screen.getByLabelText('Your message: two'));
+  await screen.findByText('2 selected');
+
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(((
+    _title: string,
+    _message: string | undefined,
+    buttons: { text: string; onPress?: () => void }[]
+  ) => {
+    buttons.find((button) => button.text === 'Delete')?.onPress?.();
+  }) as unknown as typeof Alert.alert);
+
+  await fireEvent.press(screen.getByLabelText('Delete selected messages'));
+
+  await waitFor(() => {
+    const deletes = mockFetch.mock.calls.filter(
+      ([url, init]: [string, { method?: string }]) =>
+        url.includes('/messages/') && init?.method === 'DELETE'
+    );
+    expect(deletes).toHaveLength(2);
+  });
+  alert.mockRestore();
+});
+
+it('offers no bulk delete once someone else’s message is selected', async () => {
+  // A bulk action that silently did only *part* of what it says would be worse
+  // than one that isn't there.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'mine' }),
+      message({ id: 8, sender: ADA, text: 'theirs' }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: mine');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  expect(screen.getByLabelText('Delete selected messages')).toBeTruthy();
+
+  await fireEvent.press(
+    screen.getByLabelText('Message from Ada Lovelace: theirs')
+  );
+
+  expect(screen.queryByLabelText('Delete selected messages')).toBeNull();
+  // Copy still stands: quoting a conversation is exactly what you'd select
+  // someone else's messages for.
+  expect(screen.getByLabelText('Copy selected messages')).toBeTruthy();
+});
+
+it('copies a selection in the order it was said', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: ADA, text: 'first' }),
+      message({ id: 8, sender: MINE, text: 'second' }),
+    ],
+  });
+  const copy = jest.spyOn(Clipboard, 'setStringAsync').mockResolvedValue(true);
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: first');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await fireEvent.press(screen.getByLabelText('Your message: second'));
+  await fireEvent.press(screen.getByLabelText('Copy selected messages'));
+
+  // Oldest-first, whatever order they were ticked in — a copied exchange only
+  // reads correctly in the order it happened.
+  expect(copy).toHaveBeenCalledWith('first\nsecond');
+  // And the mode ends with the action, rather than leaving the header in a
+  // state you have to dismiss.
+  expect(screen.queryByText('2 selected')).toBeNull();
+});
+
+it('leaves the action menu alone while selecting', async () => {
+  // Two modes at once is where a long-press does something you didn't mean.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'one' })],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+
+  fireEvent(screen.getByLabelText('Your message: one'), 'longPress');
+
+  expect(screen.queryByLabelText('Close message actions')).toBeNull();
+});
