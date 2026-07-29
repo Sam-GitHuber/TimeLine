@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import NewChatPicker from "./NewChatPicker.jsx";
+import ConversationInfoView from "./messages/ConversationInfoView.jsx";
 import ConversationListView from "./messages/ConversationListView.jsx";
 import ConversationThreadView from "./messages/ConversationThreadView.jsx";
 import { useMessaging } from "../messaging.jsx";
@@ -64,6 +65,10 @@ export default function MessagesDrawer() {
       {view === "thread" && (
         <ConversationThreadView key={conversationId} />
       )}
+      {/* The info panel (M9e). Unlike the transcript it holds nothing worth
+          preserving across a visit — the rename is the only editable thing on
+          it, and abandoning one halfway is a reason to *not* keep it. */}
+      {view === "info" && <ConversationInfoView key={conversationId} />}
       {view === "new" && <NewChatPicker prefill={newPrefill} />}
     </aside>,
     document.body

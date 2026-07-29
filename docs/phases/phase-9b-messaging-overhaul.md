@@ -90,7 +90,7 @@ each is written below to be picked up cold:
 | **M9b** | Transcript mechanics + the ⋯ menu & edit | `messaging/m9b-transcript` | M9a | **L** | ☑ |
 | **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☑ |
 | **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☑ |
-| **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☐ |
+| **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☑ |
 | **M9f** | Formatting, mentions, multi-select + doc rewrite | `messaging/m9f-text` | M9b | **M** | ☐ |
 
 Order matters only where the table says so: M9c/M9d stack because a reply's
@@ -1725,14 +1725,26 @@ the header and the composer rather than the bubble internals.
    all when there are no photos). The thread header becomes identity + `⋯`, with
    "Muted" still shown up there when it is.
 
-**Done when**
-- [ ] Send and view a photo, with and without a caption; it opens in `Lightbox`.
-- [ ] ⚠️ **Check the EXIF strip on a real photo with GPS in it** — the re-encode
-      is what drops it and no unit test can prove that. M7 left the same check
-      outstanding on the phone; do both at once and tick both.
-- [ ] List searches and offers mute / mark-unread / leave; the info panel has
+**Done when** — ✅ shipped, bar the one check a test can't make (below).
+- [x] Send and view a photo, with and without a caption; it opens in `Lightbox`.
+      The pipeline is `frontend/src/chatPhotos.js`, a canvas rewrite of the app's
+      module with its numbers copied exactly.
+- [x] ⚠️ **Check the EXIF strip on a real photo with GPS in it** — **done for the
+      web.** A 3000×2000 JPEG carrying GPS (51°30′26″N 0°7′39″W) and a
+      Make/Model was sent through the drawer against the local stack; the stored
+      upload came back **1600×1067 with zero EXIF tags and no GPS**, and the
+      thumbnail 480×320, likewise clean. jsdom has no decoder and no
+      `canvas.toBlob`, so no unit test can reach this — `fitWithin`'s arithmetic
+      is pinned in `frontend/src/chatPhotos.test.js` and `messaging.test.jsx`
+      asserts the drawer sends what the pipeline returned rather than the picked
+      file, which is as close as a test gets.
+      ⚠️ **The phone half is still outstanding** — M7 left it, it needs a device
+      and a real camera-roll photo, and nothing here changes it.
+- [x] List searches and offers mute / mark-unread / leave; the info panel has
       everything the app's info screen has, including rename and the gallery.
-- [ ] `messaging.md` *Frontend* updated.
+- [x] `messaging.md` *Frontend* updated — a new *Photos, the list and the info
+      panel on the web* section, and the "the web is behind" passage cut back to
+      M8 alone.
 
 ---
 

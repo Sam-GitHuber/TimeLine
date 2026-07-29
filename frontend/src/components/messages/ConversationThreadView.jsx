@@ -8,10 +8,11 @@ import {
 } from "@tanstack/react-query";
 import Avatar from "../Avatar.jsx";
 import LoadMoreButton from "../LoadMoreButton.jsx";
-import { StrokeIcon, IconButton, PanelHeader } from "../drawer-chrome.jsx";
+import { StrokeIcon, PanelHeader } from "../drawer-chrome.jsx";
 import PendingChatPanel from "../PendingChatPanel.jsx";
 import { ReportModal } from "../ReportButton.jsx";
 import AvatarStack from "./AvatarStack.jsx";
+import DrawerMenu from "./DrawerMenu.jsx";
 import MessageBubble from "./MessageBubble.jsx";
 import MessageStrandPanel, { threadQueryKey } from "./MessageStrandPanel.jsx";
 import { DaySeparator, UnreadDivider } from "./ThreadDividers.jsx";
@@ -23,6 +24,7 @@ import {
   MESSAGE_POLL_MS,
 } from "../../api.js";
 import { useAuth } from "../../auth.jsx";
+import { prepareChatPhoto } from "../../chatPhotos.js";
 import { getDraft, setDraft } from "../../drafts.js";
 import { useDayBoundary } from "../../hooks.js";
 import { insertMessage, patchReactions } from "../../messageCache.js";
@@ -38,6 +40,32 @@ const JUMP_THRESHOLD = 200;
 // How close to the top of the loaded history a scroll gets before the next page
 // of older messages is fetched.
 const OLDER_THRESHOLD = 300;
+
+/**
+ * The name in the thread header, and the one thing that stayed beside it when
+ * M9e emptied that header into a menu: **a muted thread still says "Muted" up
+ * here.**
+ *
+ * That's the exception rather than an inconsistency. Everything else the header
+ * carried was an *action*, and actions belong in the menu; "Muted" is a *state*,
+ * and the whole risk of muting a chat is forgetting you did — so it has to be
+ * visible somewhere you'd notice while reading, not two clicks away on the panel
+ * that set it.
+ */
+function HeaderName({ name, muted }) {
+  return (
+    <span className="flex min-w-0 items-baseline gap-1.5">
+      <span className="truncate font-display font-bold -tracking-[0.02em] text-ink">
+        {name}
+      </span>
+      {muted && (
+        <span className="shrink-0 text-[0.7rem] font-semibold uppercase tracking-wide text-ink-faint">
+          Muted
+        </span>
+      )}
+    </span>
+  );
+}
 
 /**
  * What the ⋯ menu offers for one message (Phase 9b M9b).
@@ -119,7 +147,7 @@ function messageActions({
 // jump-to-latest, per-conversation drafts, and the ⋯ menu (Copy · Edit · Delete
 // on your own, Copy · Report on someone else's) that replaced the inline Delete.
 export default function ConversationThreadView() {
-  const { conversationId, openList, openNew } = useMessaging();
+  const { conversationId, openList, openInfo, openNew } = useMessaging();
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
   /**
@@ -143,8 +171,21 @@ export default function ConversationThreadView() {
    * the quote name who you answered rather than who started the strand.
    */
   const [strand, setStrand] = useState(null);
+  /**
+   * The photo waiting to go with the next message (M9e), already resized,
+   * EXIF-stripped and re-encoded by `prepareChatPhoto` — plus the moment while
+   * that's happening, and anything that went wrong doing it.
+   *
+   * 🔒 Never the raw `File` off the input. The server does not open a chat
+   * attachment (it can't, under E2E), so this client-side pass is the *only*
+   * thing between a phone photo's GPS coordinates and everyone in the chat.
+   */
+  const [attachment, setAttachment] = useState(null);
+  const [preparing, setPreparing] = useState(false);
+  const [photoError, setPhotoError] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   /**
    * The conversation detail — identity, permissions, and (M9c) each
@@ -484,8 +525,8 @@ export default function ConversationThreadView() {
   const sendMutation = useMutation({
     // `?? null` so an ordinary message sends an explicit "this is not a reply"
     // rather than a hole an argument could later slide into.
-    mutationFn: ({ value, replyToId }) =>
-      api.sendMessage(conversationId, value, replyToId ?? null),
+    mutationFn: ({ value, replyToId, photo }) =>
+      api.sendMessage(conversationId, value, replyToId ?? null, photo ?? null),
     onSuccess: (message, { tempId }) => {
       // Marked before either write, so the replacement bubble is already known
       // to be yours by the time it renders — see `justSent`. Out of order it
@@ -540,10 +581,10 @@ export default function ConversationThreadView() {
    * that knows an unsent message exists and one place that decides what happens
    * when it doesn't land.
    */
-  function queueSend(value, { replyToId, rootId } = {}) {
-    const entry = newOutgoing({ text: value, replyToId, rootId });
+  function queueSend(value, { replyToId, rootId, photo } = {}) {
+    const entry = newOutgoing({ text: value, replyToId, rootId, photo });
     setOutbox((entries) => [...entries, entry]);
-    sendMutation.mutate({ value, replyToId, tempId: entry.tempId });
+    sendMutation.mutate({ value, replyToId, photo, tempId: entry.tempId });
   }
 
   function retrySend(entry) {
@@ -552,12 +593,15 @@ export default function ConversationThreadView() {
         e.tempId === entry.tempId ? { ...e, status: "sending" } : e
       )
     );
-    // `replyToId` off the entry, not recomputed: a failed reply retried without
-    // it would quietly become an ordinary message, landing in the transcript
-    // instead of the strand you sent it from.
+    // Everything off the entry, not recomputed: a failed reply retried without
+    // its `replyToId` would quietly become an ordinary message, landing in the
+    // transcript instead of the strand you sent it from — and a failed *photo*
+    // retried without its `photo` would send the caption alone and drop the
+    // picture, which is the one failure this whole path exists to prevent.
     sendMutation.mutate({
       value: entry.text,
       replyToId: entry.replyToId,
+      photo: entry.photo,
       tempId: entry.tempId,
     });
   }
@@ -676,10 +720,56 @@ export default function ConversationThreadView() {
     editMutation.reset();
   }
 
+  /**
+   * Attach a photo (M9e) — resized, EXIF-stripped and re-encoded here in the
+   * browser before it goes anywhere.
+   *
+   * **A file input is the whole affordance, and there's no camera.** The app
+   * offers one because taking a picture of what's in front of you is half of
+   * what a photo in a chat is for on a phone; at a desk it isn't, and reaching
+   * for `getUserMedia` would mean a permission prompt, a preview surface and a
+   * shutter to build the one case a webcam serves worse than the file picker
+   * already does.
+   *
+   * The input is cleared afterwards so choosing the *same* file twice still
+   * fires `change` — otherwise removing a photo and picking it again silently
+   * does nothing.
+   */
+  async function handleFileChosen(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setPhotoError(null);
+    setPreparing(true);
+    try {
+      // 🔒 This is where the photo is downscaled and its EXIF — including the
+      // GPS coordinates a phone stamps on every shot — is stripped, by being
+      // re-encoded from raw pixels. The server does none of that for chat
+      // photos, on purpose (see `chatPhotos.js`), so skipping this step would
+      // send everyone in the thread the location the picture was taken.
+      setAttachment(await prepareChatPhoto(file));
+    } catch {
+      setPhotoError("Couldn’t use that photo. Try another one.");
+    } finally {
+      setPreparing(false);
+    }
+  }
+
+  /** Take the photo back off the composer, releasing its preview URL with it. */
+  function removeAttachment() {
+    if (attachment) URL.revokeObjectURL(attachment.previewUrl);
+    setAttachment(null);
+    setPhotoError(null);
+  }
+
   function handleSubmit(event) {
     event.preventDefault();
     const value = text.trim();
-    if (!value) return;
+    // A photo with no caption is a perfectly ordinary message, so "there's
+    // something to send" is text *or* a photo — the same rule the server
+    // enforces. Not while one is still being prepared: sending then would
+    // silently drop the picture the person is looking at.
+    if ((!value && !attachment) || preparing) return;
     if (editing) {
       if (editMutation.isPending) return;
       // Saving the original text unchanged is a no-op, not a pointless PATCH
@@ -696,7 +786,10 @@ export default function ConversationThreadView() {
      * genuinely ambiguous.
      */
     setText("");
-    queueSend(value);
+    // Handed to the outbox, which owns the preview URL from here on — so this
+    // must *not* revoke it the way `removeAttachment` does.
+    setAttachment(null);
+    queueSend(value, { photo: attachment ?? undefined });
   }
 
   const other = detail?.other;
@@ -761,6 +854,48 @@ export default function ConversationThreadView() {
     });
 
   /**
+   * The thread header's `⋯` (M9e) — what used to be three icon buttons.
+   *
+   * **Details is first and Mute is second**, in that order because Details is
+   * where the rest of them now live, and a menu whose first item is the way to
+   * everything else reads as a door rather than a drawer of leftovers. Mute
+   * stays out here as well because it's the one people reach for mid-thread, and
+   * it reads as its state — the risk of muting is forgetting you did.
+   *
+   * Add and Leave are group-only: there's nobody to add to a 1:1, and leaving
+   * one is what Block is for.
+   */
+  function headerActions() {
+    const actions = [
+      { label: "Details", onClick: openInfo },
+      {
+        label: detail.muted ? "Unmute" : "Mute",
+        onClick: () => muteMutation.mutate(!detail.muted),
+      },
+    ];
+    if (isGroup) {
+      actions.push({
+        label: "Add people",
+        onClick: () => openNew({ addToConversationId: conversationId }),
+      });
+      actions.push({
+        label: "Leave chat",
+        danger: true,
+        onClick: () => {
+          if (
+            window.confirm(
+              "Leave this chat? You’ll stop receiving messages here."
+            )
+          ) {
+            leaveMutation.mutate();
+          }
+        },
+      });
+    }
+    return actions;
+  }
+
+  /**
    * The same menu inside the strand, one item shorter (no Edit) and with Reply
    * re-aiming the strand's composer instead of opening anything — you're already
    * in the strand a reply-to-a-reply would land in, since the server flattens
@@ -781,72 +916,43 @@ export default function ConversationThreadView() {
 
   return (
     <>
+      {/* Identity + `⋯`, since M9e. It used to carry Mute, Add and Leave as
+          three icon buttons crowding the name of the person you're talking to,
+          which is the one thing a chat header is for; they moved into the menu
+          and onto the info panel behind it. */}
       <PanelHeader
         onBack={openList}
         actions={
           !convoQuery.isError &&
           !isPending &&
           detail && (
-            <>
-              {/* Mute is offered on every thread, direct or group — unlike Add
-                  and Leave below, which are group-only. A bell, struck through
-                  when muted, so the state reads at a glance. */}
-              <IconButton
-                onClick={() => muteMutation.mutate(!detail.muted)}
-                label={
-                  detail.muted ? "Unmute notifications" : "Mute notifications"
-                }
-                pressed={detail.muted}
-              >
-                <StrokeIcon
-                  path={
-                    detail.muted
-                      ? "M18 8a6 6 0 00-9.33-5 M6.26 6.26A6 6 0 006 8c0 7-3 9-3 9h14 M13.73 21a2 2 0 01-3.46 0 M2 2l20 20"
-                      : "M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9 M13.73 21a2 2 0 01-3.46 0"
-                  }
-                />
-              </IconButton>
-              {isGroup && (
-                <>
-                  <IconButton
-                    onClick={() =>
-                      openNew({ addToConversationId: conversationId })
-                    }
-                    label="Add people"
-                  >
-                    <StrokeIcon path="M16 19v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2 M9 11a4 4 0 100-8 4 4 0 000 8z M19 8v6 M22 11h-6" />
-                  </IconButton>
-                  <IconButton
-                    onClick={() => leaveMutation.mutate()}
-                    label="Leave chat"
-                  >
-                    <StrokeIcon path="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4 M16 17l5-5-5-5 M21 12H9" />
-                  </IconButton>
-                </>
-              )}
-            </>
+            <DrawerMenu getActions={headerActions} label="Conversation options" />
           )
         }
       >
         {convoQuery.isError ? (
           <span className="font-semibold text-ink">Conversation</span>
         ) : isGroup ? (
-          <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={openInfo}
+            className="flex min-w-0 items-center gap-2 text-left"
+            title="Conversation details"
+          >
             <AvatarStack participants={participants} />
-            <span className="truncate font-display font-bold -tracking-[0.02em] text-ink">
-              {detail.title || "Group chat"}
-            </span>
-          </div>
+            <HeaderName name={detail.title || "Group chat"} muted={detail.muted} />
+          </button>
         ) : other ? (
+          // A 1:1's identity still goes to the *person*, not to the details:
+          // their profile is what you want when you click a name, and the panel
+          // is one item away in the menu beside it.
           <Link
             to={`/u/${other.id}`}
             className="flex min-w-0 items-center gap-2"
             title={`View ${other.display_name}’s profile`}
           >
             <Avatar user={other} size="sm" />
-            <span className="truncate font-display font-bold -tracking-[0.02em] text-ink">
-              {other.display_name}
-            </span>
+            <HeaderName name={other.display_name} muted={detail.muted} />
           </Link>
         ) : (
           <span className="text-ink-faint">Loading…</span>
@@ -1049,7 +1155,69 @@ export default function ConversationThreadView() {
                       </button>
                     </div>
                   )}
+                  {/* The photo waiting to go, or the moment it's being prepared
+                      (M9e). Hidden while editing rather than dropped: an edit is
+                      a `PATCH` of *text*, so it can't carry an attachment, and
+                      throwing away a picture someone had queued because they
+                      stopped to fix a typo would be the same small betrayal
+                      `stashedDraft` exists to prevent. It comes back with the
+                      draft when the edit ends. */}
+                  {!editing && (preparing || attachment) && (
+                    <div className="mb-2">
+                      {preparing ? (
+                        <div className="flex h-20 w-20 items-center justify-center rounded-xl border border-dashed border-line-strong text-xs text-ink-faint">
+                          Preparing…
+                        </div>
+                      ) : (
+                        <div className="relative inline-block">
+                          <img
+                            src={attachment.previewUrl}
+                            alt="Photo to send"
+                            className="h-20 w-20 rounded-xl object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={removeAttachment}
+                            aria-label="Remove photo"
+                            className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-ink text-xs font-bold text-white shadow"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <form onSubmit={handleSubmit} className="flex items-end gap-2">
+                    {!editing && (
+                      <>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept="image/*"
+                          onChange={handleFileChosen}
+                          className="hidden"
+                          data-testid="chat-photo-input"
+                        />
+                        {/* A bordered circle with a `+`, the same control the
+                            app's composer uses — not a camera or a paperclip.
+                            It adds *something* to the message, and there is one
+                            thing it can add; naming the medium in the icon would
+                            be a promise to change it the day there's a second. */}
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          disabled={preparing || !!attachment}
+                          aria-label="Add a photo"
+                          className="mb-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-line-strong bg-raised text-ink-soft transition hover:border-accent hover:bg-accent-tint hover:text-accent-deep disabled:opacity-40"
+                        >
+                          {/* One photo per message — the server's cap, and the
+                              better chat shape besides: each picture gets its
+                              own bubble, and so its own reactions, replies and
+                              delete. */}
+                          <StrokeIcon path="M12 6v12 M6 12h12" size={18} />
+                        </button>
+                      </>
+                    )}
                     <textarea
                       ref={inputRef}
                       value={text}
@@ -1078,8 +1246,13 @@ export default function ConversationThreadView() {
                       type="submit"
                       // Only an *edit* disables it. A send doesn't: the message is
                       // already on screen and the composer is already empty, so
-                      // there's nothing to wait for.
-                      disabled={!text.trim() || editMutation.isPending}
+                      // there's nothing to wait for. A photo with no caption is
+                      // sendable; a photo still being prepared is not.
+                      disabled={
+                        (!text.trim() && !attachment) ||
+                        preparing ||
+                        editMutation.isPending
+                      }
                       className="btn btn-primary btn-sm mb-0.5"
                     >
                       {editing
@@ -1106,6 +1279,14 @@ export default function ConversationThreadView() {
                   though it worked. The server owns the rules that can reject one
                   (the per-target cap, emoji validation, a closed thread), so its
                   message is what's shown. */}
+              {/* A photo that couldn't be prepared never reached the outbox, so
+                  it has no bubble to fail on — the composer is the only place
+                  left to say so. */}
+              {photoError && (
+                <p role="alert" className="mt-1 text-sm text-red-600">
+                  {photoError}
+                </p>
+              )}
               {reactMutation.isError && (
                 <p role="alert" className="mt-1 text-sm text-red-600">
                   {reactMutation.error?.message || "Couldn’t react."}

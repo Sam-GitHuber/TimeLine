@@ -474,8 +474,9 @@ Every other upload in TimeLine is processed **server-side** by
 rebuilt from raw pixels (which is what strips EXIF, including the GPS
 coordinates a phone stamps on every shot), downscaled and re-encoded. A chat
 photo does none of that on the server. It is resized, stripped and re-encoded
-**on the phone**, by `mobile/src/chatPhotos.ts`, and the server stores the bytes
-it is handed without opening them.
+**on whichever client is sending it** — `mobile/src/chatPhotos.ts` on the phone,
+`frontend/src/chatPhotos.js` in the browser — and the server stores the bytes it
+is handed without opening them.
 
 **Why:** end-to-end encryption is a committed goal for messaging
 (`docs/phases/phase-9c-e2e-encryption.md`). Under E2E the server holds bytes it
@@ -601,11 +602,13 @@ path that forgot.
 - **The media gallery** on the info screen is the answer to "the picture someone
   sent last week". It renders **nothing at all** when a chat has no photos — a
   heading over an empty grid is a feature announcing it has nothing for you.
-- **The web** shows the photo as a thumbnail linking to the full image, and the
-  same list preview. That is a **deliberate stopgap, not the finished
-  treatment** — M9 ports the app's version. It exists because the app can send a
-  captionless photo *today*, and without it the web drew an empty bubble, which
-  reads as a bug in the other person's message.
+- **The web** does the same, since
+  [M9e](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e) — a sized
+  thumbnail into the shared `Lightbox`, the same list preview, and its own
+  canvas-based version of this pipeline. (Between M7 and M9e it drew a thumbnail
+  linking to the raw file, a deliberate stopgap: the app could send a captionless
+  photo from the day M7 shipped, and without it the web drew an empty bubble,
+  which reads as a bug in the other person's message.)
 
 ### Push, moderation, backups
 
@@ -1074,15 +1077,16 @@ nothing to decide it with.
 Messaging is a **non-modal companion drawer** (`MessagesDrawer.jsx`, driven by
 `MessagingProvider` — *not* a route), docked to the edge so the feed stays
 scrollable behind it and you keep your scroll position. It walks list → thread →
-new-message:
+info → new-message:
 
 - **New chat** — a multi-select connection picker → 1:1 or group chat (+ optional
   title). Launched from a Group page it's scoped to that group (pool = group
   members ∩ your connections).
-- **Thread** — header actions: **Mute** (a bell, struck through when muted — on
-  every thread, direct or group) and, for groups, **Add people** and **Leave**. A
-  `pending` viewer sees a **locked panel**: "Connect with C & D to join", inline
-  connection-request buttons, and a **Decline / Leave** button.
+- **Thread** — the header is identity + a `⋯` (Details · Mute · Add people ·
+  Leave) since [M9e](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e),
+  which also added the [info panel](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e)
+  behind Details. A `pending` viewer sees a **locked panel**: "Connect with C & D
+  to join", inline connection-request buttons, and a **Decline / Leave** button.
 - **Sender attribution (group threads only).** An incoming message in a *group*
   carries its sender's avatar + name on one line above the bubble; a **run** of
   consecutive messages from the same person shares a single label, so a burst
@@ -1228,19 +1232,12 @@ with it is what makes that design honest rather than a quiet exception to it.
 A test asserts the wording, because the failure mode is a dialog that looks right
 and reports nothing.
 
-**The web is still behind on Phase 9b, and that's expected, not broken.** Every
-9b response field is additive, so the drawer still ignores `reply_to`/
-`reply_count`, rendering a reply as an ordinary message, and photos get the
-stopgap thumbnail M7 left rather than the app's sized bubble and lightbox. Both
-land in M9d and M9e; both are stored, and both show properly in the app.
-
-M6 adds nothing the drawer renders *wrongly*, only things it doesn't offer yet:
-[renaming a group](#renaming-a-group-chat) and
-[marking a thread unread](#marking-a-thread-unread) are new endpoints an old
-client simply never calls, and the drawer keeps Mute/Add/Leave in its thread
-header rather than moving them to an info panel. A chat renamed from the app
-shows its new name on the web immediately, because the title was always on the
-payload.
+**One piece of Phase 9b is still app-only, and that's expected, not broken.**
+[M8's formatting and @mentions](#writing-a-message-formatting-and-mentions) land
+on the web in M9f: the markup is *stored* text, so the drawer renders the
+asterisks rather than the bold, and a mention notifies correctly because the ids
+are the server's — it simply isn't highlighted. Every 9b response field is
+additive, which is what has let each of these chunks ship on its own.
 
 The read-receipts *setting* shipped on the web (a Privacy section on
 `/settings`) **a milestone before the ticks it governs** — deliberately, because
@@ -1248,11 +1245,6 @@ the disclosure happens whether or not this browser draws them, so a member who
 only ever uses the web had to be able to opt out either way. A setting that
 exists only where the feature is visible would be a setting half the members
 can't reach.
-
-When M9d ports replies, **the focused thread should not be a blur on the web**: a
-phone blurs the transcript because it has one screen, a desktop has width, so the
-right shape there is a side panel beside the transcript. Same endpoint, same
-data, different medium.
 
 ### Reactions, send state and ticks on the web (Phase 9b M9c)
 
@@ -1439,6 +1431,95 @@ route then puts focus back in the transcript's composer, because the element it
 was on has just unmounted and the drawer is deliberately not a focus trap: left
 alone, focus falls to `<body>` and the next Tab starts at the top of the page,
 outside the panel entirely.
+
+### Photos, the list and the info panel on the web (Phase 9b M9e)
+
+M9e brought [photo messages](#photo-messages) and the app's
+[conversation list](#the-conversation-list-phase-9b-m6) and
+[info screen](#the-info-screen-phase-9b-m6) across. It's the one chunk of M9 that
+**rewrites rather than ports**, and the rewrite is the interesting part.
+
+🔒 **`frontend/src/chatPhotos.js` is a rewrite of the app's module, not a port.**
+`expo-image-manipulator` has no browser equivalent, so the decoding and
+re-encoding happen on a `<canvas>`: `drawImage` paints decoded pixels, `toBlob`
+writes a fresh JPEG from them, and metadata isn't carried across — so EXIF,
+including the GPS a phone stamps on every shot, simply doesn't exist in the
+output. Same technique as the server's `_strip_and_encode`, which is why the two
+produce comparable results. **The numbers are copied exactly** (1600px long edge
+at quality 0.8, a 480px thumbnail at 0.6) and have to stay that way: two clients
+producing visibly different photos from one source is the divergence M9 exists to
+end. It is deliberately **not** routed through `api/imaging.py` — see
+[why the photo is processed on the client](#-the-photo-is-processed-on-the-client-and-that-inverts-how-posts-work),
+which is the whole reason this file exists.
+
+Two browser-specific things worth knowing before touching it:
+
+- **The strip is verified, not assumed.** A 3000×2000 JPEG carrying GPS and a
+  Make/Model went through the drawer against a local stack: what the server
+  stored was 1600×1067 with **zero EXIF tags and no GPS**, and the thumbnail
+  480×320, likewise clean. Worth repeating by hand if this file is ever changed —
+  jsdom has no decoder and no `canvas.toBlob`, so no test in the suite can see it.
+- **EXIF orientation is the browser's job, not ours.** `image-orientation:
+  from-image` is the default for `<img>`, so a photo tagged "rotate 90°" decodes
+  already upright and `naturalWidth`/`naturalHeight` report the upright
+  dimensions — which is what makes drawing it straight onto a canvas correct.
+  Setting `image-orientation: none` to "fix" something would silently rotate
+  everyone's photos.
+- **The preview is a `blob:` URL, and something has to revoke it.** An object URL
+  is a document-lifetime reference, so one left dangling pins its thumbnail's
+  bytes until the tab closes. `outbox.js` owns the lifetime: every exit from the
+  outbox — a settled send, a discard, sign-out — goes through one function that
+  frees it, rather than the two call sites that would each have to remember.
+
+**There is no camera, and that's finished rather than missing.** The app offers
+one because taking a picture of what's in front of you is half of what a photo in
+a chat is for on a phone; at a desk it isn't, and `getUserMedia` would mean a
+permission prompt, a preview surface and a shutter built to serve the one case a
+webcam serves worse than the file picker already does. `<input type="file"
+accept="image/*">` is the whole affordance.
+
+**The bubble draws a *sized* thumbnail** from the `width`/`height` on the
+payload, fitted into the bubble's 224px of content width, and that's what those
+two columns are for: the box exists before the image arrives, so a photo loading
+while you're scrolled back through history doesn't shove what you were reading.
+Clicking opens the shared `Lightbox`. Unlike the phone, **a photo inside a reply
+strand opens perfectly well** — the app leaves that one inert because its strand
+is a `Modal` and iOS won't stack two, and the web has no such trap, so it doesn't
+inherit the restriction. An **unsent** photo is inert, because both its URLs
+point at the same local thumbnail and a lightbox would be a blurry copy of what's
+already on screen.
+
+**The list gained search and a row `⋯`.** Search appears at six threads, matches a
+group's title *and* its members' names, and lives inside the scroller so it
+scrolls away rather than permanently narrowing the panel — 🔒 and it searches
+names only, never message content, for the reason on the
+[not-building list](#not-end-to-end-encrypted-yet). The row actions are
+**Mark read/unread · Mute · Leave**, behind a hover `⋯` rather than the app's
+swipe: a list row on a desktop has no swipe, and a pointer has somewhere to rest.
+The `⋯` is a **sibling** of the row's own button, not a child — a button can't
+nest a button, and the version that tried it opened the chat on every menu click.
+The mark-unread gate is the app's, and
+[narrower than the server's](#marking-a-thread-unread) for the same reason.
+
+**The info panel is a fourth drawer *view*, not a route** (`messaging.jsx` is a
+view machine). The app pushes a screen because a phone has a navigation stack;
+giving the drawer one would mean the browser's Back button closed a panel that
+isn't a page, while Escape — which *is* how you close it — left the history
+behind. It carries what the app's screen does: participants with their **Pending**
+badges, mute, add people, leave, block on a 1:1, **rename a group in place**, and
+the **media gallery** (`?media=1&order=desc`, one page, `count` for the heading
+because the grid isn't the whole chat, and **nothing at all** when there are no
+photos). A rename writes the server's response straight into the
+`['conversation', id]` cache the thread header reads, so the new name is up before
+any refetch lands.
+
+**The thread header is now identity + `⋯`** — Details · Mute · Add people ·
+Leave — for the reason the app's is: three icon buttons were crowding the name of
+the person you're talking to, which is the one thing a chat header is for. One
+exception stayed behind: **a muted thread still says "Muted" up there**, because
+everything else the header carried was an *action* and belongs in the menu, while
+mute is a *state* and the whole risk of it is forgetting you did. Leave now
+confirms first, matching the app and the rest of the web's destructive actions.
 
 ## Mobile (Phase 9 E2)
 

@@ -1,5 +1,6 @@
 import { lazy, Suspense, useRef, useState } from "react";
 import DrawerPopover from "./DrawerPopover.jsx";
+import { MenuItem } from "./DrawerMenu.jsx";
 
 // The full emoji picker is code-split, the same way the feed's `ReactionBar`
 // loads it: its bundle + emoji data arrive only when someone actually expands
@@ -213,25 +214,6 @@ export default function MessageMenu({
         </DrawerPopover>
       )}
     </>
-  );
-}
-
-// One row — a plain button. Deliberately not ARIA `menuitem`/`menu`, matching
-// `PostMenu`: those roles advertise arrow-key navigation we don't implement, so
-// a `role="dialog"` popover of ordinary buttons is the honest house pattern.
-function MenuItem({ onClick, danger = false, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`block w-full px-4 py-2 text-left text-sm font-medium transition hover:bg-accent-tint ${
-        danger
-          ? "text-red-600 hover:text-red-700"
-          : "text-ink hover:text-accent-deep"
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 

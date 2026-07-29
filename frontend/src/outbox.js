@@ -46,9 +46,11 @@ import { useCallback, useSyncExternalStore } from "react";
  * no server copy to read until the send lands. It's what lets a failed reply be
  * recoverable from inside the strand as well as from the transcript.
  *
- * The app's entry carries two more, each arriving with the chunk that needs it
- * rather than sitting here unused: `photo` (M9e) and `mentionIds` (M9f — kept on
- * the entry for the same retry reason as `replyToId`).
+ * `photo` arrived with M9e — a prepared photo (see `chatPhotos.js`) held on the
+ * entry for the same retry reason as `replyToId`: a failed photo send has to be
+ * re-sendable without asking someone to find the picture again. The app's entry
+ * carries one more, arriving with the chunk that needs it rather than sitting
+ * here unused: `mentionIds` (M9f).
  */
 
 let nextTempId = -1;
@@ -80,10 +82,36 @@ export function outboxFor(conversationId) {
  * can't act on a stale copy — the same reason a state setter takes an updater.
  */
 export function updateOutbox(conversationId, update) {
-  const next = update(outboxFor(conversationId));
+  const previous = outboxFor(conversationId);
+  const next = update(previous);
+  releaseDropped(previous, next);
   if (next.length === 0) byConversation.delete(conversationId);
   else byConversation.set(conversationId, next);
   listeners.get(conversationId)?.forEach((notify) => notify());
+}
+
+/**
+ * Free the preview object URLs of entries that have just left the outbox
+ * (Phase 9b M9e).
+ *
+ * An in-flight photo bubble draws a `blob:` URL made from the prepared
+ * thumbnail, and an object URL is a *document-lifetime* reference: left
+ * dangling, every photo you send pins its thumbnail's bytes in memory until the
+ * tab closes. Doing it here rather than at the two call sites that drop an entry
+ * (a settled send, a discard) is what makes it impossible to forget — every exit
+ * from the outbox goes through this function, including `clearOutbox`.
+ *
+ * Revoking doesn't disturb the bubble on screen: the entry is being replaced by
+ * the server's own message, which carries real `/media/` URLs, and an image the
+ * browser has already decoded is unaffected by its URL going away.
+ */
+function releaseDropped(previous, next) {
+  const kept = new Set(next.map((entry) => entry.tempId));
+  previous.forEach((entry) => {
+    if (!kept.has(entry.tempId) && entry.photo?.previewUrl) {
+      URL.revokeObjectURL(entry.photo.previewUrl);
+    }
+  });
 }
 
 /**
@@ -124,6 +152,7 @@ export function useOutbox(conversationId) {
  */
 export function clearOutbox() {
   const conversations = [...byConversation.keys()];
+  conversations.forEach((id) => releaseDropped(outboxFor(id), NONE));
   byConversation.clear();
   conversations.forEach((id) =>
     listeners.get(id)?.forEach((notify) => notify())
@@ -131,12 +160,13 @@ export function clearOutbox() {
 }
 
 /** A fresh outbox entry for a message just handed to `sendMessage`. */
-export function newOutgoing({ text, replyToId, rootId }) {
+export function newOutgoing({ text, replyToId, rootId, photo }) {
   return {
     tempId: nextTempId--,
     text,
     replyToId,
     rootId,
+    photo,
     // The device clock, only ever used to sort this bubble to the bottom of the
     // list until the server's own timestamp replaces it wholesale.
     createdAt: new Date().toISOString(),
@@ -170,6 +200,23 @@ export function asMessage(entry, me) {
     reply_to: entry.replyToId ? { id: entry.replyToId } : null,
     thread_root_id: entry.rootId ?? null,
     reply_count: 0,
-    attachments: [],
+    // The local file stands in for the server's copy until it lands (M9e). A
+    // negative `id` matching the entry's `tempId` keeps it distinct from any
+    // real attachment, and both URLs point at the prepared thumbnail: the bubble
+    // draws it, and there's nothing full-size to open yet — which is why the
+    // bubble leaves an unsent photo unclickable rather than opening a lightbox
+    // onto a smaller copy of what's already on screen.
+    attachments: entry.photo
+      ? [
+          {
+            id: entry.tempId,
+            kind: "image",
+            url: entry.photo.previewUrl,
+            thumbnail: entry.photo.previewUrl,
+            width: entry.photo.width,
+            height: entry.photo.height,
+          },
+        ]
+      : [],
   };
 }

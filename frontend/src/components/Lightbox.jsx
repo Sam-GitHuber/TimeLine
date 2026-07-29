@@ -21,14 +21,25 @@ export default function Lightbox({ images, index, onClose, onIndexChange }) {
   );
 
   // Keyboard: arrows navigate, Escape closes.
+  //
+  // ⚠️ **In the capture phase, and Escape stops there.** The viewer opens from
+  // inside the messages drawer as well as from the feed (Phase 9b M9e), and the
+  // drawer closes on Escape too — both listening on `document`, so one press
+  // shut the photo *and* the panel behind it, dumping you back on the timeline
+  // for wanting to stop looking at a picture. Capturing runs before any
+  // bubble-phase listener on the same node, so `stopPropagation` here means the
+  // nearer thing wins — the same rule, and the same technique, as
+  // `DrawerPopover`. Only Escape is swallowed: the arrows aren't ambiguous.
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") onClose();
-      else if (event.key === "ArrowLeft" && count > 1) goPrev();
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onClose();
+      } else if (event.key === "ArrowLeft" && count > 1) goPrev();
       else if (event.key === "ArrowRight" && count > 1) goNext();
     }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
   }, [onClose, goPrev, goNext, count]);
 
   // While the viewer is open: lock background scroll, move focus into the

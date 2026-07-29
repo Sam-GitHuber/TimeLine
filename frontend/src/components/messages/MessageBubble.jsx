@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import Avatar from "../Avatar.jsx";
+import Lightbox from "../Lightbox.jsx";
 import DrawerPopover from "./DrawerPopover.jsx";
 import MessageMenu from "./MessageMenu.jsx";
 import MessageText from "./MessageText.jsx";
@@ -79,6 +80,11 @@ export default function MessageBubble({
 }) {
   const reactions = message.reactions ?? [];
   const [whoOpen, setWhoOpen] = useState(false);
+  // Which of this message's photos the lightbox is showing, or null for closed.
+  // An index rather than a boolean because `MESSAGE_ATTACHMENTS_MAX` is a server
+  // constant: it's 1 today, and a bubble that already knows *which* photo was
+  // clicked doesn't need revisiting the day it isn't.
+  const [photoIndex, setPhotoIndex] = useState(null);
   const pillsRef = useRef(null);
 
   /**
@@ -195,34 +201,18 @@ export default function MessageBubble({
                 onOpenThread={onOpenThread}
               />
             )}
-            {/* Photos (Phase 9b M7). **A deliberate stopgap, not the finished
-                treatment** — M9e ports the app's version (a sized bubble that
-                doesn't reflow as it loads, opening in the shared `Lightbox`).
-                What this fixes now is worse than an unpolished photo: the app
-                can send a caption-less photo message today, and without this the
-                web renders it as an empty bubble, which reads as a bug in the
-                other person's message. A thumbnail that opens the full image in
-                a tab is honest and ten lines.
-
-                No auth plumbing needed here, unlike the app: `/media/*` is
-                cookie-gated (Caddy `forward_auth`) and a browser attaches the
-                cookie to an <img> request by itself. */}
-            {photos.map((attachment) => (
-              <a
+            {/* Photos (Phase 9b M7 on the phone, properly here in M9e — this
+                replaced a stopgap thumbnail that linked to the raw file in a new
+                tab). */}
+            {photos.map((attachment, index) => (
+              <MessagePhoto
                 key={attachment.id}
-                href={attachment.url}
-                target="_blank"
-                rel="noreferrer"
-                className="mb-1 block"
-              >
-                <img
-                  src={attachment.thumbnail}
-                  width={attachment.width}
-                  height={attachment.height}
-                  alt="Photo"
-                  className="max-h-64 w-auto rounded-xl"
-                />
-              </a>
+                attachment={attachment}
+                // An unsent photo has nowhere full-size to open: both its URLs
+                // point at the same local thumbnail, so a lightbox would be a
+                // blurry copy of what's already on screen pretending to be more.
+                onOpen={unsent ? undefined : () => setPhotoIndex(index)}
+              />
             ))}
             {message.text && (
               <MessageText text={message.text} mine={mine} large={large} />
@@ -367,6 +357,29 @@ export default function MessageBubble({
         </div>
       )}
 
+      {/* From a bubble the lightbox opens the *message's* photo, not the chat's
+          gallery: here the message is the unit, and flipping from someone's
+          picture into the rest of the thread's is a different intention. The
+          info panel's gallery is where you swipe between them (M9e).
+
+          It's a portal on `<body>` at `z-50`, above the drawer's `z-40` — so
+          unlike the phone, a photo inside a **reply strand** opens perfectly
+          well. The app leaves that one inert because its strand is a `Modal` and
+          iOS won't stack two; the web has no such trap, so it doesn't inherit
+          the restriction. */}
+      {photoIndex !== null && (
+        <Lightbox
+          images={photos.map((attachment) => ({
+            id: attachment.id,
+            image: attachment.url,
+            thumbnail: attachment.thumbnail,
+          }))}
+          index={photoIndex}
+          onIndexChange={setPhotoIndex}
+          onClose={() => setPhotoIndex(null)}
+        />
+      )}
+
       {whoOpen && (
         <DrawerPopover
           anchorRef={pillsRef}
@@ -385,6 +398,75 @@ export default function MessageBubble({
         </DrawerPopover>
       )}
     </li>
+  );
+}
+
+/**
+ * How wide a photo is allowed to draw inside a bubble, in px.
+ *
+ * The drawer is 400px, the transcript pads 16px each side and the bubble stops
+ * at 78% of what's left, of which its own padding and the ⋯ corner take ~60 —
+ * so this is the content width, not a taste. A photo drawn wider would be the
+ * one thing in the transcript that could push the bubble past its own limit.
+ */
+const PHOTO_MAX_WIDTH = 224;
+/** And how tall, so a portrait shot doesn't take the whole panel and bury the
+ * message under it. A tall photo is letterboxed narrower, not cropped. */
+const PHOTO_MAX_HEIGHT = 288;
+
+/**
+ * A photo in a bubble (Phase 9b M9e), drawn at a **known size** and opening the
+ * shared `Lightbox`.
+ *
+ * ⚠️ **The size is the whole point of the width/height on the payload.** The
+ * sender's client measured what it uploaded and sent the numbers along, so the
+ * bubble can reserve exactly the right box *before* the image arrives. Without
+ * that, every photo that loads while you're scrolled back through history shoves
+ * the message you were reading up the panel — which is worse than it sounds, and
+ * is the reason those two columns exist on `MessageAttachment` at all.
+ *
+ * No auth plumbing needed here, unlike the app: `/media/*` is cookie-gated at
+ * Caddy (`forward_auth`) and the browser attaches the cookie to an `<img>`
+ * request by itself.
+ */
+function MessagePhoto({ attachment, onOpen }) {
+  // Fall back to a square if the sender sent nothing usable — a wrong box beats
+  // no box, since the point is only to stop the transcript reflowing.
+  const naturalWidth = attachment.width || 1;
+  const naturalHeight = attachment.height || 1;
+  const scale = Math.min(
+    1,
+    PHOTO_MAX_WIDTH / naturalWidth,
+    PHOTO_MAX_HEIGHT / naturalHeight
+  );
+  const width = Math.round(naturalWidth * scale);
+  const height = Math.round(naturalHeight * scale);
+
+  const image = (
+    <img
+      src={attachment.thumbnail}
+      // Both the attribute pair (so the box exists before any CSS loads) and the
+      // style (so it survives a stylesheet that would otherwise size images).
+      width={width}
+      height={height}
+      style={{ width, height }}
+      alt="Photo"
+      className="rounded-xl bg-ink/[0.04] object-cover"
+    />
+  );
+
+  // Inert when there's nothing better to open — an unsent photo. A picture that
+  // looked clickable and did nothing would be worse than one that plainly isn't.
+  if (!onOpen) return <span className="mb-1 block">{image}</span>;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label="Open photo"
+      className="mb-1 block transition hover:opacity-90"
+    >
+      {image}
+    </button>
   );
 }
 
