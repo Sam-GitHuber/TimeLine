@@ -39,8 +39,12 @@ knowledge from a previous session's conversation.
 - **Bring the stack up with `docker compose up --build`** — never a plain `up`.
   Add `--renew-anon-volumes` when you change a dependency.
 - **Tests are not optional.** Backend `backend/api/tests.py`; mobile
-  `mobile/src/__tests__/*.test.tsx` (`npm test`); web tests sit beside the
-  component as `*.test.jsx`. In mobile tests, **`await fireEvent`** whenever a
+  `mobile/src/__tests__/*.test.tsx` (`npm test`); web tests are **flat at
+  `frontend/src/*.test.jsx`**, named for the feature rather than the component
+  (`messaging.test.jsx`, `reactions.test.jsx`) — not beside the component, which
+  is what an earlier draft of this line said. Vitest has no `include` override,
+  so a stray one nested under `components/` would still *run*; it would just be
+  the only one there. In mobile tests, **`await fireEvent`** whenever a
   later assertion depends on state that event set — otherwise the update never
   flushes and the test silently passes on stale output.
 - **Update [`../reference/messaging.md`](../reference/messaging.md) in the same
@@ -1239,11 +1243,25 @@ most of these problems for the feed already.** Do not build a second copy.
 | --- | --- |
 | Quick-emoji row, full picker, "who reacted" | `ReactionBar.jsx`, `QuickReactionPopover.jsx`, `ReactorsPopover.jsx`, `EmojiPickerPopover.jsx` (lazily imported — keep it that way) |
 | A `⋯` menu anchored to a thing, portalled to `<body>` | `PostMenu.jsx` — copy its portal + `useLayoutEffect` positioning shape |
-| Report modal | `ReportModal`, exported from `ReportButton.jsx`; `api.reportContent({ messageId })` already exists |
+| Report modal | ⚠️ **half-reuse — see below.** `ReportModal` is exported from `ReportButton.jsx` and `api.reportContent({ messageId })` already takes a message, but the *modal* does not |
 | Full-screen photo viewer with ←/→ and Esc | `Lightbox.jsx` |
 | Day headings, clock times | `utils.js` → `dayHeading`, `dayKey`, `formatClockTime` (built for the feed; the app's `useDayBoundary` is the same idea) |
 | Dropdown wiring (Esc, outside-click, roving focus) | `useDropdownMenu.js` |
 | The read-receipts *setting* | Already shipped on `/settings` (a Privacy section) — M9c draws the ticks, it does not add the toggle |
+
+⚠️ **The one row that isn't the free win it looks like: `ReportModal`.** The web's
+takes `{ postId, commentId }` only, and derives its wording as
+`postId ? "post" : "comment"`. Wire the menu's Report item straight into it and
+you get a dialog headed *"Report this comment"* that POSTs a report with **no
+target at all** — a 400 from a menu entry that looks like it works, and nothing
+in the type-free JSX to warn you. `mobile/src/components/ReportModal.tsx` is the
+finished version: port its `messageId` prop, its three-way target
+(`post` / `comment` / `message`), and 🔒 **its extra copy for the message case**.
+That copy is not decoration — M0 made a report the *only* route by which a
+message ever reaches the maintainer, so telling the reporter that the server
+snapshots the reported text is the disclosure that makes the whole moderation
+design honest. A web Report that silently omits it regresses M0's intent while
+appearing to complete it. **M9b owns this** (step 7's Report item).
 
 ### The app modules to port, and how
 
@@ -1285,10 +1303,11 @@ down and hook in there.
   endpoint, re-read that section — it probably exists. If it genuinely doesn't,
   stop and raise it, because M9 shipping a backend change means the app needs a
   release too.
-- **Tests sit beside the code** as `*.test.jsx` / `*.test.js` under
-  `frontend/src/`. `frontend/src/messaging.test.jsx` (763 lines) is the existing
-  suite and must stay green — expect to *edit* it, since M9b changes the
-  transcript's shape underneath it.
+- **Tests go in `frontend/src/messaging.test.jsx`** (763 lines, 27 tests), which
+  is where every messaging test already lives — the web suite is flat and named
+  by feature, not colocated with components. It must stay green, and expect to
+  *edit* it: M9b changes the transcript's shape underneath it. Split a second
+  file out only if this one gets unwieldy, and then still at `frontend/src/`.
 - **Update [`../reference/messaging.md`](../reference/messaging.md) in the same PR.**
   Each chunk names its section. The *Frontend* section's "the web is behind and
   that's expected" passage gets shorter with each chunk and is deleted by M9f.
@@ -1364,6 +1383,12 @@ The biggest chunk, and the one everything else sits on. It's M5 + M1 on the web.
    like `PostMenu`. Own message → Copy · Edit · Delete. Someone else's → Copy ·
    Report. No menu on a tombstone. **Build the item list as data** — M9c, M9d and
    M9f each insert an entry.
+   - ⚠️ **Report needs `ReportModal` widened first** — it takes `postId`/
+     `commentId` only, so as it stands the item would open a dialog headed
+     "Report this comment" and report nothing. Port `messageId`, the three-way
+     target and 🔒 M0's message-specific copy from
+     `mobile/src/components/ReportModal.tsx`. See the ⚠️ note in the M9 preamble
+     for why that copy is load-bearing rather than wording.
 8. **Edit** in the composer: an "Editing message" bar with the original and an ✕,
    input prefilled and focused, Send becomes Save, cancelling restores whatever
    was half-typed. `PATCH` via a new `api.editMessage`. Bubble shows **"Edited"**.
@@ -1375,6 +1400,9 @@ own message; Edit prefills, saves, and shows "Edited"; Cancel restores the draft
 
 **Done when**
 - [ ] All of the above; `messaging.test.jsx` green.
+- [ ] Report from the web menu actually files a report **against the message**,
+      with M0's disclosure copy shown — assert the wording in a test, since the
+      failure mode here is a dialog that looks right and reports nothing.
 - [ ] `messaging.md` *Frontend* section gains the transcript + menu behaviour.
 
 ---

@@ -23,7 +23,6 @@ export default function ConversationThreadView() {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
   const [text, setText] = useState("");
-  const bodyRef = useRef(null);
   const bottomRef = useRef(null);
 
   const convoQuery = useQuery({
@@ -217,7 +216,7 @@ export default function ConversationThreadView() {
         />
       ) : (
         <>
-          <div ref={bodyRef} className="flex-1 overflow-y-auto px-4 py-4">
+          <div className="flex-1 overflow-y-auto px-4 py-4">
             {messagesQuery.isLoading ? (
               <p className="py-10 text-center text-ink-faint">Loading…</p>
             ) : messages.length === 0 ? (
