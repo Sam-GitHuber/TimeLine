@@ -14,6 +14,30 @@ import { useMessaging } from "../messaging.jsx";
 // This file is the shell only. The views live in `components/messages/` — split
 // out in Phase 9b M9a, before the parity work, so that five feature diffs
 // afterwards weren't tangled with a 600-line file being carved up.
+/**
+ * The panel itself: full width on a phone, 400px from `sm` — and **740px (400 +
+ * a 340px strand) once a reply thread is open** and there's room for both, which
+ * is Phase 9b M9d's one change to this file.
+ *
+ * **The width is driven by the DOM, not by state**, and that's deliberate. The
+ * strand is rendered three components down, so a flag would have to be threaded
+ * through messaging context and could then disagree with what's actually on
+ * screen. `has-[[data-strand]]` asks the only question that matters — is there a
+ * strand in here — and can't drift from the answer.
+ *
+ * ⚠️ It has to be a **utility variant**, not a rule in `index.css`. That's the
+ * same cascade trap M9b and M9c each recorded: Tailwind's utilities layer comes
+ * last, so a component-layer `.msg-drawer:has(…)` would lose to `sm:w-[400px]`
+ * and silently do nothing. Written as a utility, `:has()` contributes its
+ * argument's specificity and the rule wins on its own merits.
+ *
+ * `lg` rather than `sm` because below ~1024px two columns aren't two *readable*
+ * columns; there the strand replaces the transcript instead, which
+ * `ConversationThreadView` handles.
+ */
+const PANEL_CLASS =
+  "msg-drawer fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-line bg-surface shadow-[-14px_0_44px_-26px_rgba(28,26,22,0.4)] outline-none transition-[width] duration-200 sm:w-[400px] lg:has-[[data-strand]]:w-[740px]";
+
 export default function MessagesDrawer() {
   const { isOpen, view, close, newPrefill, conversationId } = useMessaging();
   const panelRef = useRef(null);
@@ -39,7 +63,7 @@ export default function MessagesDrawer() {
       role="dialog"
       aria-label="Messages"
       tabIndex={-1}
-      className="msg-drawer fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-line bg-surface shadow-[-14px_0_44px_-26px_rgba(28,26,22,0.4)] outline-none sm:w-[400px]"
+      className={PANEL_CLASS}
     >
       {view === "list" && <ConversationListView />}
       {/* Keyed on the conversation so switching threads remounts rather than

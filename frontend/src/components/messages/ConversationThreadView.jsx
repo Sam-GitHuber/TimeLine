@@ -13,6 +13,7 @@ import PendingChatPanel from "../PendingChatPanel.jsx";
 import { ReportModal } from "../ReportButton.jsx";
 import AvatarStack from "./AvatarStack.jsx";
 import MessageBubble from "./MessageBubble.jsx";
+import MessageStrandPanel, { threadQueryKey } from "./MessageStrandPanel.jsx";
 import { DaySeparator, UnreadDivider } from "./ThreadDividers.jsx";
 import { reactorsQueryKey } from "../ReactorsPopover.jsx";
 import {
@@ -27,6 +28,7 @@ import { useDayBoundary } from "../../hooks.js";
 import { insertMessage, patchReactions } from "../../messageCache.js";
 import { useMessaging } from "../../messaging.jsx";
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from "../../outbox.js";
+import { useQuotedMessages } from "../../quotes.js";
 import { readStateFor, receiptsVisible } from "../../readReceipts.js";
 import { firstUnreadId, toThreadRows } from "../../threadRows.js";
 
@@ -51,12 +53,19 @@ const OLDER_THRESHOLD = 300;
  * while you can still send here. The server enforces all three independently
  * ([`messaging.md`](../../../../docs/reference/messaging.md) → *Editing a
  * message*); this only avoids offering an action that would come back 403.
+ *
+ * `allowEdit` is how the strand asks for one item fewer (M9d). Editing needs a
+ * composer mode and the strand's composer already has a job — see
+ * `MessageStrandPanel`. Everything else is offered identically in both, which is
+ * why this stayed one function rather than becoming two lists to keep in step.
  */
 function messageActions({
   message,
   mine,
   canSend,
+  allowEdit = true,
   now,
+  onReply,
   onEdit,
   onDelete,
   onReport,
@@ -73,9 +82,20 @@ function messageActions({
       },
     },
   ];
+  /**
+   * Reply, and **the only route to one** (M9d) — it opens the strand rather
+   * than aiming this composer at a message, even when the message has no
+   * replies yet and the strand is one bubble long. That's the point: a reply
+   * needs the exchange it's joining visible while you write it, which a
+   * "Replying to X" bar above the composer can never show. The phone built the
+   * bar first, used it, and threw it away; the web starts where that ended.
+   */
+  if (canSend) {
+    actions.push({ label: "Reply", onClick: () => onReply(message) });
+  }
   if (mine) {
     const age = now - new Date(message.created_at).getTime();
-    if (canSend && age < MESSAGE_EDIT_WINDOW_MS) {
+    if (allowEdit && canSend && age < MESSAGE_EDIT_WINDOW_MS) {
       actions.push({ label: "Edit", onClick: () => onEdit(message) });
     }
     actions.push({
@@ -114,6 +134,15 @@ export default function ConversationThreadView() {
   // draft to a typo fix would be its own small betrayal.
   const [stashedDraft, setStashedDraft] = useState("");
   const [reportingId, setReportingId] = useState(null);
+  /**
+   * The open reply strand, or null for the transcript alone (M9d).
+   *
+   * `rootId` is the strand's head; `replyToId` the message actually clicked,
+   * which is only the root when you got here by browsing. The two differ when
+   * you reply to something that's already a reply, and keeping both is what lets
+   * the quote name who you answered rather than who started the strand.
+   */
+  const [strand, setStrand] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -174,6 +203,19 @@ export default function ConversationThreadView() {
     [pages]
   );
   const messageCount = loaded.length;
+
+  /**
+   * The body and author of each quoted message (M9d) — from what's loaded, or
+   * fetched by id through the same clipped endpoint.
+   *
+   * 🔒 The fetch is the point, not an optimisation. `reply_to` is a bare
+   * `{ id }`, so resolving against loaded messages alone was only ever complete
+   * while the transcript eagerly loaded every page — and M9b made paging lazy.
+   * Without `quotes.js`, "Original message unavailable" would start appearing on
+   * messages the viewer is perfectly entitled to and had merely not scrolled
+   * back to, which devalues it in the case where it's true.
+   */
+  const resolveQuote = useQuotedMessages(conversationId, loaded);
 
   /**
    * Messages you've sent that the server hasn't accepted yet (M9c) — held
@@ -421,7 +463,10 @@ export default function ConversationThreadView() {
    * message landing.
    */
   const sendMutation = useMutation({
-    mutationFn: ({ value }) => api.sendMessage(conversationId, value),
+    // `?? null` so an ordinary message sends an explicit "this is not a reply"
+    // rather than a hole an argument could later slide into.
+    mutationFn: ({ value, replyToId }) =>
+      api.sendMessage(conversationId, value, replyToId ?? null),
     onSuccess: (message, { tempId }) => {
       // Marked before either write, so the replacement bubble is already known
       // to be yours by the time it renders — see `justSent`. Out of order it
@@ -434,9 +479,27 @@ export default function ConversationThreadView() {
       queryClient.setQueryData(["messages", conversationId], (cached) =>
         insertMessage(cached, message, { newestFirst: true })
       );
+      // And into the strand it belongs to, if it's a reply (M9d). The panel
+      // reads its own query, so without this a reply sent from in there blinks
+      // out of the strand between the response landing and the refetch coming
+      // back — the very flicker the write above exists to prevent, just in the
+      // other column. `thread_root_id` comes off the server's copy rather than
+      // the client's guess: the server decides which strand a reply flattens
+      // into, and `newestFirst: false` because a strand reads the endpoint's
+      // default oldest-first order.
+      if (message.thread_root_id) {
+        queryClient.setQueryData(
+          threadQueryKey(conversationId, message.thread_root_id),
+          (cached) => insertMessage(cached, message, { newestFirst: false })
+        );
+      }
       setOutbox((entries) => entries.filter((e) => e.tempId !== tempId));
       queryClient.invalidateQueries({ queryKey: ["messages", conversationId] });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      // The strand reads its own query, so a reply has to refresh it — otherwise
+      // an open strand sits a poll cycle behind the transcript beside it. Also
+      // what brings the root's freshly incremented `reply_count` in.
+      queryClient.invalidateQueries({ queryKey: ["thread", conversationId] });
     },
     // The message stays put and goes to `failed`; the bubble grows Retry and
     // Discard. Nothing is thrown away, and there's no banner under the composer
@@ -458,10 +521,10 @@ export default function ConversationThreadView() {
    * that knows an unsent message exists and one place that decides what happens
    * when it doesn't land.
    */
-  function queueSend(value) {
-    const entry = newOutgoing({ text: value });
+  function queueSend(value, { replyToId, rootId } = {}) {
+    const entry = newOutgoing({ text: value, replyToId, rootId });
     setOutbox((entries) => [...entries, entry]);
-    sendMutation.mutate({ value, tempId: entry.tempId });
+    sendMutation.mutate({ value, replyToId, tempId: entry.tempId });
   }
 
   function retrySend(entry) {
@@ -470,7 +533,14 @@ export default function ConversationThreadView() {
         e.tempId === entry.tempId ? { ...e, status: "sending" } : e
       )
     );
-    sendMutation.mutate({ value: entry.text, tempId: entry.tempId });
+    // `replyToId` off the entry, not recomputed: a failed reply retried without
+    // it would quietly become an ordinary message, landing in the transcript
+    // instead of the strand you sent it from.
+    sendMutation.mutate({
+      value: entry.text,
+      replyToId: entry.replyToId,
+      tempId: entry.tempId,
+    });
   }
 
   /** Give up on a failed send. The only way outbox text is ever thrown away. */
@@ -624,6 +694,19 @@ export default function ConversationThreadView() {
     return readStateFor(message, participants, me?.pk);
   }
 
+  /**
+   * Open the strand a message belongs to (M9d), aimed at that message.
+   *
+   * The three routes in differ only in what they pass, and they all land here:
+   * **Reply** in the ⋯ menu passes the message you clicked; a **root's reply
+   * count** passes the root; a **reply's quote** passes the root as well, since
+   * from a quote you're going to read before you write.
+   */
+  function openStrand(message, { aimAtRoot = false } = {}) {
+    const rootId = message.thread_root_id ?? message.id;
+    setStrand({ rootId, replyToId: aimAtRoot ? rootId : message.id });
+  }
+
   // Deliberately *not* memoised: it's called when a menu opens, not during
   // render, and a memo would freeze the handlers around a stale `text` — which
   // is exactly the draft `startEditing` stashes.
@@ -633,7 +716,27 @@ export default function ConversationThreadView() {
       mine: message.sender.id === me?.pk,
       canSend,
       now: Date.now(),
+      onReply: (target) => openStrand(target),
       onEdit: startEditing,
+      onDelete: (messageId) => deleteMutation.mutate(messageId),
+      onReport: (messageId) => setReportingId(messageId),
+    });
+
+  /**
+   * The same menu inside the strand, one item shorter (no Edit) and with Reply
+   * re-aiming the strand's composer instead of opening anything — you're already
+   * in the strand a reply-to-a-reply would land in, since the server flattens
+   * every reply one level deep. See `MessageStrandPanel`.
+   */
+  const getStrandActions = (message) =>
+    messageActions({
+      message,
+      mine: message.sender.id === me?.pk,
+      canSend,
+      allowEdit: false,
+      now: Date.now(),
+      onReply: (target) =>
+        setStrand((open) => open && { ...open, replyToId: target.id }),
       onDelete: (messageId) => deleteMutation.mutate(messageId),
       onReport: (messageId) => setReportingId(messageId),
     });
@@ -733,217 +836,288 @@ export default function ConversationThreadView() {
           conversationId={conversationId}
         />
       ) : (
-        <>
-          <div className="relative flex-1 overflow-hidden">
-            {/* The transcript. `flex-col-reverse` is the whole mechanism: rows
-                come newest-first, index 0 paints at the bottom, and the scroll
-                origin is the newest message — so the thread opens at the bottom
-                with no scrolling code, and a page of older messages prepending
-                doesn't move what you're reading. */}
-            <div
-              ref={scrollRef}
-              onScroll={handleScroll}
-              // `log` is the ARIA role for a running transcript — but its
-              // implied `aria-live="polite"` is turned off deliberately. A live
-              // region announces *additions*, and this container grows at both
-              // ends: paging in twenty older messages would read all twenty
-              // aloud, which is worse than silence. Announcing only genuinely
-              // new messages needs a separate visually-hidden region fed one
-              // message at a time, which is its own job rather than a side
-              // effect of the role.
-              role="log"
-              aria-live="off"
-              aria-label="Conversation"
-              className="flex h-full flex-col-reverse overflow-y-auto px-4 py-4"
-            >
-              {messagesQuery.isLoading ? (
-                <p className="py-10 text-center text-ink-faint">Loading…</p>
-              ) : rows.length === 0 ? (
-                <p className="py-10 text-center text-ink-faint">
-                  No messages yet — say hello.
-                </p>
-              ) : (
-                <ul className="flex flex-col-reverse">
-                  {rows.map((row) => {
-                    if (row.kind === "day") {
-                      return <DaySeparator key={row.key} label={row.label} />;
-                    }
-                    if (row.kind === "unread") {
+        // Two columns once a strand is open (M9d), one otherwise. The strand
+        // sits *beside* the conversation it came from rather than over it —
+        // which is the whole reason the web doesn't copy the app's blur — and
+        // the drawer widens to make room (`MessagesDrawer`). Below `lg` there
+        // isn't room for two readable columns, so the transcript stands down and
+        // the strand takes the panel: a 200px-wide transcript would be a worse
+        // companion than none.
+        <div className="flex min-h-0 flex-1">
+          <div
+            className={`min-w-0 flex-1 flex-col ${strand ? "hidden lg:flex" : "flex"}`}
+          >
+            <div className="relative flex-1 overflow-hidden">
+              {/* The transcript. `flex-col-reverse` is the whole mechanism: rows
+                  come newest-first, index 0 paints at the bottom, and the scroll
+                  origin is the newest message — so the thread opens at the bottom
+                  with no scrolling code, and a page of older messages prepending
+                  doesn't move what you're reading. */}
+              <div
+                ref={scrollRef}
+                onScroll={handleScroll}
+                // `log` is the ARIA role for a running transcript — but its
+                // implied `aria-live="polite"` is turned off deliberately. A live
+                // region announces *additions*, and this container grows at both
+                // ends: paging in twenty older messages would read all twenty
+                // aloud, which is worse than silence. Announcing only genuinely
+                // new messages needs a separate visually-hidden region fed one
+                // message at a time, which is its own job rather than a side
+                // effect of the role.
+                role="log"
+                aria-live="off"
+                aria-label="Conversation"
+                className="flex h-full flex-col-reverse overflow-y-auto px-4 py-4"
+              >
+                {messagesQuery.isLoading ? (
+                  <p className="py-10 text-center text-ink-faint">Loading…</p>
+                ) : rows.length === 0 ? (
+                  <p className="py-10 text-center text-ink-faint">
+                    No messages yet — say hello.
+                  </p>
+                ) : (
+                  <ul className="flex flex-col-reverse">
+                    {rows.map((row) => {
+                      if (row.kind === "day") {
+                        return <DaySeparator key={row.key} label={row.label} />;
+                      }
+                      if (row.kind === "unread") {
+                        return (
+                          <UnreadDivider
+                            key={row.key}
+                            count={row.count}
+                            elementRef={unreadRef}
+                          />
+                        );
+                      }
+                      const mine = row.message.sender.id === me?.pk;
                       return (
-                        <UnreadDivider
+                        <MessageBubble
                           key={row.key}
-                          count={row.count}
-                          elementRef={unreadRef}
+                          message={row.message}
+                          mine={mine}
+                          // A run's *first* bubble is the one attributed, so a
+                          // burst reads as one block instead of repeating the name
+                          // on every line.
+                          showSender={isGroup && !mine && row.startsRun}
+                          startsRun={row.startsRun}
+                          endsRun={row.endsRun}
+                          getActions={getActions}
+                          status={statusFor(row.message)}
+                          meId={me?.pk}
+                          // 🔒 Resolved through `quotes.js`, never read off the
+                          // reply's own payload — which carries a bare `{ id }`
+                          // precisely so the body can't be handed to someone the
+                          // server clipped it from.
+                          quoted={
+                            row.message.reply_to
+                              ? resolveQuote(row.message.reply_to.id)
+                              : undefined
+                          }
+                          // Both ways into the strand run through this one
+                          // handler — the quote on a reply, and the reply count
+                          // on a root. A quote aims the strand's composer at the
+                          // root, since from a quote you came to read.
+                          onOpenThread={() =>
+                            openStrand(row.message, {
+                              aimAtRoot: !!row.message.reply_to,
+                            })
+                          }
+                          // False only for the bubble that replaces one of your
+                          // own optimistic ones, which has already made its
+                          // entrance — see `justSent`.
+                          animate={!justSent.has(row.message.id)}
+                          // Omitted in a thread you can no longer send to, which
+                          // drops the menu's emoji row and "tap to remove" in the
+                          // who-reacted list: a reaction is content everyone sees,
+                          // so being severed stops it (403) exactly as it stops a
+                          // message. The list stays readable, and inert.
+                          onReact={
+                            canSend
+                              ? (emoji) =>
+                                  reactMutation.mutate({
+                                    messageId: row.message.id,
+                                    emoji,
+                                  })
+                              : undefined
+                          }
+                          onRetry={() => {
+                            const entry = outboxById.get(row.message.id);
+                            if (entry) retrySend(entry);
+                          }}
+                          onDiscard={() => discardSend(row.message.id)}
                         />
                       );
-                    }
-                    const mine = row.message.sender.id === me?.pk;
-                    return (
-                      <MessageBubble
-                        key={row.key}
-                        message={row.message}
-                        mine={mine}
-                        // A run's *first* bubble is the one attributed, so a
-                        // burst reads as one block instead of repeating the name
-                        // on every line.
-                        showSender={isGroup && !mine && row.startsRun}
-                        startsRun={row.startsRun}
-                        endsRun={row.endsRun}
-                        getActions={getActions}
-                        status={statusFor(row.message)}
-                        meId={me?.pk}
-                        // False only for the bubble that replaces one of your
-                        // own optimistic ones, which has already made its
-                        // entrance — see `justSent`.
-                        animate={!justSent.has(row.message.id)}
-                        // Omitted in a thread you can no longer send to, which
-                        // drops the menu's emoji row and "tap to remove" in the
-                        // who-reacted list: a reaction is content everyone sees,
-                        // so being severed stops it (403) exactly as it stops a
-                        // message. The list stays readable, and inert.
-                        onReact={
-                          canSend
-                            ? (emoji) =>
-                                reactMutation.mutate({
-                                  messageId: row.message.id,
-                                  emoji,
-                                })
-                            : undefined
-                        }
-                        onRetry={() => {
-                          const entry = outboxById.get(row.message.id);
-                          if (entry) retrySend(entry);
-                        }}
-                        onDiscard={() => discardSend(row.message.id)}
-                      />
-                    );
-                  })}
-                </ul>
-              )}
-              {/* Last in the DOM, so `flex-col-reverse` paints it at the *top*
-                  of the history — where "earlier messages" belongs.
+                    })}
+                  </ul>
+                )}
+                {/* Last in the DOM, so `flex-col-reverse` paints it at the *top*
+                    of the history — where "earlier messages" belongs.
 
-                  Scrolling up is the main way older messages load, but it can't
-                  be the only way: `onScroll` never fires on a transcript that
-                  doesn't overflow, so a first page that fits the panel on a tall
-                  window would leave the rest of the chat unreachable. The app
-                  doesn't have this problem because `onEndReached` fires on
-                  *layout*. This is the shared `LoadMoreButton` every other
-                  paginated list in the app uses, and it renders nothing at all
-                  once there's no next page. */}
-              <LoadMoreButton query={messagesQuery} />
+                    Scrolling up is the main way older messages load, but it can't
+                    be the only way: `onScroll` never fires on a transcript that
+                    doesn't overflow, so a first page that fits the panel on a tall
+                    window would leave the rest of the chat unreachable. The app
+                    doesn't have this problem because `onEndReached` fires on
+                    *layout*. This is the shared `LoadMoreButton` every other
+                    paginated list in the app uses, and it renders nothing at all
+                    once there's no next page. */}
+                <LoadMoreButton query={messagesQuery} />
+              </div>
+
+              {awayFrom !== null && (
+                <button
+                  type="button"
+                  onClick={jumpToLatest}
+                  className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-line bg-raised px-3 py-1.5 text-xs font-medium text-ink shadow-lg transition hover:border-accent hover:text-accent-deep"
+                >
+                  {missed > 0
+                    ? `${missed} new message${missed === 1 ? "" : "s"} ↓`
+                    : "Jump to latest ↓"}
+                </button>
+              )}
             </div>
 
-            {awayFrom !== null && (
-              <button
-                type="button"
-                onClick={jumpToLatest}
-                className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-line bg-raised px-3 py-1.5 text-xs font-medium text-ink shadow-lg transition hover:border-accent hover:text-accent-deep"
-              >
-                {missed > 0
-                  ? `${missed} new message${missed === 1 ? "" : "s"} ↓`
-                  : "Jump to latest ↓"}
-              </button>
-            )}
+            <div className="border-t border-line px-3 py-3">
+              {canSend ? (
+                <>
+                  {/* The editing bar: what you're rewriting, and a way out of it.
+                      The original is shown raw rather than cleaned up — the
+                      composer below holds that exact string, and a tidied version
+                      above the source you're typing into would be the one place
+                      dropping the markup misleads. */}
+                  {editing && (
+                    <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-raised px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-accent-deep">
+                          Editing message
+                        </p>
+                        <p className="truncate text-sm text-ink-soft">
+                          {editing.text}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={stopEditing}
+                        aria-label="Cancel editing"
+                        className="shrink-0 rounded-full px-1 text-ink-faint transition hover:text-ink"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )}
+                  <form onSubmit={handleSubmit} className="flex items-end gap-2">
+                    <textarea
+                      ref={inputRef}
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSubmit(e);
+                        }
+                        // Escape leaves edit mode rather than closing the drawer:
+                        // the nearer thing wins, and losing the whole panel
+                        // mid-correction would be a surprise.
+                        if (e.key === "Escape" && editing) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          stopEditing();
+                        }
+                      }}
+                      rows={1}
+                      placeholder={
+                        editing ? "Edit your message…" : "Write a message…"
+                      }
+                      className="max-h-32 flex-1 resize-none rounded-2xl border border-line-strong bg-raised px-4 py-2.5 text-base text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
+                    />
+                    <button
+                      type="submit"
+                      // Only an *edit* disables it. A send doesn't: the message is
+                      // already on screen and the composer is already empty, so
+                      // there's nothing to wait for.
+                      disabled={!text.trim() || editMutation.isPending}
+                      className="btn btn-primary btn-sm mb-0.5"
+                    >
+                      {editing
+                        ? editMutation.isPending
+                          ? "Saving…"
+                          : "Save"
+                        : "Send"}
+                    </button>
+                  </form>
+                </>
+              ) : (
+                <p className="py-1 text-center text-sm text-ink-faint">
+                  You’re no longer connected with{" "}
+                  {other?.display_name ?? "this person"}, so you can’t send new
+                  messages.
+                </p>
+              )}
+              {/* A failed *send* is reported on its own bubble, not here (M9c) —
+                  nearer the thing that went wrong, and the only place that works
+                  when two messages are in flight and one of them fell over. A
+                  failed edit still belongs here: it has no bubble of its own. */}
+              {/* Reacting is a one-click gesture with no optimistic pill, so a
+                  failure has to say so rather than leave the click looking as
+                  though it worked. The server owns the rules that can reject one
+                  (the per-target cap, emoji validation, a closed thread), so its
+                  message is what's shown. */}
+              {reactMutation.isError && (
+                <p role="alert" className="mt-1 text-sm text-red-600">
+                  {reactMutation.error?.message || "Couldn’t react."}
+                </p>
+              )}
+              {editMutation.isError && (
+                <p role="alert" className="mt-1 text-sm text-red-600">
+                  {editMutation.error?.message || "Couldn’t save the edit."}
+                </p>
+              )}
+            </div>
           </div>
 
-          <div className="border-t border-line px-3 py-3">
-            {canSend ? (
-              <>
-                {/* The editing bar: what you're rewriting, and a way out of it.
-                    The original is shown raw rather than cleaned up — the
-                    composer below holds that exact string, and a tidied version
-                    above the source you're typing into would be the one place
-                    dropping the markup misleads. */}
-                {editing && (
-                  <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-raised px-3 py-2">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-accent-deep">
-                        Editing message
-                      </p>
-                      <p className="truncate text-sm text-ink-soft">
-                        {editing.text}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={stopEditing}
-                      aria-label="Cancel editing"
-                      className="shrink-0 rounded-full px-1 text-ink-faint transition hover:text-ink"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                )}
-                <form onSubmit={handleSubmit} className="flex items-end gap-2">
-                  <textarea
-                    ref={inputRef}
-                    value={text}
-                    onChange={(e) => setText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSubmit(e);
-                      }
-                      // Escape leaves edit mode rather than closing the drawer:
-                      // the nearer thing wins, and losing the whole panel
-                      // mid-correction would be a surprise.
-                      if (e.key === "Escape" && editing) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        stopEditing();
-                      }
-                    }}
-                    rows={1}
-                    placeholder={
-                      editing ? "Edit your message…" : "Write a message…"
-                    }
-                    className="max-h-32 flex-1 resize-none rounded-2xl border border-line-strong bg-raised px-4 py-2.5 text-base text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
-                  />
-                  <button
-                    type="submit"
-                    // Only an *edit* disables it. A send doesn't: the message is
-                    // already on screen and the composer is already empty, so
-                    // there's nothing to wait for.
-                    disabled={!text.trim() || editMutation.isPending}
-                    className="btn btn-primary btn-sm mb-0.5"
-                  >
-                    {editing
-                      ? editMutation.isPending
-                        ? "Saving…"
-                        : "Save"
-                      : "Send"}
-                  </button>
-                </form>
-              </>
-            ) : (
-              <p className="py-1 text-center text-sm text-ink-faint">
-                You’re no longer connected with{" "}
-                {other?.display_name ?? "this person"}, so you can’t send new
-                messages.
-              </p>
-            )}
-            {/* A failed *send* is reported on its own bubble, not here (M9c) —
-                nearer the thing that went wrong, and the only place that works
-                when two messages are in flight and one of them fell over. A
-                failed edit still belongs here: it has no bubble of its own. */}
-            {/* Reacting is a one-click gesture with no optimistic pill, so a
-                failure has to say so rather than leave the click looking as
-                though it worked. The server owns the rules that can reject one
-                (the per-target cap, emoji validation, a closed thread), so its
-                message is what's shown. */}
-            {reactMutation.isError && (
-              <p role="alert" className="mt-1 text-sm text-red-600">
-                {reactMutation.error?.message || "Couldn’t react."}
-              </p>
-            )}
-            {editMutation.isError && (
-              <p role="alert" className="mt-1 text-sm text-red-600">
-                {editMutation.error?.message || "Couldn’t save the edit."}
-              </p>
-            )}
-          </div>
-        </>
+          {strand && (
+            <MessageStrandPanel
+              conversationId={conversationId}
+              rootId={strand.rootId}
+              replyToId={strand.replyToId}
+              meId={me?.pk}
+              isGroup={isGroup}
+              canSend={canSend}
+              onAimAt={(messageId) =>
+                setStrand((open) => open && { ...open, replyToId: messageId })
+              }
+              // The strand's own unsent replies, so one appears the moment you
+              // send it and a failed one is recoverable *here* — which matters
+              // most on a narrow window, where the transcript holding the other
+              // copy isn't even on screen.
+              outgoing={outbox
+                .filter((entry) => entry.rootId === strand.rootId)
+                .map((entry) => asMessage(entry, meAsAuthor))}
+              statusFor={statusFor}
+              justSent={justSent}
+              getActions={getStrandActions}
+              // Omitted in a thread you can no longer send to, exactly as in the
+              // transcript: a reaction is content everyone sees, so being
+              // severed stops it (403) as surely as it stops a message.
+              onReact={
+                canSend
+                  ? (messageId, emoji) =>
+                      reactMutation.mutate({ messageId, emoji })
+                  : undefined
+              }
+              onSend={(value, replyToId) =>
+                queueSend(value, { replyToId, rootId: strand.rootId })
+              }
+              onRetry={(message) => {
+                const entry = outboxById.get(message.id);
+                if (entry) retrySend(entry);
+              }}
+              onDiscard={(message) => discardSend(message.id)}
+              onClose={() => setStrand(null)}
+            />
+          )}
+        </div>
       )}
 
       {reportingId !== null && (

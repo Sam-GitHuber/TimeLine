@@ -1347,6 +1347,79 @@ message you're actually watching. Slower than the message poll on purpose: the
 detail costs several per-conversation queries where a message poll is one cheap
 page.
 
+### Reply threads on the web (Phase 9b M9d)
+
+M9d brought [reply threads](#reply-threads) across. The behaviour is the app's —
+one flat strand per root, quotes resolved rather than handed over, and
+[every route landing in the strand](#every-route-to-a-reply-goes-through-the-strand)
+— and `quotes.js` is a port of the app's module, comments included. **The layout
+is the one thing that deliberately differs**, and the reason is the medium.
+
+**A panel beside the transcript, where the app blurs it away.** On a phone there
+is one column, so a strand has to take the screen, and the blur is what stops
+that reading as "a modal over a list" — you haven't gone anywhere, you've
+narrowed to a strand of the conversation you're already in. A drawer has a second
+column to be had: it widens from 400px to 740 and the strand opens *next to* the
+transcript, so the conversation you opened it from stays legible rather than
+frosted over. Below `lg` (~1024px) two columns wouldn't be two *readable*
+columns, so the strand replaces the transcript and the drawer stays 400 — a
+200px-wide transcript would be a worse companion than none.
+
+⚠️ **The width is driven by the DOM, not by state**: `MessagesDrawer` carries
+`lg:has-[[data-strand]]:w-[740px]` and the panel marks itself `data-strand`. The
+strand is rendered three components down, so a flag would have to be threaded
+through messaging context and could then disagree with what's actually on screen.
+It has to be written as a **utility variant**, never a rule in `index.css` — the
+same cascade trap [M9b](#the-web-transcript-phase-9b-m9b) and M9c each recorded:
+Tailwind's utilities layer comes last, so a component-layer `.msg-drawer:has(…)`
+would lose to `sm:w-[400px]` and silently do nothing.
+
+**The two halves in the transcript.** A reply renders a **collapsed quote** inside
+its bubble (name, two lines, `line-clamp`ed so a long quote can't push the reply
+off), and a root renders **"3 replies"** on a branch line under it — the same
+living line the feed's comment threads use, so a strand reads as growing out of
+the message rather than as a button stuck under it. Clicking either opens the
+strand; the bubble's own click stays free.
+
+🔒 **The quote is resolved, never read off the reply.** `reply_to` is a bare
+`{ id }`, so `quotes.js` looks in the transcript's loaded messages and otherwise
+fetches by id through [`?ids=`](#api) — the same interval-clipped queryset, so an
+id you were clipped out of comes back **absent** and the quote says "Original
+message unavailable" **with no name above it**. That fetch stopped being optional
+when M9b made paging lazy: without it the message would appear on anything you
+merely hadn't scrolled back to, which devalues it in the case where it's true.
+Each id is asked about **once** — an unresolvable id is a fact about this viewer,
+not a transient failure, so re-asking every poll would be a request that can only
+ever return nothing. 🔒 The store is cleared on sign-out, like the outbox and the
+drafts, and for a stronger reason than either: it holds *other people's* words.
+
+**The strand carries the ⋯ menu, unlike the app's**, which leaves it out only
+because its strand is a `Modal` and so is the menu — an iOS constraint the web
+hasn't got. It's deliberately one item shorter: **no Edit**. Editing needs a
+composer mode and the strand's composer already has a job; the transcript beside
+you keeps Edit one hover away, and on a narrow window closing the strand is one
+click. **Reply inside the strand re-aims the composer** rather than opening
+anything, since a reply to a reply flattens into the strand you're already in;
+the label above the composer names the target, and clears back to the root.
+
+**The strand pulls every page, where the transcript pages lazily**, and that's
+the difference between the two views rather than an inconsistency — a transcript
+is unbounded, a strand is one exchange inside it. Reading only page one would cut
+a busy strand off at its *oldest* twenty and hide the reply you just sent, while
+the root's count climbed past what the strand showed.
+
+Replies go through the **same outbox** as everything else, so one appears the
+instant you send it and a failed one keeps its place with Retry — in the strand
+as well as the transcript, which matters most on a narrow window where the
+transcript isn't on screen. ⚠️ The entry keeps `replyToId` so a **retry is still
+a reply**; without it a failed reply would quietly become an ordinary message on
+the second attempt. It keeps `rootId` too — the client's own guess, since there's
+no server copy until the send lands — purely so the strand knows which unsent
+bubbles are its own. On success the accepted message is written into *both*
+caches, the transcript's and the strand's, using `thread_root_id` off the
+server's copy rather than the client's guess: the server decides which strand a
+reply flattens into.
+
 ## Mobile (Phase 9 E2)
 
 The iPhone app is a **client port of exactly this API — no backend change.** It

@@ -89,7 +89,7 @@ each is written below to be picked up cold:
 | **M9a** | Split the drawer (no behaviour change) | `messaging/m9a-split` | — | **S** | ☑ |
 | **M9b** | Transcript mechanics + the ⋯ menu & edit | `messaging/m9b-transcript` | M9a | **L** | ☑ |
 | **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☑ |
-| **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☐ |
+| **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☑ |
 | **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☐ |
 | **M9f** | Formatting, mentions, multi-select + doc rewrite | `messaging/m9f-text` | M9b | **M** | ☐ |
 
@@ -1601,11 +1601,66 @@ the clock.
    dispatch.
 
 **Done when**
-- [ ] Reply from the menu opens a strand; replying inside it works and pages.
-- [ ] A reply-to-a-reply lands in the same strand — no nesting anywhere.
-- [ ] A clipped root shows the "start of this thread isn't available" wording,
+- [x] Reply from the menu opens a strand; replying inside it works and pages.
+- [x] A reply-to-a-reply lands in the same strand — no nesting anywhere.
+- [x] A clipped root shows the "start of this thread isn't available" wording,
       and an unresolved quote renders with **no author name** (M3's point 6).
-- [ ] `messaging.md` *Frontend* updated.
+- [x] `messaging.md` *Frontend* updated → *Reply threads on the web (Phase 9b
+      M9d)*.
+- [x] `messaging.test.jsx` green (64 tests), whole frontend suite 260.
+
+**Five things M9d settled that the plan above didn't anticipate** — read these
+before M9e/M9f, which share the bubble and the drawer:
+
+1. **The drawer's width is driven by the DOM, not by state, and it has to be a
+   Tailwind variant.** The strand is rendered three components down from
+   `MessagesDrawer`, so widening on a flag would mean threading state through
+   messaging context — and a flag can then disagree with what's on screen.
+   `lg:has-[[data-strand]]:w-[740px]` on the panel plus `data-strand` on the
+   strand asks the only question that matters and can't drift. ⚠️ **It has to
+   live as a utility**, not as `.msg-drawer:has(…)` in `index.css` — the same
+   cascade trap M9b and M9c each recorded, third time round: Tailwind's utilities
+   layer comes last, so a component-layer rule loses to `sm:w-[400px]` and does
+   nothing at all. Written as a utility, `:has()` contributes its argument's
+   specificity and the rule wins on its own merits.
+2. **`lg`, not `sm`, is where two columns start** — and the plan's "below that
+   width, fall back to replacing the transcript" needed a number. 400 + 340 = 740
+   fits from ~1024px with feed still visible behind it; at `sm` (640) a 740px
+   drawer would either overflow or cover the page, and two 320px columns aren't
+   two readable ones. Below `lg` the transcript takes `hidden lg:flex` and the
+   strand takes the panel, which is checked by rendering it, not by reasoning.
+3. **The strand carries the ⋯ menu, and the app's reason for omitting it doesn't
+   port.** The app leaves the menu out of its strand because both are `Modal`s and
+   iOS won't stack them; `DrawerPopover` portals to `<body>`, so the web has no
+   such constraint — and without a menu the strand would be action-less on a
+   narrow window, where it's the only column on screen. It's one item shorter
+   (**no Edit**): editing needs a composer mode, this composer already has a job,
+   and a second one is the "two things fighting for one input" M3 settled
+   against. `messageActions` grew an `allowEdit` flag rather than forking into
+   two lists that would drift.
+4. **Reply *inside* the strand re-aims the composer instead of opening
+   anything** — there's nowhere to open, since the server flattens a reply to a
+   reply into the strand you're already in. That gives the web something the app
+   hasn't got (picking your target from inside the strand), so the label above
+   the composer needed a way *back* to the root; without the ✕ on it the only
+   escape from a target chosen by accident was closing the strand and reopening
+   it.
+5. ⚠️ **`replyToId` has to be kept on the outbox entry, not recomputed on
+   retry.** A failed reply retried without it sends as an ordinary message and
+   lands in the transcript instead of the strand you sent it from — a silent
+   change of meaning, and invisible unless the test asserts the *second* call's
+   arguments. `rootId` is kept for a different reason (which strand's unsent
+   bubbles are which) and is the client's own guess; the *cache* write uses
+   `thread_root_id` off the server's copy, because the server is what decides
+   which strand a reply flattens into.
+
+**Rendered and checked**, the way M9c's note asks for: the bubble markup and the
+whole drawer were rendered from the real components into a static harness against
+the *built* stylesheet and screenshotted with headless Firefox, at 1280 (two
+columns) and 900 (the strand replacing the transcript). That's what caught the
+one visual defect in the build — an emoji-only reply sat at the far left of a
+quote-width box, reading as detached from the quote above it; the `large` branch
+is a flex column with `items-end`/`items-start` now.
 
 ---
 

@@ -8,6 +8,7 @@ import {
 import { api } from "./api.js";
 import { clearDrafts } from "./drafts.js";
 import { clearOutbox } from "./outbox.js";
+import { clearQuotes } from "./quotes.js";
 
 // Holds "who is logged in" for the whole app. On first load we ask the backend
 // "who am I?" (using the httpOnly cookie the browser already has, if any), so a
@@ -54,13 +55,15 @@ export function AuthProvider({ children }) {
   const logout = useCallback(async () => {
     await api.logout();
     setUser(null);
-    // 🔒 Message drafts and the outbox both live outside React (`drafts.js`,
-    // `outbox.js`) so they can survive a component unmounting — which means
-    // nothing tears them down on its own. Both hold one person's unsent words,
-    // and on a shared computer the next person to open the drawer isn't them.
-    // The app does the same on sign-out.
+    // 🔒 Drafts, the outbox and the resolved quotes all live outside React
+    // (`drafts.js`, `outbox.js`, `quotes.js`) so they can survive a component
+    // unmounting — which means nothing tears them down on its own. The first two
+    // hold one person's unsent words; the third holds *other people's* message
+    // text, fetched to fill a quote. On a shared computer the next person to
+    // open the drawer isn't this person. The app does the same on sign-out.
     clearDrafts();
     clearOutbox();
+    clearQuotes();
   }, []);
 
   // register does NOT log you in — new accounts are pending admin approval.

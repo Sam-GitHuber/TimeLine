@@ -4,7 +4,7 @@ import DrawerPopover from "./DrawerPopover.jsx";
 import MessageMenu from "./MessageMenu.jsx";
 import MessageText from "./MessageText.jsx";
 import ReactorsPopover from "../ReactorsPopover.jsx";
-import { isEmojiOnly } from "../../messageText.js";
+import { isEmojiOnly, plainMessageText } from "../../messageText.js";
 import { formatClockTime } from "../../utils.js";
 
 // One message row — yours align right (filled accent), theirs left. A deleted
@@ -24,6 +24,8 @@ import { formatClockTime } from "../../utils.js";
 // emoji-only messages drawn large, and the ⋯ menu that replaced the inline
 // Delete. M9c added reaction pills, and — on your own messages — a clock while
 // a send is in flight, a tick when it lands, and Retry/Discard when it doesn't.
+// M9d added the two halves of a reply thread: a collapsed quote inside a reply's
+// bubble, and a "3 replies" branch under a root.
 export default function MessageBubble({
   message,
   mine,
@@ -31,6 +33,22 @@ export default function MessageBubble({
   startsRun = true,
   endsRun = true,
   getActions,
+  /**
+   * The message this one replies to, if the caller could resolve it (M9d).
+   *
+   * 🔒 **Resolved, never handed over.** `message.reply_to` is a bare `{ id }`,
+   * so this comes from the transcript's own loaded messages or from a fetch
+   * through the clipped endpoint (`quotes.js`) — the two places the server has
+   * already decided this viewer may see. `undefined` is a real answer and gets
+   * the honest "Original message unavailable", with **no name above it**.
+   */
+  quoted,
+  /**
+   * Open this message's strand. Wired to *both* ways in — a reply's quote and a
+   * root's reply count — and omitted where there is no strand to open, which is
+   * what keeps the quote inert rather than a button that does nothing.
+   */
+  onOpenThread,
   /**
    * `sending` / `failed` (from the outbox) or `sent` / `read` (computed from
    * participants' read markers) — and `undefined` on everyone else's messages,
@@ -86,6 +104,13 @@ export default function MessageBubble({
   const large =
     !message.is_deleted && photos.length === 0 && isEmojiOnly(message.text);
   const clock = formatClockTime(message.created_at);
+  /**
+   * 🔒 Clipped per viewer by the server (`_with_reply_counts`), not a plain
+   * `Count`. A count is small but it's still existence — "3 replies" on a
+   * message you can't see would tell a gap member how much happened while they
+   * were out. Nothing here has to know that; it just renders what it's given.
+   */
+  const replyCount = message.reply_count ?? 0;
 
   return (
     // The gap goes *above* each row, and is tighter inside a run — consecutive
@@ -124,7 +149,12 @@ export default function MessageBubble({
           <div
             className={`msg-menu-host ${status === "failed" ? "opacity-60" : ""} ${
               large
-                ? "max-w-[78%]"
+                ? // A column, so a quote above an emoji-only message can be full
+                  // width while the emoji itself still sits on the side its
+                  // sender's bubbles do. Without this the quote sets the box's
+                  // width and the emoji floats at the far left of it, reading as
+                  // detached from the message it belongs to.
+                  `flex max-w-[78%] flex-col ${mine ? "items-end" : "items-start"}`
                 : `msg-bubble-body max-w-[78%] rounded-2xl py-2 ${
                     mine
                       ? "bg-accent text-white"
@@ -151,6 +181,18 @@ export default function MessageBubble({
                     reactions.filter((r) => r.reacted).map((r) => r.emoji)
                   )
                 }
+              />
+            )}
+            {/* The collapsed quote (M9d) — inside the bubble, above the words,
+                so the reply reads as carrying what it answers rather than
+                sitting under a separate label. */}
+            {message.reply_to && (
+              <QuotedMessage
+                quoted={quoted}
+                // Same test the tick uses: an emoji-only message has no accent
+                // fill behind it, so white-on-white would be an invisible quote.
+                onFill={mine && !large}
+                onOpenThread={onOpenThread}
               />
             )}
             {/* Photos (Phase 9b M7). **A deliberate stopgap, not the finished
@@ -301,6 +343,30 @@ export default function MessageBubble({
           ))}
         </div>
       )}
+      {/* The way into a strand from its root (M9d), and the *only* click that
+          opens it from here — the bubble's own click stays free, the gesture
+          budget M2 settled. Drawn as a branch off the bubble, the same living
+          line the feed's comment threads use, so a strand reads as growing out
+          of the message rather than as a button stuck under it.
+
+          Its absence is what makes the quote load-bearing: a root the viewer was
+          clipped out of never renders, so its replies stand alone with no count
+          to click, and the quote is the only way in left. */}
+      {replyCount > 0 && onOpenThread && (
+        <div
+          className={`mt-0.5 flex ${mine ? "justify-end pr-1" : "justify-start pl-1"}`}
+        >
+          <button
+            type="button"
+            onClick={onOpenThread}
+            className="flex items-center gap-1.5 text-xs font-semibold text-accent-deep transition hover:underline"
+          >
+            <span aria-hidden="true" className="h-px w-3.5 bg-line-strong" />
+            {replyCount} {replyCount === 1 ? "reply" : "replies"}
+          </button>
+        </div>
+      )}
+
       {whoOpen && (
         <DrawerPopover
           anchorRef={pillsRef}
@@ -319,6 +385,80 @@ export default function MessageBubble({
         </DrawerPopover>
       )}
     </li>
+  );
+}
+
+/**
+ * The collapsed quote above a reply (Phase 9b M3 on the phone, M9d here) — two
+ * lines of the message being answered, and the name of whoever wrote it.
+ *
+ * 🔒 **What it can't say is as designed as what it can.** When `quoted` is
+ * absent the viewer was clipped out of that message, and the quote says
+ * "Original message unavailable" with **no name** — because the author is
+ * history too. Someone can join a group, post and leave again entirely inside
+ * your interval gap, and `participants` lists only *current* members, so a name
+ * here would be the one payload handing you a person you were never in a chat
+ * with. See `messaging.md` → *The visibility rule*.
+ *
+ * It's also a **way into the strand**, not just a label, and that's needed
+ * rather than convenient: when the root is one you were clipped out of, its
+ * replies stand alone in the transcript with no root to carry a count, so
+ * without this the strand would be unreachable for exactly the person whose view
+ * of it is already partial.
+ */
+function QuotedMessage({ quoted, onFill, onOpenThread }) {
+  // Plain text, so the markup is dropped rather than drawn (M9b's parser): a
+  // quote is a *reference* to a message, not a second rendering of it.
+  const body = quoted?.is_deleted
+    ? "Message deleted"
+    : quoted
+      ? plainMessageText(quoted.text)
+      : "Original message unavailable";
+
+  const content = (
+    <>
+      {quoted && (
+        <span
+          className={`block truncate text-[0.7rem] font-semibold ${
+            onFill ? "text-white/85" : "text-accent-deep"
+          }`}
+        >
+          {quoted.sender.display_name}
+        </span>
+      )}
+      {/* Two lines and no more — `line-clamp` rather than a JS truncation, so a
+          long quote can't push the reply itself off the bubble. */}
+      <span
+        className={`block line-clamp-2 text-xs ${
+          onFill ? "text-white/75" : "text-ink-soft"
+        } ${quoted ? "" : "italic"}`}
+      >
+        {body}
+      </span>
+    </>
+  );
+
+  const frame = `mb-1 block w-full border-l-2 pl-2 text-left ${
+    onFill ? "border-white/50" : "border-line-strong"
+  }`;
+
+  // Inert when there's nothing to open — which is only ever a strand you're
+  // already inside. A quote that looked clickable and wasn't would be worse
+  // than one that plainly isn't.
+  if (!onOpenThread) return <span className={frame}>{content}</span>;
+  return (
+    <button
+      type="button"
+      onClick={onOpenThread}
+      aria-label={
+        quoted
+          ? `In reply to ${quoted.sender.display_name} — open thread`
+          : "In reply to a message you can’t see — open thread"
+      }
+      className={`${frame} transition hover:opacity-80`}
+    >
+      {content}
+    </button>
   );
 }
 
