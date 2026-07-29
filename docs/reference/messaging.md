@@ -1269,6 +1269,13 @@ bubble in off the panel edge, so the pills hanging off the bubble's own edge no
 longer lined up under it; see the transcript section above for where it went and
 what that cost in CSS.
 
+⚠️ **The pill row is `relative z-10`, and that has to stay paired with the
+negative margin that creates the overlap.** Making the bubble the `⋯` menu's
+anchor made it a *positioned* element, and a positioned element paints over
+in-flow content whatever the DOM order — so the bubble covers the top of every
+pill and they read as clipped. The two changes are a milestone apart and the
+symptom shows up nowhere near either.
+
 🔒 **A pill has one gesture: it opens "who reacted", it never toggles.** That's a
 deliberate departure from the feed's chips, and the reasoning is
 [M2's](reactions.md#message-reactions-phase-9b-m2): a pill is a *display* of what

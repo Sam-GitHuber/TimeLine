@@ -1518,6 +1518,11 @@ before M9d, which renders reactions and ticks inside its strand:
    because where nothing can hover the trigger is permanently visible and the
    bubble must reserve that corner — and a `@media (hover: none)` rule in
    `@layer components` can override a component class but never a utility.
+   **And it took the pills with it**: making the bubble the menu's anchor made
+   it *positioned*, so it began painting over the in-flow pill row pulled up
+   onto its edge, and the pills came out looking clipped along the top. They're
+   `relative z-10` now — a pairing to keep, since the cause and the symptom sit
+   in different components.
 3. **The `⋯` menu's portal became a shared component, because the pills need the
    same one.** M9b's `MenuPanel` was private to `MessageMenu`; the who-reacted
    list off a pill needs identical behaviour (viewport coordinates, close on

@@ -258,9 +258,15 @@ export default function MessageBubble({
           is why the server keeps a deleted message removal-only rather than
           refusing both (reactions.md). */}
       {reactions.length > 0 && (
+        // ⚠️ `relative z-10` is what keeps the overlap the right way up, and it
+        // has to stay paired with the negative margin. The row is pulled up to
+        // sit on the bubble's edge — but the bubble is *positioned* now (it's
+        // the ⋯ menu's anchor), and a positioned element paints over in-flow
+        // content whatever the DOM order, so without this the bubble covers the
+        // top of every pill and they read as clipped.
         <div
           ref={pillsRef}
-          className={`-mt-1 flex flex-wrap gap-1 ${
+          className={`relative z-10 -mt-1 flex flex-wrap gap-1 ${
             mine ? "justify-end pr-1" : "justify-start pl-1"
           }`}
         >
