@@ -483,7 +483,7 @@ export default function ConversationThreadView() {
       // reads its own query, so without this a reply sent from in there blinks
       // out of the strand between the response landing and the refetch coming
       // back — the very flicker the write above exists to prevent, just in the
-      // other column. `thread_root_id` comes off the server's copy rather than
+      // other view. `thread_root_id` comes off the server's copy rather than
       // the client's guess: the server decides which strand a reply flattens
       // into, and `newestFirst: false` because a strand reads the endpoint's
       // default oldest-first order.
@@ -497,7 +497,7 @@ export default function ConversationThreadView() {
       queryClient.invalidateQueries({ queryKey: ["messages", conversationId] });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
       // The strand reads its own query, so a reply has to refresh it — otherwise
-      // an open strand sits a poll cycle behind the transcript beside it. Also
+      // an open strand sits a poll cycle behind the transcript behind it. Also
       // what brings the root's freshly incremented `reply_count` in.
       queryClient.invalidateQueries({ queryKey: ["thread", conversationId] });
     },
@@ -836,17 +836,22 @@ export default function ConversationThreadView() {
           conversationId={conversationId}
         />
       ) : (
-        // Two columns once a strand is open (M9d), one otherwise. The strand
-        // sits *beside* the conversation it came from rather than over it —
-        // which is the whole reason the web doesn't copy the app's blur — and
-        // the drawer widens to make room (`MessagesDrawer`). Below `lg` there
-        // isn't room for two readable columns, so the transcript stands down and
-        // the strand takes the panel: a 200px-wide transcript would be a worse
-        // companion than none.
+        // An open strand takes the panel (M9d). It doesn't sit beside the
+        // transcript: a first cut widened the drawer to 740px so it could, and
+        // that turned a companion to the timeline into something covering half
+        // the window, which is the trade this panel exists not to make.
+        //
+        // **Hidden, not unmounted**, which is the part worth keeping. The
+        // transcript holds a half-typed draft, an edit in progress, a latched
+        // unread divider and a poll; a trip into a strand is supposed to cost
+        // none of them, and M3 settled that replying must never disturb an edit.
+        // `display: none` keeps all of it alive at the price of one thing —
+        // scroll position, which a box with no layout can't hold, so closing a
+        // strand lands you at the newest message rather than where you were
+        // reading. That's the right way round: the newest message is where a
+        // conversation resumes, and jump-to-latest exists for the other case.
         <div className="flex min-h-0 flex-1">
-          <div
-            className={`min-w-0 flex-1 flex-col ${strand ? "hidden lg:flex" : "flex"}`}
-          >
+          <div className={`min-w-0 flex-1 flex-col ${strand ? "hidden" : "flex"}`}>
             <div className="relative flex-1 overflow-hidden">
               {/* The transcript. `flex-col-reverse` is the whole mechanism: rows
                   come newest-first, index 0 paints at the bottom, and the scroll
@@ -1089,8 +1094,8 @@ export default function ConversationThreadView() {
               }
               // The strand's own unsent replies, so one appears the moment you
               // send it and a failed one is recoverable *here* — which matters
-              // most on a narrow window, where the transcript holding the other
-              // copy isn't even on screen.
+              // here, since the transcript holding the other copy is hidden
+              // while a strand is open.
               outgoing={outbox
                 .filter((entry) => entry.rootId === strand.rootId)
                 .map((entry) => asMessage(entry, meAsAuthor))}

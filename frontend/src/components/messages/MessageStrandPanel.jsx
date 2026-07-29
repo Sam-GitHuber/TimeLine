@@ -22,17 +22,19 @@ export function threadQueryKey(conversationId, rootId) {
  * the exchange around it, which is the same limitation that made a
  * collapsed-quote-only design wrong.
  *
- * **A panel beside the transcript, where the app blurs it away.** This is the
- * one place the web deliberately doesn't copy the phone, and the reason is the
- * medium rather than taste. On a phone there is one column, so a strand has to
- * take the screen, and the blur is what stops that reading as "a modal over a
- * list" — you haven't gone anywhere, you've narrowed to a strand of the
- * conversation you're already in. In a drawer there's a second column to be had:
- * the drawer widens (`MessagesDrawer`) and the strand opens *next to* the
- * transcript, so the conversation you opened it from is still legible rather
- * than frosted over. Below the width where both fit, the strand replaces the
- * transcript and the drawer stays put — a 200px-wide transcript would be a worse
- * companion than none.
+ * **It takes the panel, where the app blurs the transcript behind it.** A first
+ * cut of M9d did put the strand *beside* the transcript, widening the drawer
+ * from 400px to 740 on a big window so both could be read at once, and it was
+ * rejected on sight: a drawer that grows to half the window stops being a
+ * companion to the timeline and becomes a takeover, which is the one trade this
+ * panel is shaped not to make. So the strand covers the transcript at every
+ * width — closer to the app than the widened version was, and with no breakpoint
+ * to reason about.
+ *
+ * The transcript is **hidden rather than unmounted** (`ConversationThreadView`),
+ * so the draft, an edit in progress, the latched unread divider and the poll all
+ * survive a trip into a strand — M3 settled that replying must never disturb an
+ * edit, and that has to hold when the strand is what's on screen.
  *
  * **It does carry the ⋯ menu, unlike the app's strand.** The app leaves the menu
  * out because its strand is a `Modal` and the menu is a `Modal`, and presenting
@@ -41,8 +43,7 @@ export function threadQueryKey(conversationId, rootId) {
  * menu here is deliberately one item shorter than the transcript's: **no Edit**.
  * Editing needs a composer mode, this composer already has a job, and a second
  * one would be the "two things fighting for one input" M3 settled against — the
- * transcript beside you has Edit one hover away, and on a narrow window closing
- * the strand is one click.
+ * transcript keeps Edit, and closing the strand is one click.
  *
  * **A missing root is a real state, not a loading one.** The strand is fetched
  * through the same interval-clipped endpoint as the transcript, so a member who
@@ -69,8 +70,8 @@ export default function MessageStrandPanel({
    * Replies to this strand still in the caller's outbox (M9c), already dressed
    * as messages. Rendered after the loaded ones, so a reply appears the instant
    * you send it and a failed one stays put with somewhere to act on it — rather
-   * than existing only in the transcript, which on a narrow window isn't even on
-   * screen.
+   * than existing only in the transcript, which isn't on screen while you're in
+   * here.
    */
   outgoing = [],
   /** The tick/clock for a bubble. The caller owns it; see the thread view. */
@@ -90,7 +91,7 @@ export default function MessageStrandPanel({
 
   /**
    * Polled like the transcript, so a reply someone else sends while you're
-   * reading the strand appears in it rather than only in the column beside it.
+   * reading the strand appears in it rather than only in the transcript behind it.
    *
    * **Paged, and every page pulled** — where the transcript pages lazily. That's
    * the difference between the two views rather than an inconsistency: a
@@ -168,12 +169,8 @@ export default function MessageStrandPanel({
 
   return (
     <section
-      // What widens the drawer, read by a `has-[...]` variant on the panel —
-      // see `MessagesDrawer`. A data attribute rather than plumbed state so the
-      // width can't disagree with what's actually on screen.
-      data-strand
       aria-label="Reply thread"
-      className="flex min-w-0 flex-1 flex-col border-l border-line bg-surface lg:w-[340px] lg:flex-none"
+      className="flex min-w-0 flex-1 flex-col bg-surface"
     >
       <div className="flex items-center justify-between border-b border-line px-3 py-2">
         <h2 className="font-display text-sm font-bold -tracking-[0.02em] text-ink">

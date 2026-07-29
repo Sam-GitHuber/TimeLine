@@ -83,11 +83,13 @@ clock times, run grouping, a latched unread divider, jump-to-latest, clickable
 links, big emoji, per-chat drafts, and a `⋯` menu on hover carrying
 Copy/Edit/Delete or Copy/Report; reactions, optimistic send and read-receipt
 ticks landed with it; and **reply threads** — a reply carries a collapsed quote,
-a root carries "3 replies", and either opens a **strand panel beside the
-transcript** (the drawer widens to 740px; below ~1024px the strand replaces the
-transcript) rather than the app's blur. **Three cascade traps live in this
-drawer** — the `⋯` staying visible under `@media (hover: none)`, the bubble
-reserving its corner, and the drawer's width variant — and all three are the same
+a root carries "3 replies", and either opens a **strand that takes the panel**
+(the transcript is hidden, not unmounted, so the draft and any edit survive).
+A first cut widened the drawer to 740px so the strand could sit *beside* the
+transcript; it was reversed on sight — **the drawer is a companion to the
+timeline and must never grow to cover the page**, which is why messaging isn't a
+route either. **Two cascade traps live in this drawer** — the `⋯` staying visible
+under `@media (hover: none)`, and the bubble reserving its corner — both the same
 rule: Tailwind's utilities layer comes last, so these have to be written on the
 right side of it or they silently do nothing. Read `messaging.md`'s
 *The web transcript* and *Reply threads on the web* before touching any of it.

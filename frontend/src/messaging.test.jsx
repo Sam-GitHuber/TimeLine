@@ -1457,7 +1457,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     api.getMessages.mockResolvedValue(page([root]));
     // The strand's second read is after the send, so it has the reply — the
     // send invalidates `['thread', 7]` precisely so an open strand doesn't sit a
-    // poll cycle behind the transcript beside it.
+    // poll cycle behind the transcript behind it.
     api.getThread
       .mockResolvedValueOnce(page([root]))
       .mockResolvedValue(page([root, sent]));
@@ -1672,8 +1672,8 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     await user.type(within(strand()).getByLabelText("Reply to thread"), "yes!");
     await user.click(within(strand()).getByRole("button", { name: "Send" }));
 
-    // The failure lands on the bubble, in the panel you sent it from — which on
-    // a narrow window is the only column on screen.
+    // The failure lands on the bubble, in the panel you sent it from — which is
+    // the only thing on screen while a strand is open.
     expect(await within(strand()).findByText("Not sent")).toBeInTheDocument();
     expect(within(strand()).getByText("yes!")).toBeInTheDocument();
 
@@ -1705,7 +1705,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
       within(bubble).getByRole("button", { name: "Message options" })
     );
     // Editing needs a composer mode, and this composer already has a job. The
-    // transcript beside you keeps Edit — see `MessageStrandPanel`.
+    // transcript keeps Edit — see `MessageStrandPanel`.
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
   });

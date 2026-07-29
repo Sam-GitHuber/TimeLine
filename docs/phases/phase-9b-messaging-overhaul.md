@@ -1592,10 +1592,12 @@ the clock.
    **root** renders its `reply_count` on the branch. Either opens the strand.
    🔒 Never render the quote from anything the server attached to the reply — the
    payload carries a bare `{ id }` and that's the whole point.
-3. **The strand is a panel beside the transcript, not a blur over it.** The
+3. ~~**The strand is a panel beside the transcript, not a blur over it.** The
    drawer is 400px on desktop; widen it when a strand is open rather than
    covering the conversation you opened the strand *from*. Below that width, fall
-   back to replacing the transcript.
+   back to replacing the transcript.~~ — **built, looked at, and reversed; do not
+   reinstate.** See settled point 1 below. The strand takes the panel at every
+   width, and the drawer never changes size.
 4. `Reply` joins the `⋯` menu. The transcript composer keeps **two** modes.
 5. The strand paginates — follow `next`. Its composer clears on success, not on
    dispatch.
@@ -1612,32 +1614,34 @@ the clock.
 **Five things M9d settled that the plan above didn't anticipate** — read these
 before M9e/M9f, which share the bubble and the drawer:
 
-1. **The drawer's width is driven by the DOM, not by state, and it has to be a
-   Tailwind variant.** The strand is rendered three components down from
-   `MessagesDrawer`, so widening on a flag would mean threading state through
-   messaging context — and a flag can then disagree with what's on screen.
-   `lg:has-[[data-strand]]:w-[740px]` on the panel plus `data-strand` on the
-   strand asks the only question that matters and can't drift. ⚠️ **It has to
-   live as a utility**, not as `.msg-drawer:has(…)` in `index.css` — the same
-   cascade trap M9b and M9c each recorded, third time round: Tailwind's utilities
-   layer comes last, so a component-layer rule loses to `sm:w-[400px]` and does
-   nothing at all. Written as a utility, `:has()` contributes its argument's
-   specificity and the rule wins on its own merits.
-2. **`lg`, not `sm`, is where two columns start** — and the plan's "below that
-   width, fall back to replacing the transcript" needed a number. 400 + 340 = 740
-   fits from ~1024px with feed still visible behind it; at `sm` (640) a 740px
-   drawer would either overflow or cover the page, and two 320px columns aren't
-   two readable ones. Below `lg` the transcript takes `hidden lg:flex` and the
-   strand takes the panel, which is checked by rendering it, not by reasoning.
+1. ⚠️ **The "widen the drawer" half of the plan was wrong, and was reversed
+   after seeing it. Don't reinstate it.** Step 3 above was built as written —
+   400px → 740 on a big window (`lg:has-[[data-strand]]:w-[740px]`, driven off a
+   `data-strand` attribute so no state had to be threaded through messaging
+   context), with the transcript standing down below `lg`. It renders well and is
+   wrong in use: a drawer that grows to half the window stops being a *companion*
+   to the timeline and becomes a takeover, which is the property this panel is
+   shaped around and the reason messaging isn't a route. The strand now covers
+   the transcript at every width — closer to the app than the widened version
+   was, one width, no breakpoint. **The lesson generalises past this milestone:**
+   "there's room for a second column" is a fact about the viewport, not a reason
+   to take it; the feed behind the drawer is the thing being protected.
+2. **The transcript is hidden, not unmounted, and that's load-bearing.** It holds
+   a draft, an edit in progress, the latched unread divider and a poll, and M3
+   settled that replying must disturb none of them. `display: none` keeps all of
+   it, at the cost of scroll position — a box with no layout can't hold one — so
+   closing a strand lands you at the newest message. That's the right way round
+   and jump-to-latest covers the rest, but it's the one thing to check if this
+   ever gets rebuilt as a conditional render.
 3. **The strand carries the ⋯ menu, and the app's reason for omitting it doesn't
    port.** The app leaves the menu out of its strand because both are `Modal`s and
    iOS won't stack them; `DrawerPopover` portals to `<body>`, so the web has no
-   such constraint — and without a menu the strand would be action-less on a
-   narrow window, where it's the only column on screen. It's one item shorter
-   (**no Edit**): editing needs a composer mode, this composer already has a job,
-   and a second one is the "two things fighting for one input" M3 settled
-   against. `messageActions` grew an `allowEdit` flag rather than forking into
-   two lists that would drift.
+   such constraint — and without a menu the strand would be action-less, since
+   it's the only thing on screen while it's open. It's one item shorter (**no
+   Edit**): editing needs a composer mode, this composer already has a job, and a
+   second one is the "two things fighting for one input" M3 settled against.
+   `messageActions` grew an `allowEdit` flag rather than forking into two lists
+   that would drift.
 4. **Reply *inside* the strand re-aims the composer instead of opening
    anything** — there's nowhere to open, since the server flattens a reply to a
    reply into the strand you're already in. That gives the web something the app
@@ -1656,11 +1660,12 @@ before M9e/M9f, which share the bubble and the drawer:
 
 **Rendered and checked**, the way M9c's note asks for: the bubble markup and the
 whole drawer were rendered from the real components into a static harness against
-the *built* stylesheet and screenshotted with headless Firefox, at 1280 (two
-columns) and 900 (the strand replacing the transcript). That's what caught the
-one visual defect in the build — an emoji-only reply sat at the far left of a
-quote-width box, reading as detached from the quote above it; the `large` branch
-is a flex column with `items-end`/`items-start` now.
+the *built* stylesheet and screenshotted with headless Firefox, at 1280 and 900.
+That's what caught the one visual defect in the build — an emoji-only reply sat
+at the far left of a quote-width box, reading as detached from the quote above
+it; the `large` branch is a flex column with `items-end`/`items-start` now. It's
+also how the two-column layout got shown to the user and reversed (point 1),
+which is the argument for rendering a layout rather than reasoning about it.
 
 ---
 
