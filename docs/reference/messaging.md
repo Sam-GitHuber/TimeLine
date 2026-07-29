@@ -494,6 +494,7 @@ whole of the server-side defence — treat all three as load-bearing:
 | **Byte caps** (`MESSAGE_ATTACHMENT_MAX_BYTES` 4 MB, `MESSAGE_THUMBNAIL_MAX_BYTES` 512 KB) | Per *file*, not per request — a total would let one enormous file through whenever the others were small. The thumbnail's much lower cap stops a client sidestepping the point of having one by sending the full image twice. |
 | **A count cap** (`MESSAGE_ATTACHMENTS_MAX`, currently 1) | Without it, an unbounded count is the way around the byte cap. |
 | **A forced `.jpg` filename** (`message_attachment_upload_to`) | The stored-XSS fix, and the least obvious of the three. Caddy serves `/media/*` off disk and picks the Content-Type from the *extension*, so a blob kept as `.html` or `.svg` would be served as **markup from our own origin**, next to the session cookie. Forcing `.jpg` means a browser is always told "JPEG" whatever the bytes are, and a browser will not execute a JPEG. `X-Content-Type-Options: nosniff` on that route (added in the same milestone) is the second layer. |
+| **A 6 MB body cap at the proxy** (`deploy/Caddyfile`, `@chat_upload`) | What makes the byte cap true *at the door*. Django buffers a multipart upload to a temp file before DRF ever sees it, so the 4 MB check limits what we **store**, not what we accept — without this an authenticated client could stream gigabytes at the disk and be refused only afterwards. The one route on the box with its own body limit, because it's the one upload the server never decodes. Raise it in step with the two byte caps, never below them. |
 
 Both halves are pinned by tests that will fail loudly if someone "improves" them:
 `test_the_stored_file_keeps_a_jpg_name_whatever_was_uploaded` and
@@ -575,6 +576,18 @@ path that forgot.
   picture of what's in front of you is at least half of what a photo in a chat is
   for, and routing someone out to the camera app and back is the friction that
   makes an app feel like a website in a wrapper.
+
+  🔒 **This is the app's only camera use, and it is load-bearing config.**
+  `mobile/app.json` must keep a real `cameraPermission` *string* in the
+  `expo-image-picker` plugin block. Setting it to `false` (as it was before M7,
+  when nothing used the camera) tells the config plugin to **delete**
+  `NSCameraUsageDescription` from Info.plist and to add
+  `android.permission.CAMERA` to `blockedPermissions` — and iOS terminates an
+  app that reaches for the camera with no usage description, so "Take Photo"
+  becomes a hard crash. No Jest test can see this (they mock the picker), so
+  `thread.test.tsx` asserts the config file itself. It's a **native** change:
+  editing it needs a fresh EAS build, not an OTA update — see
+  [`../mobile-release.md`](../mobile-release.md).
 - **A photo inside a focused reply strand draws but doesn't open**, because the
   strand is itself a `Modal` and stacking two on iOS is the trap `ReactionTray`
   documents. It renders no tap affordance rather than promising one that does
@@ -609,6 +622,16 @@ path that forgot.
   read, not a snapshot: we don't copy someone's photo into a second place to
   hold as evidence, so if the sender deletes the message the photo is genuinely
   gone and the report shows none. That trade is the right way round.
+
+  🔒 **The thumbnail is inlined as a `data:` URI, never linked from `/media/`.**
+  That route is `forward_auth`ed to `/api/media-auth/`, which authenticates with
+  the **JWT cookie** — and the admin runs on Django's *session* cookie, which it
+  doesn't accept. An `<img src="/media/…">` there 401s, so the queue would show
+  broken images unless the maintainer happened to also be signed into the app in
+  the same browser. Reading the file server-side means nothing is fetched and so
+  nothing has to be authorised. It's the safer rendering too: a chat attachment
+  is never decoded by us, and a `data:image/jpeg` in an `<img>` has no navigable
+  URL and can't execute whatever the bytes turn out to be.
 - **Backups need no change**, and this was checked rather than assumed:
   `deploy/backup.sh` and `deploy/restore.sh` both `rclone sync` the *whole*
   media directory, so `media/messages/` was covered the moment it existed. See

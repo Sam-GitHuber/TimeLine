@@ -401,10 +401,25 @@ function MediaGallery({ conversationId }: { conversationId: number }) {
 
   if (photos.length === 0) return null;
 
+  /**
+   * How many photos the chat holds, which is **not** how many are drawn below.
+   *
+   * The grid is one page; the heading is a fact about the conversation, so it
+   * comes from the paginated `count` rather than from `photos.length` — which
+   * would tell someone with sixty photos that they have twenty, in a confident
+   * voice, because that's how many fit on a page.
+   *
+   * `count` is a count of *messages* carrying a photo. That's the same number
+   * while `MESSAGE_ATTACHMENTS_MAX` is 1 (see messaging.md); if that cap is ever
+   * raised, this becomes an undercount and wants a real photo count from the
+   * server rather than a fudge here.
+   */
+  const total = mediaQuery.data?.count ?? photos.length;
+
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>
-        {photos.length === 1 ? '1 photo' : `${photos.length} photos`}
+        {total === 1 ? '1 photo' : `${total} photos`}
       </Text>
       <View style={styles.grid}>
         {photos.map((photo, index) => (

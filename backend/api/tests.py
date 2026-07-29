@@ -1764,6 +1764,9 @@ class MessagePhotoTests(MessagingBase):
         )
         resp = self._send(photo=make_image_upload(), thumbnail=fat_thumb)
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # And it says a size a person can act on. A cap under 1 MB formatted as
+        # megabytes rounds to "under 0 MB", which is an error about nothing.
+        self.assertIn("512 KB", str(resp.data))
 
     def test_more_attachments_than_the_count_cap_are_refused(self):
         """🔒 The other of the two limits. Without it, an unbounded count is the
@@ -1903,6 +1906,23 @@ class MessagePhotoTests(MessagingBase):
         )
         self.assertEqual(emptied.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_an_edit_that_omits_the_text_is_refused_not_treated_as_blank(self):
+        """Making ``text`` optional for photos gave it a ``""`` default, and a
+        default silently turns "the client forgot the field" into "make it
+        empty". On a photo message that would wipe the caption on a PATCH that
+        never mentioned it — so an edit has to *say* what the text now is."""
+        photo = self._send(text="keep me", photo=make_image_upload())
+
+        resp = self.client.patch(
+            f"{messages_url(self.convo)}{photo.data['id']}/", {}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        photo_message = Message.objects.get(pk=photo.data["id"])
+        self.assertEqual(photo_message.text, "keep me")
+        # And nothing was stamped "Edited" for an edit that didn't happen.
+        self.assertIsNone(photo_message.edited_at)
+
     def test_an_edit_cannot_swap_the_photo(self):
         """Attachments aren't editable. The "Edited" marker is what makes editing
         safe, and it can't honestly disclose that the *picture* changed under a
@@ -1957,12 +1977,26 @@ class MessagePhotoTests(MessagingBase):
         """🔒 M0's rule is that a report is the *only* window onto a private
         message. M7 made a message able to be nothing but a photo, so without
         this the queue would show an empty snapshot and photo abuse would be the
-        one thing moderation couldn't act on."""
+        one thing moderation couldn't act on.
+
+        **The bytes are inlined, not linked**, and this test says so on purpose.
+        M7 first rendered ``<img src="{thumbnail.url}">``, which 401s in
+        production: ``/media/*`` is ``forward_auth``ed to ``/api/media-auth/``,
+        which takes the JWT cookie and not the admin's Django session, so the
+        queue would have shown broken images — the one thing this field exists
+        to prevent. Asserting a ``data:`` URI is what keeps someone from
+        "tidying" it back into a link that only works on their machine.
+        """
+        import base64
+
         from django.contrib.admin.sites import AdminSite
 
         from .admin import ReportAdmin
 
-        sent = self._send(photo=make_image_upload())
+        upload = make_image_upload()
+        thumb_bytes = upload.read()
+        upload.seek(0)
+        sent = self._send(photo=make_image_upload(), thumbnail=upload)
         message = Message.objects.get(pk=sent.data["id"])
         self.client.force_authenticate(self.friend)
         self.client.post(
@@ -1971,7 +2005,11 @@ class MessagePhotoTests(MessagingBase):
         report = Report.objects.get()
 
         rendered = ReportAdmin(Report, AdminSite()).message_photos(report)
-        self.assertIn(MessageAttachment.objects.get().thumbnail.url, rendered)
+        expected = base64.b64encode(thumb_bytes).decode("ascii")
+        self.assertIn(f"data:image/jpeg;base64,{expected}", rendered)
+        # Nothing that would send the browser back to the gated media route.
+        self.assertNotIn("/media/", rendered)
+        self.assertNotIn(MessageAttachment.objects.get().thumbnail.url, rendered)
 
         # And it goes empty once the sender deletes the message, because the
         # photo is then genuinely gone — see the field's docstring.

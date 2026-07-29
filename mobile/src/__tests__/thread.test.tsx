@@ -2653,6 +2653,28 @@ it('offers the camera as well as the library', async () => {
   alert.mockRestore();
 });
 
+it('declares the camera permission the camera path needs', () => {
+  // 🔒 **The test above cannot catch this and shipped a crash once already.** It
+  // mocks `requestCameraPermissionsAsync`, so it passes against a binary that
+  // has no camera permission at all — which is exactly what M7 first built.
+  //
+  // `expo-image-picker`'s config plugin treats `cameraPermission: false` as an
+  // instruction to *remove* `NSCameraUsageDescription` from Info.plist and to
+  // add `android.permission.CAMERA` to `blockedPermissions`. iOS terminates an
+  // app that reaches for the camera with no usage description, so "Take Photo"
+  // was a hard crash on a real phone while every Node test stayed green.
+  //
+  // This asserts the config instead, which is the only thing about it a Node
+  // test *can* see. It's a string rather than a boolean because Apple shows it
+  // to the person in the permission prompt.
+  const config = require('../../app.json');
+  const picker = config.expo.plugins.find(
+    (plugin: unknown) => Array.isArray(plugin) && plugin[0] === 'expo-image-picker'
+  );
+  expect(typeof picker[1].cameraPermission).toBe('string');
+  expect(picker[1].cameraPermission.length).toBeGreaterThan(0);
+});
+
 it('sends a photo with no caption at all', async () => {
   // The rule the server enforces is text *or* a photo, never neither — so Send
   // has to come alive for a photo alone, and an empty composer still must not

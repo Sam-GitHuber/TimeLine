@@ -376,6 +376,18 @@ MESSAGE_ATTACHMENTS_MAX = 1
 MESSAGE_ATTACHMENT_MAX_EDGE = 10_000
 
 
+def _human_bytes(count):
+    """A byte cap as a person would say it, for a validation message they'll read.
+
+    Formatted in KB below a megabyte rather than rounded to one: the thumbnail
+    cap is 512 KB, and a naive megabyte format renders that "0 MB" — an error
+    telling someone their file must be under nothing.
+    """
+    if count < 1024 * 1024:
+        return f"{count // 1024} KB"
+    return f"{count / (1024 * 1024):.0f} MB"
+
+
 class MessageAttachmentSerializer(serializers.ModelSerializer):
     """One attachment on a message, as absolute URLs plus the client-declared
     dimensions so the bubble can reserve space before the image loads.
@@ -628,11 +640,10 @@ class MessageCreateSerializer(serializers.ModelSerializer):
         opaque, so it's applied to every part rather than to their total: a total
         would let one enormous file through whenever the others were small.
         """
-        megabytes = cap / (1024 * 1024)
         for upload in files:
             if upload.size > cap:
                 raise serializers.ValidationError(
-                    f"Each {label} must be under {megabytes:.0f} MB."
+                    f"Each {label} must be under {_human_bytes(cap)}."
                 )
         return files
 

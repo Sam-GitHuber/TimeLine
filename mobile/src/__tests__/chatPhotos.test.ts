@@ -44,6 +44,11 @@ jest.mock('expo-image-manipulator', () => ({
           resizes.push(size);
         },
         renderAsync: async () => ({
+          // A rendered image knows its own size, which is how `prepareChatPhoto`
+          // measures a pick the picker reported no dimensions for. With nothing
+          // resized, that's the file on disk — 4000×3000 here.
+          width: requested.width ?? 4000,
+          height: requested.height ?? 3000,
           saveAsync: async (options: { compress?: number; format?: string }) => {
             saves.push(options);
             return {
@@ -124,9 +129,33 @@ it('names the upload itself rather than reusing the picked filename', async () =
   expect(prepared.photo.type).toBe('image/jpeg');
 });
 
-it('falls back to a bounded long edge when the picker gives no dimensions', async () => {
+it('measures the file itself when the picker gives no dimensions', async () => {
   await prepareChatPhoto('file:///unknown.jpg');
 
-  // Width only: the manipulator keeps the ratio itself when one side is omitted.
-  expect(resizes[0]).toEqual({ width: CHAT_PHOTO_MAX_EDGE });
+  // **Not** a bare `{ width: MAX_EDGE }` bound, which is what this did first. It
+  // looks equivalent — the manipulator keeps the ratio when one side is omitted
+  // — but it breaks both halves of `fitWithin`'s contract on the one path that
+  // can't check them: it upscales a photo smaller than the bound, and on a
+  // portrait source it yields 1600×2133, overshooting the long edge it exists to
+  // enforce. One extra decode buys one rule for every pick.
+  //
+  // The mock's unresized render reports 4000×3000, so this is the real fit.
+  expect(resizes[0]).toEqual({ width: CHAT_PHOTO_MAX_EDGE, height: 1200 });
+});
+
+it('refuses a photo whose size it cannot establish', async () => {
+  // Better than guessing: a guess is a silently oversized upload the server
+  // rejects with a worse message, and the caller already has something to say
+  // about a photo it can't use.
+  const rendered = { width: 0, height: 0, saveAsync: async () => ({}) };
+  const manipulator = jest.requireMock('expo-image-manipulator');
+  const real = manipulator.ImageManipulator.manipulate;
+  manipulator.ImageManipulator.manipulate = () => ({
+    resize: () => {},
+    renderAsync: async () => rendered,
+  });
+
+  await expect(prepareChatPhoto('file:///unmeasurable.jpg')).rejects.toThrow();
+
+  manipulator.ImageManipulator.manipulate = real;
 });

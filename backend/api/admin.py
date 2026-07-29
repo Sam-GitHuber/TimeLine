@@ -1,3 +1,5 @@
+import base64
+
 from django.contrib import admin
 from django.utils.html import format_html_join
 
@@ -15,6 +17,7 @@ from .models import (
     PostImage,
     Report,
 )
+from .serializers import MESSAGE_THUMBNAIL_MAX_BYTES
 
 # NOTE: ``Message`` is deliberately **not** imported or registered here, and
 # neither is ``MessageAttachment`` — a browsable list of chat photos is the same
@@ -315,18 +318,53 @@ class ReportAdmin(admin.ModelAdmin):
 
         Thumbnails only, at thumbnail size. Enough to judge a report, and it
         avoids putting a full-size private photo on screen while triaging.
+
+        🔒 **The bytes are inlined as ``data:`` URIs, not linked from
+        ``/media/``, and that is not a style choice.** In production Caddy
+        ``forward_auth``s every ``/media/*`` request to ``/api/media-auth/``,
+        which runs on DRF's default authentication — the **JWT cookie**. The
+        admin authenticates with Django's *session* cookie, which that endpoint
+        does not accept, so an ``<img src="/media/…">`` here 401s and the
+        moderation queue shows broken images unless the maintainer happens to
+        also be signed into the app in the same browser. Reading the file
+        server-side sidesteps the question: nothing is fetched, so nothing has
+        to be authorised.
+
+        It's also the safer rendering. A chat attachment is never decoded by us
+        (see ``MessageAttachment``), so its bytes are unverified — and a
+        ``data:image/jpeg`` inside an ``<img>`` has no navigable URL and cannot
+        execute whatever they turn out to be. A blob that isn't an image simply
+        fails to draw.
         """
         message = obj.message
         if message is None:
             return ""
-        attachments = list(message.attachments.all())
-        if not attachments:
+        rows = []
+        for attachment in message.attachments.all():
+            if not attachment.thumbnail:
+                continue
+            try:
+                with attachment.thumbnail.open("rb") as handle:
+                    # Bounded by the same cap the upload was accepted under, so a
+                    # restored or hand-placed file can't inline megabytes into an
+                    # admin page. Read one byte past it to tell "at the cap" from
+                    # "over it" without holding the whole thing twice.
+                    raw = handle.read(MESSAGE_THUMBNAIL_MAX_BYTES + 1)
+            except (FileNotFoundError, OSError):
+                # The row outliving its file is a restore mismatch, not something
+                # to 500 the moderation queue over — show the rest.
+                continue
+            if len(raw) > MESSAGE_THUMBNAIL_MAX_BYTES:
+                continue
+            encoded = base64.b64encode(raw).decode("ascii")
+            rows.append((f"data:image/jpeg;base64,{encoded}",))
+        if not rows:
             return ""
         return format_html_join(
             " ",
             '<img src="{}" style="max-height:160px;border-radius:6px" />',
-            ((a.thumbnail.url,) for a in attachments if a.thumbnail),
-        ) or ""
+            rows,
+        )
 
     @admin.display(description="reason")
     def short_reason(self, obj):

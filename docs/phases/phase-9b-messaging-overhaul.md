@@ -1110,6 +1110,28 @@ gap:
 - **Reported photos are visible in the admin.** M0 made a report the only window
   onto a private message; M7 made a message able to be nothing but a photo, so
   without this, photo abuse was the one thing moderation couldn't act on.
+- **A 6 MB body cap at the proxy** (`deploy/Caddyfile`, `@chat_upload`). Django
+  buffers a multipart upload to disk before DRF looks at it, so step 2's byte cap
+  limited what we *store*, not what we *accept*. The only route on the box with
+  its own body limit, because it's the only upload the server never decodes.
+
+**Three bugs found in review and fixed on the branch**, each worth knowing about
+because none of them were visible from the code that caused them:
+
+- **The camera was unusable.** M7 added the app's first camera call, but
+  `mobile/app.json` still carried `cameraPermission: false` from when nothing
+  used it — which tells the `expo-image-picker` plugin to *delete*
+  `NSCameraUsageDescription` and block `android.permission.CAMERA`. iOS
+  terminates an app that reaches for the camera without that string, so "Take
+  Photo" was a hard crash while every Jest test stayed green (they mock the
+  picker). `thread.test.tsx` now asserts the config file itself.
+- **The admin's reported-photo thumbnails 401'd.** They were `<img src="/media/…">`,
+  and that route is `forward_auth`ed to an endpoint that takes the JWT cookie,
+  not the admin's Django session. Now inlined as `data:` URIs — nothing fetched,
+  nothing to authorise, and no navigable URL for bytes we never decoded.
+- **A `PATCH` omitting `text` wiped a photo's caption.** Making `text` optional
+  for photos gave it a `""` default, which turned "the client forgot the field"
+  into "make it empty". The edit path now requires the key.
 
 ---
 

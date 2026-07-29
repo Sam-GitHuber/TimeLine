@@ -117,7 +117,9 @@ function serve(
   conversation: Conversation,
   renamed?: Conversation,
   /** Messages the gallery's `?media=1` request finds, newest first. */
-  media: { id: number; attachments: ReturnType<typeof photo>[] }[] = []
+  media: { id: number; attachments: ReturnType<typeof photo>[] }[] = [],
+  /** The chat's *total*, when it's more than this one page holds. */
+  mediaCount?: number
 ) {
   mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
     if (String(url).includes('/api/auth/user/')) return jsonResponse(ME);
@@ -128,7 +130,7 @@ function serve(
     // endpoint with a filter, and its URL contains the conversation's too.
     if (String(url).includes('/messages/')) {
       return jsonResponse({
-        count: media.length,
+        count: mediaCount ?? media.length,
         next: null,
         previous: null,
         results: media,
@@ -348,6 +350,27 @@ it('shows the chat’s photos, newest first, and opens one full-screen', async (
   // what someone scrolling for "the one from last week" is starting from.
   await fireEvent.press(screen.getByLabelText('Photo 1 of 2'));
   await screen.findByLabelText('Close photo viewer');
+});
+
+it('counts the chat’s photos in the heading, not just the page it drew', async () => {
+  // The grid is deliberately one page, so `results.length` is a fact about the
+  // page and not about the chat. Titling the section from it tells someone with
+  // sixty photos that they have two, in a confident voice.
+  serve(
+    detail({}),
+    undefined,
+    [
+      { id: 30, attachments: [photo(9)] },
+      { id: 20, attachments: [photo(8)] },
+    ],
+    60
+  );
+
+  await renderScreen();
+  await screen.findByText('60 photos');
+  // The tiles still describe themselves by what's on screen — that numbering is
+  // navigation, and "Photo 1 of 60" would be a lie about what you can tap.
+  expect(screen.getByLabelText('Photo 1 of 2')).toBeTruthy();
 });
 
 it('renders no gallery at all in a chat with no photos', async () => {

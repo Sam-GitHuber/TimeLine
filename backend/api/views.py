@@ -2775,6 +2775,16 @@ class MessageDetailView(APIView):
             )
         _assert_can_send(request.user, convo, my_status)
 
+        # ``text`` is optional on *create* (M7: a photo needs no caption), which
+        # gave it a ``""`` default — and a default turns "the client forgot the
+        # field" into "the client asked for an empty caption". On create that's
+        # harmless, because the cross-field check still refuses a message that is
+        # neither text nor photo. On an edit it isn't: a PATCH that omits ``text``
+        # would sail through for a photo message and silently wipe its caption.
+        # An edit is a statement about the text, so the text has to be present.
+        if "text" not in request.data:
+            raise ValidationError({"text": "This field is required."})
+
         serializer = MessageCreateSerializer(
             data=request.data,
             # An edit sends no files, so the serializer can't see that this is a

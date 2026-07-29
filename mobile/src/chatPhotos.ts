@@ -89,6 +89,36 @@ function fitWithin(width: number, height: number, maxEdge: number) {
 }
 
 /**
+ * The source image's dimensions, measured if the picker didn't report them.
+ *
+ * The picker almost always does, so the extra decode almost never happens. It
+ * matters because the alternative — bounding one side and letting the
+ * manipulator infer the other — quietly breaks both halves of `fitWithin`'s
+ * contract on the path that can't check it: `{ width: MAX_EDGE }` *upscales* a
+ * small photo into a bigger file for no extra detail, and on a portrait source
+ * it produces a 1600×2133 image, overshooting the very long-edge bound it was
+ * meant to enforce. Measuring first means one rule for every pick.
+ *
+ * Throws rather than guessing if the size still can't be established: the caller
+ * already has something to say about a photo it can't use, and a guess here
+ * would be a silently oversized upload the server then rejects.
+ */
+async function measureSource(
+  uri: string,
+  declaredWidth?: number,
+  declaredHeight?: number
+) {
+  if (declaredWidth && declaredHeight) {
+    return { width: declaredWidth, height: declaredHeight };
+  }
+  const rendered = await ImageManipulator.manipulate(uri).renderAsync();
+  if (!rendered.width || !rendered.height) {
+    throw new Error('Could not measure the picked image.');
+  }
+  return { width: rendered.width, height: rendered.height };
+}
+
+/**
  * Resize + re-encode a picked photo and its thumbnail, ready to send.
  *
  * Two renders rather than one resized twice, because the manipulator's context
@@ -100,21 +130,16 @@ function fitWithin(width: number, height: number, maxEdge: number) {
  */
 export async function prepareChatPhoto(
   uri: string,
-  /** The picker's reported dimensions, when it has them. Used only to avoid a
-   * pointless upscale; the manipulator is the source of truth for the output. */
+  /** The picker's reported dimensions, when it has them. Saves a decode; the
+   * manipulator is still the source of truth for the output's own size. */
   sourceWidth?: number,
   sourceHeight?: number
 ): Promise<PreparedPhoto> {
   const stamp = Date.now();
+  const source = await measureSource(uri, sourceWidth, sourceHeight);
 
   const context = ImageManipulator.manipulate(uri);
-  if (sourceWidth && sourceHeight) {
-    context.resize(fitWithin(sourceWidth, sourceHeight, CHAT_PHOTO_MAX_EDGE));
-  } else {
-    // No dimensions from the picker: bound the long edge and let the manipulator
-    // keep the aspect ratio itself (omitting one side does exactly that).
-    context.resize({ width: CHAT_PHOTO_MAX_EDGE });
-  }
+  context.resize(fitWithin(source.width, source.height, CHAT_PHOTO_MAX_EDGE));
   const rendered = await context.renderAsync();
   const photo = await rendered.saveAsync({
     compress: PHOTO_QUALITY,
@@ -123,9 +148,7 @@ export async function prepareChatPhoto(
 
   const thumbContext = ImageManipulator.manipulate(uri);
   thumbContext.resize(
-    sourceWidth && sourceHeight
-      ? fitWithin(sourceWidth, sourceHeight, CHAT_THUMBNAIL_MAX_EDGE)
-      : { width: CHAT_THUMBNAIL_MAX_EDGE }
+    fitWithin(source.width, source.height, CHAT_THUMBNAIL_MAX_EDGE)
   );
   const thumbRendered = await thumbContext.renderAsync();
   const thumbnail = await thumbRendered.saveAsync({
@@ -135,10 +158,10 @@ export async function prepareChatPhoto(
 
   // `saveAsync` reports what it actually wrote, so these are the dimensions of
   // the bytes the server will store — which is exactly what the bubble needs to
-  // reserve the right space. Falling back to the source (then to a square) keeps
-  // a layout hint present rather than sending a zero the server would reject.
-  const width = photo.width || sourceWidth || CHAT_PHOTO_MAX_EDGE;
-  const height = photo.height || sourceHeight || CHAT_PHOTO_MAX_EDGE;
+  // reserve the right space. Falling back to the measured source keeps a layout
+  // hint present rather than sending a zero the server would reject.
+  const width = photo.width || source.width;
+  const height = photo.height || source.height;
 
   return {
     photo: {
