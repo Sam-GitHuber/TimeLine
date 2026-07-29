@@ -1,77 +1,23 @@
 # CI — runs the automated test suites on every push and pull request.
 #
-# Three independent jobs, matching the three apps in the repo:
-#   backend  — Django tests against a real Postgres (same engine as prod, so we
-#              don't get surprised by SQLite-only behaviour).
+# Two of the three apps in the repo are tested here:
 #   frontend — Vitest (React Testing Library).
 #   mobile   — Jest + React Native Testing Library (the Expo app).
 #
-# The job names here ("backend", "frontend", "mobile", "semgrep") plus CodeQL's
-# "Analyze (…)" jobs are the required status checks for branch protection on
-# main — all must pass before a PR can merge.
+# The backend (Django) suite is NOT here — it lives in backend.yml so it can be
+# path-filtered to backend-only changes. It takes ~11 minutes against every
+# other job's ~1, and it can't see frontend/ or mobile/ code, so running it on a
+# frontend PR only made the PR wait. Read backend.yml's header before changing
+# that arrangement — its skipping is why it isn't a required check.
+#
+# The job names here ("frontend", "mobile", "semgrep") plus CodeQL's "Analyze
+# (…)" jobs are the required status checks for branch protection on main — all
+# must pass before a PR can merge.
 name: CI
 
 on: [push, pull_request]
 
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: timeline
-          POSTGRES_USER: timeline
-          POSTGRES_PASSWORD: timeline
-        ports:
-          - 5432:5432
-        # Wait until Postgres is accepting connections before the job runs.
-        options: >-
-          --health-cmd "pg_isready -U timeline -d timeline"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-
-    env:
-      # Point Django at the service container (exposed on localhost in CI).
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: timeline
-      POSTGRES_USER: timeline
-      POSTGRES_PASSWORD: timeline
-      # DEBUG on so the throwaway dev secret key is used (the settings-hardening
-      # test sets its own isolated env, so this doesn't affect it).
-      DJANGO_DEBUG: "true"
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      # Lint + security scan before the tests so problems surface fast. These
-      # ride inside the "backend" job, so they're covered by the existing
-      # branch-protection requirement without adding a new required check.
-      - name: Lint (ruff)
-        run: uv run ruff check .
-
-      - name: Security scan (bandit)
-        run: uv run bandit -c pyproject.toml -r api accounts config -q
-
-      - name: Run migrations (sanity check)
-        run: uv run python manage.py migrate --noinput
-
-      - name: Run tests
-        run: uv run python manage.py test
-
   frontend:
     runs-on: ubuntu-latest
     defaults:

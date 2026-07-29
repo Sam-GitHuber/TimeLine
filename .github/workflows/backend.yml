@@ -1,0 +1,89 @@
+# Backend CI — Django tests against a real Postgres (same engine as prod, so we
+# don't get surprised by SQLite-only behaviour), plus ruff and bandit.
+#
+# WHY THIS IS ITS OWN FILE
+# ------------------------
+# This job takes ~11 minutes; every other CI job finishes in under 90 seconds.
+# Running it on a frontend- or mobile-only PR bought us nothing (the Django
+# suite can't see `frontend/` or `mobile/`) and made every PR wait on it, so it
+# only runs when something under `backend/` actually changed.
+#
+# The path filter is why this lives in a separate workflow: GitHub applies
+# `paths:` at the *workflow* level, not per job, so it can't be expressed
+# inside main.yml without pulling in a third-party action.
+#
+# IMPORTANT: "backend" is deliberately NOT a required status check on main.
+# A required check that never runs sits at "Expected — waiting for status to be
+# reported" and blocks the merge forever, which is exactly what a path-filtered
+# job does on the PRs it skips. The trade: on a backend PR nothing stops you
+# merging while this is red — check it yourself. If the repo ever gains other
+# contributors, make it required again and drop the path filter (or replace it
+# with a same-named no-op job for the skip case).
+name: Backend CI
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: timeline
+          POSTGRES_USER: timeline
+          POSTGRES_PASSWORD: timeline
+        ports:
+          - 5432:5432
+        # Wait until Postgres is accepting connections before the job runs.
+        options: >-
+          --health-cmd "pg_isready -U timeline -d timeline"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Point Django at the service container (exposed on localhost in CI).
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: timeline
+      POSTGRES_USER: timeline
+      POSTGRES_PASSWORD: timeline
+      # DEBUG on so the throwaway dev secret key is used (the settings-hardening
+      # test sets its own isolated env, so this doesn't affect it).
+      DJANGO_DEBUG: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Lint + security scan before the tests so problems surface fast.
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Security scan (bandit)
+        run: uv run bandit -c pyproject.toml -r api accounts config -q
+
+      - name: Run migrations (sanity check)
+        run: uv run python manage.py migrate --noinput
+
+      - name: Run tests
+        run: uv run python manage.py test
