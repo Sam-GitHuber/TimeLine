@@ -2863,6 +2863,30 @@ it('offers no mention picker in a 1:1', async () => {
   expect(screen.queryByLabelText('Mention Ada Lovelace')).toBeNull();
 });
 
+it('offers no mention picker while editing a message', async () => {
+  // An edit carries no `mention_ids`, so a name picked here would notify nobody
+  // and wouldn't even highlight — the highlight is driven by the ids, not the
+  // words. A picker that silently does nothing is worse than no picker; adding
+  // a mention means sending a message.
+  groupWithMentions([message({ id: 7, sender: MINE, text: 'mine' })]);
+  await renderScreen();
+
+  await openMenu('Your message: mine');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+
+  const input = screen.getByLabelText('Message');
+  await fireEvent.changeText(input, 'mine @ad');
+  // The caret is reported explicitly. Edit mode drops a whole message into the
+  // composer without going through `onChangeText`, so the hook's estimate is
+  // behind — and a test that skipped this would pass because of *that* rather
+  // than because the picker is suppressed, which is no test at all.
+  await fireEvent(input, 'selectionChange', {
+    nativeEvent: { selection: { start: 8, end: 8 } },
+  });
+
+  expect(screen.queryByLabelText('Mention Ada Lovelace')).toBeNull();
+});
+
 it('highlights a mention by resolving its id against the participants', async () => {
   // The server sends bare ids — no names, no faces — so the highlight exists
   // only because the client can match an id to someone it already knows about.

@@ -1676,11 +1676,21 @@ export default function ThreadScreen() {
 
                 {/* Who you might be naming (M8), above the input and below
                     everything else in the bar — nearest the words being typed,
-                    and out of the way the moment there's no `@` in progress. */}
-                <MentionSuggestions
-                  people={mentions.suggestions}
-                  onChoose={mentions.choose}
-                />
+                    and out of the way the moment there's no `@` in progress.
+
+                    Not offered while editing, for the same reason the attach
+                    button isn't: an edit carries no `mention_ids`, so picking
+                    someone here would do nothing at all — no notification, and
+                    not even a highlight, since the highlight is driven by the
+                    ids rather than by the words. A picker that silently does
+                    nothing is worse than no picker. Adding a mention means
+                    sending a message. */}
+                {editing ? null : (
+                  <MentionSuggestions
+                    people={mentions.suggestions}
+                    onChoose={mentions.choose}
+                  />
+                )}
 
                 <View style={styles.composer}>
                   {/* No attach button while editing: an edit changes the words

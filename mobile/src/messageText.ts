@@ -302,9 +302,14 @@ export function parseMessageText(
  * The same words with the markup characters dropped and nothing styled.
  *
  * For the places a message appears as *one line of plain text* — a conversation
- * row's preview, the editing bar, a collapsed quote. Those can't carry emphasis,
- * and showing the raw `*asterisks*` there while the bubble two inches away
- * renders them is exactly the "half-finished" seam this milestone is closing.
+ * row's preview, a collapsed quote. Those can't carry emphasis, and showing the
+ * raw `*asterisks*` there while the bubble two inches away renders them is
+ * exactly the "half-finished" seam this milestone is closing.
+ *
+ * The editing bar is deliberately **not** one of them: it labels a message you
+ * are about to rewrite, and the composer below it holds the raw string you'll
+ * actually be editing. Showing a cleaned-up version above the source you're
+ * typing into would be the one place where dropping the markup misleads.
  */
 export function plainMessageText(text: string): string {
   return parseMessageText(text)
