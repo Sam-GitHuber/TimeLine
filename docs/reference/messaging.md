@@ -645,7 +645,11 @@ path that forgot.
 
 ## Writing a message: formatting and @mentions
 
-Both added in Phase 9b M8, and both mobile-only until M9 ports them.
+Both added in Phase 9b M8 and brought to the web in M9f. The parser is one module
+ported between the two clients (`mobile/src/messageText.ts` ↔
+`frontend/src/messageText.js`) and so is the composer's half
+(`mentions.ts` ↔ `mentions.js`) — change one, change the other, or the two
+clients start disagreeing about what a message says.
 
 ### Inline formatting is a render-time parse, never a stored transform
 
@@ -655,7 +659,7 @@ absence of one that reads as broken, because people type these out of habit and
 a message full of literal asterisks says *this app doesn't know that*.
 
 **The markup characters stay in the database.** The parse happens when a bubble
-is drawn (`mobile/src/messageText.ts`), so the raw string is the source of truth
+is drawn (`messageText.ts` / `messageText.js`), so the raw string is the source of truth
 throughout: an edit shows you exactly what you typed, and the body stays one
 opaque blob the day it becomes ciphertext. Stripping markup on the way in would
 also mean the *server* deciding what a message says, which is the thing E2E has
@@ -1111,6 +1115,37 @@ transcript now holds state that is only true of one conversation (the latched
 divider, the draft, the message being edited), and carrying any of it into a
 different chat would be worse than a flicker.
 
+**Phase 9b M9 closed the gap between the two clients**, in six chunks written up
+below ([M9b](#the-web-transcript-phase-9b-m9b), [M9c](#reactions-send-state-and-ticks-on-the-web-phase-9b-m9c),
+[M9d](#reply-threads-on-the-web-phase-9b-m9d), [M9e](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e),
+[M9f](#mentions-formatting-and-multi-select-on-the-web-phase-9b-m9f) — M9a was the
+code move above). **Every 9b feature is now on both**, and the sections below
+record the handful of places the web deliberately differs, each because the
+medium does rather than because it's behind: a **hover `⋯`** instead of a
+long-press, a **strand that covers the transcript** instead of blurring it, **no
+camera** on the composer, a **`⋯` on a list row** instead of a swipe, an **info
+panel** instead of a pushed screen, and a **checkbox** in select mode.
+
+The rule that made shipping them one at a time safe is worth keeping in mind if
+this is ever done again: **every 9b response field is additive**, and the backend
+ships before either client — so an old client ignores what it doesn't know rather
+than breaking on it. What that bought is real: five of these six chunks shipped
+while the drawer was still missing features the app had, and none of them ever
+made the web *wrong*, only incomplete.
+
+⚠️ **Two cascade traps live in this drawer**, and both have the same shape: the
+`⋯` trigger's visibility under `@media (hover: none)`, and the bubble reserving
+its corner. Tailwind's utilities layer comes last, so a rule that has to beat a
+utility can't be written as one — both live in `index.css`, and half of either
+pair silently does nothing on its own. Details in
+[M9b](#the-web-transcript-phase-9b-m9b) below.
+
+🔒 **Three module-level stores hold message text outside React** — `drafts.js`,
+`quotes.js` and `outbox.js` — which is what lets a draft, a resolved quote and a
+failed send survive the drawer switching views. They are **cleared on sign-out**
+in `auth.jsx` for exactly that reason: on a shared computer the next person to
+open the drawer isn't the one who typed it.
+
 ### The web transcript (Phase 9b M9b)
 
 M9b brought the app's [transcript](#the-transcript-phase-9b-m5) and its
@@ -1231,13 +1266,6 @@ a message ever reaches the maintainer, so telling the reporter that a copy goes
 with it is what makes that design honest rather than a quiet exception to it.
 A test asserts the wording, because the failure mode is a dialog that looks right
 and reports nothing.
-
-**One piece of Phase 9b is still app-only, and that's expected, not broken.**
-[M8's formatting and @mentions](#writing-a-message-formatting-and-mentions) land
-on the web in M9f: the markup is *stored* text, so the drawer renders the
-asterisks rather than the bold, and a mention notifies correctly because the ids
-are the server's — it simply isn't highlighted. Every 9b response field is
-additive, which is what has let each of these chunks ship on its own.
 
 The read-receipts *setting* shipped on the web (a Privacy section on
 `/settings`) **a milestone before the ticks it governs** — deliberately, because
@@ -1520,6 +1548,80 @@ exception stayed behind: **a muted thread still says "Muted" up there**, because
 everything else the header carried was an *action* and belongs in the menu, while
 mute is a *state* and the whole risk of it is forgetting you did. Leave now
 confirms first, matching the app and the rest of the web's destructive actions.
+
+### Mentions, formatting and multi-select on the web (Phase 9b M9f)
+
+M9f closed the gap. It brought
+[@mentions](#-a-mention-is-a-relation-and-the-only-thing-that-beats-mute) and
+[multi-select](#multi-select-phase-9b-m8) across, and with them the last of the
+"the web is behind" caveats that used to live in this section.
+
+**Inline formatting was already here**, because M9b ported the whole parser
+rather than half of it: it finds links and `*bold*` runs in one walk, so shipping
+the link half alone would have meant a bubble that deletes the asterisks and
+styles nothing. What M9f actually added on that side is the **mention segment** —
+the parser could always emit one, and nothing on the web passed it any names
+until there was a picker and a name map to build them from.
+
+**`frontend/src/mentions.js` is a port of the app's module** (the four string
+questions, character for character, with its unit tests ported beside them) with
+**one deliberate divergence in the hook**: the app *estimates* the caret from the
+size of each edit, because an RN `TextInput` reports its selection a beat later
+and sometimes not at all. A DOM `<textarea>` gives `selectionStart` synchronously
+on the event that changed the text, so the web reads it — the estimate would be
+strictly worse here, since it can't tell typing from a paste, an undo or a
+drag-and-drop, none of which a phone keyboard produces. The mirror image of that
+difference is that picking a name *sets* the caret on the web (and puts focus
+back in the textarea), where the app leaves it alone: choosing is a **click** on
+this side, so without it you'd be dumped at the end of the message with the
+composer blurred. `onMouseDown` is prevented on every chip for the same reason.
+
+Everything else about a mention is the [rule above](#-a-mention-is-a-relation-and-the-only-thing-that-beats-mute)
+and holds identically: the picker is a strip above the composer, offered in
+**group chats only** (the server 400s `mention_ids` on a 1:1) and **not while
+editing**; the ids are reconciled against the words actually sent, so a name
+picked and then deleted notifies nobody; and a mention is drawn **weighted, not
+underlined or clickable** — there is nowhere useful to send a click, and a link
+inside the message body would be one more thing fighting the ⋯ menu and select
+mode for the same gesture. 🔒 An id the viewer can't resolve renders as the words
+the sender typed, with no name invented for it.
+
+⚠️ **A retry carries the mention ids off the outbox entry**, which is the third
+instance of the rule M9d found with `replyToId` and M9e with `photo`: a failed
+send retried without them keeps the `@Ada` in the text with nothing behind it —
+no notification through her mute, no highlight — and the change is invisible
+unless a test asserts the *second* call's arguments.
+
+**Select mode differs from the app in three places, all because of the medium.**
+It's entered from the ⋯ menu's **Select** (the app's long-press menu), the header
+becomes "N selected" with Cancel, and the composer's slot becomes **Copy** and —
+only when [every ticked message is one you could delete alone](#multi-select-phase-9b-m8)
+— **Delete**. The differences:
+
+- ⚠️ **A capture-phase click handler wraps the row, and the `preventDefault` is
+  load-bearing.** A bubble contains links, a photo, a quote and a reply count,
+  every one of which would otherwise fire on the click that was meant to tick the
+  box — opening a lightbox or navigating away mid-selection. Intercepting once in
+  the capture phase settles all of them, rather than threading a "we're selecting"
+  flag through every child that has a click of its own.
+- **There's a real checkbox**, because the row is not a button and can't become
+  one (a `<button>` can't contain the `<a>` a linkified message renders). The box
+  is the accessible control and the row click is the convenience; a keyboard's
+  Space on the box arrives at the same handler as any other click.
+- **Unsent messages can't be ticked.** They have no server id to copy or delete
+  by, so a tick-box on one would offer to include it in an action it can't be
+  part of. (The app tolerates the tick and drops it later; this is the better
+  end of that difference.)
+
+**Escape leaves select mode rather than closing the drawer** — the nearer thing
+wins, as it already does for edit mode and for a strand. It's a *capture-phase*
+`document` listener, which is what puts it ahead of the drawer's own bubble-phase
+Escape handler; there's no composer to swallow the key here, since the bulk bar
+has taken its place.
+
+Deletes go out one at a time and invalidate **on settle**, including the strand's
+`['thread', id]` cache — M9d's sixth lesson, and multi-select is exactly the kind
+of mutation it was written for.
 
 ## Mobile (Phase 9 E2)
 

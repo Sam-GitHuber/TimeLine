@@ -48,9 +48,13 @@ import { useCallback, useSyncExternalStore } from "react";
  *
  * `photo` arrived with M9e — a prepared photo (see `chatPhotos.js`) held on the
  * entry for the same retry reason as `replyToId`: a failed photo send has to be
- * re-sendable without asking someone to find the picture again. The app's entry
- * carries one more, arriving with the chunk that needs it rather than sitting
- * here unused: `mentionIds` (M9f).
+ * re-sendable without asking someone to find the picture again.
+ *
+ * `mentionIds` arrived with M9f, and it's the third instance of that one rule: a
+ * mention that a retry dropped would leave the `@Ada` sitting in the text with
+ * nothing behind it — no notification through her muted thread, and not even a
+ * highlight, since the highlight is driven by the ids. A silent downgrade of
+ * what the message *does*, on a second attempt nobody watched.
  */
 
 let nextTempId = -1;
@@ -160,13 +164,14 @@ export function clearOutbox() {
 }
 
 /** A fresh outbox entry for a message just handed to `sendMessage`. */
-export function newOutgoing({ text, replyToId, rootId, photo }) {
+export function newOutgoing({ text, replyToId, rootId, photo, mentionIds }) {
   return {
     tempId: nextTempId--,
     text,
     replyToId,
     rootId,
     photo,
+    mentionIds,
     // The device clock, only ever used to sort this bubble to the bottom of the
     // list until the server's own timestamp replaces it wholesale.
     createdAt: new Date().toISOString(),
@@ -204,6 +209,10 @@ export function asMessage(entry, me) {
     created_at: entry.createdAt,
     edited_at: null,
     reactions: [],
+    // Bare ids, exactly as the server serialises them (M9f), so the optimistic
+    // bubble highlights the name it's about to notify rather than lighting up a
+    // beat later when the server's copy replaces it.
+    mentions: entry.mentionIds ?? [],
     // 🔒 A bare `{ id }`, exactly like the server's own `reply_to` — so an
     // in-flight reply resolves its quote through `quotes.js` the same way an
     // accepted one does, rather than being the one bubble that renders a quote

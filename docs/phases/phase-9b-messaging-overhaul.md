@@ -73,7 +73,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M6** | Conversation list + thread info | — | **M** | ☑ |
 | **M7** | Photo messages | M5 | **L** | ☑ |
 | **M8** | Text, mentions & quick actions | M1 | **M** | ☑ |
-| **M9** | Web parity | M1–M8 | **L** | ☐ |
+| **M9** | Web parity | M1–M8 | **L** | ☑ |
 
 M0/M1 first. After that only the listed dependencies bind — M4, M5, M6 and M8 can
 be done in any order. **M6's media gallery is the one piece left behind**: it
@@ -91,7 +91,7 @@ each is written below to be picked up cold:
 | **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☑ |
 | **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☑ |
 | **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☑ |
-| **M9f** | Formatting, mentions, multi-select + doc rewrite | `messaging/m9f-text` | M9b | **M** | ☐ |
+| **M9f** | Formatting, mentions, multi-select + doc rewrite | `messaging/m9f-text` | M9b | **M** | ☑ |
 
 Order matters only where the table says so: M9c/M9d stack because a reply's
 strand renders reactions and ticks, and M9e/M9f both need M9b's bubble.
@@ -1779,13 +1779,46 @@ M8 on the web, plus the paperwork that closes the phase.
    and its four degradations** — they stop being true here.
 
 **Done when**
-- [ ] Formatting renders; the stored text still has its markup.
-- [ ] Mention a group member from the web; they're notified through a mute.
-- [ ] Select several and delete in one action.
-- [ ] `messaging.md` *Frontend* rewritten; the "web is behind" passage gone.
+- [x] Formatting renders; the stored text still has its markup.
+- [x] Mention a group member from the web; they're notified through a mute.
+- [x] Select several and delete in one action.
+- [x] `messaging.md` *Frontend* rewritten; the "web is behind" passage gone.
 - [ ] **Sit the drawer and the app side by side and go through every 9b feature.**
       The point of M9 is that the two stop diverging, and that's not a diff you
-      can read — it's a comparison you do.
+      can read — it's a comparison you do. **Still outstanding**, and it's the
+      last thing between this phase and shipped: it needs the branch running
+      against a real stack with the app beside it, not a test suite.
+
+**Four things M9f settled** — the last of these notes, and the two ⚠️ ones
+generalise past this milestone:
+
+1. **The port stopped being a retype at `useMentions`, and that was right.** Every
+   other module in the M9 table came across character for character, and the
+   string half of this one did too. The *hook* didn't: the app estimates the
+   caret from the size of each edit because an RN `TextInput` reports its
+   selection late or not at all, and a `<textarea>` hands you `selectionStart` on
+   the event that changed the text. Porting the estimate would have been faithful
+   and worse — it can't tell typing from a paste, an undo or a drag-and-drop.
+   The rule the table means is "don't let the two *disagree about a message*",
+   not "don't let them differ about a keyboard".
+2. ⚠️ **`preventDefault` in a capture-phase click is what makes select mode
+   possible at all.** A bubble is full of things with clicks of their own — a
+   link, a photo, a quote, a reply count — and every one of them would fire on
+   the click meant to tick the box. The alternative was threading a "we're
+   selecting" flag into every child, which is four places to forget it and one
+   test each. One handler on the row settles all of them, and the same trick is
+   the answer any time a mode has to take a gesture back off a subtree.
+3. **The row couldn't become a button, so it grew a real checkbox.** The obvious
+   accessible shape — wrap the row in a `<button>` — is invalid the moment a
+   message contains a link, and messages contain links. The checkbox is the
+   accessible control, the row click is the convenience, and a keyboard's Space
+   arrives at the same handler as a mouse.
+4. **A retry dropping `mentionIds` is the third instance of one bug.** M9d found
+   it with `replyToId`, M9e with `photo`, and this is the same shape again: the
+   entry is the record of what was *meant*, so anything recomputed at retry time
+   is something that can silently change meaning on the second attempt. Assert
+   the **second** call's arguments, not the first — that's the only place it
+   shows.
 
 ---
 
@@ -1804,15 +1837,17 @@ Two rules make that safe, and they're the difference between "web is behind" and
    backend must never rely on a new client. Release the backend, *then* submit
    the build.
 
-The one visible degradation is an edited message, which the web renders as its
-new text with no "Edited" marker until **M9** (web parity). Acceptable, and
-better said out loud than discovered — it's now recorded in `messaging.md`'s
-*Frontend* section too.
+It worked. Every degradation this rule allowed has now closed with **M9** (web
+parity) — the last of them, an edited message the web rendered with no "Edited"
+marker, went with M9b — and none of them ever made the web *wrong*, only
+incomplete. That's the whole return on "additive only": five of M9's six chunks
+shipped while the drawer was still behind the app, each one on its own PR, and
+nothing had to move in lockstep.
 
 ## Definition of done (whole phase)
 
-- [ ] All ten milestones ticked in **Progress**.
-- [ ] Message text unreachable from the admin except via a report.
+- [x] All ten milestones ticked in **Progress**.
+- [x] Message text unreachable from the admin except via a report.
 - [ ] Backend + mobile + frontend tests green in CI.
 - [ ] Every milestone deployed after a backup.
 - [ ] `../reference/messaging.md` reflects the finished state, and **this file is

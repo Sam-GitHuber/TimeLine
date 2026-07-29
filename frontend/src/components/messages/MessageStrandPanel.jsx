@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import LoadMoreButton from "../LoadMoreButton.jsx";
+import MentionSuggestions from "./MentionSuggestions.jsx";
 import MessageBubble from "./MessageBubble.jsx";
 import { api, MESSAGE_POLL_MS } from "../../api.js";
+import { useMentions } from "../../mentions.js";
 
 export function threadQueryKey(conversationId, rootId) {
   return ["thread", conversationId, rootId];
@@ -64,6 +66,15 @@ export default function MessageStrandPanel({
   meId,
   isGroup,
   canSend,
+  /**
+   * Who can be named with `@` in here, and what everyone's name is (M9f) — the
+   * same two the transcript's composer takes. A strand is where a group's
+   * side-conversations happen, so it's if anything the *more* likely place to
+   * name someone; leaving the picker out of one of the two composers would be
+   * the sort of half-finished seam M9 exists to close.
+   */
+  mentionable = [],
+  mentionNames,
   /** Aim the composer at a different message in this strand — the menu's Reply. */
   onAimAt,
   /**
@@ -88,6 +99,7 @@ export default function MessageStrandPanel({
   const [text, setText] = useState("");
   const inputRef = useRef(null);
   const bottomRef = useRef(null);
+  const mentions = useMentions({ people: mentionable, text, setText, inputRef });
 
   /**
    * Polled like the transcript, so a reply someone else sends while you're
@@ -160,11 +172,15 @@ export default function MessageStrandPanel({
      * into a failed bubble with Retry beside it. Keeping the text here as well
      * would show one message twice and make it possible to send it twice.
      */
+    // Reconciled against what's actually being sent (M9f): pick Ada, delete her
+    // name again, and no id goes with the reply — see `mentionIdsIn`.
+    const mentionIds = mentions.idsFor(value);
+    mentions.reset();
     setText("");
     // Whichever message got you here. The server flattens it into this strand
     // either way, so naming the real target costs nothing and keeps the quote
     // honest about who you answered.
-    onSend(value, target);
+    onSend(value, target, mentionIds);
   }
 
   return (
@@ -249,6 +265,7 @@ export default function MessageStrandPanel({
                     quoted={
                       message.reply_to ? byId.get(message.reply_to.id) : undefined
                     }
+                    mentionNames={mentionNames}
                     // No `onOpenThread`: you're already in the strand, and there
                     // is nowhere further to go. The quote renders inert.
                     status={status}
@@ -302,11 +319,23 @@ export default function MessageStrandPanel({
                 </button>
               </p>
             )}
+            {/* Who you might be naming (M9f), immediately above the input —
+                nearest the words being typed, and gone the moment there's no
+                `@` in progress. */}
+            <MentionSuggestions
+              people={mentions.suggestions}
+              onChoose={mentions.choose}
+            />
             <div className="flex items-end gap-2">
               <textarea
                 ref={inputRef}
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) =>
+                  mentions.onChange(e.target.value, e.target.selectionStart)
+                }
+                // Where the caret is, which is what decides whether you're
+                // half-way through typing an `@name` *right now*.
+                onSelect={(e) => mentions.onCaretMove(e.target.selectionStart)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();

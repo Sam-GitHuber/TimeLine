@@ -12,8 +12,26 @@ import { parseMessageText } from "../../messageText.js";
 //
 // The fast path matters: an ordinary message is one unmarked segment, so it
 // renders as one text node rather than a map over an array of one.
-export default function MessageText({ text, mine, large }) {
-  const segments = useMemo(() => parseMessageText(text), [text]);
+//
+// `mentions` (M9f) are the display names this message's mention ids resolved to
+// — the caller does the resolving, because it's the screen that holds the
+// participants. Empty is the ordinary case and costs the parser nothing.
+export default function MessageText({ text, mine, large, mentions }) {
+  /**
+   * Split once per message, not once per render.
+   *
+   * Ordinary text parses in microseconds, so this isn't about the common case —
+   * it's about the worst one. The scan asks "does a run close here?" at each
+   * delimiter it could open at, which is quadratic on a string full of openers
+   * that never close (`*a *a *a …`). At the 5000-character message cap that's
+   * tens of milliseconds, and a transcript re-renders on every poll, every
+   * keystroke in the composer and every scroll — so an unmemoised parse turns
+   * one awkward message into a permanently janky thread.
+   */
+  const segments = useMemo(
+    () => parseMessageText(text, { mentions }),
+    [text, mentions]
+  );
 
   const body =
     segments.length === 1 && segments[0].kind === "text" && !segments[0].marks
@@ -35,6 +53,21 @@ export default function MessageText({ text, mine, large }) {
             >
               {segment.text}
             </a>
+          ) : segment.kind === "mention" ? (
+            // Weighted, not underlined or clickable (M9f, matching the app): a
+            // mention is a fact about who the message is *for*, and there's
+            // nowhere useful to send someone who clicks it — the person's
+            // profile is a link away in the header, and a link inside a
+            // selectable, quotable message body is one more thing to fight with
+            // the ⋯ menu and select mode over the same click.
+            <span
+              key={`mention-${index}`}
+              className={`font-bold ${mine ? "text-white" : "text-accent-deep"} ${markClass(
+                segment.marks
+              )}`}
+            >
+              {segment.text}
+            </span>
           ) : (
             <span key={`text-${index}`} className={markClass(segment.marks)}>
               {segment.text}
