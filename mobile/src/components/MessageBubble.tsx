@@ -52,13 +52,19 @@
  * when in the day. URLs and email addresses are **tappable**, and a message that
  * is nothing but one to three emoji drops its bubble and is drawn large.
  *
+ * **Photos** (Phase 9b M7) sit above the caption inside the bubble, drawn at the
+ * size the sender's phone recorded so the transcript doesn't reflow as they load,
+ * and open full-screen on tap. A message may be a photo with no caption at all —
+ * which is why the text is now rendered conditionally rather than always.
+ *
  * **One gesture per target**, the rule M2 settled: **long-press** = the action
  * menu (Reply included), **tap the branch** = open the thread. The bubble's own
  * tap does nothing, and should stay that way — a target this size doing
  * different things by press duration is where a mis-timed press does the wrong
- * thing. A tappable *link* inside the text is the one exception, and it isn't
- * really one: it's a smaller target with its own affordance, and long-pressing
- * over it still opens the menu.
+ * thing. A tappable *link* inside the text is one exception and **a photo is the
+ * other**; neither really breaks the rule, because both are smaller targets with
+ * their own obvious affordance, and long-pressing over either still opens the
+ * menu.
  *
  * **There is deliberately no swipe-to-reply.** M3 shipped one and it was taken
  * out after a day of real use: a rightward drag starting on a bubble is also the
@@ -76,6 +82,7 @@ import { useRef } from 'react';
 import * as Haptics from 'expo-haptics';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
 import { SendStateIcon } from './icons';
 import type { BubbleAnchor } from './MessageActionMenu';
@@ -83,7 +90,7 @@ import { measureInWindow } from '@/measure';
 import { isEmojiOnly, linkify } from '@/messageText';
 import type { SendState } from '@/readReceipts';
 import { colors, fontSize, radius, spacing } from '@/theme';
-import type { Message, Reaction } from '@/types';
+import type { Message, MessageAttachment, Reaction } from '@/types';
 import { formatMessageTime } from '@/utils';
 
 /**
@@ -101,6 +108,7 @@ export function BubbleBody({
   status,
   endsRun = true,
   onQuotePress,
+  onPhotoPress,
 }: {
   message: Message;
   mine: boolean;
@@ -124,6 +132,12 @@ export function BubbleBody({
    * — a preview is a picture of the bubble, not a working copy of it.
    */
   onQuotePress?: () => void;
+  /**
+   * Open a photo full-screen (Phase 9b M7). Omitted by the action menu's
+   * preview, and by an in-flight bubble — there's nothing full-size to open
+   * until the upload lands.
+   */
+  onPhotoPress?: (photo: MessageAttachment) => void;
 }) {
   /**
    * The meta line goes on the run's last bubble only — that's the whole point of
@@ -147,7 +161,12 @@ export function BubbleBody({
    * Not for a reply, which has a quote block that needs a bubble to sit in, and
    * not for a tombstone, which has no text of its own.
    */
-  const large = !message.reply_to && !message.is_deleted && isEmojiOnly(message.text);
+  const photos = message.attachments ?? [];
+  const large =
+    !message.reply_to &&
+    !message.is_deleted &&
+    photos.length === 0 &&
+    isEmojiOnly(message.text);
 
   return (
     <View
@@ -166,7 +185,22 @@ export function BubbleBody({
       {message.reply_to ? (
         <QuotedMessage quoted={quoted} mine={mine} onPress={onQuotePress} />
       ) : null}
-      <MessageText message={message} mine={mine} large={large} />
+      {/* Above the caption, below the quote — the order a photo message reads
+          in: what you're replying to, the picture, then what you said about it. */}
+      {photos.length > 0 ? (
+        <View style={styles.photos}>
+          {photos.map((photo) => (
+            <MessagePhoto
+              key={photo.id}
+              photo={photo}
+              onPress={onPhotoPress ? () => onPhotoPress(photo) : undefined}
+            />
+          ))}
+        </View>
+      ) : null}
+      {message.text ? (
+        <MessageText message={message} mine={mine} large={large} />
+      ) : null}
       {/* The meta line: time, the edited marker, then the tick. A row rather
           than one string because the tick is a glyph, and it has to sit on the
           text's baseline without the emoji-ish drift a font fallback gives. */}
@@ -190,6 +224,77 @@ export function BubbleBody({
         </View>
       ) : null}
     </View>
+  );
+}
+
+/** What a bubble announces to a screen reader: the words, or "Photo" when
+ * there aren't any (a photo with a caption reads as the caption — the photo is
+ * announced by the image inside it). */
+function describeMessage(message: Message) {
+  if (message.text) return message.text;
+  return (message.attachments ?? []).length > 0 ? 'Photo' : message.text;
+}
+
+/**
+ * Longest edge of a photo inside a bubble.
+ *
+ * Bounded in *both* directions rather than just by width. A portrait phone photo
+ * is 3:4, so width-only sizing gives it a bubble taller than the screen is wide
+ * and pushes the rest of the conversation off the top — the height cap is what
+ * keeps a tall photo from taking over the transcript. Tapping opens it properly.
+ */
+const PHOTO_WIDTH = 240;
+const PHOTO_MAX_HEIGHT = 320;
+const PHOTO_MIN_HEIGHT = 96;
+
+/**
+ * One photo in a bubble (Phase 9b M7).
+ *
+ * **The space is reserved before the image arrives**, computed from the
+ * `width`/`height` the sender's phone recorded. That's the whole reason those
+ * travel with the attachment: without them the row starts at zero height and
+ * grows as each thumbnail loads, and a transcript that reflows while you're
+ * reading it is the jankiest thing a chat can do — worse when you're scrolled
+ * into history, because every load shoves the message you were reading.
+ *
+ * `AuthedImage`, not `Image`: media is behind `forward_auth` in production, so a
+ * plain `<Image>` renders a blank box there while appearing to work in dev.
+ */
+function MessagePhoto({
+  photo,
+  onPress,
+}: {
+  photo: MessageAttachment;
+  onPress?: () => void;
+}) {
+  const ratio = photo.height > 0 ? photo.height / photo.width : 1;
+  const height = Math.min(
+    PHOTO_MAX_HEIGHT,
+    Math.max(PHOTO_MIN_HEIGHT, Math.round(PHOTO_WIDTH * ratio))
+  );
+
+  return (
+    <Pressable
+      onPress={onPress}
+      // A tap on a photo opening it is the one place the bubble's own "tap does
+      // nothing" rule gives way, and it doesn't really break it: a photo is its
+      // own target with its own obvious affordance, exactly like a link in the
+      // text. Long-press over it still opens the action menu, because this
+      // Pressable doesn't claim long presses.
+      accessibilityRole={onPress ? 'imagebutton' : 'image'}
+      accessibilityLabel={onPress ? 'Photo, tap to open' : 'Photo'}
+      style={{ width: PHOTO_WIDTH, height }}
+    >
+      <AuthedImage
+        uri={photo.thumbnail}
+        style={styles.photo}
+        // `cover`: the bubble's slot is already the photo's aspect ratio unless
+        // the height cap clipped it, and for the tall ones a filled crop reads
+        // far better than a letterboxed strip. The full frame is a tap away.
+        contentFit="cover"
+        transition={120}
+      />
+    </Pressable>
   );
 }
 
@@ -429,6 +534,7 @@ export function MessageBubble({
   onLongPress,
   onShowReactors,
   onOpenThread,
+  onPhotoPress,
   onRetry,
   onDiscard,
 }: {
@@ -458,6 +564,8 @@ export function MessageBubble({
   onShowReactors?: () => void;
   /** Open the focused thread view — what the reply-count affordance does. */
   onOpenThread?: () => void;
+  /** Open a photo full-screen (Phase 9b M7) — what tapping one does. */
+  onPhotoPress?: (photo: MessageAttachment) => void;
   /** Send it again — offered under a `failed` bubble, with `onDiscard`. */
   onRetry?: () => void;
   /** Give up on a failed send and drop it. The only way text ever leaves. */
@@ -506,10 +614,12 @@ export function MessageBubble({
             accessibilityRole="text"
             // The label lets the menu be opened by assistive tech and driven in
             // tests, since a long-press isn't otherwise discoverable.
+            // A photo with no caption would otherwise announce itself as an
+            // empty message, which is how a screen reader reports "nothing here".
             accessibilityLabel={
               mine
-                ? `Your message: ${message.text}`
-                : `Message from ${message.sender.display_name}: ${message.text}`
+                ? `Your message: ${describeMessage(message)}`
+                : `Message from ${message.sender.display_name}: ${describeMessage(message)}`
             }
             accessibilityHint="Press and hold for message actions"
             style={[styles.bubbleWrap, status === 'failed' && styles.unsent]}
@@ -521,6 +631,7 @@ export function MessageBubble({
               status={status}
               endsRun={endsRun}
               onQuotePress={onOpenThread}
+              onPhotoPress={onPhotoPress}
             />
           </Pressable>
         )}
@@ -629,6 +740,19 @@ const styles = StyleSheet.create({
   // container around it would be a frame around a gesture.
   bare: { paddingVertical: spacing.xs },
   largeEmoji: { fontSize: 44, lineHeight: 52 },
+  // A gap only when there's more than one photo — with a single one (all M7
+  // sends today) this collapses to nothing and the caption below keeps its own
+  // spacing.
+  photos: { gap: spacing.xs, marginBottom: spacing.xs },
+  photo: {
+    width: '100%',
+    height: '100%',
+    // Slightly tighter than the bubble's own corner, so the photo sits *inside*
+    // it rather than fighting the outline — the same relationship a rounded
+    // image has to a rounded card everywhere else in the app.
+    borderRadius: radius.md,
+    backgroundColor: colors.line,
+  },
   text: { fontSize: fontSize.base - 1, lineHeight: 21 },
   mineText: { color: '#ffffff' },
   theirsText: { color: colors.ink },

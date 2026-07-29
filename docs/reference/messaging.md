@@ -57,7 +57,10 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
   reply threads: `reply_to` (the message answered) and `thread_root` (the head of
   its thread, denormalised in `save`) — see
   [Reply threads](#reply-threads). Both are `SET_NULL`: hard-deleting a quoted
-  message must orphan its replies, never take them with it.
+  message must orphan its replies, never take them with it. Photos hang off it
+  via `MessageAttachment` (Phase 9b M7) — see
+  [Photo messages](#photo-messages), which is also where the one place chat
+  media differs from every other upload in the app is explained.
 - **`ConversationRead`** — `(conversation, user, last_read_at)`, unique together.
   Unread for you = visible messages with `created_at > last_read_at` and
   `sender != you`. Its own table (not two timestamps on `Conversation`) is why
@@ -452,6 +455,149 @@ the one from their last active spell, and it isn't ours to hand over while
 they're in the waiting room. The clients skip pending rows when computing ticks
 anyway; withholding server-side is the half that doesn't depend on them doing so.
 
+## Photo messages
+
+Added in Phase 9b M7. Send a photo — from the camera or the library — with or
+without a caption. It arrives as a bubble you can react to, reply to and delete
+like any other message, and the whole chat's photos have a grid on the
+[thread info screen](#the-info-screen-phase-9b-m6).
+
+### 🔒 The photo is processed on the *client*, and that inverts how posts work
+
+This is the one genuinely surprising decision in the feature, so it's worth being
+precise about, because it looks like a mistake if you arrive from
+[`feed-and-posts.md`](feed-and-posts.md).
+
+Every other upload in TimeLine is processed **server-side** by
+`backend/api/imaging.py`: the file is decoded to prove it really is an image,
+rebuilt from raw pixels (which is what strips EXIF, including the GPS
+coordinates a phone stamps on every shot), downscaled and re-encoded. A chat
+photo does none of that on the server. It is resized, stripped and re-encoded
+**on the phone**, by `mobile/src/chatPhotos.ts`, and the server stores the bytes
+it is handed without opening them.
+
+**Why:** end-to-end encryption is a committed goal for messaging
+(`docs/phases/phase-9c-e2e-encryption.md`). Under E2E the server holds bytes it
+cannot read, so it *cannot* strip or resize them. Building this on the
+server-side path would mean writing code we'd have to tear out — and, worse, a
+privacy guarantee that would quietly stop holding on the day it mattered. Doing
+it on the client puts the pipeline in the only place that will always be able to
+run it. `expo-image-manipulator` was already a dependency (the avatar cropper
+uses it), so this cost nothing to adopt.
+
+**The trade, stated plainly: the server can no longer verify that an attachment
+is really an image.** Three things carry that load instead, and they are the
+whole of the server-side defence — treat all three as load-bearing:
+
+| Guard | What it does |
+| --- | --- |
+| **Byte caps** (`MESSAGE_ATTACHMENT_MAX_BYTES` 4 MB, `MESSAGE_THUMBNAIL_MAX_BYTES` 512 KB) | Per *file*, not per request — a total would let one enormous file through whenever the others were small. The thumbnail's much lower cap stops a client sidestepping the point of having one by sending the full image twice. |
+| **A count cap** (`MESSAGE_ATTACHMENTS_MAX`, currently 1) | Without it, an unbounded count is the way around the byte cap. |
+| **A forced `.jpg` filename** (`message_attachment_upload_to`) | The stored-XSS fix, and the least obvious of the three. Caddy serves `/media/*` off disk and picks the Content-Type from the *extension*, so a blob kept as `.html` or `.svg` would be served as **markup from our own origin**, next to the session cookie. Forcing `.jpg` means a browser is always told "JPEG" whatever the bytes are, and a browser will not execute a JPEG. `X-Content-Type-Options: nosniff` on that route (added in the same milestone) is the second layer. |
+
+Both halves are pinned by tests that will fail loudly if someone "improves" them:
+`test_the_stored_file_keeps_a_jpg_name_whatever_was_uploaded` and
+`test_the_bytes_are_stored_exactly_as_sent`. If you're reading this because one
+of them failed: re-encoding server-side is what stops working under E2E, so the
+test is probably right and the change probably isn't.
+
+### The data model
+
+**`MessageAttachment`** — `message` FK (CASCADE), `kind`, `file`, `thumbnail`,
+`width`, `height`, `created_at`. Shaped like `PostImage`, with two differences:
+
+- **It's a table with a `kind`, not an image field on `Message`.** Phase 13 adds
+  video clips, and that should slot in as another `kind` on this row — same
+  endpoint, same bubble, same lightbox — rather than growing a parallel model
+  and a second upload path beside this one. `thumbnail` is already the right
+  field for a video's poster frame. Only `image` exists today; adding `video`
+  before anything can produce one would be a promise the code doesn't keep.
+  (The plan for M7 called the model `MessageImage`; it was built as
+  `MessageAttachment` to satisfy the same milestone's "leave a seam for video"
+  step, which a name meaning *picture* would have fought.)
+- **`width`/`height` are client-declared.** They're layout hints — the bubble
+  reserves space from them so the transcript doesn't reflow as photos load — and
+  nothing security-sensitive keys off them. They're bounds-checked so a nonsense
+  value can't produce an unrenderable bubble, not trusted.
+
+It's a `FileField`, not an `ImageField`, because `ImageField` validation opens
+the file with Pillow on every save — exactly the server-side decode this design
+exists to do without.
+
+**One attachment per message**, and the app sends a multi-photo pick as several
+messages. That's the better chat shape as well as the smaller one: each photo
+gets its own bubble, and so its own reactions, replies, read state and delete.
+The model is a table and the wire format is a list of parallel fields, so raising
+the cap later is a server constant, not an API change.
+
+### Deleting a photo message hard-deletes the photo
+
+A message delete is [soft](#api) — the row stays, blanked, so the thread keeps its
+shape. **Its attachments are deleted outright, files and all.**
+
+The tombstone exists to leave an empty slot where something was, and blanked text
+achieves that. A photo is different in kind: the stored file is a URL that **any
+signed-in member who holds it can fetch** (media is gated at the door, not
+per-author — see [`../deploy.md`](../deploy.md)), so leaving it would mean
+"delete" removed the caption and left the picture on the internet. When someone
+deletes a photo they sent, the photo is what they mean. `MessageSerializer` also
+returns no attachments for a tombstone, so nothing can render one through a code
+path that forgot.
+
+### What the clients do with it
+
+- **The bubble** draws the thumbnail at the size the sender's phone recorded, so
+  the transcript doesn't reflow as images load — worse than it sounds when you're
+  scrolled into history and every load shoves what you were reading. Tapping
+  opens the full-size image in the existing `PhotoLightbox`. This is the second
+  exception to the bubble's "tap does nothing" rule (a link is the first), and
+  for the same reason: it's a smaller target with its own affordance, and a
+  long-press over it still opens the action menu.
+- **The composer** offers **camera and library**, not just the library. Sending a
+  picture of what's in front of you is at least half of what a photo in a chat is
+  for, and routing someone out to the camera app and back is the friction that
+  makes an app feel like a website in a wrapper.
+- **A photo inside a focused reply strand draws but doesn't open**, because the
+  strand is itself a `Modal` and stacking two on iOS is the trap `ReactionTray`
+  documents. It renders no tap affordance rather than promising one that does
+  nothing; the transcript behind the blur has the same photo.
+- **The conversation list** previews a captionless photo as **"📷 Photo"** (and a
+  captioned one as "📷 <caption>"), from an `attachment_count` on
+  `last_message`. A count and not a rendered string: the phrasing is the
+  client's, and a count is also the one fact about an attachment that survives
+  the server not being able to see it.
+- **The media gallery** on the info screen is the answer to "the picture someone
+  sent last week". It renders **nothing at all** when a chat has no photos — a
+  heading over an empty grid is a feature announcing it has nothing for you.
+- **The web** shows the photo as a thumbnail linking to the full image, and the
+  same list preview. That is a **deliberate stopgap, not the finished
+  treatment** — M9 ports the app's version. It exists because the app can send a
+  captionless photo *today*, and without it the web drew an empty bubble, which
+  reads as a bug in the other person's message.
+
+### Push, moderation, backups
+
+- **The push body is "Ada sent a photo"** (plus " in <group>" for a titled group
+  chat). It names the sender and the medium and quotes nothing, which is the
+  same rule every other push body here follows — and it's more useful than "New
+  message", because knowing a picture is waiting is often the whole reason to
+  open the app. Said whenever there's an attachment, caption or not.
+- **A reported photo is visible to the maintainer**, as thumbnails on the report
+  in the Django admin. M0's rule is that [a report is the only
+  window](#moderation-a-report-is-the-only-window) onto a private message, and
+  M7 made a message able to be nothing but a photo — without this, reporting an
+  abusive image produced an empty snapshot and photo abuse would have been the
+  one thing moderation couldn't act on. Unlike `message_text` it's a **live**
+  read, not a snapshot: we don't copy someone's photo into a second place to
+  hold as evidence, so if the sender deletes the message the photo is genuinely
+  gone and the report shows none. That trade is the right way round.
+- **Backups need no change**, and this was checked rather than assumed:
+  `deploy/backup.sh` and `deploy/restore.sh` both `rclone sync` the *whole*
+  media directory, so `media/messages/` was covered the moment it existed. See
+  [`../backup-restore.md`](../backup-restore.md) — an enumerated list of
+  subdirectories there would be a data-loss bug that only surfaces the night you
+  need the backup.
+
 ## Renaming a group chat
 
 Added in Phase 9b M6. `PATCH /api/conversations/<id>/` with `{ title }`. Until
@@ -614,6 +760,11 @@ Direct and group chats share the endpoints:
     `next` before reading anything into a missing id, or it will tell someone a
     message is unavailable when it was only unasked-for. See
     [Reply threads](#reply-threads).
+  - `?media=1` narrows it to **messages carrying a photo** (Phase 9b M7) — the
+    thread info screen's media gallery. A third filter on the same queryset for
+    the third time and the same reason: the gallery must not be able to show a
+    photo the transcript wouldn't. Excludes tombstones, whose attachments are
+    genuinely gone. Composes with `?order=desc`, which is how a gallery reads.
   - `?order=desc` returns **newest-first** (Phase 9b M5). Without it the newest
     messages sit on the *last* page, so opening a chat means walking every page
     to reach the bottom of it — which is exactly what the app used to do. It's
@@ -625,6 +776,12 @@ Direct and group chats share the endpoints:
   ([Reply threads](#reply-threads)); it's validated against **your own**
   interval-clipped messages, so an id from another thread or from inside a gap
   is rejected exactly like one that never existed.
+  - **Multipart when it carries a photo** (Phase 9b M7): parallel lists
+    `attachments`, `attachment_thumbnails`, `attachment_widths`,
+    `attachment_heights`, validated to the same length. `text` may then be
+    **blank** — a message must be text, a photo, or both, never neither, which
+    is the rule posts have enforced since Phase 4. See
+    [Photo messages](#photo-messages).
 - `POST /api/conversations/<id>/read/` — mark read up to now (clears unread);
   `DELETE` marks it **unread** again (Phase 9b M6). See
   [Marking a thread unread](#marking-a-thread-unread).
@@ -639,6 +796,10 @@ Direct and group chats share the endpoints:
   body `{ text }`. Sender-only (403), not deleted (400), within the edit window
   (403), and only while you could still *send* here (403). Validated by exactly
   the same rules as sending. See [Editing a message](#editing-a-message).
+  **Attachments are not editable** — parts sent here are ignored. A photo
+  message's caption may be edited, including down to nothing (there's still a
+  message); swapping the *picture* under something someone has already looked at
+  is not a change the "Edited" marker can honestly disclose.
 - `POST /api/conversations/<id>/participants/` — add people; any active member,
   each an addable connection.
 - `POST /api/conversations/<id>/leave/` — self-leave **or** decline-invite.
@@ -882,10 +1043,14 @@ deserves. The response is the fresh conversation, written straight into the
 `['conversation', id]` cache the thread header reads, so the new name is up before
 any refetch lands.
 
-**The media gallery isn't here yet.** It's the natural home for "the picture
-someone sent last week" and it's in M6's plan, but there are no photo messages
-until M7 — an empty grid promising a feature that doesn't exist is worse than the
-absence.
+**The media gallery** (added by M7, one milestone later than the rest of this
+screen) is the natural home for "the picture someone sent last week": a grid of
+the chat's photos, newest first, tapping into the shared `PhotoLightbox` as a
+swipeable gallery. It reads the *messages* endpoint with `?media=1`, so it can
+never show a photo the transcript wouldn't, and it renders nothing at all in a
+chat with no photos. M6 shipped this screen without it deliberately — there were
+no photo messages until M7, and an empty grid promising a feature that doesn't
+exist is worse than its absence. See [Photo messages](#photo-messages).
 
 ### The long-press action menu (Phase 9b M1)
 

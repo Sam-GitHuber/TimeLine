@@ -152,6 +152,49 @@ it('previews a deleted last message as “Message deleted”', async () => {
   expect(await screen.findByText('Message deleted')).toBeTruthy();
 });
 
+it('previews a captionless photo as “📷 Photo” (M7)', async () => {
+  // A photo message may carry no text at all, which would otherwise render as a
+  // blank line where the preview goes — a row that looks broken. It says what's
+  // waiting without quoting anything, the same rule the push body follows.
+  serve([
+    convo({
+      id: 12,
+      last_message: {
+        text: '',
+        is_deleted: false,
+        sender_id: 2,
+        created_at: '2026-07-22T10:00:00Z',
+        attachment_count: 1,
+      },
+    }),
+  ]);
+
+  await renderScreen();
+
+  expect(await screen.findByText(/📷 Photo/)).toBeTruthy();
+});
+
+it('previews a captioned photo as the caption, still marked as a photo', async () => {
+  // The words are the more useful preview when there are any; the emoji still
+  // says a picture came with them.
+  serve([
+    convo({
+      id: 13,
+      last_message: {
+        text: 'look at this view',
+        is_deleted: false,
+        sender_id: 2,
+        created_at: '2026-07-22T10:00:00Z',
+        attachment_count: 1,
+      },
+    }),
+  ]);
+
+  await renderScreen();
+
+  expect(await screen.findByText(/📷 look at this view/)).toBeTruthy();
+});
+
 it('names an untitled group by its other members and shows an unread pill', async () => {
   serve([
     convo({

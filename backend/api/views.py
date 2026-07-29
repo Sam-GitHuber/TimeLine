@@ -60,6 +60,7 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    MessageAttachment,
     Notification,
     NotificationPreference,
     Participant,
@@ -569,7 +570,16 @@ def decorate_conversations(conversations, user):
         # thread, would get the text of a message they can't read leaked into
         # their list/detail payload. Empty visible set → no preview.
         visible = _messages_for_viewer(convo, user)
-        convo._last_message = visible.order_by("-created_at", "-id").first()
+        # Prefetched because the preview has to say "📷 Photo" for a message with
+        # no caption (Phase 9b M7). Costs the same one query per conversation as
+        # a ``.count()`` in the serializer would, and buys the serializer staying
+        # a pure read of rows it was handed — the per-conversation querying all
+        # sits in this one loop, where it can be seen and counted.
+        convo._last_message = (
+            visible.order_by("-created_at", "-id")
+            .prefetch_related("attachments")
+            .first()
+        )
         convo.unread_count = unread_count_for(
             convo, user, read_at_by_convo.get(convo.id)
         )
@@ -2449,7 +2459,7 @@ class ConversationMessagesView(generics.ListAPIView):
         # id (see ``MessageSerializer.get_reply_to``), so the quoted row is never
         # fetched at all — cheaper *and* nothing there to leak.
         visible = _messages_for_viewer(convo, self.request.user).prefetch_related(
-            "reactions"
+            "reactions", "attachments"
         )
         queryset = _with_reply_counts(visible)
 
@@ -2483,6 +2493,23 @@ class ConversationMessagesView(generics.ListAPIView):
             # the one wrong answer available here.
             queryset = queryset.filter(pk__in=ids)
 
+        # ``?media=1`` (Phase 9b M7) — only messages carrying a photo, which is
+        # what the thread info screen's media gallery loads. A third filter on
+        # the same queryset for the third time and the same reason: the gallery
+        # must not be able to show a photo the transcript above it wouldn't, and
+        # the surest way to guarantee that is for both to be the *same* clipped
+        # set with the same code deciding it. Pairs with ``?order=desc`` — a
+        # gallery reads newest-first — which composes because these are all just
+        # filters.
+        #
+        # Tombstones are excluded here, not just blanked: a deleted message's
+        # attachments are actually gone (see ``MessageDetailView.delete``), so a
+        # gallery row for one would be a permanent broken image.
+        if self.request.query_params.get("media") == "1":
+            queryset = queryset.filter(
+                attachments__isnull=False, deleted_at__isnull=True
+            ).distinct()
+
         # Newest-first on request (Phase 9b M5). Mirrors ``Message.Meta.ordering``
         # exactly, reversed on both terms — the id tiebreak matters as much here
         # as it does ascending, or two messages sharing a timestamp can swap
@@ -2503,16 +2530,43 @@ class ConversationMessagesView(generics.ListAPIView):
             context={"visible_messages": visible},
         )
         serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
         now = timezone.now()
         with transaction.atomic():
             message = Message.objects.create(
                 conversation=convo,
                 sender=request.user,
-                text=serializer.validated_data["text"],
+                text=data["text"],
                 # ``thread_root`` is derived from this in ``Message.save`` — one
                 # level deep, always.
-                reply_to_id=serializer.validated_data.get("reply_to_id"),
+                reply_to_id=data.get("reply_to_id"),
             )
+            # Photos (Phase 9b M7). Written straight to storage: they arrive
+            # already resized, EXIF-stripped and re-encoded by the phone, and
+            # deliberately do **not** go through ``api.imaging.process_image`` —
+            # that path decodes, which is exactly what stops working when the
+            # server is handed ciphertext under E2E. See ``MessageAttachment``.
+            # Inside the transaction with the message, so a half-attached message
+            # can never be announced by the push enqueued below it.
+            # ``strict=True``: the serializer has already refused a payload whose
+            # lists don't line up, so a mismatch here is a bug in *this* file, and
+            # silently truncating to the shortest list would store a photo with
+            # another photo's dimensions rather than raising.
+            for file, thumbnail, width, height in zip(
+                data.get("attachments") or [],
+                data.get("attachment_thumbnails") or [],
+                data.get("attachment_widths") or [],
+                data.get("attachment_heights") or [],
+                strict=True,
+            ):
+                MessageAttachment.objects.create(
+                    message=message,
+                    kind=MessageAttachment.Kind.IMAGE,
+                    file=file,
+                    thumbnail=thumbnail,
+                    width=width,
+                    height=height,
+                )
             # Bump activity so the thread rises to the top of both lists.
             Conversation.objects.filter(pk=convo.pk).update(updated_at=now)
             # Sending implies you've read everything up to now.
@@ -2721,7 +2775,18 @@ class MessageDetailView(APIView):
             )
         _assert_can_send(request.user, convo, my_status)
 
-        serializer = MessageCreateSerializer(data=request.data)
+        serializer = MessageCreateSerializer(
+            data=request.data,
+            # An edit sends no files, so the serializer can't see that this is a
+            # photo message — and a photo message may be edited down to no
+            # caption at all, where a text one may not be edited into nothing.
+            # Told, not fetched: on the create path there's no row to ask.
+            # (Attachments themselves are **not** editable — the parts are
+            # ignored here. Swapping the photo under a message someone has
+            # already seen is the thing the "Edited" marker can't honestly
+            # disclose, and the 15-minute window doesn't make it safer.)
+            context={"has_attachments": message.attachments.exists()},
+        )
         serializer.is_valid(raise_exception=True)
         message.text = serializer.validated_data["text"]
         message.edited_at = timezone.now()
@@ -2737,9 +2802,28 @@ class MessageDetailView(APIView):
             sender=request.user,
         )
         if not message.is_deleted:
-            message.text = ""
-            message.deleted_at = timezone.now()
-            message.save(update_fields=["text", "deleted_at"])
+            with transaction.atomic():
+                message.text = ""
+                message.deleted_at = timezone.now()
+                message.save(update_fields=["text", "deleted_at"])
+                # 🔒 Photos are **hard** deleted, files and all, even though the
+                # message itself is only soft deleted (Phase 9b M7).
+                #
+                # The tombstone exists to keep the thread's shape — an empty slot
+                # where something was — and blanked text achieves that. A photo
+                # is different in kind: the row's ``file`` is a URL any signed-in
+                # member can fetch directly (media is gated at the door, not
+                # per-author — see deploy.md), so leaving it would mean "delete"
+                # removed the caption and left the picture on the internet. When
+                # someone deletes a photo they sent, the photo is what they mean.
+                #
+                # ``.delete()`` on the queryset would drop the rows and orphan
+                # the files on disk, so this walks them and deletes each file
+                # first. ``save=False`` because the row is about to go anyway.
+                for attachment in message.attachments.all():
+                    attachment.file.delete(save=False)
+                    attachment.thumbnail.delete(save=False)
+                    attachment.delete()
         return Response(
             {"detail": "Message deleted."}, status=status.HTTP_200_OK
         )

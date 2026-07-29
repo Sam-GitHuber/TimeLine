@@ -19,10 +19,12 @@
  *     invitation);
  *   - Mute, Add people (group), Leave, and — on a 1:1 — Block.
  *
- * **Deliberately not here yet: the media gallery.** It's the natural home for
- * "the picture someone sent last week" and it's in M6's plan, but there are no
- * photo messages until M7. An empty grid promising a feature that doesn't exist
- * is worse than the absence.
+ *   - **the media gallery** (Phase 9b M7) — every photo in the chat, newest
+ *     first, which is the answer to "the picture someone sent last week"
+ *     without scrolling a year of transcript. It was written into M6's plan and
+ *     deliberately left out of M6: there were no photo messages until M7, and an
+ *     empty grid promising a feature that doesn't exist is worse than its
+ *     absence.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -46,9 +48,11 @@ import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
+import { AuthedImage } from '@/components/AuthedImage';
 import { BlockButton } from '@/components/BlockButton';
+import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { colors, fontSize, radius, spacing } from '@/theme';
-import type { Participant } from '@/types';
+import type { MessageAttachment, Participant } from '@/types';
 
 export default function ConversationInfoScreen() {
   const { conversationId } = useLocalSearchParams<{ conversationId: string }>();
@@ -271,6 +275,8 @@ export default function ConversationInfoScreen() {
               ))}
             </View>
 
+            <MediaGallery conversationId={id} />
+
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Settings</Text>
 
@@ -357,6 +363,85 @@ export default function ConversationInfoScreen() {
         </KeyboardAvoidingView>
       )}
     </SafeAreaView>
+  );
+}
+
+/**
+ * Every photo in this chat, newest first (Phase 9b M7).
+ *
+ * **It renders nothing at all when there are no photos**, rather than an empty
+ * state — a heading over a blank square is a feature announcing that it has
+ * nothing for you. A chat that has never carried a picture simply doesn't have
+ * this section, and it appears the first time one is sent.
+ *
+ * 🔒 It reads the *messages* endpoint with a `media=1` filter, not a gallery
+ * endpoint of its own, so the photos here are the same interval-clipped set the
+ * transcript draws from and the gallery can't become a way to see round a gap in
+ * someone's membership. See `getConversationMedia`.
+ *
+ * One page, deliberately: this is a summary panel inside a scroll view, and
+ * nesting a paging grid inside it would fight the outer scroll for the gesture.
+ * A page is 20 photos, which at family scale is most chats entirely — and the
+ * transcript is still there for older ones.
+ */
+function MediaGallery({ conversationId }: { conversationId: number }) {
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+
+  const mediaQuery = useQuery({
+    queryKey: ['conversation-media', conversationId],
+    queryFn: () => api.getConversationMedia(conversationId),
+  });
+
+  // Flattened out of their messages: the grid is about pictures, not about which
+  // message each arrived in. Ordering follows the response (newest message
+  // first), so the newest photo is top-left.
+  const photos: MessageAttachment[] = (mediaQuery.data?.results ?? []).flatMap(
+    (message) => message.attachments ?? []
+  );
+
+  if (photos.length === 0) return null;
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>
+        {photos.length === 1 ? '1 photo' : `${photos.length} photos`}
+      </Text>
+      <View style={styles.grid}>
+        {photos.map((photo, index) => (
+          <Pressable
+            key={photo.id}
+            onPress={() => setLightboxIndex(index)}
+            accessibilityRole="imagebutton"
+            accessibilityLabel={`Photo ${index + 1} of ${photos.length}`}
+            style={({ pressed }) => [styles.tile, pressed && styles.pressed]}
+          >
+            <AuthedImage
+              uri={photo.thumbnail}
+              style={styles.tileImage}
+              contentFit="cover"
+              transition={120}
+            />
+          </Pressable>
+        ))}
+      </View>
+
+      {/* Here the viewer *is* a gallery — you swipe between the chat's photos,
+          which is exactly what you came to this screen to do. (From a bubble it
+          opens the single photo, because there the message is the unit.) */}
+      {lightboxIndex !== null ? (
+        <PhotoLightbox
+          images={photos.map((photo) => ({
+            id: photo.id,
+            image: photo.url,
+            thumbnail: photo.thumbnail,
+            width: photo.width,
+            height: photo.height,
+          }))}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />
+      ) : null}
+    </View>
   );
 }
 
@@ -497,4 +582,21 @@ const styles = StyleSheet.create({
   danger: { color: colors.danger },
   blockRow: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   pressed: { opacity: 0.7 },
+  // A wrapping grid rather than a fixed column count: percentage widths would
+  // have to be recomputed against the gap, and a flexible tile size means the
+  // last row of two photos doesn't stretch into two half-screen slabs.
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  tile: { width: 104, height: 104 },
+  tileImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: radius.md,
+    backgroundColor: colors.line,
+  },
 });

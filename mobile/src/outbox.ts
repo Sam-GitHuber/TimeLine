@@ -32,6 +32,7 @@
 
 import { useCallback, useSyncExternalStore } from 'react';
 
+import type { PreparedChatPhoto } from '@/api';
 import type { Author, Message } from '@/types';
 
 export type Outgoing = {
@@ -44,7 +45,20 @@ export type Outgoing = {
   rootId?: number;
   createdAt: string;
   status: 'sending' | 'failed';
+  /**
+   * A photo being sent with it (Phase 9b M7), already prepared for upload.
+   *
+   * Held here rather than in screen state for the same reason the text is: a
+   * failed photo send has to survive the navigation away and still be
+   * retryable, and the prepared files sit in the app's cache directory, so the
+   * URIs stay valid. `previewUri` is what the in-flight bubble draws — the
+   * local thumbnail, so a photo appears the instant you hit send rather than
+   * after a round trip.
+   */
+  photo?: OutgoingPhoto;
 };
+
+export type OutgoingPhoto = PreparedChatPhoto & { previewUri: string };
 
 let nextTempId = -1;
 
@@ -125,21 +139,25 @@ export function clearOutbox() {
   );
 }
 
-/** A fresh outbox entry for text just handed to `sendMessage`. */
+/** A fresh outbox entry for a message just handed to `sendMessage` — text, a
+ * photo, or both. */
 export function newOutgoing({
   text,
   replyToId,
   rootId,
+  photo,
 }: {
   text: string;
   replyToId?: number;
   rootId?: number;
+  photo?: OutgoingPhoto;
 }): Outgoing {
   return {
     tempId: nextTempId--,
     text,
     replyToId,
     rootId,
+    photo,
     // The device clock, only ever used to sort this bubble to the bottom of the
     // list until the server's own timestamp replaces it wholesale.
     createdAt: new Date().toISOString(),
@@ -169,5 +187,22 @@ export function asMessage(entry: Outgoing, me: Author): Message {
     reply_to: entry.replyToId ? { id: entry.replyToId } : null,
     thread_root_id: entry.rootId ?? null,
     reply_count: 0,
+    // The local file stands in for the server's copy until it lands (Phase 9b
+    // M7). A negative `id` matching the entry's `tempId` keeps it distinct from
+    // any real attachment, and both URLs point at the on-device thumbnail: the
+    // bubble draws it, and there's nothing full-size to open yet — the lightbox
+    // is keyed off the message being sent, so it never sees this.
+    attachments: entry.photo
+      ? [
+          {
+            id: entry.tempId,
+            kind: 'image',
+            url: entry.photo.previewUri,
+            thumbnail: entry.photo.previewUri,
+            width: entry.photo.width,
+            height: entry.photo.height,
+          },
+        ]
+      : [],
   };
 }

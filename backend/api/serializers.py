@@ -13,6 +13,7 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    MessageAttachment,
     Notification,
     Poll,
     Post,
@@ -348,6 +349,60 @@ MESSAGE_MAX_LENGTH = POST_MAX_LENGTH
 # typed would be worse than an error.
 CONVERSATION_TITLE_MAX_LENGTH = 100
 
+# --- message attachments (Phase 9b M7) ---------------------------------------
+# 🔒 These four constants are the *entire* server-side defence for chat photos,
+# which is a deliberate design and not a gap. A message attachment is processed
+# on the client (resized, EXIF-stripped, re-encoded) so the pipeline is unchanged
+# the day the server is handed ciphertext instead — see ``MessageAttachment``.
+# Size and count are the only limits that still mean something on bytes you
+# cannot open, so they carry the whole load and are set tight.
+
+# The phone uploads at MESSAGE_IMAGE_MAX_EDGE / JPEG q0.8, which lands a
+# photographic image around 200–500 KB. 4 MB is far above anything that pipeline
+# produces and far below anything that hurts the box — the gap absorbs an odd
+# image (a huge flat-colour PNG-ish screenshot) without inviting one.
+MESSAGE_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
+# The thumbnail is a ~400px JPEG, tens of KB. Capped separately and much lower:
+# a client that sent the full image twice would double every chat's storage and
+# the bubble would download the big one on cellular.
+MESSAGE_THUMBNAIL_MAX_BYTES = 512 * 1024
+# One attachment per message. The model is a table so several is additive later,
+# but the app sends a multi-photo pick as several messages — see messaging.md.
+# The cap exists so an unbounded count can't be the way around the byte cap.
+MESSAGE_ATTACHMENTS_MAX = 1
+# Sanity bound on the client-declared dimensions. Not a security control (they're
+# layout hints), just a floor/ceiling so a typo or a hostile client can't hand
+# the bubble an aspect ratio that computes to a zero-height or mile-tall row.
+MESSAGE_ATTACHMENT_MAX_EDGE = 10_000
+
+
+class MessageAttachmentSerializer(serializers.ModelSerializer):
+    """One attachment on a message, as absolute URLs plus the client-declared
+    dimensions so the bubble can reserve space before the image loads.
+
+    ``kind`` is on the wire from day one even though ``image`` is its only value:
+    it's what lets Phase 13's video clips arrive as data rather than as a client
+    release, and a client written today that switches on ``kind`` keeps working.
+
+    Field names are ``url``/``thumbnail`` rather than ``PostImageSerializer``'s
+    ``image``/``thumbnail`` for the same reason — ``image`` would be the wrong
+    word for a video's file, and renaming a shipped field later is the sort of
+    break the phase's compatibility rule exists to avoid.
+    """
+
+    url = serializers.SerializerMethodField()
+    thumbnail = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MessageAttachment
+        fields = ("id", "kind", "url", "thumbnail", "width", "height")
+
+    def get_url(self, obj):
+        return absolute_media_url(obj.file, self.context.get("request"))
+
+    def get_thumbnail(self, obj):
+        return absolute_media_url(obj.thumbnail, self.context.get("request"))
+
 
 class MessageSerializer(serializers.ModelSerializer):
     """A single message in a conversation thread.
@@ -376,6 +431,7 @@ class MessageSerializer(serializers.ModelSerializer):
     reactions = serializers.SerializerMethodField()
     reply_to = serializers.SerializerMethodField()
     reply_count = serializers.SerializerMethodField()
+    attachments = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -391,6 +447,7 @@ class MessageSerializer(serializers.ModelSerializer):
             "reply_to",
             "thread_root_id",
             "reply_count",
+            "attachments",
         )
 
     def get_reactions(self, obj):
@@ -452,6 +509,22 @@ class MessageSerializer(serializers.ModelSerializer):
             return annotated
         return obj.thread_messages.count()
 
+    def get_attachments(self, obj):
+        """The photos on this message (Phase 9b M7) — empty list for a text one.
+
+        **A tombstone carries none**, whatever is still on disk. Soft delete
+        blanks the text, and a "message deleted" placeholder that still showed
+        the photo would make delete a lie about the one thing people most want
+        deleted. (The rows and files are reaped by the delete path itself; this
+        is the render-side half of the same promise, so an attachment can't
+        reappear through a serializer that forgot.)
+        """
+        if obj.is_deleted:
+            return []
+        return MessageAttachmentSerializer(
+            obj.attachments.all(), many=True, context=self.context
+        ).data
+
 
 class MessageCreateSerializer(serializers.ModelSerializer):
     """Create a message. ``sender`` and ``conversation`` are set in the view
@@ -470,23 +543,124 @@ class MessageCreateSerializer(serializers.ModelSerializer):
     see, and an id you can't see is rejected identically to one that doesn't
     exist. Passing the queryset in rather than importing the clipping helper here
     keeps one implementation of the rule in ``views.py`` instead of a second copy
-    that drifts."""
+    that drifts.
 
-    text = serializers.CharField(max_length=MESSAGE_MAX_LENGTH)
+    **Attachments (Phase 9b M7)** ride in as multipart parts alongside the text,
+    the way a post's photos do — but *already processed*, because the phone does
+    the resizing and stripping (see ``MessageAttachment``). Each one is three
+    parts and a number pair: the image, its thumbnail, and its dimensions. They
+    are **parallel lists**, validated to the same length, so raising
+    ``MESSAGE_ATTACHMENTS_MAX`` above 1 is a constant change and not an API
+    change — the client already sends the plural shape.
+
+    A message must be **text, attachments, or both — never neither**, matching
+    the rule posts have enforced since Phase 4. That's what makes ``text``
+    optional here, which in turn is why ``validate`` and not ``validate_text``
+    decides emptiness: only the whole payload knows whether a blank message is a
+    photo or a mistake.
+    """
+
+    text = serializers.CharField(
+        max_length=MESSAGE_MAX_LENGTH,
+        required=False,
+        allow_blank=True,
+        default="",
+    )
     reply_to_id = serializers.IntegerField(
         required=False, allow_null=True, write_only=True
+    )
+    attachments = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        write_only=True,
+        max_length=MESSAGE_ATTACHMENTS_MAX,
+    )
+    attachment_thumbnails = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        write_only=True,
+        max_length=MESSAGE_ATTACHMENTS_MAX,
+    )
+    # Client-declared, because nothing here opens the file. Bounded so a bad
+    # value can't produce an unrenderable bubble; see ``MessageAttachment``.
+    attachment_widths = serializers.ListField(
+        child=serializers.IntegerField(
+            min_value=1, max_value=MESSAGE_ATTACHMENT_MAX_EDGE
+        ),
+        required=False,
+        write_only=True,
+        max_length=MESSAGE_ATTACHMENTS_MAX,
+    )
+    attachment_heights = serializers.ListField(
+        child=serializers.IntegerField(
+            min_value=1, max_value=MESSAGE_ATTACHMENT_MAX_EDGE
+        ),
+        required=False,
+        write_only=True,
+        max_length=MESSAGE_ATTACHMENTS_MAX,
     )
 
     class Meta:
         model = Message
-        fields = ("id", "text", "created_at", "reply_to_id")
+        fields = (
+            "id",
+            "text",
+            "created_at",
+            "reply_to_id",
+            "attachments",
+            "attachment_thumbnails",
+            "attachment_widths",
+            "attachment_heights",
+        )
         read_only_fields = ("id", "created_at")
 
     def validate_text(self, value):
-        stripped = value.strip()
-        if not stripped:
-            raise serializers.ValidationError("A message can't be empty.")
-        return stripped
+        return value.strip()
+
+    def validate_attachments(self, value):
+        return self._check_sizes(value, MESSAGE_ATTACHMENT_MAX_BYTES, "photo")
+
+    def validate_attachment_thumbnails(self, value):
+        return self._check_sizes(value, MESSAGE_THUMBNAIL_MAX_BYTES, "thumbnail")
+
+    def _check_sizes(self, files, cap, label):
+        """🔒 The byte cap — one of the only two checks left once the bytes are
+        opaque, so it's applied to every part rather than to their total: a total
+        would let one enormous file through whenever the others were small.
+        """
+        megabytes = cap / (1024 * 1024)
+        for upload in files:
+            if upload.size > cap:
+                raise serializers.ValidationError(
+                    f"Each {label} must be under {megabytes:.0f} MB."
+                )
+        return files
+
+    def validate(self, attrs):
+        """Cross-field rules: the lists line up, and the message isn't empty."""
+        files = attrs.get("attachments") or []
+        thumbs = attrs.get("attachment_thumbnails") or []
+        widths = attrs.get("attachment_widths") or []
+        heights = attrs.get("attachment_heights") or []
+        if not (len(files) == len(thumbs) == len(widths) == len(heights)):
+            # A mismatch means the client's parts got out of step, and guessing
+            # which photo the spare dimension belongs to would silently store the
+            # wrong aspect ratio. Refusing is the only honest answer.
+            raise serializers.ValidationError(
+                "Each attachment needs a thumbnail, a width and a height."
+            )
+
+        # ``has_attachments`` covers the *edit* path, which sends no files: a
+        # photo message may legitimately be edited down to no caption at all,
+        # while a text message may not be edited into nothing. The view knows
+        # which it's looking at; this serializer doesn't fetch the row to find
+        # out, because on create there's no row yet.
+        has_attachments = bool(files) or self.context.get("has_attachments", False)
+        if not attrs.get("text") and not has_attachments:
+            raise serializers.ValidationError(
+                {"text": "A message can't be empty."}
+            )
+        return attrs
 
     def validate_reply_to_id(self, value):
         if value is None:
@@ -625,6 +799,13 @@ class ConversationSerializer(serializers.ModelSerializer):
             "is_deleted": message.is_deleted,
             "sender_id": message.sender_id,
             "created_at": message.created_at,
+            # How many photos it carries (Phase 9b M7) — a *count*, not the
+            # photos, because this is a list preview and the row renders
+            # "📷 Photo" from it. Deliberately a number and not a rendered
+            # string: the phrasing is a client concern (it's localised text next
+            # to an emoji), and a count is also the one fact about an attachment
+            # that survives the server not being able to see it under E2E.
+            "attachment_count": 0 if message.is_deleted else len(message.attachments.all()),
         }
 
 

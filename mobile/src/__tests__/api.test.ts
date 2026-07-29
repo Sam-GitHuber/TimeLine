@@ -334,6 +334,67 @@ describe('createPost multipart body', () => {
     expectFilePart(avatar?.[1], 'av.jpg', 'image/jpeg');
   });
 
+  it('sends a chat photo as parallel multipart lists (M7)', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
+
+    await api.sendMessage(5, 'look at this', null, {
+      photo: { uri: 'file:///tmp/p.jpg', name: 'photo-1.jpg', type: 'image/jpeg' },
+      thumbnail: {
+        uri: 'file:///tmp/t.jpg',
+        name: 'thumb-1.jpg',
+        type: 'image/jpeg',
+      },
+      width: 1600,
+      height: 1200,
+    });
+
+    const parts = partsOf(mockFetch.mock.calls[0][1].body);
+    expect(parts).toContainEqual(['text', 'look at this']);
+    // Plural names carrying one entry each: the server takes a list (capped at
+    // one for now), so allowing several photos per message later is a server
+    // constant rather than a change to the wire shape.
+    expectFilePart(
+      parts.find(([name]) => name === 'attachments')?.[1],
+      'photo-1.jpg',
+      'image/jpeg'
+    );
+    expectFilePart(
+      parts.find(([name]) => name === 'attachment_thumbnails')?.[1],
+      'thumb-1.jpg',
+      'image/jpeg'
+    );
+    // The dimensions travel because the server never opens the file to measure
+    // it — they're what the bubble reserves its space from.
+    expect(parts).toContainEqual(['attachment_widths', '1600']);
+    expect(parts).toContainEqual(['attachment_heights', '1200']);
+  });
+
+  it('sends a photo with no caption as a blank text part, not a missing one', async () => {
+    // Blank is legal *with* a photo and only then. Omitting the field entirely
+    // would leave the server's `text` unset rather than empty.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
+
+    await api.sendMessage(5, '', null, {
+      photo: { uri: 'file:///tmp/p.jpg', name: 'p.jpg', type: 'image/jpeg' },
+      thumbnail: { uri: 'file:///tmp/t.jpg', name: 't.jpg', type: 'image/jpeg' },
+      width: 100,
+      height: 100,
+    });
+
+    expect(partsOf(mockFetch.mock.calls[0][1].body)).toContainEqual(['text', '']);
+  });
+
+  it('sends a text-only message as JSON, not multipart', async () => {
+    // The overwhelmingly common case must not pay for the photo path.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
+
+    await api.sendMessage(5, 'just words');
+
+    expect(mockFetch.mock.calls[0][1].headers['Content-Type']).toBe(
+      'application/json'
+    );
+  });
+
   it('lets the runtime set the multipart Content-Type, boundary and all', async () => {
     // Setting it by hand omits the boundary, and the server can then parse none
     // of the parts.

@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils.html import format_html_join
 
 from .models import (
     Block,
@@ -15,8 +16,11 @@ from .models import (
     Report,
 )
 
-# NOTE: ``Message`` is deliberately **not** imported or registered here. There is
-# no admin route to message text except a ``Report``'s snapshot — see
+# NOTE: ``Message`` is deliberately **not** imported or registered here, and
+# neither is ``MessageAttachment`` — a browsable list of chat photos is the same
+# window M0 closed, with pictures in it. There is no admin route to message
+# content except a ``Report``'s snapshot (text) and the thumbnails of the exact
+# message that was reported (``ReportAdmin.message_photos``) — see
 # ``ConversationAdmin``. Don't add one.
 
 
@@ -263,8 +267,23 @@ class ReportAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
     list_editable = ("status",)
     # No raw ``post``/``comment``/``message`` FKs on the form — see the docstring.
-    fields = ("target", "reporter", "reason", "message_text", "status", "created_at")
-    readonly_fields = ("target", "reporter", "reason", "message_text", "created_at")
+    fields = (
+        "target",
+        "reporter",
+        "reason",
+        "message_text",
+        "message_photos",
+        "status",
+        "created_at",
+    )
+    readonly_fields = (
+        "target",
+        "reporter",
+        "reason",
+        "message_text",
+        "message_photos",
+        "created_at",
+    )
 
     def has_add_permission(self, request):
         return False
@@ -272,6 +291,42 @@ class ReportAdmin(admin.ModelAdmin):
     @admin.display(description="target")
     def target(self, obj):
         return obj.target_label()
+
+    @admin.display(description="reported photos")
+    def message_photos(self, obj):
+        """Thumbnails of the photos on a reported message (Phase 9b M7).
+
+        **Why this exists.** M0's rule is that a report is the *only* window onto
+        a private message, and M7 made a message able to be nothing but a photo.
+        Without this, reporting an abusive image produced a queue entry with an
+        empty snapshot and no way to see what was flagged — which would have
+        meant photo abuse was the one thing the moderation path couldn't act on.
+        Same window, same justification as ``message_text``: the reporter chose
+        to show the maintainer this specific message.
+
+        **Two differences from the text snapshot, both deliberate.** This is a
+        *live* read of the message's attachments, not a copy taken at report
+        time — we don't duplicate someone's photo into a second place on disk to
+        hold as evidence. So if the sender deletes the message the photos are
+        genuinely gone (M7 hard-deletes attachment files on delete) and this goes
+        empty, where ``message_text`` would still hold its snapshot. That's the
+        honest trade: "deleted" meaning the picture is really gone is worth more
+        than a moderation queue that keeps its own copy of it.
+
+        Thumbnails only, at thumbnail size. Enough to judge a report, and it
+        avoids putting a full-size private photo on screen while triaging.
+        """
+        message = obj.message
+        if message is None:
+            return ""
+        attachments = list(message.attachments.all())
+        if not attachments:
+            return ""
+        return format_html_join(
+            " ",
+            '<img src="{}" style="max-height:160px;border-radius:6px" />',
+            ((a.thumbnail.url,) for a in attachments if a.thumbnail),
+        ) or ""
 
     @admin.display(description="reason")
     def short_reason(self, obj):

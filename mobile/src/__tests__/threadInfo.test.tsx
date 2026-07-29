@@ -11,6 +11,12 @@
  * only); what these tests hold is that the client doesn't *offer* what the
  * server would refuse, since an action that always errors is worse than one
  * that isn't there.
+ *
+ * Phase 9b M7 finishes the one piece M6 shipped without: the **media gallery**.
+ * It was left out on purpose until there were photo messages to put in it, so
+ * what's pinned here is that it appears when there are photos, stays away
+ * entirely when there aren't, and reads the chat's photos through the same
+ * interval-clipped messages endpoint as the transcript.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -95,11 +101,38 @@ function group(overrides: Partial<Conversation> = {}): Conversation {
   });
 }
 
-function serve(conversation: Conversation, renamed?: Conversation) {
+/** A photo on a message, as `MessageAttachmentSerializer` sends one. */
+function photo(id: number) {
+  return {
+    id,
+    kind: 'image' as const,
+    url: `https://example.test/media/messages/${id}.jpg`,
+    thumbnail: `https://example.test/media/messages/thumbs/${id}.jpg`,
+    width: 1200,
+    height: 900,
+  };
+}
+
+function serve(
+  conversation: Conversation,
+  renamed?: Conversation,
+  /** Messages the gallery's `?media=1` request finds, newest first. */
+  media: { id: number; attachments: ReturnType<typeof photo>[] }[] = []
+) {
   mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
     if (String(url).includes('/api/auth/user/')) return jsonResponse(ME);
     if (String(url).includes('/api/users/')) {
       return jsonResponse({ ...ADA, is_blocked: false, connection_status: 'connected' });
+    }
+    // Before the conversation-detail branch: the gallery is the *messages*
+    // endpoint with a filter, and its URL contains the conversation's too.
+    if (String(url).includes('/messages/')) {
+      return jsonResponse({
+        count: media.length,
+        next: null,
+        previous: null,
+        results: media,
+      });
     }
     if (String(url).includes('/api/conversations/5/')) {
       if (init?.method === 'PATCH') return jsonResponse(renamed ?? conversation);
@@ -298,4 +331,50 @@ it('offers Block on a 1:1', async () => {
   await renderScreen();
 
   expect(await screen.findByText('Block')).toBeTruthy();
+});
+
+/* --- The media gallery (Phase 9b M7) -------------------------------------- */
+
+it('shows the chat’s photos, newest first, and opens one full-screen', async () => {
+  serve(detail({}), undefined, [
+    { id: 30, attachments: [photo(9)] },
+    { id: 20, attachments: [photo(8)] },
+  ]);
+
+  await renderScreen();
+  await screen.findByText('2 photos');
+
+  // Numbered in the order they're drawn, so "photo 1" is the newest — which is
+  // what someone scrolling for "the one from last week" is starting from.
+  await fireEvent.press(screen.getByLabelText('Photo 1 of 2'));
+  await screen.findByLabelText('Close photo viewer');
+});
+
+it('renders no gallery at all in a chat with no photos', async () => {
+  // An empty grid under a heading is a feature announcing it has nothing for
+  // you — the same reason M6 shipped without this section rather than with an
+  // empty one.
+  serve(detail({}));
+
+  await renderScreen();
+  await screen.findByText('In this chat');
+
+  expect(screen.queryByText(/photos?$/)).toBeNull();
+});
+
+it('reads the gallery through the messages endpoint, not one of its own', async () => {
+  // 🔒 One clipped queryset serves both, so the gallery can never show a photo
+  // the transcript wouldn't — including one sent during a gap in your
+  // membership. A gallery endpoint of its own would be a second place for that
+  // rule to live, and eventually to drift.
+  serve(detail({}), undefined, [{ id: 30, attachments: [photo(9)] }]);
+
+  await renderScreen();
+  await screen.findByText('1 photo');
+
+  expect(
+    mockFetch.mock.calls.some(([url]) =>
+      String(url).includes('/api/conversations/5/messages/?media=1&order=desc')
+    )
+  ).toBe(true);
 });

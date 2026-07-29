@@ -47,19 +47,31 @@
 		reverse_proxy backend:8000
 	}
 
-	# User-uploaded media (post photos, avatars) → served straight off the shared
-	# media volume mounted at /srv/media, but AUTHORIZED FIRST: Caddy asks the
-	# backend (forward_auth → /api/media-auth/) on every request and serves the
-	# file only if that returns 2xx — i.e. only for a logged-in, active member.
-	# So a leaked media URL is useless to a logged-out stranger, and a banned
-	# member's saved URLs stop working. UUID filenames (see api/imaging.py) remain
-	# a second layer. (Per-author connection gating is a deferred Phase 7b step.)
+	# User-uploaded media (post photos, avatars, chat photos) → served straight off
+	# the shared media volume mounted at /srv/media, but AUTHORIZED FIRST: Caddy
+	# asks the backend (forward_auth → /api/media-auth/) on every request and
+	# serves the file only if that returns 2xx — i.e. only for a logged-in, active
+	# member. So a leaked media URL is useless to a logged-out stranger, and a
+	# banned member's saved URLs stop working. UUID filenames (see api/imaging.py)
+	# remain a second layer. (Per-author connection gating is a deferred Phase 7b
+	# step.)
 	@media path /media/*
 	handle @media {
 		forward_auth backend:8000 {
 			uri /api/media-auth/
 		}
 		root * /srv
+		# Never let a browser second-guess the Content-Type we serve here. Post
+		# photos and avatars are re-encoded by api/imaging.py, so their bytes are
+		# known-good — but **chat photos (Phase 9b M7) are processed on the phone
+		# and never decoded by the server**, deliberately, so that the same path
+		# works when it's handed ciphertext under E2E. Those files are stored with
+		# a forced .jpg name so file_server always labels them image/jpeg;
+		# `nosniff` is what stops a browser overriding that label by peeking at
+		# the bytes and deciding a blob is HTML — which would be stored XSS on our
+		# own origin, next to the session cookie. Two layers, cheap, and it costs
+		# nothing for the media that *was* validated.
+		header X-Content-Type-Options nosniff
 		file_server
 	}
 

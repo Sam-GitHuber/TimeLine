@@ -267,6 +267,15 @@ export function MessageThreadView({
                 return (
                   // No onLongPress and no onOpenThread: see the file docblock.
                   // You're already in the thread, and the menu is a modal.
+                  //
+                  // No `onPhotoPress` either (Phase 9b M7), and for the same
+                  // reason: this view *is* a Modal, and the lightbox is another
+                  // one — two visible modals stack badly on iOS, the trap
+                  // `ReactionTray` documents. A photo in a strand therefore
+                  // draws but doesn't open, and `MessagePhoto` renders no
+                  // affordance when it can't be pressed, so nothing here
+                  // promises a tap that does nothing. The transcript behind the
+                  // blur has the same photo, one tap away.
                   <MessageBubble
                     message={item}
                     mine={item.sender.id === meId}

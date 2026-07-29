@@ -14,6 +14,13 @@ How TimeLine's data is backed up off the box and how to restore it. The *why*
 The DB references media by path, so restoring one without the other gives you
 broken images — both are backed up together, every night.
 
+**Media means the whole `/srv/timeline/media` tree, never a list of
+subdirectories.** Backup and restore both `rclone sync` the directory itself, so
+every kind of upload is covered the day the feature ships — avatars, post photos,
+group images, and chat photos (`media/messages/`, Phase 9b M7). Keep it that way:
+an enumerated list is a data-loss bug that stays invisible until the one night
+you need the backup.
+
 **Design choices worth knowing:**
 - Everything is **encrypted before it leaves the house** (`rclone crypt`), so
   Cloudflare only ever holds ciphertext.

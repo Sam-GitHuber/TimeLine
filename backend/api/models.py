@@ -5,6 +5,8 @@ from django.db.models.functions import Greatest, Least
 from .imaging import (
     group_avatar_thumb_upload_to,
     group_avatar_upload_to,
+    message_attachment_thumb_upload_to,
+    message_attachment_upload_to,
     post_image_upload_to,
     post_thumb_upload_to,
 )
@@ -434,6 +436,68 @@ class Message(models.Model):
             return f"{self.sender} · (deleted)"
         preview = self.text[:40] + ("…" if len(self.text) > 40 else "")
         return f"{self.sender} · {preview}"
+
+
+class MessageAttachment(models.Model):
+    """A photo sent in a chat (Phase 9b M7) — the same shape as ``PostImage``,
+    with two deliberate differences.
+
+    **1. It is a table with a ``kind``, not an image field on ``Message``.**
+    Phase 13 adds video clips (``docs/phases/phase-13-video-clips.md``) and that
+    should slot in as another ``kind`` on this row — same endpoint, same bubble
+    layout, same lightbox — rather than growing a parallel model and a second
+    upload path beside this one. ``thumbnail`` is already the right field for a
+    video's poster frame. Only ``IMAGE`` exists today; adding ``VIDEO`` before
+    anything can produce one would be a promise the code doesn't keep.
+
+    The row is a table for a second reason: a message carrying *several* photos
+    is then additive. Today the API accepts **one attachment per message** and
+    the app sends a multi-photo pick as several messages — see messaging.md for
+    why that's the better chat shape (each photo gets its own bubble, and so its
+    own reactions, replies and delete).
+
+    **2. 🔒 Nothing here was decoded by us.** ``PostImage`` is written by
+    ``api.imaging.process_image`` — validated by opening it, EXIF-stripped,
+    downscaled. A message attachment is processed **on the client** instead, so
+    the pipeline still works when the server is handed ciphertext under E2E
+    (phase 9c). The server enforces byte size and count only, which are the
+    limits that survive an opaque blob. Consequences worth knowing:
+
+    - ``width``/``height`` are what the **client says** they are. They're layout
+      hints — the bubble reserves space so the transcript doesn't reflow — and
+      nothing security-sensitive keys off them. They're bounds-checked so a
+      nonsense value can't wedge a layout, not trusted.
+    - The stored filename always ends ``.jpg`` regardless of what was uploaded
+      (``message_attachment_upload_to``), because the file server picks a
+      Content-Type from the extension and an unverified blob served as markup
+      would be stored XSS. See that callable for the whole argument.
+    - A ``FileField``, not an ``ImageField``: ``ImageField`` validation would
+      open the file with Pillow on every save, which is exactly the server-side
+      decode this design is built to do without.
+    """
+
+    class Kind(models.TextChoices):
+        IMAGE = "image", "Image"
+
+    message = models.ForeignKey(
+        Message,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+    )
+    kind = models.CharField(max_length=16, choices=Kind.choices, default=Kind.IMAGE)
+    file = models.FileField(upload_to=message_attachment_upload_to)
+    thumbnail = models.FileField(upload_to=message_attachment_thumb_upload_to)
+    width = models.PositiveIntegerField()
+    height = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Upload order, ``id`` breaking ties — same rule as ``PostImage``, so a
+        # message that carries more than one attachment renders stably.
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.kind} #{self.pk} on message #{self.message_id}"
 
 
 class ConversationRead(models.Model):

@@ -373,10 +373,18 @@ function ConversationRow({
     'Group chat';
   const name = isGroup ? groupName : convo.other?.display_name ?? 'Conversation';
 
+  // A photo message may have no caption at all (Phase 9b M7), which would render
+  // as a blank line where the preview goes. "📷 Photo" says what's waiting
+  // without quoting anything — the same rule the push body follows. A photo
+  // *with* a caption shows the caption; the words are the more useful preview
+  // and the emoji still marks it as a picture.
+  const photos = last?.attachment_count ?? 0;
   const preview = last
     ? last.is_deleted
       ? 'Message deleted'
-      : last.text
+      : photos > 0
+        ? `📷 ${last.text || 'Photo'}`
+        : last.text
     : 'No messages yet';
 
   return (

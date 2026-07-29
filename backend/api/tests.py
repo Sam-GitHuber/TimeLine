@@ -31,7 +31,10 @@ from api.emoji import (
 )
 from api.serializers import (
     CONVERSATION_TITLE_MAX_LENGTH,
+    MESSAGE_ATTACHMENT_MAX_BYTES,
+    MESSAGE_ATTACHMENTS_MAX,
     MESSAGE_MAX_LENGTH,
+    MESSAGE_THUMBNAIL_MAX_BYTES,
     NotificationSerializer,
 )
 from api.views import (
@@ -57,6 +60,7 @@ from .models import (
     Group,
     GroupMembership,
     Message,
+    MessageAttachment,
     Notification,
     NotificationPreference,
     Participant,
@@ -1614,6 +1618,369 @@ class MessageEditTests(MessagingBase):
         PushOutbox.objects.all().delete()
         self._edit(self.mine, "fixed")
         self.assertFalse(PushOutbox.objects.exists())
+
+
+# Its own media root, wiped after the class. Separate from ``_PHOTO_MEDIA_ROOT``
+# on purpose: that one belongs to the post-photo suite, which processes uploads
+# server-side, and these tests exist precisely to prove message photos *don't*
+# take that path — sharing a directory would invite someone to share a helper.
+_MESSAGE_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-msg-media-")
+
+
+@override_settings(MEDIA_ROOT=_MESSAGE_MEDIA_ROOT)
+class MessagePhotoTests(MessagingBase):
+    """Photos in a chat (Phase 9b M7).
+
+    🔒 **The thing under test is mostly what the server *doesn't* do.** A message
+    attachment is resized, EXIF-stripped and re-encoded on the phone so that the
+    same pipeline works when the server is handed ciphertext under E2E (phase
+    9c), which means nothing here decodes the upload. The size cap, the count
+    cap and the forced ``.jpg`` filename are therefore not incidental hardening —
+    they are the whole of the server's defence, so each one gets a test that
+    fails loudly if it's ever relaxed.
+    """
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_MESSAGE_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        self.convo = Conversation.objects.create(
+            user_a=self.me, user_b=self.friend
+        )
+
+    def _send(self, text="", photo=None, thumbnail=None, width=120, height=90,
+              **extra):
+        """Send a photo message the way the app does — multipart parallel lists."""
+        body = {"text": text, **extra}
+        if photo is not None:
+            body["attachments"] = photo
+            body["attachment_thumbnails"] = (
+                thumbnail if thumbnail is not None else make_image_upload("t.jpg")
+            )
+            body["attachment_widths"] = width
+            body["attachment_heights"] = height
+        return self.client.post(messages_url(self.convo), body, format="multipart")
+
+    def test_send_a_photo_with_no_caption(self):
+        resp = self._send(photo=make_image_upload("holiday.jpg"), width=1200,
+                          height=900)
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["text"], "")
+        attachment = resp.data["attachments"][0]
+        self.assertEqual(attachment["kind"], "image")
+        self.assertEqual((attachment["width"], attachment["height"]), (1200, 900))
+        self.assertTrue(attachment["url"])
+        self.assertTrue(attachment["thumbnail"])
+        self.assertEqual(MessageAttachment.objects.count(), 1)
+
+    def test_send_a_photo_with_a_caption(self):
+        resp = self._send(text="look at this", photo=make_image_upload())
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["text"], "look at this")
+        self.assertEqual(len(resp.data["attachments"]), 1)
+
+    def test_a_message_must_be_text_or_a_photo_but_not_neither(self):
+        """The rule posts have enforced since Phase 4. Making ``text`` optional
+        for photos is exactly the change that could let a blank message through
+        if the cross-field check were ever dropped."""
+        self.assertEqual(
+            self._send(text="   ").status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertFalse(Message.objects.exists())
+
+    def test_the_thread_and_the_gallery_both_carry_the_photo(self):
+        self._send(photo=make_image_upload())
+        self._send(text="just words")
+
+        thread = self.client.get(messages_url(self.convo))
+        rows = thread.data["results"]
+        self.assertEqual(len(rows[0]["attachments"]), 1)
+        self.assertEqual(rows[1]["attachments"], [])
+
+        gallery = self.client.get(f"{messages_url(self.convo)}?media=1&order=desc")
+        self.assertEqual(len(gallery.data["results"]), 1)
+        self.assertEqual(len(gallery.data["results"][0]["attachments"]), 1)
+
+    def test_the_gallery_is_interval_clipped_like_the_transcript(self):
+        """🔒 The gallery is a filter on the same clipped queryset, not a second
+        endpoint — this is the test that says so. A member with a gap in their
+        membership must not be able to see through it by asking for photos."""
+        convo = Conversation.objects.create(kind=Conversation.Kind.GROUP)
+        third = make_user("third@example.com")
+        make_connection(self.friend, third, status=ACCEPTED)
+        make_connection(self.me, third, status=ACCEPTED)
+        for user in (self.me, self.friend, third):
+            participant = Participant.objects.create(
+                conversation=convo, user=user, status=Participant.Status.ACTIVE
+            )
+            ParticipantInterval.objects.create(
+                participant=participant, started_at=timezone.now()
+            )
+        # The friend's interval closes, so anything sent now is inside their gap.
+        friend_participant = Participant.objects.get(
+            conversation=convo, user=self.friend
+        )
+        friend_participant.intervals.update(ended_at=timezone.now())
+
+        self.client.post(
+            messages_url(convo),
+            {
+                "text": "",
+                "attachments": make_image_upload(),
+                "attachment_thumbnails": make_image_upload("t.jpg"),
+                "attachment_widths": 100,
+                "attachment_heights": 100,
+            },
+            format="multipart",
+        )
+
+        self.client.force_authenticate(self.friend)
+        gallery = self.client.get(f"{messages_url(convo)}?media=1")
+        self.assertEqual(gallery.data["results"], [])
+
+    def test_a_photo_over_the_byte_cap_is_refused(self):
+        """🔒 One of only two limits that still mean something on bytes we never
+        open. It's per file, not per request total — see ``_check_sizes``."""
+        oversized = SimpleUploadedFile(
+            "huge.jpg",
+            b"x" * (MESSAGE_ATTACHMENT_MAX_BYTES + 1),
+            content_type="image/jpeg",
+        )
+        resp = self._send(photo=oversized)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Message.objects.exists())
+
+    def test_a_thumbnail_over_its_own_much_smaller_cap_is_refused(self):
+        """The thumbnail is capped separately and far lower, so a client can't
+        sidestep the point of having one by sending the full image twice."""
+        fat_thumb = SimpleUploadedFile(
+            "t.jpg",
+            b"x" * (MESSAGE_THUMBNAIL_MAX_BYTES + 1),
+            content_type="image/jpeg",
+        )
+        resp = self._send(photo=make_image_upload(), thumbnail=fat_thumb)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_more_attachments_than_the_count_cap_are_refused(self):
+        """🔒 The other of the two limits. Without it, an unbounded count is the
+        way around the byte cap."""
+        extra = MESSAGE_ATTACHMENTS_MAX + 1
+        resp = self.client.post(
+            messages_url(self.convo),
+            {
+                "text": "",
+                "attachments": [make_image_upload() for _ in range(extra)],
+                "attachment_thumbnails": [
+                    make_image_upload("t.jpg") for _ in range(extra)
+                ],
+                "attachment_widths": [100] * extra,
+                "attachment_heights": [100] * extra,
+            },
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(MessageAttachment.objects.exists())
+
+    def test_parallel_lists_must_line_up(self):
+        """A photo with no dimensions would be stored with a guessed aspect
+        ratio. Refusing beats guessing."""
+        resp = self.client.post(
+            messages_url(self.convo),
+            {
+                "text": "",
+                "attachments": make_image_upload(),
+                "attachment_thumbnails": make_image_upload("t.jpg"),
+                "attachment_widths": 100,
+                # no height
+            },
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_nonsense_dimensions_are_refused(self):
+        """Client-declared, so bounded. They're layout hints and nothing
+        security-sensitive keys off them — but a zero or a mile-high value makes
+        an unrenderable bubble, and the client can't be the one to catch it."""
+        self.assertEqual(
+            self._send(photo=make_image_upload(), width=0).status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertEqual(
+            self._send(photo=make_image_upload(), height=10_000_000).status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_the_stored_file_keeps_a_jpg_name_whatever_was_uploaded(self):
+        """🔒 The stored-XSS mitigation, and the one that most needs a test,
+        because nothing about it is visible in normal use.
+
+        The server no longer decodes an attachment, so it cannot know this isn't
+        an image. Caddy serves ``/media/*`` off disk and picks the Content-Type
+        from the *extension*, so a file kept as ``.html`` would be served as
+        markup from our own origin. Forcing ``.jpg`` means a browser is always
+        told "JPEG", whatever the bytes are.
+        """
+        markup = SimpleUploadedFile(
+            "payload.html",
+            b"<script>alert(document.cookie)</script>",
+            content_type="text/html",
+        )
+        resp = self._send(photo=markup)
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        attachment = MessageAttachment.objects.get()
+        self.assertTrue(attachment.file.name.endswith(".jpg"))
+        self.assertNotIn(".html", attachment.file.name)
+
+    def test_the_bytes_are_stored_exactly_as_sent(self):
+        """The other half of "the server doesn't decode": what comes back is
+        byte-identical to what went up. A future session tempted to route this
+        through ``api.imaging`` for "safety" will fail here, and should read
+        ``MessageAttachment`` before deciding the test is wrong — re-encoding
+        server-side is what stops working under E2E.
+        """
+        upload = make_image_upload("original.jpg")
+        original = upload.read()
+        upload.seek(0)
+
+        self._send(photo=upload)
+
+        attachment = MessageAttachment.objects.get()
+        with attachment.file.open("rb") as stored:
+            self.assertEqual(stored.read(), original)
+
+    def test_deleting_a_photo_message_really_deletes_the_photo(self):
+        """🔒 Soft delete for the message, **hard** delete for the file.
+
+        A media URL is fetchable by any signed-in member who holds it (media is
+        gated at the door, not per-author), so a tombstone that left the file on
+        disk would mean "delete" removed the caption and left the picture up.
+        """
+        resp = self._send(photo=make_image_upload())
+        message_id = resp.data["id"]
+        attachment = MessageAttachment.objects.get()
+        path = Path(attachment.file.path)
+        thumb_path = Path(attachment.thumbnail.path)
+        self.assertTrue(path.exists())
+
+        delete = self.client.delete(
+            f"{messages_url(self.convo)}{message_id}/"
+        )
+
+        self.assertEqual(delete.status_code, status.HTTP_200_OK)
+        self.assertFalse(MessageAttachment.objects.exists())
+        self.assertFalse(path.exists())
+        self.assertFalse(thumb_path.exists())
+        # And the tombstone reports no attachments, so nothing can render one.
+        thread = self.client.get(messages_url(self.convo))
+        row = thread.data["results"][0]
+        self.assertTrue(row["is_deleted"])
+        self.assertEqual(row["attachments"], [])
+
+    def test_a_photo_message_can_be_edited_down_to_no_caption(self):
+        """A caption is optional on a photo, so removing one must be allowed —
+        while a text message still can't be edited into nothing."""
+        photo = self._send(text="wrng caption", photo=make_image_upload())
+        text_only = self.client.post(messages_url(self.convo), {"text": "words"})
+
+        cleared = self.client.patch(
+            f"{messages_url(self.convo)}{photo.data['id']}/",
+            {"text": ""},
+            format="json",
+        )
+        self.assertEqual(cleared.status_code, status.HTTP_200_OK)
+        self.assertEqual(cleared.data["text"], "")
+        self.assertEqual(len(cleared.data["attachments"]), 1)
+
+        emptied = self.client.patch(
+            f"{messages_url(self.convo)}{text_only.data['id']}/",
+            {"text": ""},
+            format="json",
+        )
+        self.assertEqual(emptied.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_edit_cannot_swap_the_photo(self):
+        """Attachments aren't editable. The "Edited" marker is what makes editing
+        safe, and it can't honestly disclose that the *picture* changed under a
+        message someone already looked at."""
+        sent = self._send(text="mine", photo=make_image_upload("first.jpg"))
+        before = MessageAttachment.objects.get().file.name
+
+        self.client.patch(
+            f"{messages_url(self.convo)}{sent.data['id']}/",
+            {
+                "text": "mine",
+                "attachments": make_image_upload("second.jpg"),
+                "attachment_thumbnails": make_image_upload("t.jpg"),
+                "attachment_widths": 10,
+                "attachment_heights": 10,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(MessageAttachment.objects.count(), 1)
+        self.assertEqual(MessageAttachment.objects.get().file.name, before)
+
+    def test_the_conversation_list_preview_counts_the_photo(self):
+        """The row renders "📷 Photo" from this. A count, not a rendered string:
+        the phrasing is the client's business, and a count is the one fact about
+        an attachment that survives the server not being able to see it."""
+        self._send(photo=make_image_upload())
+        listing = self.client.get(CONVERSATIONS_URL)
+        preview = listing.data["results"][0]["last_message"]
+        self.assertEqual(preview["attachment_count"], 1)
+        self.assertEqual(preview["text"], "")
+
+    def test_the_push_says_a_photo_was_sent(self):
+        """Names the sender and the medium, quotes nothing — the same rule every
+        other push body here follows. Knowing a picture is waiting is often the
+        whole reason to open the app."""
+        from api.management.commands.send_pushes import Command
+
+        # Opened through the API, not built off the model: a thread with no
+        # ``Participant`` rows is a legacy shape that deliberately enqueues
+        # nothing (see ``enqueue_message_pushes``), so ``self.convo`` would test
+        # silence rather than the phrasing.
+        opened = self.open_with(self.friend)
+        self.convo = Conversation.objects.get(pk=opened.data["id"])
+        self._send(photo=make_image_upload())
+        row = PushOutbox.objects.get(recipient=self.friend)
+
+        payload = Command()._payload(row)
+        self.assertEqual(payload["text"], f"{self.me.display_name} sent a photo")
+
+    def test_a_reported_photo_is_visible_to_the_maintainer(self):
+        """🔒 M0's rule is that a report is the *only* window onto a private
+        message. M7 made a message able to be nothing but a photo, so without
+        this the queue would show an empty snapshot and photo abuse would be the
+        one thing moderation couldn't act on."""
+        from django.contrib.admin.sites import AdminSite
+
+        from .admin import ReportAdmin
+
+        sent = self._send(photo=make_image_upload())
+        message = Message.objects.get(pk=sent.data["id"])
+        self.client.force_authenticate(self.friend)
+        self.client.post(
+            "/api/reports/", {"message": message.pk}, format="json"
+        )
+        report = Report.objects.get()
+
+        rendered = ReportAdmin(Report, AdminSite()).message_photos(report)
+        self.assertIn(MessageAttachment.objects.get().thumbnail.url, rendered)
+
+        # And it goes empty once the sender deletes the message, because the
+        # photo is then genuinely gone — see the field's docstring.
+        self.client.force_authenticate(self.me)
+        self.client.delete(f"{messages_url(self.convo)}{message.pk}/")
+        report.refresh_from_db()
+        self.assertEqual(
+            ReportAdmin(Report, AdminSite()).message_photos(report), ""
+        )
 
 
 class MessageReactionTests(MessagingBase):
