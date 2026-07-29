@@ -4,11 +4,18 @@
 full plan — definition of done, milestones, steps — and **confirm it with the
 user before writing any code.** Do not start from this file as-is.
 
-**Prerequisite: [Phase 9b](phase-9b-messaging-overhaul.md) ships first.** Its M0
-removes the admin's message window (the immediate concern), and three of its
-decisions are already made E2E-ready — reference-only reply quotes, client-side
-image processing, and reactions knowingly left as plaintext metadata. Building
-E2E before 9b would mean encrypting a feature set we're about to change.
+**Prerequisite: Phase 9b (the messaging overhaul) — shipped 2026-07-29.** It
+removed the admin's message window (the immediate concern), and three of its
+decisions were made E2E-ready: reference-only reply quotes, client-side image
+processing, and reactions knowingly left as plaintext metadata. Read
+[`../reference/messaging.md`](../reference/messaging.md) → *Not end-to-end
+encrypted (yet)* before making any design call here; it states those three and
+what they cost to undo.
+
+**Sequencing note (2026-07-29):** this phase is deliberately scheduled **after
+Phase 10 (Android)** — there are friends waiting on an Android build. The cost of
+that order is that E2E then has to land on three clients (iOS, Android, web)
+rather than two; the work is larger, not harder.
 
 ## Why this phase exists
 

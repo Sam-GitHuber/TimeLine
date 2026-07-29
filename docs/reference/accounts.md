@@ -208,8 +208,8 @@ hands the row must move rather than leave the previous owner's notifications
 going somewhere they no longer control. DELETE is scoped to the caller, so a
 leaked token value can't be used to silence someone else's phone.
 
-Nothing sends push yet — that's Phase 9 Milestone D. See
-[notifications.md](notifications.md) and `docs/phases/phase-9-iphone-app.md`.
+Push itself is documented in [notifications.md](notifications.md); the app that
+registers the token is in [mobile-app.md](mobile-app.md).
 
 ## Sign-up is gated by admin approval
 

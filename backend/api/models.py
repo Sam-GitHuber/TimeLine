@@ -1635,9 +1635,9 @@ class DevicePushToken(models.Model):
     owner's notifications going to a device they no longer control. Registration
     therefore upserts on ``expo_token`` and overwrites ``user``.
 
-    No sending logic lives here — that arrives in Milestone D. This model and its
-    endpoints ship in Milestone A so the app has somewhere to register from the
-    moment it can log in. See docs/phases/phase-9-iphone-app.md.
+    Sending logic lives in the push outbox, not here. See
+    docs/reference/notifications.md for the delivery pipeline and
+    docs/reference/mobile-app.md for the app that registers the token.
     """
 
     class Platform(models.TextChoices):

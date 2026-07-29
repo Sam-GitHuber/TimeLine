@@ -5,8 +5,8 @@
  *
  * Why a copy rather than a shared package: Tailwind tokens are CSS custom
  * properties, which React Native has no concept of. There is no mechanism that
- * could read them here, so the values are transcribed once. Phase 9's repo-layout
- * decision covers the trade-off (docs/phases/phase-9-iphone-app.md) — extracting
+ * could read them here, so the values are transcribed once. The repo-layout
+ * decision covers the trade-off (docs/reference/mobile-app.md) — extracting
  * a shared package for ~1k lines was judged worse than copying.
  *
  * **If you change a colour here, change it in `frontend/src/index.css` too** (and

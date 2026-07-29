@@ -2,7 +2,7 @@
  * Keeping cached copies of a post honest after its thread is opened.
  *
  * Ported from `frontend/src/postCache.js` — the same deliberate copy the repo
- * layout decision calls for (see docs/phases/phase-9-iphone-app.md); fix a bug
+ * layout decision calls for (see docs/reference/mobile-app.md); fix a bug
  * here and fix it there too.
  *
  * Opening a comment thread marks it seen **on the server** (the GET on the

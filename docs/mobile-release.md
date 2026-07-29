@@ -18,8 +18,8 @@ An app change ships one of two ways, and knowing which saves you a wasted build:
 | **JS / assets only** | most feature tweaks, copy, logic | **OTA update** — *not set up yet* (see "Follow-on" below) |
 | **Native** | app **icon**/splash, a new native module, permissions, SDK bump, `app.json` native config | **new binary**: `eas build` → `eas submit` → TestFlight |
 
-Until OTA is wired up (a planned follow-on, see the tail of
-`phases/phase-9-iphone-app.md`), **every** update goes the binary route below. Once
+Until OTA is wired up (a planned follow-on, see
+`reference/mobile-app.md`), **every** update goes the binary route below. Once
 OTA lands, only *native* changes will need a full rebuild.
 
 An `eas build` is **not a deploy** — it produces a beta binary for TestFlight from
@@ -191,8 +191,8 @@ warm surface (`#FBFAF7`).
 
 ## Follow-on (planned, not built): OTA continuous deployment
 
-The tail of [`phases/phase-9-iphone-app.md`](phases/phase-9-iphone-app.md)
-("Follow-on to Milestone F") plans wiring **EAS Update** so JS-only changes reach
+[`reference/mobile-app.md`](reference/mobile-app.md) ("Not built: OTA updates")
+plans wiring **EAS Update** so JS-only changes reach
 installed phones on merge to `main`, mirroring the web's continuous deploy — with
 `runtimeVersion: fingerprint` gating, update code-signing, and native changes kept
 as a deliberate rebuild. Until then, use the binary route above for everything.

@@ -3,7 +3,7 @@
  * **Set** (or **Change**) on a built-in dimension. It already knows *which*
  * dimension — the chip said so — so there's no picker to wade through.
  *
- * **Native adaptation, per the E3 plan** (docs/phases/phase-9-iphone-app.md):
+ * **Native adaptation** (docs/reference/mobile-app.md, docs/reference/events.md):
  * date and time use the **OS date/time picker** (`@react-native-community/
  * datetimepicker`) rather than a port of the web's segmented DD/MM/YYYY boxes —
  * the wheel/calendar is what a phone user expects, and it hands the API the same
