@@ -55,6 +55,7 @@ from api.models import (
     Group,
     GroupMembership,
     Message,
+    MessageMention,
     Notification,
     Participant,
     Poll,
@@ -93,6 +94,91 @@ CAROL = "carol@example.com"
 DAVE = "dave@example.com"
 ERIN = "erin@example.com"
 FRANK = "frank@example.com"
+
+# --- The long alice ↔ bob thread -------------------------------------------
+#
+# ``(sender, minutes ago, text)``, newest last. A dozen messages can't show what
+# a transcript actually has to get right, so this one is deliberately long and
+# deliberately lumpy:
+#
+# - **Longer than three pages.** History pages in at ``PAGE_SIZE`` (20), so a
+#   short thread never exercises the thing most likely to break — scrolling up
+#   for older messages (Phase 9b M5).
+# - **Bunched, with gaps between the bunches.** Consecutive messages from one
+#   person group into a single stack, and the gaps put real day separators
+#   between them. Runs also give multi-select something worth selecting: Alice
+#   has runs of her own (so Delete is offered) and Bob has a long one (so it
+#   isn't).
+# - **Text the bubble has to parse before it draws it** (Phase 9b M8) — every
+#   mark, and, more importantly, the near-misses that must come out *untouched*:
+#   ``2*3*4``, ``packing_list_final_v2.txt``, a URL with underscores in it, and a
+#   URL inside a code span (which is not a link). Those are the cases a
+#   formatting parser gets wrong, so they need to be on screen.
+CAMPING_THREAD = [
+    # ~10 days ago
+    (BOB, 14400, "Morning! Did you ever book the campsite for August?"),
+    (ALICE, 14390, "Not yet — the site wanted a deposit and I got distracted"),
+    (ALICE, 14389, "Doing it tonight, promise"),
+    (BOB, 14380, "👍"),
+    # ~6 days ago
+    (ALICE, 8640, "Booked!"),
+    (ALICE, 8639, "Pitch 14, the one by the trees"),
+    (ALICE, 8638, "Two nights, Friday and Saturday"),
+    (ALICE, 8637, "£68 all in, so *£34 each* whenever you're passing"),
+    (BOB, 8610, "Amazing, sending it over now"),
+    (BOB, 8600, "Is pitch 14 the one with the tap right behind it?"),
+    (ALICE, 8590, "That's 12 I think. 14 is a bit further up the hill"),
+    # ~3 days ago
+    (BOB, 4320, "Weather looking alright for it?"),
+    (ALICE, 4315, "Mixed. Rain Friday evening then _dry all weekend_"),
+    (ALICE, 4314, "https://www.metoffice.gov.uk/weather/forecast"),
+    (BOB, 4300, "Perfect, I'll bring the big tarp"),
+    (BOB, 4299, "🎉"),
+    # ~2 days ago — the kit list, where the formatting lives
+    (BOB, 2880, "Right, kit list. What have you got?"),
+    (ALICE, 2875, "Tent, both roll mats, the little stove"),
+    (ALICE, 2874, "No gas though, we burned the last canister in May"),
+    (ALICE, 2873, "~Two cool boxes~ one is plenty this time"),
+    (ALICE, 2872, "The stove is the `MSR PocketRocket 2` if you're buying gas"),
+    (ALICE, 2871, "*Everything* in `one` _bag_ ~each~ this time please"),
+    (ALICE, 2870, "And *bring the _good_ coffee*"),
+    (BOB, 2860, "I've got two spare canisters"),
+    (BOB, 2859, "That's 2*3*4 = 24 sausages by my maths, which can't be right"),
+    (BOB, 2858, "Full list is in packing_list_final_v2.txt on the shared drive"),
+    (ALICE, 2850, "Then we're basically sorted"),
+    (ALICE, 2849, "Site map, pitch 14 is at the top: "
+                  "https://example.com/campsite/pitch_14_map"),
+    (BOB, 2845, "The old `https://example.com/old_map` one is dead, don't use it"),
+    (BOB, 2844, "Do we need the second cool box or is one enough"),
+    (ALICE, 2840, "One. Two is how we ended up carrying everything twice"),
+    # ~1 day ago
+    (ALICE, 1440, "Also I still owe you for the ferry tickets"),
+    (BOB, 1410, "You really don't, you paid the deposit"),
+    (ALICE, 1400, "Fine. Then I'm buying the first round"),
+    (BOB, 1399, "Deal"),
+    (BOB, 1370, "Oh — one more thing"),
+    (BOB, 1369, "Sam asked if they can come along"),
+    (BOB, 1368, "They'd drive down Saturday morning"),
+    (BOB, 1367, "Back Sunday with us"),
+    (BOB, 1366, "Said they'd sort their own tent"),
+    (BOB, 1365, "Any objection?"),
+    (ALICE, 1330, "None at all, the more the better"),
+    # Today — one long unbroken run of Bob's, the multi-select case
+    (BOB, 180, "Told Sam, they're in"),
+    (BOB, 176, "They're bringing a proper coffee thing apparently"),
+    (BOB, 172, "The one with the little handle you grind"),
+    (BOB, 168, "So that's breakfast sorted"),
+    (BOB, 164, "Do you want me to do a big shop Thursday?"),
+    (BOB, 160, "I'm passing the big Sainsbury's anyway"),
+    (BOB, 156, "Sausages, eggs, bread, that sort of thing"),
+    (BOB, 152, "And marshmallows, *obviously*"),
+    (BOB, 148, "Send me anything you want adding"),
+    (BOB, 146, "Deals on until Friday: https://example.com/shop/weekly_offers"),
+    (BOB, 144, "Also do we have a torch that works"),
+    (BOB, 140, "The head torch died on the last trip I think"),
+    (BOB, 136, "I'll grab batteries just in case, ~AA~ AAA I think"),
+    (BOB, 132, "☕️🔥"),
+]
 
 
 class Command(BaseCommand):
@@ -584,14 +670,23 @@ class Command(BaseCommand):
             "5 polls and 6 RSVPs"
         )
 
-    def _send(self, convo, sender, text, at=None):
-        """Post a message, optionally back-dated.
+    def _send(self, convo, sender, text, at=None, mentions=()):
+        """Post a message, optionally back-dated, optionally naming people.
 
         Back-dating matters for more than looks: a read marker is a *timestamp*,
         so "read up to here, then two more arrived" can only be expressed if the
         messages sit at distinct, known times.
+
+        ``mentions`` writes the ``MessageMention`` rows by hand rather than
+        parsing the ``@names`` out of ``text``, because that's exactly how the
+        real send path works: the client sends **ids** and the text is never
+        searched (see docs/reference/messaging.md — a mention has to survive a
+        rename, and under E2E there'll be no text to search). Seeding it the
+        other way would quietly demo a feature the app doesn't have.
         """
         msg = Message.objects.create(conversation=convo, sender=sender, text=text)
+        for user in mentions:
+            MessageMention.objects.create(message=msg, user=user)
         return self._at(msg, at) if at else msg
 
     def _read_to(self, convo, user, at):
@@ -626,24 +721,32 @@ class Command(BaseCommand):
         def ago(hours):
             return self._ago(hours=hours)
 
-        # alice ↔ bob: Bob has no read marker at all, so everything Alice sent is
-        # unread for him — the "never opened it" case (badge of 2).
-        ab = self._direct(alice, bob, 50)
-        self._send(ab, alice, "Hey Bob, still on for Saturday?", ago(48))
-        self._send(ab, bob, "Definitely — what time?", ago(47))
-        self._send(ab, alice, "Let's say 9am at the trailhead.", ago(26))
-        self._read_to(ab, alice, ago(20))
-        self._touch(ab, ago(26))
+        # alice ↔ bob: the long thread (see CAMPING_THREAD). Created a shade
+        # before its oldest message, since a direct chat's participation
+        # intervals open at the conversation's own created_at and would
+        # otherwise clip the whole history out of view.
+        oldest = CAMPING_THREAD[0][1]
+        ab = self._direct(alice, bob, oldest / 60 + 1)
+        for email, minutes, text in CAMPING_THREAD:
+            self._send(ab, u[email], text, self._ago(minutes=minutes))
+        # Alice read up to just before today's run, so the transcript opens on
+        # an unread divider with Bob's thirteen underneath it — the state the
+        # divider, the jump-to-latest button and the nav badge all exist for.
+        self._read_to(ab, alice, self._ago(minutes=200))
+        self._touch(ab, self._ago(minutes=CAMPING_THREAD[-1][1]))
 
         # alice ↔ carol: Alice read it, *then* Carol sent one more — the "read up
-        # to here" case, and one of the two unread messages behind her nav badge.
+        # to here" case, and a short thread next to the long one.
         ac = self._direct(alice, carol, 74)
         self._send(ac, carol, "Did you finish that book I lent you?", ago(72))
         self._send(ac, alice, "Almost! One chapter to go.", ago(70))
         self._read_to(ac, alice, ago(69))
         self._send(ac, carol, "No rush — but the club meets Thursday!", ago(5))
         self._touch(ac, ago(5))
-        self._say("  created 2 direct chats (alice and bob each have unread)")
+        self._say(
+            f"  created 2 direct chats (alice ↔ bob is {len(CAMPING_THREAD)} "
+            "messages — pages, day separators, formatting; both have unread)"
+        )
 
     def _group_chat(self, creator, invitees, title, group=None, at=None):
         """Create a group chat as of ``at`` (default now).
@@ -684,24 +787,51 @@ class Command(BaseCommand):
         )
         self._send(trail, alice, "Made us a chat for Saturday's route.",
                    self._ago(hours=119))
+        self._send(trail, alice, "Parking is at the village hall, £2 for the day",
+                   self._ago(hours=118))
+        self._send(trail, alice, "Bring waterproofs — it *will* rain at some point",
+                   self._ago(hours=117))
         self._send(trail, bob, "Nice. I'll bring the map.", self._ago(hours=96))
         self._read_to(trail, alice, self._ago(hours=95))
         self._send(trail, carol, "And I'll sort snacks.", self._ago(hours=8))
-        self._touch(trail, self._ago(hours=8))
+        # @mentions (Phase 9b M8). The ids are what carry the mention — the
+        # names in the text are just what the sender typed — so these rows are
+        # what makes Alice's own name light up in her copy of the thread.
+        self._send(trail, bob,
+                   "@Alice Anderson @Carol Clarke what time are we starting?",
+                   self._ago(hours=7), mentions=[alice, carol])
+        self._send(trail, carol, "Whenever — I'm *very* flexible",
+                   self._ago(hours=6))
+        self._send(trail, bob, "Route is `NY123456` up to the tarn, then back "
+                   "the long way", self._ago(hours=5))
+        self._touch(trail, self._ago(hours=5))
 
         # 2) Standalone group chat with a PENDING participant: alice invites bob
         #    and dave, but bob↔dave aren't connected, so dave stays pending and
         #    is locked out until he connects with bob (exercises the pending
         #    panel + interval-clipped visibility).
+        #
+        #    It's also the **muted** chat, and it holds a mention of Alice —
+        #    which is the one thing that reaches her through a mute (Phase 9b
+        #    M8). Seeding both together means the rule is visible in one thread
+        #    rather than being a paragraph of documentation.
         trip = self._group_chat(alice, [bob, dave], "Mystery trip",
                                 at=self._ago(hours=144))
         self._send(trip, alice, "Planning something — details soon!",
                    self._ago(hours=143))
         self._send(trip, bob, "Ooh, intrigued.", self._ago(hours=142))
         self._read_to(trip, alice, self._ago(hours=141))
-        self._touch(trip, self._ago(hours=142))
+        self._send(trip, bob, "@Alice Anderson right, I've worked out where "
+                   "we're going", self._ago(hours=3), mentions=[alice])
+        self._send(trip, bob, "Can't say more with Dave in the chat",
+                   self._ago(hours=2))
+        Participant.objects.filter(conversation=trip, user=alice).update(
+            muted_at=self._ago(hours=100)
+        )
+        self._touch(trip, self._ago(hours=2))
         self._say(
-            "  created 2 group chats (one active trio, one with a pending member)"
+            "  created 2 group chats (one active trio with @mentions, one muted "
+            "with a pending member)"
         )
 
     def _age_notifications(self, u):

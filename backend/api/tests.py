@@ -4459,6 +4459,65 @@ class SeedDemoAliceViewpointTests(APITestCase):
         self.assertGreater(len(posts), 1)
         self.assertEqual(len(stamps), len(posts))
 
+    def test_a_thread_is_longer_than_one_page_and_spans_several_days(self):
+        """The transcript pages history in as you scroll up (Phase 9b M5), and a
+        thread that fits on one page can't show that — nor the day separators
+        between bunches. Both are properties of the *fixture*, so they're pinned
+        here rather than left to whoever next opens the app."""
+        bob = User.objects.get(email="bob@example.com")
+        convo = Conversation.objects.filter(
+            kind="direct", participants__user=bob
+        ).get(participants__user=self.alice)
+
+        page = self.client.get(f"/api/conversations/{convo.id}/messages/").data
+        self.assertGreater(page["count"], 40, "not enough history to page through")
+
+        days = {m.created_at.date() for m in convo.messages.all()}
+        self.assertGreaterEqual(len(days), 4, "no day separators to render")
+
+    def test_the_seeded_formatting_covers_the_marks_and_the_near_misses(self):
+        """The bubble parses `*bold*` and friends at draw time (Phase 9b M8), and
+        the cases that actually break a parser are the ones that must come out
+        *unchanged*. Both have to be on screen to be looked at."""
+        bodies = " ".join(Message.objects.values_list("text", flat=True))
+
+        for mark in ("*", "_", "~", "`"):
+            self.assertIn(mark, bodies, f"nothing seeded using {mark!r}")
+        # The near-misses: a word character before the delimiter opens nothing.
+        self.assertIn("2*3*4", bodies)
+        self.assertIn("packing_list_final_v2.txt", bodies)
+        self.assertIn("pitch_14_map", bodies)
+
+    def test_alice_is_mentioned_including_inside_the_muted_chat(self):
+        """A mention is stored as a row, not parsed out of the text, and its one
+        job is to notify through a *muted* thread (Phase 9b M8). Seeding one
+        inside the muted chat is what makes that rule something you can look at
+        instead of read about."""
+        mentions = MessageMention.objects.filter(user=self.alice)
+        self.assertTrue(mentions.exists(), "alice is never mentioned")
+
+        muted = Participant.objects.filter(user=self.alice, muted_at__isnull=False)
+        self.assertTrue(muted.exists(), "no muted chat in the demo world")
+        self.assertTrue(
+            mentions.filter(
+                message__conversation__in=muted.values("conversation")
+            ).exists(),
+            "no mention inside a muted chat — the one case M8 exists for",
+        )
+
+        # Every seeded mention names someone actually in the room, which is what
+        # the send endpoint enforces; a fixture that broke it would demo a state
+        # the app refuses to create.
+        for mention in MessageMention.objects.select_related("message", "user"):
+            self.assertTrue(
+                Participant.objects.filter(
+                    conversation=mention.message.conversation,
+                    user=mention.user,
+                    status="active",
+                ).exists(),
+                f"{mention} names someone who isn't an active participant",
+            )
+
 
 class MediaAuthTests(APITestCase):
     """The forward_auth gate Caddy calls before serving any /media/ file in
