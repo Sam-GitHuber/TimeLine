@@ -1221,11 +1221,19 @@ export default function ThreadScreen() {
    *
    * `loaded` is newest-first (the transcript reads `?order=desc`), so this
    * reverses rather than sorting: the list is already in order, just backwards.
+   *
+   * Memoised because `deletableSelection` below reads it during render, and
+   * `loaded` is every message paged in so far — walking all of it on each
+   * render while someone taps their way through a selection is work for
+   * nothing. Empty outside select mode, so it costs nothing there either.
    */
-  function selectedMessages(): Message[] {
-    if (!selected) return [];
-    return [...loaded].reverse().filter((m) => selected.has(m.id));
-  }
+  const selectedMessages = useMemo(
+    () =>
+      selected
+        ? [...loaded].reverse().filter((m) => selected.has(m.id))
+        : [],
+    [loaded, selected]
+  );
 
   /**
    * Copy the lot as text.
@@ -1238,7 +1246,7 @@ export default function ThreadScreen() {
    * not something anyone wants in their notes.
    */
   function copySelected() {
-    const lines = selectedMessages()
+    const lines = selectedMessages
       .filter((m) => m.text && !m.is_deleted)
       .map((m) =>
         isGroup ? `${m.sender.display_name}: ${m.text}` : m.text
@@ -1250,7 +1258,7 @@ export default function ThreadScreen() {
   }
 
   function confirmDeleteSelected() {
-    const ids = selectedMessages().map((m) => m.id);
+    const ids = selectedMessages.map((m) => m.id);
     Alert.alert(
       ids.length === 1 ? 'Delete message?' : `Delete ${ids.length} messages?`,
       'This can’t be undone.',
@@ -1290,7 +1298,7 @@ export default function ThreadScreen() {
   const deletableSelection =
     selected !== null &&
     selected.size > 0 &&
-    selectedMessages().every((m) => m.sender.id === me?.pk && !m.is_deleted);
+    selectedMessages.every((m) => m.sender.id === me?.pk && !m.is_deleted);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>

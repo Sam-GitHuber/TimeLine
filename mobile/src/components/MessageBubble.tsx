@@ -91,7 +91,7 @@
  * than the affordance is worth.
  */
 
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
 import {
   Linking,
@@ -411,16 +411,34 @@ function MessageText({
     large ? styles.largeEmoji : styles.text,
     !large && (mine ? styles.mineText : styles.theirsText),
   ];
-  // 🔒 Resolved here, from names the *viewer* already has. The message carries
-  // bare ids, so an id belonging to someone this viewer can't see resolves to
-  // nothing and its `@Ada` simply renders as the words the sender typed — which
-  // is the honest outcome, and the same rule an unresolvable reply quote follows.
-  const mentions = mentionNames
-    ? (message.mentions ?? [])
-        .map((id) => mentionNames.get(id))
-        .filter((name): name is string => !!name)
-    : [];
-  const segments = parseMessageText(message.text, { mentions });
+  /**
+   * Split once per message, not once per render.
+   *
+   * Ordinary text parses in microseconds, so this isn't about the common case —
+   * it's about the worst one. The scan asks "does a run close here?" at each
+   * delimiter it could open at, which is quadratic on a string full of openers
+   * that never close (`*a *a *a …`). At the 5000-character message cap that's
+   * tens of milliseconds, and a transcript re-renders on every poll, every
+   * keystroke in the composer and every scroll — so an unmemoised parse turns
+   * one awkward message into a permanently janky thread. Memoised, it's paid
+   * once and the pathological case is bounded.
+   *
+   * The deps are all reference-stable: the text is immutable, `mentions` comes
+   * from the query cache and `mentionNames` is memoised by the screen.
+   */
+  const segments = useMemo(() => {
+    // 🔒 Resolved here, from names the *viewer* already has. The message carries
+    // bare ids, so an id belonging to someone this viewer can't see resolves to
+    // nothing and its `@Ada` simply renders as the words the sender typed —
+    // which is the honest outcome, and the same rule an unresolvable reply quote
+    // follows.
+    const mentions = mentionNames
+      ? (message.mentions ?? [])
+          .map((id) => mentionNames.get(id))
+          .filter((name): name is string => !!name)
+      : [];
+    return parseMessageText(message.text, { mentions });
+  }, [message.text, message.mentions, mentionNames]);
   // The overwhelmingly common case: one unmarked run, one Text, no map.
   if (segments.length === 1 && segments[0].kind === 'text' && !segments[0].marks) {
     return <Text style={base}>{message.text}</Text>;

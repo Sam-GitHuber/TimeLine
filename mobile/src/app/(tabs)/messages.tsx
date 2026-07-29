@@ -383,7 +383,15 @@ function ConversationRow({
   // Markup is dropped rather than shown (Phase 9b M8): a one-line preview can't
   // carry emphasis, and leaving the raw `*asterisks*` here while the bubble one
   // tap away renders them is the seam that reads as unfinished.
-  const words = last ? plainMessageText(last.text) : '';
+  // Memoised for the same reason the bubble's parse is: stripping the markup
+  // means running the parser, and the parser has a quadratic worst case on a
+  // string full of delimiters that never close. A list row re-renders on every
+  // poll, so paying that per render would let one awkward message make the whole
+  // conversation list stutter.
+  const words = useMemo(
+    () => (last ? plainMessageText(last.text) : ''),
+    [last]
+  );
   const preview = last
     ? last.is_deleted
       ? 'Message deleted'
