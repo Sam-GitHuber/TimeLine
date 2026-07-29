@@ -1607,7 +1607,13 @@ only when [every ticked message is one you could delete alone](#multi-select-pha
 - **There's a real checkbox**, because the row is not a button and can't become
   one (a `<button>` can't contain the `<a>` a linkified message renders). The box
   is the accessible control and the row click is the convenience; a keyboard's
-  Space on the box arrives at the same handler as any other click.
+  Space on the box arrives at the same handler as any other click. Its label
+  carries the **clock time** as well as the sender, because a burst is what this
+  mode is for and a burst is several messages from one person — three boxes all
+  saying "select message from Priya" are three controls a screen reader can't
+  tell apart. The count is a `role="status"`, so ticking announces itself;
+  without it the whole mode is silent, since a header swapping and a number
+  going up are both purely visual events.
 - **Unsent messages can't be ticked.** They have no server id to copy or delete
   by, so a tick-box on one would offer to include it in an action it can't be
   part of. (The app tolerates the tick and drops it later; this is the better

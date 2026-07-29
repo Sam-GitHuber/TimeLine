@@ -479,6 +479,15 @@ export default function MessageBubble({
          * opening a lightbox or navigating away mid-selection. Intercepting in
          * the capture phase settles all of them in one place, rather than
          * threading a "we're selecting" flag into every child that has a click.
+         * In practice it's stronger than `preventDefault` alone: stopping a
+         * React capture-phase event halts the *native* dispatch too, so a link
+         * in here never sees the click at all.
+         *
+         * It reaches the portalled popovers as well, because a portal
+         * propagates through the React tree rather than the DOM one. That's
+         * moot rather than wrong — nothing in this row can open one while
+         * selecting, and an already-open one is closed by the very click that
+         * opened the ⋯ menu you entered the mode from.
          */
         <div
           onClickCapture={(event) => {
@@ -495,7 +504,12 @@ export default function MessageBubble({
             // the row at once — including a keyboard's Space on this very box,
             // which arrives here as a click like any other.
             readOnly
-            aria-label={`Select message from ${message.sender.display_name}`}
+            // The time is in the label because a **burst** is what select mode
+            // exists for, and a burst is several messages from one person: three
+            // boxes all announcing "select message from Priya" would be three
+            // controls a screen reader can't tell apart. The clock is what
+            // distinguishes them, and it's already on screen beside them.
+            aria-label={`Select message from ${message.sender.display_name} at ${clock.time}${clock.meridiem}`}
             className="mt-2 h-4 w-4 shrink-0 accent-[var(--color-accent)]"
           />
           <div className="flex min-w-0 flex-1 flex-col">{body}</div>

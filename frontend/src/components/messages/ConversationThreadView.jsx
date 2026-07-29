@@ -1094,9 +1094,13 @@ export default function ConversationThreadView() {
    * (yours, quietly skipping theirs) is worse than one that isn't there, and
    * absent reads as "not yours" where a permanently greyed button reads as a bug.
    */
+  // ⚠️ Counted off `selectedMessages`, not `selected.size` — the two can
+  // disagree, and `.every()` on an empty array is `true`. A tick whose message
+  // has since left `loaded` would otherwise offer Delete on nothing at all, and
+  // ask "Delete 0 messages?" on the way.
   const deletableSelection =
     selecting &&
-    selected.size > 0 &&
+    selectedMessages.length > 0 &&
     selectedMessages.every((m) => m.sender.id === me?.pk && !m.is_deleted);
 
   /**
@@ -1223,7 +1227,14 @@ export default function ConversationThreadView() {
             and a count plus a way out is. The transcript below stays where it
             was — only the chrome around it changes. */}
         {selecting ? (
-          <span className="font-display font-bold -tracking-[0.02em] text-ink">
+          // `role="status"` so the count is *announced* as it moves. Without it
+          // the whole mode is silent to a screen reader: the header swapping and
+          // a number going up are both purely visual events, and the count is
+          // the only feedback a tick gets.
+          <span
+            role="status"
+            className="font-display font-bold -tracking-[0.02em] text-ink"
+          >
             {selected.size} selected
           </span>
         ) : convoQuery.isError ? (
