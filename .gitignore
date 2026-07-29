@@ -177,3 +177,13 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Node
+#
+# `frontend/` and `mobile/` each ignore their own `node_modules/`, which covers
+# every intentional install — but running a JS tool from the repo *root* (an
+# `npx vitest` in the wrong directory is enough) drops a `node_modules/` cache
+# here too, where nothing was ignoring it. One such file reached `main` in the
+# 9b M9b merge before this line existed. Rooted at `/` so it can't shadow the
+# per-project ignores that already work.
+/node_modules/
