@@ -944,6 +944,41 @@ describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
     expect(api.editMessage).not.toHaveBeenCalled();
   });
 
+  it("cancels an edit with Escape without closing the drawer", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mine })])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("helo");
+    await user.type(
+      screen.getByPlaceholderText(/write a message/i),
+      "unrelated draft"
+    );
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    // The composer takes focus on the way into edit mode, so Escape lands here
+    // rather than on the drawer behind it.
+    const box = screen.getByPlaceholderText(/edit your message/i);
+    expect(box).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+
+    // The nearer thing wins: the edit is cancelled and the draft comes back,
+    // but the panel — and the thread you were in — is still open. Losing the
+    // whole drawer mid-correction would be a surprise.
+    expect(screen.queryByText("Editing message")).toBeNull();
+    expect(screen.getByPlaceholderText(/write a message/i)).toHaveValue(
+      "unrelated draft"
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Messages" })
+    ).toBeInTheDocument();
+    expect(api.editMessage).not.toHaveBeenCalled();
+  });
+
   it("reports the message itself, and says what a report hands over", async () => {
     const user = userEvent.setup();
     api.reportContent.mockResolvedValue({ id: 1 });

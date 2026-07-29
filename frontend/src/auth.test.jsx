@@ -35,6 +35,7 @@ vi.mock("./api.js", () => ({
 
 import { api } from "./api.js";
 import { AuthProvider } from "./auth.jsx";
+import { getDraft, setDraft } from "./drafts.js";
 import App from "./App.jsx";
 
 // The real provider, exactly as main.jsx wires it, at a given URL — including
@@ -151,6 +152,26 @@ describe("Login flow", () => {
     expect(
       await screen.findByRole("button", { name: "Log in" })
     ).toBeInTheDocument();
+  });
+
+  it("🔒 drops any half-written message drafts on the way out", async () => {
+    const user = userEvent.setup();
+    api.getCurrentUser.mockResolvedValue({ pk: 1, email: "sam@example.com" });
+    api.logout.mockResolvedValue({});
+
+    // A draft lives outside React (`drafts.js`) so it can survive the thread
+    // view unmounting — which means nothing tears it down on its own. On a
+    // shared computer the next person to open the drawer isn't the person who
+    // typed it, so sign-out has to.
+    setDraft(7, "something I never sent");
+
+    renderApp("/");
+    await screen.findByPlaceholderText("What's happening?");
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Log out" }));
+
+    await screen.findByRole("button", { name: "Log in" });
+    expect(getDraft(7)).toBe("");
   });
 });
 
