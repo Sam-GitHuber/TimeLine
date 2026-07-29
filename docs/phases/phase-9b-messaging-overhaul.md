@@ -76,6 +76,22 @@ be done in any order. **M6's media gallery is the one piece left behind**: it
 needs M7's photos, so build it as part of M7 rather than reopening M6. *(Done —
 it shipped with M7.)*
 
+**M9 is split into six PRs**, because it's the size of the eight before it put
+together. Each is its own branch off `main`, each leaves the web working, and
+each is written below to be picked up cold:
+
+| | M9 chunk | Branch | Depends on | Size | Done |
+|---|---|---|---|---|---|
+| **M9a** | Split the drawer (no behaviour change) | `messaging/m9a-split` | — | **S** | ☑ |
+| **M9b** | Transcript mechanics + the ⋯ menu & edit | `messaging/m9b-transcript` | M9a | **L** | ☐ |
+| **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☐ |
+| **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☐ |
+| **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☐ |
+| **M9f** | Formatting, mentions, multi-select + doc rewrite | `messaging/m9f-text` | M9b | **M** | ☐ |
+
+Order matters only where the table says so: M9c/M9d stack because a reply's
+strand renders reactions and ticks, and M9e/M9f both need M9b's bubble.
+
 ---
 
 ## Goal
@@ -1209,35 +1225,331 @@ milestone runs long, land them one at a time.
 
 ## M9 — Web parity
 
-**Branch:** `messaging/m9-web` · **Depends on:** M1–M8 · **Size:** L
+**Depends on:** M1–M8 · **Size:** L · **Six PRs — M9a…M9f below.**
+
+The app has eight milestones the web doesn't. This closes the gap. Read this
+preamble once; every chunk below assumes it.
+
+### What is already on the web, and is therefore reuse rather than work
+
+The single most useful fact for anyone picking this up cold: **the web solved
+most of these problems for the feed already.** Do not build a second copy.
+
+| Need | Already exists |
+| --- | --- |
+| Quick-emoji row, full picker, "who reacted" | `ReactionBar.jsx`, `QuickReactionPopover.jsx`, `ReactorsPopover.jsx`, `EmojiPickerPopover.jsx` (lazily imported — keep it that way) |
+| A `⋯` menu anchored to a thing, portalled to `<body>` | `PostMenu.jsx` — copy its portal + `useLayoutEffect` positioning shape |
+| Report modal | `ReportModal`, exported from `ReportButton.jsx`; `api.reportContent({ messageId })` already exists |
+| Full-screen photo viewer with ←/→ and Esc | `Lightbox.jsx` |
+| Day headings, clock times | `utils.js` → `dayHeading`, `dayKey`, `formatClockTime` (built for the feed; the app's `useDayBoundary` is the same idea) |
+| Dropdown wiring (Esc, outside-click, roving focus) | `useDropdownMenu.js` |
+| The read-receipts *setting* | Already shipped on `/settings` (a Privacy section) — M9c draws the ticks, it does not add the toggle |
+
+### The app modules to port, and how
+
+Each of these is pure logic with no React Native in it, so the port is a
+TypeScript→JavaScript retype and nothing more. **Port the comments too** — they
+carry the reasoning, and a silent divergence between the two clients is exactly
+what this milestone exists to end.
+
+| Mobile | Web home | Used by |
+| --- | --- | --- |
+| `mobile/src/messageText.ts` | `frontend/src/messageText.js` | M9b (links, big emoji), M9f (formatting, mentions) |
+| `mobile/src/threadRows.ts` | `frontend/src/threadRows.js` | M9b |
+| `mobile/src/drafts.ts` | `frontend/src/drafts.js` | M9b |
+| `mobile/src/quotes.ts` | `frontend/src/quotes.js` | M9d (needs a `useSyncExternalStore` port) |
+| `mobile/src/readReceipts.ts` | `frontend/src/readReceipts.js` | M9c |
+| `mobile/src/outbox.ts` | `frontend/src/outbox.js` | M9c |
+| `mobile/src/mentions.ts` | `frontend/src/mentions.js` | M9f |
+| `mobile/src/chatPhotos.ts` | **rewritten**, not ported — `expo-image-manipulator` → `<canvas>` | M9e |
+
+🔒 `drafts`, `quotes` and `outbox` hold message text outside React. **They must
+be cleared on sign-out**, like the app clears them — find where `auth.jsx` tears
+down and hook in there.
+
+### Two things differ because the medium does, not the model
+
+1. **Hover, not long-press.** The action menu is a `⋯` that appears on bubble
+   hover (and on focus, for keyboards) — the same way the drawer's inline Delete
+   already works. Everything *inside* the menu matches the app.
+2. **A side panel, not a blur.** M3's focused strand blurs the transcript because
+   a phone has one screen. A desktop has width, so on the web the strand sits
+   **beside** the transcript. Same endpoint, same data. **Don't port the blur.**
+
+### Standing constraints for every M9 chunk
+
+- **No backend change.** Everything M9 needs is already on the API and written up
+  in [`../reference/messaging.md`](../reference/messaging.md) → *API*: `?order=desc`,
+  `?ids=`, `?thread_root=`, `?media=1`, `PATCH` a message, `react/`, `mention_ids`,
+  multipart attachments, `DELETE …/read/`. If a chunk seems to need a new
+  endpoint, re-read that section — it probably exists. If it genuinely doesn't,
+  stop and raise it, because M9 shipping a backend change means the app needs a
+  release too.
+- **Tests sit beside the code** as `*.test.jsx` / `*.test.js` under
+  `frontend/src/`. `frontend/src/messaging.test.jsx` (763 lines) is the existing
+  suite and must stay green — expect to *edit* it, since M9b changes the
+  transcript's shape underneath it.
+- **Update [`../reference/messaging.md`](../reference/messaging.md) in the same PR.**
+  Each chunk names its section. The *Frontend* section's "the web is behind and
+  that's expected" passage gets shorter with each chunk and is deleted by M9f.
+- Branch + PR per chunk, off `main`. Never commit to `main`.
+
+---
+
+### M9a — Split the drawer
+
+**Branch:** `messaging/m9a-split` · **Depends on:** — · **Size:** S
+
+**A pure code move. No behaviour change, no new test.** It goes first and alone
+so that five feature diffs afterwards aren't tangled with a 600-line file being
+carved up. If `git diff` shows a behaviour change, it's a bug in this chunk.
+
+**Read first:** `frontend/src/components/MessagesDrawer.jsx` (all of it),
+`frontend/src/components/drawer-chrome.jsx`, `frontend/src/messaging.jsx`.
+
+**Build.** `MessagesDrawer.jsx` stays where it is (Layout imports it) and keeps
+only the shell — the portal, Esc handling, and the three-way view switch. The
+rest moves to `frontend/src/components/messages/`, following the precedent of
+`components/events/`:
+
+- `ConversationListView.jsx`, `ConversationRow.jsx`
+- `ConversationThreadView.jsx`
+- `MessageBubble.jsx`, `AvatarStack.jsx`
+
+**Done when** — ✅ done. `MessagesDrawer.jsx` is a 50-line shell; the five
+components above live in `frontend/src/components/messages/`.
+- [x] `frontend/src/messaging.test.jsx` passes untouched (27 tests, and the
+      whole frontend suite at 210).
+- [x] No `messaging.md` change — nothing user-visible happened.
+
+---
+
+### M9b — Transcript mechanics + the ⋯ menu and edit
+
+**Branch:** `messaging/m9b-transcript` · **Depends on:** M9a · **Size:** L
+
+The biggest chunk, and the one everything else sits on. It's M5 + M1 on the web.
 
 **Read first**
-- `frontend/src/components/MessagesDrawer.jsx` — all 566 lines.
-- Every preceding milestone's *Done when*, to build the checklist.
+- [`../reference/messaging.md`](../reference/messaging.md) → *The transcript
+  (Phase 9b M5)*, *The long-press action menu (Phase 9b M1)*, *Editing a message*.
+- **M5's** and **M1's** sections in this file, including their "things the plan
+  didn't anticipate" lists — several are about *why* something is shaped oddly.
+- `mobile/src/app/messages/[conversationId].tsx` and
+  `mobile/src/components/MessageBubble.tsx` for the finished behaviour.
+- `frontend/src/components/PostMenu.jsx` for the web's anchored-menu pattern.
 
 **Build**
-1. **Split `MessagesDrawer.jsx` as the very first commit**, before adding
-   anything. It holds the list, thread, rows, bubbles and avatar stack in one
-   file and this phase touches all of them; splitting first keeps the
-   feature diff from tangling with the code-move diff.
-2. Port: edit + edited marker, reply, reactions, ticks + the setting, day
-   separators and clock times, the unread divider, photos, tappable links,
-   large emoji-only messages, drafts, formatting, mentions, multi-select.
-   **Build the checklist from each milestone's *Done when*** rather than from
-   this line — it's a summary, and summaries drift.
-3. The interaction differs because the medium does — the web has hover, so the
-   menu is a hover `⋯` on the bubble rather than a long-press, the same way
-   delete already works there. **M3's focused thread is the biggest of these
-   differences**: a phone blurs the transcript because it has one screen, but a
-   desktop has width, so the right shape there is a **side panel beside the
-   transcript**, not a blur over it. Same endpoint, same data, different medium —
-   don't port the blur.
-4. Sanity-check the drawer against the app side by side. The point of this
-   milestone is that the two stop diverging.
+1. **Kill the eager full-history load first.** The drawer walks `fetchNextPage`
+   in an effect until every page is in memory — the exact defect M5 fixed on the
+   phone. Switch to `?order=desc` and page *older* messages as the scroller
+   nears the top. The web has no `FlatList`: use a normal `column-reverse` flex
+   scroller or an `onScroll` threshold — but **keep the scroll anchored** when a
+   page prepends, or reading history yanks you around.
+2. Port `threadRows.js` and render its rows: **day separators**, **clock times**
+   (`formatClockTime`, not `formatRelativeTime` — the conversation *list* keeps
+   relative time and is correct as-is), **run grouping** with the timestamp on
+   the run's last bubble only, and the two exemptions M5 records (an **"Edited"**
+   marker and an unsent bubble always show).
+3. **Unread divider**, positioned from `unread_count` on the conversation detail,
+   **latched** — read M5's point 3 before writing this; both the anchor and the
+   label are captured once, and the mark-read write must wait for the detail or
+   it races away the thing it depends on. Open the thread *at* the divider.
+4. **Jump-to-latest** with a count of what arrived since.
+5. **Tappable links** and **large emoji-only messages** — both fall out of
+   `messageText.js`. Render links as real `<a target="_blank" rel="noreferrer">`.
+   🔒 Linkifying is not link previews; nothing is fetched.
+6. **Per-conversation drafts** (`drafts.js`), *not* while editing — M5's reason.
+7. **The `⋯` menu**: appears on hover/focus of a bubble, portalled to `<body>`
+   like `PostMenu`. Own message → Copy · Edit · Delete. Someone else's → Copy ·
+   Report. No menu on a tombstone. **Build the item list as data** — M9c, M9d and
+   M9f each insert an entry.
+8. **Edit** in the composer: an "Editing message" bar with the original and an ✕,
+   input prefilled and focused, Send becomes Save, cancelling restores whatever
+   was half-typed. `PATCH` via a new `api.editMessage`. Bubble shows **"Edited"**.
+
+**Test:** paging loads one page and fetches older on scroll; separators and clock
+times render; the divider lands in the right place and doesn't move as messages
+arrive; a draft survives leaving and returning; the menu offers Edit only on your
+own message; Edit prefills, saves, and shows "Edited"; Cancel restores the draft.
 
 **Done when**
-- [ ] Every 9b behaviour present on web; `MessagesDrawer.jsx` split up.
-- [ ] `messaging.md` *Frontend* section rewritten.
+- [ ] All of the above; `messaging.test.jsx` green.
+- [ ] `messaging.md` *Frontend* section gains the transcript + menu behaviour.
+
+---
+
+### M9c — Reactions + send state and ticks
+
+**Branch:** `messaging/m9c-reactions` · **Depends on:** M9b · **Size:** M
+
+M2 + M4 on the web. Mostly wiring existing web components to a new target.
+
+**Read first**
+- [`../reference/messaging.md`](../reference/messaging.md) → *Reacting to a
+  message*, *Send state & read receipts* (all of it — the outbox, the three
+  states, how "read" is decided, the setting).
+- [`../reference/reactions.md`](../reference/reactions.md) → *Message reactions*.
+- **M2's** five settled decisions and **M4's** two, in this file.
+
+**Build**
+1. `api.js` gains message variants of `toggleReaction` / `getReactors` —
+   `POST /api/messages/<id>/react/`, `GET /api/messages/<id>/reactions/`. The
+   existing helpers take `{ postId, commentId }`; add `messageId` alongside
+   rather than forking them.
+2. Reactions in the `⋯` menu as a quick-emoji row (`QuickReactionPopover`, but
+   **the chat's six** — 👍 ❤️ 😂 😮 😢 🙏, not the feed's four; `reactions.md`
+   says why) with a `＋` to the full picker.
+3. Pills on the bubble's lower edge. 🔒 **A pill has one gesture: it opens "who
+   reacted", it never toggles** (M2's point 4). `ReactorsPopover` needs a
+   `messageId` prop and a "click to remove" on your own row.
+4. **No optimistic reaction toggle** — M2's point 5.
+5. Port `outbox.js` and `readReceipts.js`. Optimistic send: the message appears
+   instantly with a clock; a failure **keeps it in place** with Retry and never
+   drops typed text. 🔒 M4's point 1 explains why this is a store outside the
+   query cache and not an `onMutate` write — a refetch replaces the pages, so a
+   cache write survives about four seconds, which is fatal for the failed send.
+6. Ticks: clock → single → double-accented. **Three states, not four.**
+
+**Done when**
+- [ ] React from the menu; the pill opens who-reacted; toggle off works.
+- [ ] Send is instant; a failed send stays put and retries.
+- [ ] Ticks show sending/sent/read, and are absent when either party has receipts
+      off (the field simply isn't on the payload — don't hide it client-side).
+- [ ] `messaging.md` *Frontend* updated; `reactions.md` mentions the web.
+
+---
+
+### M9d — Reply threads, as a side panel
+
+**Branch:** `messaging/m9d-replies` · **Depends on:** M9c · **Size:** M–L
+
+**Read first**
+- [`../reference/messaging.md`](../reference/messaging.md) → *Reply threads*,
+  **including the 🔒 visibility rule in full**, and *Every route to a reply goes
+  through the strand*.
+- **M3's** eight settled points in this file — particularly 0 (there is no reply
+  mode on the transcript composer), 1 (a quote is a second way in), and 7 (the
+  strand paginates, and its composer clears on success).
+- `mobile/src/components/MessageThreadView.tsx`.
+
+**Build**
+1. Port `quotes.js` — the `?ids=` resolver, with its once-only asking and its
+   truncated-response caveat intact. On the web, `useSyncExternalStore` replaces
+   the app's subscription hook.
+2. A reply in the transcript renders a **collapsed quote** above its bubble; a
+   **root** renders its `reply_count` on the branch. Either opens the strand.
+   🔒 Never render the quote from anything the server attached to the reply — the
+   payload carries a bare `{ id }` and that's the whole point.
+3. **The strand is a panel beside the transcript, not a blur over it.** The
+   drawer is 400px on desktop; widen it when a strand is open rather than
+   covering the conversation you opened the strand *from*. Below that width, fall
+   back to replacing the transcript.
+4. `Reply` joins the `⋯` menu. The transcript composer keeps **two** modes.
+5. The strand paginates — follow `next`. Its composer clears on success, not on
+   dispatch.
+
+**Done when**
+- [ ] Reply from the menu opens a strand; replying inside it works and pages.
+- [ ] A reply-to-a-reply lands in the same strand — no nesting anywhere.
+- [ ] A clipped root shows the "start of this thread isn't available" wording,
+      and an unresolved quote renders with **no author name** (M3's point 6).
+- [ ] `messaging.md` *Frontend* updated.
+
+---
+
+### M9e — Photos + the conversation list and info panel
+
+**Branch:** `messaging/m9e-photos` · **Depends on:** M9b · **Size:** L
+
+M7 + M6 on the web. Can be built in parallel with M9c/M9d — it touches the list,
+the header and the composer rather than the bubble internals.
+
+**Read first**
+- [`../reference/messaging.md`](../reference/messaging.md) → *Photo messages*
+  (**all of it**, especially 🔒 *the photo is processed on the client*), *The
+  conversation list*, *The info screen*, *Renaming a group chat*, *Marking a
+  thread unread*.
+- This file's **Privacy** section, decision 2, and **M7**'s departures and bugs.
+- `mobile/src/chatPhotos.ts` — the pipeline to reproduce, not port.
+
+**Build**
+1. **A canvas pipeline in `frontend/src/chatPhotos.js`.** Resize and re-encode to
+   JPEG in the browser, which is what strips EXIF; generate the thumbnail the
+   same way. Match `chatPhotos.ts`'s dimensions and quality **exactly** — two
+   clients producing visibly different photos from the same source is the
+   divergence this milestone exists to stop. 🔒 Do **not** route this through the
+   server's `api/imaging.py`; that path is for posts and avatars, and the reason
+   is E2E (the server will one day hold opaque bytes).
+2. Send multipart with the parallel `attachments` / `attachment_thumbnails` /
+   `attachment_widths` / `attachment_heights` lists. **One attachment per
+   message** — a multi-file pick sends several messages, as the app does.
+3. Bubble renders a **sized** thumbnail (width/height are on the payload, so it
+   reserves space and the transcript doesn't reflow), opening the existing
+   `Lightbox`. This replaces the stopgap `<a href>` thumbnail currently in
+   `MessageBubble` — its comment says so.
+   - No auth plumbing needed: `/media/*` is cookie-gated at Caddy and the browser
+     attaches the cookie to an `<img>` itself.
+   - There is **no camera** on the web, and that's fine — a `<input type="file"
+     accept="image/*">` is the whole affordance. Don't reach for `getUserMedia`.
+4. **Conversation list**: name search (appears at six threads, matching a group's
+   title *and* its members' names) and per-row actions. A row has no swipe on the
+   web — put Mute / Mark unread / Leave behind a hover `⋯`, and offer mark-unread
+   only where the server would accept it.
+5. **An info panel** as a fourth drawer view (the drawer is a view machine, not a
+   router — add to `messaging.jsx`): participants with their pending badges, mute,
+   add people, leave, block on a 1:1, **rename a group in place**, and the
+   **media gallery** (`?media=1&order=desc` → `Lightbox`, rendering nothing at
+   all when there are no photos). The thread header becomes identity + `⋯`, with
+   "Muted" still shown up there when it is.
+
+**Done when**
+- [ ] Send and view a photo, with and without a caption; it opens in `Lightbox`.
+- [ ] ⚠️ **Check the EXIF strip on a real photo with GPS in it** — the re-encode
+      is what drops it and no unit test can prove that. M7 left the same check
+      outstanding on the phone; do both at once and tick both.
+- [ ] List searches and offers mute / mark-unread / leave; the info panel has
+      everything the app's info screen has, including rename and the gallery.
+- [ ] `messaging.md` *Frontend* updated.
+
+---
+
+### M9f — Formatting, mentions, multi-select, and the doc rewrite
+
+**Branch:** `messaging/m9f-text` · **Depends on:** M9b · **Size:** M
+
+M8 on the web, plus the paperwork that closes the phase.
+
+**Read first**
+- [`../reference/messaging.md`](../reference/messaging.md) → *Writing a message:
+  formatting and @mentions* (both subsections), *Multi-select*.
+- **M8** in this file.
+
+**Build**
+1. **Inline formatting** — `messageText.js` already parses it if M9b ported it;
+   this renders the marks. 🔒 **Never store markup-processed text**; the raw
+   string is the source of truth and stays one opaque blob under E2E.
+2. **@mentions** in group chats: port `mentions.js`, a suggestion popover under
+   the composer, `mention_ids` on send, and the mention rendered highlighted.
+   The muted-thread override setting already exists in `NotificationPreference`
+   and needs surfacing in `NotificationPreferencesSection.jsx` if it isn't there.
+3. **Multi-select** from the menu's Select: header becomes "N selected", the
+   composer slot becomes Copy · Delete. Read M8's four decisions —
+   particularly that **Delete is offered only when every ticked message is one
+   you could delete alone**, and that Copy joins oldest-first with names in a
+   group.
+4. **Rewrite `messaging.md`'s *Frontend* section** as the durable record of the
+   finished web client, and **delete the "the web is behind on Phase 9b" passage
+   and its four degradations** — they stop being true here.
+
+**Done when**
+- [ ] Formatting renders; the stored text still has its markup.
+- [ ] Mention a group member from the web; they're notified through a mute.
+- [ ] Select several and delete in one action.
+- [ ] `messaging.md` *Frontend* rewritten; the "web is behind" passage gone.
+- [ ] **Sit the drawer and the app side by side and go through every 9b feature.**
+      The point of M9 is that the two stop diverging, and that's not a diff you
+      can read — it's a comparison you do.
 
 ---
 
