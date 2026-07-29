@@ -415,13 +415,23 @@ def _mentionable_user_ids(convo, sender):
     would buzz their phone about something the app would then refuse to show
     them.
 
-    The legacy branch mirrors ``_messages_for_viewer``'s: a direct conversation
-    predating Phase 6a has no ``Participant`` rows, so the other side of the pair
-    is the whole membership. Neither client offers mentions in a 1:1 — there's
-    exactly one person it could mean — but the *rule* has to be complete, because
-    what this returns is what the server will accept.
+    **Group chats only, and that's a rule rather than a UI choice.** A mention is
+    the one thing that beats ``Participant.muted_at``, so allowing one in a 1:1
+    would mean the single person you might mute could defeat that mute on every
+    message by attaching your own id — muting a *person* would stop being
+    absolute, which is most of what it's for. Neither client offers a picker in a
+    direct chat, and what the server accepts must be no wider than that: an
+    endpoint that accepts more than any client sends is only ever an attack
+    surface. The per-user ``mention`` preference is no answer here either, since
+    turning it off to escape one person costs you mentions in every group.
+
+    A direct conversation therefore returns the empty set and any ``mention_ids``
+    on it are a 400 — including the legacy Participant-less threads predating
+    Phase 6a, which are direct by definition.
     """
-    ids = set(
+    if convo.kind != Conversation.Kind.GROUP:
+        return set()
+    return set(
         Participant.objects.filter(
             conversation=convo,
             status=ACTIVE_P,
@@ -431,10 +441,6 @@ def _mentionable_user_ids(convo, sender):
         .exclude(user=sender)
         .values_list("user_id", flat=True)
     )
-    if ids:
-        return ids
-    other = convo.user_b_id if convo.user_a_id == sender.id else convo.user_a_id
-    return {other} if other else set()
 
 
 def _with_reply_counts(visible):

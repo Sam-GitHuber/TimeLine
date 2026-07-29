@@ -2494,7 +2494,9 @@ class MessageMentionTests(APITestCase):
        the text is ciphertext.
     2. **Can you only name people in the room?** A mention is the one thing in
        messaging that beats mute, so an unchecked id here would be a way to buzz
-       a stranger's phone — exactly what the clique invariant forbids.
+       a stranger's phone — exactly what the clique invariant forbids. The same
+       reasoning makes mentions **group-only**: in a 1:1 the one person you might
+       mute would otherwise be able to defeat that mute on every message.
     3. **Does the mute override behave as advertised?** The setting governs
        *only* whether a mention beats mute, and getting that wrong silences
        mentions someone wanted (or punches through a quiet they asked for).
@@ -2576,6 +2578,80 @@ class MessageMentionTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(Message.objects.filter(text__contains="book").exists())
         self.assertEqual(MessageMention.objects.count(), 0)
+
+    def test_cannot_mention_anyone_in_a_direct_chat(self):
+        """🔒 Mentions are group-only, enforced here rather than only by a client
+        that declines to offer a picker.
+
+        A mention beats mute. In a 1:1 the person you'd mute is the only person
+        who can send you anything, so accepting an id here would let them defeat
+        that mute on every message — muting a *person* would stop meaning
+        anything. Neither client offers it, and what the server accepts has to be
+        no wider than that.
+        """
+        direct = Conversation.objects.create(
+            kind="direct", user_a=self.ada, user_b=self.bea, created_by=self.ada
+        )
+        for user in (self.ada, self.bea):
+            participant = Participant.objects.create(
+                conversation=direct, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=participant, started_at=direct.created_at
+            )
+        Participant.objects.filter(conversation=direct, user=self.bea).update(
+            muted_at=timezone.now()
+        )
+
+        resp = self.client.post(
+            messages_url(direct),
+            {"text": "@Bea are you there?", "mention_ids": [self.bea.pk]},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(MessageMention.objects.count(), 0)
+        # And the mute it would have beaten still holds.
+        self.assertFalse(self._queued_for(self.bea).exists())
+
+    def test_a_direct_chat_still_takes_an_ordinary_message(self):
+        """The rejection is of the *field*, not of sending — a 1:1 is otherwise
+        untouched by M8."""
+        direct = Conversation.objects.create(
+            kind="direct", user_a=self.ada, user_b=self.bea, created_by=self.ada
+        )
+        for user in (self.ada, self.bea):
+            participant = Participant.objects.create(
+                conversation=direct, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=participant, started_at=direct.created_at
+            )
+
+        resp = self.client.post(messages_url(direct), {"text": "hello"})
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["mentions"], [])
+
+    def test_mention_ids_survive_a_multipart_send(self):
+        """The photo path builds its body as a form, one part per id — a
+        different branch of the client's send and a different parse on the way
+        in, so the JSON tests above don't cover it.
+
+        A single ``mention_ids`` part holding "1,2" would arrive as one
+        unparseable value; this is what pins the repeated-part shape.
+        """
+        resp = self.client.post(
+            messages_url(self.convo),
+            {
+                "text": "@Bea @Cal look at this",
+                "mention_ids": [str(self.bea.pk), str(self.cal.pk)],
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["mentions"], [self.bea.pk, self.cal.pk])
 
     def test_cannot_mention_a_pending_member(self):
         # They can't read a line of the thread yet, so naming them would
