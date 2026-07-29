@@ -132,10 +132,15 @@ function ConversationRow({ convo, me, onOpen }) {
   const isPending = convo.my_status === "pending";
   const last = convo.last_message;
   const mine = last && last.sender_id === me?.pk;
+  // A photo message may carry no caption at all (Phase 9b M7), which would
+  // render as a blank line where the preview goes. Same phrasing as the app's.
+  const photos = last?.attachment_count ?? 0;
   const preview = last
     ? last.is_deleted
       ? "Message deleted"
-      : last.text
+      : photos > 0
+        ? `📷 ${last.text || "Photo"}`
+        : last.text
     : "No messages yet";
   const unread = convo.unread_count > 0;
 
@@ -547,9 +552,40 @@ function MessageBubble({ message, mine, showSender, onDelete, deleting }) {
                 : "bg-raised text-ink ring-1 ring-line"
             }`}
           >
-            <p className="whitespace-pre-wrap break-words text-[0.95rem]">
-              {message.text}
-            </p>
+            {/* Photos (Phase 9b M7). **A deliberate stopgap, not the finished
+                treatment** — M9 ports the app's version (a sized bubble that
+                doesn't reflow as it loads, opening in the shared `Lightbox`).
+                What this fixes now is worse than an unpolished photo: the app
+                can send a caption-less photo message today, and without this the
+                web renders it as an empty bubble, which reads as a bug in the
+                other person's message. A thumbnail that opens the full image in
+                a tab is honest and ten lines.
+
+                No auth plumbing needed here, unlike the app: `/media/*` is
+                cookie-gated (Caddy `forward_auth`) and a browser attaches the
+                cookie to an <img> request by itself. */}
+            {(message.attachments ?? []).map((attachment) => (
+              <a
+                key={attachment.id}
+                href={attachment.url}
+                target="_blank"
+                rel="noreferrer"
+                className="mb-1 block"
+              >
+                <img
+                  src={attachment.thumbnail}
+                  width={attachment.width}
+                  height={attachment.height}
+                  alt="Photo"
+                  className="max-h-64 w-auto rounded-xl"
+                />
+              </a>
+            ))}
+            {message.text && (
+              <p className="whitespace-pre-wrap break-words text-[0.95rem]">
+                {message.text}
+              </p>
+            )}
             <span
               className={`mt-0.5 block font-mono text-[0.65rem] ${
                 mine ? "text-white/70" : "text-ink-faint"

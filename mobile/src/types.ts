@@ -231,6 +231,13 @@ export type LastMessage = {
   is_deleted: boolean;
   sender_id: number;
   created_at: string;
+  /**
+   * How many photos it carries (Phase 9b M7) — a count, not the photos. The row
+   * renders "📷 Photo" from it, which is the whole reason it's a number: the
+   * wording is ours to choose, and a count is also the one fact about an
+   * attachment that still reaches us once the server can't see it.
+   */
+  attachment_count?: number;
 };
 
 /**
@@ -317,6 +324,34 @@ export type Message = {
    * thread root, which is how the transcript knows to offer "N replies".
    */
   reply_count?: number;
+  /**
+   * Photos on this message (Phase 9b M7). Empty on a text message, and empty on
+   * a tombstone — deleting a photo message really deletes the file, so there is
+   * never an attachment to draw beside "Message deleted".
+   */
+  attachments?: MessageAttachment[];
+};
+
+/**
+ * One photo sent in a chat — `MessageAttachmentSerializer`.
+ *
+ * `kind` is `'image'` today and exists so Phase 13's video clips arrive as data
+ * rather than as an app release; switch on it rather than assuming a picture.
+ *
+ * `width`/`height` are the phone's own measurements of the image *it* produced,
+ * round-tripped through the server, and the bubble reserves space from them so
+ * the transcript doesn't reflow as photos load. Deliberately client-declared:
+ * the server never opens an attachment (see messaging.md's *Photo messages*).
+ */
+export type MessageAttachment = {
+  id: number;
+  kind: 'image';
+  /** Full-size, for the lightbox. */
+  url: string;
+  /** Small, for the bubble and the media gallery. */
+  thumbnail: string;
+  width: number;
+  height: number;
 };
 
 /**

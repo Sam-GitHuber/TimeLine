@@ -126,6 +126,21 @@ export type PhotoUpload = {
 };
 
 /**
+ * A chat photo ready to upload — what `prepareChatPhoto` returns (Phase 9b M7).
+ *
+ * Declared structurally here rather than imported from `@/chatPhotos` so this
+ * module stays free of the image pipeline (and its native dependency): `api.ts`
+ * is imported by every test in the app, including ones that have no business
+ * loading `expo-image-manipulator`.
+ */
+export type PreparedChatPhoto = {
+  photo: PhotoUpload;
+  thumbnail: PhotoUpload;
+  width: number;
+  height: number;
+};
+
+/**
  * A multipart file part the winter fetch runtime will actually serialise:
  * raw bytes behind a `.bytes()` method, plus a filename and content-type.
  */
@@ -630,15 +645,62 @@ export const api = {
    * are one level deep: replying to a reply joins that thread rather than
    * nesting, which the server derives — the client never has to work out a root.
    */
-  sendMessage: (
+  sendMessage: async (
     conversationId: number | string,
     text: string,
-    replyToId?: number | null
-  ) =>
-    request<Message>(`/api/conversations/${conversationId}/messages/`, {
-      method: 'POST',
-      body: replyToId ? { text, reply_to_id: replyToId } : { text },
-    }),
+    replyToId?: number | null,
+    /**
+     * A photo to send with it (Phase 9b M7), already resized, stripped and
+     * re-encoded by `prepareChatPhoto`. Switches the request to multipart.
+     *
+     * 🔒 Send only what came out of that helper. The server does **not** open
+     * the file — it can't, because this same path has to work when it's handed
+     * ciphertext — so the EXIF stripping this app does is the *only* stripping
+     * that happens. Uploading a raw camera-roll URI here would ship the photo's
+     * GPS coordinates to everyone in the chat.
+     */
+    photo?: PreparedChatPhoto
+  ) => {
+    const path = `/api/conversations/${conversationId}/messages/`;
+    if (!photo) {
+      return request<Message>(path, {
+        method: 'POST',
+        body: replyToId ? { text, reply_to_id: replyToId } : { text },
+      });
+    }
+    const form = new FormData();
+    // Blank is legal *with* a photo and only then — a photo with no caption is
+    // an ordinary thing to send, an empty message is not. The server enforces
+    // the same rule; this just doesn't get in its way.
+    form.append('text', text);
+    if (replyToId) form.append('reply_to_id', String(replyToId));
+    // Parallel lists, one entry each. Plural because the server accepts a list
+    // (capped at one for now), so allowing several photos per message later is
+    // a server constant rather than a wire change.
+    form.append('attachments', (await toFilePart(photo.photo)) as unknown as Blob);
+    form.append(
+      'attachment_thumbnails',
+      (await toFilePart(photo.thumbnail)) as unknown as Blob
+    );
+    form.append('attachment_widths', String(photo.width));
+    form.append('attachment_heights', String(photo.height));
+    return request<Message>(path, { method: 'POST', body: form });
+  },
+
+  /**
+   * Every photo in this chat, newest first (Phase 9b M7) — the media gallery on
+   * the thread info screen.
+   *
+   * Another filter on the messages endpoint rather than a route of its own, for
+   * the third time and the same reason as `thread_root` and `ids`: the gallery
+   * must not be able to show a photo the transcript wouldn't, and the surest
+   * way to guarantee that is for both to be the same interval-clipped queryset.
+   * Paginates like every list; the caller follows `next` with `getPage`.
+   */
+  getConversationMedia: (conversationId: number | string) =>
+    request<Paginated<Message>>(
+      `/api/conversations/${conversationId}/messages/?media=1&order=desc`
+    ),
 
   /**
    * Correct your *own* message (Phase 9b M1) — the beta's first real complaint

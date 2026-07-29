@@ -1,4 +1,7 @@
+import base64
+
 from django.contrib import admin
+from django.utils.html import format_html_join
 
 from .models import (
     Block,
@@ -14,9 +17,13 @@ from .models import (
     PostImage,
     Report,
 )
+from .serializers import MESSAGE_THUMBNAIL_MAX_BYTES
 
-# NOTE: ``Message`` is deliberately **not** imported or registered here. There is
-# no admin route to message text except a ``Report``'s snapshot — see
+# NOTE: ``Message`` is deliberately **not** imported or registered here, and
+# neither is ``MessageAttachment`` — a browsable list of chat photos is the same
+# window M0 closed, with pictures in it. There is no admin route to message
+# content except a ``Report``'s snapshot (text) and the thumbnails of the exact
+# message that was reported (``ReportAdmin.message_photos``) — see
 # ``ConversationAdmin``. Don't add one.
 
 
@@ -263,8 +270,23 @@ class ReportAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
     list_editable = ("status",)
     # No raw ``post``/``comment``/``message`` FKs on the form — see the docstring.
-    fields = ("target", "reporter", "reason", "message_text", "status", "created_at")
-    readonly_fields = ("target", "reporter", "reason", "message_text", "created_at")
+    fields = (
+        "target",
+        "reporter",
+        "reason",
+        "message_text",
+        "message_photos",
+        "status",
+        "created_at",
+    )
+    readonly_fields = (
+        "target",
+        "reporter",
+        "reason",
+        "message_text",
+        "message_photos",
+        "created_at",
+    )
 
     def has_add_permission(self, request):
         return False
@@ -272,6 +294,77 @@ class ReportAdmin(admin.ModelAdmin):
     @admin.display(description="target")
     def target(self, obj):
         return obj.target_label()
+
+    @admin.display(description="reported photos")
+    def message_photos(self, obj):
+        """Thumbnails of the photos on a reported message (Phase 9b M7).
+
+        **Why this exists.** M0's rule is that a report is the *only* window onto
+        a private message, and M7 made a message able to be nothing but a photo.
+        Without this, reporting an abusive image produced a queue entry with an
+        empty snapshot and no way to see what was flagged — which would have
+        meant photo abuse was the one thing the moderation path couldn't act on.
+        Same window, same justification as ``message_text``: the reporter chose
+        to show the maintainer this specific message.
+
+        **Two differences from the text snapshot, both deliberate.** This is a
+        *live* read of the message's attachments, not a copy taken at report
+        time — we don't duplicate someone's photo into a second place on disk to
+        hold as evidence. So if the sender deletes the message the photos are
+        genuinely gone (M7 hard-deletes attachment files on delete) and this goes
+        empty, where ``message_text`` would still hold its snapshot. That's the
+        honest trade: "deleted" meaning the picture is really gone is worth more
+        than a moderation queue that keeps its own copy of it.
+
+        Thumbnails only, at thumbnail size. Enough to judge a report, and it
+        avoids putting a full-size private photo on screen while triaging.
+
+        🔒 **The bytes are inlined as ``data:`` URIs, not linked from
+        ``/media/``, and that is not a style choice.** In production Caddy
+        ``forward_auth``s every ``/media/*`` request to ``/api/media-auth/``,
+        which runs on DRF's default authentication — the **JWT cookie**. The
+        admin authenticates with Django's *session* cookie, which that endpoint
+        does not accept, so an ``<img src="/media/…">`` here 401s and the
+        moderation queue shows broken images unless the maintainer happens to
+        also be signed into the app in the same browser. Reading the file
+        server-side sidesteps the question: nothing is fetched, so nothing has
+        to be authorised.
+
+        It's also the safer rendering. A chat attachment is never decoded by us
+        (see ``MessageAttachment``), so its bytes are unverified — and a
+        ``data:image/jpeg`` inside an ``<img>`` has no navigable URL and cannot
+        execute whatever they turn out to be. A blob that isn't an image simply
+        fails to draw.
+        """
+        message = obj.message
+        if message is None:
+            return ""
+        rows = []
+        for attachment in message.attachments.all():
+            if not attachment.thumbnail:
+                continue
+            try:
+                with attachment.thumbnail.open("rb") as handle:
+                    # Bounded by the same cap the upload was accepted under, so a
+                    # restored or hand-placed file can't inline megabytes into an
+                    # admin page. Read one byte past it to tell "at the cap" from
+                    # "over it" without holding the whole thing twice.
+                    raw = handle.read(MESSAGE_THUMBNAIL_MAX_BYTES + 1)
+            except (FileNotFoundError, OSError):
+                # The row outliving its file is a restore mismatch, not something
+                # to 500 the moderation queue over — show the rest.
+                continue
+            if len(raw) > MESSAGE_THUMBNAIL_MAX_BYTES:
+                continue
+            encoded = base64.b64encode(raw).decode("ascii")
+            rows.append((f"data:image/jpeg;base64,{encoded}",))
+        if not rows:
+            return ""
+        return format_html_join(
+            " ",
+            '<img src="{}" style="max-height:160px;border-radius:6px" />',
+            rows,
+        )
 
     @admin.display(description="reason")
     def short_reason(self, obj):

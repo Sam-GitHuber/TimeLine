@@ -233,10 +233,24 @@ class Command(BaseCommand):
         # messages (and these rows) with it — no "Someone" fallback needed here,
         # unlike a Notification's actor, which is SET_NULL on purpose.
         sender = message.sender.display_name
+        # A photo says so (Phase 9b M7). It names the sender and the medium and
+        # nothing else — the same rule as every other push body here, which is
+        # why this one needed no new thinking: "sent a photo" is no more
+        # revealing than "sent a message", and it's more useful, because knowing
+        # a picture is waiting is often the whole reason to open the app.
+        #
+        # Said whenever there's an attachment, caption or not: the photo is the
+        # notable thing, and a caption is content we wouldn't quote anyway.
+        photo = message.attachments.exists()
         # A group thread says which one, since "New message from Ada" is
         # ambiguous when Ada is in four of your chats. An untitled group falls
         # back to the neutral phrasing rather than inventing a name.
-        if convo.kind == convo.Kind.GROUP and convo.title:
+        named_group = convo.kind == convo.Kind.GROUP and convo.title
+        if photo:
+            text = f"{sender} sent a photo"
+            if named_group:
+                text += f" in {convo.title}"
+        elif named_group:
             text = f"{sender} in {convo.title}"
         else:
             text = f"New message from {sender}"

@@ -5,8 +5,14 @@
 #   1. The Postgres database — a logical `pg_dump` (custom format), taken from
 #      inside the running `db` container. Portable and restorable with
 #      pg_restore; far safer than copying Postgres's raw data files.
-#   2. Uploaded media (/srv/timeline/media) — avatars + post photos, which the
-#      DB references by path, so a DB-only backup would restore broken images.
+#   2. Uploaded media — the WHOLE of /srv/timeline/media, which the DB
+#      references by path, so a DB-only backup would restore broken images.
+#      **Whole tree on purpose, never an enumerated list of subdirectories.**
+#      New kinds of upload arrive with new features (avatars, post photos, group
+#      images, and chat photos as of Phase 9b M7, under media/messages/), and a
+#      hardcoded list would silently stop backing one of them up — a data-loss
+#      bug that only surfaces the day you need the backup. Adding an upload path
+#      to the app must never require editing this script.
 #
 # Everything is pushed to an ENCRYPTED rclone remote (Cloudflare R2 behind an
 # rclone `crypt` wrapper), so the copy that leaves the house is encrypted at

@@ -67,13 +67,14 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M4** | Send status + read receipts | — | **M** | ☑ |
 | **M5** | Thread mechanics | — (do before M7) | **M–L** | ☑ |
 | **M6** | Conversation list + thread info | — | **M** | ☑ |
-| **M7** | Photo messages | M5 | **L** | ☐ |
+| **M7** | Photo messages | M5 | **L** | ☑ |
 | **M8** | Text, mentions & quick actions | M1 | **M** | ☐ |
 | **M9** | Web parity | M1–M8 | **L** | ☐ |
 
 M0/M1 first. After that only the listed dependencies bind — M4, M5, M6 and M8 can
 be done in any order. **M6's media gallery is the one piece left behind**: it
-needs M7's photos, so build it as part of M7 rather than reopening M6.
+needs M7's photos, so build it as part of M7 rather than reopening M6. *(Done —
+it shipped with M7.)*
 
 ---
 
@@ -1071,11 +1072,66 @@ Sequenced last of the feature work: biggest chunk, nothing depends on it.
    — a data-loss bug that only surfaces the day you need the backup.
 
 **Done when**
-- [ ] Send and view photos in a chat; push reads "sent a photo".
-- [ ] Images are stripped and downscaled **client-side**, verified on a real
-      photo with GPS EXIF.
-- [ ] Backups confirmed to include message media.
-- [ ] `messaging.md` documents the client-side pipeline and why it differs.
+- [x] Send and view photos in a chat; push reads "sent a photo".
+- [x] Images are stripped and downscaled **client-side** — pipeline pinned by
+      `chatPhotos.test.ts`. ⚠️ **The device check is still outstanding**: the
+      re-encode is what drops the EXIF, and no Node test can prove that on a real
+      photo. Send one with GPS EXIF from a real phone and confirm the stored file
+      carries none before calling this closed.
+- [x] Backups confirmed to include message media — `backup.sh` and `restore.sh`
+      both sync the whole media tree, so `media/messages/` was already covered.
+      The prose in both (and in `backup-restore.md`) now says *whole tree, never
+      an enumerated list*, which is the failure mode the step was guarding
+      against.
+- [x] `messaging.md` documents the client-side pipeline and why it differs.
+
+**Two deliberate departures from the steps above**, both recorded in
+`messaging.md` so a later reader doesn't take them for drift:
+
+1. **The model is `MessageAttachment`, not `MessageImage`** (step 1's name).
+   Step 9 asks for a seam so Phase 13's video slots in rather than forcing a
+   parallel path, and a model whose name means *picture* fights that. It carries
+   a `kind` (only `image` today) and a `thumbnail` that doubles as a video's
+   poster frame.
+2. **One attachment per message**, with the wire format already a list of
+   parallel fields. A multi-photo pick sends several messages, which is the
+   better chat shape as well as the smaller one — each photo gets its own bubble,
+   reactions, replies and delete. Raising the cap is a server constant, not an
+   API change.
+
+**Two things done here that the steps didn't name**, both because M7 created the
+gap:
+
+- **A forced `.jpg` filename + `nosniff` on the media route.** Once the server
+  stops decoding an upload it can't know a blob isn't markup, and Caddy picks the
+  Content-Type from the extension — a file stored as `.html` would have been
+  stored XSS on our own origin. Step 2 accepted "the server can't verify it's an
+  image" but didn't follow that through to how the file is *served*.
+- **Reported photos are visible in the admin.** M0 made a report the only window
+  onto a private message; M7 made a message able to be nothing but a photo, so
+  without this, photo abuse was the one thing moderation couldn't act on.
+- **A 6 MB body cap at the proxy** (`deploy/Caddyfile`, `@chat_upload`). Django
+  buffers a multipart upload to disk before DRF looks at it, so step 2's byte cap
+  limited what we *store*, not what we *accept*. The only route on the box with
+  its own body limit, because it's the only upload the server never decodes.
+
+**Three bugs found in review and fixed on the branch**, each worth knowing about
+because none of them were visible from the code that caused them:
+
+- **The camera was unusable.** M7 added the app's first camera call, but
+  `mobile/app.json` still carried `cameraPermission: false` from when nothing
+  used it — which tells the `expo-image-picker` plugin to *delete*
+  `NSCameraUsageDescription` and block `android.permission.CAMERA`. iOS
+  terminates an app that reaches for the camera without that string, so "Take
+  Photo" was a hard crash while every Jest test stayed green (they mock the
+  picker). `thread.test.tsx` now asserts the config file itself.
+- **The admin's reported-photo thumbnails 401'd.** They were `<img src="/media/…">`,
+  and that route is `forward_auth`ed to an endpoint that takes the JWT cookie,
+  not the admin's Django session. Now inlined as `data:` URIs — nothing fetched,
+  nothing to authorise, and no navigable URL for bytes we never decoded.
+- **A `PATCH` omitting `text` wiped a photo's caption.** Making `text` optional
+  for photos gave it a `""` default, which turned "the client forgot the field"
+  into "make it empty". The edit path now requires the key.
 
 ---
 

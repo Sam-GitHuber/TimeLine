@@ -40,26 +40,73 @@
 		reverse_proxy backend:8000
 	}
 
+	# Chat photo uploads → the tightest body cap on the box, and the only route
+	# that gets its own (Phase 9b M7).
+	#
+	# 🔒 Django buffers a multipart upload to a temp file *before* DRF gets to
+	# look at it, so the 4 MB-per-photo cap in `MessageCreateSerializer` limits
+	# what we **store**, not what we accept — an authenticated client could stream
+	# gigabytes at the disk and be refused only afterwards. That gap matters most
+	# here, because this is the one upload the server never decodes (see
+	# messaging.md's *Photo messages*), so the byte cap is doing more work than
+	# usual. This makes it true at the door.
+	#
+	# 6 MB = a 4 MB photo + a 512 KB thumbnail + multipart overhead and the text
+	# fields, with room to spare. Raise it in step with those constants, never
+	# below them, or sends fail at the proxy with an error the app can't explain.
+	#
+	# The collection route only — `POST .../messages/` is the one request in
+	# messaging that carries a file. Edit and delete are `.../messages/<id>/` and
+	# send no body worth capping, and attachments aren't editable anyway.
+	@chat_upload path /api/conversations/*/messages/
+	handle @chat_upload {
+		request_body {
+			max_size 6MB
+		}
+		reverse_proxy backend:8000
+	}
+
 	# API and Django's own static files (admin + DRF browsable API, served by
 	# WhiteNoise inside gunicorn) → the backend container.
 	@backend path /api/* /static/*
 	handle @backend {
+		# A backstop for every other endpoint, sized by the largest legitimate
+		# upload the app makes: a post carries up to MAX_IMAGES_PER_POST (10)
+		# original phone photos, which are re-encoded server-side and so arrive
+		# full-size. Deliberately generous — this is here to stop an absurd body,
+		# not to enforce a product limit. The real per-feature caps live in the
+		# serializers, where they can say something useful when they're hit.
+		request_body {
+			max_size 150MB
+		}
 		reverse_proxy backend:8000
 	}
 
-	# User-uploaded media (post photos, avatars) → served straight off the shared
-	# media volume mounted at /srv/media, but AUTHORIZED FIRST: Caddy asks the
-	# backend (forward_auth → /api/media-auth/) on every request and serves the
-	# file only if that returns 2xx — i.e. only for a logged-in, active member.
-	# So a leaked media URL is useless to a logged-out stranger, and a banned
-	# member's saved URLs stop working. UUID filenames (see api/imaging.py) remain
-	# a second layer. (Per-author connection gating is a deferred Phase 7b step.)
+	# User-uploaded media (post photos, avatars, chat photos) → served straight off
+	# the shared media volume mounted at /srv/media, but AUTHORIZED FIRST: Caddy
+	# asks the backend (forward_auth → /api/media-auth/) on every request and
+	# serves the file only if that returns 2xx — i.e. only for a logged-in, active
+	# member. So a leaked media URL is useless to a logged-out stranger, and a
+	# banned member's saved URLs stop working. UUID filenames (see api/imaging.py)
+	# remain a second layer. (Per-author connection gating is a deferred Phase 7b
+	# step.)
 	@media path /media/*
 	handle @media {
 		forward_auth backend:8000 {
 			uri /api/media-auth/
 		}
 		root * /srv
+		# Never let a browser second-guess the Content-Type we serve here. Post
+		# photos and avatars are re-encoded by api/imaging.py, so their bytes are
+		# known-good — but **chat photos (Phase 9b M7) are processed on the phone
+		# and never decoded by the server**, deliberately, so that the same path
+		# works when it's handed ciphertext under E2E. Those files are stored with
+		# a forced .jpg name so file_server always labels them image/jpeg;
+		# `nosniff` is what stops a browser overriding that label by peeking at
+		# the bytes and deciding a blob is HTML — which would be stored XSS on our
+		# own origin, next to the session cookie. Two layers, cheap, and it costs
+		# nothing for the media that *was* validated.
+		header X-Content-Type-Options nosniff
 		file_server
 	}
 

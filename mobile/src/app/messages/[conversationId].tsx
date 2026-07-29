@@ -61,6 +61,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -71,6 +72,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import EmojiPicker from 'rn-emoji-keyboard';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -82,6 +84,7 @@ import {
   MESSAGE_POLL_MS,
 } from '@/api';
 import { useAuth } from '@/auth';
+import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
@@ -89,11 +92,12 @@ import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
 import { MessageThreadView, threadQueryKey } from '@/components/MessageThreadView';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
+import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { DaySeparator, UnreadDivider } from '@/components/ThreadDivider';
 import { ReactorsSheet, reactorsQueryKey } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
 import { getDraft, setDraft } from '@/drafts';
-import type { Outgoing } from '@/outbox';
+import type { Outgoing, OutgoingPhoto } from '@/outbox';
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
 import { useQuotedMessages } from '@/quotes';
 import type { SendState } from '@/readReceipts';
@@ -107,7 +111,13 @@ import {
 } from '@/theme';
 import type { ThreadRow } from '@/threadRows';
 import { firstUnreadId, toThreadRows } from '@/threadRows';
-import type { Author, Message, Paginated, Reaction } from '@/types';
+import type {
+  Author,
+  Message,
+  MessageAttachment,
+  Paginated,
+  Reaction,
+} from '@/types';
 import { useDayBoundary } from '@/useDayBoundary';
 
 /** The composer bar's base vertical padding, before the home-indicator inset. */
@@ -161,7 +171,13 @@ function patchReactions(
 }
 
 /** What one send needs to carry, including which outbox entry it belongs to. */
-type SendVars = { value: string; replyToId?: number; tempId: number };
+type SendVars = {
+  value: string;
+  replyToId?: number;
+  tempId: number;
+  /** A prepared photo to upload with it (M7); absent on a text-only send. */
+  photo?: OutgoingPhoto;
+};
 
 /**
  * Put an accepted message into a cached list, if it isn't there already.
@@ -339,6 +355,18 @@ export default function ThreadScreen() {
   // badly on iOS (the trap `ReactionTray` documents).
   const [pickerFor, setPickerFor] = useState<number | null>(null);
   const [reactorsFor, setReactorsFor] = useState<number | null>(null);
+  /**
+   * A photo picked and prepared, waiting on the composer for you to hit Send
+   * (M7). Held here and not in the outbox because it hasn't been sent yet —
+   * the outbox is for messages that are *on their way*.
+   *
+   * `preparing` covers the second or two of resize-and-strip after a pick, which
+   * is long enough on a big photo to look like nothing happened.
+   */
+  const [attachment, setAttachment] = useState<OutgoingPhoto | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  /** The photo open in the full-screen viewer, if any. */
+  const [lightbox, setLightbox] = useState<MessageAttachment | null>(null);
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/messages');
@@ -715,8 +743,8 @@ export default function ThreadScreen() {
    * rather than dying with the component.
    */
   const sendMutation = useMutation({
-    mutationFn: ({ value, replyToId }: SendVars) =>
-      api.sendMessage(id, value, replyToId),
+    mutationFn: ({ value, replyToId, photo }: SendVars) =>
+      api.sendMessage(id, value, replyToId, photo),
     onSuccess: (message, { tempId }) => {
       // Write the accepted message into the cache *before* dropping the outbox
       // entry, so the bubble is never absent for the frame between the two.
@@ -780,10 +808,12 @@ export default function ThreadScreen() {
     value,
     replyToId,
     rootId,
+    photo,
   }: {
     value: string;
     replyToId?: number;
     rootId?: number;
+    photo?: OutgoingPhoto;
   }) {
     // A light tap on send (M5) — the same one the long-press uses. It's the
     // physical acknowledgement that the message left, which matters more here
@@ -791,12 +821,13 @@ export default function ThreadScreen() {
     // there's no moment where anything *happened*. Fire and forget; a phone
     // with no taptic engine simply resolves it.
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    const entry = newOutgoing({ text: value, replyToId, rootId });
+    const entry = newOutgoing({ text: value, replyToId, rootId, photo });
     setOutbox((entries) => [...entries, entry]);
     return sendMutation.mutateAsync({
       value,
       replyToId,
       tempId: entry.tempId,
+      photo,
     });
   }
 
@@ -814,6 +845,10 @@ export default function ThreadScreen() {
         value: entry.text,
         replyToId: entry.replyToId,
         tempId: entry.tempId,
+        // The prepared files are still in the cache directory, so a retry
+        // re-uploads them rather than asking the person to pick the photo again
+        // — which is the same promise the text half of the outbox makes.
+        photo: entry.photo,
       })
       .catch(() => {});
   }
@@ -887,12 +922,23 @@ export default function ThreadScreen() {
   const busy = editMutation.isPending;
 
   /**
+   * Whether Send does anything. Text *or* a photo is enough (M7) — a photo with
+   * no caption is an ordinary message — but not while one is still being
+   * prepared, or the tap would send an empty message and drop the photo.
+   */
+  const canSubmit = (!!text.trim() || !!attachment) && !busy && !preparing;
+
+  /**
    * Send a new message, or save the one being edited — the transcript's composer
    * does both. Replies are sent from inside the focused thread, not from here.
    */
   function handleSend() {
     const value = text.trim();
-    if (!value || busy) return;
+    // A photo with no caption is a perfectly ordinary message, so "there's
+    // something to send" is now text *or* a photo — the same rule the server
+    // enforces. Not while one is still being prepared: sending then would
+    // silently drop the photo the person is looking at.
+    if ((!value && !attachment) || busy || preparing) return;
     if (editing) {
       // Saving the original text unchanged is a no-op, not a pointless PATCH
       // that would stamp the message "Edited" for nothing.
@@ -906,7 +952,78 @@ export default function ThreadScreen() {
     // front of you as a failed bubble with Retry, which is a better home for it
     // than a composer you'd have to remember to re-send from.
     setText('');
-    queueSend({ value }).catch(() => {});
+    setAttachment(null);
+    queueSend({ value, photo: attachment ?? undefined }).catch(() => {});
+  }
+
+  /**
+   * Attach a photo (M7): take one, or pick one from the library.
+   *
+   * **The camera is offered first, not just the library.** Sending a picture of
+   * what's in front of you is at least half of what a photo in a chat is for,
+   * and bouncing someone out to the camera app and back is the kind of friction
+   * that makes an app feel like a website with a wrapper.
+   *
+   * A plain `Alert` rather than a native action sheet: three choices, one of
+   * them Cancel, and it's the pattern this screen already uses for destructive
+   * confirms — an extra dependency for a rounder sheet isn't worth it.
+   */
+  function attachPhoto() {
+    Alert.alert('Send a photo', undefined, [
+      { text: 'Take Photo', onPress: () => pickPhoto('camera') },
+      { text: 'Choose from Library', onPress: () => pickPhoto('library') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }
+
+  async function pickPhoto(source: 'camera' | 'library') {
+    let picked;
+    if (source === 'camera') {
+      // The camera *does* need permission — unlike the modern library picker,
+      // which runs out of process and hands back only what was chosen.
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert(
+          'Camera access needed',
+          'Allow camera access in Settings to take a photo here.'
+        );
+        return;
+      }
+      picked = await ImagePicker.launchCameraAsync({ quality: 1 });
+    } else {
+      // `quality: 1` on both: this is the *pick*, and every photo is resized and
+      // re-encoded a moment later by `prepareChatPhoto`. Compressing twice would
+      // only throw away detail before the step that decides how much to keep.
+      picked = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 1,
+      });
+    }
+    if (picked.canceled) return;
+    const asset = picked.assets[0];
+    if (!asset) return;
+
+    setPreparing(true);
+    try {
+      // 🔒 This is where the photo is downscaled and its EXIF — including the
+      // GPS coordinates a phone stamps on every shot — is stripped, by being
+      // re-encoded from raw pixels. The server does none of that for chat
+      // photos, on purpose (see `chatPhotos.ts`), so skipping this step would
+      // send everyone in the thread the location the picture was taken.
+      const prepared = await prepareChatPhoto(
+        asset.uri,
+        asset.width,
+        asset.height
+      );
+      setAttachment(prepared);
+    } catch {
+      Alert.alert(
+        'Couldn’t use that photo',
+        'Something went wrong preparing it. Try another one.'
+      );
+    } finally {
+      setPreparing(false);
+    }
   }
 
   function startEditing(message: Message) {
@@ -1143,6 +1260,10 @@ export default function ThreadScreen() {
                         : undefined
                     }
                     status={statusFor(message)}
+                    // No viewer for an in-flight photo: the only copy is the
+                    // local thumbnail standing in for it, so "open full size"
+                    // has nothing to open until the upload lands.
+                    onPhotoPress={pending ? undefined : setLightbox}
                     onRetry={pending ? () => retryMessage(message) : undefined}
                     onDiscard={pending ? () => discardSend(message) : undefined}
                     onShowReactors={() => setReactorsFor(message.id)}
@@ -1251,7 +1372,59 @@ export default function ThreadScreen() {
                   </View>
                 ) : null}
 
+                {/* The photo waiting to be sent (M7), above the input — where
+                    you can see it while writing the caption, and where the ✕ to
+                    change your mind is nowhere near Send. Only one at a time:
+                    picking several photos sends several messages, so each gets
+                    its own bubble and its own reactions and replies. */}
+                {attachment || preparing ? (
+                  <View style={styles.attachment}>
+                    {preparing ? (
+                      <View style={styles.attachmentPreparing}>
+                        <ActivityIndicator color={colors.accent} />
+                      </View>
+                    ) : attachment ? (
+                      <>
+                        {/* A local file, not our media host — a plain Image is
+                            right; AuthedImage would attach a pointless header. */}
+                        <Image
+                          source={{ uri: attachment.previewUri }}
+                          style={styles.attachmentThumb}
+                        />
+                        <Pressable
+                          onPress={() => setAttachment(null)}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel="Remove photo"
+                          style={styles.attachmentRemove}
+                        >
+                          <Text style={styles.attachmentRemoveText}>✕</Text>
+                        </Pressable>
+                      </>
+                    ) : null}
+                  </View>
+                ) : null}
+
                 <View style={styles.composer}>
+                  {/* No attach button while editing: an edit changes the words
+                      of a message someone may already have read, and swapping
+                      its photo is not something the "Edited" marker can honestly
+                      disclose. The server refuses it too. */}
+                  {editing ? null : (
+                    <Pressable
+                      onPress={attachPhoto}
+                      disabled={preparing}
+                      accessibilityRole="button"
+                      accessibilityLabel="Add a photo"
+                      hitSlop={6}
+                      style={({ pressed }) => [
+                        styles.attach,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.attachIcon}>＋</Text>
+                    </Pressable>
+                  )}
                   <TextInput
                     ref={inputRef}
                     value={text}
@@ -1264,12 +1437,12 @@ export default function ThreadScreen() {
                   />
                   <Pressable
                     onPress={handleSend}
-                    disabled={!text.trim() || busy}
+                    disabled={!canSubmit}
                     accessibilityRole="button"
                     accessibilityLabel={editing ? 'Save' : 'Send'}
                     style={({ pressed }) => [
                       styles.send,
-                      (!text.trim() || busy) && styles.sendDisabled,
+                      !canSubmit && styles.sendDisabled,
                       pressed && styles.pressed,
                     ]}
                   >
@@ -1344,6 +1517,26 @@ export default function ThreadScreen() {
             queueSend({ value, replyToId, rootId: thread.rootId })
           }
           onClose={() => setThread(null)}
+        />
+      ) : null}
+
+      {/* A photo, full screen (M7). The same viewer the feed uses, handed one
+          photo: a chat's pictures aren't a gallery you swipe through from a
+          bubble — the message is the unit, and the whole chat's photos have
+          their own grid on the info screen. */}
+      {lightbox ? (
+        <PhotoLightbox
+          images={[
+            {
+              id: lightbox.id,
+              image: lightbox.url,
+              thumbnail: lightbox.thumbnail,
+              width: lightbox.width,
+              height: lightbox.height,
+            },
+          ]}
+          initialIndex={0}
+          onClose={() => setLightbox(null)}
         />
       ) : null}
 
@@ -1538,6 +1731,51 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xs,
   },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
+  // Sized to match the input's collapsed height so the three controls sit on one
+  // line rather than the ＋ floating above a grown, multi-line composer.
+  attach: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+    backgroundColor: colors.raised,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // The full-width form of "+" — a hairline glyph at this size reads as a
+  // scratch on the screen rather than a button.
+  attachIcon: { fontSize: fontSize.base, color: colors.inkSoft, lineHeight: 20 },
+  attachment: { marginBottom: spacing.sm, alignSelf: 'flex-start' },
+  attachmentThumb: { width: 72, height: 72, borderRadius: radius.md },
+  attachmentPreparing: {
+    width: 72,
+    height: 72,
+    borderRadius: radius.md,
+    backgroundColor: colors.raised,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Overlapping the thumbnail's top-right corner, the way a removable chip is
+  // dismissed everywhere else in the app (see the compose box's photo strip).
+  attachmentRemove: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.ink,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentRemoveText: {
+    color: '#ffffff',
+    fontSize: fontSize.sm - 2,
+    lineHeight: 14,
+  },
   input: {
     flex: 1,
     maxHeight: 120,

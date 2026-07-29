@@ -113,6 +113,40 @@ def group_avatar_thumb_upload_to(instance, filename):
     return _uuid_name("groups/thumbs", filename)
 
 
+# --- message attachments (Phase 9b M7) ---------------------------------------
+# 🔒 These two are the *only* upload_to callables that ignore the uploaded
+# filename's extension and force ``.jpg``, because they name bytes this module
+# never decoded.
+#
+# Everything above is written by ``process_image`` below, which has already
+# opened the file with Pillow and re-encoded it — so the extension it is handed
+# is one we chose and is guaranteed to match the bytes. **Message attachments
+# skip that path entirely**: they're processed on the phone (resized, stripped,
+# re-encoded) so the same code works unchanged once the server is handed
+# ciphertext under E2E — see messaging.md's *Photo messages*. The trade is that
+# the server can no longer prove a blob is really an image.
+#
+# That matters because Caddy serves ``/media/*`` off disk with ``file_server``,
+# which picks the Content-Type from the *extension*. An attachment stored as
+# ``.html`` or ``.svg`` would be served as markup from our own origin — stored
+# XSS with a session cookie next to it. Forcing ``.jpg`` means a browser is
+# always told "this is a JPEG" whatever the bytes are, and a browser will not
+# execute a JPEG. (``X-Content-Type-Options: nosniff`` on the media route is the
+# second layer; see deploy/Caddyfile.)
+
+
+def _forced_jpeg_name(subdir):
+    return f"{subdir}/{uuid4().hex}.jpg"
+
+
+def message_attachment_upload_to(instance, filename):
+    return _forced_jpeg_name("messages")
+
+
+def message_attachment_thumb_upload_to(instance, filename):
+    return _forced_jpeg_name("messages/thumbs")
+
+
 # --- processing --------------------------------------------------------------
 
 

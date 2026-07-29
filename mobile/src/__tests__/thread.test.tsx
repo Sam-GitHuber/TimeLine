@@ -8,6 +8,11 @@
  * Phase 9b M2 adds reactions: a quick-emoji row across the top of that menu, and
  * pills under the bubble that toggle on tap and reveal who reacted on a hold.
  *
+ * Phase 9b M7 adds photo messages: the composer grows an attach button that
+ * offers the camera and the library, a picked photo is prepared *on the phone*
+ * (resized and EXIF-stripped) before it's uploaded as multipart, a photo with no
+ * caption is a valid message, and the bubble shows it and opens it full-screen.
+ *
  * Phase 9b M3 adds reply threads: Reply in that menu opens a focused strand over
  * a blurred transcript with its own composer, a reply renders a quote resolved
  * from messages the client already holds (never anything the server attached to
@@ -25,6 +30,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
+import * as ImagePicker from 'expo-image-picker';
 import { Alert, FlatList, Linking } from 'react-native';
 
 import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
@@ -98,6 +104,69 @@ jest.mock('rn-emoji-keyboard', () => {
         : null,
   };
 });
+
+/**
+ * The photo picker and the image pipeline are both native (Phase 9b M7).
+ *
+ * `expo-image-manipulator` is stood in with something that reports a plausible
+ * output rather than a no-op, because the *dimensions* it returns are what the
+ * bubble lays out from and what the multipart body carries. Its real behaviour —
+ * that a re-encode drops the EXIF — is pinned in `chatPhotos.test.ts` and,
+ * finally, on a device with a GPS-tagged photo.
+ */
+jest.mock('expo-image-picker', () => ({
+  launchImageLibraryAsync: jest.fn(),
+  launchCameraAsync: jest.fn(),
+  requestCameraPermissionsAsync: jest.fn(async () => ({ granted: true })),
+}));
+
+jest.mock('expo-image-manipulator', () => ({
+  SaveFormat: { JPEG: 'jpeg' },
+  ImageManipulator: {
+    manipulate: (uri: string) => {
+      let size: { width?: number; height?: number } = {};
+      return {
+        resize: (requested: { width?: number; height?: number }) => {
+          size = requested;
+        },
+        renderAsync: async () => ({
+          saveAsync: async () => ({
+            uri: `${uri}-prepared.jpg`,
+            width: size.width ?? 1200,
+            height: size.height ?? 900,
+          }),
+        }),
+      };
+    },
+  },
+}));
+
+const pickFromLibrary = ImagePicker.launchImageLibraryAsync as jest.Mock;
+const takePhoto = ImagePicker.launchCameraAsync as jest.Mock;
+
+/** A picked camera-roll asset, as the picker reports one. */
+const PICKED = {
+  canceled: false,
+  assets: [{ uri: 'file:///camera-roll/IMG_1.jpg', width: 4032, height: 3024 }],
+};
+
+/**
+ * Drive the composer's attach flow by answering its Alert.
+ *
+ * The choice between camera and library is an `Alert` with three buttons, so
+ * "the user tapped Take Photo" is "the second button's onPress fired" — there is
+ * no rendered sheet to press under Node.
+ */
+function chooseAttachSource(label: 'Take Photo' | 'Choose from Library') {
+  const spy = jest.spyOn(Alert, 'alert').mockImplementation(((
+    _title: string,
+    _message: string | undefined,
+    buttons: { text: string; onPress?: () => void }[]
+  ) => {
+    buttons.find((button) => button.text === label)?.onPress?.();
+  }) as unknown as typeof Alert.alert);
+  return spy;
+}
 
 const mockFetch = jest.fn();
 
@@ -182,7 +251,20 @@ function message(overrides: Partial<Message> & { id: number }): Message {
     created_at: new Date().toISOString(),
     edited_at: null,
     reactions: [],
+    attachments: [],
     ...overrides,
+  };
+}
+
+/** A photo on a message, as `MessageAttachmentSerializer` sends one. */
+function photo(id: number) {
+  return {
+    id,
+    kind: 'image' as const,
+    url: `https://example.test/media/messages/${id}.jpg`,
+    thumbnail: `https://example.test/media/messages/thumbs/${id}.jpg`,
+    width: 1200,
+    height: 900,
   };
 }
 
@@ -2520,4 +2602,180 @@ it('does not leave a message you were editing sitting in the composer', async ()
   expect((await screen.findByLabelText('Message')).props.value).toBe(
     'half-written thought'
   );
+});
+
+/* --- Photo messages (Phase 9b M7) ----------------------------------------- */
+
+it('sends a photo picked from the library, prepared on the phone', async () => {
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  pickFromLibrary.mockResolvedValue(PICKED);
+  const alert = chooseAttachSource('Choose from Library');
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  // The prepared thumbnail sits on the composer until you send it, so you can
+  // see what you're about to send and back out of it.
+  await screen.findByLabelText('Remove photo');
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  await waitFor(() => {
+    const send = mockFetch.mock.calls.find(
+      ([url, init]) =>
+        String(url).includes('/api/conversations/5/messages/') &&
+        init?.method === 'POST'
+    );
+    expect(send).toBeDefined();
+    // 🔒 Multipart rather than JSON, which is the observable sign the photo went
+    // with it. **The file is the prepared one, never the camera-roll URI** — the
+    // server doesn't open a chat attachment (it can't, once these are
+    // ciphertext), so uploading the original would ship its GPS coordinates to
+    // everyone in the chat. The exact part names and the prepared filename are
+    // pinned in `api.test.ts`, which has the harness to read a FormData's parts.
+    expect(send![1].body).toBeInstanceOf(FormData);
+    expect(send![1].headers['Content-Type']).toBeUndefined();
+  });
+  alert.mockRestore();
+});
+
+it('offers the camera as well as the library', async () => {
+  // Sending a picture of what's in front of you is half of what a photo in a
+  // chat is for; routing people out to the camera app is the friction that makes
+  // an app feel like a website.
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  takePhoto.mockResolvedValue(PICKED);
+  const alert = chooseAttachSource('Take Photo');
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+
+  await waitFor(() => expect(takePhoto).toHaveBeenCalled());
+  expect(pickFromLibrary).not.toHaveBeenCalled();
+  alert.mockRestore();
+});
+
+it('declares the camera permission the camera path needs', () => {
+  // 🔒 **The test above cannot catch this and shipped a crash once already.** It
+  // mocks `requestCameraPermissionsAsync`, so it passes against a binary that
+  // has no camera permission at all — which is exactly what M7 first built.
+  //
+  // `expo-image-picker`'s config plugin treats `cameraPermission: false` as an
+  // instruction to *remove* `NSCameraUsageDescription` from Info.plist and to
+  // add `android.permission.CAMERA` to `blockedPermissions`. iOS terminates an
+  // app that reaches for the camera with no usage description, so "Take Photo"
+  // was a hard crash on a real phone while every Node test stayed green.
+  //
+  // This asserts the config instead, which is the only thing about it a Node
+  // test *can* see. It's a string rather than a boolean because Apple shows it
+  // to the person in the permission prompt.
+  const config = require('../../app.json');
+  const picker = config.expo.plugins.find(
+    (plugin: unknown) => Array.isArray(plugin) && plugin[0] === 'expo-image-picker'
+  );
+  expect(typeof picker[1].cameraPermission).toBe('string');
+  expect(picker[1].cameraPermission.length).toBeGreaterThan(0);
+});
+
+it('sends a photo with no caption at all', async () => {
+  // The rule the server enforces is text *or* a photo, never neither — so Send
+  // has to come alive for a photo alone, and an empty composer still must not
+  // send anything.
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  pickFromLibrary.mockResolvedValue(PICKED);
+  const alert = chooseAttachSource('Choose from Library');
+
+  await renderScreen();
+  const send = await screen.findByLabelText('Send');
+  expect(send.props.accessibilityState?.disabled).toBe(true);
+
+  await fireEvent.press(screen.getByLabelText('Add a photo'));
+  await screen.findByLabelText('Remove photo');
+
+  expect(screen.getByLabelText('Send').props.accessibilityState?.disabled).toBe(
+    false
+  );
+  alert.mockRestore();
+});
+
+it('lets you back out of a photo before sending it', async () => {
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  pickFromLibrary.mockResolvedValue(PICKED);
+  const alert = chooseAttachSource('Choose from Library');
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await fireEvent.press(await screen.findByLabelText('Remove photo'));
+
+  expect(screen.queryByLabelText('Remove photo')).toBeNull();
+  // And Send goes back to inert, because there's nothing left to send.
+  expect(screen.getByLabelText('Send').props.accessibilityState?.disabled).toBe(
+    true
+  );
+  alert.mockRestore();
+});
+
+it('shows a received photo in the bubble and opens it full-screen', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 1, sender: ADA, text: '', attachments: [photo(9)] })],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Photo, tap to open'));
+
+  await screen.findByLabelText('Close photo viewer');
+});
+
+it('offers the action menu on a photo rather than swallowing the long-press', async () => {
+  // A photo is its own `Pressable`, so it becomes the touch responder and the
+  // bubble's `onLongPress` never sees the gesture. It has to re-offer the
+  // gesture itself, or Reply/React/Report are unreachable from a photo message
+  // and the hold falls through to `onPress` on release — which opened the
+  // lightbox instead of the menu.
+  //
+  // **Asserted through the hint, not by firing a long-press**, and that's not
+  // laziness: RNTL bubbles a `longPress` event up to the nearest ancestor
+  // handler, so the menu opens under test whether or not the photo carries its
+  // own — the bug reproduces on a device and cannot reproduce here. The hint is
+  // rendered only when the handler is wired, so it stands in for the wiring
+  // that the responder conflict actually turns on. If you're changing this,
+  // verify the gesture on a simulator too; no Node test can cover it.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 1, sender: ADA, text: '', attachments: [photo(9)] })],
+  });
+
+  await renderScreen();
+
+  const image = await screen.findByLabelText('Photo, tap to open');
+  expect(image.props.accessibilityHint).toBe('Press and hold for message actions');
+});
+
+it('announces a captionless photo as a photo, not as an empty message', async () => {
+  // A bubble with no text would otherwise read out as nothing at all, which is
+  // how a screen reader reports "there's nothing here".
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 1, sender: ADA, text: '', attachments: [photo(9)] })],
+  });
+
+  await renderScreen();
+  await screen.findByLabelText('Message from Ada Lovelace: Photo');
+});
+
+it('offers no attach button while editing a message', async () => {
+  // An edit changes the words of something already read; swapping the picture
+  // under it isn't something the "Edited" marker can honestly disclose, and the
+  // server refuses it.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'mine' })],
+  });
+
+  await renderScreen();
+  expect(await screen.findByLabelText('Add a photo')).toBeTruthy();
+
+  await openMenu('Your message: mine');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+
+  expect(screen.queryByLabelText('Add a photo')).toBeNull();
 });
