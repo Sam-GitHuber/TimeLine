@@ -74,9 +74,17 @@ message push can be **replied to from the notification** (built and unit-tested;
 the on-device pass is the one M8 item still outstanding, since it needs a
 TestFlight build). **M9 (web parity) is in progress** — the big one: every
 mobile-only feature above lands on the web. It's split into **six PRs, M9a–M9f**,
-each written up in the phase doc to be picked up cold. **M9a is done**: the
-602-line `MessagesDrawer.jsx` is now a shell over `frontend/src/components/messages/`,
-a pure code move with no behaviour change.
+each written up in the phase doc to be picked up cold. **M9a and M9b are done**:
+the 602-line `MessagesDrawer.jsx` is now a shell over
+`frontend/src/components/messages/` (a pure code move), and the web transcript
+has caught up with the app's — one page on open with older messages paging in as
+you scroll back (it used to load a chat's *entire* history), day separators,
+clock times, run grouping, a latched unread divider, jump-to-latest, clickable
+links, big emoji, per-chat drafts, and a `⋯` menu on hover carrying
+Copy/Edit/Delete or Copy/Report. **The `⋯` stays visible under
+`@media (hover: none)`** — the drawer is read in phone browsers, and a hover-only
+affordance would hide every message action from them; read `messaging.md`'s
+*The web transcript* before touching it, the rule is a cascade trap.
 Full plan in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
 — read it before touching messaging. Its milestones are written to be picked up
 cold by a fresh session; follow the "How to use this document" section at the top.

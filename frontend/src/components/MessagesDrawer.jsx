@@ -15,7 +15,7 @@ import { useMessaging } from "../messaging.jsx";
 // out in Phase 9b M9a, before the parity work, so that five feature diffs
 // afterwards weren't tangled with a 600-line file being carved up.
 export default function MessagesDrawer() {
-  const { isOpen, view, close, newPrefill } = useMessaging();
+  const { isOpen, view, close, newPrefill, conversationId } = useMessaging();
   const panelRef = useRef(null);
 
   // Esc closes; focus lands in the panel so keys + screen readers work. We
@@ -42,7 +42,14 @@ export default function MessagesDrawer() {
       className="msg-drawer fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-line bg-surface shadow-[-14px_0_44px_-26px_rgba(28,26,22,0.4)] outline-none sm:w-[400px]"
     >
       {view === "list" && <ConversationListView />}
-      {view === "thread" && <ConversationThreadView />}
+      {/* Keyed on the conversation so switching threads remounts rather than
+          reusing the view. Since Phase 9b M9b the thread holds state that is
+          only true of *one* conversation — the latched unread divider, the
+          composer's draft, the message being edited — and carrying any of that
+          into a different chat would be worse than a flicker. */}
+      {view === "thread" && (
+        <ConversationThreadView key={conversationId} />
+      )}
       {view === "new" && <NewChatPicker prefill={newPrefill} />}
     </aside>,
     document.body

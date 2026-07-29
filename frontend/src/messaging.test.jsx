@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App.jsx";
 import { renderWithAuth, fakeUser } from "./test-utils.jsx";
 import { api } from "./api.js";
 import { MessagingProvider } from "./messaging.jsx";
+import { clearDrafts } from "./drafts.js";
 import NewChatPicker from "./components/NewChatPicker.jsx";
 
 // Phase 5 messaging is a companion drawer (not a route): the nav "Messages"
@@ -31,7 +32,9 @@ vi.mock("./api.js", () => ({
     getConversation: vi.fn(),
     getMessages: vi.fn(),
     sendMessage: vi.fn(),
+    editMessage: vi.fn(),
     deleteMessage: vi.fn(),
+    reportContent: vi.fn(),
     markConversationRead: vi.fn(),
     getUnreadMessageCount: vi.fn(),
     getGroupInvites: vi.fn(),
@@ -48,6 +51,7 @@ vi.mock("./api.js", () => ({
   CONVERSATION_LIST_POLL_MS: 1_000_000, // effectively off in tests
   MESSAGE_POLL_MS: 1_000_000,
   NOTIFICATIONS_POLL_MS: 1_000_000,
+  MESSAGE_EDIT_WINDOW_MS: 15 * 60 * 1000,
 }));
 
 function page(results, next = null) {
@@ -135,6 +139,10 @@ async function openDrawer(user) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Drafts live outside React so they can survive a view unmounting (Phase 9b
+  // M9b), which means they also survive a *test* — so they're reset here for the
+  // same reason sign-out clears them.
+  clearDrafts();
   api.getFeed.mockResolvedValue(page([]));
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
@@ -507,19 +515,14 @@ describe("Messages drawer — group thread", () => {
 
   it("attributes each incoming sender, collapsing runs and leaving your own bubbles unlabelled", async () => {
     api.getConversation.mockResolvedValue(groupConvoDetail());
+    // Newest-first, like the real payload since M9b (`?order=desc`) — so this
+    // reads bottom-up: you, then Sanjay, then Priya's two in a row.
     api.getMessages.mockResolvedValue(
       page([
         {
-          id: 1,
-          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
-          text: "hey there",
-          is_deleted: false,
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: 2,
-          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
-          text: "did you read chapter 3?",
+          id: 4,
+          sender: { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
+          text: "loved the ending",
           is_deleted: false,
           created_at: new Date().toISOString(),
         },
@@ -531,9 +534,16 @@ describe("Messages drawer — group thread", () => {
           created_at: new Date().toISOString(),
         },
         {
-          id: 4,
-          sender: { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
-          text: "loved the ending",
+          id: 2,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "did you read chapter 3?",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: 1,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "hey there",
           is_deleted: false,
           created_at: new Date().toISOString(),
         },
@@ -596,6 +606,300 @@ describe("Messages drawer — group thread", () => {
     expect(api.openConversation).not.toHaveBeenCalled();
     // Back in the thread it was added to.
     expect(await screen.findByText("Book Club")).toBeInTheDocument();
+  });
+});
+
+// Phase 9b M9b — the transcript the app has had since M5, and the ⋯ menu it has
+// had since M1, brought to the web. The fixtures below are **newest-first**,
+// because that's what `?order=desc` returns and what `toThreadRows` is fed.
+describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
+  function msg(overrides = {}) {
+    return {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hey there",
+      is_deleted: false,
+      is_edited: false,
+      created_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+  // A local wall-clock time today, so the rendered clock is the same string
+  // whatever timezone the suite runs in.
+  function at(hour, minute) {
+    const d = new Date();
+    d.setHours(hour, minute, 0, 0);
+    return d.toISOString();
+  }
+  function daysAgo(days, hour = 9) {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    d.setHours(hour, 0, 0, 0);
+    return d.toISOString();
+  }
+  const mine = { id: fakeUser.pk, display_name: "you", avatar_thumb: null };
+
+  it("loads one page and only fetches older messages when you scroll back", async () => {
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 2, text: "second" }), msg({ id: 1, text: "first" })],
+        "http://localhost:8000/api/conversations/7/messages/?order=desc&page=2")
+    );
+    api.getPage.mockResolvedValue(page([msg({ id: 0, text: "ancient" })]));
+
+    renderAt("/messages/7");
+    expect(await screen.findByText("second")).toBeInTheDocument();
+
+    // The defect this milestone exists to fix: the drawer used to walk every
+    // page in an effect, so opening a chat pulled its whole history.
+    expect(api.getPage).not.toHaveBeenCalled();
+
+    // jsdom has no layout, so every scroll reads as "at the top of what's
+    // loaded" — which is exactly the condition that pages older messages in.
+    fireEvent.scroll(screen.getByRole("log"));
+    await waitFor(() => expect(api.getPage).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("ancient")).toBeInTheDocument();
+  });
+
+  it("groups the transcript by day and stamps bubbles with a clock time", async () => {
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 2, text: "this morning", created_at: at(9, 5) }),
+        msg({ id: 1, text: "last week", created_at: daysAgo(8) }),
+      ])
+    );
+
+    renderAt("/messages/7");
+
+    expect(await screen.findByText("this morning")).toBeInTheDocument();
+    expect(screen.getByText("Today")).toBeInTheDocument();
+    // Clock times, not "5m ago": the separator above answers *which* day, so
+    // what a bubble has to answer is when in it.
+    expect(screen.getByText(/9:05am/)).toBeInTheDocument();
+  });
+
+  it("renders links as real links and draws an emoji-only message large", async () => {
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 2, text: "🎉" }),
+        msg({ id: 1, text: "look at https://example.com/x, it's good" }),
+      ])
+    );
+
+    renderAt("/messages/7");
+
+    const link = await screen.findByRole("link", {
+      name: "https://example.com/x",
+    });
+    // The trailing comma is the writer's punctuation, not part of the URL.
+    expect(link).toHaveAttribute("href", "https://example.com/x");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noreferrer");
+    expect(screen.getByText("🎉").className).toContain("text-[2.75rem]");
+  });
+
+  it("puts the unread divider where you stopped reading and leaves it there", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail({ unread_count: 2 }));
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 3, text: "and another" }),
+        msg({ id: 2, text: "one you missed" }),
+        msg({ id: 1, text: "yours", sender: mine }),
+      ])
+    );
+
+    renderAt("/messages/7");
+
+    const divider = await screen.findByText("2 unread messages");
+    // Rows are newest-first in the DOM (the scroller is column-reverse), so the
+    // divider's *previous* sibling is the oldest message it marks.
+    expect(divider.closest("li").previousElementSibling).toHaveTextContent(
+      "one you missed"
+    );
+
+    // A message arriving while you read must not slide the marker: the anchor
+    // and the label are latched on open, not re-derived from a count that now
+    // counts back from a different newest message.
+    api.sendMessage.mockResolvedValue(msg({ id: 4, text: "ok", sender: mine }));
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 4, text: "ok", sender: mine }),
+        msg({ id: 3, text: "and another" }),
+        msg({ id: 2, text: "one you missed" }),
+        msg({ id: 1, text: "yours", sender: mine }),
+      ])
+    );
+    await user.type(
+      screen.getByPlaceholderText(/write a message/i),
+      "ok{Enter}"
+    );
+
+    expect(await screen.findByText("ok")).toBeInTheDocument();
+    const stillThere = screen.getByText("2 unread messages");
+    expect(stillThere.closest("li").previousElementSibling).toHaveTextContent(
+      "one you missed"
+    );
+  });
+
+  it("keeps a per-conversation draft when you leave the thread and come back", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+
+    renderAt("/");
+    await openDrawer(user);
+    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+
+    await user.type(
+      await screen.findByPlaceholderText(/write a message/i),
+      "half a thought"
+    );
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    await user.click(await screen.findByRole("button", { name: /Priya/ }));
+
+    expect(await screen.findByPlaceholderText(/write a message/i)).toHaveValue(
+      "half a thought"
+    );
+  });
+
+  it("offers Edit on your own recent message and never on someone else's", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 2, text: "mine", sender: mine }),
+        msg({ id: 1, text: "theirs" }),
+      ])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("mine");
+
+    const menus = screen.getAllByRole("button", { name: "Message options" });
+    // Newest-first in the DOM: yours is the first trigger.
+    await user.click(menus[0]);
+    let panel = screen.getByRole("dialog", { name: "Message options" });
+    expect(within(panel).getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Report" })).toBeNull();
+
+    await user.keyboard("{Escape}");
+    await user.click(menus[1]);
+    panel = screen.getByRole("dialog", { name: "Message options" });
+    expect(within(panel).queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Report" })).toBeInTheDocument();
+    // Escape closed the menu, not the whole drawer.
+    expect(screen.getByRole("dialog", { name: "Messages" })).toBeInTheDocument();
+  });
+
+  it("hides Edit once the fifteen-minute window has passed", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({
+          id: 2,
+          text: "long ago",
+          sender: mine,
+          created_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+        }),
+      ])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("long ago");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+
+    const panel = screen.getByRole("dialog", { name: "Message options" });
+    expect(within(panel).queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("edits a message from the composer and shows the Edited marker", async () => {
+    const user = userEvent.setup();
+    const original = msg({ id: 5, text: "helo", sender: mine });
+    api.getMessages.mockResolvedValue(page([original]));
+    api.editMessage.mockResolvedValue({ ...original, text: "hello", is_edited: true });
+
+    renderAt("/messages/7");
+    await screen.findByText("helo");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    // Prefilled with the message, and clearly labelled as an edit rather than a
+    // new message — Send has become Save.
+    const box = screen.getByPlaceholderText(/edit your message/i);
+    expect(box).toHaveValue("helo");
+    expect(screen.getByText("Editing message")).toBeInTheDocument();
+
+    api.getMessages.mockResolvedValue(
+      page([{ ...original, text: "hello", is_edited: true }])
+    );
+    await user.clear(box);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(api.editMessage).toHaveBeenCalledWith(7, 5, "hello")
+    );
+    expect(await screen.findByText("hello")).toBeInTheDocument();
+    // The marker is the disclosure that makes editing safe at all, so it has to
+    // be on the bubble rather than implied.
+    expect(await screen.findByText(/Edited/)).toBeInTheDocument();
+    // And the composer is back to writing a new message.
+    expect(screen.queryByText("Editing message")).toBeNull();
+  });
+
+  it("restores whatever you were half-typing when you cancel an edit", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mine })])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("helo");
+    await user.type(
+      screen.getByPlaceholderText(/write a message/i),
+      "unrelated draft"
+    );
+
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByPlaceholderText(/edit your message/i)).toHaveValue("helo");
+
+    await user.click(screen.getByRole("button", { name: /cancel editing/i }));
+    expect(screen.getByPlaceholderText(/write a message/i)).toHaveValue(
+      "unrelated draft"
+    );
+    expect(api.editMessage).not.toHaveBeenCalled();
+  });
+
+  it("reports the message itself, and says what a report hands over", async () => {
+    const user = userEvent.setup();
+    api.reportContent.mockResolvedValue({ id: 1 });
+    api.getMessages.mockResolvedValue(page([msg({ id: 3, text: "nasty" })]));
+
+    renderAt("/messages/7");
+    await screen.findByText("nasty");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Report" }));
+
+    // The failure mode this asserts against is a dialog that looks right and
+    // reports nothing: before M9b the modal took a post or a comment only, so
+    // it would have been headed "Report this comment" and POSTed no target.
+    expect(
+      screen.getByRole("dialog", { name: "Report message" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Report this message")).toBeInTheDocument();
+    // 🔒 M0's disclosure: a report is the only route by which a message ever
+    // reaches the maintainer, so the reporter is told a copy goes with it.
+    expect(
+      screen.getByText(/A copy of this message is sent with your report/i)
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /send report/i }));
+    await waitFor(() =>
+      expect(api.reportContent).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 3 })
+      )
+    );
   });
 });
 
