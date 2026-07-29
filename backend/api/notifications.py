@@ -190,6 +190,18 @@ def enqueue_message_pushes(message):
     outbox would faithfully deliver ten separate buzzes, which is the single
     fastest way to make someone turn notifications off.
 
+    **@mentions are the one exception to mute** (Phase 9b M8). Naming someone is
+    how you get their attention, so a mention reaches them even in a thread they
+    silenced — but that is, unavoidably, a way to punch through a quiet somebody
+    deliberately asked for, so it's **opt-out per user**: a
+    ``NotificationPreference`` row for the ``mention`` kind with ``enabled=False``
+    turns the override off. Be precise about what that setting is: it governs
+    *only* whether a mention beats mute. A mention in an unmuted thread notifies
+    either way (it comes through the ordinary path above), and a muted thread with
+    the setting off stays completely silent. Every other rule still applies to a
+    mention — you must be active, not left, and the message must fall inside your
+    interval — because a mention can't make a message readable that isn't.
+
     **A conversation with no ``Participant`` rows produces nothing.** Those are
     legacy direct threads predating Phase 6a (migration ``0009`` backfilled the
     real ones; only threads built straight off the model, as Phase 5's tests do,
@@ -199,12 +211,15 @@ def enqueue_message_pushes(message):
     convo_id = message.conversation_id
     when = message.created_at
 
-    recipients = (
+    # Everyone who could read this message: active, present, and with an interval
+    # spanning it. Mute is *not* filtered here any more — it's applied below, so
+    # the mention exception can be carved out of one audience rather than
+    # assembled from two queries that could disagree about visibility.
+    audience = (
         Participant.objects.filter(
             conversation_id=convo_id,
             left_at__isnull=True,
             status=Participant.Status.ACTIVE,
-            muted_at__isnull=True,
             user__is_active=True,
         )
         .exclude(user_id=message.sender_id)
@@ -217,10 +232,13 @@ def enqueue_message_pushes(message):
                 | Q(intervals__ended_at__gt=when)
             )
         )
+    )
+    recipient_ids = set(
+        audience.filter(muted_at__isnull=True)
         .values_list("user_id", flat=True)
         .distinct()
     )
-    recipient_ids = set(recipients)
+    recipient_ids |= _mentioned_despite_mute(message, audience)
     if not recipient_ids:
         return []
 
@@ -240,6 +258,40 @@ def enqueue_message_pushes(message):
             PushOutbox(message=message, recipient_id=user_id)
             for user_id in sorted(outstanding)
         ]
+    )
+
+
+def _mentioned_despite_mute(message, audience):
+    """The user ids this message *mentions* who have muted the thread but still
+    want mentions to reach them (Phase 9b M8).
+
+    Carved out of the same ``audience`` queryset the unmuted recipients come
+    from, so a mention can never route around visibility: someone in an interval
+    gap, or sitting at ``pending``, isn't in that set and so can't be reached by
+    being named. It's the same reason the mute filter moved out of the base query
+    rather than this being a second query of its own.
+
+    The preference is read the same way ``create_notification`` reads one —
+    **absence means enabled** — so the override is on until someone turns it off.
+    """
+    mentioned_ids = set(message.mentions.values_list("user_id", flat=True))
+    if not mentioned_ids:
+        return set()
+
+    opted_out = set(
+        NotificationPreference.objects.filter(
+            user_id__in=mentioned_ids,
+            kind=Notification.Kind.MENTION,
+            enabled=False,
+        ).values_list("user_id", flat=True)
+    )
+    return set(
+        audience.filter(
+            muted_at__isnull=False,
+            user_id__in=mentioned_ids - opted_out,
+        )
+        .values_list("user_id", flat=True)
+        .distinct()
     )
 
 

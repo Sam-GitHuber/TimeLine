@@ -52,14 +52,27 @@
  * when in the day. URLs and email addresses are **tappable**, and a message that
  * is nothing but one to three emoji drops its bubble and is drawn large.
  *
+ * **Inline formatting** (Phase 9b M8). `*bold*`, `_italic_`, `~strikethrough~`
+ * and `` `monospace` `` are drawn as what people meant by them rather than left
+ * sitting there as stray punctuation — the markup people type out of habit, and
+ * a message full of asterisks is what "this app doesn't know that" looks like.
+ * The parse is render-time only: the stored text keeps its markup characters, so
+ * an edit shows you what you typed and the body stays one blob under E2E.
+ *
  * **Photos** (Phase 9b M7) sit above the caption inside the bubble, drawn at the
  * size the sender's phone recorded so the transcript doesn't reflow as they load,
  * and open full-screen on tap. A message may be a photo with no caption at all —
  * which is why the text is now rendered conditionally rather than always.
  *
+ * **Select mode** (Phase 9b M8) is the one state where a bubble's own tap does
+ * something: it ticks the message, and the row takes an accent wash. That's a
+ * suspension of the rule below rather than an exception to it — while selecting,
+ * a tap means exactly one thing everywhere on screen, so there's nothing to
+ * mistake it for.
+ *
  * **One gesture per target**, the rule M2 settled: **long-press** = the action
  * menu (Reply included), **tap the branch** = open the thread. The bubble's own
- * tap does nothing, and should stay that way — a target this size doing
+ * tap does nothing outside select mode, and should stay that way — a target this size doing
  * different things by press duration is where a mis-timed press does the wrong
  * thing. A tappable *link* inside the text is one exception and **a photo is the
  * other**; neither really breaks the rule, because both are smaller targets with
@@ -78,18 +91,26 @@
  * than the affordance is worth.
  */
 
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Linking,
+  Pressable,
+  StyleSheet,
+  Text,
+  type TextStyle,
+  View,
+} from 'react-native';
 
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
 import { SendStateIcon } from './icons';
 import type { BubbleAnchor } from './MessageActionMenu';
 import { measureInWindow } from '@/measure';
-import { isEmojiOnly, linkify } from '@/messageText';
+import type { Mark } from '@/messageText';
+import { isEmojiOnly, parseMessageText, plainMessageText } from '@/messageText';
 import type { SendState } from '@/readReceipts';
-import { colors, fontSize, radius, spacing } from '@/theme';
+import { colors, fonts, fontSize, radius, spacing } from '@/theme';
 import type { Message, MessageAttachment, Reaction } from '@/types';
 import { formatMessageTime } from '@/utils';
 
@@ -107,6 +128,7 @@ export function BubbleBody({
   quoted,
   status,
   endsRun = true,
+  mentionNames,
   onQuotePress,
   onPhotoPress,
   onPhotoLongPress,
@@ -115,6 +137,13 @@ export function BubbleBody({
   mine: boolean;
   /** The message this one replies to, if the caller could resolve it. */
   quoted?: Message;
+  /**
+   * Display names for the ids in `message.mentions` (Phase 9b M8), so an
+   * `@Ada` in the text can be highlighted. Supplied by the screen, which is
+   * where the participant list lives; omitted, the names still read fine as
+   * ordinary words — the sender typed them into the message.
+   */
+  mentionNames?: Map<number, string>;
   /**
    * The send state to show beside the timestamp (Phase 9b M4). Only ever passed
    * for your own messages — a tick on someone else's would be meaningless — and
@@ -207,7 +236,12 @@ export function BubbleBody({
         </View>
       ) : null}
       {message.text ? (
-        <MessageText message={message} mine={mine} large={large} />
+        <MessageText
+          message={message}
+          mine={mine}
+          large={large}
+          mentionNames={mentionNames}
+        />
       ) : null}
       {/* The meta line: time, the edited marker, then the tick. A row rather
           than one string because the tick is a glyph, and it has to sit on the
@@ -325,33 +359,88 @@ function MessagePhoto({
 }
 
 /**
- * A message's words, with URLs and email addresses made tappable (Phase 9b M5).
+ * What each emphasis mark looks like (Phase 9b M8).
  *
- * The cheapest "this feels broken" fix in the whole phase: a link someone sends
- * was dead text you had to retype by hand. Splitting and styling happens in
- * `messageText.ts`; this only decides what it looks like and what a tap does.
+ * Kept beside the parser's vocabulary rather than inside it: `messageText.ts`
+ * decides *what* a run is, this decides how it's drawn — the same split the
+ * link segments already had.
+ */
+const MARK_STYLE: Record<Mark, TextStyle> = {
+  bold: { fontWeight: '700' },
+  italic: { fontStyle: 'italic' },
+  strike: { textDecorationLine: 'line-through' },
+  // Monospace also drops a hair in size, because at a shared point size a mono
+  // face reads noticeably larger than the body text beside it.
+  mono: { fontFamily: fonts.mono, fontSize: fontSize.base - 3 },
+};
+
+function markStyles(marks: Mark[] | undefined): TextStyle[] {
+  return marks ? marks.map((mark) => MARK_STYLE[mark]) : [];
+}
+
+/**
+ * A message's words: URLs and email addresses made tappable (Phase 9b M5), and
+ * `*bold*` / `_italic_` / `~strikethrough~` / `` `monospace` `` drawn as what
+ * people meant by them (Phase 9b M8).
  *
- * 🔒 **Nothing is fetched.** Link *previews* are on the phase's "not building"
- * list — they'd mean the server retrieving every URL anyone pastes, which is a
- * tracking leak and an SSRF surface for a thumbnail. An underline and
- * `Linking.openURL` involve neither.
+ * The cheapest "this feels broken" fixes in the whole phase — a link someone
+ * sends was dead text you had to retype by hand, and the markup people type out
+ * of habit sat there as literal asterisks. Splitting happens in
+ * `messageText.ts`; this only decides what each run looks like and what a tap
+ * does.
+ *
+ * 🔒 **Nothing is fetched, and nothing is rewritten.** Link *previews* are on
+ * the phase's "not building" list — they'd mean the server retrieving every URL
+ * anyone pastes, which is a tracking leak and an SSRF surface for a thumbnail.
+ * And the markup is only ever *unrendered*, never stripped from the stored text:
+ * the raw string is the source of truth, so an edit shows you exactly what you
+ * typed and the body stays one opaque blob under E2E.
  */
 function MessageText({
   message,
   mine,
   large,
+  mentionNames,
 }: {
   message: Message;
   mine: boolean;
   large: boolean;
+  mentionNames?: Map<number, string>;
 }) {
   const base = [
     large ? styles.largeEmoji : styles.text,
     !large && (mine ? styles.mineText : styles.theirsText),
   ];
-  const segments = linkify(message.text);
-  // The overwhelmingly common case: one run, one Text, no map.
-  if (segments.length === 1 && segments[0].kind === 'text') {
+  /**
+   * Split once per message, not once per render.
+   *
+   * Ordinary text parses in microseconds, so this isn't about the common case —
+   * it's about the worst one. The scan asks "does a run close here?" at each
+   * delimiter it could open at, which is quadratic on a string full of openers
+   * that never close (`*a *a *a …`). At the 5000-character message cap that's
+   * tens of milliseconds, and a transcript re-renders on every poll, every
+   * keystroke in the composer and every scroll — so an unmemoised parse turns
+   * one awkward message into a permanently janky thread. Memoised, it's paid
+   * once and the pathological case is bounded.
+   *
+   * The deps are all reference-stable: the text is immutable, `mentions` comes
+   * from the query cache and `mentionNames` is memoised by the screen.
+   */
+  const segments = useMemo(() => {
+    // 🔒 Resolved here, from names the *viewer* already has. The message carries
+    // bare ids, so an id belonging to someone this viewer can't see resolves to
+    // nothing and its `@Ada` simply renders as the words the sender typed —
+    // which is the honest outcome, and the same rule an unresolvable reply quote
+    // follows.
+    const mentions = mentionNames
+      ? (message.mentions ?? [])
+          .map((id) => mentionNames.get(id))
+          .filter((name): name is string => !!name)
+      : [];
+    return parseMessageText(message.text, { mentions });
+  }, [message.text, message.mentions, mentionNames]);
+  // The overwhelmingly common case: one unmarked run, one Text, no map.
+  if (segments.length === 1 && segments[0].kind === 'text' && !segments[0].marks) {
     return <Text style={base}>{message.text}</Text>;
   }
   return (
@@ -362,7 +451,10 @@ function MessageText({
             // Position is a stable key here: the array is derived from an
             // immutable string, so the same text always splits the same way.
             key={`link-${index}`}
-            style={mine ? styles.linkMine : styles.linkTheirs}
+            style={[
+              markStyles(segment.marks),
+              mine ? styles.linkMine : styles.linkTheirs,
+            ]}
             accessibilityRole="link"
             // Swallowed: a URL the OS has no handler for (a scheme nobody has
             // installed) rejects, and there is nothing useful to say about it
@@ -371,8 +463,20 @@ function MessageText({
           >
             {segment.text}
           </Text>
+        ) : segment.kind === 'mention' ? (
+          <Text
+            key={`mention-${index}`}
+            style={[
+              markStyles(segment.marks),
+              mine ? styles.mentionMine : styles.mentionTheirs,
+            ]}
+          >
+            {segment.text}
+          </Text>
         ) : (
-          <Text key={`text-${index}`}>{segment.text}</Text>
+          <Text key={`text-${index}`} style={markStyles(segment.marks)}>
+            {segment.text}
+          </Text>
         )
       )}
     </Text>
@@ -508,9 +612,13 @@ function QuotedMessage({
    */
   onPress?: () => void;
 }) {
+  // Two lines of plain text, so the markup is dropped rather than drawn (M8):
+  // a quote is a *reference* to a message, not a second rendering of it.
   const body = quoted?.is_deleted
     ? 'Message deleted'
-    : (quoted?.text ?? 'Original message unavailable');
+    : quoted
+      ? plainMessageText(quoted.text)
+      : 'Original message unavailable';
   return (
     <Pressable
       onPress={onPress}
@@ -557,6 +665,9 @@ export function MessageBubble({
   endsRun = true,
   quoted,
   status,
+  mentionNames,
+  selected,
+  onPress,
   onLongPress,
   onShowReactors,
   onOpenThread,
@@ -578,6 +689,17 @@ export function MessageBubble({
   quoted?: Message;
   /** Its send state (Phase 9b M4) — your own messages only; see `BubbleBody`. */
   status?: SendState;
+  /** Names for this message's mention ids (Phase 9b M8); see `BubbleBody`. */
+  mentionNames?: Map<number, string>;
+  /** Ticked in select mode (Phase 9b M8) — the row takes an accent wash. */
+  selected?: boolean;
+  /**
+   * What a plain tap does. **Only ever passed in select mode**: outside it the
+   * bubble's tap deliberately does nothing, for the reason in this file's
+   * header. In select mode a tap means one thing everywhere on the screen,
+   * which is why the rule can be suspended without becoming ambiguous.
+   */
+  onPress?: () => void;
   /**
    * Opens the action menu, anchored to this bubble's rect on screen. Omitted
    * inside the focused thread view, which is deliberately menu-less — see
@@ -617,7 +739,16 @@ export function MessageBubble({
     // tells you where one person's burst ends and the next begins, so it has to
     // mean something. Every bubble spaced equally is the shape the thread had
     // before, and it read as a wall.
-    <View style={[styles.row, !endsRun && styles.rowInRun]}>
+    <View
+      style={[
+        styles.row,
+        !endsRun && styles.rowInRun,
+        // The wash is on the whole row, not the bubble: it has to read as "this
+        // message is picked" rather than as a new kind of bubble, and it has to
+        // be visible on a tombstone and behind reaction pills too.
+        selected && styles.rowSelected,
+      ]}
+    >
       {showSender && (
         <View style={styles.senderLine}>
           <Avatar user={message.sender} size="xs" />
@@ -635,9 +766,11 @@ export function MessageBubble({
         ) : (
           <Pressable
             ref={bubbleRef}
+            onPress={onPress}
             onLongPress={onLongPress ? handleLongPress : undefined}
             delayLongPress={350}
             accessibilityRole="text"
+            accessibilityState={onPress ? { selected: !!selected } : undefined}
             // The label lets the menu be opened by assistive tech and driven in
             // tests, since a long-press isn't otherwise discoverable.
             // A photo with no caption would otherwise announce itself as an
@@ -656,6 +789,7 @@ export function MessageBubble({
               quoted={quoted}
               status={status}
               endsRun={endsRun}
+              mentionNames={mentionNames}
               onQuotePress={onOpenThread}
               onPhotoPress={onPhotoPress}
               // The same handler the wrapper uses, so the menu anchors to the
@@ -734,6 +868,10 @@ export function MessageBubble({
 
 const styles = StyleSheet.create({
   row: { marginBottom: spacing.sm },
+  // Full-bleed by design: the row is inset by the list's padding, and a wash
+  // that stopped at the bubble's edge would read as a selected *bubble* rather
+  // than a selected message.
+  rowSelected: { backgroundColor: colors.accentTint },
   // Inside a run. Not zero: the bubbles still need a hairline between them, and
   // at 2px they read as stacked rather than as one very tall message.
   rowInRun: { marginBottom: 2 },
@@ -791,6 +929,12 @@ const styles = StyleSheet.create({
   // is not a strong enough signal on its own, and colour alone never is.
   linkMine: { color: '#ffffff', textDecorationLine: 'underline' },
   linkTheirs: { color: colors.accentDeep, textDecorationLine: 'underline' },
+  // A mention is weighted rather than underlined (M8): it isn't tappable, and
+  // an underline is this app's promise that something opens. Weight plus tint
+  // is enough to find a name at a glance in a busy group, which is all a
+  // mention has to do.
+  mentionMine: { color: '#ffffff', fontWeight: '700' },
+  mentionTheirs: { color: colors.accentDeep, fontWeight: '700' },
   meta: {
     marginTop: 2,
     flexDirection: 'row',

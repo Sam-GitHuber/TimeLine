@@ -434,9 +434,10 @@ opened the chat.
 **It lives on `accounts.User`, not in `NotificationPreference`.** A preference
 row is keyed by a notification *kind*, and there is no "someone read your
 message" notification to hang this off — nothing is created, sent or buzzed. The
-same reasoning put `Participant.muted_at` on the participant. (Contrast the
-planned M8 mentions-override, which *is* a notification kind and so does belong
-there. The pair reads as a rule, not an inconsistency.)
+same reasoning put `Participant.muted_at` on the participant. (Contrast M8's
+[mentions-override](#-a-mention-is-a-relation-and-the-only-thing-that-beats-mute),
+which *is* a notification kind and so does belong there. The pair reads as a
+rule, not an inconsistency.)
 
 **Groups are not carved out.** Some messengers exempt them; we don't — "you
 can't turn this off in group chats" is precisely the exception that makes a
@@ -639,6 +640,123 @@ path that forgot.
   subdirectories there would be a data-loss bug that only surfaces the night you
   need the backup.
 
+## Writing a message: formatting and @mentions
+
+Both added in Phase 9b M8, and both mobile-only until M9 ports them.
+
+### Inline formatting is a render-time parse, never a stored transform
+
+`*bold*`, `_italic_`, `~strikethrough~` and `` `monospace` `` are drawn as what
+people meant by them. This is not a feature anyone asks for by name — it's the
+absence of one that reads as broken, because people type these out of habit and
+a message full of literal asterisks says *this app doesn't know that*.
+
+**The markup characters stay in the database.** The parse happens when a bubble
+is drawn (`mobile/src/messageText.ts`), so the raw string is the source of truth
+throughout: an edit shows you exactly what you typed, and the body stays one
+opaque blob the day it becomes ciphertext. Stripping markup on the way in would
+also mean the *server* deciding what a message says, which is the thing E2E has
+to make impossible.
+
+Two decisions inside the parser are worth knowing before changing it:
+
+- **Links and marks are found in one walk of the string**, not by linkifying and
+  then formatting the pieces. Two passes fight: a URL full of underscores is not
+  italic, and a `` `code span` `` holding a URL is not a link. Asking "link
+  here? delimiter here?" at each index settles both in the order the characters
+  actually appear.
+- **A delimiter with a word character before it opens nothing.** That single rule
+  is what keeps `read_file_sync`, `2*3*4` and an email address intact. The bias
+  is deliberate and the inverse of what it looks like: leaving an asterisk on
+  screen is a shrug, while italicising half of someone's variable name is the
+  app corrupting what they wrote.
+
+Places that show a message as *one line of plain text* — a conversation row's
+preview, a collapsed quote — drop the markup rather than drawing it
+(`plainMessageText`). A preview can't carry emphasis, and showing raw asterisks
+there while the bubble renders them is the seam that reads as half-finished.
+
+### 🔒 A mention is a relation, and the only thing that beats mute
+
+Typing `@` in a group chat offers the thread's active members; picking one puts
+their whole name in the text **and records their user id**. The picker is a strip
+above the composer, and it is **not offered while editing** a message: an edit
+carries no `mention_ids`, so a name picked there would notify nobody and wouldn't
+even highlight (the highlight comes from the ids, not the words). Adding a
+mention means sending a message.
+
+**Why an id and not the name in the text.** Names change, two people in a family
+can share one, and — the load-bearing reason — under E2E there is no text for
+the server to read. Whoever a mention notifies has to be decidable from
+*metadata*, so it's a `MessageMention` row per (message, user) from day one
+rather than "extracted properly later".
+
+| Field | |
+| --- | --- |
+| `message` | CASCADE — the mention is a fact about a message and outlives neither it nor the user. |
+| `user` | CASCADE, unique together with `message`: naming someone twice in one message is one mention of them. |
+
+**What a mention does is exactly one thing: it notifies through a muted thread.**
+That's the whole point of naming someone, and it's the one justified exception to
+`Participant.muted_at`. It's also unavoidably a way to punch through a quiet
+someone deliberately asked for, so the override is **opt-out per user** — the
+`mention` notification preference, phrased in Settings as exactly what it does:
+*"Let @mentions notify me in muted chats."* Default on.
+
+Be precise about that setting, because getting it wrong silences mentions
+someone wanted:
+
+- muted thread + setting on → **notified** (this is the whole feature);
+- muted thread + setting off → **silent**;
+- unmuted thread → **notified either way**, through the ordinary message push.
+  Someone who turned the override off has not asked to stop hearing their name.
+
+**Mute is the only rule it overrides.** Every other gate still applies: you must
+be an active participant, not left, with an interval spanning the message.
+A mention cannot make a message readable that isn't, so it cannot announce one.
+That's enforced by carving the mentioned recipients out of the *same* audience
+queryset the ordinary recipients come from (`enqueue_message_pushes`), rather
+than assembling a second one that could disagree about visibility.
+
+**🔒 The ids a client may send are checked against the conversation's active
+participants.** An unchecked id would make the send endpoint a way to buzz a
+stranger's phone about a thread they aren't in — the exact thing the clique
+invariant exists to prevent. A `pending` member is refused too: they can't read a
+line of the thread, so naming them would announce something the app would then
+refuse to show them.
+
+**🔒 Group chats only, and the *server* is what enforces it.** `mention_ids` on a
+direct conversation is a 400, not a silently ignored field. The reason is the
+override itself: in a 1:1 the one person you might mute is the only person who
+can send you anything, so accepting an id there would let them defeat that mute
+on every message — muting a *person* would stop meaning anything, and the
+`mention` preference is no escape since turning it off to get away from one
+person costs you mentions in every group. Neither client offers a picker in a
+1:1, and that's exactly why the endpoint mustn't accept one: an endpoint wider
+than any client sends is only ever an attack surface. (`_mentionable_user_ids`
+returns nothing for a direct thread, legacy Participant-less ones included.)
+
+**On the wire a mention is a bare user id**, exactly like [`reply_to`](#reply-threads)
+— no name, no avatar. The client resolves it against the participants payload it
+already holds; an id it can't resolve simply renders as the words the sender
+typed, which is the honest outcome and needs no special case. Serialised as `[]`
+on a tombstone. It isn't pruned per viewer, and that was considered rather than
+skipped: anyone who can read the message can already read the `@Ada` *in* it, so
+the id says nothing the body doesn't.
+
+The push body says **"Ada mentioned you"** (plus " in <group>"). A silenced chat
+that suddenly buzzes owes you an explanation, and that's it — still naming the
+person and quoting nothing, like every other push here.
+
+**Where the setting lives is a rule, not a coincidence.** The mention override is
+a genuine notification kind, so it sits in `NotificationPreference` with the
+others and inherits absence-means-enabled, the `{kind: bool}` API and both
+clients' Settings screens. Contrast
+[`User.send_read_receipts`](#the-setting-usersend_read_receipts), which lives on
+the user model precisely *because* there's no notification kind behind it. Read
+the two together. (No `Notification` row is ever created for a mention:
+messaging keeps its own unread badge and stays outside the activity centre.)
+
 ## Renaming a group chat
 
 Added in Phase 9b M6. `PATCH /api/conversations/<id>/` with `{ title }`. Until
@@ -817,6 +935,15 @@ Direct and group chats share the endpoints:
   ([Reply threads](#reply-threads)); it's validated against **your own**
   interval-clipped messages, so an id from another thread or from inside a gap
   is rejected exactly like one that never existed.
+  - Optional `mention_ids` names people (Phase 9b M8), **group chats only**,
+    capped at `MESSAGE_MENTIONS_MAX` (20) and **validated against the
+    conversation's active participants** — an id from outside the room, or any id
+    at all on a direct thread, is a 400 rather than a silent drop, because a
+    mention is the one thing that beats a muted thread. Duplicates collapse.
+    Sent as repeated parts on the multipart (photo) path, one per id. The
+    messages payload carries them back as `mentions: [<user id>]`,
+    bare ids like `reply_to`. See
+    [@mentions](#-a-mention-is-a-relation-and-the-only-thing-that-beats-mute).
   - **Multipart when it carries a photo** (Phase 9b M7): parallel lists
     `attachments`, `attachment_thumbnails`, `attachment_widths`,
     `attachment_heights`, validated to the same length. `text` may then be
@@ -1135,6 +1262,11 @@ from "editing" to an accidental delete.
 `ReportModal`); M1 only added the menu entry that opens it, which is the UI entry
 point M0 deliberately shipped without.
 
+**Select** (M8) is the way into multi-select, and this menu is the right door for
+it: it's already the answer to "do something with this message", and the second
+message you want is the one you long-press *after* deciding there's more than
+one. See [Multi-select](#multi-select-phase-9b-m8).
+
 **Reactions render as pills** hanging off the bubble's lower edge on its near
 side. **Tapping one opens "who reacted"; it never toggles** — a pill displays what
 the thread said, so a tap goes to the detail of it rather than quietly changing it.
@@ -1307,6 +1439,65 @@ can't have. A tapped message push deep-links to the thread via `routeForNotifica
 mark-read-on-open clears the badge, so the tap path needs nothing special. It's the
 only push with `notificationId: null` and `kind: "message"` — there's no
 activity-centre row behind it. See [Push notifications](#push-notifications).
+
+### Multi-select (Phase 9b M8)
+
+Select in the long-press menu turns the header into "N selected" with Cancel, and
+the composer's slot into **Copy** and **Delete**. Deleting a burst one long-press
+at a time is genuinely irritating, and it's the only part of the thread where the
+app made you repeat yourself.
+
+Four decisions:
+
+- **The pressed message comes with you into the mode.** A burst is exactly where
+  you already know you want the next few, so entering with nothing ticked would
+  waste the tap you just made.
+- **A tap on a bubble ticks it** — the one state where a bubble's own tap does
+  anything. That's a *suspension* of the [one-gesture-per-target
+  rule](#the-long-press-action-menu-phase-9b-m1) rather than an exception to it:
+  while selecting, a tap means one thing everywhere on screen. The long-press
+  menu stands down for the same reason, so two modes can't race.
+- **Delete is offered only when every ticked message is one you could delete on
+  its own.** A bulk action that silently did *part* of what it says — yours,
+  quietly skipping theirs — is worse than one that isn't there. Absent reads as
+  "not yours"; permanently greyed reads as a bug. Copy stays either way, since
+  quoting an exchange is what you'd select someone else's messages for.
+- **Copy joins them oldest-first**, prefixed with who said what in a group. An
+  exchange between three people is unreadable pasted without names, and only
+  reads correctly in the order it happened. Messages with no words (a photo on
+  its own) are skipped rather than rendered as a placeholder.
+
+Deletes go out one at a time rather than in parallel — nobody is waiting on the
+round trip, since the bubbles are already gone from the selection — with one
+invalidation at the end, on settle rather than success: a partial failure still
+deleted some of them, and leaving those on screen would look like the whole
+action failed.
+
+### Replying from the notification (Phase 9b M8)
+
+A message push carries an iOS notification **category**, so pulling it down gives
+you a text field: type, send, and the app never comes to the foreground. That's
+what turns a push from a doorbell into something you can answer, and it's why the
+handler navigates nowhere on a reply — opening the thread would defeat the point.
+
+The moving parts, which have to agree by name: the backend puts
+`categoryId: "message"` on message pushes only (`send_pushes`), and the app
+registers that category with a `reply` action at launch (`push.ts`), because iOS
+keeps categories per *app* and a push can arrive before anyone signs in on this
+launch. **iOS silently ignores a category it doesn't know**, which looks exactly
+like the feature not existing — so the string is pinned by a test on both sides.
+
+**A reply that fails to send is kept.** There's no screen to report on — by
+construction the app isn't in front of anyone — and a second notification saying
+"couldn't send" would be a poor apology for having eaten what someone wrote. So
+it goes into the same [outbox](#optimistic-send-the-outbox) an in-app send uses
+and shows up as a failed bubble with Retry the next time the thread is opened.
+"We never drop text you typed" covers text typed into a notification too.
+
+Only messages get the category: replying to "Ada replied to your post" would mean
+posting a comment from the lock screen, which is a different feature against a
+different endpoint. See
+[notifications.md](notifications.md#phone-push-phase-9-milestone-d).
 
 ## Moderation: a report is the only window
 

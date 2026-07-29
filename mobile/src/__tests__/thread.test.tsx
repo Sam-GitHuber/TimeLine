@@ -2779,3 +2779,241 @@ it('offers no attach button while editing a message', async () => {
 
   expect(screen.queryByLabelText('Add a photo')).toBeNull();
 });
+
+/**
+ * @mentions (Phase 9b M8). Three things worth pinning at screen level: the
+ * picker appears while you're typing an `@`, choosing someone puts their whole
+ * name in and sends their **id**, and a name that got deleted before you hit
+ * send isn't sent at all. Everything about *matching* is a string question and
+ * lives in `mentions.test.ts`.
+ */
+function groupWithMentions(messages: Message[] = []) {
+  serve({
+    conversation: detail({
+      kind: 'group',
+      other: null,
+      title: 'Hikers',
+      participants: [
+        { ...ADA, status: 'active' },
+        { ...GRACE, status: 'active' },
+        { id: ME.pk, display_name: ME.display_name, avatar_thumb: null, status: 'active' },
+      ],
+    }),
+    messages,
+  });
+}
+
+it('offers people to mention and sends the chosen one as an id', async () => {
+  groupWithMentions();
+  await renderScreen();
+
+  const input = await screen.findByLabelText('Message');
+  await fireEvent.changeText(input, 'can @ad');
+
+  // The picker is a strip above the composer, not a modal: you're still writing.
+  await fireEvent.press(await screen.findByLabelText('Mention Ada Lovelace'));
+  // The half-typed query is replaced by the whole name, so the text says who
+  // you meant even for a client that can't resolve the id.
+  expect(screen.getByLabelText('Message').props.value).toBe('can @Ada Lovelace ');
+
+  await fireEvent.changeText(
+    screen.getByLabelText('Message'),
+    'can @Ada Lovelace bring the map?'
+  );
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  await waitFor(() => {
+    const send = mockFetch.mock.calls.find(
+      ([url, init]: [string, { method?: string; body?: string }]) =>
+        url.includes('/messages/') && init?.method === 'POST'
+    );
+    expect(JSON.parse(send[1].body).mention_ids).toEqual([ADA.id]);
+  });
+});
+
+it('does not name someone whose name was deleted before sending', async () => {
+  // Picked, then thought better of it. Sending the id anyway would buzz a muted
+  // thread about a message that doesn't mention her — the app talking behind
+  // your back.
+  groupWithMentions();
+  await renderScreen();
+
+  const input = await screen.findByLabelText('Message');
+  await fireEvent.changeText(input, '@ad');
+  await fireEvent.press(await screen.findByLabelText('Mention Ada Lovelace'));
+  await fireEvent.changeText(screen.getByLabelText('Message'), 'never mind');
+  await fireEvent.press(screen.getByLabelText('Send'));
+
+  await waitFor(() => {
+    const send = mockFetch.mock.calls.find(
+      ([url, init]: [string, { method?: string; body?: string }]) =>
+        url.includes('/messages/') && init?.method === 'POST'
+    );
+    expect(JSON.parse(send[1].body).mention_ids).toBeUndefined();
+  });
+});
+
+it('offers no mention picker in a 1:1', async () => {
+  // One person it could mean, so the picker would be ceremony around a word.
+  serve({ conversation: detail({}), messages: [] });
+  await renderScreen();
+
+  await fireEvent.changeText(await screen.findByLabelText('Message'), '@');
+
+  expect(screen.queryByLabelText('Mention Ada Lovelace')).toBeNull();
+});
+
+it('offers no mention picker while editing a message', async () => {
+  // An edit carries no `mention_ids`, so a name picked here would notify nobody
+  // and wouldn't even highlight — the highlight is driven by the ids, not the
+  // words. A picker that silently does nothing is worse than no picker; adding
+  // a mention means sending a message.
+  groupWithMentions([message({ id: 7, sender: MINE, text: 'mine' })]);
+  await renderScreen();
+
+  await openMenu('Your message: mine');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+
+  const input = screen.getByLabelText('Message');
+  await fireEvent.changeText(input, 'mine @ad');
+  // The caret is reported explicitly. Edit mode drops a whole message into the
+  // composer without going through `onChangeText`, so the hook's estimate is
+  // behind — and a test that skipped this would pass because of *that* rather
+  // than because the picker is suppressed, which is no test at all.
+  await fireEvent(input, 'selectionChange', {
+    nativeEvent: { selection: { start: 8, end: 8 } },
+  });
+
+  expect(screen.queryByLabelText('Mention Ada Lovelace')).toBeNull();
+});
+
+it('highlights a mention by resolving its id against the participants', async () => {
+  // The server sends bare ids — no names, no faces — so the highlight exists
+  // only because the client can match an id to someone it already knows about.
+  groupWithMentions([
+    message({
+      id: 1,
+      sender: GRACE,
+      text: '@Ada Lovelace can you bring the map?',
+      mentions: [ADA.id],
+    }),
+  ]);
+
+  await renderScreen();
+
+  // The name is its own run inside the bubble, split out of the sentence — which
+  // is what being styled differently means here.
+  expect(await screen.findByText('@Ada Lovelace')).toBeTruthy();
+});
+
+/**
+ * Multi-select (Phase 9b M8). Deleting a burst one long-press at a time is the
+ * irritation this removes, so what's worth pinning is that the mode is
+ * reachable, that a tap ticks rather than doing nothing, that Delete acts on
+ * everything ticked — and that it isn't offered for someone else's messages,
+ * where a bulk action could only ever half-work.
+ */
+it('selects several messages and deletes them in one action', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'one' }),
+      message({ id: 8, sender: MINE, text: 'two' }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+
+  // The pressed message comes with you — the common case is "this one and the
+  // next few", so entering the mode with nothing ticked would waste a tap.
+  await screen.findByText('1 selected');
+  await fireEvent.press(screen.getByLabelText('Your message: two'));
+  await screen.findByText('2 selected');
+
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(((
+    _title: string,
+    _message: string | undefined,
+    buttons: { text: string; onPress?: () => void }[]
+  ) => {
+    buttons.find((button) => button.text === 'Delete')?.onPress?.();
+  }) as unknown as typeof Alert.alert);
+
+  await fireEvent.press(screen.getByLabelText('Delete selected messages'));
+
+  await waitFor(() => {
+    const deletes = mockFetch.mock.calls.filter(
+      ([url, init]: [string, { method?: string }]) =>
+        url.includes('/messages/') && init?.method === 'DELETE'
+    );
+    expect(deletes).toHaveLength(2);
+  });
+  alert.mockRestore();
+});
+
+it('offers no bulk delete once someone else’s message is selected', async () => {
+  // A bulk action that silently did only *part* of what it says would be worse
+  // than one that isn't there.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'mine' }),
+      message({ id: 8, sender: ADA, text: 'theirs' }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: mine');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  expect(screen.getByLabelText('Delete selected messages')).toBeTruthy();
+
+  await fireEvent.press(
+    screen.getByLabelText('Message from Ada Lovelace: theirs')
+  );
+
+  expect(screen.queryByLabelText('Delete selected messages')).toBeNull();
+  // Copy still stands: quoting a conversation is exactly what you'd select
+  // someone else's messages for.
+  expect(screen.getByLabelText('Copy selected messages')).toBeTruthy();
+});
+
+it('copies a selection in the order it was said', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: ADA, text: 'first' }),
+      message({ id: 8, sender: MINE, text: 'second' }),
+    ],
+  });
+  const copy = jest.spyOn(Clipboard, 'setStringAsync').mockResolvedValue(true);
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: first');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await fireEvent.press(screen.getByLabelText('Your message: second'));
+  await fireEvent.press(screen.getByLabelText('Copy selected messages'));
+
+  // Oldest-first, whatever order they were ticked in — a copied exchange only
+  // reads correctly in the order it happened.
+  expect(copy).toHaveBeenCalledWith('first\nsecond');
+  // And the mode ends with the action, rather than leaving the header in a
+  // state you have to dismiss.
+  expect(screen.queryByText('2 selected')).toBeNull();
+});
+
+it('leaves the action menu alone while selecting', async () => {
+  // Two modes at once is where a long-press does something you didn't mean.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'one' })],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+
+  fireEvent(screen.getByLabelText('Your message: one'), 'longPress');
+
+  expect(screen.queryByLabelText('Close message actions')).toBeNull();
+});

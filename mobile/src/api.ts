@@ -659,13 +659,27 @@ export const api = {
      * that happens. Uploading a raw camera-roll URI here would ship the photo's
      * GPS coordinates to everyone in the chat.
      */
-    photo?: PreparedChatPhoto
+    photo?: PreparedChatPhoto,
+    /**
+     * Who the message names with `@` (Phase 9b M8), as user ids.
+     *
+     * Sent as ids rather than left for the server to find in the text: names
+     * change, two people can share one, and under E2E there is no text for the
+     * server to read. It's what decides whether a *muted* thread still buzzes
+     * the person named, so the server checks every id is an active participant
+     * — an id from outside the room is refused, not ignored.
+     */
+    mentionIds?: number[]
   ) => {
     const path = `/api/conversations/${conversationId}/messages/`;
     if (!photo) {
       return request<Message>(path, {
         method: 'POST',
-        body: replyToId ? { text, reply_to_id: replyToId } : { text },
+        body: {
+          text,
+          ...(replyToId ? { reply_to_id: replyToId } : {}),
+          ...(mentionIds?.length ? { mention_ids: mentionIds } : {}),
+        },
       });
     }
     const form = new FormData();
@@ -674,6 +688,10 @@ export const api = {
     // the same rule; this just doesn't get in its way.
     form.append('text', text);
     if (replyToId) form.append('reply_to_id', String(replyToId));
+    // One part per id — how a multipart body carries a list, and what DRF's
+    // ListField reads back. A single `mention_ids` part holding "1,2" would
+    // arrive as one unparseable value.
+    mentionIds?.forEach((userId) => form.append('mention_ids', String(userId)));
     // Parallel lists, one entry each. Plural because the server accepts a list
     // (capped at one for now), so allowing several photos per message later is
     // a server constant rather than a wire change.

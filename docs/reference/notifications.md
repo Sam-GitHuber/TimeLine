@@ -145,12 +145,28 @@ DB-unique, and adding a kind later is data, not a migration of everyone's blob).
 **Absence means enabled** (opt-out): new kinds notify by default; users mute what
 they don't want.
 
-Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, and the five
-[event](events.md) kinds) are ever written here and exposed in the API. The
+Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, the five
+[event](events.md) kinds, and `mention`) are ever written here and exposed in the
+API. The
 connection/invite kinds are **always-on**: muting "someone wants to connect" would
 hide something you must act
 on — and with the badges unified, the bell is the only signal. A `PATCH` that tries
 to mute an always-on kind is a 400.
+
+**`mention` is the odd one, and deliberately so** (Phase 9b M8). No
+`Notification` row is *ever* created with that kind — messaging keeps its own
+unread badge and stays outside the bell. The kind exists because the preference
+needs a home, and what it governs is a genuine delivery: whether an `@mention`
+notifies you **in a chat you muted**. Putting it here buys the
+absence-means-enabled rule, the `{kind: bool}` API and both clients' Settings
+screens for nothing.
+
+It is *not* a blanket mentions on/off, and it's labelled as exactly what it does
+— *"Let @mentions notify me in muted chats"*. A mention in an unmuted thread
+notifies either way, through the ordinary message push; a muted thread with this
+off stays fully silent. Getting that backwards would hand someone a setting that
+silences mentions they wanted. See
+[messaging.md](messaging.md#-a-mention-is-a-relation-and-the-only-thing-that-beats-mute).
 
 **What does *not* belong here, and why the boundary is worth stating.** A row is
 keyed by a notification *kind*, so a preference only lives here if there is
@@ -163,7 +179,9 @@ sit elsewhere:
 - **`accounts.User.send_read_receipts`** — whether you share read state. Nothing
   is ever notified when someone reads a message; the setting governs a *payload
   field*, not a delivery. See
-  [messaging.md](messaging.md#the-setting-usersend_read_receipts).
+  [messaging.md](messaging.md#the-setting-usersend_read_receipts). Read it beside
+  `mention` above: the two placements are the same rule applied honestly, not an
+  inconsistency.
 
 Both are on the object the setting actually describes rather than in a preference
 table that would have to invent a fake kind to hold them. The rule is simply: if
@@ -373,6 +391,30 @@ The drain claims its rows with `select_for_update(skip_locked=True)`, so a
 hand-run during a timer tick takes different rows rather than sending the same
 push twice.
 
+### Replying from the notification (Phase 9b M8)
+
+A **message** push carries `categoryId: "message"` — an iOS notification
+category, which is what puts a text field under the push when it's pulled down.
+The app registers that category with a single `reply` action at launch (see
+`mobile/src/push.ts`), and `opensAppToForeground: false` is the point of it: the
+reply is sent without the app taking over the screen someone was on.
+
+Only message pushes carry it. Replying to *"Ada replied to your post"* would mean
+posting a comment from the lock screen — a different feature against a different
+endpoint. A kind that grows an action later opts in by adding a category to its
+payload rather than by changing the sender.
+
+Two things about this are easy to get wrong:
+
+- **The category name must match on both sides.** iOS silently ignores one it
+  doesn't know, which looks precisely like the feature not existing — so the
+  string is pinned by a test in the backend suite *and* in the app's.
+- **The reply comes back through the ordinary send endpoint**, from the app.
+  Nothing in the push path receives anything; Expo is a one-way street. What the
+  app does when that send fails is described in
+  [messaging.md](messaging.md#replying-from-the-notification-phase-9b-m8) — it
+  keeps the words rather than dropping them.
+
 ### What leaves the box, and who sees it
 
 Worth being explicit, since privacy-first is a project non-negotiable and push
@@ -383,6 +425,10 @@ line (*"Ada replied to your post"*), and the deep-link route. It travels to
 **Expo's push service**, then to **Apple's APNs**, before reaching the phone.
 So both see a recipient's device token and the **display name of the person who
 acted**.
+
+A mention says *"Ada mentioned you"* (Phase 9b M8) — which is the same rule, and
+earns its place because a chat you silenced suddenly buzzing owes you an
+explanation.
 
 Deliberately **not** included: any post, comment **or message** text, any photo,
 any email address. A push names people but never quotes them — so a lock screen

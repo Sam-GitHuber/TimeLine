@@ -24,6 +24,10 @@ The flow per drain:
    registration. See ``PushReceipt`` for why that would otherwise be silent.
 6. Prune delivered rows older than the retention window.
 
+A **message** push also carries a **category** (Phase 9b M8), which is what
+gives it a Reply field when it's pulled down on iOS. The reply itself comes back
+through the ordinary send endpoint from the app; nothing here receives it.
+
 A **notification** row's wording and deep-link come straight from
 ``NotificationSerializer`` — the same ``text`` and ``url`` the web activity
 centre renders, so a push and the in-app row can never drift apart. A
@@ -104,6 +108,11 @@ class Command(BaseCommand):
             "message",
             "message__sender",
             "message__conversation",
+        ).prefetch_related(
+            # Whether *this* recipient was named decides the wording (Phase 9b
+            # M8), and a muted thread's push is only here at all because they
+            # were — so the line has to be able to say so.
+            "message__mentions",
         )
         if not dry_run:
             # skip_locked: a concurrent run takes different rows rather than
@@ -242,11 +251,24 @@ class Command(BaseCommand):
         # Said whenever there's an attachment, caption or not: the photo is the
         # notable thing, and a caption is content we wouldn't quote anyway.
         photo = message.attachments.exists()
+        # Named with an @ (Phase 9b M8). Said first because it's the *reason*
+        # this push exists whenever the thread is muted — a silenced chat that
+        # suddenly buzzes owes you an explanation, and "Ada mentioned you" is it.
+        # Still names the person and nothing else: a mention quotes no more of
+        # the message than any other push body does.
+        mentioned = any(
+            mention.user_id == row.recipient_id
+            for mention in message.mentions.all()
+        )
         # A group thread says which one, since "New message from Ada" is
         # ambiguous when Ada is in four of your chats. An untitled group falls
         # back to the neutral phrasing rather than inventing a name.
         named_group = convo.kind == convo.Kind.GROUP and convo.title
-        if photo:
+        if mentioned:
+            text = f"{sender} mentioned you"
+            if named_group:
+                text += f" in {convo.title}"
+        elif photo:
             text = f"{sender} sent a photo"
             if named_group:
                 text += f" in {convo.title}"
@@ -261,6 +283,14 @@ class Command(BaseCommand):
             "kind": "message",
             "text": text,
             "url": f"/messages/{convo.id}",
+            # The iOS notification category (Phase 9b M8), which is what puts a
+            # **Reply** field on a pulled-down message push. Only messages carry
+            # one: replying to "Ada replied to your post" would mean posting a
+            # comment from the lock screen, which is a different feature and a
+            # different endpoint. The name must match the app's
+            # ``MESSAGE_CATEGORY`` — iOS ignores a category it doesn't know,
+            # which looks exactly like the feature not existing.
+            "category": "message",
         }
 
     def _message(self, device, data):
@@ -276,7 +306,7 @@ class Command(BaseCommand):
         route string the web app uses (e.g. ``/p/12?comment=34``), which the app
         maps onto its native route.
         """
-        return {
+        message = {
             "to": device.expo_token,
             "title": "TimeLine",
             "body": data["text"],
@@ -287,6 +317,12 @@ class Command(BaseCommand):
                 "url": data["url"],
             },
         }
+        # Expo's field name for APNs' ``category``. Sent only where there's an
+        # action to offer, so a notification kind that grows one later opts in
+        # by adding it to its payload rather than by changing this.
+        if data.get("category"):
+            message["categoryId"] = data["category"]
+        return message
 
     def _send(self, messages):
         """POST every message, then settle each row by what happened to it.

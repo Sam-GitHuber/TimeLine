@@ -52,6 +52,44 @@ export function configureNotificationHandler(): void {
   });
 }
 
+/**
+ * The category a **message** push carries (Phase 9b M8), and the name the
+ * backend puts in its `categoryId`. Change one and you must change the other —
+ * an unknown category is silently ignored by iOS, which looks exactly like the
+ * feature not existing.
+ */
+export const MESSAGE_CATEGORY = 'message';
+/** The action inside it. Compared against `response.actionIdentifier`. */
+export const REPLY_ACTION = 'reply';
+
+/**
+ * Register the notification actions iOS draws under a pulled-down push
+ * (Phase 9b M8) — for now, one: **Reply, with a text field**.
+ *
+ * This is what turns a push from a doorbell into something you can answer.
+ * `opensAppToForeground: false` is the whole point: the reply is sent from the
+ * notification, without the app taking over the screen you were on.
+ *
+ * Registered at launch rather than at login, because iOS keeps categories per
+ * *app*, not per session, and a push can arrive before anyone has signed in on
+ * this launch. Failures are swallowed for the same reason `registerForPush`
+ * swallows its own: no notification nicety may ever break starting the app —
+ * without the category the push simply has no Reply action on it.
+ */
+export function configureNotificationCategories(): void {
+  Notifications.setNotificationCategoryAsync(MESSAGE_CATEGORY, [
+    {
+      identifier: REPLY_ACTION,
+      buttonTitle: 'Reply',
+      textInput: {
+        submitButtonTitle: 'Send',
+        placeholder: 'Message',
+      },
+      options: { opensAppToForeground: false },
+    },
+  ]).catch(() => {});
+}
+
 /** The EAS project id, which `getExpoPushTokenAsync` needs to mint a token. */
 function projectId(): string | undefined {
   return (
@@ -138,6 +176,21 @@ export async function unregisterPush(): Promise<void> {
  */
 export async function forgetLocalPushToken(): Promise<void> {
   await SecureStore.deleteItemAsync(PUSH_TOKEN_KEY);
+}
+
+/**
+ * The conversation a `/messages/<id>` deep link points at (Phase 9b M8).
+ *
+ * The reply-from-a-notification path needs the id itself, not a route: it sends
+ * a message rather than opening a screen. Reading it from the same `url` the
+ * deep link uses keeps one shape on the wire — the push carries no separate
+ * conversation field to fall out of step with it.
+ */
+export function conversationIdFromUrl(
+  url: string | null | undefined
+): number | null {
+  const match = url?.match(/^\/messages\/(\d+)$/);
+  return match ? Number(match[1]) : null;
 }
 
 /**

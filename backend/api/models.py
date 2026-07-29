@@ -353,6 +353,11 @@ class Message(models.Model):
     the quoted body fetches it through the interval-clipped messages endpoint
     like any other message, which is what keeps a reply from becoming a window
     into history the viewer was clipped out of.
+
+    Mentions (Phase 9b M8): naming someone with ``@`` writes a ``MessageMention``
+    row rather than leaving the fact in the text, so the "a mention notifies even
+    in a muted chat" rule is decided from metadata — which is what keeps it
+    working once the text is ciphertext.
     """
 
     conversation = models.ForeignKey(
@@ -498,6 +503,63 @@ class MessageAttachment(models.Model):
 
     def __str__(self):
         return f"{self.kind} #{self.pk} on message #{self.message_id}"
+
+
+class MessageMention(models.Model):
+    """Someone named with ``@`` in a message (Phase 9b M8).
+
+    **A real relation, not a name parsed out of the text.** Two reasons, and both
+    are the kind that only bite later:
+
+    - **Display names change.** A mention resolved by matching text would stop
+      notifying the moment someone married, and would start notifying the wrong
+      person if two members' names ever collided.
+    - **🔒 Under E2E the server cannot read the message at all.** Whoever a
+      mention notifies has to be decidable from *metadata*, because the words
+      will be ciphertext (phase 9c). A row per mentioned user is exactly that,
+      and it's why this table exists on the day mentions ship rather than being
+      "extracted properly later".
+
+    What it's *for* is one thing only: **a mention notifies even in a muted
+    thread** (see ``notifications.enqueue_message_pushes``). That's the whole
+    point of naming someone, and it's also the one justified exception to
+    ``Participant.muted_at`` — so it's opt-out per user, via the ``mention``
+    notification preference.
+
+    The **client** decides who it offers to mention and sends the ids; the
+    serializer checks each one is an active participant of that conversation, so
+    a message can never carry a mention of someone who isn't in the room.
+    ``CASCADE`` on both sides: the mention is a fact about a message and a user,
+    and outlives neither.
+    """
+
+    message = models.ForeignKey(
+        Message,
+        on_delete=models.CASCADE,
+        related_name="mentions",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="message_mentions",
+    )
+
+    class Meta:
+        constraints = [
+            # Naming someone twice in one message is one mention of them — the
+            # notification rule is per-person, so a second row would be a second
+            # chance to get the "did we already queue one" logic wrong.
+            models.UniqueConstraint(
+                fields=["message", "user"], name="unique_message_mention"
+            ),
+        ]
+        indexes = [
+            # The push path's question: who did this message name?
+            models.Index(fields=["message"]),
+        ]
+
+    def __str__(self):
+        return f"@{self.user} in message #{self.message_id}"
 
 
 class ConversationRead(models.Model):
@@ -1085,6 +1147,21 @@ class Notification(models.Model):
         EVENT_SCHEDULED = "event_scheduled", "Event date set"
         EVENT_UPDATED = "event_updated", "Event changed"
         EVENT_CANCELLED = "event_cancelled", "Event cancelled"
+        # Phase 9b M8. **No Notification row is ever created with this kind**,
+        # and that isn't an omission. Messaging is deliberately outside the
+        # activity centre — it has its own unread badge — so a mention has no
+        # bell row to sit in. The kind exists because the *preference* needs a
+        # home, and a genuine notification kind belongs in ``NotificationPreference``
+        # with the others rather than as a one-off boolean: it inherits the
+        # absence-means-enabled rule, the API's ``{kind: bool}`` map, and both
+        # clients' settings screens for free. It governs exactly one thing —
+        # whether an @mention overrides a *muted* chat (see
+        # ``notifications.enqueue_message_pushes``), never whether mentions
+        # notify at all. Contrast ``User.send_read_receipts`` (Phase 9b M4),
+        # which lives on the user model precisely because there is no
+        # notification kind behind it; the two placements are the same rule
+        # applied honestly, not an inconsistency.
+        MENTION = "mention", "You were mentioned in a chat"
 
     # Kinds a user is allowed to mute in preferences. The request/invite kinds
     # are deliberately *always-on*: muting "someone wants to connect" or "you've
@@ -1102,6 +1179,11 @@ class Notification(models.Model):
             Kind.EVENT_SCHEDULED,
             Kind.EVENT_UPDATED,
             Kind.EVENT_CANCELLED,
+            # Mutable, and default-on like the rest: naming someone is how you
+            # get their attention, so it should reach them by default — but
+            # punching through a quiet they deliberately asked for has to be
+            # something they can decline. See the kind's note above.
+            Kind.MENTION,
         }
     )
 

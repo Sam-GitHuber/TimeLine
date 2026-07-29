@@ -68,7 +68,7 @@ Tick as each merges. If this table and `git log` disagree, git is right.
 | **M5** | Thread mechanics | — (do before M7) | **M–L** | ☑ |
 | **M6** | Conversation list + thread info | — | **M** | ☑ |
 | **M7** | Photo messages | M5 | **L** | ☑ |
-| **M8** | Text, mentions & quick actions | M1 | **M** | ☐ |
+| **M8** | Text, mentions & quick actions | M1 | **M** | ☑ |
 | **M9** | Web parity | M1–M8 | **L** | ☐ |
 
 M0/M1 first. After that only the listed dependencies bind — M4, M5, M6 and M8 can
@@ -1192,14 +1192,18 @@ milestone runs long, land them one at a time.
      Phase 9's Milestone D notes apply.
 
 **Done when**
-- [ ] `*bold*`/`_italic_` render; raw text unchanged in the database.
-- [ ] @mention a group member; they're notified even if the thread is muted.
-- [ ] Turning off *"Let @mentions notify me in muted chats"* silences it in muted
+- [x] `*bold*`/`_italic_` render; raw text unchanged in the database.
+- [x] @mention a group member; they're notified even if the thread is muted.
+- [x] Turning off *"Let @mentions notify me in muted chats"* silences it in muted
       threads **only** — mentions in unmuted threads still notify.
-- [ ] Select several messages and delete them in one action.
+- [x] Select several messages and delete them in one action.
 - [ ] Reply to a message from the notification without opening the app
-      (**device-tested**).
-- [ ] `messaging.md` + `notifications.md` updated.
+      (**device-tested**) — built and unit-tested on both sides (the category on
+      the wire, the send-and-don't-navigate decision, and the failed reply
+      landing in the outbox). **The device pass is still outstanding**: whether
+      iOS draws the text field is native behaviour no Node test reaches, and it
+      needs a TestFlight build.
+- [x] `messaging.md` + `notifications.md` updated.
 
 ---
 
