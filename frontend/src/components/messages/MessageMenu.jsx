@@ -111,6 +111,13 @@ function MenuPanel({ anchorRef, itemCount, onClose, children }) {
   const wrapRef = useRef(null);
   const [pos, setPos] = useState(null);
 
+  // **Viewport coordinates, and `position: fixed`** — not `PostMenu`'s page
+  // coordinates. That difference is not a style choice: `PostMenu` is anchored
+  // to a post in the normal page flow, so a document-positioned portal scrolls
+  // with its anchor. This anchor lives inside a **`fixed`** drawer, which
+  // doesn't move when the page scrolls — so a document-positioned menu would
+  // slide away from the bubble it belongs to the moment the feed behind the
+  // drawer was scrolled.
   useLayoutEffect(() => {
     const el = anchorRef.current;
     if (!el) return;
@@ -119,11 +126,11 @@ function MenuPanel({ anchorRef, itemCount, onClose, children }) {
     // Right-align with the trigger, clamped to the viewport — the drawer is
     // docked to the right edge, so an un-clamped menu would hang off it.
     let left = Math.min(r.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8);
-    left = Math.max(8, left) + window.scrollX;
+    left = Math.max(8, left);
     const top =
       r.bottom + height > window.innerHeight - 8 && r.top - height - 6 > 8
-        ? r.top - height - 6 + window.scrollY
-        : r.bottom + 6 + window.scrollY;
+        ? r.top - height - 6
+        : r.bottom + 6;
     setPos({ left, top });
   }, [anchorRef, itemCount]);
 
@@ -142,11 +149,27 @@ function MenuPanel({ anchorRef, itemCount, onClose, children }) {
         onClose();
       }
     }
+    // Any scroll anywhere closes it. The menu is measured once and then sits
+    // still, so scrolling the transcript underneath it would leave it hovering
+    // over a *different* message — and acting on the right one while pointing at
+    // the wrong one is the exact failure the anchored menu exists to prevent
+    // (see messaging.md on why this isn't a bottom sheet). Re-measuring on every
+    // scroll frame would be the other answer, but closing is what a menu whose
+    // anchor has moved should do anyway.
+    //
+    // Capture, because `scroll` doesn't bubble: the transcript is an inner
+    // scroller, and a listener on `document` would never hear it otherwise.
+    function onScroll(e) {
+      if (wrapRef.current?.contains(e.target)) return;
+      onClose();
+    }
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("scroll", onScroll, true);
     };
   }, [onClose, anchorRef]);
 
@@ -157,7 +180,7 @@ function MenuPanel({ anchorRef, itemCount, onClose, children }) {
       role="dialog"
       aria-label="Message options"
       style={{
-        position: "absolute",
+        position: "fixed",
         left: pos.left,
         top: pos.top,
         width: MENU_WIDTH,

@@ -1130,6 +1130,19 @@ browser measures from the bottom. `scrollTop` is 0 at the newest message and run
 negative going back; the two thresholds take `Math.abs` of it, since that sign
 convention is the spec's but was not always every engine's.
 
+**Scrolling up can't be the *only* way to reach history**, so the shared
+`LoadMoreButton` sits at the top of the transcript as well. `onScroll` never
+fires on a transcript that doesn't overflow — one page of short messages in a
+tall window — and the rest of the chat would then be unreachable with no sign
+anything was missing. The app has no equivalent gap because `onEndReached` fires
+on *layout*, not on scroll.
+
+**The transcript is `role="log"` with `aria-live="off"`.** The role is right and
+the implied live region isn't: a live region announces *additions*, and this
+container grows at both ends, so paging in twenty older messages would read all
+twenty aloud. Announcing genuinely new messages wants a separate visually-hidden
+region fed one at a time — a job of its own, not a side effect of the role.
+
 Everything else is [M5's write-up](#the-transcript-phase-9b-m5) and holds
 identically here: day separators re-derived at local midnight (`useDayBoundary`
 in `hooks.js`, ported), **clock times** rather than "5m ago" (the conversation
@@ -1149,7 +1162,17 @@ because the medium does, and the way the drawer's inline Delete already worked.
 It's revealed by hovering the bubble and by `:focus-visible`, so a keyboard
 reaches every action a mouse can, and it portals to `<body>` like `PostMenu`
 because the transcript is an `overflow-y-auto` scroller that would otherwise clip
-it. Inside
+it.
+
+⚠️ **It positions in *viewport* coordinates (`position: fixed`), unlike
+`PostMenu`, and closes on any scroll.** `PostMenu` is anchored to a post in the
+normal page flow, so a document-positioned portal scrolls along with it. This
+anchor sits inside a **`fixed`** drawer over a page that stays scrollable — and
+inside an inner scroller of its own — so a document-positioned menu drifts away
+from its bubble in *both* directions. Closing on scroll (a capture-phase
+listener, since `scroll` doesn't bubble) is the rest of the answer: a menu still
+open over a message that has moved is exactly the mistake the anchored design
+exists to prevent. Inside
 it matches the app: **Copy · Edit · Delete** on your own, **Copy · Report** on
 someone else's, no menu on a tombstone. The items are **data**, and the list is
 built when the menu opens rather than during render — Edit expires after fifteen

@@ -1400,7 +1400,7 @@ own message; Edit prefills, saves, and shows "Edited"; Cancel restores the draft
 
 **Done when** — ✅ all done; `messaging.md` → *The web transcript (Phase 9b M9b)*
 is the durable record.
-- [x] All of the above; `messaging.test.jsx` green (37 tests, whole suite 220).
+- [x] All of the above; `messaging.test.jsx` green (40 tests, whole suite 223).
 - [x] Report from the web menu actually files a report **against the message**,
       with M0's disclosure copy shown — assert the wording in a test, since the
       failure mode here is a dialog that looks right and reports nothing.
@@ -1438,6 +1438,15 @@ before M9c–M9f, which all build on this bubble:
 4. **The web has no `useDayBoundary`; the feed never needed one.** The app's was
    ported into `hooks.js` rather than left out, because a drawer left open
    overnight is *more* likely than a phone left on the feed, not less.
+5. **Two things the app gets from `FlatList` had to be built by hand, and both
+   were missed on the first cut** (caught in review, fixed before merge). A
+   scroll threshold is not a substitute for `onEndReached`: `onScroll` never
+   fires on a transcript that doesn't overflow, so a first page that fits a tall
+   window left the rest of the chat unreachable — the shared `LoadMoreButton` is
+   the second way in. And a portal anchored inside a **`fixed`** drawer must
+   position in viewport coordinates and close on scroll; copying `PostMenu`'s
+   document coordinates left the menu drifting off its bubble whenever the feed
+   behind the drawer, or the transcript itself, was scrolled.
 
 ---
 

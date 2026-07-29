@@ -171,6 +171,31 @@ describe("Messages drawer — list", () => {
     expect(within(drawer).getByText("3")).toBeInTheDocument();
   });
 
+  it("shows a row's preview as plain text, without the bubble's markup", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      page([
+        convoRow({
+          last_message: {
+            text: "*really* important",
+            is_deleted: false,
+            sender_id: 2,
+            created_at: new Date().toISOString(),
+          },
+        }),
+      ])
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+
+    // A preview is one line of plain text and can't carry emphasis. Since M9b
+    // the bubble renders `*really*` as bold, so leaving the asterisks here would
+    // be the half-finished seam `plainMessageText` exists to close.
+    expect(await screen.findByText("really important")).toBeInTheDocument();
+    expect(screen.queryByText("*really* important")).toBeNull();
+  });
+
   it("shows an empty state with a New message action", async () => {
     const user = userEvent.setup();
     renderAt("/");
@@ -660,6 +685,48 @@ describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
     expect(await screen.findByText("ancient")).toBeInTheDocument();
   });
 
+  it("offers Load more as well, since a short thread never fires a scroll", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(
+      page(
+        [msg({ id: 1, text: "first" })],
+        "http://localhost:8000/api/conversations/7/messages/?order=desc&page=2"
+      )
+    );
+    api.getPage.mockResolvedValue(page([msg({ id: 0, text: "ancient" })]));
+
+    renderAt("/messages/7");
+    await screen.findByText("first");
+
+    // Scrolling up is the main way older messages load, but `onScroll` never
+    // fires on a transcript that doesn't overflow — so a first page that fits
+    // the panel would otherwise leave the rest of the chat unreachable.
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(api.getPage).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("ancient")).toBeInTheDocument();
+    // Nothing left to fetch: the control takes itself away.
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("closes the ⋯ menu when the transcript scrolls out from under it", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 1, text: "hello" })]));
+
+    renderAt("/messages/7");
+    await screen.findByText("hello");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    expect(
+      screen.getByRole("dialog", { name: "Message options" })
+    ).toBeInTheDocument();
+
+    // The panel is measured once and then sits still, so a scroll would leave
+    // it hovering over a different message — acting on the right one while
+    // pointing at the wrong one is the failure an anchored menu exists to
+    // prevent.
+    fireEvent.scroll(screen.getByRole("log"));
+    expect(screen.queryByRole("dialog", { name: "Message options" })).toBeNull();
+  });
+
   it("groups the transcript by day and stamps bubbles with a clock time", async () => {
     api.getMessages.mockResolvedValue(
       page([
@@ -720,9 +787,15 @@ describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
     // A message arriving while you read must not slide the marker: the anchor
     // and the label are latched on open, not re-derived from a count that now
     // counts back from a different newest message.
+    //
+    // The arriving message has to be **theirs**. `firstUnreadId` skips your own,
+    // so a message you sent yourself would leave the anchor where it is even
+    // with the latch removed — the assertion would pass against the bug it's
+    // here to catch.
     api.sendMessage.mockResolvedValue(msg({ id: 4, text: "ok", sender: mine }));
     api.getMessages.mockResolvedValue(
       page([
+        msg({ id: 5, text: "and one more from them" }),
         msg({ id: 4, text: "ok", sender: mine }),
         msg({ id: 3, text: "and another" }),
         msg({ id: 2, text: "one you missed" }),
@@ -734,7 +807,7 @@ describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
       "ok{Enter}"
     );
 
-    expect(await screen.findByText("ok")).toBeInTheDocument();
+    expect(await screen.findByText("and one more from them")).toBeInTheDocument();
     const stillThere = screen.getByText("2 unread messages");
     expect(stillThere.closest("li").previousElementSibling).toHaveTextContent(
       "one you missed"

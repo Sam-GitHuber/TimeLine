@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import Avatar from "../Avatar.jsx";
+import LoadMoreButton from "../LoadMoreButton.jsx";
 import { StrokeIcon, IconButton, PanelHeader } from "../drawer-chrome.jsx";
 import PendingChatPanel from "../PendingChatPanel.jsx";
 import { ReportModal } from "../ReportButton.jsx";
@@ -284,8 +285,11 @@ export default function ConversationThreadView() {
   );
   const jumpToLatest = useCallback(() => {
     // 0 is the bottom in a column-reverse scroller, which is where latest is.
+    // The scroll handler clears `awayFrom` when we arrive; clearing it here as
+    // well would hide the button, then a smooth-scroll frame still past the
+    // threshold would bring it back with a freshly captured marker — a flash of
+    // "Jump to latest ↓" with no count on the way to the bottom.
     scrollRef.current?.scrollTo?.({ top: 0, behavior: "smooth" });
-    setAwayFrom(null);
   }, []);
 
   /**
@@ -537,10 +541,16 @@ export default function ConversationThreadView() {
             <div
               ref={scrollRef}
               onScroll={handleScroll}
-              // `log` is the ARIA role for a running transcript: it implies a
-              // polite live region, so a screen reader announces an incoming
-              // message instead of leaving it to be discovered by re-reading.
+              // `log` is the ARIA role for a running transcript — but its
+              // implied `aria-live="polite"` is turned off deliberately. A live
+              // region announces *additions*, and this container grows at both
+              // ends: paging in twenty older messages would read all twenty
+              // aloud, which is worse than silence. Announcing only genuinely
+              // new messages needs a separate visually-hidden region fed one
+              // message at a time, which is its own job rather than a side
+              // effect of the role.
               role="log"
+              aria-live="off"
               aria-label="Conversation"
               className="flex h-full flex-col-reverse overflow-y-auto px-4 py-4"
             >
@@ -583,11 +593,18 @@ export default function ConversationThreadView() {
                   })}
                 </ul>
               )}
-              {isFetchingNextPage && (
-                <p className="py-2 text-center text-xs text-ink-faint">
-                  Loading earlier messages…
-                </p>
-              )}
+              {/* Last in the DOM, so `flex-col-reverse` paints it at the *top*
+                  of the history — where "earlier messages" belongs.
+
+                  Scrolling up is the main way older messages load, but it can't
+                  be the only way: `onScroll` never fires on a transcript that
+                  doesn't overflow, so a first page that fits the panel on a tall
+                  window would leave the rest of the chat unreachable. The app
+                  doesn't have this problem because `onEndReached` fires on
+                  *layout*. This is the shared `LoadMoreButton` every other
+                  paginated list in the app uses, and it renders nothing at all
+                  once there's no next page. */}
+              <LoadMoreButton query={messagesQuery} />
             </div>
 
             {awayFrom !== null && (
