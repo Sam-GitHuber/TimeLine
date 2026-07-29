@@ -87,7 +87,7 @@ each is written below to be picked up cold:
 | | M9 chunk | Branch | Depends on | Size | Done |
 |---|---|---|---|---|---|
 | **M9a** | Split the drawer (no behaviour change) | `messaging/m9a-split` | — | **S** | ☑ |
-| **M9b** | Transcript mechanics + the ⋯ menu & edit | `messaging/m9b-transcript` | M9a | **L** | ☐ |
+| **M9b** | Transcript mechanics + the ⋯ menu & edit | `messaging/m9b-transcript` | M9a | **L** | ☑ |
 | **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☐ |
 | **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☐ |
 | **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☐ |
@@ -1398,12 +1398,55 @@ times render; the divider lands in the right place and doesn't move as messages
 arrive; a draft survives leaving and returning; the menu offers Edit only on your
 own message; Edit prefills, saves, and shows "Edited"; Cancel restores the draft.
 
-**Done when**
-- [ ] All of the above; `messaging.test.jsx` green.
-- [ ] Report from the web menu actually files a report **against the message**,
+**Done when** — ✅ all done; `messaging.md` → *The web transcript (Phase 9b M9b)*
+is the durable record.
+- [x] All of the above; `messaging.test.jsx` green (40 tests, whole suite 223).
+- [x] Report from the web menu actually files a report **against the message**,
       with M0's disclosure copy shown — assert the wording in a test, since the
       failure mode here is a dialog that looks right and reports nothing.
-- [ ] `messaging.md` *Frontend* section gains the transcript + menu behaviour.
+- [x] `messaging.md` *Frontend* section gains the transcript + menu behaviour.
+
+**Four things M9b settled that the plan above didn't anticipate** — read these
+before M9c–M9f, which all build on this bubble:
+
+1. **A hover affordance had to answer for touch, and the fix is a cascade
+   problem, not a design one.** The plan says the menu appears on bubble hover
+   "the same way the drawer's inline Delete already works" — but the drawer is
+   read in phone browsers too, and a touch device never fires `:hover`, so that
+   inline Delete has always been an invisible zero-opacity button there. M9b
+   would have made it worse by putting *four* actions (including Report, which
+   App Review requires be reachable) behind the same hidden trigger.
+   `@media (hover: none)` keeps it visible — but written as a Tailwind
+   `group-hover:` utility it can't be overridden from `@layer components`, since
+   the utilities layer comes last and `opacity-0` wins. **The trigger's
+   visibility lives entirely in `index.css`**, one rule set in one layer. Ask
+   `hover: none`, never a width breakpoint: a touchscreen laptop hovers, and a
+   narrow desktop window still has a mouse.
+2. **The whole of `messageText.ts` came across, formatting included — M9f's step
+   1 is already done.** The plan splits the module between M9b (links, big
+   emoji) and M9f (formatting, mentions), but it finds links and `*bold*` runs in
+   **one walk**, deliberately: a URL full of underscores is not italic. Porting
+   half of it would have meant a bubble that *strips* `*asterisks*` and styles
+   nothing — a visible regression shipped on purpose for one PR. Mentions are
+   still M9f's: nothing passes `mentions`, so the parser never emits one, and
+   what M9f actually needs is the name map and the composer's `@` picker.
+3. **The thread view is keyed on the conversation id** in `MessagesDrawer.jsx`.
+   It never had to be before, because it held nothing but a composer string.
+   Now it latches an unread anchor, seeds a draft and can be mid-edit — all true
+   of exactly one conversation — and the drawer can switch threads without
+   unmounting (a profile's Message button does it).
+4. **The web has no `useDayBoundary`; the feed never needed one.** The app's was
+   ported into `hooks.js` rather than left out, because a drawer left open
+   overnight is *more* likely than a phone left on the feed, not less.
+5. **Two things the app gets from `FlatList` had to be built by hand, and both
+   were missed on the first cut** (caught in review, fixed before merge). A
+   scroll threshold is not a substitute for `onEndReached`: `onScroll` never
+   fires on a transcript that doesn't overflow, so a first page that fits a tall
+   window left the rest of the chat unreachable — the shared `LoadMoreButton` is
+   the second way in. And a portal anchored inside a **`fixed`** drawer must
+   position in viewport coordinates and close on scroll; copying `PostMenu`'s
+   document coordinates left the menu drifting off its bubble whenever the feed
+   behind the drawer, or the transcript itself, was scrolled.
 
 ---
 
@@ -1554,9 +1597,11 @@ M8 on the web, plus the paperwork that closes the phase.
 - **M8** in this file.
 
 **Build**
-1. **Inline formatting** — `messageText.js` already parses it if M9b ported it;
-   this renders the marks. 🔒 **Never store markup-processed text**; the raw
-   string is the source of truth and stays one opaque blob under E2E.
+1. **Inline formatting** — ✅ **already done by M9b**, which ported the parser
+   whole and rendered its marks rather than ship a bubble that strips
+   `*asterisks*` and styles nothing (see M9b's note 2). Left here so the
+   checklist below still covers it. 🔒 **Never store markup-processed text**; the
+   raw string is the source of truth and stays one opaque blob under E2E.
 2. **@mentions** in group chats: port `mentions.js`, a suggestion popover under
    the composer, `mention_ids` on send, and the mention rendered highlighted.
    The muted-thread override setting already exists in `NotificationPreference`

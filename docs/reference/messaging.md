@@ -1100,16 +1100,121 @@ new-message:
   blank screen). It coordinates with the left-docked [groups](groups.md) drawer on
   narrow viewports (opening one closes the other below 800px).
 
-**The web is behind on Phase 9b and that's expected, not broken.** Every 9b
-response field is additive, so the drawer ignores `is_edited`/`edited_at`,
-`reactions`, `reply_to`/`reply_count` and the participants' `last_read_at`, and
-simply renders an edited message as its new text with no marker and a reply as an
-ordinary message. Web parity is its own milestone (9b M9), which also splits
-`MessagesDrawer.jsx` up. Four visible degradations until then — the missing
-"Edited" marker, message reactions being invisible, a reply reading as an
-unattached message, and no ticks or optimistic send — worth saying out loud
-rather than having someone discover them. All four are stored and all four show
-in the app.
+Since **Phase 9b M9a** the drawer file is a ~55-line shell — the portal, Esc, and
+the three-way view switch — over `frontend/src/components/messages/`. The thread
+view is **keyed on the conversation id**, so switching chats remounts it: the
+transcript now holds state that is only true of one conversation (the latched
+divider, the draft, the message being edited), and carrying any of it into a
+different chat would be worse than a flicker.
+
+### The web transcript (Phase 9b M9b)
+
+M9b brought the app's [transcript](#the-transcript-phase-9b-m5) and its
+[action menu](#the-long-press-action-menu-phase-9b-m1) across. The two clients
+now share the modules that decide what a transcript *is* — `threadRows.js`,
+`messageText.js` and `drafts.js` are ports of the app's, comments included, and
+the point of the port is that they stop diverging. Change one, change the other.
+
+**It loads one page.** The drawer used to walk `fetchNextPage` in an effect until
+every page was in memory — the same defect, for the same reason, that M5 fixed on
+the phone: the endpoint's default order is oldest-first, so reaching the bottom
+of a chat meant loading all of it. It reads [`?order=desc`](#api) now and pages
+backwards as you scroll up.
+
+**The scroller is `flex-col-reverse`, which is the web's answer to the app's
+inverted `FlatList`.** Rows are newest-first, index 0 paints at the bottom, and
+the scroll origin is the newest message — so the thread opens at the bottom with
+no scrolling code (it deleted a `scrollIntoView`-on-every-change effect), and a
+page of older messages prepending doesn't move what you're reading, because the
+browser measures from the bottom. `scrollTop` is 0 at the newest message and runs
+negative going back; the two thresholds take `Math.abs` of it, since that sign
+convention is the spec's but was not always every engine's.
+
+**Scrolling up can't be the *only* way to reach history**, so the shared
+`LoadMoreButton` sits at the top of the transcript as well. `onScroll` never
+fires on a transcript that doesn't overflow — one page of short messages in a
+tall window — and the rest of the chat would then be unreachable with no sign
+anything was missing. The app has no equivalent gap because `onEndReached` fires
+on *layout*, not on scroll.
+
+**The transcript is `role="log"` with `aria-live="off"`.** The role is right and
+the implied live region isn't: a live region announces *additions*, and this
+container grows at both ends, so paging in twenty older messages would read all
+twenty aloud. Announcing genuinely new messages wants a separate visually-hidden
+region fed one at a time — a job of its own, not a side effect of the role.
+
+Everything else is [M5's write-up](#the-transcript-phase-9b-m5) and holds
+identically here: day separators re-derived at local midnight (`useDayBoundary`
+in `hooks.js`, ported), **clock times** rather than "5m ago" (the conversation
+*list* keeps relative time, where the question really is how recent something
+is), run grouping with the timestamp on the run's last bubble — exempting the
+**"Edited"** marker, which is a disclosure and can't be hidden by where a bubble
+sits — a **latched** unread divider the thread opens at, jump-to-latest with a
+count of what arrived since, clickable links, emoji-only messages drawn large,
+and per-conversation drafts (🔒 cleared on sign-out in `auth.jsx`, like the app
+clears them). Inline formatting comes across with the parser rather than after
+it: `messageText.js` finds links and `*bold*` runs in **one walk** (a URL full of
+underscores is not italic), so splitting the port in half would have meant
+rendering a message with its markup silently deleted and nothing styled.
+
+**The menu is a `⋯` on hover, not a long-press** — the one thing that differs
+because the medium does, and the way the drawer's inline Delete already worked.
+It's revealed by hovering the bubble and by `:focus-visible`, so a keyboard
+reaches every action a mouse can, and it portals to `<body>` like `PostMenu`
+because the transcript is an `overflow-y-auto` scroller that would otherwise clip
+it.
+
+⚠️ **It positions in *viewport* coordinates (`position: fixed`), unlike
+`PostMenu`, and closes on any scroll.** `PostMenu` is anchored to a post in the
+normal page flow, so a document-positioned portal scrolls along with it. This
+anchor sits inside a **`fixed`** drawer over a page that stays scrollable — and
+inside an inner scroller of its own — so a document-positioned menu drifts away
+from its bubble in *both* directions. Closing on scroll (a capture-phase
+listener, since `scroll` doesn't bubble) is the rest of the answer: a menu still
+open over a message that has moved is exactly the mistake the anchored design
+exists to prevent. Inside
+it matches the app: **Copy · Edit · Delete** on your own, **Copy · Report** on
+someone else's, no menu on a tombstone. The items are **data**, and the list is
+built when the menu opens rather than during render — Edit expires after fifteen
+minutes, and a list built at render time would depend on when React last redrew.
+
+🔒 **A hover affordance has to answer for the people who can't hover.** The
+drawer is used in phone browsers as well as on a desktop, and a touch device
+never fires `:hover` — so a trigger hidden behind it would leave every message
+action (including **Report**, which is the only route a message has to the
+maintainer, and which App Review requires be reachable) as an invisible
+zero-opacity button. One rule in `index.css` keeps `.msg-menu-trigger` visible
+under `@media (hover: none)`. The visibility rules live in CSS rather than as
+`opacity-0 group-hover:opacity-100` utilities for a cascade reason worth knowing:
+Tailwind's utilities layer comes *after* `@layer components`, so a media query
+written there loses to `opacity-0` and the touch case silently doesn't work. And
+the question asked is `hover: none`, not a width breakpoint — a touchscreen
+laptop still hovers, and a narrow desktop window doesn't stop having a mouse.
+
+**Editing happens in the composer**, which grows an "Editing message" bar showing
+the original with an ✕; the input is prefilled and focused and Send becomes Save.
+Cancelling (or Escape, which the composer swallows so it doesn't also close the
+drawer) restores whatever you were half-typing. Saving unchanged text is a no-op
+rather than a `PATCH` that would stamp the message "Edited" for nothing.
+
+**Report widened `ReportModal` to take a `messageId`.** It took a post or a
+comment id only and derived its wording as "post, or else comment" — so wiring a
+message straight into it would have opened a dialog headed *"Report this
+comment"* that POSTed a report with no target at all. It now carries the
+three-way target and 🔒 **the message-specific copy the app has**: since
+[M0](#moderation-a-report-is-the-only-window) a report is the only route by which
+a message ever reaches the maintainer, so telling the reporter that a copy goes
+with it is what makes that design honest rather than a quiet exception to it.
+A test asserts the wording, because the failure mode is a dialog that looks right
+and reports nothing.
+
+**The web is still behind on Phase 9b, and that's expected, not broken.** Every
+9b response field is additive, so the drawer ignores `reactions`,
+`reply_to`/`reply_count` and the participants' `last_read_at`, rendering a reply
+as an ordinary message. Three visible degradations remain until M9c–M9f land:
+message reactions are invisible, a reply reads as an unattached message, and
+there are no ticks or optimistic send. All three are stored and all three show in
+the app.
 
 M6 adds nothing the drawer renders *wrongly*, only things it doesn't offer yet:
 [renaming a group](#renaming-a-group-chat) and

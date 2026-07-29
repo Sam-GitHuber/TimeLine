@@ -550,6 +550,37 @@
     animation: tl-rise 0.4s ease both;
   }
 
+  /* The ⋯ trigger on a message bubble (Phase 9b M9b).
+
+     It hides until you hover the bubble, which keeps a transcript quiet — but
+     "hover the bubble" is a pointer idea, and plenty of people read the drawer
+     in a phone browser. Left to hover alone the whole action menu (Copy, Edit,
+     Delete, Report) would be an invisible zero-opacity button they could only
+     find by accident. `(hover: none)` is the honest question to ask: not "is the
+     screen small" — a laptop with a touchscreen still hovers, and a narrow
+     desktop window doesn't stop having a mouse — but "can this input hover at
+     all". Where it can't, the trigger simply stays visible.
+
+     Written here rather than as `opacity-0 group-hover:opacity-100` utilities
+     because a media query in @layer components loses to a utility every time —
+     Tailwind's utilities layer comes last, so `opacity-0` would win and the
+     touch case would silently not work. One rule set, one layer, no cascade
+     puzzle. `[aria-expanded="true"]` keeps it visible while its own menu is
+     open, which the button already announces for us. */
+  .msg-menu-trigger {
+    opacity: 0;
+  }
+  .group:hover .msg-menu-trigger,
+  .msg-menu-trigger:focus-visible,
+  .msg-menu-trigger[aria-expanded="true"] {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .msg-menu-trigger {
+      opacity: 1;
+    }
+  }
+
   /* ---- Group events & planning calendar (Phase 8b) ----
      The calendar lives in the same warm world as the timeline: one accent, the
      three type voices, IBM Plex Mono for every exact "when". */

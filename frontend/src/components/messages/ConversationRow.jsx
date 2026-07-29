@@ -1,6 +1,7 @@
 import Avatar from "../Avatar.jsx";
 import { StrokeIcon } from "../drawer-chrome.jsx";
 import AvatarStack from "./AvatarStack.jsx";
+import { plainMessageText } from "../../messageText.js";
 import { formatRelativeTime } from "../../utils.js";
 
 // One row in the conversation list: who it's with, the last thing said, and how
@@ -15,12 +16,17 @@ export default function ConversationRow({ convo, me, onOpen }) {
   // A photo message may carry no caption at all (Phase 9b M7), which would
   // render as a blank line where the preview goes. Same phrasing as the app's.
   const photos = last?.attachment_count ?? 0;
+  // A preview is one line of plain text, so it drops the markup rather than
+  // showing the raw `*asterisks*` the bubble two inches away renders as bold
+  // (Phase 9b M9b). Leaving them here was the "half-finished" seam
+  // `plainMessageText` exists to close.
+  const body = last?.text ? plainMessageText(last.text) : "";
   const preview = last
     ? last.is_deleted
       ? "Message deleted"
       : photos > 0
-        ? `📷 ${last.text || "Photo"}`
-        : last.text
+        ? `📷 ${body || "Photo"}`
+        : body
     : "No messages yet";
   const unread = convo.unread_count > 0;
 

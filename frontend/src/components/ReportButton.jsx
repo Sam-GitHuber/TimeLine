@@ -38,7 +38,13 @@ export default function ReportButton({ postId = null, commentId = null, authorId
 // The report dialog itself, exported so the post ⋯ overflow menu (issue #62)
 // can open it as its "Report" item without re-rendering the inline trigger.
 // `ReportButton` (the inline trigger) is still used for comments.
-export function ReportModal({ postId, commentId, onClose }) {
+//
+// Pass exactly one of `postId` / `commentId` / `messageId`. Messages were added
+// in Phase 9b M9b, alongside the ⋯ menu on a message bubble — before that this
+// took two ids and derived its wording as "post or else comment", so wiring a
+// message into it would have opened a dialog headed "Report this comment" and
+// POSTed a report with no target at all.
+export function ReportModal({ postId, commentId, messageId, onClose }) {
   const dialogRef = useRef(null);
   const [reason, setReason] = useState("");
   const [error, setError] = useState(null);
@@ -68,7 +74,12 @@ export function ReportModal({ postId, commentId, onClose }) {
     setError(null);
     setSubmitting(true);
     try {
-      await api.reportContent({ postId, commentId, reason: reason.trim() });
+      await api.reportContent({
+        postId,
+        commentId,
+        messageId,
+        reason: reason.trim(),
+      });
       setDone(true);
     } catch (err) {
       setError(err.message || "Couldn’t send the report.");
@@ -76,7 +87,8 @@ export function ReportModal({ postId, commentId, onClose }) {
     }
   }
 
-  const target = postId ? "post" : "comment";
+  const target =
+    postId != null ? "post" : commentId != null ? "comment" : "message";
   const stop = (event) => event.stopPropagation();
 
   return createPortal(
@@ -99,7 +111,9 @@ export function ReportModal({ postId, commentId, onClose }) {
               Thanks for letting us know
             </h2>
             <p className="mt-2 text-sm text-ink-soft">
-              We’ll review this {target} and take it down if it breaks the rules.
+              {target === "message"
+                ? "We’ll review this message and act on it if it breaks the rules."
+                : `We’ll review this ${target} and take it down if it breaks the rules.`}
             </p>
             <div className="mt-4 flex justify-end">
               <button
@@ -121,6 +135,19 @@ export function ReportModal({ postId, commentId, onClose }) {
               copyright, or shouldn’t be here. It goes to the site owner to
               review.
             </p>
+            {/* 🔒 Say plainly what reporting a private message hands over. Since
+                Phase 9b M0 the site owner can't read a conversation any other
+                way, so this is the one moment message text leaves the chat —
+                and the disclosure is what makes that moderation design honest
+                rather than a quiet exception to it. Not decoration: a Report
+                that omits it looks finished while regressing M0's intent. */}
+            {target === "message" && (
+              <p className="mt-2 text-sm text-ink-soft">
+                A copy of this message is sent with your report. It’s the only
+                way the site owner can see it — they can’t read your
+                conversations otherwise.
+              </p>
+            )}
             <textarea
               value={reason}
               onChange={(e) => setReason(e.target.value)}

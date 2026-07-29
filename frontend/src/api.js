@@ -26,6 +26,12 @@ export const CONVERSATION_LIST_POLL_MS = 12000;
 // note as messaging applies (docs/phases/phase-8-notifications.md).
 export const NOTIFICATIONS_POLL_MS = 12000;
 
+// How long after sending a message you can still correct it (Phase 9b M9b) — a
+// mirror of `MESSAGE_EDIT_WINDOW` in `backend/api/views.py`, and of the app's
+// `MESSAGE_EDIT_WINDOW_MS`. The server stays authoritative; this only keeps the
+// ⋯ menu from offering an Edit that would come back 403.
+export const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
+
 function getCookie(name) {
   const match = document.cookie.match(
     new RegExp("(?:^|; )" + name + "=([^;]*)")
@@ -384,14 +390,37 @@ export const api = {
   getConversation: (conversationId) =>
     request(`/api/conversations/${conversationId}/`),
 
-  // Messages in a conversation, oldest-first, paginated.
+  // Messages in a conversation, **newest-first**, paginated.
+  //
+  // `?order=desc` is what makes a thread openable in one request (Phase 9b M9b).
+  // The endpoint's default is oldest-first, which puts the newest messages on
+  // the *last* page — so "show me the bottom of this chat" used to mean walking
+  // every page, which is exactly what the drawer did in an effect. Asking for
+  // desc makes page one the screenful you open to and lets older messages page
+  // in upward as you scroll back.
   getMessages: (conversationId) =>
-    request(`/api/conversations/${conversationId}/messages/`),
+    request(`/api/conversations/${conversationId}/messages/?order=desc`),
 
   // Send a message. Sender is the session user (never the body).
   sendMessage: (conversationId, text) =>
     request(`/api/conversations/${conversationId}/messages/`, {
       method: "POST",
+      body: { text },
+    }),
+
+  // Correct your own message (Phase 9b M9b). The reported problem that started
+  // the whole messaging overhaul was that a typo was permanent.
+  //
+  // Sender-only, and only within the server's 15-minute window (403 after that:
+  // a thread is a shared record, so you can fix "teh", not rewrite what someone
+  // read and replied to yesterday). A deleted message can't be edited (400).
+  //
+  // Deliberately does **not** bump the conversation's activity time — fixing a
+  // typo shouldn't jump the thread to the top of everyone's list — so the
+  // conversation list needs its preview refreshed, never reordering.
+  editMessage: (conversationId, messageId, text) =>
+    request(`/api/conversations/${conversationId}/messages/${messageId}/`, {
+      method: "PATCH",
       body: { text },
     }),
 
