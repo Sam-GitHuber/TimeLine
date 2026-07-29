@@ -89,7 +89,7 @@ each is written below to be picked up cold:
 | **M9a** | Split the drawer (no behaviour change) | `messaging/m9a-split` | — | **S** | ☑ |
 | **M9b** | Transcript mechanics + the ⋯ menu & edit | `messaging/m9b-transcript` | M9a | **L** | ☑ |
 | **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☑ |
-| **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☐ |
+| **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☑ |
 | **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☐ |
 | **M9f** | Formatting, mentions, multi-select + doc rewrite | `messaging/m9f-text` | M9b | **M** | ☐ |
 
@@ -1592,20 +1592,91 @@ the clock.
    **root** renders its `reply_count` on the branch. Either opens the strand.
    🔒 Never render the quote from anything the server attached to the reply — the
    payload carries a bare `{ id }` and that's the whole point.
-3. **The strand is a panel beside the transcript, not a blur over it.** The
+3. ~~**The strand is a panel beside the transcript, not a blur over it.** The
    drawer is 400px on desktop; widen it when a strand is open rather than
    covering the conversation you opened the strand *from*. Below that width, fall
-   back to replacing the transcript.
+   back to replacing the transcript.~~ — **built, looked at, and reversed; do not
+   reinstate.** See settled point 1 below. The strand takes the panel at every
+   width, and the drawer never changes size.
 4. `Reply` joins the `⋯` menu. The transcript composer keeps **two** modes.
 5. The strand paginates — follow `next`. Its composer clears on success, not on
    dispatch.
 
 **Done when**
-- [ ] Reply from the menu opens a strand; replying inside it works and pages.
-- [ ] A reply-to-a-reply lands in the same strand — no nesting anywhere.
-- [ ] A clipped root shows the "start of this thread isn't available" wording,
+- [x] Reply from the menu opens a strand; replying inside it works and pages.
+- [x] A reply-to-a-reply lands in the same strand — no nesting anywhere.
+- [x] A clipped root shows the "start of this thread isn't available" wording,
       and an unresolved quote renders with **no author name** (M3's point 6).
-- [ ] `messaging.md` *Frontend* updated.
+- [x] `messaging.md` *Frontend* updated → *Reply threads on the web (Phase 9b
+      M9d)*.
+- [x] `messaging.test.jsx` green (67 tests), whole frontend suite 263.
+
+**Six things M9d settled that the plan above didn't anticipate** — read these
+before M9e/M9f, which share the bubble and the drawer:
+
+1. ⚠️ **The "widen the drawer" half of the plan was wrong, and was reversed
+   after seeing it. Don't reinstate it.** Step 3 above was built as written —
+   400px → 740 on a big window (`lg:has-[[data-strand]]:w-[740px]`, driven off a
+   `data-strand` attribute so no state had to be threaded through messaging
+   context), with the transcript standing down below `lg`. It renders well and is
+   wrong in use: a drawer that grows to half the window stops being a *companion*
+   to the timeline and becomes a takeover, which is the property this panel is
+   shaped around and the reason messaging isn't a route. The strand now covers
+   the transcript at every width — closer to the app than the widened version
+   was, one width, no breakpoint. **The lesson generalises past this milestone:**
+   "there's room for a second column" is a fact about the viewport, not a reason
+   to take it; the feed behind the drawer is the thing being protected.
+2. **The transcript is hidden, not unmounted, and that's load-bearing.** It holds
+   a draft, an edit in progress, the latched unread divider and a poll, and M3
+   settled that replying must disturb none of them. `display: none` keeps all of
+   it, at the cost of scroll position — a box with no layout can't hold one — so
+   closing a strand lands you at the newest message. That's the right way round
+   and jump-to-latest covers the rest, but it's the one thing to check if this
+   ever gets rebuilt as a conditional render.
+3. **The strand carries the ⋯ menu, and the app's reason for omitting it doesn't
+   port.** The app leaves the menu out of its strand because both are `Modal`s and
+   iOS won't stack them; `DrawerPopover` portals to `<body>`, so the web has no
+   such constraint — and without a menu the strand would be action-less, since
+   it's the only thing on screen while it's open. It's one item shorter (**no
+   Edit**): editing needs a composer mode, this composer already has a job, and a
+   second one is the "two things fighting for one input" M3 settled against.
+   `messageActions` grew an `allowEdit` flag rather than forking into two lists
+   that would drift.
+4. **Reply *inside* the strand re-aims the composer instead of opening
+   anything** — there's nowhere to open, since the server flattens a reply to a
+   reply into the strand you're already in. That gives the web something the app
+   hasn't got (picking your target from inside the strand), so the label above
+   the composer needed a way *back* to the root; without the ✕ on it the only
+   escape from a target chosen by accident was closing the strand and reopening
+   it.
+5. ⚠️ **`replyToId` has to be kept on the outbox entry, not recomputed on
+   retry.** A failed reply retried without it sends as an ordinary message and
+   lands in the transcript instead of the strand you sent it from — a silent
+   change of meaning, and invisible unless the test asserts the *second* call's
+   arguments. `rootId` is kept for a different reason (which strand's unsent
+   bubbles are which) and is the client's own guess; the *cache* write uses
+   `thread_root_id` off the server's copy, because the server is what decides
+   which strand a reply flattens into.
+6. ⚠️ **The strand is a second cache, and every message mutation has to reach
+   it** — `['thread', id, rootId]` beside the transcript's `['messages', id]`.
+   Reached by the send path first, and *missed* on the review pass by the
+   reaction patch and the delete invalidation, which is the shape of the mistake
+   worth remembering: neither showed anything wrong, because the transcript
+   holding the right answer is hidden while a strand is open, so both just looked
+   like a click that did nothing until the next poll. **M9e and M9f both add
+   mutations here** (a photo reply, an edit-adjacent mentions write, multi-select
+   delete) — check each against the strand, not only the transcript. Reactions go
+   in via `setQueriesData` on the `['thread', id]` prefix rather than the open
+   strand's key, so a cached strand can't come back holding a stale pill.
+
+**Rendered and checked**, the way M9c's note asks for: the bubble markup and the
+whole drawer were rendered from the real components into a static harness against
+the *built* stylesheet and screenshotted with headless Firefox, at 1280 and 900.
+That's what caught the one visual defect in the build — an emoji-only reply sat
+at the far left of a quote-width box, reading as detached from the quote above
+it; the `large` branch is a flex column with `items-end`/`items-start` now. It's
+also how the two-column layout got shown to the user and reversed (point 1),
+which is the argument for rendering a layout rather than reasoning about it.
 
 ---
 

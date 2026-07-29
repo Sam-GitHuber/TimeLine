@@ -438,11 +438,56 @@ export const api = {
   getMessages: (conversationId) =>
     request(`/api/conversations/${conversationId}/messages/?order=desc`),
 
+  /**
+   * A handful of messages by id (Phase 9b M9d) — how a reply's collapsed quote
+   * gets the words and the name it shows.
+   *
+   * 🔒 **This is the front door, not a way round it.** A reply's payload carries
+   * `reply_to` as a bare `{ id }` on purpose: embedding the quoted body would
+   * hand it to anyone who can see the *reply*, walking straight around the
+   * server's interval clipping. `?ids=` is one more filter on the very queryset
+   * the transcript reads, so an id the viewer was clipped out of comes back
+   * **absent** — indistinguishable from one that never existed. A caller learns
+   * nothing by asking, and the unresolved quote can honestly say so.
+   *
+   * Paginated like every message list, so a request for more ids than fit in a
+   * page is answered short with a `next`; `quotes.js` is where that's handled.
+   */
+  getMessagesByIds: (conversationId, ids) =>
+    request(
+      `/api/conversations/${conversationId}/messages/?ids=${ids.join(",")}`
+    ),
+
+  /**
+   * One reply strand — a root message and every reply hanging off it (Phase 9b
+   * M9d). What the strand panel loads.
+   *
+   * It's the *same* endpoint as `getMessages` with a filter rather than a route
+   * of its own, and that's deliberate on the server side: one queryset means a
+   * strand can never show a message the transcript wouldn't. A viewer who was
+   * clipped out of the root gets the replies they can see and no head, and the
+   * panel renders that honestly instead of pretending the thread is broken.
+   *
+   * Being that same endpoint it paginates, oldest-first — this is page one, and
+   * the caller follows `next`. Reading only this would cut a busy strand off at
+   * its *oldest* twenty and hide the reply you just sent.
+   */
+  getThread: (conversationId, rootId) =>
+    request(
+      `/api/conversations/${conversationId}/messages/?thread_root=${rootId}`
+    ),
+
   // Send a message. Sender is the session user (never the body).
-  sendMessage: (conversationId, text) =>
+  //
+  // `replyToId` makes it a reply (Phase 9b M9d). The server validates it against
+  // *your* visible messages, so an id from another thread or from inside a gap
+  // in your membership is rejected exactly like one that doesn't exist. Replies
+  // are one level deep: replying to a reply joins that strand rather than
+  // nesting, which the server derives — the client never works out a root.
+  sendMessage: (conversationId, text, replyToId = null) =>
     request(`/api/conversations/${conversationId}/messages/`, {
       method: "POST",
-      body: { text },
+      body: { text, ...(replyToId ? { reply_to_id: replyToId } : {}) },
     }),
 
   // Correct your own message (Phase 9b M9b). The reported problem that started

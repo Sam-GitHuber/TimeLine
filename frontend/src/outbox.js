@@ -34,16 +34,21 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 /**
- * An entry is `{ tempId, text, createdAt, status }`, where `tempId` is negative
- * so it can never collide with a server id, and `status` is `"sending"` or
- * `"failed"`.
+ * An entry is `{ tempId, text, replyToId, rootId, createdAt, status }`, where
+ * `tempId` is negative so it can never collide with a server id, and `status` is
+ * `"sending"` or `"failed"`.
  *
- * The app's entry carries three more fields, each arriving with the chunk that
- * needs it rather than sitting here unused: `replyToId`/`rootId` (M9d, so a
- * reply that fails inside a strand is recoverable from the transcript too),
- * `photo` (M9e) and `mentionIds` (M9f — kept on the entry so a *retry* sends the
- * same mentions, since otherwise a failed message that named someone would
- * quietly stop naming them on the second attempt).
+ * `replyToId`/`rootId` arrived with M9d. Both are kept, and they're not the same
+ * question: `replyToId` is what a **retry** has to send again, or a reply that
+ * failed would quietly turn into an ordinary message on the second attempt;
+ * `rootId` is which strand the bubble belongs *in*, and it's the client's own
+ * guess (`thread_root_id ?? id` of the message being answered) because there is
+ * no server copy to read until the send lands. It's what lets a failed reply be
+ * recoverable from inside the strand as well as from the transcript.
+ *
+ * The app's entry carries two more, each arriving with the chunk that needs it
+ * rather than sitting here unused: `photo` (M9e) and `mentionIds` (M9f — kept on
+ * the entry for the same retry reason as `replyToId`).
  */
 
 let nextTempId = -1;
@@ -126,10 +131,12 @@ export function clearOutbox() {
 }
 
 /** A fresh outbox entry for a message just handed to `sendMessage`. */
-export function newOutgoing({ text }) {
+export function newOutgoing({ text, replyToId, rootId }) {
   return {
     tempId: nextTempId--,
     text,
+    replyToId,
+    rootId,
     // The device clock, only ever used to sort this bubble to the bottom of the
     // list until the server's own timestamp replaces it wholesale.
     createdAt: new Date().toISOString(),
@@ -156,6 +163,13 @@ export function asMessage(entry, me) {
     created_at: entry.createdAt,
     edited_at: null,
     reactions: [],
+    // 🔒 A bare `{ id }`, exactly like the server's own `reply_to` — so an
+    // in-flight reply resolves its quote through `quotes.js` the same way an
+    // accepted one does, rather than being the one bubble that renders a quote
+    // from something it was handed.
+    reply_to: entry.replyToId ? { id: entry.replyToId } : null,
+    thread_root_id: entry.rootId ?? null,
+    reply_count: 0,
     attachments: [],
   };
 }

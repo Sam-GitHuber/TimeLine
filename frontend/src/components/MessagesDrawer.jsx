@@ -14,6 +14,20 @@ import { useMessaging } from "../messaging.jsx";
 // This file is the shell only. The views live in `components/messages/` — split
 // out in Phase 9b M9a, before the parity work, so that five feature diffs
 // afterwards weren't tangled with a 600-line file being carved up.
+/**
+ * The panel itself: full width on a phone, 400px from `sm`, and **that width
+ * whatever is open inside it**.
+ *
+ * Phase 9b M9d tried the other thing first — widening to 740 on a big window so
+ * a reply strand could sit *beside* the transcript — and it was rejected on
+ * sight: a drawer that grows to half the window stops being a companion to the
+ * timeline and starts being a takeover, which is the one thing this panel is
+ * shaped not to do. A strand opens over the transcript instead, at every width.
+ * One width, one column, no breakpoint to reason about.
+ */
+const PANEL_CLASS =
+  "msg-drawer fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-line bg-surface shadow-[-14px_0_44px_-26px_rgba(28,26,22,0.4)] outline-none sm:w-[400px]";
+
 export default function MessagesDrawer() {
   const { isOpen, view, close, newPrefill, conversationId } = useMessaging();
   const panelRef = useRef(null);
@@ -39,7 +53,7 @@ export default function MessagesDrawer() {
       role="dialog"
       aria-label="Messages"
       tabIndex={-1}
-      className="msg-drawer fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-line bg-surface shadow-[-14px_0_44px_-26px_rgba(28,26,22,0.4)] outline-none sm:w-[400px]"
+      className={PANEL_CLASS}
     >
       {view === "list" && <ConversationListView />}
       {/* Keyed on the conversation so switching threads remounts rather than

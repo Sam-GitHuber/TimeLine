@@ -7,6 +7,7 @@ import { api } from "./api.js";
 import { MessagingProvider } from "./messaging.jsx";
 import { clearDrafts } from "./drafts.js";
 import { clearOutbox } from "./outbox.js";
+import { clearQuotes } from "./quotes.js";
 import NewChatPicker from "./components/NewChatPicker.jsx";
 
 // Phase 5 messaging is a companion drawer (not a route): the nav "Messages"
@@ -32,6 +33,8 @@ vi.mock("./api.js", () => ({
     createGroupChat: vi.fn(),
     getConversation: vi.fn(),
     getMessages: vi.fn(),
+    getMessagesByIds: vi.fn(),
+    getThread: vi.fn(),
     sendMessage: vi.fn(),
     editMessage: vi.fn(),
     deleteMessage: vi.fn(),
@@ -150,6 +153,10 @@ beforeEach(() => {
   // Unsent messages outlive the view too (Phase 9b M9c), for the same reason,
   // so a failed send in one test would otherwise turn up in the next.
   clearOutbox();
+  // 🔒 So do resolved quotes (Phase 9b M9d) — and this one holds *other
+  // people's* message text, so it's cleared here for exactly the reason
+  // sign-out clears it.
+  clearQuotes();
   api.getFeed.mockResolvedValue(page([]));
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
@@ -160,6 +167,8 @@ beforeEach(() => {
   api.getConversations.mockResolvedValue(page([]));
   api.listUsers.mockResolvedValue(page([]));
   api.getMessages.mockResolvedValue(page([]));
+  api.getMessagesByIds.mockResolvedValue(page([]));
+  api.getThread.mockResolvedValue(page([]));
   api.getConversation.mockResolvedValue(convoDetail());
   api.markConversationRead.mockResolvedValue({ detail: "Marked read." });
 });
@@ -435,7 +444,11 @@ describe("Messages drawer — thread", () => {
     await user.type(box, "yo");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
-    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledWith(7, "yo"));
+    // The explicit `null` is "not a reply" (Phase 9b M9d) — the transcript's
+    // composer never sends one; replying goes through the strand.
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "yo", null)
+    );
   });
 
   it("hides the composer when you can no longer message", async () => {
@@ -1395,6 +1408,422 @@ describe("Messages drawer — reactions, send state and ticks (Phase 9b M9c)", (
     // doesn't offer what would fail.
     expect(screen.queryByRole("button", { name: /React with/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Report" })).toBeInTheDocument();
+  });
+});
+
+// Phase 9b M9d — reply threads on the web. The strand is a panel beside the
+// transcript rather than the app's blur over it, but everything below the layout
+// is the same behaviour: one flat strand per root, quotes resolved through the
+// clipped endpoint, and every route in landing in the same place.
+describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
+  function msg(overrides = {}) {
+    return {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hey there",
+      is_deleted: false,
+      is_edited: false,
+      created_at: new Date().toISOString(),
+      reactions: [],
+      reply_to: null,
+      thread_root_id: null,
+      reply_count: 0,
+      ...overrides,
+    };
+  }
+  const mineSender = { id: fakeUser.pk, display_name: "you", avatar_thumb: null };
+
+  /** The open strand panel, or a failure that says which one is missing. */
+  function strand() {
+    return screen.getByRole("region", { name: "Reply thread" });
+  }
+
+  async function openMenu(user, text) {
+    // The ⋯ lives inside the bubble, so scope to the row the text is in.
+    const bubble = (await screen.findByText(text)).closest("li");
+    await user.click(within(bubble).getByRole("button", { name: "Message options" }));
+  }
+
+  it("opens a strand from Reply, and sends the reply into it", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?" });
+    const sent = msg({
+      id: 9,
+      sender: mineSender,
+      text: "yes!",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([root]));
+    // The strand's second read is after the send, so it has the reply — the
+    // send invalidates `['thread', 7]` precisely so an open strand doesn't sit a
+    // poll cycle behind the transcript behind it.
+    api.getThread
+      .mockResolvedValueOnce(page([root]))
+      .mockResolvedValue(page([root, sent]));
+    api.sendMessage.mockResolvedValue(sent);
+
+    renderAt("/messages/7");
+    expect(await screen.findByText("dinner?")).toBeInTheDocument();
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    // Reply opens the strand — it does *not* aim the transcript's composer at
+    // the message. That's M3's first settled point, and the one a future session
+    // is most likely to reverse by accident.
+    expect(api.getThread).toHaveBeenCalledWith(7, 5);
+    expect(within(strand()).getByText("dinner?")).toBeInTheDocument();
+    expect(screen.queryByText(/Replying to/)).toBeNull();
+
+    const box = within(strand()).getByLabelText("Reply to thread");
+    await user.type(box, "yes!");
+    await user.click(within(strand()).getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "yes!", 5)
+    );
+    // And it lands in the strand you sent it from, not only in the transcript.
+    expect(await within(strand()).findByText("yes!")).toBeInTheDocument();
+  });
+
+  it("pages a strand rather than showing its oldest twenty", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+    api.getThread.mockResolvedValue(
+      page(
+        [msg({ id: 5, text: "dinner?" })],
+        "http://localhost:8000/api/conversations/7/messages/?thread_root=5&page=2"
+      )
+    );
+    api.getPage.mockResolvedValue(
+      page([msg({ id: 6, text: "the newest reply", reply_to: { id: 5 }, thread_root_id: 5 })])
+    );
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    // A strand is short and bounded, so every page is pulled — unlike the
+    // transcript, which pages lazily. Reading only page one would cut a busy
+    // strand off at its *oldest* twenty and hide the reply you just sent.
+    expect(await within(strand()).findByText("the newest reply")).toBeInTheDocument();
+  });
+
+  it("lands a reply-to-a-reply in the same strand, quoting who you answered", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?", reply_count: 1 });
+    const reply = msg({
+      id: 6,
+      sender: { id: 3, display_name: "Sanjay", avatar_thumb: null },
+      text: "where though",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([reply, root]));
+    api.getThread.mockResolvedValue(page([root, reply]));
+    api.sendMessage.mockResolvedValue(
+      msg({ id: 7, sender: mineSender, text: "the usual", reply_to: { id: 6 }, thread_root_id: 5 })
+    );
+
+    renderAt("/messages/7");
+    await openMenu(user, "where though");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    // `thread_root_id`, not the message's own id: replying to a reply joins that
+    // strand rather than starting a nested one. The server flattens it either
+    // way — this is the client not asking for something different.
+    expect(api.getThread).toHaveBeenCalledWith(7, 5);
+    // And the composer aims at the reply you clicked, so the quote names who you
+    // actually answered rather than whoever started the strand.
+    expect(within(strand()).getByText("Replying to Sanjay")).toBeInTheDocument();
+
+    await user.type(within(strand()).getByLabelText("Reply to thread"), "the usual");
+    await user.click(within(strand()).getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "the usual", 6)
+    );
+  });
+
+  it("opens the strand from a root's reply count, aimed at the root", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "dinner?", reply_count: 3 })])
+    );
+    api.getThread.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+
+    renderAt("/messages/7");
+    await user.click(await screen.findByRole("button", { name: /3 replies/ }));
+
+    expect(api.getThread).toHaveBeenCalledWith(7, 5);
+    // No "Replying to" label: the target *is* the root, and naming it would just
+    // restate the message at the top of the panel.
+    expect(within(strand()).queryByText(/Replying to/)).toBeNull();
+  });
+
+  it("resolves a quote through the clipped endpoint, never off the reply", async () => {
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({
+          id: 6,
+          text: "where though",
+          reply_to: { id: 5 },
+          thread_root_id: 5,
+        }),
+      ])
+    );
+    // The quoted message hasn't paged in — so it's fetched by id. 🔒 This is the
+    // whole privacy design: the reply's payload carries a bare `{ id }`, and the
+    // body comes back through the same interval-clipped queryset the transcript
+    // reads.
+    api.getMessagesByIds.mockResolvedValue(
+      page([msg({ id: 5, text: "dinner?" })])
+    );
+
+    renderAt("/messages/7");
+    expect(await screen.findByText("where though")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.getMessagesByIds).toHaveBeenCalledWith(7, [5])
+    );
+    // Both halves of the resolved quote: the words, and the author — which the
+    // reply's own payload never carried.
+    const quote = await screen.findByRole("button", {
+      name: "In reply to Priya — open thread",
+    });
+    expect(within(quote).getByText("dinner?")).toBeInTheDocument();
+    expect(within(quote).getByText("Priya")).toBeInTheDocument();
+  });
+
+  it("asks about an unresolvable quote once, then says so with no author name", async () => {
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({
+          id: 6,
+          sender: { id: 3, display_name: "Sanjay", avatar_thumb: null },
+          text: "where though",
+          reply_to: { id: 5 },
+          thread_root_id: 5,
+        }),
+      ])
+    );
+    // Clipped out of this viewer's history: the id simply isn't in the response,
+    // indistinguishable from one that never existed.
+    api.getMessagesByIds.mockResolvedValue(page([]));
+
+    renderAt("/messages/7");
+    expect(
+      await screen.findByText("Original message unavailable")
+    ).toBeInTheDocument();
+    // 🔒 No name above it. A client that couldn't resolve the message isn't
+    // entitled to its author either — someone can join a group, post and leave
+    // entirely inside your gap, and this would be the one payload handing you
+    // their name. Sanjay wrote the *reply*, so his name is on that bubble; the
+    // quote carries nobody's.
+    const quote = screen.getByText("Original message unavailable").parentElement;
+    expect(within(quote).queryByText("Priya")).toBeNull();
+
+    // Asked once and never again: an unresolvable id is a fact about this
+    // viewer, not a transient failure, so re-asking every poll would be a
+    // request that can only ever return nothing.
+    expect(api.getMessagesByIds).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a headless strand from a reply's quote, and says the head is missing", async () => {
+    const user = userEvent.setup();
+    const orphan = msg({
+      id: 6,
+      text: "where though",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([orphan]));
+    api.getMessagesByIds.mockResolvedValue(page([]));
+    // The strand comes back with the replies this viewer may see and no root.
+    api.getThread.mockResolvedValue(page([orphan]));
+
+    renderAt("/messages/7");
+    // The quote is the only way in here, and that's the point rather than a
+    // convenience: with the root clipped out there's no bubble to carry a reply
+    // count, so without this the strand would be unreachable for exactly the
+    // person whose view of it is already partial.
+    await user.click(
+      await screen.findByRole("button", {
+        name: /In reply to a message you can’t see/,
+      })
+    );
+
+    expect(api.getThread).toHaveBeenCalledWith(7, 5);
+    // Different wording from a quote's "Original message unavailable", which on
+    // a whole strand reads as an error. Two different things to tell someone.
+    expect(
+      within(strand()).getByText(/The start of this thread isn’t available/)
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a failed reply in the strand, and retries it as a reply", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+    api.getThread.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+    api.sendMessage.mockRejectedValue(new Error("offline"));
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    await user.type(within(strand()).getByLabelText("Reply to thread"), "yes!");
+    await user.click(within(strand()).getByRole("button", { name: "Send" }));
+
+    // The failure lands on the bubble, in the panel you sent it from — which is
+    // the only thing on screen while a strand is open.
+    expect(await within(strand()).findByText("Not sent")).toBeInTheDocument();
+    expect(within(strand()).getByText("yes!")).toBeInTheDocument();
+
+    api.sendMessage.mockResolvedValue(
+      msg({ id: 9, sender: mineSender, text: "yes!", reply_to: { id: 5 }, thread_root_id: 5 })
+    );
+    await user.click(within(strand()).getByRole("button", { name: "Retry" }));
+    // ⚠️ Still a reply. The `replyToId` is kept on the outbox entry precisely so
+    // a retry can't quietly turn a failed reply into an ordinary message.
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenLastCalledWith(7, "yes!", 5)
+    );
+  });
+
+  it("offers no Edit inside the strand — one composer, one job", async () => {
+    const user = userEvent.setup();
+    const own = msg({ id: 5, sender: mineSender, text: "dinner?" });
+    api.getMessages.mockResolvedValue(page([own]));
+    api.getThread.mockResolvedValue(page([own]));
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    // Offered in the transcript, on a recent message of your own.
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    const bubble = within(strand()).getByText("dinner?").closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    // Editing needs a composer mode, and this composer already has a job. The
+    // transcript keeps Edit — see `MessageStrandPanel`.
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+  });
+
+  it("offers no Reply at all in a thread you can no longer send to", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail({ can_send: false }));
+    api.getMessages.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    // The server refuses a reply from a severed connection exactly as it refuses
+    // a message; the menu just doesn't offer what would come back 403.
+    expect(screen.queryByRole("button", { name: "Reply" })).toBeNull();
+  });
+
+  // The next three are all one point: the strand reads a query of its *own*
+  // (`['thread', id, rootId]`), so anything the thread view does to a message
+  // has to reach that cache as well as the transcript's `['messages', id]`.
+  // Reaching only the transcript isn't wrong-looking in the transcript — it's
+  // invisible, because the transcript is hidden while a strand is open. The
+  // click just appears to do nothing until the next poll.
+  it("shows a reaction made inside the strand without waiting for a poll", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?" });
+    api.getMessages.mockResolvedValue(page([root]));
+    api.getThread.mockResolvedValue(page([root]));
+    api.toggleReaction.mockResolvedValue({
+      reactions: [{ emoji: "👍", count: 1, reacted: true }],
+    });
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    const bubble = within(strand()).getByText("dinner?").closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    await user.click(screen.getByRole("button", { name: "React with 👍" }));
+
+    await waitFor(() =>
+      expect(api.toggleReaction).toHaveBeenCalledWith({
+        messageId: 5,
+        emoji: "👍",
+      })
+    );
+    // M2's fifth decision is that there's no *optimistic* write — the server
+    // owns the rules — which is only tolerable because the response is written
+    // straight in. In here that means writing it into the strand's cache too.
+    expect(
+      await within(strand()).findByRole("button", {
+        name: /👍, 1, including you/,
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("clears a message from the strand when you delete it there", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, sender: mineSender, text: "dinner?" });
+    const reply = msg({
+      id: 6,
+      sender: mineSender,
+      text: "actually no",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([reply, root]));
+    api.getThread.mockResolvedValue(page([root, reply]));
+    api.deleteMessage.mockResolvedValue({});
+
+    renderAt("/messages/7");
+    // In from the reply rather than the root: the root's words are also in the
+    // reply's quote, so "dinner?" is on screen twice.
+    await openMenu(user, "actually no");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    const bubble = within(strand()).getByText("actually no").closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    // What the strand's re-read comes back with once the delete has landed.
+    api.getThread.mockResolvedValue(
+      page([root, { ...reply, is_deleted: true, text: "" }])
+    );
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(api.deleteMessage).toHaveBeenCalledWith(7, 6));
+    expect(
+      await within(strand()).findByText("Message deleted")
+    ).toBeInTheDocument();
+  });
+
+  it("closes the strand on Escape rather than the whole drawer", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+    api.getThread.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+    expect(strand()).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+
+    // The nearer thing wins — the same call the composer's Escape already makes
+    // for edit mode. Losing the whole panel (and the draft and edit the strand
+    // is hidden *over*) because you wanted to leave a thread would be a
+    // surprise, and Escape is the only key anyone tries first.
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Reply thread" })).toBeNull()
+    );
+    expect(screen.getByRole("dialog", { name: "Messages" })).toBeInTheDocument();
+    // And focus comes back into the transcript. The element it was on has just
+    // unmounted, so left alone it falls to `<body>` — and the drawer is
+    // deliberately not a focus trap, so the next Tab would start at the top of
+    // the page, outside the panel entirely.
+    expect(screen.getByPlaceholderText(/write a message/i)).toHaveFocus();
   });
 });
 
