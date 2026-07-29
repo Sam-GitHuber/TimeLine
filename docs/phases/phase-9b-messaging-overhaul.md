@@ -1512,12 +1512,17 @@ before M9d, which renders reactions and ticks inside its strand:
    off a bubble's edge. Pills do, and a trigger taking real width held every
    actionable bubble in off the panel edge, so the pills stopped lining up under
    the thing they belong to. It's now absolutely positioned in the bubble's
-   top-right corner. **The cost is one more rule in `index.css`, and it's the
-   same cascade trap M9b recorded, pointing the other way**: the bubble's
-   horizontal padding had to leave Tailwind (`px-3.5` → `.msg-bubble-body`),
-   because where nothing can hover the trigger is permanently visible and the
-   bubble must reserve that corner — and a `@media (hover: none)` rule in
-   `@layer components` can override a component class but never a utility.
+   top-right corner, with the bubble **reserving** that corner. **The cost is
+   one more rule in `index.css`, and it's the same cascade trap M9b recorded,
+   pointing the other way**: the bubble's horizontal padding had to leave
+   Tailwind (`px-3.5` → `.msg-bubble-body`) so `.msg-menu-host` could override
+   it, which same-layer source order does and no component rule could ever do
+   against a utility. ⚠️ **And the reserve has to be unconditional** — it was
+   `@media (hover: none)` only at first, on the reasoning that a hover-only
+   trigger may sit over the text while you hover. Rendering it said otherwise:
+   the trigger is opaque, so it hides the end of the first line and every
+   wrapped message reads as truncated. **Verify a hover affordance by looking at
+   it**; this was invisible to the whole suite.
    **And it took the pills with it**: making the bubble the menu's anchor made
    it *positioned*, so it began painting over the in-flow pill row pulled up
    onto its edge, and the pills came out looking clipped along the top. They're
@@ -1556,10 +1561,13 @@ before M9d, which renders reactions and ticks inside its strand:
    drawer-testable without a poll, so each state is staged as its own render and
    the transition itself is covered by `readReceipts.test.js`.
 
-**Not verified on screen.** Everything here is covered by the suite, but the
-pixel-level questions this chunk raises — where a pill sits against a run of
-bubbles (M2's "watch for"), whether the 252px quick row reads well against a
-160px item list, the tick's baseline against the clock — want a real browser.
+**Rendered and checked.** No browser automation was available, so the bubble
+markup was rendered against the *built* stylesheet in a static harness and
+screenshotted with headless Firefox — which is what caught the truncation above
+and confirmed the pills paint over the bubble rather than under it. Two things
+that harness can't answer and a real session still should: the quick-emoji row
+against the item list at a real 400px drawer, and the tick's baseline against
+the clock.
 
 ---
 

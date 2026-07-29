@@ -103,15 +103,14 @@ export default function MessageMenu({
         // can't hover — a phone browser — where hiding it would make the whole
         // menu an invisible button nobody could find.
         //
-        // Absolutely positioned in the bubble's top-right corner, over its own
-        // background rather than transparent: the corner is where a line of
-        // text ends, so an unbacked trigger would have glyphs showing through
-        // the gaps between the dots. Where nothing can hover the bubble reserves
-        // this space (`msg-menu-host`), so the two never actually overlap.
+        // Absolutely positioned in the bubble's top-right corner. It needs no
+        // background of its own because the bubble *reserves* that corner
+        // (`msg-menu-host` in index.css) on every device — text can't enter a
+        // padding box, so the dots never have words behind them to mask.
         className={`msg-menu-trigger absolute right-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full transition ${
           onFill
-            ? "bg-accent text-white/70 hover:bg-white/25 hover:text-white"
-            : "bg-raised text-ink-faint hover:bg-accent-tint hover:text-accent-deep"
+            ? "text-white/70 hover:bg-white/25 hover:text-white"
+            : "text-ink-faint hover:bg-accent-tint hover:text-accent-deep"
         }`}
       >
         <svg

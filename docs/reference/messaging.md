@@ -1169,13 +1169,20 @@ sibling *beside* the bubble, which cost real width: every bubble that could be
 acted on sat pushed in off the panel edge, and once M9c hung reaction pills off
 the bubble's own edge the two no longer lined up. The corner is also where a
 message's own actions belong. `msg-menu-host` on the bubble is the positioning
-context, and 🔒 **where nothing can hover it also reserves the corner**
-(`padding-right`), because there the trigger is permanently visible and would
-otherwise sit on the end of the first line for good. That padding lives in
-`index.css` for the same cascade reason the visibility rules do — a
-`@media (hover: none)` rule in `@layer components` can override
-`.msg-bubble-body`, but could never override a `px-3.5` utility. Both halves in
-CSS, or neither works.
+context and ⚠️ **reserves that corner (`padding-right`) on every device, not
+only where nothing can hover.** The first cut reserved it under
+`@media (hover: none)` alone, reasoning that a trigger which only appears on
+hover could sit over the words while you hover. Rendering it settled that: the
+trigger is *opaque*, so it doesn't crowd the text, it hides it — the first line
+of every wrapped message lost its last couple of characters and read as
+truncated. A bubble 18px wider than its text is the cheaper cost. Reserving
+always has a second benefit: the bubble doesn't reflow when you mouse over it.
+
+That padding lives in `index.css` rather than as a `px-3.5` utility for the same
+cascade reason the visibility rules do, pointing the other way: `.msg-menu-host`
+has to *override* `.msg-bubble-body`, which works on same-layer source order and
+could never work against a utility, since Tailwind's utilities layer comes last.
+Both halves in CSS, or neither does anything.
 
 ⚠️ **It positions in *viewport* coordinates (`position: fixed`), unlike
 `PostMenu`, and closes on any scroll.** `PostMenu` is anchored to a post in the
