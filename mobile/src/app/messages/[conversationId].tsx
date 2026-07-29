@@ -694,7 +694,13 @@ export default function ThreadScreen() {
    * single tick would read as "nobody is ever reading these", where showing
    * nothing says the true thing, which is that you asked out of this.
    */
-  const participants = detail?.participants ?? [];
+  // Memoised, not a bare `?? []`: the detail payload is re-fetched every
+  // `CONVERSATION_DETAIL_POLL_MS`, and a fresh empty array each time would
+  // rebuild the mention map (and everything keyed off it) on every tick.
+  const participants = useMemo(
+    () => detail?.participants ?? [],
+    [detail?.participants]
+  );
   const showReceipts = receiptsVisible(participants);
 
   /**
