@@ -566,10 +566,19 @@ export default function ConversationThreadView() {
     // — the failure is already visible on the thing that failed, which is a
     // better place to say it than somewhere that can't tell you *which* of two
     // messages in flight fell over.
-    onError: (_error, { tempId }) =>
+    //
+    // **The reason is kept, not just the fact** (M9e). A text send fails because
+    // the network blinked, and Retry is the whole answer; a *photo* can fail
+    // because the server refused it — over the 4 MB cap, or a thread you've been
+    // severed from — and that is deterministic, so a bubble offering nothing but
+    // Retry invites someone to press it forever. Saying what the server said
+    // turns a loop into a decision.
+    onError: (error, { tempId }) =>
       setOutbox((entries) =>
         entries.map((e) =>
-          e.tempId === tempId ? { ...e, status: "failed" } : e
+          e.tempId === tempId
+            ? { ...e, status: "failed", error: error?.message ?? null }
+            : e
         )
       ),
   });
@@ -590,7 +599,12 @@ export default function ConversationThreadView() {
   function retrySend(entry) {
     setOutbox((entries) =>
       entries.map((e) =>
-        e.tempId === entry.tempId ? { ...e, status: "sending" } : e
+        // The previous reason goes with the retry: leaving it under a bubble
+        // that's trying again would be reporting a failure that hasn't happened
+        // yet, and it'll be back in a moment if it's still true.
+        e.tempId === entry.tempId
+          ? { ...e, status: "sending", error: null }
+          : e
       )
     );
     // Everything off the entry, not recomputed: a failed reply retried without
@@ -762,16 +776,57 @@ export default function ConversationThreadView() {
     setPhotoError(null);
   }
 
+  /**
+   * Release a queued photo's preview URL if the view goes away still holding it
+   * (M9e) — closing the drawer, or switching to another chat, which remounts
+   * this view because it's keyed on the conversation id.
+   *
+   * The other two exits are already covered: `removeAttachment` revokes when you
+   * take the photo off, and `outbox.js` takes ownership the moment one is handed
+   * over to a send. This is the third, and without it every abandoned pick pins
+   * its thumbnail's bytes until the tab closes.
+   *
+   * Through a ref, and the cleanup runs on unmount **only** — keying the effect
+   * on `attachment` would revoke on every change, including the one that hands
+   * the photo to the outbox, blanking the in-flight bubble that's now drawing it.
+   */
+  const attachmentRef = useRef(null);
+  useEffect(() => {
+    attachmentRef.current = attachment;
+  }, [attachment]);
+  useEffect(
+    () => () => {
+      const held = attachmentRef.current;
+      if (held) URL.revokeObjectURL(held.previewUrl);
+    },
+    []
+  );
+
+  /**
+   * Whether there's anything to submit — read by both the button's `disabled`
+   * and `handleSubmit`, so the two can't disagree about it.
+   *
+   * ⚠️ **An edit and a send ask different questions**, and conflating them was a
+   * real bug: a queued photo made `!value` false, so clearing the field mid-edit
+   * fired a `PATCH` with empty text where the old code had returned early. The
+   * server 400s that on a text message ("A message can't be empty") — but it
+   * *allows* it on a photo message, since editing a caption down to nothing is a
+   * legitimate thing to do. That's the rule mirrored here: an edit needs words
+   * unless the message it's editing carries a photo of its own. The composer's
+   * queued attachment has nothing to do with it — a `PATCH` can't carry one.
+   */
+  const editingHasPhoto = (editing?.attachments?.length ?? 0) > 0;
+  const canSubmit = preparing
+    ? false
+    : editing
+      ? (!!text.trim() || editingHasPhoto) && !editMutation.isPending
+      : !!text.trim() || !!attachment;
+
   function handleSubmit(event) {
     event.preventDefault();
     const value = text.trim();
-    // A photo with no caption is a perfectly ordinary message, so "there's
-    // something to send" is text *or* a photo — the same rule the server
-    // enforces. Not while one is still being prepared: sending then would
-    // silently drop the picture the person is looking at.
-    if ((!value && !attachment) || preparing) return;
+    if (!canSubmit) return;
     if (editing) {
-      if (editMutation.isPending) return;
       // Saving the original text unchanged is a no-op, not a pointless PATCH
       // that would stamp the message "Edited" for nothing.
       if (value === editing.text) stopEditing();
@@ -1247,15 +1302,11 @@ export default function ConversationThreadView() {
                     />
                     <button
                       type="submit"
-                      // Only an *edit* disables it. A send doesn't: the message is
-                      // already on screen and the composer is already empty, so
-                      // there's nothing to wait for. A photo with no caption is
-                      // sendable; a photo still being prepared is not.
-                      disabled={
-                        (!text.trim() && !attachment) ||
-                        preparing ||
-                        editMutation.isPending
-                      }
+                      // Only an *edit* blocks on its request. A send doesn't: the
+                      // message is already on screen and the composer is already
+                      // empty, so there's nothing to wait for. See `canSubmit`
+                      // for why the two modes ask different questions.
+                      disabled={!canSubmit}
                       className="btn btn-primary btn-sm mb-0.5"
                     >
                       {editing

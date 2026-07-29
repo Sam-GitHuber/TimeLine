@@ -107,6 +107,12 @@ export default function ConversationListView() {
    * row ever grows a "has incoming history" flag.
    */
   function rowActions(convo) {
+    // Clear the last failure as a new menu opens. `getActions` is called on the
+    // click that opens one, not during render, so this is an event handler doing
+    // event-handler work — and without it a single failed mute leaves a red line
+    // over the list until some *other* action happens to succeed, long after
+    // it's stopped being true.
+    rowAction.reset();
     const actions = [];
     const leaving = convo.my_status === "pending";
     if (!leaving) {

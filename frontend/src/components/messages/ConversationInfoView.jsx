@@ -277,6 +277,11 @@ export default function ConversationInfoView() {
             )}
           </Section>
 
+          {/* Rendered only when it has something in it. A `Section` draws a rule
+              across the panel, so an unconditional one left a stray line under a
+              1:1 for as long as the profile behind the Block control was still
+              loading. */}
+          {(isGroup || (other && otherQuery.data)) && (
           <Section>
             {isGroup && (
               <button
@@ -316,6 +321,7 @@ export default function ConversationInfoView() {
               </div>
             )}
           </Section>
+          )}
         </div>
       )}
     </>

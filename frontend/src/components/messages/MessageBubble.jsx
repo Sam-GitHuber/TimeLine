@@ -272,6 +272,22 @@ export default function MessageBubble({
           </button>
         </div>
       )}
+      {/* What the server said, on its own line under the controls (M9e).
+          **Beside "Not sent", never instead of it**: the fact and the reason
+          answer different questions, and a bubble that swapped one for the other
+          would trade "this didn't send" for a sentence you have to parse to work
+          out that much.
+
+          Most failures have nothing to add — a network blink carries no message,
+          and Retry is the whole answer — so this is usually absent. It earns its
+          place on the ones that will fail again however often they're retried: a
+          photo over the byte cap, a thread you've been severed from. Without it,
+          Retry is a button that can only disappoint. */}
+      {status === "failed" && message.outboxError && (
+        <p className="mt-0.5 pr-1 text-right text-xs text-ink-faint">
+          {message.outboxError}
+        </p>
+      )}
 
       {/* The pills, hanging off the bubble's lower edge on its near side.
           **One gesture: a click opens "who reacted", it never toggles the
@@ -430,17 +446,19 @@ const PHOTO_MAX_HEIGHT = 288;
  * request by itself.
  */
 function MessagePhoto({ attachment, onOpen }) {
-  // Fall back to a square if the sender sent nothing usable — a wrong box beats
-  // no box, since the point is only to stop the transcript reflowing.
-  const naturalWidth = attachment.width || 1;
-  const naturalHeight = attachment.height || 1;
+  // Used undefended, because both ends guarantee them: `MessageAttachment`'s
+  // columns are non-null and `MessageSerializer` bounds each at `min_value=1`,
+  // and the outbox's local stand-in carries what `prepareChatPhoto` measured. An
+  // earlier `|| 1` here looked careful and wasn't — it could only ever have
+  // turned a missing dimension into a 1×1 image, which is less use than the
+  // stretched box it was guarding against.
   const scale = Math.min(
     1,
-    PHOTO_MAX_WIDTH / naturalWidth,
-    PHOTO_MAX_HEIGHT / naturalHeight
+    PHOTO_MAX_WIDTH / attachment.width,
+    PHOTO_MAX_HEIGHT / attachment.height
   );
-  const width = Math.round(naturalWidth * scale);
-  const height = Math.round(naturalHeight * scale);
+  const width = Math.round(attachment.width * scale);
+  const height = Math.round(attachment.height * scale);
 
   const image = (
     <img

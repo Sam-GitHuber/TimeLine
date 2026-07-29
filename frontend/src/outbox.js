@@ -187,6 +187,17 @@ export function asMessage(entry, me) {
   return {
     id: entry.tempId,
     sender: me,
+    /**
+     * Why the send failed, if it did (M9e) — **the one field here that isn't a
+     * server field**, which is why it's camelCase among snake_case: nothing
+     * should mistake it for something the API returned.
+     *
+     * It rides on the message rather than being passed alongside it because a
+     * failed bubble is rendered from two places (the transcript and a reply
+     * strand), and a second prop threaded through both is a second thing that
+     * can be present in one view and missing in the other.
+     */
+    outboxError: entry.error ?? null,
     text: entry.text,
     is_deleted: false,
     is_edited: false,

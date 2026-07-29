@@ -2001,6 +2001,62 @@ describe("Messages drawer — photos (Phase 9b M9e)", () => {
     expect(screen.getByRole("button", { name: "Add a photo" })).toBeEnabled();
   });
 
+  it("frees an abandoned photo's preview when the thread goes away", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversations.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    expect(revoke).not.toHaveBeenCalled();
+
+    // Back to the list unmounts the thread with the photo still queued. An
+    // object URL is a document-lifetime reference, so left alone every
+    // abandoned pick pins its thumbnail's bytes until the tab closes.
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    await waitFor(() =>
+      expect(revoke).toHaveBeenCalledWith(preparedPhoto.previewUrl)
+    );
+    revoke.mockRestore();
+  });
+
+  it("does not free the preview when the photo is handed to the outbox", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    // Left in flight, so the entry — and the URL its bubble is drawing — stays.
+    api.sendMessage.mockReturnValue(new Promise(() => {}));
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // ⚠️ Ownership passes to the outbox on send, and revoking here would blank
+    // the in-flight bubble now drawing it — which is why the composer clears its
+    // state without revoking, and why the unmount cleanup is keyed on nothing.
+    await waitFor(() =>
+      expect(screen.queryByAltText("Photo to send")).toBeNull()
+    );
+    expect(revoke).not.toHaveBeenCalled();
+    revoke.mockRestore();
+  });
+
   it("says so when a photo can't be prepared, and sends nothing", async () => {
     const user = userEvent.setup();
     api.getConversation.mockResolvedValue(convoDetail());
@@ -2045,6 +2101,134 @@ describe("Messages drawer — photos (Phase 9b M9e)", () => {
       "src",
       "/media/messages/full.jpg"
     );
+  });
+
+  it("retries a failed photo send *with the photo*, not the caption alone", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    api.sendMessage.mockRejectedValue(new Error("offline"));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    await user.type(screen.getByPlaceholderText(/write a message/i), "look");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Not sent")).toBeInTheDocument();
+
+    api.sendMessage.mockResolvedValue(photoMessage({ id: 9, text: "look" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    // ⚠️ The photo comes off the *entry*, not recomputed — a retry that dropped
+    // it would send the caption alone and silently lose the picture, which is
+    // the one thing this whole path exists to prevent. (The same reason a
+    // retried reply keeps its `replyToId`.)
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenLastCalledWith(
+        7,
+        "look",
+        null,
+        preparedPhoto
+      )
+    );
+  });
+
+  it("shows the server's reason on a send it will never accept", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+    api.sendMessage.mockRejectedValue(
+      new Error("Each photo must be under 4 MB.")
+    );
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "huge.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // Beside "Not sent", never instead of it: a refusal will fail again however
+    // often it's retried, so without the reason Retry is a button that can only
+    // disappoint.
+    expect(await screen.findByText("Not sent")).toBeInTheDocument();
+    expect(
+      screen.getByText("Each photo must be under 4 MB.")
+    ).toBeInTheDocument();
+  });
+
+  it("won't let a queued photo turn an emptied edit into a PATCH", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 5,
+          sender: { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
+          text: "teh plan",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
+    prepareChatPhoto.mockResolvedValue(preparedPhoto);
+
+    renderAt("/messages/7");
+    await screen.findByText("teh plan");
+    await user.upload(
+      screen.getByTestId("chat-photo-input"),
+      new File(["raw"], "beach.jpg", { type: "image/jpeg" })
+    );
+    await screen.findByAltText("Photo to send");
+
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByPlaceholderText(/edit your message/i));
+
+    // ⚠️ The queued photo made `!value` false, so the send-side guard let an
+    // empty edit through — a `PATCH` the server answers "A message can't be
+    // empty". A `PATCH` can't carry an attachment, so the composer's photo has
+    // nothing to do with whether an edit has something to say.
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.keyboard("{Enter}");
+    expect(api.editMessage).not.toHaveBeenCalled();
+  });
+
+  it("lets a photo message's caption be edited away, as the server does", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        photoMessage({
+          id: 5,
+          text: "look",
+          sender: { id: fakeUser.pk, display_name: "you", avatar_thumb: null },
+        }),
+      ])
+    );
+    api.editMessage.mockResolvedValue({});
+
+    renderAt("/messages/7");
+    await screen.findByText("look");
+
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByPlaceholderText(/edit your message/i));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    // A photo with no caption is an ordinary message, so editing one down to
+    // nothing is legitimate — `MessageSerializer.validate` allows exactly this
+    // via `has_attachments`, and the composer mustn't be stricter than it.
+    await waitFor(() => expect(api.editMessage).toHaveBeenCalledWith(7, 5, ""));
   });
 
   it("closes the photo on Escape without taking the drawer with it", async () => {
@@ -2249,6 +2433,28 @@ describe("Messages drawer — list search and row actions (Phase 9b M9e)", () =>
     expect(
       await screen.findByRole("button", { name: "Unmute" })
     ).toBeInTheDocument();
+  });
+
+  it("clears a failed row action when the next menu opens", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.markConversationRead.mockRejectedValue(new Error("Couldn’t do that."));
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await openRowMenu(user, "Priya");
+    await user.click(screen.getByRole("button", { name: "Mark read" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn’t do that/i
+    );
+
+    // One mutation is shared by every row, so without a reset a single failure
+    // left a red line over the list until some *other* action happened to
+    // succeed — long after it had stopped being true.
+    await openRowMenu(user, "Priya");
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("confirms before leaving from the row", async () => {
