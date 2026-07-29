@@ -679,7 +679,11 @@ there while the bubble renders them is the seam that reads as half-finished.
 ### 🔒 A mention is a relation, and the only thing that beats mute
 
 Typing `@` in a group chat offers the thread's active members; picking one puts
-their whole name in the text **and records their user id**.
+their whole name in the text **and records their user id**. The picker is a strip
+above the composer, and it is **not offered while editing** a message: an edit
+carries no `mention_ids`, so a name picked there would notify nobody and wouldn't
+even highlight (the highlight comes from the ids, not the words). Adding a
+mention means sending a message.
 
 **Why an id and not the name in the text.** Names change, two people in a family
 can share one, and — the load-bearing reason — under E2E there is no text for
@@ -720,6 +724,17 @@ stranger's phone about a thread they aren't in — the exact thing the clique
 invariant exists to prevent. A `pending` member is refused too: they can't read a
 line of the thread, so naming them would announce something the app would then
 refuse to show them.
+
+**🔒 Group chats only, and the *server* is what enforces it.** `mention_ids` on a
+direct conversation is a 400, not a silently ignored field. The reason is the
+override itself: in a 1:1 the one person you might mute is the only person who
+can send you anything, so accepting an id there would let them defeat that mute
+on every message — muting a *person* would stop meaning anything, and the
+`mention` preference is no escape since turning it off to get away from one
+person costs you mentions in every group. Neither client offers a picker in a
+1:1, and that's exactly why the endpoint mustn't accept one: an endpoint wider
+than any client sends is only ever an attack surface. (`_mentionable_user_ids`
+returns nothing for a direct thread, legacy Participant-less ones included.)
 
 **On the wire a mention is a bare user id**, exactly like [`reply_to`](#reply-threads)
 — no name, no avatar. The client resolves it against the participants payload it
@@ -920,11 +935,13 @@ Direct and group chats share the endpoints:
   ([Reply threads](#reply-threads)); it's validated against **your own**
   interval-clipped messages, so an id from another thread or from inside a gap
   is rejected exactly like one that never existed.
-  - Optional `mention_ids` names people (Phase 9b M8), capped at
-    `MESSAGE_MENTIONS_MAX` (20) and **validated against the conversation's active
-    participants** — an id from outside the room is a 400, not a silent drop,
-    because a mention is the one thing that beats a muted thread. Duplicates
-    collapse. The messages payload carries them back as `mentions: [<user id>]`,
+  - Optional `mention_ids` names people (Phase 9b M8), **group chats only**,
+    capped at `MESSAGE_MENTIONS_MAX` (20) and **validated against the
+    conversation's active participants** — an id from outside the room, or any id
+    at all on a direct thread, is a 400 rather than a silent drop, because a
+    mention is the one thing that beats a muted thread. Duplicates collapse.
+    Sent as repeated parts on the multipart (photo) path, one per id. The
+    messages payload carries them back as `mentions: [<user id>]`,
     bare ids like `reply_to`. See
     [@mentions](#-a-mention-is-a-relation-and-the-only-thing-that-beats-mute).
   - **Multipart when it carries a photo** (Phase 9b M7): parallel lists
