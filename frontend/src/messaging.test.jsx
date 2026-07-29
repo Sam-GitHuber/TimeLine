@@ -6,6 +6,7 @@ import { renderWithAuth, fakeUser } from "./test-utils.jsx";
 import { api } from "./api.js";
 import { MessagingProvider } from "./messaging.jsx";
 import { clearDrafts } from "./drafts.js";
+import { clearOutbox } from "./outbox.js";
 import NewChatPicker from "./components/NewChatPicker.jsx";
 
 // Phase 5 messaging is a companion drawer (not a route): the nav "Messages"
@@ -47,9 +48,12 @@ vi.mock("./api.js", () => ({
     getNotifications: vi.fn(),
     markNotificationsSeen: vi.fn(),
     markNotificationAddressed: vi.fn(),
+    toggleReaction: vi.fn(),
+    getReactors: vi.fn(),
   },
   CONVERSATION_LIST_POLL_MS: 1_000_000, // effectively off in tests
   MESSAGE_POLL_MS: 1_000_000,
+  CONVERSATION_DETAIL_POLL_MS: 1_000_000,
   NOTIFICATIONS_POLL_MS: 1_000_000,
   MESSAGE_EDIT_WINDOW_MS: 15 * 60 * 1000,
 }));
@@ -143,6 +147,9 @@ beforeEach(() => {
   // M9b), which means they also survive a *test* — so they're reset here for the
   // same reason sign-out clears them.
   clearDrafts();
+  // Unsent messages outlive the view too (Phase 9b M9c), for the same reason,
+  // so a failed send in one test would otherwise turn up in the next.
+  clearOutbox();
   api.getFeed.mockResolvedValue(page([]));
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
@@ -1008,6 +1015,386 @@ describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
         expect.objectContaining({ messageId: 3 })
       )
     );
+  });
+});
+
+describe("Messages drawer — reactions, send state and ticks (Phase 9b M9c)", () => {
+  function msg(overrides = {}) {
+    return {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hey there",
+      is_deleted: false,
+      is_edited: false,
+      created_at: new Date().toISOString(),
+      reactions: [],
+      ...overrides,
+    };
+  }
+  const mineSender = { id: fakeUser.pk, display_name: "you", avatar_thumb: null };
+  /** A participant row as the conversation detail serves it — `last_read_at`
+   * present means they report; the key being *absent* means they don't. */
+  function participant(id, name, overrides = {}) {
+    return {
+      id,
+      display_name: name,
+      avatar_thumb: null,
+      status: "active",
+      ...overrides,
+    };
+  }
+
+  it("keeps the ⋯ inside the bubble, so the pills line up under it", async () => {
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({
+          id: 3,
+          text: "big news",
+          reactions: [{ emoji: "👍", count: 1, reacted: false }],
+        }),
+      ])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("big news");
+
+    // Beside the bubble the trigger was a flex sibling taking real width, so
+    // every actionable bubble sat pushed in off the panel edge — and the pills,
+    // which hang off the bubble's own edge, stopped lining up under it.
+    const bubble = screen.getByText("big news").closest(".msg-menu-host");
+    expect(bubble).not.toBeNull();
+    expect(
+      within(bubble).getByRole("button", { name: "Message options" })
+    ).toBeInTheDocument();
+  });
+
+  it("reacts from the ⋯ menu and shows the pill the server sends back", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 3, text: "big news" })]));
+    api.toggleReaction.mockResolvedValue({
+      reactions: [{ emoji: "😮", count: 1, reacted: true }],
+    });
+
+    renderAt("/messages/7");
+    await screen.findByText("big news");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+
+    // The chat's six, not the feed's four: 😮 and 😢 are the warm replies to
+    // someone's news, and a set that can only be cheerful makes you type a
+    // whole message to say "oh no".
+    await user.click(screen.getByRole("button", { name: "React with 😮" }));
+    await waitFor(() =>
+      expect(api.toggleReaction).toHaveBeenCalledWith({
+        messageId: 3,
+        emoji: "😮",
+      })
+    );
+
+    // No optimistic write (M2's fifth decision) — the pill is what the server
+    // answered with, written straight into the cached page.
+    expect(
+      await screen.findByRole("button", { name: /😮, 1, including you/ })
+    ).toBeInTheDocument();
+  });
+
+  it("says so when a reaction is rejected, rather than swallowing the click", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 3, text: "big news" })]));
+    // The server owns the rules that can reject one — the per-target cap, emoji
+    // validation, a thread you've been severed from — so its message is shown.
+    api.toggleReaction.mockRejectedValue(
+      new Error("You can only use 4 different emoji here.")
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("big news");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "React with 👍" }));
+
+    // There's no optimistic pill to take away, so silence would leave the click
+    // looking as though it had worked.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /only use 4 different emoji/i
+    );
+  });
+
+  it("opens who-reacted from a pill, and takes your own reaction off there", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({
+          id: 3,
+          text: "big news",
+          reactions: [{ emoji: "👍", count: 2, reacted: true }],
+        }),
+      ])
+    );
+    api.getReactors.mockResolvedValue([
+      {
+        emoji: "👍",
+        count: 2,
+        users: [
+          { id: fakeUser.pk, display_name: "you" },
+          { id: 2, display_name: "Priya" },
+        ],
+      },
+    ]);
+    api.toggleReaction.mockResolvedValue({ reactions: [] });
+
+    renderAt("/messages/7");
+    await screen.findByText("big news");
+
+    // 🔒 One gesture: a pill *opens* the list, it never toggles. A tiny target
+    // that both toggles and does something else is where a mis-click does the
+    // wrong thing — and unlike a post's chip, a message has a ⋯ menu to carry
+    // the alternative.
+    await user.click(screen.getByRole("button", { name: /👍, 2, including you/ }));
+    expect(
+      await screen.findByRole("dialog", { name: "Who reacted" })
+    ).toBeInTheDocument();
+    expect(api.toggleReaction).not.toHaveBeenCalled();
+    const list = screen.getByRole("dialog", { name: "Who reacted" });
+    expect(within(list).getByText("Priya")).toBeInTheDocument();
+
+    await user.click(within(list).getByRole("button", { name: /tap to remove/i }));
+    await waitFor(() =>
+      expect(api.toggleReaction).toHaveBeenCalledWith({
+        messageId: 3,
+        emoji: "👍",
+      })
+    );
+  });
+
+  it("shows a sent message instantly, before the server has answered", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([]));
+    // Never settles: the point is that the bubble doesn't wait for it.
+    api.sendMessage.mockReturnValue(new Promise(() => {}));
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "on my way");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("on my way")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Sending" })).toBeInTheDocument();
+    // The composer clears on dispatch and never blocks — sending two quick
+    // messages in a row is ordinary.
+    expect(box).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    // An unsent message has no ⋯ menu: every action it offers needs a server id
+    // it hasn't got.
+    expect(screen.queryByRole("button", { name: "Message options" })).toBeNull();
+  });
+
+  it("keeps a failed send in place with Retry, and never drops the text", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([]));
+    api.sendMessage.mockRejectedValue(new Error("offline"));
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "still here");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Not sent")).toBeInTheDocument();
+    // The words stay exactly where they were put — this is the whole reason the
+    // outbox sits outside the query cache, which a poll would have emptied.
+    expect(screen.getByText("still here")).toBeInTheDocument();
+
+    api.sendMessage.mockResolvedValue({
+      ...msg({ id: 9, sender: mineSender, text: "still here" }),
+    });
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledTimes(2)
+    );
+    await waitFor(() => expect(screen.queryByText("Not sent")).toBeNull());
+  });
+
+  // The read marker rides on the conversation *detail*, which is polled on
+  // `CONVERSATION_DETAIL_POLL_MS` (off in tests) — so each state is staged as
+  // its own render rather than by waiting for a poll to move one to the next.
+  const sentAt = new Date(Date.now() - 60_000).toISOString();
+  const joinedLongAgo = new Date(Date.now() - 600_000).toISOString();
+  function detailWithMarkers(theirLastRead) {
+    return convoDetail({
+      participants: [
+        participant(fakeUser.pk, "you", {
+          last_read_at: null,
+          active_since: joinedLongAgo,
+        }),
+        participant(2, "Priya", {
+          last_read_at: theirLastRead,
+          active_since: joinedLongAgo,
+        }),
+      ],
+    });
+  }
+
+  it("doesn't replay the arrival animation when a send settles", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([]));
+    let accept;
+    api.sendMessage.mockReturnValue(
+      new Promise((resolve) => {
+        accept = resolve;
+      })
+    );
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // The optimistic bubble is the one that arrives, so it animates.
+    expect(screen.getByText("hello").closest("li")).toHaveClass("msg-bubble");
+
+    const accepted = msg({ id: 9, sender: mineSender, text: "hello" });
+    api.getMessages.mockResolvedValue(page([accepted]));
+    accept(accepted);
+    await waitFor(() =>
+      expect(screen.queryByRole("img", { name: "Sending" })).toBeNull()
+    );
+
+    // ⚠️ Its replacement must not. A row is keyed `m-${id}`, so swapping the
+    // temp id for the server's remounts the bubble and `tl-rise` would fade the
+    // message up from nothing a moment after it appeared — the "appears to
+    // change when it lands" flash the outbox exists to prevent.
+    expect(screen.getByText("hello").closest("li")).not.toHaveClass(
+      "msg-bubble"
+    );
+  });
+
+  it("keeps a failed send when you go back to the list and return", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.getMessages.mockResolvedValue(page([]));
+    api.sendMessage.mockRejectedValue(new Error("offline"));
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "don’t lose me");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Not sent");
+
+    // 🔒 This is the whole reason the outbox is a module-level store rather than
+    // component state. The drawer switches list ↔ thread without a route
+    // change, so held in the view a failed send — the one message this exists
+    // to keep — would be thrown away by the most ordinary click there is.
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    await screen.findByRole("button", { name: /Priya/ });
+    await user.click(screen.getByRole("button", { name: /Priya/ }));
+
+    expect(await screen.findByText("don’t lose me")).toBeInTheDocument();
+    expect(screen.getByText("Not sent")).toBeInTheDocument();
+  });
+
+  it("ticks your own message sent, and never someone else's", async () => {
+    // Their marker sits *before* the message: they haven't got to it yet.
+    api.getConversation.mockResolvedValue(
+      detailWithMarkers(new Date(Date.now() - 120_000).toISOString())
+    );
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 3, sender: mineSender, text: "mine", created_at: sentAt }),
+        msg({ id: 2, text: "theirs", created_at: sentAt }),
+      ])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("mine");
+    expect(screen.getByRole("img", { name: "Sent" })).toBeInTheDocument();
+    // Exactly one: a tick on an incoming message would be telling you that you
+    // read it.
+    expect(screen.getAllByRole("img", { name: /Sent|Read/ })).toHaveLength(1);
+  });
+
+  it("ticks read once everyone it was for has read it", async () => {
+    // Three states, not four — there is no "delivered", because nothing in our
+    // stack reports that a device received anything.
+    api.getConversation.mockResolvedValue(
+      detailWithMarkers(new Date().toISOString())
+    );
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 3, sender: mineSender, text: "mine", created_at: sentAt })])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("mine");
+    expect(screen.getByRole("img", { name: "Read" })).toBeInTheDocument();
+  });
+
+  it("doesn't wait on someone who joined after the message was sent", async () => {
+    // `active_since` after the message: it was never theirs to read, so the
+    // tick mustn't stall on them. The client-side shadow of the server's
+    // interval clipping — it grants nothing, it just stops a late arrival
+    // holding a tick open forever.
+    api.getConversation.mockResolvedValue(
+      convoDetail({
+        participants: [
+          participant(fakeUser.pk, "you", {
+            last_read_at: null,
+            active_since: joinedLongAgo,
+          }),
+          participant(2, "Priya", {
+            last_read_at: new Date().toISOString(),
+            active_since: joinedLongAgo,
+          }),
+          participant(3, "Sanjay", {
+            last_read_at: null,
+            active_since: new Date().toISOString(),
+          }),
+        ],
+      })
+    );
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 3, sender: mineSender, text: "mine", created_at: sentAt })])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("mine");
+    expect(screen.getByRole("img", { name: "Read" })).toBeInTheDocument();
+  });
+
+  it("shows no ticks at all when read receipts are off", async () => {
+    // 🔒 The setting is symmetric and enforced server-side: with it off the
+    // markers simply aren't on the payload, in either direction. Nothing is
+    // hidden client-side, because hiding data already on the device would be
+    // theatre — so "off" here is the absence of the key.
+    api.getConversation.mockResolvedValue(
+      convoDetail({
+        participants: [
+          participant(fakeUser.pk, "you"),
+          participant(2, "Priya"),
+        ],
+      })
+    );
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 3, sender: mineSender, text: "mine" })])
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("mine");
+    // The whole column goes, rather than freezing on one tick — a permanent
+    // single tick would read as "nobody is ever opening these".
+    expect(screen.queryByRole("img", { name: /Sent|Read|Sending/ })).toBeNull();
+  });
+
+  it("offers no way to react in a thread you can no longer send to", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail({ can_send: false }));
+    api.getMessages.mockResolvedValue(page([msg({ id: 3, text: "old chat" })]));
+
+    renderAt("/messages/7");
+    await screen.findByText("old chat");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+
+    // Reacting is content everyone in the thread sees, so it needs `can_send`
+    // exactly like editing does — the server 403s it either way. The menu just
+    // doesn't offer what would fail.
+    expect(screen.queryByRole("button", { name: /React with/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Report" })).toBeInTheDocument();
   });
 });
 

@@ -88,7 +88,7 @@ each is written below to be picked up cold:
 |---|---|---|---|---|---|
 | **M9a** | Split the drawer (no behaviour change) | `messaging/m9a-split` | — | **S** | ☑ |
 | **M9b** | Transcript mechanics + the ⋯ menu & edit | `messaging/m9b-transcript` | M9a | **L** | ☑ |
-| **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☐ |
+| **M9c** | Reactions + send state & ticks | `messaging/m9c-reactions` | M9b | **M** | ☑ |
 | **M9d** | Reply threads (a side panel, not a blur) | `messaging/m9d-replies` | M9c | **M–L** | ☐ |
 | **M9e** | Photos + the conversation list & info panel | `messaging/m9e-photos` | M9b | **L** | ☐ |
 | **M9f** | Formatting, mentions, multi-select + doc rewrite | `messaging/m9f-text` | M9b | **M** | ☐ |
@@ -1482,12 +1482,92 @@ M2 + M4 on the web. Mostly wiring existing web components to a new target.
    cache write survives about four seconds, which is fatal for the failed send.
 6. Ticks: clock → single → double-accented. **Three states, not four.**
 
-**Done when**
-- [ ] React from the menu; the pill opens who-reacted; toggle off works.
-- [ ] Send is instant; a failed send stays put and retries.
-- [ ] Ticks show sending/sent/read, and are absent when either party has receipts
+**Done when** — ✅ all done; `messaging.md` → *Reactions, send state and ticks on
+the web (Phase 9b M9c)* and `reactions.md` → *Frontend* are the durable record.
+- [x] React from the menu; the pill opens who-reacted; toggle off works.
+- [x] Send is instant; a failed send stays put and retries.
+- [x] Ticks show sending/sent/read, and are absent when either party has receipts
       off (the field simply isn't on the payload — don't hide it client-side).
-- [ ] `messaging.md` *Frontend* updated; `reactions.md` mentions the web.
+- [x] `messaging.md` *Frontend* updated; `reactions.md` mentions the web.
+- [x] `messaging.test.jsx` green (54 tests), plus `readReceipts.test.js` ported
+      alongside the module; whole frontend suite 250.
+
+**Six things M9c settled that the plan above didn't anticipate** — read these
+before M9d, which renders reactions and ticks inside its strand:
+
+1. ⚠️ **Optimistic send made every message animate twice, and the fix has to
+   live in the transcript.** Caught in review, not in the build. A row is keyed
+   `m-${id}`, so settling an outbox entry swaps a negative temp id for the
+   server's, React remounts the bubble, and `.msg-bubble`'s `tl-rise` fades the
+   message up from nothing a moment after it appeared — the "appears to *change*
+   when it lands" flash the optimistic bubble exists to prevent, on every single
+   send. The transcript now keeps the ids that came from its own outbox
+   (`justSent`) and passes `animate={false}` for their replacements. **M9d
+   inherits this**: a reply settling in a strand is the same swap, and the strand
+   will need the same answer. Worth knowing generally — an arrival animation and
+   an optimistic bubble are a bad pair anywhere the key changes underneath.
+
+2. **The pills forced the `⋯` back inside the bubble.** M9b put the trigger
+   *beside* the bubble as a flex sibling, which was fine while nothing else hung
+   off a bubble's edge. Pills do, and a trigger taking real width held every
+   actionable bubble in off the panel edge, so the pills stopped lining up under
+   the thing they belong to. It's now absolutely positioned in the bubble's
+   top-right corner, with the bubble **reserving** that corner. **The cost is
+   one more rule in `index.css`, and it's the same cascade trap M9b recorded,
+   pointing the other way**: the bubble's horizontal padding had to leave
+   Tailwind (`px-3.5` → `.msg-bubble-body`) so `.msg-menu-host` could override
+   it, which same-layer source order does and no component rule could ever do
+   against a utility. ⚠️ **And the reserve has to be unconditional** — it was
+   `@media (hover: none)` only at first, on the reasoning that a hover-only
+   trigger may sit over the text while you hover. Rendering it said otherwise:
+   the trigger is opaque, so it hides the end of the first line and every
+   wrapped message reads as truncated. **Verify a hover affordance by looking at
+   it**; this was invisible to the whole suite.
+   **And it took the pills with it**: making the bubble the menu's anchor made
+   it *positioned*, so it began painting over the in-flow pill row pulled up
+   onto its edge, and the pills came out looking clipped along the top. They're
+   `relative z-10` now — a pairing to keep, since the cause and the symptom sit
+   in different components.
+3. **The `⋯` menu's portal became a shared component, because the pills need the
+   same one.** M9b's `MenuPanel` was private to `MessageMenu`; the who-reacted
+   list off a pill needs identical behaviour (viewport coordinates, close on
+   scroll, portal to `<body>`), and the *wrong* thing to reach for is the feed's
+   `PopoverPortal` in `ReactionBar.jsx`, which positions in page coordinates and
+   would drift off its bubble the moment anything scrolled. It's now
+   `components/messages/DrawerPopover.jsx`, and M9d's side panel should use it
+   for anything it anchors. Its `bare` prop exists because both the emoji picker
+   and `ReactorsPopover` draw their own frame — a wrapper that also drew one
+   gave two borders around one popover.
+4. **The full picker expands the menu panel in place rather than opening beside
+   it.** The app hands over to a separate modal (and has to keep the menu mounted
+   while it does, an iOS constraint); the web has no such constraint, and one
+   portal means one anchor and one outside-click owner. The panel's measured size
+   is a prop, so switching modes re-measures — a menu-sized position under a
+   400px picker hangs off the bottom of the window.
+5. **`sendMutation` no longer disables the composer, and the send-error banner
+   under it is gone.** Both were right when the response was the first sign
+   anything had happened. Now the bubble is already on screen: blocking would
+   re-introduce exactly the lag the outbox removes, and a banner can't say
+   *which* of two messages in flight fell over. The failure lives on the bubble.
+   `handleSubmit` clears the composer on dispatch — **not** in `onSuccess`, which
+   would wipe whatever you'd started typing in the seconds since.
+6. **The conversation detail had to start polling.** It was a one-shot `useQuery`,
+   which is fine for identity and permissions and useless for read markers: a
+   marker fetched on open is older than every message you send afterwards, so the
+   second tick would only ever appear after leaving the thread and coming back.
+   `CONVERSATION_DETAIL_POLL_MS` (12s) mirrors the app's. Two follow-ons:
+   `participants` is now `useMemo`'d, since a fresh `?? []` every 12s would
+   rebuild everything keyed off it; and the ticks' state transition isn't
+   drawer-testable without a poll, so each state is staged as its own render and
+   the transition itself is covered by `readReceipts.test.js`.
+
+**Rendered and checked.** No browser automation was available, so the bubble
+markup was rendered against the *built* stylesheet in a static harness and
+screenshotted with headless Firefox — which is what caught the truncation above
+and confirmed the pills paint over the bubble rather than under it. Two things
+that harness can't answer and a real session still should: the quick-emoji row
+against the item list at a real 400px drawer, and the tick's baseline against
+the clock.
 
 ---
 

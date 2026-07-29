@@ -7,6 +7,7 @@ import {
 } from "react";
 import { api } from "./api.js";
 import { clearDrafts } from "./drafts.js";
+import { clearOutbox } from "./outbox.js";
 
 // Holds "who is logged in" for the whole app. On first load we ask the backend
 // "who am I?" (using the httpOnly cookie the browser already has, if any), so a
@@ -53,11 +54,13 @@ export function AuthProvider({ children }) {
   const logout = useCallback(async () => {
     await api.logout();
     setUser(null);
-    // 🔒 Message drafts live outside React (`drafts.js`) so they can survive a
-    // component unmounting — which means nothing tears them down on its own. A
-    // draft is one person's unsent words, and on a shared computer the next
-    // person to open the drawer isn't them. The app does the same on sign-out.
+    // 🔒 Message drafts and the outbox both live outside React (`drafts.js`,
+    // `outbox.js`) so they can survive a component unmounting — which means
+    // nothing tears them down on its own. Both hold one person's unsent words,
+    // and on a shared computer the next person to open the drawer isn't them.
+    // The app does the same on sign-out.
     clearDrafts();
+    clearOutbox();
   }, []);
 
   // register does NOT log you in — new accounts are pending admin approval.

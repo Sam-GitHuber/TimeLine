@@ -14,11 +14,20 @@ import { ReportModal } from "../ReportButton.jsx";
 import AvatarStack from "./AvatarStack.jsx";
 import MessageBubble from "./MessageBubble.jsx";
 import { DaySeparator, UnreadDivider } from "./ThreadDividers.jsx";
-import { api, MESSAGE_EDIT_WINDOW_MS, MESSAGE_POLL_MS } from "../../api.js";
+import { reactorsQueryKey } from "../ReactorsPopover.jsx";
+import {
+  api,
+  CONVERSATION_DETAIL_POLL_MS,
+  MESSAGE_EDIT_WINDOW_MS,
+  MESSAGE_POLL_MS,
+} from "../../api.js";
 import { useAuth } from "../../auth.jsx";
 import { getDraft, setDraft } from "../../drafts.js";
 import { useDayBoundary } from "../../hooks.js";
+import { insertMessage, patchReactions } from "../../messageCache.js";
 import { useMessaging } from "../../messaging.jsx";
+import { asMessage, newOutgoing, updateOutbox, useOutbox } from "../../outbox.js";
+import { readStateFor, receiptsVisible } from "../../readReceipts.js";
 import { firstUnreadId, toThreadRows } from "../../threadRows.js";
 
 // How far from the newest message counts as "scrolled away", in px — the point
@@ -108,9 +117,20 @@ export default function ConversationThreadView() {
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
+  /**
+   * The conversation detail — identity, permissions, and (M9c) each
+   * participant's read marker, which is what the ticks are computed from.
+   *
+   * **Polled**, where it used to be fetched once: a marker taken when the thread
+   * opened is by construction older than every message you send afterwards, so a
+   * mount-time snapshot could only ever say "sent" about the message you're
+   * watching. Slower than the message poll on purpose — see
+   * `CONVERSATION_DETAIL_POLL_MS`.
+   */
   const convoQuery = useQuery({
     queryKey: ["conversation", conversationId],
     queryFn: () => api.getConversation(conversationId),
+    refetchInterval: CONVERSATION_DETAIL_POLL_MS,
   });
 
   const detail = convoQuery.data;
@@ -147,11 +167,55 @@ export default function ConversationThreadView() {
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const pages = messagesQuery.data;
-  const messages = useMemo(
+  /** What the server has accepted, newest-first. The outbox sits in front of it
+   * when the rows are built, below. */
+  const loaded = useMemo(
     () => pages?.pages.flatMap((page) => page.results) ?? [],
     [pages]
   );
-  const messageCount = messages.length;
+  const messageCount = loaded.length;
+
+  /**
+   * Messages you've sent that the server hasn't accepted yet (M9c) — held
+   * outside the query cache, and outside this component, so a failed send
+   * survives both a poll and a click back to the conversation list. See
+   * `outbox.js` for why the obvious shape (an optimistic cache write) doesn't
+   * work here.
+   */
+  const outbox = useOutbox(conversationId);
+  const setOutbox = useCallback(
+    (update) => updateOutbox(conversationId, update),
+    [conversationId]
+  );
+  /** You, as a message sender — what an outbox entry is dressed in. */
+  const meAsAuthor = useMemo(
+    () => ({
+      id: me?.pk ?? -1,
+      display_name: me?.display_name ?? "",
+      avatar_thumb: me?.avatar_thumb ?? null,
+    }),
+    [me?.pk, me?.display_name, me?.avatar_thumb]
+  );
+  const outboxById = new Map(outbox.map((entry) => [entry.tempId, entry]));
+
+  /**
+   * Server ids of messages that arrived here by *your* sending them, so their
+   * bubble can skip the arrival animation.
+   *
+   * ⚠️ Not a nicety — without it every send animates **twice**. A transcript row
+   * is keyed `m-${id}`, and settling an outbox entry swaps a negative `tempId`
+   * for the server's id, so React unmounts the bubble and mounts a new one —
+   * which re-runs `.msg-bubble`'s `tl-rise` (a fade up from nothing) a fraction
+   * of a second after the message appeared. That flash is precisely the
+   * "message that appears to *change* when it lands" the outbox exists to
+   * prevent, so the optimistic bubble animates and its replacement doesn't.
+   *
+   * State rather than a ref because it's read during render, and `useState`'s
+   * lazy initialiser rather than a fresh `new Set()` each render. It's bounded
+   * by what you send in one sitting: the view is keyed on the conversation id,
+   * so switching chats starts a new one.
+   */
+  const [justSent, setJustSent] = useState(() => new Set());
 
   /**
    * How many messages were waiting when you opened the thread — captured
@@ -186,7 +250,7 @@ export default function ConversationThreadView() {
    */
   const [unreadFrom, setUnreadFrom] = useState(null);
   if (unreadFrom === null && unreadOnOpen) {
-    const anchor = firstUnreadId(messages, unreadOnOpen, me?.pk);
+    const anchor = firstUnreadId(loaded, unreadOnOpen, me?.pk);
     if (anchor !== null) setUnreadFrom(anchor);
   }
   const unread = useMemo(
@@ -201,15 +265,30 @@ export default function ConversationThreadView() {
    * The transcript's rows, newest-first — which is what the `column-reverse`
    * scroller below wants, and the same order the app's inverted list reads in.
    *
+   * Everything the server hasn't accepted goes at the **front** (M9c).
+   * Concatenating rather than merging by timestamp is both correct and simpler:
+   * a message that hasn't been accepted is by definition newer than every
+   * message that has.
+   *
    * `today` is a dependency, not a value used directly: it changes at local
    * midnight, the one moment "Today" and "Yesterday" go stale with no data
    * having changed.
    */
   const today = useDayBoundary();
   const rows = useMemo(
-    () => toThreadRows({ messages, meId: me?.pk, unread }),
+    () =>
+      toThreadRows({
+        messages: [
+          // Reversed on the way in: the outbox holds entries oldest-first, and
+          // everything downstream of here is newest-first.
+          ...outbox.map((entry) => asMessage(entry, meAsAuthor)).reverse(),
+          ...loaded,
+        ],
+        meId: me?.pk,
+        unread,
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see `today` above
-    [messages, me?.pk, unread, today]
+    [loaded, outbox, meAsAuthor, me?.pk, unread, today]
   );
 
   /**
@@ -250,11 +329,11 @@ export default function ConversationThreadView() {
    * exactly the moment the boolean flips.
    */
   const [awayFrom, setAwayFrom] = useState(null);
-  const newestAt = messages[0] ? Date.parse(messages[0].created_at) : 0;
+  const newestAt = loaded[0] ? Date.parse(loaded[0].created_at) : 0;
   const missed =
     awayFrom === null
       ? 0
-      : messages.filter(
+      : loaded.filter(
           (m) => m.sender.id !== me?.pk && Date.parse(m.created_at) > awayFrom
         ).length;
 
@@ -331,12 +410,100 @@ export default function ConversationThreadView() {
     if (!editing) setDraft(conversationId, text);
   }, [conversationId, text, editing]);
 
+  /**
+   * Send one message and settle its outbox entry (M9c).
+   *
+   * The composer is **not** touched here — it was cleared the moment the message
+   * went into the outbox. Clearing on the response was right when the response
+   * was the first sign anything had happened; now it would wipe whatever you'd
+   * started typing in the seconds since, which is the exact draft loss
+   * `stashedDraft` exists to prevent, just triggered by your own previous
+   * message landing.
+   */
   const sendMutation = useMutation({
-    mutationFn: (value) => api.sendMessage(conversationId, value),
-    onSuccess: () => {
-      setText("");
+    mutationFn: ({ value }) => api.sendMessage(conversationId, value),
+    onSuccess: (message, { tempId }) => {
+      // Marked before either write, so the replacement bubble is already known
+      // to be yours by the time it renders — see `justSent`. Out of order it
+      // would animate once and then be told not to.
+      setJustSent((sent) => new Set(sent).add(message.id));
+      // Write the accepted message into the cache *before* dropping the outbox
+      // entry, so the bubble is never absent for the frame between the two.
+      // React batches both, but the ordering is what makes that true rather
+      // than incidental.
+      queryClient.setQueryData(["messages", conversationId], (cached) =>
+        insertMessage(cached, message, { newestFirst: true })
+      );
+      setOutbox((entries) => entries.filter((e) => e.tempId !== tempId));
       queryClient.invalidateQueries({ queryKey: ["messages", conversationId] });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    },
+    // The message stays put and goes to `failed`; the bubble grows Retry and
+    // Discard. Nothing is thrown away, and there's no banner under the composer
+    // — the failure is already visible on the thing that failed, which is a
+    // better place to say it than somewhere that can't tell you *which* of two
+    // messages in flight fell over.
+    onError: (_error, { tempId }) =>
+      setOutbox((entries) =>
+        entries.map((e) =>
+          e.tempId === tempId ? { ...e, status: "failed" } : e
+        )
+      ),
+  });
+
+  /**
+   * Send, showing the message immediately (M9c).
+   *
+   * Everything that sends in this view goes through here, so there's one place
+   * that knows an unsent message exists and one place that decides what happens
+   * when it doesn't land.
+   */
+  function queueSend(value) {
+    const entry = newOutgoing({ text: value });
+    setOutbox((entries) => [...entries, entry]);
+    sendMutation.mutate({ value, tempId: entry.tempId });
+  }
+
+  function retrySend(entry) {
+    setOutbox((entries) =>
+      entries.map((e) =>
+        e.tempId === entry.tempId ? { ...e, status: "sending" } : e
+      )
+    );
+    sendMutation.mutate({ value: entry.text, tempId: entry.tempId });
+  }
+
+  /** Give up on a failed send. The only way outbox text is ever thrown away. */
+  function discardSend(tempId) {
+    setOutbox((entries) => entries.filter((e) => e.tempId !== tempId));
+  }
+
+  /**
+   * Toggle an emoji on a message (M9c).
+   *
+   * 🔒 **No optimistic write** — M2's fifth decision, and it holds on the web
+   * for the same reason: simulating the toggle locally means a second copy of
+   * rules the server owns (the per-target cap, emoji validation, count-then-
+   * emoji ordering) that can show a pill and then take it away.
+   */
+  const reactMutation = useMutation({
+    mutationFn: ({ messageId, emoji }) =>
+      api.toggleReaction({ messageId, emoji }),
+    onSuccess: (data, { messageId }) => {
+      queryClient.setQueryData(["messages", conversationId], (cached) =>
+        patchReactions(cached, messageId, data.reactions ?? [])
+      );
+      // The reactor list is a *separate* cache that outlives the popover, so it
+      // has to be dealt with too — otherwise the next open renders the
+      // pre-toggle list, and because that list is actionable, a row still
+      // saying "tap to remove" for a reaction you already removed would toggle
+      // it straight back on.
+      //
+      // `removeQueries`, not `invalidateQueries`: the popover is closed by now,
+      // so the query is *inactive* and invalidation would only mark it stale —
+      // reopening would still render the stale rows for the length of a round
+      // trip, which is exactly the window in which they can be clicked.
+      queryClient.removeQueries({ queryKey: reactorsQueryKey({ messageId }) });
     },
   });
 
@@ -413,14 +580,49 @@ export default function ConversationThreadView() {
       else editMutation.mutate({ messageId: editing.id, value });
       return;
     }
-    if (sendMutation.isPending) return;
-    sendMutation.mutate(value);
+    /**
+     * **The composer clears on dispatch and never blocks** (M9c). Sending two
+     * quick messages in a row is ordinary, and waiting for the first is exactly
+     * the lag the outbox removes. An *edit* still blocks, above, because it
+     * targets one specific message and two saves racing on it would be
+     * genuinely ambiguous.
+     */
+    setText("");
+    queueSend(value);
   }
 
   const other = detail?.other;
-  const participants = detail?.participants ?? [];
+  // Memoised, not a bare `?? []`: the detail is re-fetched every
+  // `CONVERSATION_DETAIL_POLL_MS` now, and a fresh empty array each time would
+  // rebuild everything keyed off it on every tick.
+  const participants = useMemo(
+    () => detail?.participants ?? [],
+    [detail?.participants]
+  );
   // Renamed from Phase 5's `can_message` — see ConversationSerializer.
   const canSend = detail?.can_send ?? false;
+
+  /**
+   * Whether this thread shows ticks at all. False means **you** turned read
+   * receipts off, which the server signals by withholding every marker
+   * including your own — and then the whole column disappears rather than
+   * freezing on "sent", because a permanent single tick would read as "nobody
+   * is ever opening these" where showing nothing says the true thing.
+   */
+  const showReceipts = receiptsVisible(participants);
+
+  /**
+   * The tick (or clock) for one bubble. Never on someone else's message: a tick
+   * reports what *your* message did, and on an incoming one it would be telling
+   * you that you read it.
+   */
+  function statusFor(message) {
+    if (message.sender.id !== me?.pk) return undefined;
+    const pending = outboxById.get(message.id);
+    if (pending) return pending.status;
+    if (!showReceipts) return undefined;
+    return readStateFor(message, participants, me?.pk);
+  }
 
   // Deliberately *not* memoised: it's called when a menu opens, not during
   // render, and a memo would freeze the handlers around a stale `text` — which
@@ -588,6 +790,31 @@ export default function ConversationThreadView() {
                         startsRun={row.startsRun}
                         endsRun={row.endsRun}
                         getActions={getActions}
+                        status={statusFor(row.message)}
+                        meId={me?.pk}
+                        // False only for the bubble that replaces one of your
+                        // own optimistic ones, which has already made its
+                        // entrance — see `justSent`.
+                        animate={!justSent.has(row.message.id)}
+                        // Omitted in a thread you can no longer send to, which
+                        // drops the menu's emoji row and "tap to remove" in the
+                        // who-reacted list: a reaction is content everyone sees,
+                        // so being severed stops it (403) exactly as it stops a
+                        // message. The list stays readable, and inert.
+                        onReact={
+                          canSend
+                            ? (emoji) =>
+                                reactMutation.mutate({
+                                  messageId: row.message.id,
+                                  emoji,
+                                })
+                            : undefined
+                        }
+                        onRetry={() => {
+                          const entry = outboxById.get(row.message.id);
+                          if (entry) retrySend(entry);
+                        }}
+                        onDiscard={() => discardSend(row.message.id)}
                       />
                     );
                   })}
@@ -675,20 +902,17 @@ export default function ConversationThreadView() {
                   />
                   <button
                     type="submit"
-                    disabled={
-                      !text.trim() ||
-                      sendMutation.isPending ||
-                      editMutation.isPending
-                    }
+                    // Only an *edit* disables it. A send doesn't: the message is
+                    // already on screen and the composer is already empty, so
+                    // there's nothing to wait for.
+                    disabled={!text.trim() || editMutation.isPending}
                     className="btn btn-primary btn-sm mb-0.5"
                   >
                     {editing
                       ? editMutation.isPending
                         ? "Saving…"
                         : "Save"
-                      : sendMutation.isPending
-                        ? "Sending…"
-                        : "Send"}
+                      : "Send"}
                   </button>
                 </form>
               </>
@@ -699,9 +923,18 @@ export default function ConversationThreadView() {
                 messages.
               </p>
             )}
-            {sendMutation.isError && (
-              <p className="mt-1 text-sm text-red-600">
-                {sendMutation.error?.message || "Couldn't send. Try again."}
+            {/* A failed *send* is reported on its own bubble, not here (M9c) —
+                nearer the thing that went wrong, and the only place that works
+                when two messages are in flight and one of them fell over. A
+                failed edit still belongs here: it has no bubble of its own. */}
+            {/* Reacting is a one-click gesture with no optimistic pill, so a
+                failure has to say so rather than leave the click looking as
+                though it worked. The server owns the rules that can reject one
+                (the per-target cap, emoji validation, a closed thread), so its
+                message is what's shown. */}
+            {reactMutation.isError && (
+              <p role="alert" className="mt-1 text-sm text-red-600">
+                {reactMutation.error?.message || "Couldn’t react."}
               </p>
             )}
             {editMutation.isError && (

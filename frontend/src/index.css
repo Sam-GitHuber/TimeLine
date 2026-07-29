@@ -581,6 +581,35 @@
     }
   }
 
+  /* A bubble's own horizontal padding, and the corner it lends the ⋯ trigger.
+
+     ⚠️ **The corner is reserved on every device, not only where nothing can
+     hover.** The first version reserved it under `(hover: none)` only, on the
+     reasoning that a trigger which appears on hover can sit over the text for
+     as long as you hover. Rendering it proved that wrong: the trigger is opaque,
+     so it doesn't blend with the words underneath, it *hides* them — the first
+     line of every wrapped message lost a couple of characters and read as
+     truncated ("I'll be about ter", "see you the"). A message you can't finish
+     reading is a worse cost than a bubble being 18px wider than its text.
+
+     ⚠️ The padding is here rather than as a `px-3.5` utility for the cascade
+     reason the visibility rules above are, pointing the other way: this rule has
+     to *override* `.msg-bubble-body`, which works on same-layer source order and
+     could never work against a utility, since Tailwind's utilities layer comes
+     last. Keep both in CSS, or neither does anything.
+
+     `msg-menu-host` is on every live bubble, not only ones currently showing a
+     menu, so a bubble doesn't change width underneath you when a send settles
+     and its trigger appears. */
+  .msg-bubble-body {
+    padding-inline: 0.875rem;
+  }
+  .msg-menu-host {
+    position: relative;
+    /* 4px inset + a 24px button + 4px of breathing room. */
+    padding-right: 2rem;
+  }
+
   /* ---- Group events & planning calendar (Phase 8b) ----
      The calendar lives in the same warm world as the timeline: one accent, the
      three type voices, IBM Plex Mono for every exact "when". */

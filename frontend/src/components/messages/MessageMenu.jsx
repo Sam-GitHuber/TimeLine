@@ -1,8 +1,27 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { lazy, Suspense, useRef, useState } from "react";
+import DrawerPopover from "./DrawerPopover.jsx";
+
+// The full emoji picker is code-split, the same way the feed's `ReactionBar`
+// loads it: its bundle + emoji data arrive only when someone actually expands
+// past the six quick emoji. Keep it lazy.
+const EmojiPickerPopover = lazy(() => import("../EmojiPickerPopover.jsx"));
+
+/**
+ * The one-tap emoji above the menu's items (Phase 9b M9c), and the row's whole
+ * design brief: cover the replies people actually send so the `＋` is the
+ * exception rather than the route.
+ *
+ * **Deliberately not the feed's four.** `QuickReactionPopover` keeps its quick
+ * set strictly positive (👍 ❤️ 😂 🎉) because reacting to someone's *post* with
+ * 😢 reads as a verdict on it. In a conversation the opposite is true: 😮 and 😢
+ * to someone's news are the warm, human answers, and a set that can only be
+ * cheerful makes you type a whole message to say "oh no". Different context,
+ * different set — not an oversight. Same six as the app's `MessageActionMenu`.
+ */
+const CHAT_QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 // The ⋯ action menu on a message bubble (Phase 9b M9b — the web's answer to the
-// app's long-press menu).
+// app's long-press menu; M9c added the quick-reaction row).
 //
 // **Hover, not long-press**, which is the one thing that differs from the phone
 // and differs because the medium does: a desktop has a pointer, and the drawer
@@ -10,10 +29,17 @@ import { createPortal } from "react-dom";
 // is revealed by the bubble row's `group-hover` — and by `:focus-visible`, so a
 // keyboard reaches every action a mouse can.
 //
+// **It lives in the bubble's top-right corner, not beside the bubble.** Beside
+// it, the trigger was a flex sibling taking real width, so every bubble that
+// could be acted on sat pushed in off the panel edge — and the reaction pills,
+// which hang off the bubble's *own* edge, no longer lined up under it. The
+// corner is also simply where a message's own actions belong. The caller makes
+// the bubble the positioning context (`msg-menu-host`).
+//
 // **The items are data, not JSX** (`messageActions` in ConversationThreadView),
-// for the same reason the app's are: M9c inserts React, M9d inserts Reply, M9f
-// inserts Select, and a menu built out of conditional JSX would have to be
-// re-read from scratch by each of them.
+// for the same reason the app's are: M9d inserts Reply, M9f inserts Select, and
+// a menu built out of conditional JSX would have to be re-read from scratch by
+// each of them.
 //
 // `getActions` is a *function*, called when the menu opens rather than during
 // render, because one of the entries expires: Edit is offered for fifteen
@@ -21,22 +47,54 @@ import { createPortal } from "react-dom";
 // on when React last happened to redraw the bubble. Same reasoning as the app's
 // `messageActions`, where the clock is passed in for exactly this reason.
 //
-// The panel is portalled to `<body>` and positioned like `PostMenu`'s: page
-// coordinates measured in a layout effect, flipped above the trigger when
-// there's no room below. In the drawer that isn't cosmetic — the transcript is
-// an `overflow-y-auto` scroller, so a menu left in the flow would be clipped by
-// it on the bubbles nearest the top and bottom.
-export default function MessageMenu({ getActions, mine }) {
+// The panel is a `DrawerPopover` — portalled to `<body>` and positioned in
+// viewport coordinates; see that file for why the drawer can't use the feed's
+// page-coordinate portal.
+export default function MessageMenu({
+  getActions,
+  /**
+   * True when the trigger sits on your own bubble's accent fill, which needs
+   * light dots on the fill's own colour rather than the ink palette. An
+   * emoji-only message has no fill, so it takes the ink one even when it's
+   * yours.
+   */
+  onFill,
+  /**
+   * Toggle an emoji on this message. **Omitted when reacting isn't available**
+   * — a thread you can no longer send to — and the row is then left out
+   * entirely rather than shown offering an action the server would 403. Same
+   * line the app draws.
+   */
+  onReact,
+  /** The emoji you've already used here, so a quick slot reads as active and
+   * clicking it takes the reaction off. */
+  reactedEmojis,
+}) {
   const triggerRef = useRef(null);
   const [actions, setActions] = useState(null);
+  // The full picker replaces the panel's contents rather than opening beside it:
+  // one portal, one anchor, and no moment where two popovers are on screen
+  // fighting over the same outside-click.
+  const [full, setFull] = useState(false);
   const open = actions !== null;
+  const showQuick = !!onReact;
+
+  function close() {
+    setActions(null);
+    setFull(false);
+  }
+
+  function react(emoji) {
+    close();
+    onReact(emoji);
+  }
 
   return (
     <>
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => setActions((current) => (current ? null : getActions()))}
+        onClick={() => (open ? close() : setActions(getActions()))}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label="Message options"
@@ -44,8 +102,15 @@ export default function MessageMenu({ getActions, mine }) {
         // until the bubble is hovered, and always visible on an input that
         // can't hover — a phone browser — where hiding it would make the whole
         // menu an invisible button nobody could find.
-        className={`msg-menu-trigger mb-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep ${
-          mine ? "order-first" : ""
+        //
+        // Absolutely positioned in the bubble's top-right corner. It needs no
+        // background of its own because the bubble *reserves* that corner
+        // (`msg-menu-host` in index.css) on every device — text can't enter a
+        // padding box, so the dots never have words behind them to mask.
+        className={`msg-menu-trigger absolute right-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full transition ${
+          onFill
+            ? "text-white/70 hover:bg-white/25 hover:text-white"
+            : "text-ink-faint hover:bg-accent-tint hover:text-accent-deep"
         }`}
       >
         <svg
@@ -61,24 +126,91 @@ export default function MessageMenu({ getActions, mine }) {
       </button>
 
       {open && (
-        <MenuPanel
+        <DrawerPopover
           anchorRef={triggerRef}
-          itemCount={actions.length}
-          onClose={() => setActions(null)}
+          label="Message options"
+          width={full ? PICKER_WIDTH : showQuick ? QUICK_WIDTH : MENU_WIDTH}
+          height={
+            full
+              ? PICKER_HEIGHT
+              : actions.length * ITEM_HEIGHT +
+                (showQuick ? QUICK_HEIGHT : 0) +
+                PANEL_PADDING
+          }
+          // The picker brings its own rounded, bordered chrome, so wrapping it
+          // in the menu's would draw two frames around one popover.
+          bare={full}
+          onClose={close}
         >
-          {actions.map((action) => (
-            <MenuItem
-              key={action.label}
-              danger={action.danger}
-              onClick={() => {
-                setActions(null);
-                action.onClick();
-              }}
-            >
-              {action.label}
-            </MenuItem>
-          ))}
-        </MenuPanel>
+          {full ? (
+            <Suspense fallback={null}>
+              <EmojiPickerPopover
+                onPick={react}
+                onClose={close}
+                ignoreRef={triggerRef}
+              />
+            </Suspense>
+          ) : (
+            <>
+              {showQuick && (
+                <div className="flex items-center gap-0.5 border-b border-line px-1 pb-1">
+                  {CHAT_QUICK_EMOJI.map((emoji) => {
+                    const active = reactedEmojis?.has(emoji);
+                    return (
+                      <button
+                        key={emoji}
+                        type="button"
+                        onClick={() => react(emoji)}
+                        aria-pressed={!!active}
+                        aria-label={
+                          active
+                            ? `Remove ${emoji} reaction`
+                            : `React with ${emoji}`
+                        }
+                        className={`flex h-8 w-8 items-center justify-center rounded-full text-lg leading-none transition hover:scale-110 ${
+                          active ? "bg-accent-tint" : "hover:bg-accent-tint"
+                        }`}
+                      >
+                        <span aria-hidden="true">{emoji}</span>
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => setFull(true)}
+                    aria-label="More emoji"
+                    className="flex h-8 w-8 items-center justify-center rounded-full text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                      className="h-4 w-4"
+                    >
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+              {actions.map((action) => (
+                <MenuItem
+                  key={action.label}
+                  danger={action.danger}
+                  onClick={() => {
+                    close();
+                    action.onClick();
+                  }}
+                >
+                  {action.label}
+                </MenuItem>
+              ))}
+            </>
+          )}
+        </DrawerPopover>
       )}
     </>
   );
@@ -104,92 +236,12 @@ function MenuItem({ onClick, danger = false, children }) {
 }
 
 const MENU_WIDTH = 160;
+/** Seven 32px slots (six emoji + `＋`), their gaps, and the panel's padding. */
+const QUICK_WIDTH = 252;
 const ITEM_HEIGHT = 36;
+/** The quick-reaction row's height, including its divider. */
+const QUICK_HEIGHT = 44;
 const PANEL_PADDING = 8;
-
-function MenuPanel({ anchorRef, itemCount, onClose, children }) {
-  const wrapRef = useRef(null);
-  const [pos, setPos] = useState(null);
-
-  // **Viewport coordinates, and `position: fixed`** — not `PostMenu`'s page
-  // coordinates. That difference is not a style choice: `PostMenu` is anchored
-  // to a post in the normal page flow, so a document-positioned portal scrolls
-  // with its anchor. This anchor lives inside a **`fixed`** drawer, which
-  // doesn't move when the page scrolls — so a document-positioned menu would
-  // slide away from the bubble it belongs to the moment the feed behind the
-  // drawer was scrolled.
-  useLayoutEffect(() => {
-    const el = anchorRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const height = itemCount * ITEM_HEIGHT + PANEL_PADDING;
-    // Right-align with the trigger, clamped to the viewport — the drawer is
-    // docked to the right edge, so an un-clamped menu would hang off it.
-    let left = Math.min(r.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8);
-    left = Math.max(8, left);
-    const top =
-      r.bottom + height > window.innerHeight - 8 && r.top - height - 6 > 8
-        ? r.top - height - 6
-        : r.bottom + 6;
-    setPos({ left, top });
-  }, [anchorRef, itemCount]);
-
-  useEffect(() => {
-    function onPointerDown(e) {
-      // The trigger toggles itself; without this, clicking it to close would
-      // close here and immediately reopen there.
-      if (anchorRef?.current?.contains(e.target)) return;
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) onClose();
-    }
-    function onKeyDown(e) {
-      // Stopped from propagating, or Escape would also close the whole drawer
-      // — one key press, two dismissals, and the thread you were in is gone.
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    }
-    // Any scroll anywhere closes it. The menu is measured once and then sits
-    // still, so scrolling the transcript underneath it would leave it hovering
-    // over a *different* message — and acting on the right one while pointing at
-    // the wrong one is the exact failure the anchored menu exists to prevent
-    // (see messaging.md on why this isn't a bottom sheet). Re-measuring on every
-    // scroll frame would be the other answer, but closing is what a menu whose
-    // anchor has moved should do anyway.
-    //
-    // Capture, because `scroll` doesn't bubble: the transcript is an inner
-    // scroller, and a listener on `document` would never hear it otherwise.
-    function onScroll(e) {
-      if (wrapRef.current?.contains(e.target)) return;
-      onClose();
-    }
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown, true);
-    document.addEventListener("scroll", onScroll, true);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown, true);
-      document.removeEventListener("scroll", onScroll, true);
-    };
-  }, [onClose, anchorRef]);
-
-  if (!pos) return null; // avoid a one-frame flash before we measure
-  return createPortal(
-    <div
-      ref={wrapRef}
-      role="dialog"
-      aria-label="Message options"
-      style={{
-        position: "fixed",
-        left: pos.left,
-        top: pos.top,
-        width: MENU_WIDTH,
-        zIndex: 60,
-      }}
-      className="overflow-hidden rounded-xl border border-line bg-raised py-1 shadow-lg"
-    >
-      {children}
-    </div>,
-    document.body
-  );
-}
+// Roughly what `emoji-picker-element` occupies — used only to keep it on screen.
+const PICKER_WIDTH = 348;
+const PICKER_HEIGHT = 400;
