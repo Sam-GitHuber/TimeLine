@@ -1489,13 +1489,25 @@ the web (Phase 9b M9c)* and `reactions.md` → *Frontend* are the durable record
 - [x] Ticks show sending/sent/read, and are absent when either party has receipts
       off (the field simply isn't on the payload — don't hide it client-side).
 - [x] `messaging.md` *Frontend* updated; `reactions.md` mentions the web.
-- [x] `messaging.test.jsx` green (51 tests), plus `readReceipts.test.js` ported
-      alongside the module; whole frontend suite 247.
+- [x] `messaging.test.jsx` green (53 tests), plus `readReceipts.test.js` ported
+      alongside the module; whole frontend suite 249.
 
-**Four things M9c settled that the plan above didn't anticipate** — read these
+**Five things M9c settled that the plan above didn't anticipate** — read these
 before M9d, which renders reactions and ticks inside its strand:
 
-1. **The `⋯` menu's portal became a shared component, because the pills need the
+1. ⚠️ **Optimistic send made every message animate twice, and the fix has to
+   live in the transcript.** Caught in review, not in the build. A row is keyed
+   `m-${id}`, so settling an outbox entry swaps a negative temp id for the
+   server's, React remounts the bubble, and `.msg-bubble`'s `tl-rise` fades the
+   message up from nothing a moment after it appeared — the "appears to *change*
+   when it lands" flash the optimistic bubble exists to prevent, on every single
+   send. The transcript now keeps the ids that came from its own outbox
+   (`justSent`) and passes `animate={false}` for their replacements. **M9d
+   inherits this**: a reply settling in a strand is the same swap, and the strand
+   will need the same answer. Worth knowing generally — an arrival animation and
+   an optimistic bubble are a bad pair anywhere the key changes underneath.
+
+2. **The `⋯` menu's portal became a shared component, because the pills need the
    same one.** M9b's `MenuPanel` was private to `MessageMenu`; the who-reacted
    list off a pill needs identical behaviour (viewport coordinates, close on
    scroll, portal to `<body>`), and the *wrong* thing to reach for is the feed's
@@ -1505,20 +1517,20 @@ before M9d, which renders reactions and ticks inside its strand:
    for anything it anchors. Its `bare` prop exists because both the emoji picker
    and `ReactorsPopover` draw their own frame — a wrapper that also drew one
    gave two borders around one popover.
-2. **The full picker expands the menu panel in place rather than opening beside
+3. **The full picker expands the menu panel in place rather than opening beside
    it.** The app hands over to a separate modal (and has to keep the menu mounted
    while it does, an iOS constraint); the web has no such constraint, and one
    portal means one anchor and one outside-click owner. The panel's measured size
    is a prop, so switching modes re-measures — a menu-sized position under a
    400px picker hangs off the bottom of the window.
-3. **`sendMutation` no longer disables the composer, and the send-error banner
+4. **`sendMutation` no longer disables the composer, and the send-error banner
    under it is gone.** Both were right when the response was the first sign
    anything had happened. Now the bubble is already on screen: blocking would
    re-introduce exactly the lag the outbox removes, and a banner can't say
    *which* of two messages in flight fell over. The failure lives on the bubble.
    `handleSubmit` clears the composer on dispatch — **not** in `onSuccess`, which
    would wipe whatever you'd started typing in the seconds since.
-4. **The conversation detail had to start polling.** It was a one-shot `useQuery`,
+5. **The conversation detail had to start polling.** It was a one-shot `useQuery`,
    which is fine for identity and permissions and useless for read markers: a
    marker fetched on open is older than every message you send afterwards, so the
    second tick would only ever appear after leaving the thread and coming back.

@@ -1277,6 +1277,16 @@ went wrong, and the only place that can say *which* of two messages in flight
 fell over. An unsent message has no ⋯ menu: every action it offers needs a server
 id it hasn't got.
 
+⚠️ **The bubble that replaces an optimistic one doesn't re-animate**, and the
+transcript tracks which ids came from your own outbox (`justSent`) purely to
+arrange that. A row is keyed `m-${id}`, so settling an entry swaps a negative
+temp id for the server's and React remounts the bubble — which re-runs
+`.msg-bubble`'s `tl-rise` and fades the message up from nothing a fraction of a
+second after it appeared. That flash is exactly the "message that appears to
+*change* when it lands" the optimistic bubble exists to prevent, so the
+optimistic one animates and its replacement doesn't. A test asserts the class,
+since nothing in jsdom would show the flash itself.
+
 🔒 **The outbox is a module-level store, not a cache write** — the same decision,
 for the same reason, as [the app's](#optimistic-send-the-outbox). A poll
 *replaces* an infinite query's pages, so an optimistic write survives about four

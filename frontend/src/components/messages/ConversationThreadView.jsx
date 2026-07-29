@@ -199,6 +199,25 @@ export default function ConversationThreadView() {
   const outboxById = new Map(outbox.map((entry) => [entry.tempId, entry]));
 
   /**
+   * Server ids of messages that arrived here by *your* sending them, so their
+   * bubble can skip the arrival animation.
+   *
+   * ⚠️ Not a nicety — without it every send animates **twice**. A transcript row
+   * is keyed `m-${id}`, and settling an outbox entry swaps a negative `tempId`
+   * for the server's id, so React unmounts the bubble and mounts a new one —
+   * which re-runs `.msg-bubble`'s `tl-rise` (a fade up from nothing) a fraction
+   * of a second after the message appeared. That flash is precisely the
+   * "message that appears to *change* when it lands" the outbox exists to
+   * prevent, so the optimistic bubble animates and its replacement doesn't.
+   *
+   * State rather than a ref because it's read during render, and `useState`'s
+   * lazy initialiser rather than a fresh `new Set()` each render. It's bounded
+   * by what you send in one sitting: the view is keyed on the conversation id,
+   * so switching chats starts a new one.
+   */
+  const [justSent, setJustSent] = useState(() => new Set());
+
+  /**
    * How many messages were waiting when you opened the thread — captured
    * **once**, because the mark-read effect below moves the marker a moment later
    * and the divider has to outlive that.
@@ -404,6 +423,10 @@ export default function ConversationThreadView() {
   const sendMutation = useMutation({
     mutationFn: ({ value }) => api.sendMessage(conversationId, value),
     onSuccess: (message, { tempId }) => {
+      // Marked before either write, so the replacement bubble is already known
+      // to be yours by the time it renders — see `justSent`. Out of order it
+      // would animate once and then be told not to.
+      setJustSent((sent) => new Set(sent).add(message.id));
       // Write the accepted message into the cache *before* dropping the outbox
       // entry, so the bubble is never absent for the frame between the two.
       // React batches both, but the ordering is what makes that true rather
@@ -769,6 +792,10 @@ export default function ConversationThreadView() {
                         getActions={getActions}
                         status={statusFor(row.message)}
                         meId={me?.pk}
+                        // False only for the bubble that replaces one of your
+                        // own optimistic ones, which has already made its
+                        // entrance — see `justSent`.
+                        animate={!justSent.has(row.message.id)}
                         // Omitted in a thread you can no longer send to, which
                         // drops the menu's emoji row and "tap to remove" in the
                         // who-reacted list: a reaction is content everyone sees,

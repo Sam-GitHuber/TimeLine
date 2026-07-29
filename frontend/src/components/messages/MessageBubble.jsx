@@ -50,6 +50,14 @@ export default function MessageBubble({
   /** Send a failed message again, and give up on it. Both only on `failed`. */
   onRetry,
   onDiscard,
+  /**
+   * Whether this bubble gets the arrival animation. False for the one that
+   * replaces your own optimistic bubble: the row is keyed on the message id, so
+   * swapping a temp id for the server's remounts it, and `.msg-bubble` would
+   * fade the message up from nothing a moment after it appeared. See
+   * `justSent` in `ConversationThreadView`.
+   */
+  animate = true,
 }) {
   const reactions = message.reactions ?? [];
   const [whoOpen, setWhoOpen] = useState(false);
@@ -86,7 +94,9 @@ export default function MessageBubble({
     // `column-reverse`: margins stay physical while the order flips, so "the row
     // visually above me" is the one this margin separates us from either way.
     <li
-      className={`${message.is_deleted ? "" : "msg-bubble"} group flex flex-col ${
+      className={`${
+        message.is_deleted || !animate ? "" : "msg-bubble"
+      } group flex flex-col ${
         startsRun ? "mt-2" : "mt-0.5"
       }`}
     >
@@ -224,12 +234,21 @@ export default function MessageBubble({
       )}
 
       {/* The pills, hanging off the bubble's lower edge on its near side.
-          **One gesture: a click opens "who reacted", it never toggles.** A pill
-          is a *display* of what the thread said, so a click goes to the detail
-          of it rather than silently changing it — deliberately unlike the feed's
-          chips, which do toggle, because a post has no ⋯ menu to carry the
-          alternative and a message has two better homes for it (the menu's emoji
-          row, and "tap to remove" in the list this opens). */}
+          **One gesture: a click opens "who reacted", it never toggles the
+          reaction.** A pill is a *display* of what the thread said, so a click
+          goes to the detail of it rather than silently changing it —
+          deliberately unlike the feed's chips, which do toggle, because a post
+          has no ⋯ menu to carry the alternative and a message has two better
+          homes for it (the menu's emoji row, and "tap to remove" in the list
+          this opens).
+
+          Rendered on a **tombstone** too, and that's the point rather than an
+          oversight: a reaction someone left is a thing that happened, and
+          dropping it when the message is deleted would make it look as though
+          they never did. It's also load-bearing — a tombstone has no ⋯ menu, so
+          this is the *only* route left to take your own reaction off one, which
+          is why the server keeps a deleted message removal-only rather than
+          refusing both (reactions.md). */}
       {reactions.length > 0 && (
         <div
           ref={pillsRef}
@@ -241,7 +260,12 @@ export default function MessageBubble({
             <button
               key={reaction.emoji}
               type="button"
-              onClick={() => setWhoOpen(true)}
+              // Toggles the list rather than only opening it: both this and the
+              // popover's own outside-click handler treat the pill row as the
+              // anchor and ignore clicks on it, so an open-only pill would leave
+              // the thing it opened with no way to shut it from where you are.
+              onClick={() => setWhoOpen((open) => !open)}
+              aria-expanded={whoOpen}
               aria-label={`${reaction.emoji}, ${reaction.count}${
                 reaction.reacted ? ", including you" : ""
               } — see who reacted`}

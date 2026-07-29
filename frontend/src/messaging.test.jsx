@@ -1208,6 +1208,64 @@ describe("Messages drawer — reactions, send state and ticks (Phase 9b M9c)", (
     });
   }
 
+  it("doesn't replay the arrival animation when a send settles", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([]));
+    let accept;
+    api.sendMessage.mockReturnValue(
+      new Promise((resolve) => {
+        accept = resolve;
+      })
+    );
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // The optimistic bubble is the one that arrives, so it animates.
+    expect(screen.getByText("hello").closest("li")).toHaveClass("msg-bubble");
+
+    const accepted = msg({ id: 9, sender: mineSender, text: "hello" });
+    api.getMessages.mockResolvedValue(page([accepted]));
+    accept(accepted);
+    await waitFor(() =>
+      expect(screen.queryByRole("img", { name: "Sending" })).toBeNull()
+    );
+
+    // ⚠️ Its replacement must not. A row is keyed `m-${id}`, so swapping the
+    // temp id for the server's remounts the bubble and `tl-rise` would fade the
+    // message up from nothing a moment after it appeared — the "appears to
+    // change when it lands" flash the outbox exists to prevent.
+    expect(screen.getByText("hello").closest("li")).not.toHaveClass(
+      "msg-bubble"
+    );
+  });
+
+  it("keeps a failed send when you go back to the list and return", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.getMessages.mockResolvedValue(page([]));
+    api.sendMessage.mockRejectedValue(new Error("offline"));
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "don’t lose me");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Not sent");
+
+    // 🔒 This is the whole reason the outbox is a module-level store rather than
+    // component state. The drawer switches list ↔ thread without a route
+    // change, so held in the view a failed send — the one message this exists
+    // to keep — would be thrown away by the most ordinary click there is.
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    await screen.findByRole("button", { name: /Priya/ });
+    await user.click(screen.getByRole("button", { name: /Priya/ }));
+
+    expect(await screen.findByText("don’t lose me")).toBeInTheDocument();
+    expect(screen.getByText("Not sent")).toBeInTheDocument();
+  });
+
   it("ticks your own message sent, and never someone else's", async () => {
     // Their marker sits *before* the message: they haven't got to it yet.
     api.getConversation.mockResolvedValue(
