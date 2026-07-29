@@ -42,6 +42,7 @@ import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import { ComposeIcon } from '@/components/icons';
+import { plainMessageText } from '@/messageText';
 import type { SwipeAction } from '@/components/SwipeableRow';
 import { SwipeableRow } from '@/components/SwipeableRow';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -379,12 +380,16 @@ function ConversationRow({
   // *with* a caption shows the caption; the words are the more useful preview
   // and the emoji still marks it as a picture.
   const photos = last?.attachment_count ?? 0;
+  // Markup is dropped rather than shown (Phase 9b M8): a one-line preview can't
+  // carry emphasis, and leaving the raw `*asterisks*` here while the bubble one
+  // tap away renders them is the seam that reads as unfinished.
+  const words = last ? plainMessageText(last.text) : '';
   const preview = last
     ? last.is_deleted
       ? 'Message deleted'
       : photos > 0
-        ? `📷 ${last.text || 'Photo'}`
-        : last.text
+        ? `📷 ${words || 'Photo'}`
+        : words
     : 'No messages yet';
 
   return (

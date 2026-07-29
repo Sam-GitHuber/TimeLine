@@ -52,6 +52,13 @@
  * when in the day. URLs and email addresses are **tappable**, and a message that
  * is nothing but one to three emoji drops its bubble and is drawn large.
  *
+ * **Inline formatting** (Phase 9b M8). `*bold*`, `_italic_`, `~strikethrough~`
+ * and `` `monospace` `` are drawn as what people meant by them rather than left
+ * sitting there as stray punctuation — the markup people type out of habit, and
+ * a message full of asterisks is what "this app doesn't know that" looks like.
+ * The parse is render-time only: the stored text keeps its markup characters, so
+ * an edit shows you what you typed and the body stays one blob under E2E.
+ *
  * **Photos** (Phase 9b M7) sit above the caption inside the bubble, drawn at the
  * size the sender's phone recorded so the transcript doesn't reflow as they load,
  * and open full-screen on tap. A message may be a photo with no caption at all —
@@ -80,16 +87,24 @@
 
 import { useRef } from 'react';
 import * as Haptics from 'expo-haptics';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Linking,
+  Pressable,
+  StyleSheet,
+  Text,
+  type TextStyle,
+  View,
+} from 'react-native';
 
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
 import { SendStateIcon } from './icons';
 import type { BubbleAnchor } from './MessageActionMenu';
 import { measureInWindow } from '@/measure';
-import { isEmojiOnly, linkify } from '@/messageText';
+import type { Mark } from '@/messageText';
+import { isEmojiOnly, parseMessageText, plainMessageText } from '@/messageText';
 import type { SendState } from '@/readReceipts';
-import { colors, fontSize, radius, spacing } from '@/theme';
+import { colors, fonts, fontSize, radius, spacing } from '@/theme';
 import type { Message, MessageAttachment, Reaction } from '@/types';
 import { formatMessageTime } from '@/utils';
 
@@ -325,16 +340,42 @@ function MessagePhoto({
 }
 
 /**
- * A message's words, with URLs and email addresses made tappable (Phase 9b M5).
+ * What each emphasis mark looks like (Phase 9b M8).
  *
- * The cheapest "this feels broken" fix in the whole phase: a link someone sends
- * was dead text you had to retype by hand. Splitting and styling happens in
- * `messageText.ts`; this only decides what it looks like and what a tap does.
+ * Kept beside the parser's vocabulary rather than inside it: `messageText.ts`
+ * decides *what* a run is, this decides how it's drawn — the same split the
+ * link segments already had.
+ */
+const MARK_STYLE: Record<Mark, TextStyle> = {
+  bold: { fontWeight: '700' },
+  italic: { fontStyle: 'italic' },
+  strike: { textDecorationLine: 'line-through' },
+  // Monospace also drops a hair in size, because at a shared point size a mono
+  // face reads noticeably larger than the body text beside it.
+  mono: { fontFamily: fonts.mono, fontSize: fontSize.base - 3 },
+};
+
+function markStyles(marks: Mark[] | undefined): TextStyle[] {
+  return marks ? marks.map((mark) => MARK_STYLE[mark]) : [];
+}
+
+/**
+ * A message's words: URLs and email addresses made tappable (Phase 9b M5), and
+ * `*bold*` / `_italic_` / `~strikethrough~` / `` `monospace` `` drawn as what
+ * people meant by them (Phase 9b M8).
  *
- * 🔒 **Nothing is fetched.** Link *previews* are on the phase's "not building"
- * list — they'd mean the server retrieving every URL anyone pastes, which is a
- * tracking leak and an SSRF surface for a thumbnail. An underline and
- * `Linking.openURL` involve neither.
+ * The cheapest "this feels broken" fixes in the whole phase — a link someone
+ * sends was dead text you had to retype by hand, and the markup people type out
+ * of habit sat there as literal asterisks. Splitting happens in
+ * `messageText.ts`; this only decides what each run looks like and what a tap
+ * does.
+ *
+ * 🔒 **Nothing is fetched, and nothing is rewritten.** Link *previews* are on
+ * the phase's "not building" list — they'd mean the server retrieving every URL
+ * anyone pastes, which is a tracking leak and an SSRF surface for a thumbnail.
+ * And the markup is only ever *unrendered*, never stripped from the stored text:
+ * the raw string is the source of truth, so an edit shows you exactly what you
+ * typed and the body stays one opaque blob under E2E.
  */
 function MessageText({
   message,
@@ -349,9 +390,9 @@ function MessageText({
     large ? styles.largeEmoji : styles.text,
     !large && (mine ? styles.mineText : styles.theirsText),
   ];
-  const segments = linkify(message.text);
-  // The overwhelmingly common case: one run, one Text, no map.
-  if (segments.length === 1 && segments[0].kind === 'text') {
+  const segments = parseMessageText(message.text);
+  // The overwhelmingly common case: one unmarked run, one Text, no map.
+  if (segments.length === 1 && segments[0].kind === 'text' && !segments[0].marks) {
     return <Text style={base}>{message.text}</Text>;
   }
   return (
@@ -362,7 +403,10 @@ function MessageText({
             // Position is a stable key here: the array is derived from an
             // immutable string, so the same text always splits the same way.
             key={`link-${index}`}
-            style={mine ? styles.linkMine : styles.linkTheirs}
+            style={[
+              markStyles(segment.marks),
+              mine ? styles.linkMine : styles.linkTheirs,
+            ]}
             accessibilityRole="link"
             // Swallowed: a URL the OS has no handler for (a scheme nobody has
             // installed) rejects, and there is nothing useful to say about it
@@ -372,7 +416,9 @@ function MessageText({
             {segment.text}
           </Text>
         ) : (
-          <Text key={`text-${index}`}>{segment.text}</Text>
+          <Text key={`text-${index}`} style={markStyles(segment.marks)}>
+            {segment.text}
+          </Text>
         )
       )}
     </Text>
@@ -508,9 +554,13 @@ function QuotedMessage({
    */
   onPress?: () => void;
 }) {
+  // Two lines of plain text, so the markup is dropped rather than drawn (M8):
+  // a quote is a *reference* to a message, not a second rendering of it.
   const body = quoted?.is_deleted
     ? 'Message deleted'
-    : (quoted?.text ?? 'Original message unavailable');
+    : quoted
+      ? plainMessageText(quoted.text)
+      : 'Original message unavailable';
   return (
     <Pressable
       onPress={onPress}
