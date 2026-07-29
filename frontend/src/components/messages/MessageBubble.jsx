@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Avatar from "../Avatar.jsx";
 import Lightbox from "../Lightbox.jsx";
 import DrawerPopover from "./DrawerPopover.jsx";
@@ -26,7 +26,8 @@ import { formatClockTime } from "../../utils.js";
 // Delete. M9c added reaction pills, and — on your own messages — a clock while
 // a send is in flight, a tick when it lands, and Retry/Discard when it doesn't.
 // M9d added the two halves of a reply thread: a collapsed quote inside a reply's
-// bubble, and a "3 replies" branch under a root.
+// bubble, and a "3 replies" branch under a root. M9f added highlighted
+// @mentions and the tick-box a bubble grows in select mode.
 export default function MessageBubble({
   message,
   mine,
@@ -34,6 +35,27 @@ export default function MessageBubble({
   startsRun = true,
   endsRun = true,
   getActions,
+  /**
+   * Display names for this message's mention ids (M9f), so `@Ada` in the text
+   * can be told from someone writing about an email address. The caller owns the
+   * map because it's the screen that holds the participants — and it covers
+   * *everyone* including you, since a message naming you has to light up as much
+   * as one naming anyone else.
+   */
+  mentionNames,
+  /**
+   * Select mode (M9f): tick this bubble, or untick it. Present only while
+   * selecting, and only on messages the server has actually accepted — an unsent
+   * one has no id to copy or delete by, so offering it a tick-box would be
+   * offering to include it in an action it can't be part of.
+   *
+   * While it's present the row's own click *is* the toggle, and the caller drops
+   * the ⋯ menu, the reaction row and the strand links for the same reason the
+   * app's long-press menu stands down: two modes racing for one gesture.
+   */
+  onToggleSelect,
+  /** Whether this bubble is currently ticked. */
+  selected = false,
   /**
    * The message this one replies to, if the caller could resolve it (M9d).
    *
@@ -118,19 +140,29 @@ export default function MessageBubble({
    */
   const replyCount = message.reply_count ?? 0;
 
-  return (
-    // The gap goes *above* each row, and is tighter inside a run — consecutive
-    // messages from one person read as a block rather than a stack of separate
-    // ones. Above rather than below because the transcript scroller is
-    // `column-reverse`: margins stay physical while the order flips, so "the row
-    // visually above me" is the one this margin separates us from either way.
-    <li
-      className={`${
-        message.is_deleted || !animate ? "" : "msg-bubble"
-      } group flex flex-col ${
-        startsRun ? "mt-2" : "mt-0.5"
-      }`}
-    >
+  /**
+   * The names this message's mention ids resolve to (M9f).
+   *
+   * 🔒 Resolved here, from names the *viewer* already has. The message carries
+   * bare ids, so an id belonging to someone this viewer can't see resolves to
+   * nothing and its `@Ada` simply renders as the words the sender typed — which
+   * is the honest outcome, and the same rule an unresolvable reply quote follows.
+   *
+   * Memoised so the parse below it can be: an unstable array would defeat
+   * `MessageText`'s own memo on every poll.
+   */
+  const mentions = useMemo(
+    () =>
+      mentionNames
+        ? (message.mentions ?? [])
+            .map((id) => mentionNames.get(id))
+            .filter(Boolean)
+        : undefined,
+    [message.mentions, mentionNames]
+  );
+
+  const body = (
+    <>
       {showSender && (
         <span className="mb-1 flex items-center gap-1.5">
           <Avatar user={message.sender} size="xs" />
@@ -215,7 +247,12 @@ export default function MessageBubble({
               />
             ))}
             {message.text && (
-              <MessageText text={message.text} mine={mine} large={large} />
+              <MessageText
+                text={message.text}
+                mine={mine}
+                large={large}
+                mentions={mentions}
+              />
             )}
             {showMeta && (
               // The meta line: time, the edited marker, then the tick. A row
@@ -412,6 +449,73 @@ export default function MessageBubble({
             ignoreRef={pillsRef}
           />
         </DrawerPopover>
+      )}
+    </>
+  );
+
+  return (
+    // The gap goes *above* each row, and is tighter inside a run — consecutive
+    // messages from one person read as a block rather than a stack of separate
+    // ones. Above rather than below because the transcript scroller is
+    // `column-reverse`: margins stay physical while the order flips, so "the row
+    // visually above me" is the one this margin separates us from either way.
+    <li
+      className={`${
+        message.is_deleted || !animate ? "" : "msg-bubble"
+      } group flex flex-col ${startsRun ? "mt-2" : "mt-0.5"} ${
+        selected ? "rounded-xl bg-accent-tint" : ""
+      }`}
+    >
+      {onToggleSelect ? (
+        /**
+         * Select mode (M9f). The tick-box is the accessible control and the row
+         * around it is the convenient one — a click anywhere on the message
+         * toggles it, which is what the app's tap does and what anyone who has
+         * used a messenger expects.
+         *
+         * ⚠️ **`onClickCapture`, and the `preventDefault` is the point.** The row
+         * still contains links, a photo, a quote and a reply count, all of which
+         * would otherwise fire on the click that was meant to tick the box —
+         * opening a lightbox or navigating away mid-selection. Intercepting in
+         * the capture phase settles all of them in one place, rather than
+         * threading a "we're selecting" flag into every child that has a click.
+         * In practice it's stronger than `preventDefault` alone: stopping a
+         * React capture-phase event halts the *native* dispatch too, so a link
+         * in here never sees the click at all.
+         *
+         * It reaches the portalled popovers as well, because a portal
+         * propagates through the React tree rather than the DOM one. That's
+         * moot rather than wrong — nothing in this row can open one while
+         * selecting, and an already-open one is closed by the very click that
+         * opened the ⋯ menu you entered the mode from.
+         */
+        <div
+          onClickCapture={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleSelect();
+          }}
+          className="flex items-start gap-2"
+        >
+          <input
+            type="checkbox"
+            checked={selected}
+            // Read-only because the toggle is handled above, for everything in
+            // the row at once — including a keyboard's Space on this very box,
+            // which arrives here as a click like any other.
+            readOnly
+            // The time is in the label because a **burst** is what select mode
+            // exists for, and a burst is several messages from one person: three
+            // boxes all announcing "select message from Priya" would be three
+            // controls a screen reader can't tell apart. The clock is what
+            // distinguishes them, and it's already on screen beside them.
+            aria-label={`Select message from ${message.sender.display_name} at ${clock.time}${clock.meridiem}`}
+            className="mt-2 h-4 w-4 shrink-0 accent-[var(--color-accent)]"
+          />
+          <div className="flex min-w-0 flex-1 flex-col">{body}</div>
+        </div>
+      ) : (
+        body
       )}
     </li>
   );

@@ -495,13 +495,30 @@ export const api = {
    * the *only* processing that happens to a chat photo. Handing the raw `File`
    * off the input straight to here would ship the photo's GPS coordinates to
    * everyone in the chat.
+   *
+   * `mentionIds` names people (Phase 9b M9f) — user ids, never the names in the
+   * text. 🔒 It's the one argument here with any power behind it: a mention is
+   * the only thing that beats a muted thread, so the server checks every id is
+   * an *active* participant of a *group* chat and 400s anything else. Sent only
+   * when there's something to send, so an ordinary message stays an ordinary
+   * body. See `mentions.js`.
    */
-  sendMessage: (conversationId, text, replyToId = null, photo = null) => {
+  sendMessage: (
+    conversationId,
+    text,
+    replyToId = null,
+    photo = null,
+    mentionIds = null
+  ) => {
     const path = `/api/conversations/${conversationId}/messages/`;
     if (!photo) {
       return request(path, {
         method: "POST",
-        body: { text, ...(replyToId ? { reply_to_id: replyToId } : {}) },
+        body: {
+          text,
+          ...(replyToId ? { reply_to_id: replyToId } : {}),
+          ...(mentionIds?.length ? { mention_ids: mentionIds } : {}),
+        },
       });
     }
     const form = new FormData();
@@ -510,6 +527,10 @@ export const api = {
     // the same rule; this just doesn't get in its way.
     form.append("text", text);
     if (replyToId) form.append("reply_to_id", String(replyToId));
+    // One part per id, not one part holding "1,2": DRF's `ListField` reads
+    // repeated keys off multipart, and a comma-joined string arrives as a single
+    // value it then refuses to parse as a list of integers.
+    mentionIds?.forEach((userId) => form.append("mention_ids", String(userId)));
     // Parallel lists, one entry each. Plural because the server accepts a list
     // (capped at one for now — `MESSAGE_ATTACHMENTS_MAX`), so allowing several
     // photos per message later is a server constant rather than a wire change.

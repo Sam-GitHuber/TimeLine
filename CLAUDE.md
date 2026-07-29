@@ -42,60 +42,47 @@ release. Remaining housekeeping (not blocking): distil `phase-9-iphone-app.md`
 into `docs/reference/` mobile docs and delete it, per the phase-ships convention
 (the release half already lives in `mobile-release.md`).
 
-**Phase 9b — the messaging overhaul — is in progress; M0–M8 are done.**
-It came off the first real beta feedback (no way to edit a message) and brings
-messaging up to the standard of a high-end messaging app: a long-press action
-menu, edit, reply, message reactions, read receipts + send status, thread
-mechanics, photos, then web parity. Shipped so far: the admin can no longer read
-anyone's messages (a report is the only window); the app has an anchored
-long-press menu with Copy/Edit/Delete/Report plus a 15-minute edit window;
-messages can be reacted to with any emoji; **reply threads** — Reply in the
-long-press menu opens a focused strand that blurs the transcript and brings the
-whole back-and-forth forward (mobile only until M9); and **optimistic send +
-read receipts** — a message appears instantly with a clock, a failed send keeps
-its place with Retry, and your own bubbles carry sent/read ticks governed by a
-symmetric `send_read_receipts` setting (the toggle is on both clients; the ticks
-are mobile-only until M9); and **thread mechanics** — the transcript now opens on
-one page and pages history in as you scroll up (it used to load a chat's *entire*
-history), with day separators, clock times, grouped runs, an unread divider,
-jump-to-latest, tappable links, large emoji-only messages and per-chat drafts;
-and **the conversation list + a thread info screen** — rows swipe for
-mute/mark-unread/leave, the list searches by name, and Mute/Add/Leave moved off
-the cramped thread header into `/messages/[id]/info`, which also renames a group
-chat; and **photo messages** — send from the camera or the library, with or
-without a caption, tap to view full-screen, plus the media gallery M6 left
-behind. Chat photos are resized and EXIF-stripped **on the phone**, not the
-server, so the pipeline survives E2E — read `messaging.md`'s *Photo messages*
-before touching them; and **text, mentions & quick actions** — `*bold*`/
+**Phase 9b — the messaging overhaul — is code-complete; M0–M9 are done.**
+It came off the first real beta feedback (no way to edit a message) and brought
+messaging up to the standard of a high-end messaging app, on **both clients**:
+an action menu (long-press on the phone, a hover `⋯` on the web) with
+Copy/Edit/Delete/Report and a 15-minute edit window; emoji reactions on messages;
+**reply threads** — Reply opens a focused strand carrying the whole
+back-and-forth, and a reply's collapsed quote or a root's "3 replies" opens it;
+**optimistic send + read receipts** — a message appears instantly with a clock, a
+failed send keeps its place with Retry, and your own bubbles carry sent/read
+ticks governed by a symmetric `send_read_receipts` setting; **thread mechanics** —
+one page on open with history paging in as you scroll back (it used to load a
+chat's *entire* history), day separators, clock times, grouped runs, a latched
+unread divider, jump-to-latest, links, big emoji-only messages and per-chat
+drafts; **the conversation list + a thread info view** — row actions for
+mute/mark-unread/leave, search by name, and Mute/Add/Leave off the cramped
+header; **photo messages**, resized and EXIF-stripped **on the client**, not the
+server, so the pipeline survives E2E (read `messaging.md`'s *Photo messages*
+before touching them); and **text, mentions & multi-select** — `*bold*`/
 `_italic_`/`~strike~`/`` `mono` `` render at draw time (the stored text keeps its
 markup), `@mentions` in a group notify **through a muted thread** unless you turn
-that override off, several messages can be selected for one Copy/Delete, and a
-message push can be **replied to from the notification** (built and unit-tested;
-the on-device pass is the one M8 item still outstanding, since it needs a
-TestFlight build). **M9 (web parity) is in progress** — the big one: every
-mobile-only feature above lands on the web. It's split into **six PRs, M9a–M9f**,
-each written up in the phase doc to be picked up cold. **M9a–M9d are done**:
-the 602-line `MessagesDrawer.jsx` is now a shell over
-`frontend/src/components/messages/` (a pure code move); the web transcript
-has caught up with the app's — one page on open with older messages paging in as
-you scroll back (it used to load a chat's *entire* history), day separators,
-clock times, run grouping, a latched unread divider, jump-to-latest, clickable
-links, big emoji, per-chat drafts, and a `⋯` menu on hover carrying
-Copy/Edit/Delete or Copy/Report; reactions, optimistic send and read-receipt
-ticks landed with it; and **reply threads** — a reply carries a collapsed quote,
-a root carries "3 replies", and either opens a **strand that takes the panel**
-(the transcript is hidden, not unmounted, so the draft and any edit survive).
-A first cut widened the drawer to 740px so the strand could sit *beside* the
-transcript; it was reversed on sight — **the drawer is a companion to the
-timeline and must never grow to cover the page**, which is why messaging isn't a
-route either. **Two cascade traps live in this drawer** — the `⋯` staying visible
-under `@media (hover: none)`, and the bubble reserving its corner — both the same
-rule: Tailwind's utilities layer comes last, so these have to be written on the
-right side of it or they silently do nothing. Read `messaging.md`'s
-*The web transcript* and *Reply threads on the web* before touching any of it.
+that override off, and several messages can be selected for one Copy/Delete.
+A message push can also be **replied to from the notification** — built and
+unit-tested; that on-device pass is the one M8 item still outstanding, since it
+needs a TestFlight build, and the side-by-side walkthrough of the two clients is
+M9's. The admin can no longer read anyone's messages: a report is the only
+window.
+
+Two things a session touching the drawer should know before it starts. **The
+drawer is a companion to the timeline and must never grow to cover the page** —
+a first cut of M9d widened it to 740px so a strand could sit beside the
+transcript and was reversed on sight, which is also why messaging isn't a route.
+And **two cascade traps live in it** — the `⋯` staying visible under
+`@media (hover: none)`, and the bubble reserving its corner — both the same rule:
+Tailwind's utilities layer comes last, so these have to be written on the right
+side of it or they silently do nothing. The finished web client is written up in
+`messaging.md`'s *Frontend* section; read the relevant subsection before changing
+any of it.
 Full plan in [`docs/phases/phase-9b-messaging-overhaul.md`](docs/phases/phase-9b-messaging-overhaul.md)
-— read it before touching messaging. Its milestones are written to be picked up
-cold by a fresh session; follow the "How to use this document" section at the top.
+— read it before touching messaging. It is distilled into `messaging.md` and
+deleted when the phase ships.
+
 **E2E encryption is a committed goal**, sketched as
 [`docs/phases/phase-9c-e2e-encryption.md`](docs/phases/phase-9c-e2e-encryption.md);
 three 9b decisions are already shaped by it, so read 9b's *Privacy* section

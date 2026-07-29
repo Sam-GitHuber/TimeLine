@@ -491,7 +491,7 @@ describe("Messages drawer — thread", () => {
     // The explicit `null` is "not a reply" (Phase 9b M9d) — the transcript's
     // composer never sends one; replying goes through the strand.
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "yo", null, null)
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "yo", null, null, [])
     );
   });
 
@@ -1548,7 +1548,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     await user.click(within(strand()).getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "yes!", 5, null)
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "yes!", 5, null, [])
     );
     // And it lands in the strand you sent it from, not only in the transcript.
     expect(await within(strand()).findByText("yes!")).toBeInTheDocument();
@@ -1608,7 +1608,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     await user.type(within(strand()).getByLabelText("Reply to thread"), "the usual");
     await user.click(within(strand()).getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "the usual", 6, null)
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "the usual", 6, null, [])
     );
   });
 
@@ -1752,7 +1752,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // ⚠️ Still a reply. The `replyToId` is kept on the outbox entry precisely so
     // a retry can't quietly turn a failed reply into an ordinary message.
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenLastCalledWith(7, "yes!", 5, null)
+      expect(api.sendMessage).toHaveBeenLastCalledWith(7, "yes!", 5, null, [])
     );
   });
 
@@ -1944,7 +1944,13 @@ describe("Messages drawer — photos (Phase 9b M9e)", () => {
     // open a chat attachment, so this pass is the only thing that strips the
     // EXIF — including the GPS a phone stamps on every shot.
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "look", null, preparedPhoto)
+      expect(api.sendMessage).toHaveBeenCalledWith(
+        7,
+        "look",
+        null,
+        preparedPhoto,
+        []
+      )
     );
     expect(prepareChatPhoto).toHaveBeenCalledWith(file);
     // And the composer is empty again — the photo went with the message rather
@@ -1977,7 +1983,7 @@ describe("Messages drawer — photos (Phase 9b M9e)", () => {
     // ordinary message, and the server agrees.
     await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(api.sendMessage).toHaveBeenCalledWith(7, "", null, preparedPhoto)
+      expect(api.sendMessage).toHaveBeenCalledWith(7, "", null, preparedPhoto, [])
     );
   });
 
@@ -2128,13 +2134,14 @@ describe("Messages drawer — photos (Phase 9b M9e)", () => {
     // ⚠️ The photo comes off the *entry*, not recomputed — a retry that dropped
     // it would send the caption alone and silently lose the picture, which is
     // the one thing this whole path exists to prevent. (The same reason a
-    // retried reply keeps its `replyToId`.)
+    // retried reply keeps its `replyToId`, and a retried mention its ids.)
     await waitFor(() =>
       expect(api.sendMessage).toHaveBeenLastCalledWith(
         7,
         "look",
         null,
-        preparedPhoto
+        preparedPhoto,
+        []
       )
     );
   });
@@ -2655,6 +2662,355 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
     // The one thing that stayed beside the name when the header emptied into a
     // menu: mute is a *state*, and the whole risk of it is forgetting you did.
     expect(await screen.findByText("Muted")).toBeInTheDocument();
+  });
+});
+
+describe("Messages drawer — mentions and multi-select (Phase 9b M9f)", () => {
+  function msg(overrides = {}) {
+    return {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hey there",
+      is_deleted: false,
+      is_edited: false,
+      created_at: new Date().toISOString(),
+      reactions: [],
+      mentions: [],
+      ...overrides,
+    };
+  }
+  const mineSender = { id: fakeUser.pk, display_name: "you", avatar_thumb: null };
+
+  /** The ⋯ on the bubble holding `text` — it lives inside the bubble, so this
+   * scopes to that row rather than picking whichever trigger came first. */
+  async function openMenu(user, text) {
+    const bubble = (await screen.findByText(text)).closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+  }
+
+  /** Enter select mode from a message's menu, the only way in. */
+  async function startSelecting(user, text) {
+    await openMenu(user, text);
+    await user.click(screen.getByRole("button", { name: "Select" }));
+  }
+
+  it("offers the group's other members after an @ and sends their id, not their name", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.sendMessage.mockResolvedValue(
+      msg({ id: 9, sender: mineSender, text: "@Priya Lovelace?" })
+    );
+
+    renderAt("/messages/11");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "@Pr");
+
+    // You are not on your own list, and the picker matches on any part of a
+    // name rather than only the start of it.
+    expect(
+      screen.getByRole("button", { name: "Mention Priya" })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mention you" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Mention Priya" }));
+    // The whole name goes in, with a trailing space — you've finished naming
+    // someone and the next thing you type is a word.
+    expect(box).toHaveValue("@Priya ");
+    // And the strip stands down: there's no half-typed @ any more.
+    expect(screen.queryByRole("button", { name: "Mention Priya" })).toBeNull();
+
+    await user.type(box, "the book?");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // 🔒 A user id, worked out from what was picked — never left for the server
+    // to find by matching names in the text, which is impossible under E2E and
+    // wrong the day two people share a name.
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(
+        11,
+        "@Priya the book?",
+        null,
+        null,
+        [2]
+      )
+    );
+  });
+
+  it("drops the id again when the name is deleted before sending", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.sendMessage.mockResolvedValue(msg({ id: 9, sender: mineSender }));
+
+    renderAt("/messages/11");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "@Pr");
+    await user.click(screen.getByRole("button", { name: "Mention Priya" }));
+    await user.clear(box);
+    await user.type(box, "never mind");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // Picking someone and then thinking better of it must not buzz their muted
+    // thread about a message that doesn't name them — the ids are reconciled
+    // against the words actually sent.
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(11, "never mind", null, null, [])
+    );
+  });
+
+  it("retries a failed mention *with its ids*, not as an ordinary message", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.sendMessage.mockRejectedValue(new Error("offline"));
+
+    renderAt("/messages/11");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "@Pr");
+    await user.click(screen.getByRole("button", { name: "Mention Priya" }));
+    await user.type(box, "the book?");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Not sent")).toBeInTheDocument();
+
+    api.sendMessage.mockResolvedValue(
+      msg({ id: 9, sender: mineSender, text: "@Priya the book?", mentions: [2] })
+    );
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    // ⚠️ The ids come off the *entry*, not recomputed — and the composer was
+    // cleared and the picker reset the moment the first attempt went out, so
+    // anything recomputed here would be empty. A retry that dropped them would
+    // leave the `@Priya` in the words with nothing behind it: no notification
+    // through her muted thread, and not even a highlight. Asserting the
+    // **second** call is the only place that shows. (Same rule as a retried
+    // reply's `replyToId` and a retried photo's file.)
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
+    expect(api.sendMessage).toHaveBeenLastCalledWith(
+      11,
+      "@Priya the book?",
+      null,
+      null,
+      [2]
+    );
+  });
+
+  it("sends a mention from the strand's composer too", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "who's bringing what?" });
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([root]));
+    api.getThread.mockResolvedValue(page([root]));
+    api.sendMessage.mockResolvedValue(
+      msg({ id: 9, sender: mineSender, text: "@Priya the pudding", reply_to: { id: 5 } })
+    );
+
+    renderAt("/messages/11");
+    await openMenu(user, "who's bringing what?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    const strand = screen.getByRole("region", { name: "Reply thread" });
+    const box = within(strand).getByLabelText("Reply to thread");
+    await user.type(box, "@Pr");
+    // A strand is where a group's side-conversations happen, so it's if anything
+    // the *more* likely place to name someone — leaving the picker out of one of
+    // the two composers would be the seam M9 exists to close.
+    await user.click(
+      within(strand).getByRole("button", { name: "Mention Priya" })
+    );
+    await user.type(box, "the pudding");
+    await user.click(within(strand).getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(
+        11,
+        "@Priya the pudding",
+        5,
+        null,
+        [2]
+      )
+    );
+  });
+
+  it("offers no picker in a 1:1, or while editing", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mineSender })])
+    );
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "@");
+
+    // 🔒 Not a UI preference: the server *refuses* `mention_ids` on a direct
+    // conversation, because in a 1:1 the one person you might have muted is the
+    // only person who can send you anything.
+    expect(screen.queryByRole("group", { name: "Mention someone" })).toBeNull();
+
+    // And in a group thread the picker still stands down while editing: an edit
+    // carries no `mention_ids`, so a name picked there would notify nobody and
+    // wouldn't even highlight.
+    await user.clear(box);
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mineSender })])
+    );
+    renderAt("/messages/11");
+    await openMenu(user, "helo");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.type(screen.getByPlaceholderText(/edit your message/i), " @Pr");
+    expect(screen.queryByRole("button", { name: "Mention Priya" })).toBeNull();
+  });
+
+  it("highlights a mention in the bubble, and leaves an unresolvable one as words", async () => {
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 6, text: "@Priya and @Nobody, chapter 3?", mentions: [2, 99] }),
+      ])
+    );
+
+    renderAt("/messages/11");
+
+    // The named participant is split out of the run and drawn heavier.
+    const mention = await screen.findByText("@Priya");
+    expect(mention).toHaveClass("font-bold");
+    // 🔒 An id the viewer can't resolve — someone who has since left, or who was
+    // never visible to them — renders as the words the sender typed, with no
+    // name invented for it. `@Nobody` therefore stays inside a plain run.
+    expect(screen.queryByText("@Nobody")).toBeNull();
+  });
+
+  it("selects several messages and deletes them in one action", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 6, text: "and this", sender: mineSender }),
+        msg({ id: 5, text: "delete this", sender: mineSender }),
+      ])
+    );
+    api.deleteMessage.mockResolvedValue({});
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderAt("/messages/7");
+    await startSelecting(user, "delete this");
+
+    // The message you acted on comes with you into the mode — a burst is
+    // exactly where you already know you want the next one too.
+    expect(await screen.findByText("1 selected")).toBeInTheDocument();
+    // The composer's slot holds the bulk actions now; the header carries a way
+    // out instead of the person you're talking to.
+    expect(screen.queryByPlaceholderText(/write a message/i)).toBeNull();
+
+    // A click anywhere on a bubble ticks it — the one state where a message's
+    // own click does something.
+    await user.click(screen.getByText("and this"));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(confirm).toHaveBeenCalled();
+    await waitFor(() => expect(api.deleteMessage).toHaveBeenCalledWith(7, 5));
+    expect(api.deleteMessage).toHaveBeenCalledWith(7, 6);
+    // The mode ends with the action.
+    expect(
+      await screen.findByPlaceholderText(/write a message/i)
+    ).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it("offers Copy but not Delete once the selection includes someone else's message", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 6, text: "did you read it?" }),
+        msg({ id: 5, text: "not yet", sender: mineSender }),
+      ])
+    );
+
+    renderAt("/messages/11");
+    await startSelecting(user, "not yet");
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+
+    await user.click(screen.getByText("did you read it?"));
+
+    // Absent, not greyed: a bulk action that silently did *part* of what it says
+    // is worse than one that isn't there, and absent reads as "not yours".
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    // Copy stays either way — quoting an exchange is exactly what you'd select
+    // someone else's messages for.
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+
+    // Oldest-first, with names in a group: an exchange between several people is
+    // unreadable pasted without them, and only reads right in the order it
+    // happened. (`userEvent.setup()` stubs the clipboard.)
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "you: not yet\nPriya: did you read it?"
+      )
+    );
+  });
+
+  it("leaves an unsent message out of a selection entirely", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "sent one", sender: mineSender })])
+    );
+    // Never resolves: the send stays in flight, so the bubble stays unsent.
+    api.sendMessage.mockReturnValue(new Promise(() => {}));
+
+    renderAt("/messages/7");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "still going");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("still going")).toBeInTheDocument();
+
+    await startSelecting(user, "sent one");
+
+    // One tick-box, on the message the server has actually accepted. An unsent
+    // one has no id to copy or delete by, so a box on it would be offering to
+    // include it in an action it can't be part of — and clicking it does
+    // nothing rather than silently ticking a message the bulk actions ignore.
+    expect(screen.getAllByRole("checkbox", { name: /^Select message/ })).toHaveLength(1);
+    await user.click(screen.getByText("still going"));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+  });
+
+  it("stands the menu and the strand links down while selecting", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({
+          id: 5,
+          text: "dinner?",
+          sender: mineSender,
+          reply_count: 2,
+        }),
+      ])
+    );
+
+    renderAt("/messages/7");
+    expect(await screen.findByText("2 replies")).toBeInTheDocument();
+    await startSelecting(user, "dinner?");
+
+    // While selecting, a click means one thing everywhere on screen — so the ⋯
+    // and both ways into a strand step aside rather than racing it.
+    expect(screen.queryByRole("button", { name: "Message options" })).toBeNull();
+    expect(screen.queryByText("2 replies")).toBeNull();
+
+    // Escape leaves the selection rather than closing the drawer: the nearer
+    // thing wins, and the composer that would normally catch the key has been
+    // replaced by the bulk bar.
+    await user.keyboard("{Escape}");
+    expect(await screen.findByText("2 replies")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Messages" })).toBeInTheDocument();
   });
 });
 

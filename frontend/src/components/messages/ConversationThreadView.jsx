@@ -13,6 +13,7 @@ import PendingChatPanel from "../PendingChatPanel.jsx";
 import { ReportModal } from "../ReportButton.jsx";
 import AvatarStack from "./AvatarStack.jsx";
 import DrawerMenu from "./DrawerMenu.jsx";
+import MentionSuggestions from "./MentionSuggestions.jsx";
 import MessageBubble from "./MessageBubble.jsx";
 import MessageStrandPanel, { threadQueryKey } from "./MessageStrandPanel.jsx";
 import { DaySeparator, UnreadDivider } from "./ThreadDividers.jsx";
@@ -27,6 +28,7 @@ import { useAuth } from "../../auth.jsx";
 import { prepareChatPhoto } from "../../chatPhotos.js";
 import { getDraft, setDraft } from "../../drafts.js";
 import { useDayBoundary } from "../../hooks.js";
+import { useMentions } from "../../mentions.js";
 import { insertMessage, patchReactions } from "../../messageCache.js";
 import { useMessaging } from "../../messaging.jsx";
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from "../../outbox.js";
@@ -75,7 +77,8 @@ function HeaderName({ name, muted }) {
  * Edit expires fifteen minutes after sending, and a menu whose contents depend
  * on render timing is the kind of bug nobody reproduces.
  *
- * **Data, not JSX**, deliberately: M9c slots React in, M9d Reply, M9f Select.
+ * **Data, not JSX**, deliberately — M9c slotted React in, M9d Reply and M9f
+ * Select, none of which had to re-read a tree of conditional markup to do it.
  *
  * Edit appears only on your own message, only inside the edit window, and only
  * while you can still send here. The server enforces all three independently
@@ -97,6 +100,7 @@ function messageActions({
   onEdit,
   onDelete,
   onReport,
+  onSelect,
 }) {
   const actions = [
     {
@@ -110,6 +114,16 @@ function messageActions({
       },
     },
   ];
+  /**
+   * The way into select mode (M9f), and it belongs here for the reason the app's
+   * does: this menu is already the answer to "do something with this message",
+   * and the second message you want is the one you go for *after* deciding
+   * there's more than one. Offered only where there's a mode to enter — the
+   * strand has no bulk actions, so `onSelect` is simply absent there.
+   */
+  if (onSelect) {
+    actions.push({ label: "Select", onClick: () => onSelect(message) });
+  }
   /**
    * Reply, and **the only route to one** (M9d) — it opens the strand rather
    * than aiming this composer at a message, even when the message has no
@@ -183,6 +197,17 @@ export default function ConversationThreadView() {
   const [attachment, setAttachment] = useState(null);
   const [preparing, setPreparing] = useState(false);
   const [photoError, setPhotoError] = useState(null);
+  /**
+   * The ticked messages while selecting (M9f), or `null` when there's no
+   * selection mode running at all.
+   *
+   * `null` rather than an empty set, because "no mode" and "mode with nothing
+   * ticked" are genuinely different states: the second still shows the count
+   * header and the bulk bar, and it's reachable by unticking the message you
+   * entered with.
+   */
+  const [selected, setSelected] = useState(null);
+  const selecting = selected !== null;
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -494,6 +519,28 @@ export default function ConversationThreadView() {
   }, [conversationId, text, editing]);
 
   /**
+   * Escape leaves select mode rather than closing the drawer (M9f) — the nearer
+   * thing wins, the same call the composer already makes for edit mode and the
+   * strand for itself.
+   *
+   * On `document` in the **capture** phase, which is what puts it ahead of the
+   * drawer's own Escape handler: that one is a bubble-phase document listener,
+   * so stopping propagation up here means it never runs. Without this, changing
+   * your mind about a selection would cost you the whole panel — and there'd be
+   * no composer to catch the key, since the bulk bar has taken its place.
+   */
+  useEffect(() => {
+    if (!selecting) return;
+    function onKeyDown(event) {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setSelected(null);
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [selecting]);
+
+  /**
    * Put focus back in the composer when a strand closes (M9d).
    *
    * Whatever focus was on — the strand's Close button, or its composer — has
@@ -525,8 +572,14 @@ export default function ConversationThreadView() {
   const sendMutation = useMutation({
     // `?? null` so an ordinary message sends an explicit "this is not a reply"
     // rather than a hole an argument could later slide into.
-    mutationFn: ({ value, replyToId, photo }) =>
-      api.sendMessage(conversationId, value, replyToId ?? null, photo ?? null),
+    mutationFn: ({ value, replyToId, photo, mentionIds }) =>
+      api.sendMessage(
+        conversationId,
+        value,
+        replyToId ?? null,
+        photo ?? null,
+        mentionIds ?? null
+      ),
     onSuccess: (message, { tempId }) => {
       // Marked before either write, so the replacement bubble is already known
       // to be yours by the time it renders — see `justSent`. Out of order it
@@ -590,10 +643,22 @@ export default function ConversationThreadView() {
    * that knows an unsent message exists and one place that decides what happens
    * when it doesn't land.
    */
-  function queueSend(value, { replyToId, rootId, photo } = {}) {
-    const entry = newOutgoing({ text: value, replyToId, rootId, photo });
+  function queueSend(value, { replyToId, rootId, photo, mentionIds } = {}) {
+    const entry = newOutgoing({
+      text: value,
+      replyToId,
+      rootId,
+      photo,
+      mentionIds,
+    });
     setOutbox((entries) => [...entries, entry]);
-    sendMutation.mutate({ value, replyToId, photo, tempId: entry.tempId });
+    sendMutation.mutate({
+      value,
+      replyToId,
+      photo,
+      mentionIds,
+      tempId: entry.tempId,
+    });
   }
 
   function retrySend(entry) {
@@ -609,13 +674,16 @@ export default function ConversationThreadView() {
     );
     // Everything off the entry, not recomputed: a failed reply retried without
     // its `replyToId` would quietly become an ordinary message, landing in the
-    // transcript instead of the strand you sent it from — and a failed *photo*
+    // transcript instead of the strand you sent it from; a failed *photo*
     // retried without its `photo` would send the caption alone and drop the
-    // picture, which is the one failure this whole path exists to prevent.
+    // picture; and a retry without its `mentionIds` would leave the `@Ada` in
+    // the words with nothing behind it — no notification through her mute, and
+    // no highlight either. Three different silent downgrades, one rule.
     sendMutation.mutate({
       value: entry.text,
       replyToId: entry.replyToId,
       photo: entry.photo,
+      mentionIds: entry.mentionIds,
       tempId: entry.tempId,
     });
   }
@@ -690,6 +758,33 @@ export default function ConversationThreadView() {
       // Delete is offered inside the strand as well (M9d), and the strand reads
       // its own query — so without this the message you just deleted sits there
       // until the next poll, in the one view that's on screen at the time.
+      queryClient.invalidateQueries({ queryKey: ["thread", conversationId] });
+    },
+  });
+
+  /**
+   * Delete everything ticked, in one action (M9f).
+   *
+   * **One at a time rather than in parallel**, because nobody is waiting on the
+   * round trips — the bubbles left the selection the moment you confirmed — and
+   * a burst of parallel DELETEs is a burst for no benefit.
+   *
+   * **Invalidated on settle, not on success.** A partial failure still deleted
+   * some of them, and leaving those on screen would make the whole action look
+   * as though it had failed. The strand's cache is invalidated too, for M9d's
+   * reason: a deleted message the strand still holds is invisible in review,
+   * because the transcript that has the right answer is hidden while a strand is
+   * open.
+   */
+  const deleteManyMutation = useMutation({
+    mutationFn: async (messageIds) => {
+      for (const messageId of messageIds) {
+        await api.deleteMessage(conversationId, messageId);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["messages", conversationId] });
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
       queryClient.invalidateQueries({ queryKey: ["thread", conversationId] });
     },
   });
@@ -840,11 +935,17 @@ export default function ConversationThreadView() {
      * targets one specific message and two saves racing on it would be
      * genuinely ambiguous.
      */
+    // Reconciled against what's actually being sent (M9f), not trusted from the
+    // picker: pick Ada, change your mind, delete her name, send — and no id goes
+    // with it, so her muted thread doesn't buzz about a message that doesn't
+    // mention her. See `mentionIdsIn`.
+    const mentionIds = mentions.idsFor(value);
+    mentions.reset();
     setText("");
     // Handed to the outbox, which owns the preview URL from here on — so this
     // must *not* revoke it the way `removeAttachment` does.
     setAttachment(null);
-    queueSend(value, { photo: attachment ?? undefined });
+    queueSend(value, { photo: attachment ?? undefined, mentionIds });
   }
 
   const other = detail?.other;
@@ -871,6 +972,39 @@ export default function ConversationThreadView() {
   const showReceipts = receiptsVisible(participants);
 
   /**
+   * Who can be named with `@`, and what everyone's name is (M9f).
+   *
+   * **Groups only.** In a 1:1 there is exactly one person it could mean, so a
+   * picker would be ceremony around a word — and here it's more than a UI call:
+   * the server *refuses* `mention_ids` on a direct conversation, because a
+   * mention beats mute and in a 1:1 the one person you might have muted is the
+   * only person who can send you anything (see `messaging.md`).
+   *
+   * `mentionNames` is separate and covers *everyone*, you included: it's what
+   * the bubbles highlight from, and a message naming you has to light up as much
+   * as one naming anyone else. The ids on a message are bare — the server sends
+   * no names — so this map is the only thing that can turn them back into the
+   * `@Ada` in the text.
+   */
+  const mentionable = useMemo(
+    () =>
+      isGroup
+        ? participants.filter((p) => p.status === "active" && p.id !== me?.pk)
+        : [],
+    [isGroup, participants, me?.pk]
+  );
+  const mentionNames = useMemo(
+    () => new Map(participants.map((p) => [p.id, p.display_name])),
+    [participants]
+  );
+  const mentions = useMentions({
+    people: mentionable,
+    text,
+    setText,
+    inputRef,
+  });
+
+  /**
    * The tick (or clock) for one bubble. Never on someone else's message: a tick
    * reports what *your* message did, and on an incoming one it would be telling
    * you that you read it.
@@ -882,6 +1016,92 @@ export default function ConversationThreadView() {
     if (!showReceipts) return undefined;
     return readStateFor(message, participants, me?.pk);
   }
+
+  /**
+   * Enter select mode with the message you acted on already ticked (M9f).
+   *
+   * A burst is exactly where you know you want the *next* few as well, so
+   * entering with nothing ticked would waste the click you just made.
+   */
+  function startSelecting(message) {
+    // Clear a previous run's failure with the mode that produced it, or it sits
+    // under the composer reporting something you've already moved on from.
+    deleteManyMutation.reset();
+    setSelected(new Set([message.id]));
+  }
+
+  function toggleSelected(messageId) {
+    setSelected((current) => {
+      const next = new Set(current ?? []);
+      if (!next.delete(messageId)) next.add(messageId);
+      return next;
+    });
+  }
+
+  /**
+   * The ticked messages, oldest-first — the order they were said in, which is
+   * the only order a copied exchange reads correctly in.
+   *
+   * `loaded` is newest-first (the transcript reads `?order=desc`), so this
+   * reverses rather than sorting: the list is already in order, just backwards.
+   * It's drawn from `loaded` alone, which is also what keeps an unsent message
+   * out of a selection — it has no server id to copy or delete by.
+   *
+   * Memoised because `deletableSelection` reads it during render and `loaded` is
+   * every page fetched so far: walking all of it on each render while someone
+   * clicks their way through a selection is work for nothing. Empty outside
+   * select mode, so it costs nothing there either.
+   */
+  const selectedMessages = useMemo(
+    () => (selected ? [...loaded].reverse().filter((m) => selected.has(m.id)) : []),
+    [loaded, selected]
+  );
+
+  /**
+   * Copy the lot as text.
+   *
+   * A group prefixes each line with who said it, because a copied exchange
+   * between three people is unreadable otherwise; a 1:1 doesn't, since pasting
+   * your own name into a note about a conversation you were in adds nothing.
+   * Messages with no words (a photo on its own) are skipped rather than rendered
+   * as a placeholder — the clipboard takes text, and "📷 Photo" is not something
+   * anyone wants in their notes.
+   */
+  function copySelected() {
+    const lines = selectedMessages
+      .filter((m) => m.text && !m.is_deleted)
+      .map((m) => (isGroup ? `${m.sender.display_name}: ${m.text}` : m.text));
+    if (lines.length > 0) {
+      navigator.clipboard?.writeText?.(lines.join("\n"))?.catch?.(() => {});
+    }
+    setSelected(null);
+  }
+
+  function confirmDeleteSelected() {
+    const ids = selectedMessages.map((m) => m.id);
+    const question =
+      ids.length === 1
+        ? "Delete this message? This can’t be undone."
+        : `Delete ${ids.length} messages? This can’t be undone.`;
+    if (!window.confirm(question)) return;
+    deleteManyMutation.mutate(ids);
+    setSelected(null);
+  }
+
+  /**
+   * Whether every ticked message is one you could delete on its own — Delete is
+   * offered only then. A bulk action that silently did *part* of what it says
+   * (yours, quietly skipping theirs) is worse than one that isn't there, and
+   * absent reads as "not yours" where a permanently greyed button reads as a bug.
+   */
+  // ⚠️ Counted off `selectedMessages`, not `selected.size` — the two can
+  // disagree, and `.every()` on an empty array is `true`. A tick whose message
+  // has since left `loaded` would otherwise offer Delete on nothing at all, and
+  // ask "Delete 0 messages?" on the way.
+  const deletableSelection =
+    selecting &&
+    selectedMessages.length > 0 &&
+    selectedMessages.every((m) => m.sender.id === me?.pk && !m.is_deleted);
 
   /**
    * Open the strand a message belongs to (M9d), aimed at that message.
@@ -909,6 +1129,7 @@ export default function ConversationThreadView() {
       onEdit: startEditing,
       onDelete: (messageId) => deleteMutation.mutate(messageId),
       onReport: (messageId) => setReportingId(messageId),
+      onSelect: startSelecting,
     });
 
   /**
@@ -979,16 +1200,44 @@ export default function ConversationThreadView() {
           which is the one thing a chat header is for; they moved into the menu
           and onto the info panel behind it. */}
       <PanelHeader
-        onBack={openList}
+        // Back stands down while selecting (M9f): leaving the thread isn't what
+        // the arrow would mean in that moment, and Cancel — which is what you
+        // actually want — takes its place on the other side of the count.
+        onBack={selecting ? undefined : openList}
         actions={
-          !convoQuery.isError &&
-          !isPending &&
-          detail && (
-            <DrawerMenu getActions={headerActions} label="Conversation options" />
+          selecting ? (
+            <button
+              type="button"
+              onClick={() => setSelected(null)}
+              className="btn btn-ghost btn-sm"
+            >
+              Cancel
+            </button>
+          ) : (
+            !convoQuery.isError &&
+            !isPending &&
+            detail && (
+              <DrawerMenu getActions={headerActions} label="Conversation options" />
+            )
           )
         }
       >
-        {convoQuery.isError ? (
+        {/* Select mode takes the header over, exactly as it does on the phone:
+            who you're talking to is not what you need while picking messages,
+            and a count plus a way out is. The transcript below stays where it
+            was — only the chrome around it changes. */}
+        {selecting ? (
+          // `role="status"` so the count is *announced* as it moves. Without it
+          // the whole mode is silent to a screen reader: the header swapping and
+          // a number going up are both purely visual events, and the count is
+          // the only feedback a tick gets.
+          <span
+            role="status"
+            className="font-display font-bold -tracking-[0.02em] text-ink"
+          >
+            {selected.size} selected
+          </span>
+        ) : convoQuery.isError ? (
           <span className="font-semibold text-ink">Conversation</span>
         ) : isGroup ? (
           <button
@@ -1109,7 +1358,20 @@ export default function ConversationThreadView() {
                           showSender={isGroup && !mine && row.startsRun}
                           startsRun={row.startsRun}
                           endsRun={row.endsRun}
-                          getActions={getActions}
+                          // Every action stands down in select mode (M9f) — the
+                          // menu, the reaction row, and both ways into a strand.
+                          // While selecting, a click on a message means one
+                          // thing everywhere on screen, which is the same
+                          // suspension of the one-gesture-per-target rule the
+                          // app makes when its long-press menu steps aside.
+                          getActions={selecting ? undefined : getActions}
+                          onToggleSelect={
+                            selecting && !outboxById.has(row.message.id)
+                              ? () => toggleSelected(row.message.id)
+                              : undefined
+                          }
+                          selected={!!selected?.has(row.message.id)}
+                          mentionNames={mentionNames}
                           status={statusFor(row.message)}
                           meId={me?.pk}
                           // 🔒 Resolved through `quotes.js`, never read off the
@@ -1125,10 +1387,13 @@ export default function ConversationThreadView() {
                           // handler — the quote on a reply, and the reply count
                           // on a root. A quote aims the strand's composer at the
                           // root, since from a quote you came to read.
-                          onOpenThread={() =>
-                            openStrand(row.message, {
-                              aimAtRoot: !!row.message.reply_to,
-                            })
+                          onOpenThread={
+                            selecting
+                              ? undefined
+                              : () =>
+                                  openStrand(row.message, {
+                                    aimAtRoot: !!row.message.reply_to,
+                                  })
                           }
                           // False only for the bubble that replaces one of your
                           // own optimistic ones, which has already made its
@@ -1140,7 +1405,7 @@ export default function ConversationThreadView() {
                           // so being severed stops it (403) exactly as it stops a
                           // message. The list stays readable, and inert.
                           onReact={
-                            canSend
+                            canSend && !selecting
                               ? (emoji) =>
                                   reactMutation.mutate({
                                     messageId: row.message.id,
@@ -1186,7 +1451,36 @@ export default function ConversationThreadView() {
             </div>
 
             <div className="border-t border-line px-3 py-3">
-              {canSend ? (
+              {/* While selecting, the composer's slot holds the bulk actions
+                  instead (M9f) — the same place, so nothing moves, and there is
+                  never both a composer and an action bar competing for the
+                  bottom of the panel. */}
+              {selecting ? (
+                <div className="flex items-center justify-center gap-6 py-1">
+                  <button
+                    type="button"
+                    onClick={copySelected}
+                    disabled={selected.size === 0}
+                    className="text-sm font-semibold text-accent-deep transition hover:underline disabled:text-ink-faint disabled:no-underline"
+                  >
+                    Copy
+                  </button>
+                  {/* Only when every ticked message is one you can delete — see
+                      `deletableSelection`. Absent rather than disabled: a
+                      permanently greyed Delete beside someone else's message
+                      reads as a bug, where nothing at all reads as "not
+                      yours". */}
+                  {deletableSelection && (
+                    <button
+                      type="button"
+                      onClick={confirmDeleteSelected}
+                      className="text-sm font-semibold text-red-600 transition hover:underline"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              ) : canSend ? (
                 <>
                   {/* The editing bar: what you're rewriting, and a way out of it.
                       The original is shown raw rather than cleaned up — the
@@ -1245,6 +1539,23 @@ export default function ConversationThreadView() {
                       )}
                     </div>
                   )}
+                  {/* Who you might be naming (M9f), directly above the input —
+                      nearest the words being typed, and gone the moment there's
+                      no `@` in progress.
+
+                      Not offered while editing, for the same reason the attach
+                      button isn't: an edit carries no `mention_ids`, so picking
+                      someone here would do nothing at all — no notification, and
+                      not even a highlight, since the highlight is driven by the
+                      ids rather than by the words. A picker that silently does
+                      nothing is worse than no picker. Adding a mention means
+                      sending a message. */}
+                  {!editing && (
+                    <MentionSuggestions
+                      people={mentions.suggestions}
+                      onChoose={mentions.choose}
+                    />
+                  )}
                   <form onSubmit={handleSubmit} className="flex items-end gap-2">
                     {!editing && (
                       <>
@@ -1279,7 +1590,14 @@ export default function ConversationThreadView() {
                     <textarea
                       ref={inputRef}
                       value={text}
-                      onChange={(e) => setText(e.target.value)}
+                      onChange={(e) =>
+                        mentions.onChange(e.target.value, e.target.selectionStart)
+                      }
+                      // Where the caret is, which is what decides whether you're
+                      // half-way through typing an `@name` *right now* (M9f).
+                      onSelect={(e) =>
+                        mentions.onCaretMove(e.target.selectionStart)
+                      }
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
@@ -1351,6 +1669,17 @@ export default function ConversationThreadView() {
                   {editMutation.error?.message || "Couldn’t save the edit."}
                 </p>
               )}
+              {/* A bulk delete that fell over has no bubble to fail on and no
+                  mode left to report in — the selection ends the moment you
+                  confirm, so this is the only place left to say so. Its own
+                  wording rather than the server's: a partial failure means
+                  *some* of them are still there, which is what you need to know
+                  and not what any one response says. */}
+              {deleteManyMutation.isError && (
+                <p role="alert" className="mt-1 text-sm text-red-600">
+                  Some messages are still there. Try again.
+                </p>
+              )}
             </div>
           </div>
 
@@ -1362,6 +1691,8 @@ export default function ConversationThreadView() {
               meId={me?.pk}
               isGroup={isGroup}
               canSend={canSend}
+              mentionable={mentionable}
+              mentionNames={mentionNames}
               onAimAt={(messageId) =>
                 setStrand((open) => open && { ...open, replyToId: messageId })
               }
@@ -1384,8 +1715,12 @@ export default function ConversationThreadView() {
                       reactMutation.mutate({ messageId, emoji })
                   : undefined
               }
-              onSend={(value, replyToId) =>
-                queueSend(value, { replyToId, rootId: strand.rootId })
+              onSend={(value, replyToId, mentionIds) =>
+                queueSend(value, {
+                  replyToId,
+                  rootId: strand.rootId,
+                  mentionIds,
+                })
               }
               onRetry={(message) => {
                 const entry = outboxById.get(message.id);
