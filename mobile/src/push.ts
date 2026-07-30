@@ -18,9 +18,12 @@
  *    logout would fail exactly when it matters, leaving the server pushing a
  *    previous user's notifications to a phone they no longer control — the
  *    privacy failure `DevicePushToken`'s upsert-on-token rule exists to avoid.
- * 3. **A simulator has no push token.** `Device.isDevice` guards the whole
- *    path, because `getExpoPushTokenAsync` throws there and an unhandled throw
- *    on login would be a login failure.
+ * 3. **The iOS Simulator has no push token**, and `getExpoPushTokenAsync`
+ *    throws there — an unhandled throw on login would be a login failure. An
+ *    **Android emulator is not the same case**: on a Google Play system image
+ *    it has real Play Services and registers a real FCM token, which is what
+ *    makes push testable without owning an Android phone. See
+ *    `canRegisterForPush`.
  */
 
 import Constants from 'expo-constants';
@@ -185,6 +188,26 @@ export function configureNotificationChannels(): void {
   }
 }
 
+/**
+ * Whether this device can mint a push token at all.
+ *
+ * **Not simply `Device.isDevice`**, and the difference matters (Phase 10). That
+ * check is really asking "is this the iOS Simulator", where
+ * `getExpoPushTokenAsync` throws and there is no push to be had. An **Android
+ * emulator** running a *Google Play* system image has genuine Play Services and
+ * registers a genuine FCM token — so excluding it bought nothing and cost the
+ * only way to test Android push without owning an Android phone.
+ *
+ * Being wrong in the permissive direction is cheap: `registerForPush` wraps
+ * everything in a try/catch that returns `null`, so an emulator that somehow
+ * can't register degrades to "no push" rather than breaking a login. Being
+ * wrong in the restrictive direction is what we had — silent, and indis-
+ * tinguishable from push being broken.
+ */
+function canRegisterForPush(): boolean {
+  return Device.isDevice || Platform.OS === 'android';
+}
+
 /** The EAS project id, which `getExpoPushTokenAsync` needs to mint a token. */
 function projectId(): string | undefined {
   return (
@@ -203,7 +226,7 @@ function projectId(): string | undefined {
  */
 export async function registerForPush(): Promise<string | null> {
   try {
-    if (!Device.isDevice) return null;
+    if (!canRegisterForPush()) return null;
 
     const existing = await Notifications.getPermissionsAsync();
     let granted = existing.granted;

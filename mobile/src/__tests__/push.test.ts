@@ -88,14 +88,39 @@ describe('registerForPush', () => {
     });
   });
 
-  it('does nothing on a simulator', async () => {
-    // getExpoPushTokenAsync throws there, and an unhandled throw on the login
-    // path would surface as a failed login.
-    mockIsDevice = false;
+  (Platform.OS === 'ios' ? it : it.skip)(
+    'does nothing on the iOS Simulator',
+    async () => {
+      // getExpoPushTokenAsync throws there, and an unhandled throw on the login
+      // path would surface as a failed login.
+      mockIsDevice = false;
 
-    expect(await registerForPush()).toBeNull();
-    expect(api.registerPushToken).not.toHaveBeenCalled();
-  });
+      expect(await registerForPush()).toBeNull();
+      expect(api.registerPushToken).not.toHaveBeenCalled();
+    }
+  );
+
+  (Platform.OS === 'android' ? it : it.skip)(
+    'still registers on an Android emulator (Phase 10)',
+    async () => {
+      // An Android emulator reports `isDevice: false` exactly like the iOS
+      // Simulator, but on a Google Play system image it has real Play Services
+      // and mints a real FCM token. Excluding it bought nothing and cost the
+      // only way to test Android push without owning a phone — so the guard is
+      // scoped to iOS. Without this test the regression is silent: push simply
+      // never registers, which is indistinguishable from push being broken.
+      mockIsDevice = false;
+      mockNotifications.getPermissionsAsync.mockResolvedValue({
+        granted: true,
+      } as never);
+      mockNotifications.getExpoPushTokenAsync.mockResolvedValue({
+        data: TOKEN,
+      } as never);
+
+      expect(await registerForPush()).toBe(TOKEN);
+      expect(api.registerPushToken).toHaveBeenCalledWith(TOKEN);
+    }
+  );
 
   it('prompts only when iOS would actually show a prompt', async () => {
     mockNotifications.getPermissionsAsync.mockResolvedValue({

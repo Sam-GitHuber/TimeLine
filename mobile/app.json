@@ -16,6 +16,7 @@
     },
     "android": {
       "package": "net.yourtimeline.app",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#fbfaf7",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

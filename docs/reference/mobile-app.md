@@ -317,6 +317,13 @@ things worth knowing before touching it:
 
 - **iOS push cannot be tested in the Simulator.** It needs a real device and an
   active Apple Developer Program membership. Budget a device pass.
+- **Android push *can* be tested on the emulator**, provided the AVD uses a
+  **Google Play** system image — it has real Play Services and mints a real FCM
+  token. This is why `registerForPush` guards on `canRegisterForPush()` rather
+  than `Device.isDevice`: an emulator reports `isDevice: false` exactly like the
+  iOS Simulator, so the original guard silently skipped registration on Android
+  and made push look broken. Verified end to end (Phase 10) with no Android
+  hardware involved.
 - **Cold start is the path that's easy to miss** — a tap that *launches* the app
   uses a different Expo API from one that arrives while it's running. Test it by
   force-quitting before sending.

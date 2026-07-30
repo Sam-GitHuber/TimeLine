@@ -495,6 +495,14 @@ else knows how a push is delivered.
 
 ### App side (`mobile/src/push.ts`)
 
+**Where registration is possible** is not simply "a real device". `registerForPush`
+asks `canRegisterForPush()`, which is `Device.isDevice || Platform.OS === 'android'`.
+The `isDevice` check is really asking *"is this the iOS Simulator"*, where
+`getExpoPushTokenAsync` throws; an **Android emulator on a Google Play system
+image** has genuine Play Services and registers a genuine FCM token. Excluding it
+bought nothing and cost the only way to test Android push without owning a phone
+— and the failure was silent, indistinguishable from push being broken.
+
 **Registration** runs on sign-in *and* on every launch that restores a session —
 Expo can rotate a device's token, and the backend upserts, so re-registering is
 cheap and keeps `last_seen` honest. A user permanently logged in would otherwise
