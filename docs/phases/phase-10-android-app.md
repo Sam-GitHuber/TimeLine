@@ -1,6 +1,6 @@
 # Phase 10 — Android App
 
-**Status:** in progress — **B done; A underway**
+**Status:** in progress — **A, B done; C and D largely done and verified on the emulator. Outstanding: FCM credentials, Play Console distribution.**
 
 Because Phase 9 built the app in **React Native (Expo)**, the app is *already*
 cross-platform — this phase is **not a second app**. Every screen already exists.
@@ -216,10 +216,11 @@ What genuinely needed doing was the state that *isn't* a modal, where a press
 falls through to the navigator and leaves the screen with the state still armed
 underneath — quiet, and reads as an app bug rather than a missing handler:
 
-- **Message multi-select** — done. `src/useAndroidBack.ts` is a focus-scoped
-  `BackHandler` hook; the thread screen uses it to clear the selection. Pinned
-  by `androidBack.test.tsx` (the hook) plus an integration test in
-  `thread.test.tsx` (that the screen actually calls it — the part a refactor
+- **Message multi-select** — done, and **verified on the emulator**: back clears
+  the selection and stays in the thread. `src/useAndroidBack.ts` is a
+  focus-scoped `BackHandler` hook; the thread screen uses it to clear the
+  selection. Pinned by `androidBack.test.tsx` (the hook) plus an integration test
+  in `thread.test.tsx` (that the screen actually calls it — the part a refactor
   silently drops).
 - **Still to check on a device:** the emoji tray (`rn-emoji-keyboard` is itself
   a `Modal`, so it likely handles its own back), and the root case — back on a
@@ -253,14 +254,24 @@ Tests read the same on both platforms via `pickDateTimeValue` in the shared
 helpers — it absorbs the fact that Android needs one more tap, which is a real
 difference rather than a test artefact.
 
+**Verified on the emulator:** the editor shows the trigger reading back the
+current value, tapping it raises the native clock dialog (tinted with the app's
+emerald accent), and — the actual bug — **cancelling and tapping again reopens
+it**. Before the fix the second tap did nothing, permanently.
+
 ### Layout and visual polish
 
 - **Edge-to-edge is mandatory** on modern Android under Expo SDK 54+: the status
   and navigation bars draw *over* the app. Every screen needs its safe-area
   insets checked, especially the message composer sitting above the gesture bar.
-- **Shadows don't cross over.** 15 `shadow*` style usages against only 5
-  `elevation` — iOS shadow props render nothing on Android. Each needs an
-  `elevation` counterpart or the depth cues just vanish.
+- **Shadows: already correct, nothing to do.** An earlier draft of this plan
+  claimed "15 `shadow*` usages against only 5 `elevation`" and treated it as a
+  gap. That was a miscount — `shadow*` is three or four *properties* per style
+  (`shadowColor`/`shadowOffset`/`shadowOpacity`/`shadowRadius`) against
+  `elevation`'s one. There are **five** raised styles in the app
+  (`ReactionTray`, `MessageActionMenu`, the messages thread, the People and
+  Groups tabs) and every one already pairs its iOS shadow with an Android
+  `elevation`. Verified on the emulator.
 - **`BlurView`** (`MessageThreadView`, the composer backdrop) is expensive and
   visually different on Android; check `experimentalBlurMethod` or fall back to a
   solid translucent surface.
@@ -293,9 +304,19 @@ or a LAN IP. Already documented in `mobile-app.md`; it will bite anyway.
 
 ## 3. Milestones
 
-**A. Emulator + toolchain.** Android Studio, an AVD on a **Google Play** system
-image, `npx expo run:android` / dev build launching. Log in, feed, compose,
-profiles work. Fix whatever's outright broken.
+**A. Emulator + toolchain.** ✅ **Done.** Android Studio + `android-commandlinetools`,
+an AVD (`TimeLine_Pixel8`, Android 16, **Google Play** system image, 4 GB RAM,
+host GPU). `npx expo run:android` produces a dev build; **BUILD SUCCESSFUL in
+31m 43s** first time, seconds thereafter. Login, feed, groups, events, messages
+all verified against the local `seed_demo` stack. **No Android-only layout bugs
+found** — safe areas, the spine, day dividers, reaction chips, bubbles, the tab
+bar and badges all render correctly.
+
+Two toolchain notes worth keeping: the first build auto-downloads the **2.4 GB
+Android NDK** (reanimated/worklets compile C++ from source) plus Build-Tools 35
+even if you installed 36, so budget the disk and the time once. And the emulator
+reaches the host at **`10.0.2.2`**, which also has to be in Django's
+`DJANGO_ALLOWED_HOSTS` or every request 400s — see `mobile/.env`.
 
 **B. Both platforms tested.** ✅ **Done.** `jest.config.js` runs two projects
 (`jest-expo/ios` + `jest-expo/android`); 84 suites, 968 tests green. Needed a
