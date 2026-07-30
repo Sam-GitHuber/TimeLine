@@ -12,6 +12,7 @@
  * collects `*test.ts(x)` / `*spec.ts(x)`.
  */
 
+import { fireEvent, screen } from '@testing-library/react-native';
 import { ActionSheetIOS, Alert, BackHandler, Platform } from 'react-native';
 
 /**
@@ -217,4 +218,31 @@ export function pressBack(): boolean {
 /** How many back handlers are currently registered. */
 export function backHandlerCount(): number {
   return backHandlers.length;
+}
+
+// --- Date / time pickers ----------------------------------------------------
+
+/**
+ * Pick a value from the built-in date/time editor, on either platform.
+ *
+ * The two platforms need a different number of taps and that is a real
+ * difference, not a test artefact (Phase 10). iOS draws the wheel inline and
+ * always mounted, so the stubbed picker is there to press immediately. Android's
+ * is a one-shot modal dialog, so the editor shows a trigger first and only
+ * mounts the picker once it's pressed.
+ *
+ * The stub in `jest.setup.js` commits a fixed 2026-08-15 10:30 on press, so
+ * either path lands the same value.
+ */
+export async function pickDateTimeValue(
+  dimension: 'date' | 'time'
+): Promise<void> {
+  if (Platform.OS === 'android') {
+    await fireEvent.press(
+      screen.getByLabelText(
+        dimension === 'date' ? 'Choose a date' : 'Choose a time'
+      )
+    );
+  }
+  await fireEvent.press(screen.getByLabelText('Pick a value'));
 }

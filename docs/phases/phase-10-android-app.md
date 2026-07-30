@@ -229,21 +229,28 @@ underneath — quiet, and reads as an app bug rather than a missing handler:
 for v1; revisit once the rest is behaving, since predictive back is increasingly
 the platform default.
 
-### Date and time pickers (a known, already-documented gap)
+### Date and time pickers ✅ **Done**
 
-`src/components/events/DimensionEditor.tsx` carries this comment, written during
-Phase 8b:
+The gap `DimensionEditor.tsx` had flagged in a comment since Phase 8b: iOS draws
+an inline wheel that stays put, Android's is a **one-shot modal dialog** that
+opens on mount and is inert once dismissed. Left alone, event planning and every
+date/time poll were the most Android-broken thing in the app.
 
-> *iOS renders the spinner inline and persistently, which is what this layout
-> assumes. Android's picker is a one-shot modal dialog: an always-mounted
-> instance shows once and won't reopen after dismissal, so Phase 10 (Android)
-> will need a `show` state + remount around this. iOS-only for now.*
+Both components fixed:
 
-That's two components (`DimensionEditor` and `PollOptionFields`) and it affects
-**event planning and every date/time poll** — the most Android-broken feature in
-the app today. It needs a `show`-state wrapper, handling `event.type ===
-'dismissed'`, and the `display="spinner"` / `themeVariant` props are iOS-shaped
-and should become platform-conditional.
+- **`DimensionEditor`** — Android gets a trigger that doubles as the read-out
+  (so the selection is visible while the dialog is closed, which is most of the
+  time), and the picker is mounted only while the dialog should be up. Any
+  Android event unmounts it, so the next press gets a working instance rather
+  than a button that works exactly once.
+- **`PollOptionFields`** — the row press raises the dialog and the event closes
+  the row. No "Done" on Android: the system dialog brings its own OK/Cancel, and
+  a second confirm button next to it is just confusing.
+- `display="spinner"` and `themeVariant` are iOS-shaped and are now conditional.
+
+Tests read the same on both platforms via `pickDateTimeValue` in the shared
+helpers — it absorbs the fact that Android needs one more tap, which is a real
+difference rather than a test artefact.
 
 ### Layout and visual polish
 

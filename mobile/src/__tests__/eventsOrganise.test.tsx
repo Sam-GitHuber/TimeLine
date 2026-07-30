@@ -15,6 +15,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { Platform } from 'react-native';
 
 import { api } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
@@ -28,6 +29,7 @@ import {
   alertSpy,
   menuOptions,
   pickMenuAction,
+  pickDateTimeValue,
   pressAlertButton,
   resetMenuSpies,
 } from './helpers';
@@ -207,7 +209,7 @@ describe('setting a dimension', () => {
 
     // Open the date editor, "pick" a value (the stub fires 2026-08-15), commit.
     await fireEvent.press(await screen.findByLabelText('Set Date'));
-    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    await pickDateTimeValue('date');
     await fireEvent.press(screen.getByText('Set the date'));
 
     await waitFor(() =>
@@ -250,8 +252,14 @@ describe('setting a dimension', () => {
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByLabelText('Change Date'));
-    // The editor opened — its native picker stub is on screen.
-    expect(await screen.findByLabelText('Pick a value')).toBeTruthy();
+    // The editor opened. What proves that differs by platform, and the
+    // difference is the feature: iOS mounts the wheel inline, Android shows a
+    // trigger and only raises its one-shot dialog when you press it.
+    expect(
+      await screen.findByLabelText(
+        Platform.OS === 'android' ? 'Choose a date' : 'Pick a value'
+      )
+    ).toBeTruthy();
   });
 
   it('surfaces a finalise failure in an alert and keeps the editor open', async () => {
@@ -263,7 +271,7 @@ describe('setting a dimension', () => {
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByLabelText('Set Date'));
-    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    await pickDateTimeValue('date');
     await fireEvent.press(screen.getByText('Set the date'));
 
     await waitFor(() =>
