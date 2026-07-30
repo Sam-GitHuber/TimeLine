@@ -17,7 +17,7 @@
 import DateTimePicker, {
   type DateTimePickerChangeEvent,
 } from '@react-native-community/datetimepicker';
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { formatEventDate, formatEventTime } from '@/eventFormat';
@@ -211,7 +211,57 @@ function DateTimeField({
    * than throwing a dialog in your face the instant you tap "Set a date".
    */
   const [showAndroidPicker, setShowAndroidPicker] = useState(false);
+
+  /**
+   * Bumped on every trigger press, and used as the picker's `key` (#170).
+   *
+   * `showAndroidPicker` alone assumes every open eventually reports back. One
+   * doesn't: `DateTimePickerAndroid.open` presents inside a `try`/`catch` whose
+   * only exit is `onError`, so a rejected open (the documented null-activity
+   * case, a configuration change mid-present) fires *none* of OK/Cancel. The
+   * flag would stay `true`, `setShowAndroidPicker(true)` would be a no-op
+   * against it, and the editor would be dead for the rest of the visit —
+   * exactly the "opens once" failure this whole shape exists to fix.
+   *
+   * Changing the key remounts the picker whatever the flag says, so the trigger
+   * cannot become inert. `onError` below resets the flag as well; this is the
+   * belt to its braces, because the next failure mode won't be one we predicted.
+   */
+  const [pickerNonce, setPickerNonce] = useState(0);
+  /**
+   * The nonce of the presentation the trigger last asked for, readable
+   * synchronously — the same number as `pickerNonce`, a render earlier.
+   *
+   * Remounting has a cost the flag alone didn't have: the outgoing instance's
+   * cleanup calls `DateTimePickerAndroid.dismiss(mode)`, which resolves *its*
+   * pending `open` with the DISMISS action. So a second tap on the trigger
+   * before the first dialog has finished appearing (200ms on cheap hardware —
+   * an ordinary double-tap) tears down instance A, hears A's `onDismiss`, and
+   * would close instance B, whose dialog is the one now on screen: the
+   * organiser sees it flash open and vanish.
+   *
+   * `onDismiss`/`onError` therefore ignore anything reported by a presentation
+   * we've already replaced. Comparing the nonce the handler was *created* with
+   * against the live one is enough, because `open` captures the handlers it was
+   * called with — A's report arrives through A's function object. Their
+   * identities change only when the nonce does, and that already remounts, so
+   * this costs the stability #169 needs nothing.
+   *
+   * `onValueChange` is deliberately left unscoped: a programmatically dismissed
+   * dialog resolves DISMISS, never SET, so no stale path reaches it.
+   */
+  const liveNonce = useRef(0);
   const isAndroid = Platform.OS === 'android';
+
+  // The handlers below are `useCallback`ed, and on Android that is load-bearing
+  // rather than a micro-optimisation (#169). The library's Android component
+  // opens the dialog from a `useEffect` keyed on `[onChange, onValueChange,
+  // onDismiss, onNeutralButtonPress, valueTimestamp, mode]`. Inline arrows are a
+  // fresh identity every render, so *any* re-render while the dialog was up — a
+  // react-query refetch, `busy` flipping — re-ran that effect and re-opened the
+  // picker, snapping the calendar back to `value` and discarding what the
+  // organiser had spun to. `value` is state here, so it was already stable; the
+  // handlers were not.
 
   /**
    * A value was chosen: iOS fires this on every tick of the wheel, Android once
@@ -219,10 +269,34 @@ function DateTimeField({
    * *re-openable* — leaving it mounted after it closes itself gives a trigger
    * that works exactly once.
    */
-  const onValueChange = (_event: DateTimePickerChangeEvent, picked: Date) => {
-    if (isAndroid) setShowAndroidPicker(false);
-    setValue(picked);
-  };
+  const onValueChange = useCallback(
+    (_event: DateTimePickerChangeEvent, picked: Date) => {
+      if (isAndroid) setShowAndroidPicker(false);
+      setValue(picked);
+    },
+    [isAndroid]
+  );
+
+  /**
+   * Android's Cancel. Never fires for the iOS inline wheel, which is never
+   * dismissed — so this needs no platform guard.
+   */
+  const onDismiss = useCallback(() => {
+    if (pickerNonce !== liveNonce.current) return; // a dialog we already replaced
+    setShowAndroidPicker(false);
+  }, [pickerNonce]);
+
+  /** A present that threw. Let go of the flag so the editor isn't wedged. */
+  const onError = useCallback(() => {
+    if (pickerNonce !== liveNonce.current) return;
+    setShowAndroidPicker(false);
+  }, [pickerNonce]);
+
+  const openAndroidPicker = useCallback(() => {
+    liveNonce.current += 1;
+    setPickerNonce(liveNonce.current);
+    setShowAndroidPicker(true);
+  }, []);
 
   const formatted =
     dimension === 'date' ? formatEventDate(toISODate(value)) : formatEventTime(toHM(value));
@@ -233,7 +307,7 @@ function DateTimeField({
         // The trigger doubles as the read-out, so the current selection is
         // visible while the dialog is closed — which is most of the time.
         <Pressable
-          onPress={() => setShowAndroidPicker(true)}
+          onPress={openAndroidPicker}
           disabled={busy}
           accessibilityRole="button"
           accessibilityLabel={
@@ -251,6 +325,7 @@ function DateTimeField({
           the next press gets a fresh (and therefore functional) instance. */}
       {!isAndroid || showAndroidPicker ? (
         <DateTimePicker
+          key={pickerNonce}
           value={value}
           mode={dimension}
           // `spinner` is the iOS inline wheel this layout is built around;
@@ -262,9 +337,8 @@ function DateTimeField({
           style={isAndroid ? undefined : styles.picker}
           themeVariant={isAndroid ? undefined : pickerThemeVariant}
           onValueChange={onValueChange}
-          // Android's Cancel. Never fires for the iOS inline wheel, which is
-          // never dismissed — so this needs no platform guard.
-          onDismiss={() => setShowAndroidPicker(false)}
+          onDismiss={onDismiss}
+          onError={onError}
         />
       ) : null}
 

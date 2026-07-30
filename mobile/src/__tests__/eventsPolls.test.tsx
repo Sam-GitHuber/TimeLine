@@ -165,6 +165,9 @@ async function renderScreen() {
       </QueryClientProvider>
     );
   });
+  // Returned so a test can force a background refetch — the ordinary way this
+  // screen re-renders without the organiser doing anything (#169).
+  return queryClient;
 }
 
 beforeEach(async () => {
@@ -208,6 +211,53 @@ describe('opening a poll', () => {
           dimension: 'date',
           allowMultiple: true, // date default is pick-any
           options: [{ date_value: '2026-08-15' }, { date_value: '2026-08-15' }],
+        })
+      )
+    );
+    open.mockRestore();
+  });
+
+  /**
+   * A re-render underneath an open option picker must not disturb it (#169).
+   *
+   * This was the worse of the two instances. The seed was
+   * `valueToDate(dimension, opt.value)` computed inline, which returns a
+   * **fresh `new Date()`** for a blank option — so the `valueTimestamp` the
+   * library keys its re-present effect on moved on literally every render,
+   * alongside the inline-arrow handlers. Any refetch while the dialog was up
+   * re-opened it on today's date, discarding the option the organiser was
+   * halfway through choosing.
+   */
+  androidIt('keeps an in-progress poll option when the screen refetches', async () => {
+    serve(makeEvent());
+    const open = jest.spyOn(api, 'openPoll').mockResolvedValue(locationPoll());
+    const queryClient = await renderScreen();
+
+    await fireEvent.press(await screen.findByLabelText('Poll Date'));
+    await fireEvent.press(screen.getByLabelText('Option 1'));
+    await fireEvent.press(screen.getByLabelText('Spin the picker'));
+
+    // Changed data, or react-query's structural sharing keeps the old object
+    // and never re-renders; and a tick, because it notifies on a batched timer.
+    serve(makeEvent({ updated_at: '2026-07-18T11:00:00Z' }));
+    await act(async () => {
+      await queryClient.invalidateQueries();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByLabelText('Picker selection').props.children).toBe('1');
+
+    // The spun option is what lands in the poll — 08-16, not the seeded 08-15.
+    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    await fireEvent.press(screen.getByLabelText('Option 2'));
+    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    await fireEvent.press(screen.getByText('Open poll'));
+
+    await waitFor(() =>
+      expect(open).toHaveBeenCalledWith(
+        9,
+        expect.objectContaining({
+          options: [{ date_value: '2026-08-16' }, { date_value: '2026-08-15' }],
         })
       )
     );

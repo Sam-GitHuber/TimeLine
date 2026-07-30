@@ -13,6 +13,7 @@
 import DateTimePicker, {
   type DateTimePickerChangeEvent,
 } from '@react-native-community/datetimepicker';
+import { useCallback, useMemo } from 'react';
 import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { formatEventDate, formatEventTime } from '@/eventFormat';
@@ -58,6 +59,54 @@ export function PollOptionFields({
   // modal dialog on Android; see the comment at the picker below.
   const isAndroid = Platform.OS === 'android';
 
+  /**
+   * Only one row's picker is ever mounted (`activeIndex`), so its props are
+   * built once here rather than inside the `.map()`. That isn't tidiness — on
+   * Android it's what keeps the dialog open (#169).
+   *
+   * The library's Android component re-opens the picker from a `useEffect` keyed
+   * on `[onChange, onValueChange, onDismiss, onNeutralButtonPress,
+   * valueTimestamp, mode]`. In the map these were inline arrows, and the seed
+   * was `valueToDate(...)` — which returns a **fresh `new Date()`** for a blank
+   * option, so even the timestamp moved on every render. Any re-render while the
+   * dialog was up (a refetch, a sibling row updating) therefore re-fired the
+   * effect and snapped the calendar back to the seed, discarding whatever the
+   * organiser had spun to without them having touched anything.
+   *
+   * Two invariants keep these identities stable, and both are worth preserving:
+   * every call site passes `useState` setters for `onChange`/`onActiveIndex`,
+   * and nothing rewrites `options` while a picker is open except the pick
+   * itself (which closes the row in the same batch on Android). A parent that
+   * synced `options` from a query on every refetch would break the second and
+   * bring #169 back.
+   */
+  const activeValue = activeIndex === null ? '' : (options[activeIndex]?.value ?? '');
+
+  const pickerSeed = useMemo(
+    () => (isPicker ? valueToDate(dimension as 'date' | 'time', activeValue) : new Date()),
+    // `activeIndex` is deliberately a dependency: a blank row seeds to "now", and
+    // moving to a different blank row should reseed rather than reuse a `Date`
+    // captured when the first one was opened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isPicker, dimension, activeValue, activeIndex]
+  );
+
+  const onPickerValueChange = useCallback(
+    (_e: DateTimePickerChangeEvent, picked: Date) => {
+      if (activeIndex === null) return;
+      if (isAndroid) onActiveIndex(null);
+      const next = options.slice();
+      next[activeIndex] = {
+        ...next[activeIndex],
+        value: pickedToValue(dimension as 'date' | 'time', picked),
+      };
+      onChange(next);
+    },
+    [activeIndex, isAndroid, onActiveIndex, options, onChange, dimension]
+  );
+
+  const closePicker = useCallback(() => onActiveIndex(null), [onActiveIndex]);
+
   return (
     <View style={styles.wrap}>
       <View style={styles.list}>
@@ -102,7 +151,7 @@ export function PollOptionFields({
               // because the dialog brings its own OK/Cancel.
               <View style={styles.pickerOpen}>
                 <DateTimePicker
-                  value={valueToDate(dimension, opt.value)}
+                  value={pickerSeed}
                   mode={dimension}
                   display={isAndroid ? 'default' : 'spinner'}
                   // `styles.picker` / `pickerThemeVariant` carry the two *iOS*
@@ -110,20 +159,18 @@ export function PollOptionFields({
                   // theme.ts. Neither applies to a system dialog.
                   style={isAndroid ? undefined : styles.picker}
                   themeVariant={isAndroid ? undefined : pickerThemeVariant}
-                  onValueChange={(
-                    _e: DateTimePickerChangeEvent,
-                    picked: Date
-                  ) => {
-                    if (isAndroid) onActiveIndex(null);
-                    setValue(i, pickedToValue(dimension, picked));
-                  }}
+                  onValueChange={onPickerValueChange}
                   // Android's Cancel. Never fires for the iOS inline wheel,
                   // which is never dismissed, so it needs no platform guard.
-                  onDismiss={() => onActiveIndex(null)}
+                  onDismiss={closePicker}
+                  // A present that threw reports through neither OK nor Cancel,
+                  // so without this the row stays "open" around a dead dialog
+                  // and takes a second press to recover (#170).
+                  onError={closePicker}
                 />
                 {isAndroid ? null : (
                   <Pressable
-                    onPress={() => onActiveIndex(null)}
+                    onPress={closePicker}
                     accessibilityRole="button"
                     accessibilityLabel="Done"
                     hitSlop={6}
