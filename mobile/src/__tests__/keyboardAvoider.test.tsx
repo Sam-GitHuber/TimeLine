@@ -36,22 +36,60 @@ jest.mock('react-native-keyboard-controller', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { View } = require('react-native');
 
-  const props: Record<string, unknown>[] = [];
+  // A `jest.fn()` rather than a plain array, so the `jest.clearAllMocks()` in
+  // jest.setup.js resets it between tests. A module-scope array would persist,
+  // and every assertion would read the last render *anywhere in the file* —
+  // so adding a test later could silently certify another test's props.
+  const record = jest.fn();
 
   return {
-    __props: props,
+    __record: record,
     KeyboardAvoidingView: (received: Record<string, unknown>) => {
-      props.push(received);
+      record(received);
       return React.createElement(View, { testID: 'avoider' }, received.children);
     },
   };
 });
 
+/**
+ * The props the wrapper handed the library on the most recent render.
+ *
+ * Asserts it rendered at all first: if `KeyboardAvoider` is ever repointed at
+ * react-native's `KeyboardAvoidingView` — the regression this file exists to
+ * catch — the mock is never reached, and without this the tests would die with
+ * `Cannot read properties of undefined` instead of saying what went wrong.
+ */
 function lastProps(): Record<string, unknown> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { __props } = require('react-native-keyboard-controller');
-  return __props[__props.length - 1];
+  const { __record } = require('react-native-keyboard-controller');
+  expect(__record).toHaveBeenCalled();
+  return __record.mock.lastCall[0];
 }
+
+it('has its provider mounted above the navigator in the root layout', () => {
+  // Every avoider in the app is inert without `KeyboardProvider`, and mounting
+  // it is also what re-configures Android's modals (see KeyboardAvoider.tsx), so
+  // a refactor that drops or re-nests it below the navigator breaks eleven
+  // screens *and* changes every modal — silently, with lint, tsc and the whole
+  // suite still green. Asserted against the source rather than by rendering
+  // `RootLayout`, which would need the auth gate, the query client, the router
+  // and the push stack stood up to prove one wrapper's position.
+  // Resolved through the `@/` mapper rather than `__dirname` or a cwd-relative
+  // path, so the test works whichever directory Jest is invoked from. The casts
+  // are because this project deliberately has no `@types/node` — adding it to a
+  // React Native app invites global type clashes (Node's timer and Buffer types
+  // against RN's), which is a bad trade for two calls in one test.
+  const resolve = (require as unknown as { resolve(id: string): string }).resolve;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require('fs') as { readFileSync(p: string, enc: string): string };
+  const layout = fs.readFileSync(resolve('@/app/_layout'), 'utf8');
+
+  expect(layout).toContain('<KeyboardProvider>');
+  // Above the navigator, not merely present.
+  expect(layout.indexOf('<KeyboardProvider>')).toBeLessThan(
+    layout.indexOf('<AuthGate />')
+  );
+});
 
 it('is backed by the keyboard-controller library, not React Native', async () => {
   await render(
@@ -93,6 +131,22 @@ it('lets a screen override the behavior deliberately', async () => {
   // 'padding' is a default, not a lock: the spread in the component has to come
   // after it, or a screen with a layout that needs 'height' is silently ignored.
   expect(lastProps().behavior).toBe('height');
+});
+
+it('keeps the default when behavior is explicitly undefined', async () => {
+  await render(
+    // What `Platform.select({ ios: 'padding' })` evaluates to on Android, and
+    // what any hoisted platform ternary would produce.
+    <KeyboardAvoider behavior={undefined}>
+      <Text>composer</Text>
+    </KeyboardAvoider>
+  );
+
+  // Object spread copies keys whose value is `undefined`, so with
+  // `behavior="padding"` written *before* `{...props}` this returned undefined
+  // and the avoider was inert on both platforms — worse than the original bug,
+  // which at least worked on iOS. A parameter default is the fix; this pins it.
+  expect(lastProps().behavior).toBe('padding');
 });
 
 it('passes style and offsets through to the library', async () => {

@@ -315,16 +315,35 @@ and our generated `android/gradle.properties` carries `edgeToEdgeEnabled=true` �
 so the app has to consume `WindowInsets.ime()` itself. Nothing did, and the
 keyboard drew over the message composer.
 
-Two things make this worth reading rather than just obeying. **RN's own
-`KeyboardAvoidingView` can't be fixed by passing `behavior="padding"` on
-Android**: RN 0.86 reports a correct keyboard *height* (`ReactRootView` derives
-it from `WindowInsets.ime()`), but the component positions itself from
-`endCoordinates.screenY`, which still comes from the resize-era
-`getWindowVisibleDisplayFrame()`. It needs the resize that edge-to-edge just
-took away. Hence `react-native-keyboard-controller`, which reads the IME insets
-directly on both platforms and detects the same `edgeToEdgeEnabled` flag. It
-needs `KeyboardProvider` at the root of `app/_layout.tsx`; without it the
-avoiders render but never move, which looks exactly like the original bug.
+**Why a library rather than `behavior="padding"`, stated accurately.** An earlier
+version of this section claimed RN's `KeyboardAvoidingView` simply *can't* work
+under edge-to-edge. That was wrong, and the correction is worth having because
+the false version rules out a cheaper fix. RN 0.86 reports a correct keyboard
+height, and `ReactRootView.java:973` has an explicit branch for the position too:
+`screenY = softInputMode == SOFT_INPUT_ADJUST_NOTHING ? visibleBottom - height :
+visibleBottom`. Under `adjustNothing` that is resize-free and correct — so RN's
+component *would* work, in that mode. What we actually have is the manifest's
+`adjustResize`, which takes the second arm: a resize-era measurement of a window
+that no longer resizes. Reaching `adjustNothing` needs a config plugin or manifest
+edit, since `app.json` exposes only `android.softwareKeyboardLayoutMode:
+resize | pan`, and it would apply app-wide. `react-native-keyboard-controller`
+was chosen over that for animation quality — it tracks the keyboard rather than
+stepping once it settles — and for one code path across both platforms. A trade,
+not a necessity.
+
+**Mounting `KeyboardProvider` re-configures every `<Modal>` in the app.** This is
+the part that bites. RN sets each modal's dialog window to
+`SOFT_INPUT_ADJUST_RESIZE` (`ReactModalHostView.kt:332`), so modal dialogs were
+the one surface still being resized under edge-to-edge — an input inside a modal
+worked with no help. The library's `ModalAttachedWatcher` overrides that to
+`ADJUST_NOTHING` on every modal show ("imitating edge-to-edge mode behavior",
+`ModalAttachedWatcher.kt:96`), unconditionally. So **a `<Modal>` with a text
+input now needs a `KeyboardAvoider` inside it, where before it needed nothing** —
+the reverse of the usual direction, and it caught `ReportModal` and
+`DeleteAccountSection` on the way in. The provider also has to sit above the
+navigator; without it every avoider renders but never moves, which looks exactly
+like the original bug. `keyboardAvoider.test.tsx` asserts its position for that
+reason.
 
 **And the emulator hides it — this is the "harness is more forgiving" shape
 again, in its worst form.** The AVD's Gboard comes up in **floating** mode, a
@@ -333,7 +352,21 @@ attempts to reproduce the reported bug both "passed". **Dock the keyboard before
 trusting a keyboard check on an emulator**, or use a real device. Jest can't see
 it either — layout is the one thing the suite genuinely cannot check — so the
 guard is `keyboardAvoider.test.tsx` (the props the wrapper asks for, under both
-platform projects) plus the lint rule that makes the old pattern un-writable.
+platform projects) plus a lint rule. **The lint rule blocks the direct spellings
+only**: `no-restricted-imports` on the name, and a `no-restricted-syntax`
+selector for an inline `Platform` ternary in a `behavior` prop. A hoisted
+`const behavior = Platform.OS === 'ios' ? …`, a `Platform.select({ … })`, or
+`import * as RN from 'react-native'` all slip past it. It's a guard against
+copy-paste, which is how this happened, not a proof.
+
+**This is also the app's one deliberate exception to the Reanimated rule above.**
+`react-native-keyboard-controller` is Reanimated-backed and drives a
+`Reanimated.View` in all fifteen call sites, none of it gesture-driven. That's a
+knowing trade for keyboard tracking that follows the finger, and it only avoids
+the documented Jest breakage because `jest.setup.js` mocks the library wholesale
+— which means **a Reanimated or worklets upgrade that breaks the real avoider
+will still show a green suite** and fail only on a device. Worth remembering at
+the next SDK bump.
 
 **Port a helper when a screen needs it, not before.** `formatRelativeTime` was
 deleted for being unused and came back one PR later; that's the rule working, not

@@ -25,6 +25,7 @@ import {
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
 
 export function DeleteAccountSection() {
@@ -82,60 +83,68 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
       onRequestClose={onCancel}
       accessibilityViewIsModal
     >
-      <Pressable style={styles.backdrop} onPress={onCancel}>
-        <Pressable style={styles.card} onPress={() => {}}>
-          <Text style={styles.cardTitle}>Delete your account?</Text>
-          <Text style={styles.cardBody}>
-            This permanently deletes your account and all your content. It can’t
-            be undone. Enter your password to confirm.
-          </Text>
-
-          <Text style={styles.label}>Password</Text>
-          <TextInput
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoFocus
-            textContentType="password"
-            style={styles.input}
-            accessibilityLabel="Password"
-          />
-
-          {error ? (
-            <Text style={styles.error} accessibilityRole="alert">
-              {error}
+      {/* Required since #172 mounted `KeyboardProvider`: that strips the
+          `adjustResize` React Native gives every modal dialog, so this password
+          field — which `autoFocus`es, opening the keyboard immediately — would
+          otherwise sit behind it along with the Delete button. See
+          `components/KeyboardAvoider.tsx`. The avoider pads the bottom and the
+          backdrop then centres the card in what's left. */}
+      <KeyboardAvoider style={styles.avoider}>
+        <Pressable style={styles.backdrop} onPress={onCancel}>
+          <Pressable style={styles.card} onPress={() => {}}>
+            <Text style={styles.cardTitle}>Delete your account?</Text>
+            <Text style={styles.cardBody}>
+              This permanently deletes your account and all your content. It can’t
+              be undone. Enter your password to confirm.
             </Text>
-          ) : null}
 
-          <View style={styles.actions}>
-            <Pressable
-              onPress={onCancel}
-              accessibilityRole="button"
-              style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
-            >
-              <Text style={styles.ghostLabel}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              onPress={handleDelete}
-              disabled={deleting || !password}
-              accessibilityRole="button"
-              style={({ pressed }) => [
-                styles.btn,
-                styles.danger,
-                (pressed || deleting || !password) && styles.pressed,
-              ]}
-            >
-              {deleting ? (
-                <ActivityIndicator color="#ffffff" size="small" />
-              ) : (
-                <Text style={styles.dangerLabel}>Delete forever</Text>
-              )}
-            </Pressable>
-          </View>
+            <Text style={styles.label}>Password</Text>
+            <TextInput
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoFocus
+              textContentType="password"
+              style={styles.input}
+              accessibilityLabel="Password"
+            />
+
+            {error ? (
+              <Text style={styles.error} accessibilityRole="alert">
+                {error}
+              </Text>
+            ) : null}
+
+            <View style={styles.actions}>
+              <Pressable
+                onPress={onCancel}
+                accessibilityRole="button"
+                style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
+              >
+                <Text style={styles.ghostLabel}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={handleDelete}
+                disabled={deleting || !password}
+                accessibilityRole="button"
+                style={({ pressed }) => [
+                  styles.btn,
+                  styles.danger,
+                  (pressed || deleting || !password) && styles.pressed,
+                ]}
+              >
+                {deleting ? (
+                  <ActivityIndicator color="#ffffff" size="small" />
+                ) : (
+                  <Text style={styles.dangerLabel}>Delete forever</Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
         </Pressable>
-      </Pressable>
+      </KeyboardAvoider>
     </Modal>
   );
 }
@@ -165,6 +174,7 @@ const styles = StyleSheet.create({
   },
   dangerOutlineLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.danger },
 
+  avoider: { flex: 1 },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(28,26,22,0.4)',

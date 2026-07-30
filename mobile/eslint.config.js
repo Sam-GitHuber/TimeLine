@@ -24,9 +24,14 @@ module.exports = defineConfig([
      * this" rule, the failure is at the call site, and the message can say what
      * to do instead. Layout itself is unverifiable in Jest, so the next-best
      * guard is making the broken pattern un-writable.
+     *
+     * The wrapper is deliberately **not** exempted here. An `ignores` on this
+     * config object would switch off both rules — and every rule later added to
+     * this block — in the one file where reintroducing the pattern silently
+     * reverts all eleven screens at once. It carries a single
+     * `eslint-disable-next-line` on the one import that needs it instead.
      */
     files: ["src/**/*.{ts,tsx}"],
-    ignores: ["src/components/KeyboardAvoider.tsx"],
     rules: {
       "no-restricted-imports": ["error", {
         paths: [{

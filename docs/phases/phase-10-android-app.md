@@ -284,10 +284,14 @@ it**. Before the fix the second tap did nothing, permanently.
   contract that had changed. Replaced by one shared
   `components/KeyboardAvoider.tsx` over `react-native-keyboard-controller`,
   which reads the IME insets directly; `KeyboardProvider` is mounted in
-  `app/_layout.tsx`. A lint rule blocks the old pattern. Full write-up in
-  `reference/mobile-app.md`. **The emulator hid this** — the AVD's Gboard opens
-  in floating mode and covers nothing, so *dock the keyboard* before believing
-  any keyboard check here.
+  `app/_layout.tsx`. A lint rule blocks the old pattern. Now **fifteen** call
+  sites, not eleven: four screens had bottom-of-page inputs and no avoider at
+  all (`settings`, `events/[eventId]`, `ReportModal`, `DeleteAccountSection`) —
+  and the last two *needed* one only because mounting the provider strips the
+  `adjustResize` React Native gives modal dialogs. Full write-up, including that
+  modal trap, in `reference/mobile-app.md`. **The emulator hid this** — the AVD's
+  Gboard opens in floating mode and covers nothing, so *dock the keyboard* before
+  believing any keyboard check here.
 - **Action sheets already have Android fallbacks** (four `ActionSheetIOS` sites
   fall back to `Alert.alert`), one of which is explicitly commented "Phase 10
   refines this". They work; they just look like a stack of alert buttons. Worth a

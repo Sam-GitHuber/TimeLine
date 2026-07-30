@@ -33,6 +33,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEditor';
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
@@ -190,140 +191,147 @@ export default function EventScreen() {
           </Text>
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-          <View style={styles.titleRow}>
-            <Text style={styles.title}>{event.title}</Text>
-            {event.status === 'cancelled' ? (
-              <Text style={styles.tagOff}>Cancelled</Text>
-            ) : event.is_past ? (
-              <Text style={styles.tag}>Happened</Text>
+        <KeyboardAvoider style={styles.fill}>
+          {/* DimensionEditor's poll-question and place fields sit well down a
+              long page, and this screen never had a `KeyboardAvoidingView` to
+              convert — under edge-to-edge nothing resizes the window, so without
+              an avoider they go behind the keyboard. See
+              `components/KeyboardAvoider.tsx`. */}
+          <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+            <View style={styles.titleRow}>
+              <Text style={styles.title}>{event.title}</Text>
+              {event.status === 'cancelled' ? (
+                <Text style={styles.tagOff}>Cancelled</Text>
+              ) : event.is_past ? (
+                <Text style={styles.tag}>Happened</Text>
+              ) : null}
+            </View>
+
+            <Pressable
+              style={styles.organiser}
+              onPress={() => router.push(`/u/${event.organiser.id}`)}
+              accessibilityRole="button"
+            >
+              <Avatar user={event.organiser} size="xs" />
+              <Text style={styles.organiserText}>Organised by {event.organiser.display_name}</Text>
+            </Pressable>
+
+            {event.event_date ? (
+              <Text style={styles.when}>{formatEventWhen(event)}</Text>
             ) : null}
-          </View>
 
-          <Pressable
-            style={styles.organiser}
-            onPress={() => router.push(`/u/${event.organiser.id}`)}
-            accessibilityRole="button"
-          >
-            <Avatar user={event.organiser} size="xs" />
-            <Text style={styles.organiserText}>Organised by {event.organiser.display_name}</Text>
-          </Pressable>
+            {event.description ? <Text style={styles.description}>{event.description}</Text> : null}
 
-          {event.event_date ? (
-            <Text style={styles.when}>{formatEventWhen(event)}</Text>
-          ) : null}
+            {event.location_name ? (
+              <Text style={styles.location}>
+                {event.location_name}
+                {isSafeHttpUrl(event.location_url) ? (
+                  <Text
+                    style={styles.locationLink}
+                    onPress={() => Linking.openURL(event.location_url).catch(() => {})}
+                    accessibilityRole="link"
+                  >
+                    {'  ·  link'}
+                  </Text>
+                ) : null}
+              </Text>
+            ) : null}
 
-          {event.description ? <Text style={styles.description}>{event.description}</Text> : null}
-
-          {event.location_name ? (
-            <Text style={styles.location}>
-              {event.location_name}
-              {isSafeHttpUrl(event.location_url) ? (
-                <Text
-                  style={styles.locationLink}
-                  onPress={() => Linking.openURL(event.location_url).catch(() => {})}
-                  accessibilityRole="link"
-                >
-                  {'  ·  link'}
-                </Text>
-              ) : null}
-            </Text>
-          ) : null}
-
-          {event.status !== 'cancelled' ? (
-            <View style={styles.section}>
-              {event.can_manage && nothingDecided(event) && !editing ? (
-                <Text style={styles.hint}>
-                  Nothing’s set yet. Start with a date — set it now, or open a poll
-                  and let the group pick.
-                </Text>
-              ) : null}
-              <DimensionChips
-                event={event}
-                canManage={event.can_manage}
-                onAction={(dimension, mode) => setEditing({ dimension, mode })}
-              />
-              {editing ? (
-                <DimensionEditor
-                  key={`${editing.dimension}:${editing.mode}`}
-                  dimension={editing.dimension}
-                  mode={editing.mode}
-                  busy={finalise.isPending || openPoll.isPending}
-                  onSet={(dimension, value) => finalise.mutate({ dimension, value })}
-                  onPoll={(draft) => openPoll.mutate(draft)}
-                  onCancel={() => setEditing(null)}
-                />
-              ) : null}
-              {/* Open a poll on a fresh custom question — the chips only cover the
-                  three built-ins, so a custom poll starts here. */}
-              {event.can_manage && !editing ? (
-                <Pressable
-                  onPress={() => setEditing({ dimension: 'custom', mode: 'poll' })}
-                  accessibilityRole="button"
-                  hitSlop={6}
-                  style={styles.askMore}
-                >
-                  <Text style={styles.askMoreLabel}>+ Ask the group something else</Text>
-                </Pressable>
-              ) : null}
-            </View>
-          ) : null}
-
-          {(event.polls ?? []).length > 0 ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Polls</Text>
-              {event.polls.map((poll) => (
-                <PollTally
-                  key={poll.id}
-                  poll={poll}
-                  busy={vote.isPending || pollBusy}
-                  onVote={(optionIds) => vote.mutate({ pollId: poll.id, optionIds })}
+            {event.status !== 'cancelled' ? (
+              <View style={styles.section}>
+                {event.can_manage && nothingDecided(event) && !editing ? (
+                  <Text style={styles.hint}>
+                    Nothing’s set yet. Start with a date — set it now, or open a poll
+                    and let the group pick.
+                  </Text>
+                ) : null}
+                <DimensionChips
+                  event={event}
                   canManage={event.can_manage}
-                  onFinalise={(arg) => finalise.mutate(arg)}
-                  onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, payload })}
-                  onClose={() => closePoll.mutate(poll.id)}
-                  onReopen={() => reopenPoll.mutate(poll.id)}
-                  onDelete={() => deletePoll.mutate(poll.id)}
+                  onAction={(dimension, mode) => setEditing({ dimension, mode })}
                 />
-              ))}
-            </View>
-          ) : null}
-
-          {event.status !== 'cancelled' ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Are you going?</Text>
-              <RsvpBar event={event} busy={rsvp.isPending} onRsvp={(b) => rsvp.mutate(b)} />
-            </View>
-          ) : null}
-
-          {/* Cancel/delete — the organiser or a group admin (`can_moderate`).
-              Cancel soft-cancels (a tombstone that notifies RSVPs); delete is a
-              hard, everyone removal. */}
-          {event.can_moderate ? (
-            <View style={styles.section}>
-              <View style={styles.moderate}>
-                {event.status !== 'cancelled' ? (
+                {editing ? (
+                  <DimensionEditor
+                    key={`${editing.dimension}:${editing.mode}`}
+                    dimension={editing.dimension}
+                    mode={editing.mode}
+                    busy={finalise.isPending || openPoll.isPending}
+                    onSet={(dimension, value) => finalise.mutate({ dimension, value })}
+                    onPoll={(draft) => openPoll.mutate(draft)}
+                    onCancel={() => setEditing(null)}
+                  />
+                ) : null}
+                {/* Open a poll on a fresh custom question — the chips only cover the
+                    three built-ins, so a custom poll starts here. */}
+                {event.can_manage && !editing ? (
                   <Pressable
-                    onPress={confirmCancel}
-                    disabled={cancel.isPending}
+                    onPress={() => setEditing({ dimension: 'custom', mode: 'poll' })}
+                    accessibilityRole="button"
+                    hitSlop={6}
+                    style={styles.askMore}
+                  >
+                    <Text style={styles.askMoreLabel}>+ Ask the group something else</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+
+            {(event.polls ?? []).length > 0 ? (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Polls</Text>
+                {event.polls.map((poll) => (
+                  <PollTally
+                    key={poll.id}
+                    poll={poll}
+                    busy={vote.isPending || pollBusy}
+                    onVote={(optionIds) => vote.mutate({ pollId: poll.id, optionIds })}
+                    canManage={event.can_manage}
+                    onFinalise={(arg) => finalise.mutate(arg)}
+                    onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, payload })}
+                    onClose={() => closePoll.mutate(poll.id)}
+                    onReopen={() => reopenPoll.mutate(poll.id)}
+                    onDelete={() => deletePoll.mutate(poll.id)}
+                  />
+                ))}
+              </View>
+            ) : null}
+
+            {event.status !== 'cancelled' ? (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Are you going?</Text>
+                <RsvpBar event={event} busy={rsvp.isPending} onRsvp={(b) => rsvp.mutate(b)} />
+              </View>
+            ) : null}
+
+            {/* Cancel/delete — the organiser or a group admin (`can_moderate`).
+                Cancel soft-cancels (a tombstone that notifies RSVPs); delete is a
+                hard, everyone removal. */}
+            {event.can_moderate ? (
+              <View style={styles.section}>
+                <View style={styles.moderate}>
+                  {event.status !== 'cancelled' ? (
+                    <Pressable
+                      onPress={confirmCancel}
+                      disabled={cancel.isPending}
+                      accessibilityRole="button"
+                      style={({ pressed }) => [styles.dangerBtn, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.dangerLabel}>Cancel event</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    onPress={confirmDelete}
+                    disabled={remove.isPending}
                     accessibilityRole="button"
                     style={({ pressed }) => [styles.dangerBtn, pressed && styles.pressed]}
                   >
-                    <Text style={styles.dangerLabel}>Cancel event</Text>
+                    <Text style={styles.dangerLabel}>Delete event</Text>
                   </Pressable>
-                ) : null}
-                <Pressable
-                  onPress={confirmDelete}
-                  disabled={remove.isPending}
-                  accessibilityRole="button"
-                  style={({ pressed }) => [styles.dangerBtn, pressed && styles.pressed]}
-                >
-                  <Text style={styles.dangerLabel}>Delete event</Text>
-                </Pressable>
+                </View>
               </View>
-            </View>
-          ) : null}
-        </ScrollView>
+            ) : null}
+          </ScrollView>
+        </KeyboardAvoider>
       )}
     </SafeAreaView>
   );
@@ -342,6 +350,7 @@ const styles = StyleSheet.create({
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.sm },
   emptyTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink, textAlign: 'center' },
   emptyBody: { fontSize: fontSize.sm, color: colors.inkSoft, textAlign: 'center', lineHeight: 20 },
+  fill: { flex: 1 },
   content: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.xxl },
   titleRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },
   title: { fontSize: fontSize.xl, fontWeight: '700', color: colors.ink, flexShrink: 1 },

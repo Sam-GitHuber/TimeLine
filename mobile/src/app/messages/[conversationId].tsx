@@ -1413,7 +1413,14 @@ export default function ThreadScreen() {
           onLeave={goBack}
         />
       ) : (
-        <KeyboardAvoider style={styles.fill}>
+        <KeyboardAvoider style={styles.fill} enabled={thread === null}>
+          {/* `enabled` is off while the focused thread is open. The thread is a
+              screen-level sibling with its own avoider, so both would otherwise
+              respond to the same keyboard — and because the thread is transparent
+              over a blurred copy of this transcript, the background one animating
+              its padding makes the blurred transcript lurch as the keyboard
+              opens. The inverted FlatList's viewport shrinking underneath can
+              also leave the thread parked where the user never scrolled. */}
           {/* The list and its floating control share a box, so the jump button
               can sit at the bottom of the *transcript* rather than being laid
               out between it and the composer — where it would push the thread

@@ -24,6 +24,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BASE_URL } from '@/api';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { ChangePasswordSection } from '@/components/settings/ChangePasswordSection';
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
@@ -49,17 +50,24 @@ export default function SettingsScreen() {
         <View style={styles.spacer} />
       </View>
 
-      <ScrollView
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
-      >
-        <FeedPreferencesSection />
-        <NotificationPreferencesSection />
-        <PrivacySection />
-        <ChangePasswordSection />
-        <LegalSection />
-        <DeleteAccountSection />
-      </ScrollView>
+      {/* `ChangePasswordSection`'s three fields sit low on a long page, so this
+          screen needs an avoider even though it never had a
+          `KeyboardAvoidingView` to convert — under edge-to-edge nothing resizes
+          the window, so without it the field and its Save button go behind the
+          keyboard. See `components/KeyboardAvoider.tsx`. */}
+      <KeyboardAvoider style={styles.fill}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+        >
+          <FeedPreferencesSection />
+          <NotificationPreferencesSection />
+          <PrivacySection />
+          <ChangePasswordSection />
+          <LegalSection />
+          <DeleteAccountSection />
+        </ScrollView>
+      </KeyboardAvoider>
     </SafeAreaView>
   );
 }
@@ -109,6 +117,7 @@ const styles = StyleSheet.create({
     color: colors.ink,
   },
   spacer: { width: 48 },
+  fill: { flex: 1 },
   content: {
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.xxl,
