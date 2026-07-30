@@ -7,17 +7,24 @@
  * cache invalidation), while confirming it actually removes. A non-admin sees
  * the roster read-only, with no action sheet.
  *
- * The action sheet and the confirm dialog are captured, not driven natively:
- * `ActionSheetIOS.showActionSheetWithOptions` hands us the callback to invoke
- * with a chosen index, and `Alert.alert` hands us the button list to press.
+ * The menu and the confirm dialog are captured, not driven natively: the shared
+ * `./helpers` seam hands us the menu to pick an option from — an action sheet on
+ * iOS, an `Alert` chooser on Android — and the button list to press on the
+ * confirm, so these tests read identically on both platforms.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { ActionSheetIOS, Alert } from 'react-native';
 
 import GroupMembersScreen from '@/app/groups/[groupId]/members';
 import type { Group, GroupMember } from '@/types';
+
+import {
+  menuWasShown,
+  pickMenuAction,
+  pressAlertButton,
+  resetMenuSpies,
+} from './helpers';
 
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ groupId: '7' }),
@@ -94,28 +101,6 @@ async function renderScreen() {
   return { invalidate };
 }
 
-const showActionSheet = jest.spyOn(ActionSheetIOS, 'showActionSheetWithOptions');
-const alertSpy = jest.spyOn(Alert, 'alert');
-
-/**
- * Invoke the last action sheet's callback with the chosen option index.
- *
- * Deliberately *not* wrapped in `act()`: the callback kicks off an async
- * mutation whose fetch resolves after the callback returns, so wrapping only the
- * synchronous call would leak that work out of the act and poison the next
- * render. The test's trailing `waitFor` flushes it instead.
- */
-function pickAction(index: number) {
-  const callback = showActionSheet.mock.calls.at(-1)?.[1] as (i: number) => void;
-  callback(index);
-}
-
-/** Press a button (by its text) on the last `Alert.alert` with the given title. */
-function pressAlertButton(title: string, buttonText: string) {
-  const call = alertSpy.mock.calls.find(([t]) => t === title);
-  const buttons = call?.[2] as { text?: string; onPress?: () => void }[] | undefined;
-  buttons?.find((b) => b.text === buttonText)?.onPress?.();
-}
 
 function madeRequest(match: RegExp, method: string) {
   return mockFetch.mock.calls.some(
@@ -125,8 +110,7 @@ function madeRequest(match: RegExp, method: string) {
 
 beforeEach(() => {
   mockFetch.mockReset();
-  showActionSheet.mockReset().mockImplementation(() => {});
-  alertSpy.mockReset().mockImplementation(() => {});
+  resetMenuSpies();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -144,8 +128,8 @@ it('promotes a member via the role endpoint', async () => {
   serve();
   const { invalidate } = await renderScreen();
 
-  fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
-  pickAction(0); // "Make admin"
+  await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+  pickMenuAction(0); // "Make admin"
 
   await waitFor(() =>
     expect(madeRequest(/\/api\/groups\/7\/members\/2\/role\/$/, 'POST')).toBe(true)
@@ -159,8 +143,8 @@ it('does nothing when the remove confirmation is cancelled', async () => {
   serve();
   const { invalidate } = await renderScreen();
 
-  fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
-  pickAction(1); // "Remove from group" → confirm dialog
+  await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+  pickMenuAction(1); // "Remove from group" → confirm dialog
   pressAlertButton('Remove member?', 'Cancel');
 
   // The whole point of the fix: cancelling never touches the API or the cache.
@@ -172,8 +156,8 @@ it('removes a member when the confirmation is accepted', async () => {
   serve();
   await renderScreen();
 
-  fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
-  pickAction(1); // "Remove from group"
+  await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+  pickMenuAction(1); // "Remove from group"
   pressAlertButton('Remove member?', 'Remove');
 
   await waitFor(() =>
@@ -188,5 +172,5 @@ it('is read-only for a non-admin (no action sheet)', async () => {
   const row = await screen.findByLabelText('Ada Lovelace');
   fireEvent.press(row);
 
-  expect(showActionSheet).not.toHaveBeenCalled();
+  expect(menuWasShown()).toBe(false);
 });

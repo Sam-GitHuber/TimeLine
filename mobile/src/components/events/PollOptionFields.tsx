@@ -11,9 +11,9 @@
  */
 
 import DateTimePicker, {
-  type DateTimePickerEvent,
+  type DateTimePickerChangeEvent,
 } from '@react-native-community/datetimepicker';
-import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { colors, fontSize, fonts, pickerHeight, pickerThemeVariant, radius, spacing } from '@/theme';
@@ -54,6 +54,10 @@ export function PollOptionFields({
 
   const addRow = () => onChange([...options, blankOption()]);
 
+  // The date/time picker is a persistent inline wheel on iOS and a one-shot
+  // modal dialog on Android; see the comment at the picker below.
+  const isAndroid = Platform.OS === 'android';
+
   return (
     <View style={styles.wrap}>
       <View style={styles.list}>
@@ -86,32 +90,48 @@ export function PollOptionFields({
               />
             )}
             {isPicker && activeIndex === i ? (
-              // Keep the spinner open while it's the active row — its `onChange`
-              // fires on *every* tick, so closing there (the first bug) dismissed
-              // it the instant you touched it. Update the value live; a "Done"
-              // (or tapping another row) collapses it.
+              // iOS: keep the spinner open while it's the active row — its
+              // `onChange` fires on *every* tick, so closing there (the first
+              // bug) dismissed it the instant you touched it. Update the value
+              // live; a "Done" (or tapping another row) collapses it.
+              //
+              // Android: the same mount opens a modal dialog, which reports
+              // once and is then inert. So it closes the row on either
+              // `onValueChange` (OK) or `onDismiss` (Cancel) — unmounting, so
+              // the next press gets a working instance — and draws no "Done",
+              // because the dialog brings its own OK/Cancel.
               <View style={styles.pickerOpen}>
                 <DateTimePicker
                   value={valueToDate(dimension, opt.value)}
                   mode={dimension}
-                  display="spinner"
-                  // `styles.picker` / `pickerThemeVariant` carry the two picker
-                  // quirks (explicit size, forced light wheel) — see theme.ts.
-                  style={styles.picker}
-                  themeVariant={pickerThemeVariant}
-                  onChange={(_e: DateTimePickerEvent, picked?: Date) => {
-                    if (picked) setValue(i, pickedToValue(dimension, picked));
+                  display={isAndroid ? 'default' : 'spinner'}
+                  // `styles.picker` / `pickerThemeVariant` carry the two *iOS*
+                  // picker quirks (explicit size, forced light wheel) — see
+                  // theme.ts. Neither applies to a system dialog.
+                  style={isAndroid ? undefined : styles.picker}
+                  themeVariant={isAndroid ? undefined : pickerThemeVariant}
+                  onValueChange={(
+                    _e: DateTimePickerChangeEvent,
+                    picked: Date
+                  ) => {
+                    if (isAndroid) onActiveIndex(null);
+                    setValue(i, pickedToValue(dimension, picked));
                   }}
+                  // Android's Cancel. Never fires for the iOS inline wheel,
+                  // which is never dismissed, so it needs no platform guard.
+                  onDismiss={() => onActiveIndex(null)}
                 />
-                <Pressable
-                  onPress={() => onActiveIndex(null)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Done"
-                  hitSlop={6}
-                  style={styles.done}
-                >
-                  <Text style={styles.doneLabel}>Done</Text>
-                </Pressable>
+                {isAndroid ? null : (
+                  <Pressable
+                    onPress={() => onActiveIndex(null)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Done"
+                    hitSlop={6}
+                    style={styles.done}
+                  >
+                    <Text style={styles.doneLabel}>Done</Text>
+                  </Pressable>
+                )}
               </View>
             ) : null}
           </View>

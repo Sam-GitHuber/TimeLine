@@ -47,6 +47,11 @@ jobs:
   # mobile — the Expo (React Native) iOS/Android app. Jest + React Native
   # Testing Library, unit and component tests only.
   #
+  # `npm test` runs the whole suite **twice, once per platform** (Phase 10; see
+  # mobile/jest.config.js), so a suite count of ~82 for ~41 files is expected.
+  # That is what covers the app's `Platform.OS === 'android'` branches — before
+  # it, they were never executed by CI on any run.
+  #
   # This job deliberately does NOT build an app binary. Real iOS/Android builds
   # happen on EAS (Expo's cloud build service), which needs signing credentials
   # and a macOS runner — don't try to produce an IPA here.

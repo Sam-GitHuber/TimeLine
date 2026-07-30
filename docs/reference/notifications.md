@@ -246,7 +246,8 @@ renders and cannot drift from it.
 the backend sends to Expo; Expo fans out to Apple (and Google in Phase 10). So
 one code path covers both platforms, the backend holds **no APNs key** (that
 lives with EAS), and Phase 10 needs no schema change — only a different
-`platform` value.
+`platform` value, plus the `channelId` described under "Android notification
+channels" below.
 
 ### Three models
 
@@ -415,6 +416,54 @@ Two things about this are easy to get wrong:
   [messaging.md](messaging.md#replying-from-the-notification-phase-9b-m8) — it
   keeps the words rather than dropping them.
 
+### Android notification channels (Phase 10)
+
+Android 8+ files every notification into a **channel**, and the channel — not
+the app — owns whether it makes a sound, shows a heads-up banner, or stays
+silent. The user tunes each one in system settings, which is the point: *"let
+messages interrupt me but keep reactions quiet"* becomes something they decide
+without us building a screen for it.
+
+Every push therefore carries a **`channelId`** (`_message` in `send_pushes`),
+derived from its `kind` by `notifications.channel_for_kind`. iOS ignores the
+field.
+
+Six channels, mirroring the **per-type preference groups** so the OS control and
+the in-app one tell the same story:
+
+| Channel | Kinds | Importance |
+|---|---|---|
+| `messages` | the message push (no `Notification` row) | high |
+| `mentions` | `mention` | high |
+| `replies` | `post_reply`, `comment_reply` | default |
+| `reactions` | `reaction` | **low** — nice to know, never urgent, and a popular post shouldn't buzz a pocket twenty times |
+| `events` | the five event kinds | default |
+| `social` | `connection_request`, `connection_accepted`, `group_invite` | default |
+
+Deliberately **not one channel per kind**: five separate event channels would be
+a wall of switches nobody reads.
+
+Three properties that make this fussier than it looks:
+
+- **A push naming a channel the device doesn't have is dropped silently.** It
+  does *not* fall back to a default, and nothing appears in any log — so a
+  mismatch between the two lists looks exactly like push being broken. The ids
+  are therefore hard-coded on **both** sides (`ANDROID_CHANNELS` here,
+  `CHANNELS` in `mobile/src/push.ts`) with a test on each pinning the set. A
+  test that derived them from the code it checks would agree with itself while
+  the two processes drifted apart. Same belt-and-braces as `MESSAGE_CATEGORY`.
+- **A channel is immutable once created on a device.** Changing an importance in
+  code does nothing for anyone who already has the app — only a new channel id
+  takes effect, and that loses whatever the user had tuned. So the importances
+  above are chosen to be lived with.
+- **The channels are created at launch, not at login** (`_layout.tsx`), for the
+  same reason as the iOS categories: a push can arrive before anyone signs in,
+  and the channel must exist before the notification does.
+
+A kind with no mapping falls back to `social` rather than being dropped — but a
+test enumerates `Notification.Kind`, so adding a kind without a channel fails the
+suite rather than quietly half-working.
+
 ### What leaves the box, and who sees it
 
 Worth being explicit, since privacy-first is a project non-negotiable and push
@@ -445,6 +494,14 @@ trade ever stops looking right, the swap is confined to `send_pushes` — nothin
 else knows how a push is delivered.
 
 ### App side (`mobile/src/push.ts`)
+
+**Where registration is possible** is not simply "a real device". `registerForPush`
+asks `canRegisterForPush()`, which is `Device.isDevice || Platform.OS === 'android'`.
+The `isDevice` check is really asking *"is this the iOS Simulator"*, where
+`getExpoPushTokenAsync` throws; an **Android emulator on a Google Play system
+image** has genuine Play Services and registers a genuine FCM token. Excluding it
+bought nothing and cost the only way to test Android push without owning a phone
+— and the failure was silent, indistinguishable from push being broken.
 
 **Registration** runs on sign-in *and* on every launch that restores a session —
 Expo can rotate a device's token, and the backend upserts, so re-registering is
@@ -511,8 +568,12 @@ redundant.
 
 ## Out of scope (deferred)
 
-- **Android push** — Phase 10. The Expo transport above already covers it; only
-  a different `platform` value and an FCM credential are outstanding.
+- **Android push** — Phase 10, partly landed. The Expo transport above already
+  covers it and `DevicePushToken.platform` needed no schema change, but the
+  claim once made here that *only* a `platform` value and an FCM credential were
+  outstanding was **wrong**: Android also needs a **notification channel** on
+  every push. See "Android notification channels" below. Still outstanding: the
+  FCM credential itself.
 - **Email / digest** notifications; **@-mentions** (TimeLine has no mention
   feature).
 - **Messages in the activity centre** — still deliberately out, and now

@@ -60,6 +60,78 @@ _CONNECTION_GATED_KINDS = frozenset(
     }
 )
 
+# --- Android notification channels (Phase 10) -------------------------------
+#
+# Android 8+ files every notification into a **channel**, and the channel — not
+# the app — owns whether it makes a sound, shows a heads-up banner, or lights
+# the LED. A user tunes them individually in system settings, which is the point:
+# "let messages interrupt me but keep reactions quiet" is a thing they can decide
+# without us building a screen for it.
+#
+# The grouping mirrors the **per-type preferences**, so the OS-level control and
+# the in-app one tell the same story instead of contradicting each other. It is
+# deliberately *not* one channel per kind: five separate event channels would be
+# a wall of switches nobody reads.
+#
+# Two things make this fussier than it looks:
+#
+# 1. **The ids must match the app's** (``CHANNELS`` in mobile/src/push.ts). An
+#    Android push naming a channel that doesn't exist on the device does not
+#    fall back to a default — it is **dropped silently**, which looks exactly
+#    like push being broken. Pinned by a test on each side, the same belt-and-
+#    braces as ``MESSAGE_CATEGORY``.
+# 2. **A channel's settings are immutable once created on a device.** Changing an
+#    importance here does nothing to anyone who already has the app; only a new
+#    channel id takes effect. So these are chosen to be lived with, and the
+#    importances live in the app (which creates the channels), not here.
+_KIND_CHANNELS = {
+    Notification.Kind.POST_REPLY: "replies",
+    Notification.Kind.COMMENT_REPLY: "replies",
+    Notification.Kind.REACTION: "reactions",
+    Notification.Kind.CONNECTION_REQUEST: "social",
+    Notification.Kind.CONNECTION_ACCEPTED: "social",
+    Notification.Kind.GROUP_INVITE: "social",
+    Notification.Kind.EVENT_CREATED: "events",
+    Notification.Kind.POLL_OPENED: "events",
+    Notification.Kind.EVENT_SCHEDULED: "events",
+    Notification.Kind.EVENT_UPDATED: "events",
+    Notification.Kind.EVENT_CANCELLED: "events",
+    # A mention rides the messaging surface but keeps its own channel, matching
+    # its own preference: being named is the one thing that should still reach
+    # you in a chat you've otherwise quietened.
+    Notification.Kind.MENTION: "mentions",
+}
+
+# The kind a *message* push carries. It has no ``Notification`` row, so it isn't
+# in the map above (see ``enqueue_message_pushes``).
+MESSAGE_CHANNEL = "messages"
+
+# A mention arrives as a *message* push too — ``Kind.MENTION`` exists only so the
+# preference has a home and never creates a ``Notification`` row. So the sender
+# picks this explicitly (see ``send_pushes._payload``); reaching it through
+# ``channel_for_kind`` is impossible, and leaving it that way made the channel an
+# inert switch in Android settings.
+MENTION_CHANNEL = _KIND_CHANNELS[Notification.Kind.MENTION]
+
+# Where anything unrecognised goes. A kind added later without a channel still
+# gets delivered — quietly wrong beats silently dropped — and a test enumerating
+# ``Notification.Kind`` fails so it doesn't stay that way.
+DEFAULT_CHANNEL = "social"
+
+# Every channel the app creates, and so every value we may put on the wire.
+# The app holds the matching list (``CHANNELS`` in mobile/src/push.ts); a test
+# on each side pins the set, because the two can only be kept in step by saying
+# so twice.
+ANDROID_CHANNELS = frozenset(_KIND_CHANNELS.values()) | {MESSAGE_CHANNEL}
+
+
+def channel_for_kind(kind):
+    """The Android notification channel a push of this ``kind`` belongs in."""
+    if kind == "message":
+        return MESSAGE_CHANNEL
+    return _KIND_CHANNELS.get(kind, DEFAULT_CHANNEL)
+
+
 # Kinds that refresh an existing *unread* row rather than stacking a duplicate:
 # a react/un-react/re-react, or repeated edits to one event within a short
 # window, bump a single line to the top instead of filling the centre.

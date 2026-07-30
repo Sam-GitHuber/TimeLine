@@ -15,11 +15,12 @@
  */
 
 import DateTimePicker, {
-  type DateTimePickerEvent,
+  type DateTimePickerChangeEvent,
 } from '@react-native-community/datetimepicker';
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { colors, fontSize, pickerHeight, pickerThemeVariant, radius, spacing } from '@/theme';
 import { PollOptionFields } from './PollOptionFields';
 import {
@@ -196,26 +197,77 @@ function DateTimeField({
   // wall-clock parts (never `toISOString`, which is UTC and can slip a day).
   const [value, setValue] = useState(() => new Date());
 
-  const onChange = (_event: DateTimePickerEvent, picked?: Date) => {
-    if (picked) setValue(picked);
+  /**
+   * Android only: whether the picker dialog is currently up (Phase 10).
+   *
+   * The two platforms disagree about what a picker *is*, and it isn't a styling
+   * difference. iOS draws an inline wheel that lives in the layout and stays
+   * put. Android's is a **one-shot modal dialog**: it opens the moment the
+   * component mounts and, once dismissed, will not reopen — the same mounted
+   * instance is inert from then on. So Android needs a trigger to press and a
+   * remount each time, which is what this flag drives.
+   *
+   * Left `false` initially so the editor opens showing what's selected rather
+   * than throwing a dialog in your face the instant you tap "Set a date".
+   */
+  const [showAndroidPicker, setShowAndroidPicker] = useState(false);
+  const isAndroid = Platform.OS === 'android';
+
+  /**
+   * A value was chosen: iOS fires this on every tick of the wheel, Android once
+   * when OK is pressed. Closing on Android is what makes the dialog
+   * *re-openable* — leaving it mounted after it closes itself gives a trigger
+   * that works exactly once.
+   */
+  const onValueChange = (_event: DateTimePickerChangeEvent, picked: Date) => {
+    if (isAndroid) setShowAndroidPicker(false);
+    setValue(picked);
   };
 
-  // iOS renders the spinner inline and persistently, which is what this layout
-  // assumes. Android's picker is a one-shot modal dialog: an always-mounted
-  // instance shows once and won't reopen after dismissal, so Phase 10 (Android)
-  // will need a `show` state + remount around this. iOS-only for now.
+  const formatted =
+    dimension === 'date' ? formatEventDate(toISODate(value)) : formatEventTime(toHM(value));
+
   return (
     <View style={styles.column}>
-      <DateTimePicker
-        value={value}
-        mode={dimension}
-        display="spinner"
-        // `styles.picker` / `pickerThemeVariant` carry the two picker quirks
-        // (explicit size, forced light wheel) — see theme.ts.
-        style={styles.picker}
-        themeVariant={pickerThemeVariant}
-        onChange={onChange}
-      />
+      {isAndroid ? (
+        // The trigger doubles as the read-out, so the current selection is
+        // visible while the dialog is closed — which is most of the time.
+        <Pressable
+          onPress={() => setShowAndroidPicker(true)}
+          disabled={busy}
+          accessibilityRole="button"
+          accessibilityLabel={
+            dimension === 'date' ? 'Choose a date' : 'Choose a time'
+          }
+          android_ripple={{ color: colors.line }}
+          style={styles.pickerTrigger}
+        >
+          <Text style={styles.pickerTriggerLabel}>{formatted}</Text>
+        </Pressable>
+      ) : null}
+
+      {/* iOS: always mounted, inline. Android: mounted only while the dialog
+          should be up, and unmounted again by `onValueChange`/`onDismiss` so
+          the next press gets a fresh (and therefore functional) instance. */}
+      {!isAndroid || showAndroidPicker ? (
+        <DateTimePicker
+          value={value}
+          mode={dimension}
+          // `spinner` is the iOS inline wheel this layout is built around;
+          // Android takes its platform default dialog (calendar / clock).
+          display={isAndroid ? 'default' : 'spinner'}
+          // `styles.picker` / `pickerThemeVariant` carry the two *iOS* picker
+          // quirks (explicit size, forced light wheel) — see theme.ts. Neither
+          // applies to a system dialog.
+          style={isAndroid ? undefined : styles.picker}
+          themeVariant={isAndroid ? undefined : pickerThemeVariant}
+          onValueChange={onValueChange}
+          // Android's Cancel. Never fires for the iOS inline wheel, which is
+          // never dismissed — so this needs no platform guard.
+          onDismiss={() => setShowAndroidPicker(false)}
+        />
+      ) : null}
+
       <Actions
         label={SET_VERB[dimension]}
         disabled={busy}
@@ -284,6 +336,18 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },
   column: { gap: spacing.sm, alignItems: 'flex-start' },
   picker: { alignSelf: 'stretch', height: pickerHeight },
+  // Android's trigger-and-read-out (Phase 10). Sized like the text input above
+  // it so the editor doesn't change shape between dimensions.
+  pickerTrigger: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  pickerTriggerLabel: { fontSize: fontSize.sm, color: colors.ink },
   hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20 },
   input: {
     flexGrow: 1,

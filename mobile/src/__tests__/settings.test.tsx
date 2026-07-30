@@ -30,6 +30,8 @@ import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSec
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
 import { PrivacySection } from '@/components/settings/PrivacySection';
 
+import { switchValue } from './helpers';
+
 const mockSignOut = jest.fn();
 const mockRefreshUser = jest.fn();
 // `send_read_receipts` comes off the auth user rather than its own fetch — it
@@ -119,9 +121,9 @@ describe('NotificationPreferencesSection', () => {
 
     // Friendly labels, and the switches reflect the fetched values.
     const replies = await screen.findByLabelText('Replies to your posts');
-    expect(replies.props.value).toBe(true);
+    expect(switchValue(replies)).toBe(true);
     expect(
-      screen.getByLabelText('Reactions to your posts and comments').props.value
+      switchValue(screen.getByLabelText('Reactions to your posts and comments'))
     ).toBe(false);
   });
 
@@ -243,7 +245,7 @@ describe('FeedPreferencesSection', () => {
     await renderWithClient(<FeedPreferencesSection />);
 
     expect(
-      screen.getByLabelText('Show group posts in your feed').props.value
+      switchValue(screen.getByLabelText('Show group posts in your feed'))
     ).toBe(true);
   });
 
@@ -264,7 +266,7 @@ describe('PrivacySection (Phase 9b M4)', () => {
     mockUser = { send_read_receipts: false };
     await renderWithClient(<PrivacySection />);
 
-    expect(screen.getByLabelText('Send read receipts').props.value).toBe(false);
+    expect(switchValue(screen.getByLabelText('Send read receipts'))).toBe(false);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
@@ -297,6 +299,6 @@ describe('PrivacySection (Phase 9b M4)', () => {
     // Not optimistic, deliberately: this one decides what the server discloses
     // about you, so showing it as off while it's still on would be the wrong
     // way round to be wrong.
-    expect(screen.getByLabelText('Send read receipts').props.value).toBe(true);
+    expect(switchValue(screen.getByLabelText('Send read receipts'))).toBe(true);
   });
 });

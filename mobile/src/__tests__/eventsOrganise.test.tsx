@@ -15,7 +15,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { ActionSheetIOS, Alert } from 'react-native';
+import { Platform } from 'react-native';
 
 import { api } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
@@ -24,6 +24,15 @@ import { AuthProvider } from '@/auth';
 import { PlanEventForm } from '@/components/events/PlanEventForm';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, User } from '@/types';
+
+import {
+  alertSpy,
+  menuOptions,
+  pickMenuAction,
+  pickDateTimeValue,
+  pressAlertButton,
+  resetMenuSpies,
+} from './helpers';
 
 const mockParams: Record<string, string> = { eventId: '9', groupId: '7' };
 const mockPush = jest.fn();
@@ -136,6 +145,7 @@ async function renderWith(node: React.ReactElement) {
 
 beforeEach(async () => {
   mockFetch.mockReset();
+  resetMenuSpies();
   mockPush.mockReset();
   mockReplace.mockReset();
   mockParams.eventId = '9';
@@ -199,7 +209,7 @@ describe('setting a dimension', () => {
 
     // Open the date editor, "pick" a value (the stub fires 2026-08-15), commit.
     await fireEvent.press(await screen.findByLabelText('Set Date'));
-    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    await pickDateTimeValue('date');
     await fireEvent.press(screen.getByText('Set the date'));
 
     await waitFor(() =>
@@ -207,6 +217,40 @@ describe('setting a dimension', () => {
     );
     finalise.mockRestore();
   });
+
+  /**
+   * The Android bug this milestone exists for (Phase 10).
+   *
+   * Android's picker is a one-shot modal dialog: mounted, it opens once and is
+   * inert thereafter. The editor therefore mounts it only while it should be
+   * up and unmounts on dismissal, so the next press gets a working instance.
+   * Get that wrong and the picker opens exactly once per visit to the screen —
+   * which is invisible to a test that only ever opens it.
+   */
+  (Platform.OS === 'android' ? it : it.skip)(
+    'reopens the picker after it is dismissed',
+    async () => {
+      serveEvent(planningEvent());
+
+      await renderWith(<EventScreen />);
+      await fireEvent.press(await screen.findByLabelText('Set Date'));
+
+      // Closed to begin with: the editor shows its trigger, not a dialog.
+      expect(screen.queryByLabelText('Pick a value')).toBeNull();
+
+      await fireEvent.press(screen.getByLabelText('Choose a date'));
+      expect(screen.getByLabelText('Pick a value')).toBeTruthy();
+
+      // Dismiss (Android's Cancel) — the picker unmounts…
+      await fireEvent.press(screen.getByLabelText('Dismiss the picker'));
+      expect(screen.queryByLabelText('Pick a value')).toBeNull();
+
+      // …and pressing the trigger again brings it back. This is the assertion
+      // that would have failed before the fix.
+      await fireEvent.press(screen.getByLabelText('Choose a date'));
+      expect(screen.getByLabelText('Pick a value')).toBeTruthy();
+    }
+  );
 
   it('finalises a typed location', async () => {
     serveEvent(planningEvent());
@@ -242,8 +286,14 @@ describe('setting a dimension', () => {
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByLabelText('Change Date'));
-    // The editor opened — its native picker stub is on screen.
-    expect(await screen.findByLabelText('Pick a value')).toBeTruthy();
+    // The editor opened. What proves that differs by platform, and the
+    // difference is the feature: iOS mounts the wheel inline, Android shows a
+    // trigger and only raises its one-shot dialog when you press it.
+    expect(
+      await screen.findByLabelText(
+        Platform.OS === 'android' ? 'Choose a date' : 'Pick a value'
+      )
+    ).toBeTruthy();
   });
 
   it('surfaces a finalise failure in an alert and keeps the editor open', async () => {
@@ -251,21 +301,19 @@ describe('setting a dimension', () => {
     const finalise = jest
       .spyOn(api, 'finaliseDimension')
       .mockRejectedValue(new Error('Server said no'));
-    const alert = jest.spyOn(Alert, 'alert');
 
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByLabelText('Set Date'));
-    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    await pickDateTimeValue('date');
     await fireEvent.press(screen.getByText('Set the date'));
 
     await waitFor(() =>
-      expect(alert).toHaveBeenCalledWith('Couldn’t save', 'Server said no')
+      expect(alertSpy).toHaveBeenCalledWith('Couldn’t save', 'Server said no')
     );
     // The editor stays open on error so the organiser can retry.
     expect(screen.getByText('Set the date')).toBeTruthy();
     finalise.mockRestore();
-    alert.mockRestore();
   });
 
   it('offers no Set affordance to a non-organiser', async () => {
@@ -286,39 +334,29 @@ describe('cancel and delete', () => {
   it('cancels the event after a confirm (moderator only)', async () => {
     serveEvent(planningEvent());
     const cancel = jest.spyOn(api, 'cancelEvent').mockResolvedValue(planningEvent());
-    const alert = jest.spyOn(Alert, 'alert');
 
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByText('Cancel event'));
     // The confirm Alert hands us its buttons; press the destructive one.
-    await act(async () => {
-      const buttons = alert.mock.calls.at(-1)?.[2] as { text?: string; onPress?: () => void }[];
-      buttons?.find((b) => b.text === 'Cancel event')?.onPress?.();
-    });
+    await act(async () => pressAlertButton('Cancel this event?', 'Cancel event'));
 
     await waitFor(() => expect(cancel).toHaveBeenCalledWith(9));
     cancel.mockRestore();
-    alert.mockRestore();
   });
 
   it('deletes the event after a confirm (moderator only)', async () => {
     serveEvent(planningEvent());
     const del = jest.spyOn(api, 'deleteEvent').mockResolvedValue(undefined);
-    const alert = jest.spyOn(Alert, 'alert');
 
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByText('Delete event'));
     // The confirm Alert hands us its buttons; press the destructive one.
-    await act(async () => {
-      const buttons = alert.mock.calls.at(-1)?.[2] as { text?: string; onPress?: () => void }[];
-      buttons?.find((b) => b.text === 'Delete')?.onPress?.();
-    });
+    await act(async () => pressAlertButton('Delete this event?', 'Delete'));
 
     await waitFor(() => expect(del).toHaveBeenCalledWith(9));
     del.mockRestore();
-    alert.mockRestore();
   });
 
   it('hides cancel/delete from a non-moderator', async () => {
@@ -336,9 +374,6 @@ describe('cancel and delete', () => {
 
 describe('group ⋯ menu', () => {
   it('routes "Plan an event" to the plan screen', async () => {
-    const showActionSheet = jest
-      .spyOn(ActionSheetIOS, 'showActionSheetWithOptions')
-      .mockImplementation(() => {});
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes('/api/auth/user/')) return jsonResponse(ME);
       if (url.includes('/api/groups/7/posts/')) {
@@ -352,14 +387,9 @@ describe('group ⋯ menu', () => {
     await renderWith(<GroupScreen />);
     await fireEvent.press(await screen.findByLabelText('Group actions'));
 
-    const [config, cb] = showActionSheet.mock.calls.at(-1) as [
-      { options: string[] },
-      (i: number) => void,
-    ];
-    expect(config.options[0]).toBe('Plan an event');
-    await act(async () => cb(0));
+    expect(menuOptions()[0]).toBe('Plan an event');
+    await act(async () => pickMenuAction(0));
 
     expect(mockPush).toHaveBeenCalledWith('/groups/7/plan');
-    showActionSheet.mockRestore();
   });
 });

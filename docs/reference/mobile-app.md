@@ -110,6 +110,35 @@ scale. CI runs a `mobile-test` job (`npm ci`, `npm test`, `npm run typecheck`)
 alongside `backend` and `frontend`. **App builds happen on EAS, never in GitHub
 Actions** — don't try to build an IPA in CI.
 
+**The suite runs twice, once per platform** (Phase 10). `jest.config.js` declares
+two `projects` — `jest-expo/ios` and `jest-expo/android` — so ~41 test files
+report as ~82 suites, and failures are tagged `[ios]` / `[android]`. The platform
+decides what `Platform.OS` reports, so before this the app's Android branches (the
+action-sheet fallbacks, keyboard-avoidance behaviour, the date pickers) were
+**never executed by CI on any run** — they were first exercised by a person
+holding a phone. Two things this turned up, both worth knowing before adding a
+test:
+
+- **`src/__tests__/helpers.ts` absorbs the platform-divergent test seams**, so a
+  test doesn't branch on `Platform.OS` itself. It owns the `ActionSheetIOS` and
+  `Alert` spies and exposes `pickMenuAction` / `pickMenuOption` / `menuOptions` /
+  `menuDestructiveOption` / `menuWasShown` — because a "⋯" menu is an action
+  sheet on iOS and an `Alert` chooser on Android. It also has `switchValue`,
+  since a `<Switch>` reports through `value` on iOS and `on` on Android; **RNTL's
+  `toBeChecked()` only understands the iOS shape and silently reports a switch
+  that is on as unchecked**, which is worse than having no matcher.
+  Corollary: **never `jest.spyOn(Alert, 'alert')` locally and `mockRestore()` it**
+  — restoring puts the *original* back and tears out the shared spy, so a later
+  test in the same file records nothing and fails somewhere unrelated. This cost
+  real time to find.
+- **`babel.config.js` had to be added.** The platform presets hand `babel-jest`
+  only a `caller`, dropping the `presets` the root `jest-expo` preset injects; with
+  no babel config on disk to fall back on, *every* suite dies parsing Flow types
+  in React Native's own setup file. The error names `@react-native/jest-preset`,
+  so it reads like a broken dependency rather than a missing config. The file
+  declares exactly what Metro and jest-expo already resolved implicitly, so it
+  changes nothing about the bundle.
+
 Three test-harness traps, all recurring:
 
 - **RNTL v14 made `render` and `fireEvent` async — `await` them.** Without the
@@ -200,11 +229,16 @@ permission string** — the bug would have surfaced only at the dev-build switch
 an app that dies the moment you tap "Add photos", and as an App Review rejection.
 **When adding any Expo package, check whether it ships a config plugin.** Verify
 without a full build: `npx expo config --type introspect` prints the resolved
-`Info.plist` and Android permissions. Permissions are also narrowed deliberately
-(`cameraPermission: false`, `microphonePermission: false`) — the plugin adds both
-by default plus Android's `RECORD_AUDIO`, and we only ever open the photo library.
-An unexplained microphone permission on a privacy-first app is a bad look, and
-Phase 10 would inherit it on the Play listing.
+`Info.plist` and Android permissions. Permissions are narrowed deliberately:
+**`microphonePermission: false`**, because the picker plugin otherwise adds a
+microphone string *and* Android's `RECORD_AUDIO`, and an unexplained microphone
+permission on a privacy-first app is a bad look — one the Play listing would
+show. Setting it `false` doesn't merely omit the permission, it emits an explicit
+`tools:node="remove"` so the merge strips anything a dependency adds; verified in
+Phase 10, so don't "fix" that entry when you see it in the introspected manifest.
+**The camera permission is real and stays** — chat photos can be taken with the
+camera (Phase 9b M7, `launchCameraAsync`), so this is a live capability, not
+plugin default cruft.
 
 **Don't use `new URL()`.** React Native ships a partial `URL` implementation
 (hence `react-native-url-polyfill`). Paging follows the paginator's `next` URL,
@@ -283,6 +317,13 @@ things worth knowing before touching it:
 
 - **iOS push cannot be tested in the Simulator.** It needs a real device and an
   active Apple Developer Program membership. Budget a device pass.
+- **Android push *can* be tested on the emulator**, provided the AVD uses a
+  **Google Play** system image — it has real Play Services and mints a real FCM
+  token. This is why `registerForPush` guards on `canRegisterForPush()` rather
+  than `Device.isDevice`: an emulator reports `isDevice: false` exactly like the
+  iOS Simulator, so the original guard silently skipped registration on Android
+  and made push look broken. Verified end to end (Phase 10) with no Android
+  hardware involved.
 - **Cold start is the path that's easy to miss** — a tap that *launches* the app
   uses a different Expo API from one that arrives while it's running. Test it by
   force-quitting before sending.

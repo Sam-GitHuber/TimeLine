@@ -16,16 +16,7 @@
  */
 
 import { useState } from 'react';
-import {
-  ActionSheetIOS,
-  Alert,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { Avatar } from '../Avatar';
 import { PollOptionFields } from './PollOptionFields';
@@ -38,6 +29,7 @@ import {
 import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 import type { Poll, PollOptionPayload, PollResultOption } from '@/types';
+import { useActionMenu } from '@/components/ActionMenu';
 
 /** What `onFinalise` carries: a free value or a pinned option, for a dimension. */
 export type FinaliseArg = { dimension: PollDimension; value?: string; optionId?: number };
@@ -90,37 +82,25 @@ export function PollTally({
     onVote(Array.from(next));
   }
 
-  function openMenu() {
-    const labels = [
-      ...(canEdit ? ['Edit poll'] : []),
-      open ? 'Close poll' : 'Re-open poll',
-      'Remove poll',
-      'Cancel',
-    ];
-    const cancelIndex = labels.length - 1;
-    const removeIndex = labels.indexOf('Remove poll');
-    const run = (i: number) => {
-      const label = labels[i];
-      if (label === 'Edit poll') setEditing(true);
-      else if (label === 'Close poll') onClose?.();
-      else if (label === 'Re-open poll') onReopen?.();
-      else if (label === 'Remove poll') confirmRemove();
-    };
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        { options: labels, destructiveButtonIndex: removeIndex, cancelButtonIndex: cancelIndex },
-        run
-      );
-    } else {
-      Alert.alert('Poll options', undefined, [
-        ...labels.slice(0, cancelIndex).map((label, i) => ({
-          text: label,
-          onPress: () => run(i),
-          style: (label === 'Remove poll' ? 'destructive' : 'default') as 'destructive' | 'default',
-        })),
-        { text: 'Cancel', style: 'cancel' as const },
-      ]);
-    }
+  const { openMenu, menu } = useActionMenu();
+
+  function showMenu() {
+    // Four items for an unvoted poll. Through the old `Alert` fallback Android
+    // kept only three and dropped **Cancel**, in a dialog that was also
+    // non-cancelable — so every remaining button mutated the poll and there was
+    // no way out. See the note in ActionMenu.tsx.
+    openMenu({
+      title: 'Poll options',
+      items: [
+        ...(canEdit
+          ? [{ label: 'Edit poll', onPress: () => setEditing(true) }]
+          : []),
+        open
+          ? { label: 'Close poll', onPress: () => onClose?.() }
+          : { label: 'Re-open poll', onPress: () => onReopen?.() },
+        { label: 'Remove poll', destructive: true, onPress: confirmRemove },
+      ],
+    });
   }
 
   function confirmRemove() {
@@ -148,7 +128,7 @@ export function PollTally({
           </Text>
           {canManage ? (
             <Pressable
-              onPress={openMenu}
+              onPress={showMenu}
               accessibilityRole="button"
               accessibilityLabel="Poll options"
               hitSlop={8}
@@ -205,6 +185,8 @@ export function PollTally({
       </View>
 
       {noVotes ? <Text style={styles.empty}>No votes yet.</Text> : null}
+
+      {menu}
     </View>
   );
 }

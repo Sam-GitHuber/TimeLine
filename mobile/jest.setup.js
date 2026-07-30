@@ -57,6 +57,12 @@ jest.mock('expo-notifications', () => ({
   // `.catch`, and a mock returning undefined would throw at import time in
   // every suite that pulls the module in.
   setNotificationCategoryAsync: jest.fn(async () => ({})),
+  // Creates an Android notification channel (Phase 10). Resolved rather than a
+  // bare jest.fn() for the same reason as the category above:
+  // `configureNotificationChannels` attaches a `.catch`, and a mock returning
+  // undefined would throw at import time in every suite that pulls this in.
+  setNotificationChannelAsync: jest.fn(async () => ({})),
+  AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
   useLastNotificationResponse: jest.fn(() => null),
 }));
 
@@ -73,24 +79,41 @@ jest.mock('react-native-safe-area-context', () =>
 
 // `@react-native-community/datetimepicker` is a native module (the OS date/time
 // wheel) with no Node counterpart, and it's imported by the event dimension
-// editor (E3c). Stand it in with a pressable that, on press, fires `onChange`
-// with a **fixed** date (2026-08-15 10:30) so a test can drive "the organiser
-// picked a value" deterministically and then assert the finalise call.
+// editor (E3c). Stand it in with two pressables: one that commits a **fixed**
+// date (2026-08-15 10:30) through `onValueChange`, so a test can drive "the
+// organiser picked a value" deterministically, and one that fires `onDismiss`.
+//
+// `onValueChange`/`onDismiss` rather than the old `onChange` (Phase 10): the
+// single-callback API is deprecated and warns at runtime, and the split maps
+// onto what Android actually reports — OK versus Cancel. The dismiss affordance
+// is what lets a test cover the Android path where the dialog is closed without
+// a choice, which is the path that used to leave the picker inert.
 jest.mock('@react-native-community/datetimepicker', () => {
   const React = require('react');
-  const { Pressable, Text } = require('react-native');
+  const { Pressable, Text, View } = require('react-native');
   return {
     __esModule: true,
-    default: ({ onChange, testID }) =>
+    default: ({ onValueChange, onDismiss, testID }) =>
       React.createElement(
-        Pressable,
-        {
-          testID: testID ?? 'datetimepicker',
-          accessibilityLabel: 'Pick a value',
-          onPress: () =>
-            onChange?.({ type: 'set' }, new Date(2026, 7, 15, 10, 30)),
-        },
-        React.createElement(Text, null, 'picker')
+        View,
+        { testID: testID ?? 'datetimepicker' },
+        React.createElement(
+          Pressable,
+          {
+            accessibilityLabel: 'Pick a value',
+            onPress: () =>
+              onValueChange?.(
+                { nativeEvent: { timestamp: 0, utcOffset: 0 } },
+                new Date(2026, 7, 15, 10, 30)
+              ),
+          },
+          React.createElement(Text, null, 'picker')
+        ),
+        React.createElement(
+          Pressable,
+          { accessibilityLabel: 'Dismiss the picker', onPress: () => onDismiss?.() },
+          React.createElement(Text, null, 'dismiss')
+        )
       ),
   };
 });
