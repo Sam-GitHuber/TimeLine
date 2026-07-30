@@ -3099,6 +3099,54 @@ it('selects several messages and deletes them in one action', async () => {
   }
 );
 
+/**
+ * Selection outranks the composer states it covers up (#168).
+ *
+ * Select mode takes over the composer's slot with the bulk bar, so a staged
+ * photo is still staged but no longer *visible*. Dismissing the photo first
+ * would be a press that changes nothing on screen and quietly bins the photo —
+ * the priority has to follow what you can see, not the order things opened in.
+ */
+(Platform.OS === 'android' ? it : it.skip)(
+  'clears the selection before a staged photo it is covering',
+  async () => {
+    captureBackHandler();
+    const alert = chooseAttachSource('Choose from Library');
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'one' })],
+    });
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Add a photo'));
+    await screen.findByLabelText('Remove photo');
+
+    // Select mode replaces the composer — the photo is staged but off screen.
+    await openMenu('Your message: one');
+    await fireEvent.press(screen.getByLabelText('Select'));
+    await screen.findByText('1 selected');
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    // First press: the selection, because it's what's on top.
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.queryByText('1 selected')).toBeNull();
+    // The composer is back, and the photo survived the press.
+    expect(await screen.findByLabelText('Remove photo')).toBeTruthy();
+
+    // Second: now the photo, which you can see again.
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    expect(mockBack).not.toHaveBeenCalled();
+    expect(backHandlerCount()).toBe(0);
+    alert.mockRestore();
+  }
+);
+
 it('offers no bulk delete once someone else’s message is selected', async () => {
   // A bulk action that silently did only *part* of what it says would be worse
   // than one that isn't there.

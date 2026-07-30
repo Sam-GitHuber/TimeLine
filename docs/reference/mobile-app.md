@@ -533,8 +533,15 @@ explicit priority**, not one `useAndroidBack` per state. React Native runs back
 handlers most-recently-registered-first, so separate subscriptions rank
 themselves by the order the user happened to *open* things — on the message
 thread, a photo staged before hitting Edit would claim the press meant for the
-edit. The thread screen decides the order itself: edit, then staged photo, then
-selection, then leave.
+edit. The thread screen decides the order itself: selection, then edit, then
+staged photo, then leave.
+
+Order that priority by **what's on screen**, not by what the state model
+suggests. Select mode replaces the thread's composer with a bulk-action bar, so
+while it's on, the editing banner and the staged-photo preview are unmounted —
+dismissing either of them first would read as a dead press that quietly binned
+your photo, discovered only after leaving select mode. Selection is therefore
+first even though it's the state you opened last.
 
 The edit case is why this is a correctness bug and not a polish one. Cancelling
 an edit is the **only** path that restores `stashedDraft` to the composer

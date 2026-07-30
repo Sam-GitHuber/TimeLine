@@ -418,16 +418,25 @@ export default function ThreadScreen() {
    * down. React Native runs back handlers most-recently-registered-first, so
    * three separate calls would order themselves by the sequence you happened to
    * *open* things in — a photo staged before you hit Edit would claim the press
-   * ahead of the edit. Innermost first, decided here.
+   * ahead of the edit. Topmost first, decided here.
+   *
+   * "Topmost" means *what you can actually see*, which is why **selection comes
+   * first**. Select mode takes over the composer's slot entirely (see the bulk
+   * bar below), so while it's on, the editing banner and the staged-photo
+   * preview aren't on screen at all. Staging a photo and then long-pressing
+   * → Select is an ordinary sequence, and closing the photo underneath would
+   * look like a dead press that silently threw the photo away — you'd only find
+   * out after leaving select mode. Edit before photo below it, both being
+   * composer states, and the edit banner sits above the preview.
    *
    * `stopEditing` is a hoisted function declaration, which is what lets this sit
    * next to the state it reads rather than 800 lines further down.
    */
-  const dismissible = Boolean(editing) || attachment !== null || selecting;
+  const dismissible = selecting || Boolean(editing) || attachment !== null;
   useAndroidBack(dismissible, () => {
-    if (editing) stopEditing();
+    if (selecting) setSelected(null);
+    else if (editing) stopEditing();
     else if (attachment) setAttachment(null);
-    else if (selecting) setSelected(null);
   });
 
   const goBack = () =>
