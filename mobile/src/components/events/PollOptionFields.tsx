@@ -11,7 +11,7 @@
  */
 
 import DateTimePicker, {
-  type DateTimePickerEvent,
+  type DateTimePickerChangeEvent,
 } from '@react-native-community/datetimepicker';
 import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
@@ -95,10 +95,11 @@ export function PollOptionFields({
               // bug) dismissed it the instant you touched it. Update the value
               // live; a "Done" (or tapping another row) collapses it.
               //
-              // Android: the same mount opens a modal dialog, which reports one
-              // event and is then inert. So it closes the row on that event —
-              // unmounting, so the next press gets a working instance — and
-              // draws no "Done", because the dialog brings its own OK/Cancel.
+              // Android: the same mount opens a modal dialog, which reports
+              // once and is then inert. So it closes the row on either
+              // `onValueChange` (OK) or `onDismiss` (Cancel) — unmounting, so
+              // the next press gets a working instance — and draws no "Done",
+              // because the dialog brings its own OK/Cancel.
               <View style={styles.pickerOpen}>
                 <DateTimePicker
                   value={valueToDate(dimension, opt.value)}
@@ -109,12 +110,16 @@ export function PollOptionFields({
                   // theme.ts. Neither applies to a system dialog.
                   style={isAndroid ? undefined : styles.picker}
                   themeVariant={isAndroid ? undefined : pickerThemeVariant}
-                  onChange={(e: DateTimePickerEvent, picked?: Date) => {
+                  onValueChange={(
+                    _e: DateTimePickerChangeEvent,
+                    picked: Date
+                  ) => {
                     if (isAndroid) onActiveIndex(null);
-                    if (e.type !== 'dismissed' && picked) {
-                      setValue(i, pickedToValue(dimension, picked));
-                    }
+                    setValue(i, pickedToValue(dimension, picked));
                   }}
+                  // Android's Cancel. Never fires for the iOS inline wheel,
+                  // which is never dismissed, so it needs no platform guard.
+                  onDismiss={() => onActiveIndex(null)}
                 />
                 {isAndroid ? null : (
                   <Pressable

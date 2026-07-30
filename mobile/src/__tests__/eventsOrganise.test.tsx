@@ -218,6 +218,40 @@ describe('setting a dimension', () => {
     finalise.mockRestore();
   });
 
+  /**
+   * The Android bug this milestone exists for (Phase 10).
+   *
+   * Android's picker is a one-shot modal dialog: mounted, it opens once and is
+   * inert thereafter. The editor therefore mounts it only while it should be
+   * up and unmounts on dismissal, so the next press gets a working instance.
+   * Get that wrong and the picker opens exactly once per visit to the screen —
+   * which is invisible to a test that only ever opens it.
+   */
+  (Platform.OS === 'android' ? it : it.skip)(
+    'reopens the picker after it is dismissed',
+    async () => {
+      serveEvent(planningEvent());
+
+      await renderWith(<EventScreen />);
+      await fireEvent.press(await screen.findByLabelText('Set Date'));
+
+      // Closed to begin with: the editor shows its trigger, not a dialog.
+      expect(screen.queryByLabelText('Pick a value')).toBeNull();
+
+      await fireEvent.press(screen.getByLabelText('Choose a date'));
+      expect(screen.getByLabelText('Pick a value')).toBeTruthy();
+
+      // Dismiss (Android's Cancel) — the picker unmounts…
+      await fireEvent.press(screen.getByLabelText('Dismiss the picker'));
+      expect(screen.queryByLabelText('Pick a value')).toBeNull();
+
+      // …and pressing the trigger again brings it back. This is the assertion
+      // that would have failed before the fix.
+      await fireEvent.press(screen.getByLabelText('Choose a date'));
+      expect(screen.getByLabelText('Pick a value')).toBeTruthy();
+    }
+  );
+
   it('finalises a typed location', async () => {
     serveEvent(planningEvent());
     const finalise = jest

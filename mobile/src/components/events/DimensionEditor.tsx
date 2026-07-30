@@ -15,7 +15,7 @@
  */
 
 import DateTimePicker, {
-  type DateTimePickerEvent,
+  type DateTimePickerChangeEvent,
 } from '@react-native-community/datetimepicker';
 import { useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -213,13 +213,15 @@ function DateTimeField({
   const [showAndroidPicker, setShowAndroidPicker] = useState(false);
   const isAndroid = Platform.OS === 'android';
 
-  const onChange = (event: DateTimePickerEvent, picked?: Date) => {
-    // Android reports the dismissal as an event; iOS never sends one, because
-    // its inline wheel is never dismissed. Closing on *any* Android event is
-    // what makes the dialog re-openable — leaving it mounted after a dismiss
-    // gives a button that works exactly once.
+  /**
+   * A value was chosen: iOS fires this on every tick of the wheel, Android once
+   * when OK is pressed. Closing on Android is what makes the dialog
+   * *re-openable* — leaving it mounted after it closes itself gives a trigger
+   * that works exactly once.
+   */
+  const onValueChange = (_event: DateTimePickerChangeEvent, picked: Date) => {
     if (isAndroid) setShowAndroidPicker(false);
-    if (event.type !== 'dismissed' && picked) setValue(picked);
+    setValue(picked);
   };
 
   const formatted =
@@ -245,8 +247,8 @@ function DateTimeField({
       ) : null}
 
       {/* iOS: always mounted, inline. Android: mounted only while the dialog
-          should be up, and unmounted again by `onChange` so the next press
-          gets a fresh (and therefore functional) instance. */}
+          should be up, and unmounted again by `onValueChange`/`onDismiss` so
+          the next press gets a fresh (and therefore functional) instance. */}
       {!isAndroid || showAndroidPicker ? (
         <DateTimePicker
           value={value}
@@ -259,7 +261,10 @@ function DateTimeField({
           // applies to a system dialog.
           style={isAndroid ? undefined : styles.picker}
           themeVariant={isAndroid ? undefined : pickerThemeVariant}
-          onChange={onChange}
+          onValueChange={onValueChange}
+          // Android's Cancel. Never fires for the iOS inline wheel, which is
+          // never dismissed — so this needs no platform guard.
+          onDismiss={() => setShowAndroidPicker(false)}
         />
       ) : null}
 
