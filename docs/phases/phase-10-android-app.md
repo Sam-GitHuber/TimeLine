@@ -1,6 +1,6 @@
 # Phase 10 — Android App
 
-**Status:** plan — **fleshed out, awaiting go-ahead to start**
+**Status:** in progress — **B done; A underway**
 
 Because Phase 9 built the app in **React Native (Expo)**, the app is *already*
 cross-platform — this phase is **not a second app**. Every screen already exists.
@@ -120,12 +120,11 @@ hard to undo:
 
 Four layers, cheapest first — the same philosophy as the rest of the project:
 
-1. **Jest, on both platforms.** `jest-expo` can run the suite twice, once per
-   platform, so `Platform.OS === 'android'` branches are actually executed
-   instead of being dead code in CI. We have ~17 files with platform branches
-   (action sheets, keyboard avoidance) that today are **only ever tested on the
-   iOS path**. This is the highest-value testing change in the phase and costs a
-   config edit plus some CI minutes.
+1. **Jest, on both platforms.** ✅ Done — the suite runs twice, so the
+   `Platform.OS === 'android'` branches (action sheets, keyboard avoidance) are
+   actually executed rather than being dead code in CI. This was the
+   highest-value testing change in the phase; see `reference/mobile-app.md` for
+   the two traps it needed working around.
 2. **The Android Emulator**, for the daily loop. Android Studio, an AVD on a
    **Google Play** system image (required for FCM push to work), arm64 on Apple
    Silicon so it's genuinely fast. Unlike iOS, **push can be tested on the
@@ -201,23 +200,33 @@ real, located thing.
 
 Android's hardware/gesture back has no iOS equivalent, and this is where a
 cross-platform app usually feels broken. Expo Router handles back for *stack
-navigation* automatically. The work is everything that isn't a stack push —
-**nine `<Modal>` components** currently in `src/components/`:
+navigation* automatically.
 
-`PhotoLightbox`, `ReportModal`, `MessageActionMenu`, `AvatarCropModal`,
-`DisconnectWarningModal`, `ReactionTray`, `ReactorsSheet`,
-`DeleteAccountSection`'s confirm, and the popover inside `MessageThreadView`.
+**The modals turned out to be fine** — this plan originally budgeted work for
+them, wrongly. All nine `<Modal>` components (`PhotoLightbox`, `ReportModal`,
+`MessageActionMenu`, `AvatarCropModal`, `DisconnectWarningModal`,
+`ReactionTray`, `ReactorsSheet`, `DeleteAccountSection`'s confirm, and the
+popover in `MessageThreadView`) already wire `onRequestClose` to a real close
+handler, so Android back dismisses each of them correctly. Phase 9b got this
+right.
 
-RN's `Modal` has an `onRequestClose` prop that Android's back button fires —
-each of these needs it wired, or back either does nothing (feels frozen) or
-escapes the whole screen underneath the open modal. Plus non-modal transient
-state that should absorb a back press: **message multi-select mode** and the
-emoji tray. And the root case: back on the feed tab should **exit the app**, not
-bounce between tabs.
+What genuinely needed doing was the state that *isn't* a modal, where a press
+falls through to the navigator and leaves the screen with the state still armed
+underneath — quiet, and reads as an app bug rather than a missing handler:
+
+- **Message multi-select** — done. `src/useAndroidBack.ts` is a focus-scoped
+  `BackHandler` hook; the thread screen uses it to clear the selection. Pinned
+  by `androidBack.test.tsx` (the hook) plus an integration test in
+  `thread.test.tsx` (that the screen actually calls it — the part a refactor
+  silently drops).
+- **Still to check on a device:** the emoji tray (`rn-emoji-keyboard` is itself
+  a `Modal`, so it likely handles its own back), and the root case — back on a
+  root tab should exit the app rather than bounce between tabs. Both are
+  "verify, probably nothing", not budgeted work.
 
 `app.json` currently sets `predictiveBackGestureEnabled: false` — fine to keep
-for v1; revisit once the modals are behaving, since predictive back is
-increasingly the platform default.
+for v1; revisit once the rest is behaving, since predictive back is increasingly
+the platform default.
 
 ### Date and time pickers (a known, already-documented gap)
 
@@ -277,9 +286,11 @@ or a LAN IP. Already documented in `mobile-app.md`; it will bite anyway.
 image, `npx expo run:android` / dev build launching. Log in, feed, compose,
 profiles work. Fix whatever's outright broken.
 
-**B. Both platforms tested.** `jest-expo` multi-project config so the suite runs
-under `Platform.OS === 'android'` as well as iOS; CI updated. Do this *before*
-the fixing milestones so the Android branches are covered as we write them.
+**B. Both platforms tested.** ✅ **Done.** `jest.config.js` runs two projects
+(`jest-expo/ios` + `jest-expo/android`); 84 suites, 968 tests green. Needed a
+`babel.config.js` the project never had, and `src/__tests__/helpers.ts` to absorb
+the seams that genuinely differ (menus, `<Switch>`, the back button). Done
+*before* the fixing milestones so Android branches are covered as we write them.
 
 **C. Push on Android.** Firebase project, `google-services.json` via EAS secret,
 FCM v1 service account on EAS, notification channels mapped to the Phase 8

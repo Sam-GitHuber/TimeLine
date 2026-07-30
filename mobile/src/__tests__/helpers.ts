@@ -12,7 +12,7 @@
  * collects `*test.ts(x)` / `*spec.ts(x)`.
  */
 
-import { ActionSheetIOS, Alert, Platform } from 'react-native';
+import { ActionSheetIOS, Alert, BackHandler, Platform } from 'react-native';
 
 /**
  * The two ways the app opens a "⋯" menu, spied so a test can drive them.
@@ -168,4 +168,53 @@ export function switchValue(element: {
     );
   }
   return value;
+}
+
+// --- Android back button ----------------------------------------------------
+
+const backHandlers: (() => boolean)[] = [];
+
+/**
+ * Capture Android back-button registrations so a test can fire one.
+ *
+ * `BackHandler.addEventListener` is a native bridge: under Node it registers
+ * nothing and there is no way to press back. This records the handlers instead.
+ * Call from `beforeEach`; pair with `pressBack()`.
+ *
+ * Returns a `removed` counter so a test can assert the listener is actually
+ * torn down — a screen that subscribes and never unsubscribes swallows back
+ * presses for the rest of its life, which is a screen you can't leave.
+ */
+export function captureBackHandler(): { removed: () => number } {
+  let removed = 0;
+  backHandlers.length = 0;
+  jest
+    .spyOn(BackHandler, 'addEventListener')
+    .mockImplementation((_event, handler) => {
+      backHandlers.push(handler as () => boolean);
+      return {
+        remove: () => {
+          removed += 1;
+          const index = backHandlers.indexOf(handler as () => boolean);
+          if (index >= 0) backHandlers.splice(index, 1);
+        },
+      };
+    });
+  return { removed: () => removed };
+}
+
+/**
+ * Fire the Android back button, returning whether anything claimed it.
+ *
+ * Invokes the most recently registered handler, matching React Native's
+ * documented "last registered wins" ordering.
+ */
+export function pressBack(): boolean {
+  const handler = backHandlers.at(-1);
+  return handler ? handler() : false;
+}
+
+/** How many back handlers are currently registered. */
+export function backHandlerCount(): number {
+  return backHandlers.length;
 }

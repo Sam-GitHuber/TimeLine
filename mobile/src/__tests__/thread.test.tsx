@@ -28,10 +28,10 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
-import { Alert, FlatList, Linking } from 'react-native';
+import { Alert, FlatList, Linking, Platform } from 'react-native';
 
 import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
@@ -42,11 +42,21 @@ import { clearQuotes } from '@/quotes';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
+import { captureBackHandler, pressBack } from './helpers';
+
 const mockParams: { conversationId: string } = { conversationId: '5' };
 const mockPush = jest.fn();
 const mockBack = jest.fn();
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => mockParams,
+  // The screen is always focused under test, so focus is a plain effect —
+  // which still runs the cleanup on unmount, keeping `useAndroidBack`'s
+  // subscribe/unsubscribe pairing honest.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: jest.mock factories are hoisted above the
+    // imports, so a module-scope binding isn't initialised yet when this runs.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   router: {
     push: (...args: unknown[]) => mockPush(...args),
     back: (...args: unknown[]) => mockBack(...args),
@@ -2951,6 +2961,49 @@ it('selects several messages and deletes them in one action', async () => {
   });
   alert.mockRestore();
 });
+
+/**
+ * Android's back button leaves multi-select rather than the thread (Phase 10).
+ *
+ * Without a handler the press falls through to the navigator and you land two
+ * screens away with the selection still armed — quiet, and reads as a bug in
+ * the app rather than a missing handler. The hook itself is unit-tested in
+ * `androidBack.test.tsx`; this pins that the *screen* actually uses it, which
+ * is the part a refactor can silently drop.
+ *
+ * Android-only: iOS has no hardware back, and `useAndroidBack` registers
+ * nothing there.
+ */
+(Platform.OS === 'android' ? it : it.skip)(
+  'clears the selection on Android back, without leaving the thread',
+  async () => {
+    const back = captureBackHandler();
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'one' })],
+    });
+
+    await renderScreen();
+    await openMenu('Your message: one');
+    await fireEvent.press(screen.getByLabelText('Select'));
+    await screen.findByText('1 selected');
+
+    let handled = false;
+    await act(async () => {
+      handled = pressBack();
+    });
+
+    // The selection is gone, the press was swallowed, and we're still here.
+    expect(handled).toBe(true);
+    expect(screen.queryByText('1 selected')).toBeNull();
+    expect(mockBack).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Your message: one')).toBeTruthy();
+
+    // …and the handler is unregistered once the mode closes, so a second back
+    // press leaves the thread as it normally would.
+    expect(back.removed()).toBe(1);
+  }
+);
 
 it('offers no bulk delete once someone else’s message is selected', async () => {
   // A bulk action that silently did only *part* of what it says would be worse

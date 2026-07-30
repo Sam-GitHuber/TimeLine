@@ -126,6 +126,7 @@ import type {
   Paginated,
   Reaction,
 } from '@/types';
+import { useAndroidBack } from '@/useAndroidBack';
 import { useDayBoundary } from '@/useDayBoundary';
 
 /** The composer bar's base vertical padding, before the home-indicator inset. */
@@ -396,6 +397,12 @@ export default function ThreadScreen() {
    */
   const [selected, setSelected] = useState<Set<number> | null>(null);
   const selecting = selected !== null;
+
+  // Android back clears the selection rather than leaving the thread — the
+  // hardware equivalent of the header's Cancel, and what the OS convention
+  // leads people to expect from a selection mode.
+  const clearSelection = useCallback(() => setSelected(null), []);
+  useAndroidBack(selecting, clearSelection);
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/messages');
