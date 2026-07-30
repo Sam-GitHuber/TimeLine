@@ -30,6 +30,7 @@ import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 import type { Poll, PollOptionPayload, PollResultOption } from '@/types';
 import { useActionMenu } from '@/components/ActionMenu';
+import { useAndroidBack } from '@/useAndroidBack';
 
 /** What `onFinalise` carries: a free value or a pinned option, for a dimension. */
 export type FinaliseArg = { dimension: PollDimension; value?: string; optionId?: number };
@@ -72,6 +73,10 @@ export function PollTally({
   // which React flags) — same as the web. A cast refetches for fresh *counts*.
   const [selected, setSelected] = useState<Set<number>>(new Set(poll.your_votes ?? []));
   const [editing, setEditing] = useState(false);
+
+  // Android back leaves the edit form rather than the event screen — the
+  // hardware equivalent of its Cancel (#168).
+  useAndroidBack(editing, () => setEditing(false));
 
   function toggle(optionId: number) {
     if (!open || busy) return;

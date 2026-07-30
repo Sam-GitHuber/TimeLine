@@ -77,6 +77,30 @@ jest.mock('react-native-safe-area-context', () =>
   require('react-native-safe-area-context/jest/mock').default
 );
 
+/**
+ * `useFocusEffect` needs a navigator above it, and a unit test renders a screen
+ * or a component on its own — so the real one throws "Couldn't find a
+ * navigation object" (#168).
+ *
+ * Stubbed as a plain `useEffect`, which is honest for a test: there is exactly
+ * one screen and it is always focused. The cleanup still runs on unmount, so
+ * `useAndroidBack`'s subscribe/unsubscribe pairing is exercised for real rather
+ * than assumed — that pairing is the part a broken hook would get wrong.
+ *
+ * Global rather than per-suite because `useAndroidBack` is now spread across
+ * eight screens and components; a per-file stub means every future suite that
+ * happens to mount one of them fails on a navigation error that has nothing to
+ * do with what it's testing. Everything else in `expo-router` stays real.
+ *
+ * A suite that replaces `expo-router` wholesale with its own factory (to fake
+ * `router` or `useLocalSearchParams`) overrides this and must include the same
+ * stub — that's a property of `jest.mock`, not something this can prevent.
+ */
+jest.mock('expo-router', () => ({
+  ...jest.requireActual('expo-router'),
+  useFocusEffect: (callback) => require('react').useEffect(callback, [callback]),
+}));
+
 // `@react-native-community/datetimepicker` is a native module (the OS date/time
 // wheel) with no Node counterpart, and it's imported by the event dimension
 // editor (E3c). Stand it in with two pressables: one that commits a **fixed**

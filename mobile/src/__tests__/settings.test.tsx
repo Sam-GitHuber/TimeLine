@@ -30,7 +30,7 @@ import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSec
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
 import { PrivacySection } from '@/components/settings/PrivacySection';
 
-import { switchValue } from './helpers';
+import { androidIt, captureBackHandler, pressBack, switchValue } from './helpers';
 
 const mockSignOut = jest.fn();
 const mockRefreshUser = jest.fn();
@@ -177,6 +177,27 @@ describe('ChangePasswordSection', () => {
     await fireEvent.press(screen.getByRole('button', { name: 'Change password' }));
     // The mismatch guard means no request goes out.
     expect(made(/\/api\/auth\/password\/change\/$/, 'POST')).toBe(false);
+  });
+
+  /**
+   * Android back collapses the form rather than leaving Settings (#168).
+   *
+   * The form is inline, not a Modal, so the press fell through to the tab
+   * navigator — abandoning a half-filled password change *and* the screen, when
+   * the user only meant the first.
+   */
+  androidIt('collapses the form on Android back, staying in Settings', async () => {
+    captureBackHandler();
+    await openForm();
+    await fireEvent.changeText(screen.getByLabelText('Current password'), 'old-pw');
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    expect(screen.queryByLabelText('Current password')).toBeNull();
+    // Collapsed back to the section's own affordance, still on the page.
+    expect(screen.getByText('Change password…')).toBeTruthy();
   });
 
   it('POSTs the current + new pair and confirms success', async () => {

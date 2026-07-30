@@ -81,6 +81,40 @@ androidOnly('unsubscribes when the state closes', async () => {
   expect(backHandlerCount()).toBe(0);
 });
 
+/**
+ * An unmemoised handler neither churns the subscription nor goes stale (#168).
+ *
+ * Both halves of the same decision. `onBack` is read through a ref, so a caller
+ * passing a fresh arrow every render — which is what all eight call sites do,
+ * because it reads better next to the state it closes — doesn't tear the
+ * listener down and re-add it on every render. The price of a ref is staleness,
+ * so the second half checks the press runs the *latest* closure rather than the
+ * one from the render that subscribed.
+ */
+androidOnly('takes a fresh handler each render without resubscribing', async () => {
+  const first = jest.fn();
+  const second = jest.fn();
+  // Not `onBack={first}` — an inline arrow, so the identity differs every render
+  // even when the behaviour doesn't. That's the case being pinned.
+  const view = await render(<Screen active onBack={() => first()} />);
+  expect(backHandlerCount()).toBe(1);
+
+  await act(async () => {
+    view.rerender(<Screen active onBack={() => second()} />);
+  });
+
+  // One listener throughout: no remove, no re-add.
+  expect(backHandlerCount()).toBe(1);
+  expect(back.removed()).toBe(0);
+
+  await act(async () => {
+    pressBack();
+  });
+
+  expect(second).toHaveBeenCalledTimes(1);
+  expect(first).not.toHaveBeenCalled();
+});
+
 iosOnly('never registers a listener', async () => {
   const onBack = jest.fn();
   await render(<Screen active onBack={onBack} />);

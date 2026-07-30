@@ -492,3 +492,64 @@ permissions, and Android-only layout bugs. `DevicePushToken.platform` already
 exists, so there's no schema change. The Play Console is a **$25 one-off**, needed
 only for Play Store distribution — the emulator and a real device via Expo Go work
 without it.
+
+### The back button
+
+iOS has no hardware back, so every dismissible thing in the app was built with
+only an **on-screen** way to close it — a Cancel, an ✕, a tap outside. On Android
+back is *the* way people dismiss things, and a press nothing claims doesn't just
+do nothing: it falls through to the navigator and **leaves the screen**. The
+failure is quiet and reads as a bug in the app rather than a missing handler.
+
+The rule, in two halves:
+
+- **`<Modal>` needs nothing.** React Native routes the press to its
+  `onRequestClose`, and every modal in the app wires one. Keep it that way — a
+  new `<Modal>` without `onRequestClose` is the same bug in a different shape.
+- **Everything else needs `useAndroidBack(active, onBack)`**
+  (`mobile/src/useAndroidBack.ts`). Inline editors, staged attachments,
+  multi-select, expanding panels, search fields — all of them are plain views,
+  and all of them fell through before #168.
+
+Three things about that hook are load-bearing:
+
+- **It's scoped to focus** (`useFocusEffect`). A screen left mounted behind
+  another would otherwise keep swallowing presses meant for the screen on top.
+  The cost is that a unit test rendering a screen outside a navigator throws, so
+  `jest.setup.js` stubs `useFocusEffect` as a plain `useEffect` for the whole
+  suite — a suite that replaces `expo-router` with its own factory has to include
+  the same stub.
+- **`onBack` is read through a ref**, so callers don't have to memoise it and an
+  inline arrow is fine. Across a dozen call sites the likelier mistake is a fresh
+  closure silently resubscribing on every render, or a `useCallback` with stale
+  deps closing over old state. `active` is the only thing that subscribes, which
+  is what the hook actually means.
+- **The handler returns `true`.** Returning false runs your handler *and*
+  navigates — the state closes and the screen disappears, which is worse than not
+  handling the press at all.
+
+**When one screen has several dismissible states, give it one handler with an
+explicit priority**, not one `useAndroidBack` per state. React Native runs back
+handlers most-recently-registered-first, so separate subscriptions rank
+themselves by the order the user happened to *open* things — on the message
+thread, a photo staged before hitting Edit would claim the press meant for the
+edit. The thread screen decides the order itself: selection, then edit, then
+staged photo, then leave.
+
+Order that priority by **what's on screen**, not by what the state model
+suggests. Select mode replaces the thread's composer with a bulk-action bar, so
+while it's on, the editing banner and the staged-photo preview are unmounted —
+dismissing either of them first would read as a dead press that quietly binned
+your photo, discovered only after leaving select mode. Selection is therefore
+first even though it's the state you opened last.
+
+The edit case is why this is a correctness bug and not a polish one. Cancelling
+an edit is the **only** path that restores `stashedDraft` to the composer
+(`messaging.md`), so a back press that popped the screen instead destroyed
+whatever you'd half-typed before you paused to fix a typo — and put you two
+screens away from noticing.
+
+Tests are per-screen and Android-only, gated with `androidIt` from the test
+helpers; `androidBack.test.tsx` pins the hook's own contract. The two layers are
+both needed — the unit test says the hook works, the screen tests say the screens
+still call it, and the second is what a refactor silently drops.

@@ -8,11 +8,13 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 
 import { CommentThread, ancestorIdsOf } from '@/components/CommentThread';
 import type { Comment } from '@/types';
+
+import { androidIt, captureBackHandler, pressBack } from './helpers';
 
 // CommentThread reads the current user (to hide "Report" on your own comment).
 // A fixed stub keeps the real AuthProvider's async setState out of these tests;
@@ -203,6 +205,36 @@ describe('writing', () => {
     await waitFor(() => expect(mockFetch.mock.calls.length).toBeGreaterThan(1));
     const body = JSON.parse(mockFetch.mock.calls[1][1].body);
     expect(body).toEqual({ text: 'Thanks!', parent: 4 });
+  });
+
+  /**
+   * Android back closes the reply box, not the post (#168).
+   *
+   * The box is inline under the comment it answers, so an unclaimed press
+   * popped the whole post screen — abandoning the reply and the thread you were
+   * reading in one go.
+   */
+  androidIt('closes the reply box on Android back', async () => {
+    captureBackHandler();
+    mockFetch.mockResolvedValue(jsonResponse([comment({ id: 4, text: 'Parent' })]));
+
+    await renderThread();
+    await screen.findByText('Parent');
+    await fireEvent.press(screen.getByText('Reply'));
+    await fireEvent.changeText(
+      await screen.findByLabelText('Reply to Alice Anderson…'),
+      'half a reply'
+    );
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    expect(screen.queryByLabelText('Reply to Alice Anderson…')).toBeNull();
+    // The comment it hung off is still there — we closed the box, not the post.
+    expect(screen.getByText('Parent')).toBeTruthy();
+    // Nothing was posted on the way out.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it('will not post an empty comment', async () => {

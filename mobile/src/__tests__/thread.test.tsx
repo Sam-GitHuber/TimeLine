@@ -42,7 +42,7 @@ import { clearQuotes } from '@/quotes';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
-import { captureBackHandler, pressBack } from './helpers';
+import { backHandlerCount, captureBackHandler, pressBack } from './helpers';
 
 const mockParams: { conversationId: string } = { conversationId: '5' };
 const mockPush = jest.fn();
@@ -3002,6 +3002,148 @@ it('selects several messages and deletes them in one action', async () => {
     // …and the handler is unregistered once the mode closes, so a second back
     // press leaves the thread as it normally would.
     expect(back.removed()).toBe(1);
+  }
+);
+
+/**
+ * Android back cancels an edit instead of destroying the draft (#168).
+ *
+ * The worst of the unguarded states, because it loses work rather than just
+ * misplacing you: `stashedDraft` is put back by the Cancel path and by nothing
+ * else, so a back press that fell through to the navigator took the
+ * half-written message with it *and* left the thread. Both halves are asserted
+ * here — the draft is the point, but a test that only checked the draft would
+ * still pass if we'd fixed it by cancelling the edit on the way out.
+ */
+(Platform.OS === 'android' ? it : it.skip)(
+  'cancels an edit on Android back, keeping the draft and the thread',
+  async () => {
+    captureBackHandler();
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+    });
+
+    await renderScreen();
+    await fireEvent.changeText(
+      await screen.findByLabelText('Message'),
+      'half-written thought'
+    );
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    expect(screen.getByLabelText('Message').props.value).toBe('teh quick fox');
+
+    let handled = false;
+    await act(async () => {
+      handled = pressBack();
+    });
+
+    expect(handled).toBe(true);
+    expect(screen.queryByText('Editing message')).toBeNull();
+    expect(screen.getByLabelText('Message').props.value).toBe(
+      'half-written thought'
+    );
+    expect(mockBack).not.toHaveBeenCalled();
+    // Abandoning an edit is not an edit: nothing reached the server.
+    expect(
+      mockFetch.mock.calls.some(([, init]) => String(init?.method) === 'PATCH')
+    ).toBe(false);
+  }
+);
+
+/**
+ * With two things open, back closes the innermost first (#168).
+ *
+ * The one behaviour a per-state `useAndroidBack` couldn't give us: React Native
+ * runs back handlers most-recently-registered-first, so three separate
+ * subscriptions would rank themselves by the order you *opened* things, and a
+ * photo staged before you hit Edit would swallow the press meant for the edit.
+ * The screen decides the order instead, and this is what pins it — staging the
+ * photo first is the arrangement that fails under registration order.
+ */
+(Platform.OS === 'android' ? it : it.skip)(
+  'unwinds a staged photo and an edit one at a time, innermost first',
+  async () => {
+    captureBackHandler();
+    const alert = chooseAttachSource('Choose from Library');
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+    });
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Add a photo'));
+    await screen.findByLabelText('Remove photo');
+
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    await screen.findByText('Editing message');
+
+    // First press: the edit, opened last.
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.queryByText('Editing message')).toBeNull();
+    expect(screen.getByLabelText('Remove photo')).toBeTruthy();
+
+    // Second: the photo still waiting underneath it.
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    // Only now is there nothing left to close, so back means back.
+    expect(mockBack).not.toHaveBeenCalled();
+    expect(backHandlerCount()).toBe(0);
+    alert.mockRestore();
+  }
+);
+
+/**
+ * Selection outranks the composer states it covers up (#168).
+ *
+ * Select mode takes over the composer's slot with the bulk bar, so a staged
+ * photo is still staged but no longer *visible*. Dismissing the photo first
+ * would be a press that changes nothing on screen and quietly bins the photo —
+ * the priority has to follow what you can see, not the order things opened in.
+ */
+(Platform.OS === 'android' ? it : it.skip)(
+  'clears the selection before a staged photo it is covering',
+  async () => {
+    captureBackHandler();
+    const alert = chooseAttachSource('Choose from Library');
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'one' })],
+    });
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Add a photo'));
+    await screen.findByLabelText('Remove photo');
+
+    // Select mode replaces the composer — the photo is staged but off screen.
+    await openMenu('Your message: one');
+    await fireEvent.press(screen.getByLabelText('Select'));
+    await screen.findByText('1 selected');
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    // First press: the selection, because it's what's on top.
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.queryByText('1 selected')).toBeNull();
+    // The composer is back, and the photo survived the press.
+    expect(await screen.findByLabelText('Remove photo')).toBeTruthy();
+
+    // Second: now the photo, which you can see again.
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    expect(mockBack).not.toHaveBeenCalled();
+    expect(backHandlerCount()).toBe(0);
+    alert.mockRestore();
   }
 );
 

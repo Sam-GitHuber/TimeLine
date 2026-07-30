@@ -39,6 +39,7 @@ import { SPINE_CENTRE } from './timeline';
 import { markPostCommentsSeen } from '@/postCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Comment } from '@/types';
+import { useAndroidBack } from '@/useAndroidBack';
 import { formatRelativeTime } from '@/utils';
 
 /*
@@ -338,6 +339,14 @@ function CommentNode({
   const { user } = useAuth();
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
+  // Android back closes the reply box rather than the post — it's the only way
+  // to abandon a reply without losing the post you were reading (#168).
+  //
+  // Per comment, so opening a second box while a first is still open leaves two
+  // subscribed. React Native runs the most recently registered first, which
+  // closes the one you just opened — the right answer, and the reason this
+  // doesn't need a single owner for the whole tree.
+  useAndroidBack(showReply, () => setShowReply(false));
   const [reporting, setReporting] = useState(false);
   // Reporting yourself is pointless, so the control is hidden on your own
   // comment — the same owner check the web's inline `ReportButton` makes. The

@@ -9,7 +9,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
 
 import ProfileScreen from '@/app/u/[userId]';
@@ -18,6 +18,8 @@ import { PostCard } from '@/components/PostCard';
 import { saveTokens } from '@/tokens';
 import type { Post, ProfileUser, User } from '@/types';
 
+import { androidIt, captureBackHandler, pressBack } from './helpers';
+
 // A mutable route param so each test can view a different person. Both this and
 // the router spy are `mock`-prefixed so Jest lets the factory below close over
 // them (its one exception to the out-of-scope-variable rule).
@@ -25,6 +27,12 @@ const mockParams: { userId: string } = { userId: '1' };
 const mockPush = jest.fn();
 
 jest.mock('expo-router', () => ({
+  // The screen is always focused under test, so focus is a plain effect — see
+  // `jest.setup.js`, whose global stub this local factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
   // `push` reads `mockPush` lazily: the factory runs while the hoisted imports
   // load expo-router, which is *before* the `const mockPush` line executes, so
@@ -291,6 +299,31 @@ describe('editing your profile', () => {
     await fireEvent.changeText(await screen.findByLabelText('Last name'), '');
 
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  /**
+   * Android back closes the editor, not the profile (#168).
+   *
+   * The editor is inline rather than a Modal, so nothing claimed the press and
+   * it fell through to the navigator — taking a rewritten bio with it, since
+   * the form holds its fields in local state and unmounts with the screen.
+   */
+  androidIt('closes the editor on Android back, staying on the profile', async () => {
+    captureBackHandler();
+    serve({ user: profile({ id: 1 }), posts: [] });
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
+    await fireEvent.changeText(await screen.findByLabelText('Bio'), 'a rewritten bio');
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    // Back to the read view — and still on it, rather than wherever the
+    // navigator would have taken us.
+    expect(screen.queryByLabelText('Bio')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Edit profile' })).toBeTruthy();
   });
 });
 

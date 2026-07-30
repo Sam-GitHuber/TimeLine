@@ -18,6 +18,14 @@ import type { Group, Post, User } from '@/types';
 
 const mockParams: { groupId: string } = { groupId: '7' };
 jest.mock('expo-router', () => ({
+  // The screen is always focused under test, so focus is a plain effect — see
+  // `jest.setup.js`, whose global stub this local factory overrides. Needed
+  // here because the calendar tab renders `MonthGrid`, which uses
+  // `useAndroidBack` → `useFocusEffect` (#168).
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
   router: {
     push: jest.fn(),

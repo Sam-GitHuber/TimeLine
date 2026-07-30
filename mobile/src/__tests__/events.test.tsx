@@ -9,7 +9,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 
 import { api } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
@@ -20,8 +20,16 @@ import { MonthGrid } from '@/components/events/MonthGrid';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, Poll, User } from '@/types';
 
+import { androidIt, captureBackHandler, pressBack } from './helpers';
+
 const mockParams: Record<string, string> = { eventId: '9', groupId: '7' };
 jest.mock('expo-router', () => ({
+  // The screen is always focused under test, so focus is a plain effect — see
+  // `jest.setup.js`, whose global stub this local factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
   router: {
     push: jest.fn(),
@@ -461,5 +469,41 @@ describe('MonthGrid', () => {
     expect(screen.getByText('August 2026')).toBeTruthy();
     expect(screen.getByText('Mon')).toBeTruthy();
     expect(screen.getByText(/Quiz night/)).toBeTruthy();
+  });
+
+  /**
+   * Android back closes the day panel rather than the calendar (#168).
+   *
+   * A cell shows three events before it collapses the rest behind "+N more",
+   * and the panel that opens is a plain view, not a Modal — so back skipped
+   * straight past it and off the calendar screen.
+   */
+  androidIt('closes the “+N more” day panel on Android back', async () => {
+    captureBackHandler();
+    const busyDay = [1, 2, 3, 4].map((n) =>
+      makeEvent({
+        id: 30 + n,
+        title: `Event ${n}`,
+        status: 'scheduled',
+        event_date: '2026-08-14',
+        starts_at: '2026-08-14T19:00:00Z',
+        start_time: '19:00:00',
+      })
+    );
+    await render(<MonthGrid events={busyDay} />);
+
+    await fireEvent.press(screen.getByText('+1 more'));
+    // The panel lists every event for the day — all four, group name and all,
+    // where the cell itself had room for three.
+    expect(screen.getAllByText('The Andersons')).toHaveLength(4);
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    expect(screen.queryAllByText('The Andersons')).toHaveLength(0);
+    // Still on the calendar, with the affordance to reopen it.
+    expect(screen.getByText('August 2026')).toBeTruthy();
+    expect(screen.getByText('+1 more')).toBeTruthy();
   });
 });

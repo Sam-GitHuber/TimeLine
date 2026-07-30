@@ -37,6 +37,7 @@ import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEd
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
 import { formatEventWhen } from '@/eventFormat';
+import { useAndroidBack } from '@/useAndroidBack';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 
 type PollDimension = 'date' | 'time' | 'location' | 'custom';
@@ -71,6 +72,11 @@ export default function EventScreen() {
 
   // Which chip's editor is open (organiser's Set/Change/Poll), or null.
   const [editing, setEditing] = useState<Editing | null>(null);
+
+  // Android back closes that editor rather than the event — the hardware
+  // equivalent of its Cancel. Without it, a press meant to back out of a poll
+  // you'd started drafting drops you back on the group timeline (#168).
+  useAndroidBack(editing !== null, () => setEditing(null));
 
   const eventQuery = useQuery({
     queryKey: ['event', id],
