@@ -23,8 +23,6 @@ import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -38,6 +36,7 @@ import { Avatar } from '@/components/Avatar';
 import { SettingsIcon } from '@/components/icons';
 import { BlockButton } from '@/components/BlockButton';
 import { ConnectButton } from '@/components/ConnectButton';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { MessageButton } from '@/components/MessageButton';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
 import { TimelineList } from '@/components/TimelineList';
@@ -239,10 +238,7 @@ export default function ProfileScreen() {
           </Pressable>
         </View>
       ) : (
-        <KeyboardAvoidingView
-          style={styles.fill}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
+        <KeyboardAvoider style={styles.fill}>
           <TimelineList
             rows={canSeePosts ? rows : []}
             // The editor's inputs and Save/Cancel live in the header; `handled`
@@ -286,7 +282,7 @@ export default function ProfileScreen() {
               ) : null
             }
           />
-        </KeyboardAvoidingView>
+        </KeyboardAvoider>
       )}
     </SafeAreaView>
   );

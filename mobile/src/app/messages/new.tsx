@@ -27,8 +27,6 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
   FlatList,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -39,6 +37,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { dedupeById } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation, PersonSummary } from '@/types';
@@ -149,10 +148,7 @@ export default function NewChatScreen() {
         />
       </View>
 
-      <KeyboardAvoidingView
-        style={styles.fill}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
+      <KeyboardAvoider style={styles.fill}>
         <FlatList
           data={filtered}
           keyExtractor={(person) => String(person.id)}
@@ -233,7 +229,7 @@ export default function NewChatScreen() {
           </View>
           {create.isError && <Text style={styles.error}>{errorMessage}</Text>}
         </View>
-      </KeyboardAvoidingView>
+      </KeyboardAvoider>
     </SafeAreaView>
   );
 }

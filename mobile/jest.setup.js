@@ -160,6 +160,24 @@ jest.mock('expo-blur', () => {
   return { BlurView: View };
 });
 
+// `react-native-keyboard-controller` reads the keyboard's insets through a
+// native view (and a Reanimated worklet), neither of which exists under Node.
+// Every screen pulls it in via `KeyboardAvoider`, and the root layout mounts its
+// `KeyboardProvider`, so without a stand-in the whole suite fails at import.
+//
+// The library ships this mock for exactly that, and the important property is
+// the same one the `expo-blur` mock above needs: `KeyboardAvoidingView` becomes
+// a plain `View`, so it **keeps its children in the tree**. These wrap entire
+// screens — a null stand-in would make every message, field and button inside
+// them unqueryable, and dozens of unrelated tests would fail for a reason that
+// looks nothing like the cause.
+//
+// (`require` of the subpath, not a hand-rolled stub, so the fake surface tracks
+// the library's own across upgrades.)
+jest.mock('react-native-keyboard-controller', () =>
+  require('react-native-keyboard-controller/jest')
+);
+
 // Reset between tests so a token stored by one can't leak into the next.
 beforeEach(() => {
   const SecureStore = require('expo-secure-store');

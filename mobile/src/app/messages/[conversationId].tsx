@@ -68,10 +68,8 @@ import {
   Alert,
   FlatList,
   Image,
-  KeyboardAvoidingView,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -93,6 +91,7 @@ import { useAuth } from '@/auth';
 import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
@@ -1414,10 +1413,7 @@ export default function ThreadScreen() {
           onLeave={goBack}
         />
       ) : (
-        <KeyboardAvoidingView
-          style={styles.fill}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
+        <KeyboardAvoider style={styles.fill}>
           {/* The list and its floating control share a box, so the jump button
               can sit at the bottom of the *transcript* rather than being laid
               out between it and the composer — where it would push the thread
@@ -1584,7 +1580,7 @@ export default function ThreadScreen() {
           {/* Pad the bar past the home-indicator inset so the composer and Send
               button clear the bottom edge / swipe area on full-screen phones. On
               a home-button phone `insets.bottom` is 0, so this is the base pad.
-              When the keyboard is up, KeyboardAvoidingView lifts the whole bar
+              When the keyboard is up, `KeyboardAvoider` lifts the whole bar
               above it, and this inset becomes a small, harmless gap. */}
           <View
             style={[
@@ -1792,7 +1788,7 @@ export default function ThreadScreen() {
               </Text>
             )}
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardAvoider>
       )}
 
       {/* The focused thread (M3). Mounted at screen level, over everything —

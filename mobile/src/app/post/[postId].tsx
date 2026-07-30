@@ -17,8 +17,6 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef } from 'react';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -30,6 +28,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api, ApiError } from '@/api';
 import { CommentThread } from '@/components/CommentThread';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { PostCard } from '@/components/PostCard';
 import { colors, fontSize, spacing } from '@/theme';
 
@@ -120,12 +119,9 @@ export default function PostScreen() {
         </Pressable>
       </View>
 
-      <KeyboardAvoidingView
-        style={styles.fill}
-        // Without this the keyboard covers the comment box you're typing in —
-        // the single most common way a mobile comment form feels broken.
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
+      {/* Without this the keyboard covers the comment box you're typing in —
+          the single most common way a mobile comment form feels broken. */}
+      <KeyboardAvoider style={styles.fill}>
         <ScrollView
           ref={scrollRef}
           contentContainerStyle={styles.content}
@@ -164,7 +160,7 @@ export default function PostScreen() {
             </>
           ) : null}
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardAvoider>
     </SafeAreaView>
   );
 }

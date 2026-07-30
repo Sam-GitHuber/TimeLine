@@ -8,8 +8,6 @@ import { useQuery } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,6 +18,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { GroupForm } from '@/components/GroupForm';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { colors, fontSize, spacing } from '@/theme';
 
 export default function EditGroupScreen() {
@@ -38,7 +37,7 @@ export default function EditGroupScreen() {
         <View style={styles.spacer} />
       </View>
       {group ? (
-        <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <KeyboardAvoider style={styles.fill}>
           <ScrollView keyboardShouldPersistTaps="handled">
             <GroupForm
               mode="edit"
@@ -50,7 +49,7 @@ export default function EditGroupScreen() {
               }}
             />
           </ScrollView>
-        </KeyboardAvoidingView>
+        </KeyboardAvoider>
       ) : (
         <ActivityIndicator color={colors.accent} style={styles.spinner} />
       )}

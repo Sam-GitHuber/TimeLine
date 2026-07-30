@@ -33,8 +33,6 @@ import { useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -50,6 +48,7 @@ import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import { AuthedImage } from '@/components/AuthedImage';
 import { BlockButton } from '@/components/BlockButton';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { MessageAttachment, Participant } from '@/types';
@@ -179,10 +178,7 @@ export default function ConversationInfoScreen() {
           </Text>
         </View>
       ) : (
-        <KeyboardAvoidingView
-          style={styles.fill}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
+        <KeyboardAvoider style={styles.fill}>
           <ScrollView
             contentContainerStyle={styles.content}
             keyboardShouldPersistTaps="handled"
@@ -360,7 +356,7 @@ export default function ConversationInfoScreen() {
               ) : null}
             </View>
           </ScrollView>
-        </KeyboardAvoidingView>
+        </KeyboardAvoider>
       )}
     </SafeAreaView>
   );

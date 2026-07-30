@@ -303,6 +303,38 @@ emoji data). Emoji **validation stays server-side only** (`api/emoji.py`) — a
 second copy of "what counts as an emoji" in JS would drift from the one that
 decides.
 
+**Keyboard avoidance needs `KeyboardAvoider`, not `KeyboardAvoidingView`.** Use
+`src/components/KeyboardAvoider.tsx` for anything with a text input near the
+bottom of the screen; a lint rule enforces it. The long version is in that file's
+header, but the short one is worth carrying: Android used to resize the window
+when the keyboard opened (`android:windowSoftInputMode="adjustResize"`), so
+eleven screens correctly did nothing themselves and wrote
+`behavior={Platform.OS === 'ios' ? 'padding' : undefined}`. **Edge-to-edge
+removed the resize** — Expo SDK 54+ enables it, Android 15 (API 35) mandates it,
+and our generated `android/gradle.properties` carries `edgeToEdgeEnabled=true` —
+so the app has to consume `WindowInsets.ime()` itself. Nothing did, and the
+keyboard drew over the message composer.
+
+Two things make this worth reading rather than just obeying. **RN's own
+`KeyboardAvoidingView` can't be fixed by passing `behavior="padding"` on
+Android**: RN 0.86 reports a correct keyboard *height* (`ReactRootView` derives
+it from `WindowInsets.ime()`), but the component positions itself from
+`endCoordinates.screenY`, which still comes from the resize-era
+`getWindowVisibleDisplayFrame()`. It needs the resize that edge-to-edge just
+took away. Hence `react-native-keyboard-controller`, which reads the IME insets
+directly on both platforms and detects the same `edgeToEdgeEnabled` flag. It
+needs `KeyboardProvider` at the root of `app/_layout.tsx`; without it the
+avoiders render but never move, which looks exactly like the original bug.
+
+**And the emulator hides it — this is the "harness is more forgiving" shape
+again, in its worst form.** The AVD's Gboard comes up in **floating** mode, a
+small pill taking almost no vertical space, so nothing is covered and two
+attempts to reproduce the reported bug both "passed". **Dock the keyboard before
+trusting a keyboard check on an emulator**, or use a real device. Jest can't see
+it either — layout is the one thing the suite genuinely cannot check — so the
+guard is `keyboardAvoider.test.tsx` (the props the wrapper asks for, under both
+platform projects) plus the lint rule that makes the old pattern un-writable.
+
 **Port a helper when a screen needs it, not before.** `formatRelativeTime` was
 deleted for being unused and came back one PR later; that's the rule working, not
 churn. `formatAbsoluteTime` stays out — it fills a *hover* tooltip on the web, and

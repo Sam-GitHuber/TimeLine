@@ -10,6 +10,51 @@ module.exports = defineConfig([
     ignores: ["dist/*", ".expo/*"],
   },
   {
+    /**
+     * Keep the Android keyboard bug from being written a twelfth time.
+     *
+     * Eleven screens each carried
+     * `behavior={Platform.OS === 'ios' ? 'padding' : undefined}` — inert on
+     * Android by design, because Android used to resize the window for us. Under
+     * the edge-to-edge mode Expo SDK 54+ enables and Android 15 mandates, it
+     * doesn't, so the keyboard drew over the message composer and a tester found
+     * it on day one. `components/KeyboardAvoider.tsx` has the full story.
+     *
+     * This lives in lint rather than in a test on purpose: it's a "don't write
+     * this" rule, the failure is at the call site, and the message can say what
+     * to do instead. Layout itself is unverifiable in Jest, so the next-best
+     * guard is making the broken pattern un-writable.
+     */
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/components/KeyboardAvoider.tsx"],
+    rules: {
+      "no-restricted-imports": ["error", {
+        paths: [{
+          name: "react-native",
+          importNames: ["KeyboardAvoidingView"],
+          message:
+            "Use `KeyboardAvoider` from '@/components/KeyboardAvoider'. React Native's KeyboardAvoidingView positions itself from `endCoordinates.screenY`, which assumes the window resize that Android's edge-to-edge mode removed — so on Android it cannot lift the composer clear of the keyboard.",
+        }],
+        // The library's own component is the thing `KeyboardAvoider` wraps.
+        // Importing it directly elsewhere skips the shared default and is how
+        // the per-screen drift started last time.
+        patterns: [{
+          group: ["react-native-keyboard-controller"],
+          importNames: ["KeyboardAvoidingView"],
+          message:
+            "Use `KeyboardAvoider` from '@/components/KeyboardAvoider' so `behavior` stays decided in one place.",
+        }],
+      }],
+      "no-restricted-syntax": ["error", {
+        // Any `behavior` prop branching on the platform, whatever the spacing.
+        selector:
+          "JSXAttribute[name.name='behavior'] ConditionalExpression MemberExpression[object.name='Platform']",
+        message:
+          "Don't make keyboard `behavior` platform-conditional — that ternary is the Android keyboard bug (see components/KeyboardAvoider.tsx). `KeyboardAvoider` handles both platforms.",
+      }],
+    },
+  },
+  {
     // Jest's globals, for the plain-JS setup file. The TypeScript suites don't
     // need this — `no-undef` is off for TS, where the compiler answers the same
     // question properly — but `jest.setup.js` is linted as ordinary JS and every
