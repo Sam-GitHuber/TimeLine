@@ -16,6 +16,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { formatEventTime, parseEventDate } from '@/eventFormat';
 import { colors, fontSize, fonts, spacing } from '@/theme';
 import type { Event } from '@/types';
+import { useAndroidBack } from '@/useAndroidBack';
 
 const MAX_PER_DAY = 3;
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -23,6 +24,10 @@ const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 export function MonthGrid({ events = [] }: { events?: Event[] }) {
   const [cursor, setCursor] = useState(() => startOfMonth(firstEventDate(events)));
   const [openDay, setOpenDay] = useState<string | null>(null);
+
+  // The day panel reads as an overlay, so Android back should close it rather
+  // than leave the calendar underneath it (#168).
+  useAndroidBack(openDay !== null, () => setOpenDay(null));
 
   const byDay = useMemo(() => groupByDay(events), [events]);
   const todayKey = dayKeyLocal(new Date());

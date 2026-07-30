@@ -13,6 +13,12 @@ import type { Post } from '@/types';
 const params: { postId: string; comment?: string } = { postId: '7' };
 
 jest.mock('expo-router', () => ({
+  // The screen is always focused under test, so focus is a plain effect — see
+  // `jest.setup.js`, whose global stub this local factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => params,
   router: { push: jest.fn(), back: jest.fn(), replace: jest.fn(), canGoBack: () => true },
 }));

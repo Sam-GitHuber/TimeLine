@@ -20,9 +20,14 @@ import {
 
 import { api } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
+import { useAndroidBack } from '@/useAndroidBack';
 
 export function ChangePasswordSection() {
   const [open, setOpen] = useState(false);
+
+  // Android back collapses the form rather than leaving Settings, so a press
+  // meant to abandon a half-filled password change doesn't do both (#168).
+  useAndroidBack(open, () => setOpen(false));
 
   return (
     <View style={styles.section}>

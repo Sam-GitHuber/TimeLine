@@ -252,6 +252,17 @@ export function backHandlerCount(): number {
   return backHandlers.length;
 }
 
+/**
+ * `it`, but only under the **android** project.
+ *
+ * iOS has no hardware back and `useAndroidBack` registers nothing there, so
+ * every one of these tests would be asserting on a listener that doesn't
+ * exist. Shared because #168 spread the hook across eight screens and
+ * components, and a per-file `Platform.OS === 'android' ? it : it.skip` is the
+ * kind of line that gets copied slightly wrong the ninth time.
+ */
+export const androidIt = Platform.OS === 'android' ? it : it.skip;
+
 // --- Date / time pickers ----------------------------------------------------
 
 /**

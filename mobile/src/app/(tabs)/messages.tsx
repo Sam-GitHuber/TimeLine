@@ -47,6 +47,7 @@ import type { SwipeAction } from '@/components/SwipeableRow';
 import { SwipeableRow } from '@/components/SwipeableRow';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation } from '@/types';
+import { useAndroidBack } from '@/useAndroidBack';
 import { formatRelativeTime } from '@/utils';
 
 /**
@@ -90,6 +91,11 @@ export default function MessagesScreen() {
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
+
+  // Android back clears a filtered list back to the full one before it does
+  // anything else — the convention every search box on the platform follows,
+  // and here it stands between a stray press and leaving the app (#168).
+  useAndroidBack(search !== '', () => setSearch(''));
 
   const query = useQuery({
     queryKey: ['conversations'],

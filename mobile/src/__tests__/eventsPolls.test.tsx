@@ -20,14 +20,23 @@ import { saveTokens } from '@/tokens';
 import type { Event, Poll, User } from '@/types';
 
 import {
+  androidIt,
+  captureBackHandler,
   menuOptions,
   pickMenuOption,
   pressAlertButton,
+  pressBack,
   resetMenuSpies,
 } from './helpers';
 
 const mockParams: Record<string, string> = { eventId: '9' };
 jest.mock('expo-router', () => ({
+  // The screen is always focused under test, so focus is a plain effect — see
+  // `jest.setup.js`, whose global stub this local factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
   router: { push: jest.fn(), replace: jest.fn(), back: jest.fn(), canGoBack: () => true },
 }));
@@ -328,6 +337,37 @@ describe('poll lifecycle', () => {
         })
       )
     );
+    edit.mockRestore();
+  });
+
+  /**
+   * Android back leaves the edit form, not the event (#168).
+   *
+   * The form replaces the tally in place rather than opening a Modal, so an
+   * unclaimed press dropped the organiser back on the group timeline with the
+   * reworded question thrown away.
+   */
+  androidIt('closes the poll edit form on Android back', async () => {
+    captureBackHandler();
+    serve(makeEvent({ polls: [customPoll()] }));
+    const edit = jest.spyOn(api, 'editPoll');
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Poll options'));
+    await act(async () => pickMenuOption('Edit poll'));
+    await fireEvent.changeText(screen.getByLabelText('Option 2'), 'Cake');
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    // Back to the tally, on the same screen, with nothing saved.
+    expect(screen.queryByText('Save changes')).toBeNull();
+    // The tally is back (the question shows on the chip as well as the poll,
+    // hence `getAllByText`), and the edited wording never reached it.
+    expect(screen.getAllByText('What should we bring?').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Cake')).toBeNull();
+    expect(edit).not.toHaveBeenCalled();
     edit.mockRestore();
   });
 });

@@ -43,6 +43,7 @@ import { TimelineList } from '@/components/TimelineList';
 import { toRows } from '@/feed';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
+import { useAndroidBack } from '@/useAndroidBack';
 import { useDayBoundary } from '@/useDayBoundary';
 
 export default function ProfileScreen() {
@@ -52,6 +53,11 @@ export default function ProfileScreen() {
   const isSelf = me?.pk === id;
 
   const [editing, setEditing] = useState(false);
+
+  // Android back closes the inline editor instead of the profile — the same
+  // thing the form's Cancel does. Without it the press leaves the screen and
+  // the half-typed bio goes with it (#168).
+  useAndroidBack(editing, () => setEditing(false));
 
   // Only *other* people's profiles need this fetch — your own header renders
   // from the auth `me` (kept fresh by refreshUser), and `canSeePosts` below

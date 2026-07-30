@@ -16,7 +16,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { Alert } from 'react-native';
 
 import MessagesScreen from '@/app/(tabs)/messages';
@@ -24,8 +24,21 @@ import { AuthProvider } from '@/auth';
 import { saveTokens } from '@/tokens';
 import type { Conversation } from '@/types';
 
+import {
+  androidIt,
+  backHandlerCount,
+  captureBackHandler,
+  pressBack,
+} from './helpers';
+
 const mockPush = jest.fn();
 jest.mock('expo-router', () => ({
+  // The screen is always focused under test, so focus is a plain effect — see
+  // `jest.setup.js`, whose global stub this local factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   // Arrow so the read of `mockPush` is deferred to call time (the hoisted
   // factory runs before the `const` initialises — the trap the C4 notes describe).
   router: { push: (...args: unknown[]) => mockPush(...args) },
@@ -321,6 +334,35 @@ it('keeps the search field mounted when the filter empties the list', async () =
   await fireEvent.changeText(field, 'nobody');
 
   expect(screen.getByLabelText('Search conversations')).toBeTruthy();
+});
+
+/**
+ * Android back clears the search before it does anything else (#168).
+ *
+ * This is a **tab** screen, so the press that fell through didn't move you back
+ * a screen — it left the app, with the list still filtered when you returned.
+ * Clearing first is what every Android search box does.
+ */
+androidIt('clears the search on Android back rather than leaving the app', async () => {
+  captureBackHandler();
+  serve(manyConversations());
+
+  await renderScreen();
+  const field = await screen.findByLabelText('Search conversations');
+  await fireEvent.changeText(field, 'grace');
+  expect(screen.queryByText('Ada Lovelace')).toBeNull();
+
+  await act(async () => {
+    expect(pressBack()).toBe(true);
+  });
+
+  // Back to the whole list, and the field is still there to type into.
+  expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+  expect(screen.getByLabelText('Search conversations').props.value).toBe('');
+
+  // With nothing left to clear, the handler is gone and back means back —
+  // otherwise this tab would be one you can never leave.
+  expect(backHandlerCount()).toBe(0);
 });
 
 /* --- Swipe actions (Phase 9b M6) ------------------------------------------- */

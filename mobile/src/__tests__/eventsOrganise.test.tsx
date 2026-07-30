@@ -27,10 +27,13 @@ import type { Event, Group, User } from '@/types';
 
 import {
   alertSpy,
+  androidIt,
+  captureBackHandler,
   menuOptions,
   pickMenuAction,
   pickDateTimeValue,
   pressAlertButton,
+  pressBack,
   resetMenuSpies,
 } from './helpers';
 
@@ -38,6 +41,12 @@ const mockParams: Record<string, string> = { eventId: '9', groupId: '7' };
 const mockPush = jest.fn();
 const mockReplace = jest.fn();
 jest.mock('expo-router', () => ({
+  // The screen is always focused under test, so focus is a plain effect — see
+  // `jest.setup.js`, whose global stub this local factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
   // Arrows read the spies lazily (the factory runs before the consts init).
   router: {
@@ -313,6 +322,34 @@ describe('setting a dimension', () => {
     );
     // The editor stays open on error so the organiser can retry.
     expect(screen.getByText('Set the date')).toBeTruthy();
+    finalise.mockRestore();
+  });
+
+  /**
+   * Android back closes the dimension editor, not the event (#168).
+   *
+   * The editor opens inline under the chip rather than as a Modal, so an
+   * unclaimed press took the organiser off the event entirely — mid-decision,
+   * and back to the group timeline.
+   */
+  androidIt('closes the dimension editor on Android back', async () => {
+    captureBackHandler();
+    serveEvent(planningEvent());
+    const finalise = jest.spyOn(api, 'finaliseDimension');
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByLabelText('Set Date'));
+    await screen.findByText('Set the date');
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    // The editor is gone, the chip that opens it is back, and nothing was
+    // committed on the way out.
+    expect(screen.queryByText('Set the date')).toBeNull();
+    expect(screen.getByLabelText('Set Date')).toBeTruthy();
+    expect(finalise).not.toHaveBeenCalled();
     finalise.mockRestore();
   });
 

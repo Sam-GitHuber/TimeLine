@@ -403,11 +403,32 @@ export default function ThreadScreen() {
   const [selected, setSelected] = useState<Set<number> | null>(null);
   const selecting = selected !== null;
 
-  // Android back clears the selection rather than leaving the thread — the
-  // hardware equivalent of the header's Cancel, and what the OS convention
-  // leads people to expect from a selection mode.
-  const clearSelection = useCallback(() => setSelected(null), []);
-  useAndroidBack(selecting, clearSelection);
+  /**
+   * What Android's back button means on this screen (#168).
+   *
+   * Back is how Android dismisses things, and this screen stacks three
+   * dismissible states that aren't Modals. An unclaimed press falls through to
+   * the navigator and leaves the thread entirely — and in the edit case it
+   * takes typed text with it, because cancelling is the *only* path that puts
+   * `stashedDraft` back in the composer. Back on a half-written message you'd
+   * paused to fix a typo in would have lost it, two screens ago.
+   *
+   * One handler rather than one `useAndroidBack` per state, because the
+   * priority is the interesting part and this is the only place it's written
+   * down. React Native runs back handlers most-recently-registered-first, so
+   * three separate calls would order themselves by the sequence you happened to
+   * *open* things in — a photo staged before you hit Edit would claim the press
+   * ahead of the edit. Innermost first, decided here.
+   *
+   * `stopEditing` is a hoisted function declaration, which is what lets this sit
+   * next to the state it reads rather than 800 lines further down.
+   */
+  const dismissible = Boolean(editing) || attachment !== null || selecting;
+  useAndroidBack(dismissible, () => {
+    if (editing) stopEditing();
+    else if (attachment) setAttachment(null);
+    else if (selecting) setSelected(null);
+  });
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace('/messages');
