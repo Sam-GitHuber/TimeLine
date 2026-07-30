@@ -7887,6 +7887,51 @@ class SendPushesCommandTests(APITestCase):
 
         self.assertNotIn("categoryId", self._sent_body(urlopen)[0])
 
+    def test_every_notification_kind_maps_to_a_known_android_channel(self):
+        """No kind may fall through to the default without someone noticing.
+
+        Android drops a push naming a channel the device doesn't have — silently,
+        with nothing in any log. So the failure mode of forgetting to map a new
+        kind is "push quietly stops working for it", which is exactly the kind of
+        bug that survives to production. Enumerating the enum here means adding a
+        kind without a channel fails the suite instead.
+        """
+        for kind in Notification.Kind.values:
+            with self.subTest(kind=kind):
+                self.assertIn(
+                    notifications.channel_for_kind(kind),
+                    notifications.ANDROID_CHANNELS,
+                    f"{kind} has no Android notification channel",
+                )
+
+    def test_the_channel_ids_match_the_app(self):
+        # The other copy lives in mobile/src/push.ts (`CHANNELS`), with the
+        # mirror-image test. Hard-coded on both sides on purpose: a test that
+        # derived them from the code it checks would agree with itself while the
+        # two processes drifted apart.
+        self.assertEqual(
+            sorted(notifications.ANDROID_CHANNELS),
+            ["events", "mentions", "messages", "reactions", "replies", "social"],
+        )
+
+    def test_a_notification_push_carries_its_channel(self):
+        # A reply belongs in the "replies" channel, so someone who has turned
+        # replies down in Android settings gets what they asked for.
+        self._queue(kind=Notification.Kind.POST_REPLY, post=self.post)
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["channelId"], "replies")
+
+    def test_a_message_push_carries_the_messages_channel(self):
+        # Messages get their own high-importance channel — the one thing people
+        # generally do want interrupting them.
+        self._queue_message()
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["channelId"], "messages")
+
     def test_a_message_push_never_carries_the_message_text(self):
         # The body crosses Expo's servers and Apple's. Naming the sender is the
         # most we ever say; quoting a private message would be a real leak.

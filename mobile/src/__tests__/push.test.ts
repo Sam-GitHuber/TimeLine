@@ -8,12 +8,15 @@
  */
 
 import * as Notifications from 'expo-notifications';
+import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 import { api } from '@/api';
 import {
+  CHANNEL_IDS,
   conversationIdFromUrl,
   configureNotificationCategories,
+  configureNotificationChannels,
   MESSAGE_CATEGORY,
   registerForPush,
   REPLY_ACTION,
@@ -38,6 +41,8 @@ jest.mock('expo-notifications', () => ({
   getExpoPushTokenAsync: jest.fn(),
   setNotificationHandler: jest.fn(),
   setNotificationCategoryAsync: jest.fn(async () => ({})),
+  setNotificationChannelAsync: jest.fn(async () => ({})),
+  AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
 }));
 
 jest.mock('expo-constants', () => ({
@@ -226,6 +231,63 @@ describe('configureNotificationCategories', () => {
     expect(actions[0].identifier).toBe(REPLY_ACTION);
     expect(actions[0].textInput).toBeTruthy();
     expect(actions[0].options?.opensAppToForeground).toBe(false);
+  });
+});
+
+describe('configureNotificationChannels (Phase 10)', () => {
+  /**
+   * The ids the **backend** puts in each push's `channelId`
+   * (`api/notifications.py`'s `_KIND_CHANNELS` + `MESSAGE_CHANNEL`).
+   *
+   * Hard-coded rather than derived, deliberately: this is the copy that has to
+   * agree with a different language in a different process, and a test that
+   * read them from the same array as the code would agree with itself while
+   * both drifted from the server. An Android push naming a channel the device
+   * doesn't have is **dropped silently**, so drift here looks exactly like push
+   * being broken — with nothing in any log to say so.
+   */
+  const BACKEND_CHANNEL_IDS = [
+    'messages',
+    'mentions',
+    'replies',
+    'reactions',
+    'events',
+    'social',
+  ];
+
+  it('creates exactly the channels the backend sends', () => {
+    expect([...CHANNEL_IDS].sort()).toEqual([...BACKEND_CHANNEL_IDS].sort());
+  });
+
+  const androidOnly = Platform.OS === 'android' ? it : it.skip;
+  const iosOnly = Platform.OS === 'ios' ? it : it.skip;
+
+  androidOnly('registers every channel, messages loud and reactions quiet', () => {
+    configureNotificationChannels();
+
+    const created = mockNotifications.setNotificationChannelAsync.mock.calls;
+    expect(created.map(([id]) => id).sort()).toEqual(
+      [...BACKEND_CHANNEL_IDS].sort()
+    );
+
+    // Importance is the whole reason channels are worth having: the split
+    // between what may interrupt you and what may not.
+    const importanceOf = (id: string) =>
+      created.find(([channelId]) => channelId === id)?.[1]?.importance;
+    expect(importanceOf('messages')).toBe(Notifications.AndroidImportance.HIGH);
+    expect(importanceOf('mentions')).toBe(Notifications.AndroidImportance.HIGH);
+    expect(importanceOf('reactions')).toBe(Notifications.AndroidImportance.LOW);
+
+    // Every channel needs a name — it's what the user sees in system settings,
+    // and an unnamed one is unmanageable there.
+    for (const [, config] of created) {
+      expect(config?.name).toBeTruthy();
+    }
+  });
+
+  iosOnly('creates nothing on iOS, where channels do not exist', () => {
+    configureNotificationChannels();
+    expect(mockNotifications.setNotificationChannelAsync).not.toHaveBeenCalled();
   });
 });
 

@@ -165,16 +165,17 @@ real, located thing.
 - **Two different service-account keys, easily confused:** one for **FCM v1**
   (sending push) and, if we automate submission, another for the **Play Developer
   API** (`eas submit`). Different consoles, different purposes.
-- **Notification channels.** Android 8+ requires them; without an explicit one,
-  everything lands in a generic "Default" channel that the user can only mute
-  wholesale. Create channels with `Notifications.setNotificationChannelAsync` at
-  launch (before any push can arrive), **mirroring the Phase 8 per-type
-  preference groups** — so the in-app preference and the OS channel tell the same
-  story rather than fighting. Messages get their own channel (higher importance,
-  it's the one thing people want to interrupt them). **Channel settings are
-  immutable after creation** — once a user has it, changing importance in code
-  does nothing; you'd need a new channel id. So get the ids and importances right
-  first time.
+- **Notification channels.** ✅ **Done.** Six channels mirroring the per-type
+  preference groups (`messages`, `mentions`, `replies`, `reactions`, `events`,
+  `social`), created at launch by `configureNotificationChannels`, with each push
+  carrying a matching `channelId`. Written up in
+  [`reference/notifications.md`](../reference/notifications.md#android-notification-channels-phase-10).
+
+  **This needed a backend change, which this plan and `notifications.md` both
+  said it wouldn't.** The claim was that Android needed "only a different
+  `platform` value and an FCM credential" — true of the device registry, false of
+  delivery: a push naming a channel the device doesn't have is **dropped
+  silently**, so the server has to name one. Both docs corrected.
 - **Android 13+ runtime notification permission.** `POST_NOTIFICATIONS` is a
   runtime prompt now. `registerForPush()` in `mobile/src/push.ts` already asks via
   `requestPermissionsAsync` and treats refusal as normal, so this should work
@@ -191,10 +192,10 @@ real, located thing.
   notification categories are supported on Android too, but the options differ —
   confirm reply-from-the-shade actually works, and if it doesn't, degrade
   gracefully rather than shipping a dead button.
-- Nothing changes on the **backend**: `DevicePushToken.platform` already exists,
-  and `api.ts` already sends `Platform.OS`, so an Android token registers as
-  `"android"` today with no code change. The whole Expo transport
-  (`PushOutbox` → Expo → APNs/FCM) is platform-agnostic by design.
+- **Device registration** needed nothing: `DevicePushToken.platform` already
+  exists and `api.ts` already sends `Platform.OS`, so an Android token registers
+  as `"android"` with no code change. The transport (`PushOutbox` → Expo →
+  APNs/FCM) is genuinely platform-agnostic; only the `channelId` above wasn't.
 
 ### The back button
 

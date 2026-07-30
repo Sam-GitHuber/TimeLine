@@ -57,6 +57,12 @@ jest.mock('expo-notifications', () => ({
   // `.catch`, and a mock returning undefined would throw at import time in
   // every suite that pulls the module in.
   setNotificationCategoryAsync: jest.fn(async () => ({})),
+  // Creates an Android notification channel (Phase 10). Resolved rather than a
+  // bare jest.fn() for the same reason as the category above:
+  // `configureNotificationChannels` attaches a `.catch`, and a mock returning
+  // undefined would throw at import time in every suite that pulls this in.
+  setNotificationChannelAsync: jest.fn(async () => ({})),
+  AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
   useLastNotificationResponse: jest.fn(() => null),
 }));
 

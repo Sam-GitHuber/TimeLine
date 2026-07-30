@@ -28,6 +28,7 @@ import * as Device from 'expo-device';
 import type { Href } from 'expo-router';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 
 import { api } from '@/api';
 
@@ -88,6 +89,100 @@ export function configureNotificationCategories(): void {
       options: { opensAppToForeground: false },
     },
   ]).catch(() => {});
+}
+
+/**
+ * The Android notification **channels** (Phase 10), and their importance.
+ *
+ * Android 8+ files every notification into a channel, and the channel — not the
+ * app — decides whether it makes a sound or shows a heads-up banner. The user
+ * tunes them individually in system settings, which is the point: "let messages
+ * interrupt me but keep reactions quiet" becomes something they can decide
+ * without us building a screen for it.
+ *
+ * The grouping mirrors the **per-type preferences** (see the backend's
+ * `_KIND_CHANNELS`) so the OS control and the in-app one agree. Deliberately not
+ * one channel per notification kind — five separate event channels would be a
+ * wall of switches nobody reads.
+ *
+ * Three things to know before touching this:
+ *
+ * - **The ids must match the backend's**, which puts one in each push's
+ *   `channelId`. A push naming a channel the device doesn't have is **dropped
+ *   silently** — it does not fall back to a default — which looks exactly like
+ *   push being broken. Pinned by a test on each side.
+ * - **A channel is immutable once created on a device.** Changing an importance
+ *   here does nothing for anyone who already has the app; only a new id takes
+ *   effect. So these are chosen to be lived with.
+ * - **Importance is a floor, not a rule.** The user can turn any channel down
+ *   (or off) afterwards, and that's deliberate — it's their phone.
+ */
+const CHANNELS: {
+  id: string;
+  name: string;
+  importance: Notifications.AndroidImportance;
+}[] = [
+  {
+    // The one thing people generally do want interrupting them, and the only
+    // push that arrives while a conversation is live.
+    id: 'messages',
+    name: 'Messages',
+    importance: Notifications.AndroidImportance.HIGH,
+  },
+  {
+    // Being named should still reach you in a chat you've otherwise quietened —
+    // the whole reason mentions have their own preference.
+    id: 'mentions',
+    name: 'Mentions',
+    importance: Notifications.AndroidImportance.HIGH,
+  },
+  {
+    id: 'replies',
+    name: 'Replies',
+    importance: Notifications.AndroidImportance.DEFAULT,
+  },
+  {
+    // Quiet by default: a reaction is nice to know about, never urgent, and a
+    // popular post shouldn't buzz a pocket twenty times.
+    id: 'reactions',
+    name: 'Reactions',
+    importance: Notifications.AndroidImportance.LOW,
+  },
+  {
+    id: 'events',
+    name: 'Group events',
+    importance: Notifications.AndroidImportance.DEFAULT,
+  },
+  {
+    // Connection requests and group invites — things waiting on an answer.
+    id: 'social',
+    name: 'Requests and invites',
+    importance: Notifications.AndroidImportance.DEFAULT,
+  },
+];
+
+/** The channel ids, for the test that pins them against the backend's. */
+export const CHANNEL_IDS = CHANNELS.map((channel) => channel.id);
+
+/**
+ * Create the notification channels. Android-only, and a no-op elsewhere.
+ *
+ * Runs at launch rather than at login, for the same reason the categories do:
+ * a push can arrive before anyone signs in on this launch, and the channel has
+ * to exist *before* the notification does or it's dropped. Creating one that
+ * already exists is a cheap no-op, so this is safe to run every time.
+ *
+ * Failures are swallowed — as with the categories, no notification nicety may
+ * break starting the app.
+ */
+export function configureNotificationChannels(): void {
+  if (Platform.OS !== 'android') return;
+  for (const channel of CHANNELS) {
+    Notifications.setNotificationChannelAsync(channel.id, {
+      name: channel.name,
+      importance: channel.importance,
+    }).catch(() => {});
+  }
 }
 
 /** The EAS project id, which `getExpoPushTokenAsync` needs to mint a token. */

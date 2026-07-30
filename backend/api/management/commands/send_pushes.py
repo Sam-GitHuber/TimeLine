@@ -48,6 +48,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
+from ...notifications import channel_for_kind
 from ...serializers import NotificationSerializer
 
 # Expo's reply carries one ticket per message, in the order sent.
@@ -234,6 +235,7 @@ class Command(BaseCommand):
                 "kind": data["kind"],
                 "text": data["text"],
                 "url": data["url"],
+                "channel": channel_for_kind(data["kind"]),
             }
 
         message = row.message
@@ -291,6 +293,7 @@ class Command(BaseCommand):
             # ``MESSAGE_CATEGORY`` — iOS ignores a category it doesn't know,
             # which looks exactly like the feature not existing.
             "category": "message",
+            "channel": channel_for_kind("message"),
         }
 
     def _message(self, device, data):
@@ -322,6 +325,12 @@ class Command(BaseCommand):
         # by adding it to its payload rather than by changing this.
         if data.get("category"):
             message["categoryId"] = data["category"]
+        # The Android notification channel (Phase 10). Ignored by iOS, and
+        # **required** on Android: a push naming a channel the device doesn't
+        # have is dropped silently rather than falling back to a default, so
+        # these ids must match the app's. See ``notifications.channel_for_kind``.
+        if data.get("channel"):
+            message["channelId"] = data["channel"]
         return message
 
     def _send(self, messages):

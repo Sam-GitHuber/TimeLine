@@ -26,6 +26,7 @@ import { AuthProvider, useAuth } from '@/auth';
 import { PreferencesProvider } from '@/preferences';
 import {
   configureNotificationCategories,
+  configureNotificationChannels,
   configureNotificationHandler,
 } from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
@@ -39,6 +40,10 @@ configureNotificationHandler();
 // (Phase 9b M8) has to be registered with iOS before a notification carrying
 // its category can arrive, which can be before anyone signs in on this launch.
 configureNotificationCategories();
+// And the Android notification channels (Phase 10), for the same reason again:
+// a push naming a channel the device hasn't created yet is dropped silently
+// rather than falling back to a default. No-op on iOS.
+configureNotificationChannels();
 
 /**
  * Created once at module scope, not inside the component: a QueryClient holds
