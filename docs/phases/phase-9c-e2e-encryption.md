@@ -85,28 +85,35 @@ compromised *device*, or against the other person screenshotting.
    silently insert its own key and read everything. An unverifiable E2E system is
    theatre. Needs a real UI, however simple.
 7. **Decrypting inside the notification extension** (added 2026-07-30). Under
-   E2E the server cannot phrase a push body, because it cannot read the message.
-   The only way a notification ever shows content again is to decrypt it **on
-   the device, before it is displayed**.
+   E2E the server can still phrase the *contentless* body it sends today — it
+   knows who sent what to whom — but it can never say anything **about the
+   message**, because it cannot read it. So the only way a notification shows
+   content again is to decrypt it **on the device, before it is displayed**.
 
-   **[Phase 10b](phase-10b-notification-content.md) builds the whole extension
-   ahead of this phase** — the iOS service extension and its config plugin, the
-   Android path, the shared keychain, the auth-in-an-extension rules, the
+   **[Phase 10b](phase-10b-notification-content.md) builds the extension ahead
+   of this phase** — the iOS service extension and its config plugin, the
+   Android path, the shared keychain, the credentials-in-an-extension rules, the
    per-device toggle, the fallback discipline — against *plaintext* messages,
    because all of that is independent of the cryptography. Read it first; it is
    the starting point for this milestone, not background.
 
    **What is left for 9c is one substitution**: the extension stops *fetching*
    the body from an endpoint and starts *decrypting* it locally. Which is still
-   the nastiest thing in the phase:
+   the nastiest thing in the phase — and note that it **reopens 10b's central
+   safety property**, not just its data source:
 
-   - **The extension needs the message keys**, not just an auth token — so 10b's
+   - **The extension needs the message keys**, not just a credential — so 10b's
      shared keychain has to carry protocol state too.
-   - **It must advance the ratchet**, and so shares mutable protocol state with
-     the main app. Two processes stepping the same double-ratchet is a known
-     source of "message can't be decrypted" bugs — the ordering has to be
-     designed, not discovered. **This is the part 10b cannot de-risk**, and the
-     reason this milestone stays late in the phase.
+   - **It must advance the ratchet.** 10b is deliberately built so the extension
+     is a pure *reader* — it never mutates anything the main app also mutates,
+     which is exactly why it is forbidden from refreshing a rotating token. A
+     ratchet step is a **write**, so that property is gone and the two-process
+     hazard 10b designed around comes back in a harder form: two processes
+     stepping the same double-ratchet is a known source of "message can't be
+     decrypted" bugs, and the ordering has to be designed, not discovered.
+     **This is the part 10b cannot de-risk** — it is the reason this milestone
+     stays late in the phase, and the reason 10b's "survives into 9c" table
+     marks two rows as lost rather than one.
    - **An NSE has a hard memory ceiling** (~24 MB) and seconds to finish.
      Decrypting text is fine; anything touching media is not.
 
