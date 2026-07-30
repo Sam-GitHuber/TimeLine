@@ -16,7 +16,6 @@ import { router } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import {
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -24,7 +23,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BASE_URL } from '@/api';
-import { KeyboardAvoider } from '@/components/KeyboardAvoider';
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { ChangePasswordSection } from '@/components/settings/ChangePasswordSection';
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
@@ -55,19 +54,18 @@ export default function SettingsScreen() {
           `KeyboardAvoidingView` to convert — under edge-to-edge nothing resizes
           the window, so without it the field and its Save button go behind the
           keyboard. See `components/KeyboardAvoider.tsx`. */}
-      <KeyboardAvoider style={styles.fill}>
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-        >
-          <FeedPreferencesSection />
-          <NotificationPreferencesSection />
-          <PrivacySection />
-          <ChangePasswordSection />
-          <LegalSection />
-          <DeleteAccountSection />
-        </ScrollView>
-      </KeyboardAvoider>
+      <KeyboardAwareScroll
+        style={styles.fill}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+      >
+        <FeedPreferencesSection />
+        <NotificationPreferencesSection />
+        <PrivacySection />
+        <ChangePasswordSection />
+        <LegalSection />
+        <DeleteAccountSection />
+      </KeyboardAwareScroll>
     </SafeAreaView>
   );
 }

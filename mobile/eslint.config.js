@@ -45,9 +45,9 @@ module.exports = defineConfig([
         // the per-screen drift started last time.
         patterns: [{
           group: ["react-native-keyboard-controller"],
-          importNames: ["KeyboardAvoidingView"],
+          importNames: ["KeyboardAvoidingView", "KeyboardAwareScrollView"],
           message:
-            "Use `KeyboardAvoider` from '@/components/KeyboardAvoider' so `behavior` stays decided in one place.",
+            "Use `KeyboardAvoider` / `KeyboardAwareScroll` from '@/components/KeyboardAvoider', so `behavior` and `bottomOffset` stay decided in one place.",
         }],
       }],
       "no-restricted-syntax": ["error", {

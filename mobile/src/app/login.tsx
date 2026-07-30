@@ -12,7 +12,6 @@ import { useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -21,7 +20,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '@/auth';
-import { KeyboardAvoider } from '@/components/KeyboardAvoider';
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
 
 export default function LoginScreen() {
@@ -52,80 +51,79 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <KeyboardAvoider style={styles.flex}>
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-        >
-          <Text style={styles.title}>TimeLine</Text>
-          <Text style={styles.subtitle}>
-            Your friends and family, in the order they posted.
+      <KeyboardAwareScroll
+        style={styles.flex}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Text style={styles.title}>TimeLine</Text>
+        <Text style={styles.subtitle}>
+          Your friends and family, in the order they posted.
+        </Text>
+
+        {/* The visible <Text> labels aren't announced as the field's name by
+            VoiceOver — they're separate elements — so each input carries an
+            explicit accessibilityLabel. */}
+        <Text style={styles.label}>Email</Text>
+        <TextInput
+          accessibilityLabel="Email"
+          style={styles.input}
+          value={email}
+          onChangeText={setEmail}
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="email-address"
+          textContentType="emailAddress"
+          placeholder="you@example.com"
+          placeholderTextColor={colors.inkFaint}
+          editable={!submitting}
+        />
+
+        <Text style={styles.label}>Password</Text>
+        <TextInput
+          accessibilityLabel="Password"
+          style={styles.input}
+          value={password}
+          onChangeText={setPassword}
+          secureTextEntry
+          autoCapitalize="none"
+          textContentType="password"
+          placeholderTextColor={colors.inkFaint}
+          editable={!submitting}
+          onSubmitEditing={handleSubmit}
+          returnKeyType="go"
+        />
+
+        {error ? (
+          <Text style={styles.error} accessibilityRole="alert">
+            {error}
           </Text>
+        ) : null}
 
-          {/* The visible <Text> labels aren't announced as the field's name by
-              VoiceOver — they're separate elements — so each input carries an
-              explicit accessibilityLabel. */}
-          <Text style={styles.label}>Email</Text>
-          <TextInput
-            accessibilityLabel="Email"
-            style={styles.input}
-            value={email}
-            onChangeText={setEmail}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="email-address"
-            textContentType="emailAddress"
-            placeholder="you@example.com"
-            placeholderTextColor={colors.inkFaint}
-            editable={!submitting}
-          />
+        <Pressable
+          style={({ pressed }) => [
+            styles.button,
+            pressed && styles.buttonPressed,
+            !canSubmit && styles.buttonDisabled,
+          ]}
+          onPress={handleSubmit}
+          disabled={!canSubmit}
+          accessibilityRole="button"
+        >
+          {submitting ? (
+            <ActivityIndicator color={colors.raised} />
+          ) : (
+            <Text style={styles.buttonText}>Log in</Text>
+          )}
+        </Pressable>
 
-          <Text style={styles.label}>Password</Text>
-          <TextInput
-            accessibilityLabel="Password"
-            style={styles.input}
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            autoCapitalize="none"
-            textContentType="password"
-            placeholderTextColor={colors.inkFaint}
-            editable={!submitting}
-            onSubmitEditing={handleSubmit}
-            returnKeyType="go"
-          />
-
-          {error ? (
-            <Text style={styles.error} accessibilityRole="alert">
-              {error}
-            </Text>
-          ) : null}
-
-          <Pressable
-            style={({ pressed }) => [
-              styles.button,
-              pressed && styles.buttonPressed,
-              !canSubmit && styles.buttonDisabled,
-            ]}
-            onPress={handleSubmit}
-            disabled={!canSubmit}
-            accessibilityRole="button"
-          >
-            {submitting ? (
-              <ActivityIndicator color={colors.raised} />
-            ) : (
-              <Text style={styles.buttonText}>Log in</Text>
-            )}
-          </Pressable>
-
-          <View style={styles.footer}>
-            <Text style={styles.footerText}>
-              TimeLine is invite-only while it&rsquo;s in beta. Ask Sam for an
-              account.
-            </Text>
-          </View>
-        </ScrollView>
-      </KeyboardAvoider>
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>
+            TimeLine is invite-only while it&rsquo;s in beta. Ask Sam for an
+            account.
+          </Text>
+        </View>
+      </KeyboardAwareScroll>
     </SafeAreaView>
   );
 }

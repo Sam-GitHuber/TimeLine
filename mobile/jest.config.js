@@ -10,9 +10,12 @@
  * preset per platform, and the platform decides what `Platform.OS` reports and
  * which `.ios.tsx` / `.android.tsx` file a bare import resolves to. Under the
  * single `jest-expo` preset the whole suite ran as iOS, so every
- * `Platform.OS === 'android'` branch in the app — the action-sheet fallbacks,
- * the keyboard-avoidance behaviour, the date pickers — was **dead code as far as
- * CI was concerned**, and would first be exercised by a person holding a phone.
+ * `Platform.OS === 'android'` branch in the app — the action-sheet fallbacks and
+ * the date pickers — was **dead code as far as CI was concerned**, and would
+ * first be exercised by a person holding a phone. (The keyboard-avoidance
+ * ternary used to be the headline example here. #172 deleted it: keyboard
+ * handling is now platform-agnostic, so `keyboardAvoider.test.tsx` asserts the
+ * *same* result under both projects rather than two different branches.)
  * Running both projects is what makes an Android regression a red test rather
  * than a bug report.
  *

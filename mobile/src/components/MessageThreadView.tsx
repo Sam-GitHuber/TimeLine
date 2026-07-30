@@ -60,7 +60,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MentionSuggestions } from './MentionSuggestions';
 import { MessageBubble } from './MessageBubble';
 import { api, MESSAGE_POLL_MS } from '@/api';
-import { KeyboardAvoider } from '@/components/KeyboardAvoider';
+import {
+  KeyboardAvoider,
+  useKeyboardVisible,
+} from '@/components/KeyboardAvoider';
 import type { Mentionable } from '@/mentions';
 import { useMentions } from '@/mentions';
 import type { SendState } from '@/readReceipts';
@@ -140,6 +143,7 @@ export function MessageThreadView({
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
+  const keyboardVisible = useKeyboardVisible();
   const listRef = useRef<FlatList<Message>>(null);
   const [text, setText] = useState('');
   const mentions = useMentions({ people: mentionable, text, setText });
@@ -334,7 +338,7 @@ export function MessageThreadView({
           <View
             style={[
               styles.composerBar,
-              { paddingBottom: spacing.sm + 2 + insets.bottom },
+              { paddingBottom: spacing.sm + 2 + (keyboardVisible ? 0 : insets.bottom) },
             ]}
             pointerEvents="auto"
           >

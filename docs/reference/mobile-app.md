@@ -111,13 +111,15 @@ alongside `backend` and `frontend`. **App builds happen on EAS, never in GitHub
 Actions** — don't try to build an IPA in CI.
 
 **The suite runs twice, once per platform** (Phase 10). `jest.config.js` declares
-two `projects` — `jest-expo/ios` and `jest-expo/android` — so ~41 test files
-report as ~82 suites, and failures are tagged `[ios]` / `[android]`. The platform
+two `projects` — `jest-expo/ios` and `jest-expo/android` — so ~43 test files
+report as ~86 suites, and failures are tagged `[ios]` / `[android]`. The platform
 decides what `Platform.OS` reports, so before this the app's Android branches (the
-action-sheet fallbacks, keyboard-avoidance behaviour, the date pickers) were
-**never executed by CI on any run** — they were first exercised by a person
-holding a phone. Two things this turned up, both worth knowing before adding a
-test:
+action-sheet fallbacks and the date pickers) were **never executed by CI on any
+run** — they were first exercised by a person holding a phone. Keyboard avoidance
+used to head that list; #172 removed the branch entirely, so keyboard handling is
+now identical on both platforms and the doubled run asserts the *same* result
+twice rather than two different paths. Two things this turned up, both worth
+knowing before adding a test:
 
 - **`src/__tests__/helpers.ts` absorbs the platform-divergent test seams**, so a
   test doesn't branch on `Platform.OS` itself. It owns the `ActionSheetIOS` and

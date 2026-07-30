@@ -91,7 +91,10 @@ import { useAuth } from '@/auth';
 import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
-import { KeyboardAvoider } from '@/components/KeyboardAvoider';
+import {
+  KeyboardAvoider,
+  useKeyboardVisible,
+} from '@/components/KeyboardAvoider';
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
@@ -308,6 +311,9 @@ export default function ThreadScreen() {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
+  // Drives the composer's bottom pad: the safe-area inset is dead space once the
+  // keyboard has lifted the bar clear of it. See `useKeyboardVisible`.
+  const keyboardVisible = useKeyboardVisible();
   /**
    * Seeded from the draft store (M5), so a half-written message survives leaving
    * the thread and coming back. It used to die with the screen, which made
@@ -1587,12 +1593,18 @@ export default function ThreadScreen() {
           {/* Pad the bar past the home-indicator inset so the composer and Send
               button clear the bottom edge / swipe area on full-screen phones. On
               a home-button phone `insets.bottom` is 0, so this is the base pad.
-              When the keyboard is up, `KeyboardAvoider` lifts the whole bar
-              above it, and this inset becomes a small, harmless gap. */}
+              Dropped while the keyboard is up: `KeyboardAvoider` has already
+              lifted the bar clear, so the inset would be dead space between the
+              composer and the keys — ~34pt on iOS, and up to ~48dp on Android
+              three-button navigation, because the library pads by the full IME
+              inset measured from the window bottom. */}
           <View
             style={[
               styles.composerBar,
-              { paddingBottom: COMPOSER_PAD + insets.bottom },
+              {
+                paddingBottom:
+                  COMPOSER_PAD + (keyboardVisible ? 0 : insets.bottom),
+              },
             ]}
           >
             {/* While selecting, the composer's slot holds the bulk actions

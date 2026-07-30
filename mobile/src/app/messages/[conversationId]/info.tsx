@@ -34,7 +34,6 @@ import {
   ActivityIndicator,
   Alert,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -48,7 +47,7 @@ import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import { AuthedImage } from '@/components/AuthedImage';
 import { BlockButton } from '@/components/BlockButton';
-import { KeyboardAvoider } from '@/components/KeyboardAvoider';
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { MessageAttachment, Participant } from '@/types';
@@ -178,185 +177,184 @@ export default function ConversationInfoScreen() {
           </Text>
         </View>
       ) : (
-        <KeyboardAvoider style={styles.fill}>
-          <ScrollView
-            contentContainerStyle={styles.content}
-            keyboardShouldPersistTaps="handled"
-          >
-            <View style={styles.identity}>
-              {isGroup ? (
-                <AvatarStack participants={detail.participants} max={3} />
-              ) : (
-                <Avatar user={other} size="lg" />
-              )}
+        <KeyboardAwareScroll
+          style={styles.fill}
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.identity}>
+            {isGroup ? (
+              <AvatarStack participants={detail.participants} max={3} />
+            ) : (
+              <Avatar user={other} size="lg" />
+            )}
 
-              {draftTitle !== null ? (
-                // Editing in place rather than on a screen of its own: it's one
-                // field, and a round trip through a form would be more
-                // navigation than the change deserves.
-                <View style={styles.renameRow}>
-                  <TextInput
-                    value={draftTitle}
-                    onChangeText={setDraftTitle}
-                    placeholder="Name this chat"
-                    placeholderTextColor={colors.inkFaint}
-                    accessibilityLabel="Chat name"
-                    autoFocus
-                    maxLength={100}
-                    style={styles.renameInput}
-                  />
-                  <Pressable
-                    onPress={() => setDraftTitle(null)}
-                    accessibilityRole="button"
-                    accessibilityLabel="Cancel rename"
-                    hitSlop={8}
-                  >
-                    <Text style={styles.renameCancel}>Cancel</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => renameMutation.mutate(draftTitle.trim())}
-                    disabled={renameMutation.isPending}
-                    accessibilityRole="button"
-                    accessibilityLabel="Save name"
-                    hitSlop={8}
-                  >
-                    <Text style={styles.renameSave}>
-                      {renameMutation.isPending ? 'Saving…' : 'Save'}
-                    </Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <>
-                  <Text style={styles.name} numberOfLines={2}>
-                    {isGroup ? groupName : other?.display_name ?? 'Conversation'}
+            {draftTitle !== null ? (
+              // Editing in place rather than on a screen of its own: it's one
+              // field, and a round trip through a form would be more
+              // navigation than the change deserves.
+              <View style={styles.renameRow}>
+                <TextInput
+                  value={draftTitle}
+                  onChangeText={setDraftTitle}
+                  placeholder="Name this chat"
+                  placeholderTextColor={colors.inkFaint}
+                  accessibilityLabel="Chat name"
+                  autoFocus
+                  maxLength={100}
+                  style={styles.renameInput}
+                />
+                <Pressable
+                  onPress={() => setDraftTitle(null)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel rename"
+                  hitSlop={8}
+                >
+                  <Text style={styles.renameCancel}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => renameMutation.mutate(draftTitle.trim())}
+                  disabled={renameMutation.isPending}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save name"
+                  hitSlop={8}
+                >
+                  <Text style={styles.renameSave}>
+                    {renameMutation.isPending ? 'Saving…' : 'Save'}
                   </Text>
-                  {canRename ? (
-                    <Pressable
-                      onPress={() => setDraftTitle(detail.title ?? '')}
-                      accessibilityRole="button"
-                      accessibilityLabel="Rename chat"
-                      hitSlop={8}
-                    >
-                      <Text style={styles.link}>Rename</Text>
-                    </Pressable>
-                  ) : null}
-                  {!isGroup && other ? (
-                    <Pressable
-                      onPress={() => router.push(`/u/${other.id}`)}
-                      accessibilityRole="button"
-                      accessibilityLabel={`View ${other.display_name}’s profile`}
-                      hitSlop={8}
-                    >
-                      <Text style={styles.link}>View profile</Text>
-                    </Pressable>
-                  ) : null}
-                </>
-              )}
-
-              {detail.group ? (
-                <Text style={styles.groupScope}>
-                  In the group {detail.group.name}
+                </Pressable>
+              </View>
+            ) : (
+              <>
+                <Text style={styles.name} numberOfLines={2}>
+                  {isGroup ? groupName : other?.display_name ?? 'Conversation'}
                 </Text>
-              ) : null}
-            </View>
+                {canRename ? (
+                  <Pressable
+                    onPress={() => setDraftTitle(detail.title ?? '')}
+                    accessibilityRole="button"
+                    accessibilityLabel="Rename chat"
+                    hitSlop={8}
+                  >
+                    <Text style={styles.link}>Rename</Text>
+                  </Pressable>
+                ) : null}
+                {!isGroup && other ? (
+                  <Pressable
+                    onPress={() => router.push(`/u/${other.id}`)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`View ${other.display_name}’s profile`}
+                    hitSlop={8}
+                  >
+                    <Text style={styles.link}>View profile</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            )}
 
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>
-                {isGroup
-                  ? `${detail.participants.length} people`
-                  : 'In this chat'}
+            {detail.group ? (
+              <Text style={styles.groupScope}>
+                In the group {detail.group.name}
               </Text>
-              {detail.participants.map((person) => (
-                <PersonRow key={person.id} person={person} meId={me?.pk} />
-              ))}
-            </View>
+            ) : null}
+          </View>
 
-            <MediaGallery conversationId={id} />
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>
+              {isGroup
+                ? `${detail.participants.length} people`
+                : 'In this chat'}
+            </Text>
+            {detail.participants.map((person) => (
+              <PersonRow key={person.id} person={person} meId={me?.pk} />
+            ))}
+          </View>
 
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Settings</Text>
+          <MediaGallery conversationId={id} />
 
-              {/* Mute reads as its state, not as an imperative — a muted thread
-                  should say so, since the whole risk of muting is forgetting
-                  you did. It silences the buzz only: the thread keeps its
-                  unread badge either way. */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Settings</Text>
+
+            {/* Mute reads as its state, not as an imperative — a muted thread
+                should say so, since the whole risk of muting is forgetting
+                you did. It silences the buzz only: the thread keeps its
+                unread badge either way. */}
+            <Pressable
+              onPress={() => muteMutation.mutate(!detail.muted)}
+              disabled={muteMutation.isPending}
+              accessibilityRole="switch"
+              accessibilityLabel="Mute notifications"
+              accessibilityState={{ checked: detail.muted }}
+              style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+            >
+              <View style={styles.actionText}>
+                <Text style={styles.actionLabel}>
+                  {detail.muted ? 'Muted' : 'Mute notifications'}
+                </Text>
+                <Text style={styles.actionHint}>
+                  {detail.muted
+                    ? 'This chat won’t buzz your phone. It still shows unread.'
+                    : 'Stop this chat buzzing your phone.'}
+                </Text>
+              </View>
+              <Text style={styles.actionState}>
+                {detail.muted ? 'On' : 'Off'}
+              </Text>
+            </Pressable>
+
+            {isGroup ? (
               <Pressable
-                onPress={() => muteMutation.mutate(!detail.muted)}
-                disabled={muteMutation.isPending}
-                accessibilityRole="switch"
-                accessibilityLabel="Mute notifications"
-                accessibilityState={{ checked: detail.muted }}
+                onPress={() => router.push(`/messages/new?addTo=${id}`)}
+                accessibilityRole="button"
+                accessibilityLabel="Add people"
                 style={({ pressed }) => [styles.action, pressed && styles.pressed]}
               >
                 <View style={styles.actionText}>
-                  <Text style={styles.actionLabel}>
-                    {detail.muted ? 'Muted' : 'Mute notifications'}
+                  <Text style={styles.actionLabel}>Add people</Text>
+                  <Text style={styles.actionHint}>
+                    Anyone you’re connected with. They join once they’re
+                    connected to everyone here.
+                  </Text>
+                </View>
+              </Pressable>
+            ) : null}
+          </View>
+
+          <View style={styles.section}>
+            {isGroup ? (
+              <Pressable
+                onPress={confirmLeave}
+                disabled={leaveMutation.isPending}
+                accessibilityRole="button"
+                accessibilityLabel="Leave chat"
+                style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+              >
+                <View style={styles.actionText}>
+                  <Text style={[styles.actionLabel, styles.danger]}>
+                    Leave chat
                   </Text>
                   <Text style={styles.actionHint}>
-                    {detail.muted
-                      ? 'This chat won’t buzz your phone. It still shows unread.'
-                      : 'Stop this chat buzzing your phone.'}
+                    You’ll stop receiving messages here.
                   </Text>
                 </View>
-                <Text style={styles.actionState}>
-                  {detail.muted ? 'On' : 'Off'}
-                </Text>
               </Pressable>
+            ) : null}
 
-              {isGroup ? (
-                <Pressable
-                  onPress={() => router.push(`/messages/new?addTo=${id}`)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Add people"
-                  style={({ pressed }) => [styles.action, pressed && styles.pressed]}
-                >
-                  <View style={styles.actionText}>
-                    <Text style={styles.actionLabel}>Add people</Text>
-                    <Text style={styles.actionHint}>
-                      Anyone you’re connected with. They join once they’re
-                      connected to everyone here.
-                    </Text>
-                  </View>
-                </Pressable>
-              ) : null}
-            </View>
-
-            <View style={styles.section}>
-              {isGroup ? (
-                <Pressable
-                  onPress={confirmLeave}
-                  disabled={leaveMutation.isPending}
-                  accessibilityRole="button"
-                  accessibilityLabel="Leave chat"
-                  style={({ pressed }) => [styles.action, pressed && styles.pressed]}
-                >
-                  <View style={styles.actionText}>
-                    <Text style={[styles.actionLabel, styles.danger]}>
-                      Leave chat
-                    </Text>
-                    <Text style={styles.actionHint}>
-                      You’ll stop receiving messages here.
-                    </Text>
-                  </View>
-                </Pressable>
-              ) : null}
-
-              {/* Block is the strong, explicit cut — it severs the connection,
-                  hides the thread from both of you and bars re-connecting. The
-                  shared control owns the warning modal, so this screen doesn't
-                  hold a second copy of what blocking costs. */}
-              {!isGroup && other && otherQuery.data ? (
-                <View style={styles.blockRow}>
-                  <BlockButton
-                    userId={other.id}
-                    displayName={other.display_name}
-                    isBlocked={otherQuery.data.is_blocked}
-                  />
-                </View>
-              ) : null}
-            </View>
-          </ScrollView>
-        </KeyboardAvoider>
+            {/* Block is the strong, explicit cut — it severs the connection,
+                hides the thread from both of you and bars re-connecting. The
+                shared control owns the warning modal, so this screen doesn't
+                hold a second copy of what blocking costs. */}
+            {!isGroup && other && otherQuery.data ? (
+              <View style={styles.blockRow}>
+                <BlockButton
+                  userId={other.id}
+                  displayName={other.display_name}
+                  isBlocked={otherQuery.data.is_blocked}
+                />
+              </View>
+            ) : null}
+          </View>
+        </KeyboardAwareScroll>
       )}
     </SafeAreaView>
   );

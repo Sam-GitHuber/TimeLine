@@ -21,7 +21,10 @@
 import { render, screen } from '@testing-library/react-native';
 import { Platform, Text } from 'react-native';
 
-import { KeyboardAvoider } from '@/components/KeyboardAvoider';
+import {
+  KeyboardAvoider,
+  useKeyboardVisible,
+} from '@/components/KeyboardAvoider';
 
 /**
  * Replaces the shared mock from `jest.setup.js` with one that records the props
@@ -48,6 +51,10 @@ jest.mock('react-native-keyboard-controller', () => {
       record(received);
       return React.createElement(View, { testID: 'avoider' }, received.children);
     },
+    // A stand-in for the real keyboard state, so `useKeyboardVisible` can be
+    // driven from a test. The selector shape matters: the hook passes one in.
+    useKeyboardState: (selector: (s: { isVisible: boolean }) => unknown) =>
+      selector({ isVisible: true }),
   };
 });
 
@@ -147,6 +154,19 @@ it('keeps the default when behavior is explicitly undefined', async () => {
   // and the avoider was inert on both platforms — worse than the original bug,
   // which at least worked on iOS. A parameter default is the fix; this pins it.
   expect(lastProps().behavior).toBe('padding');
+});
+
+it('reports keyboard visibility through the selector', async () => {
+  function Probe() {
+    return <Text>{useKeyboardVisible() ? 'up' : 'down'}</Text>;
+  }
+  await render(<Probe />);
+
+  // The hook exists so the composers can drop their safe-area bottom inset while
+  // the keyboard covers it. Reading the wrong field (or forgetting the selector,
+  // which would return the whole state object — truthy either way) would leave a
+  // dead band above the keyboard on Android that no other test would notice.
+  expect(screen.getByText('up')).toBeTruthy();
 });
 
 it('passes style and offsets through to the library', async () => {

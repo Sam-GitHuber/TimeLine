@@ -9,7 +9,6 @@ import { router, useLocalSearchParams } from 'expo-router';
 import {
   ActivityIndicator,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -18,7 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { GroupForm } from '@/components/GroupForm';
-import { KeyboardAvoider } from '@/components/KeyboardAvoider';
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { colors, fontSize, spacing } from '@/theme';
 
 export default function EditGroupScreen() {
@@ -37,19 +36,17 @@ export default function EditGroupScreen() {
         <View style={styles.spacer} />
       </View>
       {group ? (
-        <KeyboardAvoider style={styles.fill}>
-          <ScrollView keyboardShouldPersistTaps="handled">
-            <GroupForm
-              mode="edit"
-              groupId={id}
-              initial={{
-                name: group.name,
-                description: group.description,
-                avatar_thumb: group.avatar_thumb,
-              }}
-            />
-          </ScrollView>
-        </KeyboardAvoider>
+        <KeyboardAwareScroll style={styles.fill} keyboardShouldPersistTaps="handled">
+          <GroupForm
+            mode="edit"
+            groupId={id}
+            initial={{
+              name: group.name,
+              description: group.description,
+              avatar_thumb: group.avatar_thumb,
+            }}
+          />
+        </KeyboardAwareScroll>
       ) : (
         <ActivityIndicator color={colors.accent} style={styles.spinner} />
       )}
