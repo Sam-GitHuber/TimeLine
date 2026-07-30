@@ -553,3 +553,39 @@ Tests are per-screen and Android-only, gated with `androidIt` from the test
 helpers; `androidBack.test.tsx` pins the hook's own contract. The two layers are
 both needed — the unit test says the hook works, the screen tests say the screens
 still call it, and the second is what a refactor silently drops.
+
+### The date/time picker
+
+`@react-native-community/datetimepicker` is **two different components behind one
+import**, and the difference is not styling. On iOS it's an inline wheel that
+lives in the layout and stays put. On Android it renders *nothing* and opens a
+**modal dialog as a side effect** — the picker in the event `DimensionEditor` and
+`PollOptionFields` therefore mounts only while the dialog should be up, and
+unmounts when it closes, because one mounted instance opens exactly once.
+
+Three consequences, each of which was a bug (#131, #169, #170):
+
+- **The dialog re-opens whenever the library's effect re-runs**, and its deps are
+  `[onChange, onValueChange, onDismiss, onNeutralButtonPress, valueTimestamp,
+  mode]` — mostly *callback identities*. Inline arrows are a fresh identity every
+  render, so any re-render underneath an open dialog (a react-query refetch, a
+  `busy` flip) re-presented it and snapped the calendar back to the `value` prop,
+  throwing away a selection the organiser was halfway through. **Memoise every
+  handler you pass, and the seeded `Date` too** — `PollOptionFields` seeded blank
+  options with a bare `new Date()`, so even the timestamp moved every render.
+- **A failed open reports through `onError` alone.** `DateTimePickerAndroid.open`
+  presents inside a `try`/`catch`, so a rejected present (a null host activity, a
+  configuration change mid-present) fires *neither* OK nor Cancel. Without an
+  `onError` the "is it open" flag stays `true` and the trigger — which only ever
+  set it `true` — becomes a no-op: the editor is dead for the rest of the visit.
+  Pass `onError`, and make the trigger tolerate a stuck flag anyway
+  (`DimensionEditor` bumps a nonce used as the picker's `key`, so a press
+  remounts regardless of what the flag says).
+- **A stub with no effects can't see any of this.** The Jest stand-in in
+  `jest.setup.js` is platform-split for that reason: iOS gets the flat
+  always-mounted version, Android reproduces the real dep list, loses its
+  in-progress selection on a re-present, and exposes `__failNextOpen()` /
+  `__openCount()` so a test can drive the failure path and count presentations.
+  Before it did, both bugs above passed the suite — including a regression test
+  written for exactly this component, which only ever exercised a React
+  conditional.

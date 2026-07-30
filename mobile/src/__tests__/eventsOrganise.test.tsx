@@ -37,6 +37,19 @@ import {
   resetMenuSpies,
 } from './helpers';
 
+/**
+ * The date-picker stub's test controls (see `jest.setup.js`).
+ *
+ * On Android, presenting the picker is a *side effect* — the real component
+ * renders nothing — so "was it opened, and how many times" can't be read off
+ * the tree. These expose it, plus a way to arm the failure mode that fires
+ * `onError` and nothing else.
+ */
+const pickerStub = jest.requireMock('@react-native-community/datetimepicker') as {
+  __failNextOpen: () => void;
+  __openCount: () => number;
+};
+
 const mockParams: Record<string, string> = { eventId: '9', groupId: '7' };
 const mockPush = jest.fn();
 const mockReplace = jest.fn();
@@ -150,6 +163,9 @@ async function renderWith(node: React.ReactElement) {
       </QueryClientProvider>
     );
   });
+  // Returned so a test can force a background refetch — the ordinary way this
+  // screen re-renders without the organiser doing anything (#169).
+  return queryClient;
 }
 
 beforeEach(async () => {
@@ -260,6 +276,83 @@ describe('setting a dimension', () => {
       expect(screen.getByLabelText('Pick a value')).toBeTruthy();
     }
   );
+
+  /**
+   * A re-render underneath the open dialog must not disturb it (#169).
+   *
+   * The library re-presents the Android dialog from a `useEffect` keyed partly
+   * on its callback props, so inline-arrow handlers re-opened it on *every*
+   * render — snapping the calendar back to the seed and throwing away what the
+   * organiser had spun to. The trigger is a background refetch here, but
+   * anything that re-renders the screen did it, and the organiser did none of
+   * them.
+   */
+  androidIt('keeps the in-progress date when the screen refetches underneath', async () => {
+    serveEvent(planningEvent());
+    const queryClient = await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByLabelText('Set Date'));
+    await fireEvent.press(screen.getByLabelText('Choose a date'));
+
+    // The organiser spins the calendar a day past the seeded value.
+    await fireEvent.press(screen.getByLabelText('Spin the picker'));
+    expect(screen.getByLabelText('Picker selection').props.children).toBe('1');
+
+    // A background refetch lands. It has to bring *changed* data to be worth
+    // testing: react-query shares structure, so a byte-identical refetch keeps
+    // the old object and never re-renders anything. `updated_at` moving is the
+    // most inert change the event has.
+    serveEvent(planningEvent({ updated_at: '2026-07-18T11:00:00Z' }));
+    await act(async () => {
+      await queryClient.invalidateQueries();
+      // react-query notifies observers on a batched timer, so the re-render
+      // this test is about lands *after* the refetch promise settles. Without
+      // this tick the assertions below run before the screen has re-rendered
+      // and pass no matter what.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Still the same presentation, still holding their selection.
+    expect(pickerStub.__openCount()).toBe(1);
+    expect(screen.getByLabelText('Picker selection').props.children).toBe('1');
+
+    // And it's their spun value that gets committed, not the seed.
+    await fireEvent.press(screen.getByLabelText('Pick a value'));
+    const finalise = jest.spyOn(api, 'finaliseDimension').mockResolvedValue(planningEvent());
+    await fireEvent.press(screen.getByText('Set the date'));
+    await waitFor(() =>
+      expect(finalise).toHaveBeenCalledWith(9, { dimension: 'date', value: '2026-08-16' })
+    );
+    finalise.mockRestore();
+  });
+
+  /**
+   * An open that throws must not wedge the editor (#170).
+   *
+   * `DateTimePickerAndroid.open` presents inside a `try`/`catch` whose only
+   * exit is `onError` — a null host activity reports through neither OK nor
+   * Cancel. With the "is it up" flag left `true` and a trigger that only ever
+   * set it `true`, the editor was dead for the rest of the visit, and "Set the
+   * date" would then commit whatever `new Date()` had seeded it with.
+   */
+  androidIt('recovers from a picker that fails to open', async () => {
+    serveEvent(planningEvent());
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByLabelText('Set Date'));
+
+    pickerStub.__failNextOpen();
+    await fireEvent.press(screen.getByLabelText('Choose a date'));
+
+    // It was attempted, and nothing came up.
+    expect(pickerStub.__openCount()).toBe(1);
+    expect(screen.queryByLabelText('Pick a value')).toBeNull();
+
+    // The next press must still present one. Before the fix this was a no-op
+    // against a flag already `true`, and the editor never recovered.
+    await fireEvent.press(screen.getByLabelText('Choose a date'));
+    expect(screen.getByLabelText('Pick a value')).toBeTruthy();
+  });
 
   it('finalises a typed location', async () => {
     serveEvent(planningEvent());
