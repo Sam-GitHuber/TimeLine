@@ -7898,9 +7898,14 @@ class SendPushesCommandTests(APITestCase):
         """
         for kind in Notification.Kind.values:
             with self.subTest(kind=kind):
+                # Against ``_KIND_CHANNELS``, **not** ``channel_for_kind``.
+                # Asserting the latter lands in ``ANDROID_CHANNELS`` is
+                # tautological: an unmapped kind falls back to DEFAULT_CHANNEL,
+                # which is itself a member — so the test passed for every
+                # conceivable input and protected nothing.
                 self.assertIn(
-                    notifications.channel_for_kind(kind),
-                    notifications.ANDROID_CHANNELS,
+                    kind,
+                    notifications._KIND_CHANNELS,
                     f"{kind} has no Android notification channel",
                 )
 
@@ -7926,6 +7931,32 @@ class SendPushesCommandTests(APITestCase):
     def test_a_message_push_carries_the_messages_channel(self):
         # Messages get their own high-importance channel — the one thing people
         # generally do want interrupting them.
+        self._queue_message()
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["channelId"], "messages")
+
+    def test_a_mention_push_uses_the_mentions_channel(self):
+        """The channel that exists so a mention still reaches you in a muted chat.
+
+        A mention has no ``Notification`` row — ``Kind.MENTION`` only gives the
+        *preference* a home — so it rides the message branch. Take the channel
+        from ``kind`` alone and every mention files under **messages**, which
+        means turning Messages down to quieten a busy group chat silences your
+        @mentions with it: exactly what the separate channel is for.
+        """
+        convo, message = self._queue_message(text="@Me look at this")
+        MessageMention.objects.create(message=message, user=self.me)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "mentions")
+        # Still a message push in every other respect.
+        self.assertEqual(sent["data"]["kind"], "message")
+
+    def test_a_plain_message_push_stays_on_the_messages_channel(self):
         self._queue_message()
 
         urlopen = self._run()

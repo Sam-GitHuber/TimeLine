@@ -106,6 +106,13 @@ _KIND_CHANNELS = {
 # in the map above (see ``enqueue_message_pushes``).
 MESSAGE_CHANNEL = "messages"
 
+# A mention arrives as a *message* push too — ``Kind.MENTION`` exists only so the
+# preference has a home and never creates a ``Notification`` row. So the sender
+# picks this explicitly (see ``send_pushes._payload``); reaching it through
+# ``channel_for_kind`` is impossible, and leaving it that way made the channel an
+# inert switch in Android settings.
+MENTION_CHANNEL = _KIND_CHANNELS[Notification.Kind.MENTION]
+
 # Where anything unrecognised goes. A kind added later without a channel still
 # gets delivered — quietly wrong beats silently dropped — and a test enumerating
 # ``Notification.Kind`` fails so it doesn't stay that way.

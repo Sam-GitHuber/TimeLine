@@ -128,7 +128,7 @@ it('promotes a member via the role endpoint', async () => {
   serve();
   const { invalidate } = await renderScreen();
 
-  fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+  await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
   pickMenuAction(0); // "Make admin"
 
   await waitFor(() =>
@@ -143,7 +143,7 @@ it('does nothing when the remove confirmation is cancelled', async () => {
   serve();
   const { invalidate } = await renderScreen();
 
-  fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+  await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
   pickMenuAction(1); // "Remove from group" → confirm dialog
   pressAlertButton('Remove member?', 'Cancel');
 
@@ -156,7 +156,7 @@ it('removes a member when the confirmation is accepted', async () => {
   serve();
   await renderScreen();
 
-  fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+  await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
   pickMenuAction(1); // "Remove from group"
   pressAlertButton('Remove member?', 'Remove');
 

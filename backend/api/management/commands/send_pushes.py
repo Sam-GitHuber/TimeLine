@@ -48,7 +48,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
-from ...notifications import channel_for_kind
+from ...notifications import MENTION_CHANNEL, channel_for_kind
 from ...serializers import NotificationSerializer
 
 # Expo's reply carries one ticket per message, in the order sent.
@@ -293,7 +293,13 @@ class Command(BaseCommand):
             # ``MESSAGE_CATEGORY`` — iOS ignores a category it doesn't know,
             # which looks exactly like the feature not existing.
             "category": "message",
-            "channel": channel_for_kind("message"),
+            # A mention gets the **mentions** channel, not messages. Without
+            # this the channel is unreachable — `Kind.MENTION` never creates a
+            # `Notification`, so a mention always rides this message branch —
+            # and someone who turns Messages down to quieten a busy group chat
+            # silences their @mentions with it. Which is the exact outcome the
+            # separate channel exists to prevent.
+            "channel": MENTION_CHANNEL if mentioned else channel_for_kind("message"),
         }
 
     def _message(self, device, data):

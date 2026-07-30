@@ -16,6 +16,19 @@ expo-env.d.ts
 *.p8
 *.p12
 *.key
+
+# Firebase / Google **service account** keys. These download as ordinary .json,
+# which the patterns above don't catch — and `google-services.json` sitting
+# committed next door establishes .json under mobile/ as a normal, committable
+# file, so nothing else would stop one being added by mistake.
+#
+# The distinction matters: `google-services.json` is client config that ships in
+# every APK and is deliberately committed. A service-account key can **send push
+# to every family device under this app's identity**. It belongs on EAS and
+# nowhere else. See docs/mobile-release.md.
+*-firebase-adminsdk-*.json
+*service-account*.json
+google-service-account*.json
 *.mobileprovision
 
 # Metro

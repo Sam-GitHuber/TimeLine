@@ -16,19 +16,20 @@ import { fireEvent, screen } from '@testing-library/react-native';
 import { ActionSheetIOS, Alert, BackHandler, Platform } from 'react-native';
 
 /**
- * The two ways the app opens a "⋯" menu, spied so a test can drive them.
+ * `Alert`, spied so a test can drive a **confirmation**.
  *
- * The app shows an `ActionSheetIOS` on iOS and falls back to a plain
- * `Alert.alert` chooser on Android (`PostMenu`, the group menu, the poll menu,
- * the member menu). Both spies are installed because a test file typically
- * needs the `Alert` one anyway — confirmations are an `Alert` on *both*
- * platforms.
+ * Menus no longer go through `Alert` on either platform — they use
+ * `useActionMenu`, an `ActionSheetIOS` on iOS and a real rendered bottom sheet
+ * on Android. `Alert` is now only what it should always have been: a two- or
+ * three-button confirmation.
  */
+export const alertSpy = jest.spyOn(Alert, 'alert');
+
+/** The iOS action sheet, spied so a test can pick from it. */
 export const showActionSheet = jest.spyOn(
   ActionSheetIOS,
   'showActionSheetWithOptions'
 );
-export const alertSpy = jest.spyOn(Alert, 'alert');
 
 /** Reset both spies to silent no-ops. Call from `beforeEach`. */
 export function resetMenuSpies(): void {
@@ -39,49 +40,53 @@ export function resetMenuSpies(): void {
 type AlertButton = { text?: string; onPress?: () => void };
 
 /**
- * Choose option `index` from the menu the app just opened, on either platform.
+ * The menu options currently on offer, in order, without Cancel.
  *
- * `index` is an index into the app's own `labels` array, which is the one thing
- * both branches genuinely share — the Android fallback maps `labels` to alert
- * buttons in order and appends its own Cancel, so the indices line up and a test
- * can stay written in terms of "the third item in the menu".
+ * **Reads what the platform actually presents**, which is the correction this
+ * seam needed. The previous version read the raw array handed to `Alert.alert`
+ * on Android — but React Native's Android `Alert` keeps only
+ * `buttons.slice(0, 3)`, so every Android menu assertion certified items the OS
+ * silently discarded. Now the Android branch queries the rendered sheet, which
+ * has no such limit and is the thing a user sees.
  *
- * Deliberately *not* wrapped in `act()`: the callback kicks off an async
- * mutation whose fetch resolves after it returns, so wrapping only the
- * synchronous call would leak that work out of the act and poison the next
- * render. The caller's trailing `waitFor` flushes it instead.
- */
-export function pickMenuAction(index: number): void {
-  if (Platform.OS === 'ios') {
-    const callback = showActionSheet.mock.calls.at(-1)?.[1] as (
-      i: number
-    ) => void;
-    callback(index);
-    return;
-  }
-
-  // Android: the most recent alert *is* the menu — a confirmation, if the
-  // chosen action raises one, can only come after this press.
-  const buttons = alertSpy.mock.calls.at(-1)?.[2] as AlertButton[] | undefined;
-  if (!buttons) throw new Error('pickMenuAction: no menu alert was shown');
-  buttons[index]?.onPress?.();
-}
-
-/**
- * The labels currently on offer in the menu, in order, without the Cancel item.
- *
- * Lets a test assert *what a menu offers* (e.g. that Edit disappears once a poll
- * has votes) rather than only what happens when you pick something.
+ * Throws if no menu is open. Returning `[]` would let an assertion like
+ * `expect(menuOptions()).not.toContain('Edit poll')` pass vacuously when the
+ * menu never opened at all.
  */
 export function menuOptions(): string[] {
   if (Platform.OS === 'ios') {
-    const options = showActionSheet.mock.calls.at(-1)?.[0]?.options ?? [];
-    return options.filter((label) => label !== 'Cancel');
+    const config = showActionSheet.mock.calls.at(-1)?.[0];
+    if (!config) throw new Error('menuOptions: no action sheet was shown');
+    return config.options.filter((label) => label !== 'Cancel');
   }
-  const buttons = (alertSpy.mock.calls.at(-1)?.[2] ?? []) as AlertButton[];
-  return buttons
-    .map((b) => b.text ?? '')
-    .filter((label) => label !== 'Cancel' && label !== '');
+  const items = screen.queryAllByTestId(/^action-menu-item/);
+  if (items.length === 0) throw new Error('menuOptions: no menu sheet is open');
+  return items.map((item) => String(item.props.accessibilityLabel));
+}
+
+/**
+ * Choose option `index` from the open menu, on either platform.
+ *
+ * `index` indexes the options as {@link menuOptions} reports them — Cancel
+ * excluded — so a test reads the same on both.
+ */
+export function pickMenuAction(index: number): void {
+  if (Platform.OS === 'ios') {
+    const callback = showActionSheet.mock.calls.at(-1)?.[1];
+    if (!callback) throw new Error('pickMenuAction: no action sheet was shown');
+    callback(index);
+    return;
+  }
+  const items = screen.queryAllByTestId(/^action-menu-item/);
+  const item = items[index];
+  if (!item) {
+    throw new Error(
+      `pickMenuAction: no option at index ${index} — offered: ${
+        items.map((i) => i.props.accessibilityLabel).join(', ') || '(nothing)'
+      }`
+    );
+  }
+  fireEvent.press(item);
 }
 
 /**
@@ -105,11 +110,12 @@ export function pickMenuOption(label: string): void {
 /**
  * The label of the option the menu marks as **destructive**, if any.
  *
- * The two platforms record the same intent differently — iOS by index
- * (`destructiveButtonIndex`), Android by a per-button `style` — so asserting on
- * either directly would pin the mechanism rather than the intent. What a test
- * actually wants to know is "is Delete flagged as the dangerous one", which is
- * true on both.
+ * iOS records the intent by index (`destructiveButtonIndex`); the Android sheet
+ * renders it in red. Asserting on either mechanism directly would pin the
+ * mechanism rather than the intent — what a test wants to know is "is Delete
+ * flagged as the dangerous one", which is now true on both. (It was *not* true
+ * of the old Android `Alert`, which ignores per-button `style` entirely, so the
+ * previous helper asserted a warning the platform never drew.)
  */
 export function menuDestructiveOption(): string | undefined {
   if (Platform.OS === 'ios') {
@@ -117,31 +123,57 @@ export function menuDestructiveOption(): string | undefined {
     const index = config?.destructiveButtonIndex;
     return typeof index === 'number' ? config?.options[index] : undefined;
   }
-  const buttons = (alertSpy.mock.calls.at(-1)?.[2] ?? []) as (AlertButton & {
-    style?: string;
-  })[];
-  return buttons.find((b) => b.style === 'destructive')?.text;
+  const item = screen.queryAllByTestId('action-menu-item-destructive')[0];
+  return item ? String(item.props.accessibilityLabel) : undefined;
 }
 
-/** Whether the app opened a "⋯" menu at all, on either platform. */
+/** Whether a "⋯" menu is currently open, on either platform. */
 export function menuWasShown(): boolean {
   return Platform.OS === 'ios'
     ? showActionSheet.mock.calls.length > 0
-    : alertSpy.mock.calls.length > 0;
+    : screen.queryByTestId('action-menu') !== null;
+}
+
+/** Dismiss an open menu without choosing anything (Android's Cancel). */
+export function cancelMenu(): void {
+  if (Platform.OS === 'ios') {
+    const config = showActionSheet.mock.calls.at(-1)?.[0];
+    const callback = showActionSheet.mock.calls.at(-1)?.[1];
+    if (!config || !callback) throw new Error('cancelMenu: no action sheet');
+    callback(config.cancelButtonIndex ?? config.options.length - 1);
+    return;
+  }
+  fireEvent.press(screen.getByTestId('action-menu-cancel'));
 }
 
 /**
  * Press a button (by its text) on the `Alert.alert` with the given title.
  *
- * Confirmations are an `Alert` on both platforms, so this needs no branch — but
- * on Android the menu is *also* an alert, hence matching on title rather than
- * taking the most recent call. Searches newest-first so that re-opening the same
- * dialog in one test presses the live one.
+ * Confirmations are an `Alert` on both platforms, so this needs no branch.
+ * Searches newest-first so re-opening the same dialog presses the live one, and
+ * **throws** rather than no-opping on a miss: several callers assert an
+ * *absence* afterwards, and would pass identically whether the dialog appeared
+ * or was never shown.
  */
 export function pressAlertButton(title: string, buttonText: string): void {
   const call = alertSpy.mock.calls.findLast(([t]) => t === title);
-  const buttons = call?.[2] as AlertButton[] | undefined;
-  buttons?.find((b) => b.text === buttonText)?.onPress?.();
+  if (!call) {
+    throw new Error(
+      `pressAlertButton: no alert titled "${title}" — saw: ${
+        alertSpy.mock.calls.map(([t]) => String(t)).join(', ') || '(none)'
+      }`
+    );
+  }
+  const buttons = call[2] as AlertButton[] | undefined;
+  const button = buttons?.find((b) => b.text === buttonText);
+  if (!button) {
+    throw new Error(
+      `pressAlertButton: no "${buttonText}" on "${title}" — offered: ${
+        buttons?.map((b) => b.text).join(', ') || '(none)'
+      }`
+    );
+  }
+  button.onPress?.();
 }
 
 /**

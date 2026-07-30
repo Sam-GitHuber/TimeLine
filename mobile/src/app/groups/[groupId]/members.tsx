@@ -11,21 +11,12 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import {
-  ActionSheetIOS,
-  ActivityIndicator,
-  Alert,
-  FlatList,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { useActionMenu } from '@/components/ActionMenu';
 import { Avatar } from '@/components/Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { GroupMember } from '@/types';
@@ -60,6 +51,8 @@ export default function GroupMembersScreen() {
       ),
   });
 
+  const { openMenu, menu } = useActionMenu();
+
   function manage(member: GroupMember) {
     if (!isAdmin) return;
     const name = member.user.display_name;
@@ -81,24 +74,13 @@ export default function GroupMembersScreen() {
         },
       ]);
 
-    const labels = [roleLabel, 'Remove from group', 'Cancel'];
-    const pick = (i: number) => {
-      if (i === 0) promote();
-      else if (i === 1) remove();
-    };
-
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        { title: name, options: labels, destructiveButtonIndex: 1, cancelButtonIndex: 2 },
-        pick
-      );
-    } else {
-      Alert.alert(name, undefined, [
-        { text: labels[0], onPress: () => pick(0) },
-        { text: labels[1], style: 'destructive' as const, onPress: () => pick(1) },
-        { text: 'Cancel', style: 'cancel' as const },
-      ]);
-    }
+    openMenu({
+      title: name,
+      items: [
+        { label: roleLabel, onPress: promote },
+        { label: 'Remove from group', destructive: true, onPress: remove },
+      ],
+    });
   }
 
   const members = membersQuery.data ?? [];
@@ -162,6 +144,7 @@ export default function GroupMembersScreen() {
           ) : null
         }
       />
+      {menu}
     </SafeAreaView>
   );
 }

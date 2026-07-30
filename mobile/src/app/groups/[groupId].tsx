@@ -26,10 +26,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useMemo, useState } from 'react';
 import {
-  ActionSheetIOS,
   ActivityIndicator,
-  Alert,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -40,6 +37,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api, ApiError } from '@/api';
 import { useAuth } from '@/auth';
+import { useActionMenu } from '@/components/ActionMenu';
 import { useGroupActions } from '@/components/useGroupActions';
 import { Avatar } from '@/components/Avatar';
 import { ComposeBox } from '@/components/ComposeBox';
@@ -125,48 +123,30 @@ export default function GroupScreen() {
 
   const { leave, remove } = useGroupActions(id);
 
-  function openMenu() {
+  const { openMenu, menu } = useActionMenu();
+
+  function showMenu() {
     // "Plan an event" leads — any active member can plan (events.md), and it's
     // the group page's main creative action.
-    const options = ['Plan an event', 'Invite people', 'Members'];
-    const adminOptions = isAdmin ? ['Edit group', 'Delete group'] : [];
-    const labels = [...options, ...adminOptions, 'Leave group', 'Cancel'];
-    const cancelIndex = labels.length - 1;
-    const leaveIndex = cancelIndex - 1;
-    const deleteIndex = isAdmin ? labels.indexOf('Delete group') : -1;
-
-    const run = (i: number) => {
-      const label = labels[i];
-      if (label === 'Plan an event') router.push(`/groups/${id}/plan`);
-      else if (label === 'Invite people') router.push(`/groups/${id}/invite`);
-      else if (label === 'Members') router.push(`/groups/${id}/members`);
-      else if (label === 'Edit group') router.push(`/groups/${id}/edit`);
-      else if (label === 'Delete group') remove();
-      else if (label === 'Leave group') leave();
-    };
-
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options: labels,
-          destructiveButtonIndex: deleteIndex >= 0 ? deleteIndex : leaveIndex,
-          cancelButtonIndex: cancelIndex,
-        },
-        run
-      );
-    } else {
-      // Android fallback (Phase 10 refines this): a simple alert chooser.
-      Alert.alert(group?.name ?? 'Group', undefined, [
-        ...labels.slice(0, cancelIndex).map((label, i) => ({
-          text: label,
-          onPress: () => run(i),
-          style: (label === 'Delete group' || label === 'Leave group'
-            ? 'destructive'
-            : 'default') as 'destructive' | 'default',
-        })),
-        { text: 'Cancel', style: 'cancel' as const },
-      ]);
-    }
+    //
+    // Seven items for an admin. That is *fine* through `useActionMenu` and was
+    // catastrophic through the old `Alert` fallback, which silently kept only
+    // the first three — see the note in ActionMenu.tsx.
+    openMenu({
+      title: group?.name ?? 'Group',
+      items: [
+        { label: 'Plan an event', onPress: () => router.push(`/groups/${id}/plan`) },
+        { label: 'Invite people', onPress: () => router.push(`/groups/${id}/invite`) },
+        { label: 'Members', onPress: () => router.push(`/groups/${id}/members`) },
+        ...(isAdmin
+          ? [
+              { label: 'Edit group', onPress: () => router.push(`/groups/${id}/edit`) },
+              { label: 'Delete group', destructive: true, onPress: remove },
+            ]
+          : []),
+        { label: 'Leave group', destructive: !isAdmin, onPress: leave },
+      ],
+    });
   }
 
   const notFound =
@@ -250,7 +230,7 @@ export default function GroupScreen() {
           {group?.name ?? 'Group'}
         </Text>
         {group ? (
-          <Pressable onPress={openMenu} accessibilityRole="button" accessibilityLabel="Group actions" hitSlop={8}>
+          <Pressable onPress={showMenu} accessibilityRole="button" accessibilityLabel="Group actions" hitSlop={8}>
             <Text style={styles.menu}>⋯</Text>
           </Pressable>
         ) : (
@@ -327,6 +307,8 @@ export default function GroupScreen() {
           }
         />
       )}
+
+      {menu}
     </SafeAreaView>
   );
 }

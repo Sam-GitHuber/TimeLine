@@ -7,23 +7,18 @@
  *
  * Post *edit* is deliberately not here yet — tracked separately, not E4.
  *
- * A native action sheet (`ActionSheetIOS`, with the `Alert` fallback for Android
- * that Phase 10 refines) is the right feel for a short owner-dependent menu — the
- * same pattern the group ⋯ menu uses (`app/groups/[groupId].tsx`).
+ * Presented through `useActionMenu` — an `ActionSheetIOS` on iOS, a bottom sheet
+ * on Android — the same pattern the group ⋯ menu uses
+ * (`app/groups/[groupId].tsx`).
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import {
-  ActionSheetIOS,
-  Alert,
-  Platform,
-  Pressable,
-  StyleSheet,
-} from 'react-native';
+import { Alert, Pressable, StyleSheet } from 'react-native';
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { useActionMenu } from './ActionMenu';
 import { KebabIcon } from './icons';
 import { ReportModal } from './ReportModal';
 import { colors, radius, spacing } from '@/theme';
@@ -67,38 +62,15 @@ export function PostMenu({
     ]);
   }
 
-  function openMenu() {
-    const labels = isOwner ? ['Delete post', 'Cancel'] : ['Report post', 'Cancel'];
-    const cancelIndex = labels.length - 1;
+  const { openMenu, menu } = useActionMenu();
 
-    const run = (i: number) => {
-      const label = labels[i];
-      if (label === 'Delete post') confirmDelete();
-      else if (label === 'Report post') setReporting(true);
-    };
-
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options: labels,
-          destructiveButtonIndex: isOwner ? 0 : undefined,
-          cancelButtonIndex: cancelIndex,
-        },
-        run
-      );
-    } else {
-      Alert.alert('Post options', undefined, [
-        ...labels.slice(0, cancelIndex).map((label, i) => ({
-          text: label,
-          onPress: () => run(i),
-          style: (label === 'Delete post' ? 'destructive' : 'default') as
-            | 'destructive'
-            | 'default',
-        })),
-        { text: 'Cancel', style: 'cancel' as const },
-      ]);
-    }
-  }
+  const showMenu = () =>
+    openMenu({
+      title: 'Post options',
+      items: isOwner
+        ? [{ label: 'Delete post', destructive: true, onPress: confirmDelete }]
+        : [{ label: 'Report post', onPress: () => setReporting(true) }],
+    });
 
   // Nothing to offer a logged-out viewer (they can't reach the feed anyway).
   if (!user) return null;
@@ -106,7 +78,7 @@ export function PostMenu({
   return (
     <>
       <Pressable
-        onPress={openMenu}
+        onPress={showMenu}
         accessibilityRole="button"
         accessibilityLabel="Post options"
         hitSlop={8}
@@ -114,6 +86,8 @@ export function PostMenu({
       >
         <KebabIcon color={colors.inkFaint} />
       </Pressable>
+
+      {menu}
 
       {reporting ? (
         <ReportModal postId={postId} onClose={() => setReporting(false)} />
