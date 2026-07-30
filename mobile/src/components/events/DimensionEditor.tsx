@@ -17,7 +17,7 @@
 import DateTimePicker, {
   type DateTimePickerChangeEvent,
 } from '@react-native-community/datetimepicker';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { formatEventDate, formatEventTime } from '@/eventFormat';
@@ -228,6 +228,29 @@ function DateTimeField({
    * belt to its braces, because the next failure mode won't be one we predicted.
    */
   const [pickerNonce, setPickerNonce] = useState(0);
+  /**
+   * The nonce of the presentation the trigger last asked for, readable
+   * synchronously — the same number as `pickerNonce`, a render earlier.
+   *
+   * Remounting has a cost the flag alone didn't have: the outgoing instance's
+   * cleanup calls `DateTimePickerAndroid.dismiss(mode)`, which resolves *its*
+   * pending `open` with the DISMISS action. So a second tap on the trigger
+   * before the first dialog has finished appearing (200ms on cheap hardware —
+   * an ordinary double-tap) tears down instance A, hears A's `onDismiss`, and
+   * would close instance B, whose dialog is the one now on screen: the
+   * organiser sees it flash open and vanish.
+   *
+   * `onDismiss`/`onError` therefore ignore anything reported by a presentation
+   * we've already replaced. Comparing the nonce the handler was *created* with
+   * against the live one is enough, because `open` captures the handlers it was
+   * called with — A's report arrives through A's function object. Their
+   * identities change only when the nonce does, and that already remounts, so
+   * this costs the stability #169 needs nothing.
+   *
+   * `onValueChange` is deliberately left unscoped: a programmatically dismissed
+   * dialog resolves DISMISS, never SET, so no stale path reaches it.
+   */
+  const liveNonce = useRef(0);
   const isAndroid = Platform.OS === 'android';
 
   // The handlers below are `useCallback`ed, and on Android that is load-bearing
@@ -258,13 +281,20 @@ function DateTimeField({
    * Android's Cancel. Never fires for the iOS inline wheel, which is never
    * dismissed — so this needs no platform guard.
    */
-  const onDismiss = useCallback(() => setShowAndroidPicker(false), []);
+  const onDismiss = useCallback(() => {
+    if (pickerNonce !== liveNonce.current) return; // a dialog we already replaced
+    setShowAndroidPicker(false);
+  }, [pickerNonce]);
 
   /** A present that threw. Let go of the flag so the editor isn't wedged. */
-  const onError = useCallback(() => setShowAndroidPicker(false), []);
+  const onError = useCallback(() => {
+    if (pickerNonce !== liveNonce.current) return;
+    setShowAndroidPicker(false);
+  }, [pickerNonce]);
 
   const openAndroidPicker = useCallback(() => {
-    setPickerNonce((n) => n + 1);
+    liveNonce.current += 1;
+    setPickerNonce(liveNonce.current);
     setShowAndroidPicker(true);
   }, []);
 

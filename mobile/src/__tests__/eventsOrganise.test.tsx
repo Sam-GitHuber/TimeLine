@@ -354,6 +354,36 @@ describe('setting a dimension', () => {
     expect(screen.getByLabelText('Pick a value')).toBeTruthy();
   });
 
+  /**
+   * The cost of remounting on every press, which #170's fix introduced.
+   *
+   * Tearing down a presentation makes the library dismiss its dialog, and that
+   * resolves its still-pending `open` as a **Cancel** — reported late, through
+   * the handlers that presentation captured. So a second tap before the first
+   * dialog has finished appearing (a couple of hundred ms on cheap hardware —
+   * an ordinary double-tap) opens a second one, then hears the first one's
+   * Cancel and closes it. The organiser sees the calendar flash up and vanish.
+   */
+  androidIt('survives a double-tap on the trigger', async () => {
+    serveEvent(planningEvent());
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByLabelText('Set Date'));
+
+    await fireEvent.press(screen.getByLabelText('Choose a date'));
+    await fireEvent.press(screen.getByLabelText('Choose a date'));
+
+    // Let the superseded presentation's Cancel land.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Two presentations were asked for, and the one the organiser is actually
+    // looking at is still up.
+    expect(pickerStub.__openCount()).toBe(2);
+    expect(screen.getByLabelText('Pick a value')).toBeTruthy();
+  });
+
   it('finalises a typed location', async () => {
     serveEvent(planningEvent());
     const finalise = jest

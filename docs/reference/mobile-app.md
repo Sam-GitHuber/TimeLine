@@ -580,7 +580,13 @@ Three consequences, each of which was a bug (#131, #169, #170):
   set it `true` — becomes a no-op: the editor is dead for the rest of the visit.
   Pass `onError`, and make the trigger tolerate a stuck flag anyway
   (`DimensionEditor` bumps a nonce used as the picker's `key`, so a press
-  remounts regardless of what the flag says).
+  remounts regardless of what the flag says). Remounting isn't free, though:
+  the outgoing instance's cleanup calls `DateTimePickerAndroid.dismiss(mode)`,
+  which resolves *its* pending open as a Cancel. So **scope the close handlers
+  to the presentation that produced them** — `DimensionEditor` compares the
+  nonce a handler was created with against the live one — or an ordinary
+  double-tap on the trigger opens a second dialog and then closes it with the
+  first one's `onDismiss`.
 - **A stub with no effects can't see any of this.** The Jest stand-in in
   `jest.setup.js` is platform-split for that reason: iOS gets the flat
   always-mounted version, Android reproduces the real dep list, loses its

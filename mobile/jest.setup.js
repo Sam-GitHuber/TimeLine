@@ -151,6 +151,14 @@ jest.mock('@react-native-community/datetimepicker', () => {
   let failNextOpen = false;
   let openCount = 0;
 
+  /** Mark a presentation settled before reporting through `handler`. */
+  const settle =
+    (settled, handler) =>
+    (...args) => {
+      settled.current = true;
+      handler?.(...args);
+    };
+
   const affordances = (onValueChange, onDismiss, extra) =>
     [
       React.createElement(
@@ -200,12 +208,19 @@ jest.mock('@react-native-community/datetimepicker', () => {
     const [presented, setPresented] = React.useState(false);
     const [spins, setSpins] = React.useState(0);
     const valueTimestamp = value ? value.getTime() : 0;
+    // Whether this presentation has already reported OK or Cancel. An unsettled
+    // one still owes its caller a Cancel when it goes away — see the cleanup.
+    const settled = React.useRef(false);
 
     React.useEffect(
       () => {
         openCount += 1;
         if (failNextOpen) {
           failNextOpen = false;
+          // A present that threw put nothing on screen — including when it was
+          // a *re*-present, which takes down the dialog that was already up.
+          setPresented(false);
+          settled.current = true;
           // The real `catch` reports through `onError` alone. Firing anything
           // else here would hide exactly the gap #170 is about.
           onError?.(new Error('Activity is null'));
@@ -213,6 +228,19 @@ jest.mock('@react-native-community/datetimepicker', () => {
         }
         setPresented(true);
         setSpins(0);
+
+        // **Unmounting dismisses the dialog, and that gets reported.** The real
+        // component's cleanup calls `DateTimePickerAndroid.dismiss(mode)`, which
+        // resolves this presentation's still-pending `open` with the DISMISS
+        // action — so `onDismiss` fires, through the handler *this* presentation
+        // captured. Asynchronously, which is the whole difficulty: the report
+        // lands after a replacement has mounted, so a caller that doesn't scope
+        // its close handlers closes the new dialog with the old one's Cancel.
+        // Without this, remounting on every press looks free.
+        return () => {
+          if (settled.current) return;
+          setTimeout(() => onDismiss?.(), 0);
+        };
       },
       // Deliberately the library's dep list, verbatim.
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -224,7 +252,10 @@ jest.mock('@react-native-community/datetimepicker', () => {
     return React.createElement(
       View,
       { testID: testID ?? 'datetimepicker' },
-      affordances(onValueChange, onDismiss, {
+      // Wrapped so a real OK/Cancel marks this presentation settled — the
+      // cleanup then owes it nothing, exactly as a dialog the user has already
+      // closed cannot report a second time.
+      affordances(settle(settled, onValueChange), settle(settled, onDismiss), {
         picked: () => new Date(PICKED.getTime() + spins * DAY_MS),
         nodes: [
           React.createElement(
