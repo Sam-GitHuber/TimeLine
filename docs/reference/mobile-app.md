@@ -348,10 +348,47 @@ like the original bug. `keyboardAvoider.test.tsx` asserts its position for that
 reason.
 
 **And the emulator hides it — this is the "harness is more forgiving" shape
-again, in its worst form.** The AVD's Gboard comes up in **floating** mode, a
-small pill taking almost no vertical space, so nothing is covered and two
-attempts to reproduce the reported bug both "passed". **Dock the keyboard before
-trusting a keyboard check on an emulator**, or use a real device. Jest can't see
+again, in its worst form.** Gboard comes up as a **small vertical pill** on the
+left edge (backspace / enter / emoji / ☰) instead of a keyboard. It takes almost
+no vertical space, so nothing is covered and two attempts to reproduce the
+reported bug both "passed".
+
+That pill is Gboard's **physical-keyboard toolbar**, not floating mode, and the
+distinction is what makes it fixable. Android has decided a hardware keyboard is
+in use, so Gboard collapses to a toolbar — and **a toolbar reports a zero-height
+IME inset**, which means no amount of app-side keyboard handling can respond to
+it. The app is behaving correctly; there is simply nothing to avoid.
+
+Getting a real keyboard, in order:
+
+1. `adb shell settings put secure show_ime_with_hard_keyboard 1` — a *secure*
+   setting, so it survives reboots. Necessary but not sufficient on its own.
+2. **`adb reboot`.** This is the part that actually works. The "physical keyboard
+   is in use" state lives in the system input-method service; force-stopping
+   Gboard, re-selecting the IME and `pm clear`ing Gboard all fail to shift it.
+3. Don't send `adb shell input keyevent` at the emulator while testing the
+   keyboard. Those are injected as *hardware* key events and flip Gboard straight
+   back to the toolbar — which is how this state kept coming back mid-session.
+   Drive it with `input tap` only, or with the mouse.
+
+**Verify with insets, never with your eyes**, because the pill and a real
+keyboard are easy to confuse in a screenshot:
+
+```
+adb shell dumpsys window | grep "type=ime"
+```
+
+- `frame=[0,0][0,0]` or `frame=[0,2400][1080,2400]`, i.e. zero height → the
+  toolbar. **Whatever you are looking at proves nothing.**
+- `frame=[0,1517][1080,2400] … visible=true sideHint=BOTTOM` → a real docked
+  keyboard, and the check is now meaningful.
+
+`adb shell uiautomator dump` then grepping the composer's `EditText` `bounds=`
+gives the other half objectively: its bottom edge should sit just above the IME
+frame's top, and the gap should *shrink* by the navigation-bar inset when the
+keyboard opens (that is `useKeyboardVisible` doing its job). Measured on a Pixel 8
+/ API 36: composer `[152,2206][869,2311]` closed → `[152,1386][869,1491]` open,
+against an IME top of 1517. Jest can't see
 it either — layout is the one thing the suite genuinely cannot check — so the
 guard is `keyboardAvoider.test.tsx` (the props the wrapper asks for, under both
 platform projects) plus a lint rule. **The lint rule blocks the direct spellings
