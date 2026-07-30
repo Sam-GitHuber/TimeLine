@@ -13,9 +13,10 @@
  *   - Block confirms through the shared warning modal then POSTs; Unblock fires
  *     immediately with no warning.
  *
- * The action sheet and confirm alert are captured, not driven natively (the same
- * approach as `groupMembers.test.tsx`): `ActionSheetIOS.showActionSheetWithOptions`
- * hands us the callback; `Alert.alert` hands us the button list.
+ * The menu and confirm alert are captured, not driven natively (the same
+ * approach as `groupMembers.test.tsx`), through the shared `./helpers` seam —
+ * which also absorbs the fact that the menu is an `ActionSheetIOS` on iOS and an
+ * `Alert` chooser on Android, so these tests read the same on both platforms.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -28,13 +29,20 @@ import {
   waitFor,
 } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
-import { ActionSheetIOS, Alert } from 'react-native';
 
 import { BlockButton } from '@/components/BlockButton';
 import { CommentThread } from '@/components/CommentThread';
 import { PostMenu } from '@/components/PostMenu';
 import { ReportModal } from '@/components/ReportModal';
 import type { Comment } from '@/types';
+
+import {
+  menuDestructiveOption,
+  menuOptions,
+  pickMenuAction,
+  pressAlertButton,
+  resetMenuSpies,
+} from './helpers';
 
 // A fixed viewer (pk 1) over the real AuthProvider — the owner checks read it.
 jest.mock('@/auth', () => ({
@@ -53,25 +61,6 @@ function jsonResponse(body: unknown, status = 200) {
   };
 }
 
-const showActionSheet = jest.spyOn(ActionSheetIOS, 'showActionSheetWithOptions');
-const alertSpy = jest.spyOn(Alert, 'alert');
-
-/** Invoke the last action sheet's callback with the chosen option index. */
-function pickAction(index: number) {
-  const callback = showActionSheet.mock.calls.at(-1)?.[1] as (i: number) => void;
-  callback(index);
-}
-
-/** Press a button (by text) on the last `Alert.alert` with the given title. */
-function pressAlertButton(title: string, buttonText: string) {
-  const call = alertSpy.mock.calls.find(([t]) => t === title);
-  const buttons = call?.[2] as { text?: string; onPress?: () => void }[] | undefined;
-  buttons?.find((b) => b.text === buttonText)?.onPress?.();
-}
-
-function lastActionSheetOptions(): string[] {
-  return (showActionSheet.mock.calls.at(-1)?.[0] as { options: string[] }).options;
-}
 
 /** Find a request matching url + method, and parse its JSON body. */
 function requestBody(match: RegExp, method: string): unknown {
@@ -105,8 +94,7 @@ async function renderWithClient(ui: ReactElement) {
 
 beforeEach(() => {
   mockFetch.mockReset();
-  showActionSheet.mockReset().mockImplementation(() => {});
-  alertSpy.mockReset().mockImplementation(() => {});
+  resetMenuSpies();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -124,9 +112,9 @@ describe('PostMenu', () => {
 
     await fireEvent.press(screen.getByLabelText('Post options'));
     // Not the owner → the menu offers Report, not Delete.
-    expect(lastActionSheetOptions()).toEqual(['Report post', 'Cancel']);
+    expect(menuOptions()).toEqual(['Report post']);
 
-    await act(async () => pickAction(0));
+    await act(async () => pickMenuAction(0));
     await fireEvent.changeText(
       screen.getByLabelText('Reason for reporting this post'),
       'spam'
@@ -146,13 +134,10 @@ describe('PostMenu', () => {
 
     await fireEvent.press(screen.getByLabelText('Post options'));
     // The owner → Delete, marked destructive.
-    expect(lastActionSheetOptions()).toEqual(['Delete post', 'Cancel']);
-    const opts = showActionSheet.mock.calls.at(-1)?.[0] as {
-      destructiveButtonIndex?: number;
-    };
-    expect(opts.destructiveButtonIndex).toBe(0);
+    expect(menuOptions()).toEqual(['Delete post']);
+    expect(menuDestructiveOption()).toBe('Delete post');
 
-    await act(async () => pickAction(0));
+    await act(async () => pickMenuAction(0));
     // Nothing fires until the confirm is actually pressed.
     expect(made(/\/api\/posts\/5\/$/, 'DELETE')).toBe(false);
 
@@ -167,7 +152,7 @@ describe('PostMenu', () => {
     await renderWithClient(<PostMenu postId={5} authorId={1} />);
 
     await fireEvent.press(screen.getByLabelText('Post options'));
-    await act(async () => pickAction(0));
+    await act(async () => pickMenuAction(0));
     // The alert's Cancel has no onPress, so nothing runs.
     await act(async () => pressAlertButton('Delete post?', 'Cancel'));
 

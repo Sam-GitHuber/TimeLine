@@ -110,6 +110,35 @@ scale. CI runs a `mobile-test` job (`npm ci`, `npm test`, `npm run typecheck`)
 alongside `backend` and `frontend`. **App builds happen on EAS, never in GitHub
 Actions** — don't try to build an IPA in CI.
 
+**The suite runs twice, once per platform** (Phase 10). `jest.config.js` declares
+two `projects` — `jest-expo/ios` and `jest-expo/android` — so ~41 test files
+report as ~82 suites, and failures are tagged `[ios]` / `[android]`. The platform
+decides what `Platform.OS` reports, so before this the app's Android branches (the
+action-sheet fallbacks, keyboard-avoidance behaviour, the date pickers) were
+**never executed by CI on any run** — they were first exercised by a person
+holding a phone. Two things this turned up, both worth knowing before adding a
+test:
+
+- **`src/__tests__/helpers.ts` absorbs the platform-divergent test seams**, so a
+  test doesn't branch on `Platform.OS` itself. It owns the `ActionSheetIOS` and
+  `Alert` spies and exposes `pickMenuAction` / `pickMenuOption` / `menuOptions` /
+  `menuDestructiveOption` / `menuWasShown` — because a "⋯" menu is an action
+  sheet on iOS and an `Alert` chooser on Android. It also has `switchValue`,
+  since a `<Switch>` reports through `value` on iOS and `on` on Android; **RNTL's
+  `toBeChecked()` only understands the iOS shape and silently reports a switch
+  that is on as unchecked**, which is worse than having no matcher.
+  Corollary: **never `jest.spyOn(Alert, 'alert')` locally and `mockRestore()` it**
+  — restoring puts the *original* back and tears out the shared spy, so a later
+  test in the same file records nothing and fails somewhere unrelated. This cost
+  real time to find.
+- **`babel.config.js` had to be added.** The platform presets hand `babel-jest`
+  only a `caller`, dropping the `presets` the root `jest-expo` preset injects; with
+  no babel config on disk to fall back on, *every* suite dies parsing Flow types
+  in React Native's own setup file. The error names `@react-native/jest-preset`,
+  so it reads like a broken dependency rather than a missing config. The file
+  declares exactly what Metro and jest-expo already resolved implicitly, so it
+  changes nothing about the bundle.
+
 Three test-harness traps, all recurring:
 
 - **RNTL v14 made `render` and `fireEvent` async — `await` them.** Without the

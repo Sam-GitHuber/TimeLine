@@ -15,7 +15,6 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { ActionSheetIOS, Alert } from 'react-native';
 
 import { api } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
@@ -24,6 +23,14 @@ import { AuthProvider } from '@/auth';
 import { PlanEventForm } from '@/components/events/PlanEventForm';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, User } from '@/types';
+
+import {
+  alertSpy,
+  menuOptions,
+  pickMenuAction,
+  pressAlertButton,
+  resetMenuSpies,
+} from './helpers';
 
 const mockParams: Record<string, string> = { eventId: '9', groupId: '7' };
 const mockPush = jest.fn();
@@ -136,6 +143,7 @@ async function renderWith(node: React.ReactElement) {
 
 beforeEach(async () => {
   mockFetch.mockReset();
+  resetMenuSpies();
   mockPush.mockReset();
   mockReplace.mockReset();
   mockParams.eventId = '9';
@@ -251,7 +259,6 @@ describe('setting a dimension', () => {
     const finalise = jest
       .spyOn(api, 'finaliseDimension')
       .mockRejectedValue(new Error('Server said no'));
-    const alert = jest.spyOn(Alert, 'alert');
 
     await renderWith(<EventScreen />);
 
@@ -260,12 +267,11 @@ describe('setting a dimension', () => {
     await fireEvent.press(screen.getByText('Set the date'));
 
     await waitFor(() =>
-      expect(alert).toHaveBeenCalledWith('Couldn’t save', 'Server said no')
+      expect(alertSpy).toHaveBeenCalledWith('Couldn’t save', 'Server said no')
     );
     // The editor stays open on error so the organiser can retry.
     expect(screen.getByText('Set the date')).toBeTruthy();
     finalise.mockRestore();
-    alert.mockRestore();
   });
 
   it('offers no Set affordance to a non-organiser', async () => {
@@ -286,39 +292,29 @@ describe('cancel and delete', () => {
   it('cancels the event after a confirm (moderator only)', async () => {
     serveEvent(planningEvent());
     const cancel = jest.spyOn(api, 'cancelEvent').mockResolvedValue(planningEvent());
-    const alert = jest.spyOn(Alert, 'alert');
 
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByText('Cancel event'));
     // The confirm Alert hands us its buttons; press the destructive one.
-    await act(async () => {
-      const buttons = alert.mock.calls.at(-1)?.[2] as { text?: string; onPress?: () => void }[];
-      buttons?.find((b) => b.text === 'Cancel event')?.onPress?.();
-    });
+    await act(async () => pressAlertButton('Cancel this event?', 'Cancel event'));
 
     await waitFor(() => expect(cancel).toHaveBeenCalledWith(9));
     cancel.mockRestore();
-    alert.mockRestore();
   });
 
   it('deletes the event after a confirm (moderator only)', async () => {
     serveEvent(planningEvent());
     const del = jest.spyOn(api, 'deleteEvent').mockResolvedValue(undefined);
-    const alert = jest.spyOn(Alert, 'alert');
 
     await renderWith(<EventScreen />);
 
     await fireEvent.press(await screen.findByText('Delete event'));
     // The confirm Alert hands us its buttons; press the destructive one.
-    await act(async () => {
-      const buttons = alert.mock.calls.at(-1)?.[2] as { text?: string; onPress?: () => void }[];
-      buttons?.find((b) => b.text === 'Delete')?.onPress?.();
-    });
+    await act(async () => pressAlertButton('Delete this event?', 'Delete'));
 
     await waitFor(() => expect(del).toHaveBeenCalledWith(9));
     del.mockRestore();
-    alert.mockRestore();
   });
 
   it('hides cancel/delete from a non-moderator', async () => {
@@ -336,9 +332,6 @@ describe('cancel and delete', () => {
 
 describe('group ⋯ menu', () => {
   it('routes "Plan an event" to the plan screen', async () => {
-    const showActionSheet = jest
-      .spyOn(ActionSheetIOS, 'showActionSheetWithOptions')
-      .mockImplementation(() => {});
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes('/api/auth/user/')) return jsonResponse(ME);
       if (url.includes('/api/groups/7/posts/')) {
@@ -352,14 +345,9 @@ describe('group ⋯ menu', () => {
     await renderWith(<GroupScreen />);
     await fireEvent.press(await screen.findByLabelText('Group actions'));
 
-    const [config, cb] = showActionSheet.mock.calls.at(-1) as [
-      { options: string[] },
-      (i: number) => void,
-    ];
-    expect(config.options[0]).toBe('Plan an event');
-    await act(async () => cb(0));
+    expect(menuOptions()[0]).toBe('Plan an event');
+    await act(async () => pickMenuAction(0));
 
     expect(mockPush).toHaveBeenCalledWith('/groups/7/plan');
-    showActionSheet.mockRestore();
   });
 });

@@ -12,13 +12,19 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { ActionSheetIOS, Alert } from 'react-native';
 
 import { api } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
 import { AuthProvider } from '@/auth';
 import { saveTokens } from '@/tokens';
 import type { Event, Poll, User } from '@/types';
+
+import {
+  menuOptions,
+  pickMenuOption,
+  pressAlertButton,
+  resetMenuSpies,
+} from './helpers';
 
 const mockParams: Record<string, string> = { eventId: '9' };
 jest.mock('expo-router', () => ({
@@ -152,11 +158,9 @@ async function renderScreen() {
   });
 }
 
-const showActionSheet = jest.spyOn(ActionSheetIOS, 'showActionSheetWithOptions');
-
 beforeEach(async () => {
   mockFetch.mockReset();
-  showActionSheet.mockReset().mockImplementation(() => {});
+  resetMenuSpies();
   mockParams.eventId = '9';
   globalThis.fetch = mockFetch as unknown as typeof fetch;
   await saveTokens({ access: 'a', refresh: 'r' });
@@ -269,8 +273,7 @@ describe('poll lifecycle', () => {
     await renderScreen();
     await fireEvent.press(await screen.findByLabelText('Poll options'));
 
-    const [config, cb] = showActionSheet.mock.calls.at(-1) as [{ options: string[] }, (i: number) => void];
-    await act(async () => cb(config.options.indexOf('Close poll')));
+    await act(async () => pickMenuOption('Close poll'));
 
     await waitFor(() => expect(close).toHaveBeenCalledWith(5));
     close.mockRestore();
@@ -279,21 +282,15 @@ describe('poll lifecycle', () => {
   it('removes a poll after a confirm', async () => {
     serve(makeEvent({ polls: [locationPoll()] }));
     const del = jest.spyOn(api, 'deletePoll').mockResolvedValue(undefined);
-    const alert = jest.spyOn(Alert, 'alert');
 
     await renderScreen();
     await fireEvent.press(await screen.findByLabelText('Poll options'));
 
-    const [config, cb] = showActionSheet.mock.calls.at(-1) as [{ options: string[] }, (i: number) => void];
-    await act(async () => cb(config.options.indexOf('Remove poll')));
-    await act(async () => {
-      const buttons = alert.mock.calls.at(-1)?.[2] as { text?: string; onPress?: () => void }[];
-      buttons?.find((b) => b.text === 'Remove poll')?.onPress?.();
-    });
+    await act(async () => pickMenuOption('Remove poll'));
+    await act(async () => pressAlertButton('Remove this poll?', 'Remove poll'));
 
     await waitFor(() => expect(del).toHaveBeenCalledWith(5));
     del.mockRestore();
-    alert.mockRestore();
   });
 
   it('offers Edit only while the poll is unvoted', async () => {
@@ -303,8 +300,7 @@ describe('poll lifecycle', () => {
     await renderScreen();
     await fireEvent.press(await screen.findByLabelText('Poll options'));
 
-    const config = showActionSheet.mock.calls.at(-1)?.[0] as { options: string[] };
-    expect(config.options).not.toContain('Edit poll');
+    expect(menuOptions()).not.toContain('Edit poll');
   });
 
   it('edits an unvoted poll', async () => {
@@ -314,8 +310,7 @@ describe('poll lifecycle', () => {
     await renderScreen();
     await fireEvent.press(await screen.findByLabelText('Poll options'));
 
-    const [config, cb] = showActionSheet.mock.calls.at(-1) as [{ options: string[] }, (i: number) => void];
-    await act(async () => cb(config.options.indexOf('Edit poll')));
+    await act(async () => pickMenuOption('Edit poll'));
 
     // The edit form is the create form pre-filled. Change one option and save.
     await fireEvent.changeText(screen.getByLabelText('Option 2'), 'Cake');
