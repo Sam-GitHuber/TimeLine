@@ -68,10 +68,8 @@ import {
   Alert,
   FlatList,
   Image,
-  KeyboardAvoidingView,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -93,6 +91,10 @@ import { useAuth } from '@/auth';
 import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
+import {
+  KeyboardAvoider,
+  useKeyboardVisible,
+} from '@/components/KeyboardAvoider';
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
@@ -309,6 +311,9 @@ export default function ThreadScreen() {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
+  // Drives the composer's bottom pad: the safe-area inset is dead space once the
+  // keyboard has lifted the bar clear of it. See `useKeyboardVisible`.
+  const keyboardVisible = useKeyboardVisible();
   /**
    * Seeded from the draft store (M5), so a half-written message survives leaving
    * the thread and coming back. It used to die with the screen, which made
@@ -1414,10 +1419,14 @@ export default function ThreadScreen() {
           onLeave={goBack}
         />
       ) : (
-        <KeyboardAvoidingView
-          style={styles.fill}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
+        <KeyboardAvoider style={styles.fill} enabled={thread === null}>
+          {/* `enabled` is off while the focused thread is open. The thread is a
+              screen-level sibling with its own avoider, so both would otherwise
+              respond to the same keyboard — and because the thread is transparent
+              over a blurred copy of this transcript, the background one animating
+              its padding makes the blurred transcript lurch as the keyboard
+              opens. The inverted FlatList's viewport shrinking underneath can
+              also leave the thread parked where the user never scrolled. */}
           {/* The list and its floating control share a box, so the jump button
               can sit at the bottom of the *transcript* rather than being laid
               out between it and the composer — where it would push the thread
@@ -1584,12 +1593,18 @@ export default function ThreadScreen() {
           {/* Pad the bar past the home-indicator inset so the composer and Send
               button clear the bottom edge / swipe area on full-screen phones. On
               a home-button phone `insets.bottom` is 0, so this is the base pad.
-              When the keyboard is up, KeyboardAvoidingView lifts the whole bar
-              above it, and this inset becomes a small, harmless gap. */}
+              Dropped while the keyboard is up: `KeyboardAvoider` has already
+              lifted the bar clear, so the inset would be dead space between the
+              composer and the keys — ~34pt on iOS, and up to ~48dp on Android
+              three-button navigation, because the library pads by the full IME
+              inset measured from the window bottom. */}
           <View
             style={[
               styles.composerBar,
-              { paddingBottom: COMPOSER_PAD + insets.bottom },
+              {
+                paddingBottom:
+                  COMPOSER_PAD + (keyboardVisible ? 0 : insets.bottom),
+              },
             ]}
           >
             {/* While selecting, the composer's slot holds the bulk actions
@@ -1792,7 +1807,7 @@ export default function ThreadScreen() {
               </Text>
             )}
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardAvoider>
       )}
 
       {/* The focused thread (M3). Mounted at screen level, over everything —

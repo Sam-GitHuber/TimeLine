@@ -6,16 +6,14 @@
 
 import { router, useLocalSearchParams } from 'expo-router';
 import {
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { PlanEventForm } from '@/components/events/PlanEventForm';
 import { colors, fontSize, spacing } from '@/theme';
 
@@ -32,11 +30,9 @@ export default function PlanEventScreen() {
         <Text style={styles.title}>Plan an event</Text>
         <View style={styles.spacer} />
       </View>
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView keyboardShouldPersistTaps="handled">
-          <PlanEventForm groupId={id} />
-        </ScrollView>
-      </KeyboardAvoidingView>
+      <KeyboardAwareScroll style={styles.fill} keyboardShouldPersistTaps="handled">
+        <PlanEventForm groupId={id} />
+      </KeyboardAwareScroll>
     </SafeAreaView>
   );
 }

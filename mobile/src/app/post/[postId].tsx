@@ -17,10 +17,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef } from 'react';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -30,6 +27,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api, ApiError } from '@/api';
 import { CommentThread } from '@/components/CommentThread';
+import {
+  KeyboardAwareScroll,
+  type KeyboardAwareScrollRef,
+} from '@/components/KeyboardAvoider';
 import { PostCard } from '@/components/PostCard';
 import { colors, fontSize, spacing } from '@/theme';
 
@@ -42,7 +43,7 @@ export default function PostScreen() {
   const id = Number(postId);
   const highlightCommentId = comment ? Number(comment) : null;
 
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<KeyboardAwareScrollRef>(null);
   // Where the post itself ends, so a comment's offset within the thread can be
   // turned into an offset within the page. A ref, not state: it feeds an
   // imperative scroll, nothing renders from it, and keeping it out of the
@@ -120,51 +121,47 @@ export default function PostScreen() {
         </Pressable>
       </View>
 
-      <KeyboardAvoidingView
+      {/* Without this the keyboard covers the comment box you're typing in —
+          the single most common way a mobile comment form feels broken. */}
+      <KeyboardAwareScroll
         style={styles.fill}
-        // Without this the keyboard covers the comment box you're typing in —
-        // the single most common way a mobile comment form feels broken.
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        ref={scrollRef}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
       >
-        <ScrollView
-          ref={scrollRef}
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-        >
-          {isLoading ? (
-            <ActivityIndicator color={colors.accent} style={styles.spinner} />
-          ) : notFound ? (
-            <View style={styles.centre}>
-              <Text style={styles.emptyTitle}>Post not available</Text>
-              <Text style={styles.emptyBody}>
-                This post doesn’t exist, or you don’t have access to it.
-              </Text>
+        {isLoading ? (
+          <ActivityIndicator color={colors.accent} style={styles.spinner} />
+        ) : notFound ? (
+          <View style={styles.centre}>
+            <Text style={styles.emptyTitle}>Post not available</Text>
+            <Text style={styles.emptyBody}>
+              This post doesn’t exist, or you don’t have access to it.
+            </Text>
+          </View>
+        ) : error ? (
+          <View style={styles.centre}>
+            <Text style={styles.emptyTitle}>Couldn’t load this post</Text>
+            <Text style={styles.emptyBody}>
+              {error instanceof Error ? error.message : 'Something went wrong.'}
+            </Text>
+          </View>
+        ) : post ? (
+          <>
+            <PostCard post={post} interactive={false} />
+            <View
+              testID="thread"
+              style={styles.thread}
+              onLayout={handleThreadLayout}
+            >
+              <CommentThread
+                postId={id}
+                highlightCommentId={highlightCommentId}
+                onHighlightLayout={scrollToThreadOffset}
+              />
             </View>
-          ) : error ? (
-            <View style={styles.centre}>
-              <Text style={styles.emptyTitle}>Couldn’t load this post</Text>
-              <Text style={styles.emptyBody}>
-                {error instanceof Error ? error.message : 'Something went wrong.'}
-              </Text>
-            </View>
-          ) : post ? (
-            <>
-              <PostCard post={post} interactive={false} />
-              <View
-                testID="thread"
-                style={styles.thread}
-                onLayout={handleThreadLayout}
-              >
-                <CommentThread
-                  postId={id}
-                  highlightCommentId={highlightCommentId}
-                  onHighlightLayout={scrollToThreadOffset}
-                />
-              </View>
-            </>
-          ) : null}
-        </ScrollView>
-      </KeyboardAvoidingView>
+          </>
+        ) : null}
+      </KeyboardAwareScroll>
     </SafeAreaView>
   );
 }

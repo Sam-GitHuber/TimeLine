@@ -48,9 +48,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -62,6 +60,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MentionSuggestions } from './MentionSuggestions';
 import { MessageBubble } from './MessageBubble';
 import { api, MESSAGE_POLL_MS } from '@/api';
+import {
+  KeyboardAvoider,
+  useKeyboardVisible,
+} from '@/components/KeyboardAvoider';
 import type { Mentionable } from '@/mentions';
 import { useMentions } from '@/mentions';
 import type { SendState } from '@/readReceipts';
@@ -141,6 +143,7 @@ export function MessageThreadView({
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
+  const keyboardVisible = useKeyboardVisible();
   const listRef = useRef<FlatList<Message>>(null);
   const [text, setText] = useState('');
   const mentions = useMentions({ people: mentionable, text, setText });
@@ -233,9 +236,8 @@ export function MessageThreadView({
           accessibilityLabel="Close thread"
         />
 
-        <KeyboardAvoidingView
+        <KeyboardAvoider
           style={[styles.sheet, { paddingTop: insets.top + spacing.sm }]}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           pointerEvents="box-none"
         >
           <View style={styles.header} pointerEvents="auto">
@@ -336,7 +338,7 @@ export function MessageThreadView({
           <View
             style={[
               styles.composerBar,
-              { paddingBottom: spacing.sm + 2 + insets.bottom },
+              { paddingBottom: spacing.sm + 2 + (keyboardVisible ? 0 : insets.bottom) },
             ]}
             pointerEvents="auto"
           >
@@ -399,7 +401,7 @@ export function MessageThreadView({
               </Text>
             )}
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardAvoider>
       </BlurView>
     </Modal>
   );

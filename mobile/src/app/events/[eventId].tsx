@@ -23,7 +23,6 @@ import {
   Alert,
   Linking,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -33,6 +32,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEditor';
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
@@ -190,7 +190,16 @@ export default function EventScreen() {
           </Text>
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <KeyboardAwareScroll
+          style={styles.fill}
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* DimensionEditor's poll-question and place fields sit well down a
+              long page, and this screen never had a `KeyboardAvoidingView` to
+              convert — under edge-to-edge nothing resizes the window, so without
+              help they go behind the keyboard. `KeyboardAwareScroll` also scrolls
+              the focused field into view, which matters on a page this long. */}
           <View style={styles.titleRow}>
             <Text style={styles.title}>{event.title}</Text>
             {event.status === 'cancelled' ? (
@@ -323,7 +332,7 @@ export default function EventScreen() {
               </View>
             </View>
           ) : null}
-        </ScrollView>
+        </KeyboardAwareScroll>
       )}
     </SafeAreaView>
   );
@@ -342,6 +351,7 @@ const styles = StyleSheet.create({
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.sm },
   emptyTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink, textAlign: 'center' },
   emptyBody: { fontSize: fontSize.sm, color: colors.inkSoft, textAlign: 'center', lineHeight: 20 },
+  fill: { flex: 1 },
   content: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.xxl },
   titleRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },
   title: { fontSize: fontSize.xl, fontWeight: '700', color: colors.ink, flexShrink: 1 },

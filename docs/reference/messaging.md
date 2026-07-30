@@ -1648,6 +1648,20 @@ are a long-press (a phone has no hover for the web's inline Delete — see below
 and the **Message** button on a profile pushes the thread full-screen rather than
 opening a drawer alongside.
 
+**The composer's keyboard handling is not the platform default** (#172). It goes
+through `components/KeyboardAvoider.tsx`, over
+`react-native-keyboard-controller`, because Android's `adjustResize` stopped
+resizing the window once edge-to-edge became mandatory — so the keyboard drew
+straight over the compose box, which a tester hit on the first Android build. The
+transcript needs no help of its own: it's an **inverted** `FlatList`, so the
+newest message stays pinned while the keyboard animates rather than being chased
+back into view. The composer bar also **drops its safe-area bottom inset while the
+keyboard is up** (`useKeyboardVisible`), because the avoider has already lifted it
+clear and the inset would otherwise be a dead band — up to ~48dp on Android
+three-button navigation. The full reasoning, including the trap that a
+`<Modal>` with an input now *needs* an avoider where it previously needed none,
+is in [`mobile-app.md`](mobile-app.md).
+
 ### The conversation list (Phase 9b M6)
 
 **Swipe a row for its actions**, the shape every mainstream messenger's list has

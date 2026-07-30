@@ -120,6 +120,16 @@ Once processing finishes, the build attaches to the **"Family and Friends"** gro
 app on the iPhone (signed in as the same Apple ID) → the new build installs over
 the old one.
 
+**Check the keyboard on any build that touched a screen with a text input.** It's
+the one class of bug the Jest suite provably cannot see (layout), and it reached
+real testers once already (#172). Tap into: a **chat composer**, the **login**
+form, **Settings → change password**, and a **modal with a field** (Report, or
+Delete account) — the composer should sit directly on the keyboard with no gap,
+and a focused field low in a form should scroll into view. On Android, **dock the
+keyboard first**: the emulator's Gboard opens in *floating* mode, occupies almost
+no height, and hides this entire class of bug — two attempts to reproduce the
+original report "passed" for exactly that reason.
+
 ## iOS testers: internal vs external
 
 - **Internal** (current): people added as users on the App Store Connect team

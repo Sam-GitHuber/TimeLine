@@ -111,13 +111,15 @@ alongside `backend` and `frontend`. **App builds happen on EAS, never in GitHub
 Actions** — don't try to build an IPA in CI.
 
 **The suite runs twice, once per platform** (Phase 10). `jest.config.js` declares
-two `projects` — `jest-expo/ios` and `jest-expo/android` — so ~41 test files
-report as ~82 suites, and failures are tagged `[ios]` / `[android]`. The platform
+two `projects` — `jest-expo/ios` and `jest-expo/android` — so ~43 test files
+report as ~86 suites, and failures are tagged `[ios]` / `[android]`. The platform
 decides what `Platform.OS` reports, so before this the app's Android branches (the
-action-sheet fallbacks, keyboard-avoidance behaviour, the date pickers) were
-**never executed by CI on any run** — they were first exercised by a person
-holding a phone. Two things this turned up, both worth knowing before adding a
-test:
+action-sheet fallbacks and the date pickers) were **never executed by CI on any
+run** — they were first exercised by a person holding a phone. Keyboard avoidance
+used to head that list; #172 removed the branch entirely, so keyboard handling is
+now identical on both platforms and the doubled run asserts the *same* result
+twice rather than two different paths. Two things this turned up, both worth
+knowing before adding a test:
 
 - **`src/__tests__/helpers.ts` absorbs the platform-divergent test seams**, so a
   test doesn't branch on `Platform.OS` itself. It owns the `ActionSheetIOS` and
@@ -302,6 +304,108 @@ reactions, whose `+` opens `rn-emoji-keyboard`, a pure-JS MIT grid, ~200 KB of
 emoji data). Emoji **validation stays server-side only** (`api/emoji.py`) — a
 second copy of "what counts as an emoji" in JS would drift from the one that
 decides.
+
+**Keyboard avoidance needs `KeyboardAvoider`, not `KeyboardAvoidingView`.** Use
+`src/components/KeyboardAvoider.tsx` for anything with a text input near the
+bottom of the screen; a lint rule enforces it. The long version is in that file's
+header, but the short one is worth carrying: Android used to resize the window
+when the keyboard opened (`android:windowSoftInputMode="adjustResize"`), so
+eleven screens correctly did nothing themselves and wrote
+`behavior={Platform.OS === 'ios' ? 'padding' : undefined}`. **Edge-to-edge
+removed the resize** — Expo SDK 54+ enables it, Android 15 (API 35) mandates it,
+and our generated `android/gradle.properties` carries `edgeToEdgeEnabled=true` —
+so the app has to consume `WindowInsets.ime()` itself. Nothing did, and the
+keyboard drew over the message composer.
+
+**Why a library rather than `behavior="padding"`, stated accurately.** An earlier
+version of this section claimed RN's `KeyboardAvoidingView` simply *can't* work
+under edge-to-edge. That was wrong, and the correction is worth having because
+the false version rules out a cheaper fix. RN 0.86 reports a correct keyboard
+height, and `ReactRootView.java:973` has an explicit branch for the position too:
+`screenY = softInputMode == SOFT_INPUT_ADJUST_NOTHING ? visibleBottom - height :
+visibleBottom`. Under `adjustNothing` that is resize-free and correct — so RN's
+component *would* work, in that mode. What we actually have is the manifest's
+`adjustResize`, which takes the second arm: a resize-era measurement of a window
+that no longer resizes. Reaching `adjustNothing` needs a config plugin or manifest
+edit, since `app.json` exposes only `android.softwareKeyboardLayoutMode:
+resize | pan`, and it would apply app-wide. `react-native-keyboard-controller`
+was chosen over that for animation quality — it tracks the keyboard rather than
+stepping once it settles — and for one code path across both platforms. A trade,
+not a necessity.
+
+**Mounting `KeyboardProvider` re-configures every `<Modal>` in the app.** This is
+the part that bites. RN sets each modal's dialog window to
+`SOFT_INPUT_ADJUST_RESIZE` (`ReactModalHostView.kt:332`), so modal dialogs were
+the one surface still being resized under edge-to-edge — an input inside a modal
+worked with no help. The library's `ModalAttachedWatcher` overrides that to
+`ADJUST_NOTHING` on every modal show ("imitating edge-to-edge mode behavior",
+`ModalAttachedWatcher.kt:96`), unconditionally. So **a `<Modal>` with a text
+input now needs a `KeyboardAvoider` inside it, where before it needed nothing** —
+the reverse of the usual direction, and it caught `ReportModal` and
+`DeleteAccountSection` on the way in. The provider also has to sit above the
+navigator; without it every avoider renders but never moves, which looks exactly
+like the original bug. `keyboardAvoider.test.tsx` asserts its position for that
+reason.
+
+**And the emulator hides it — this is the "harness is more forgiving" shape
+again, in its worst form.** Gboard comes up as a **small vertical pill** on the
+left edge (backspace / enter / emoji / ☰) instead of a keyboard. It takes almost
+no vertical space, so nothing is covered and two attempts to reproduce the
+reported bug both "passed".
+
+That pill is Gboard's **physical-keyboard toolbar**, not floating mode, and the
+distinction is what makes it fixable. Android has decided a hardware keyboard is
+in use, so Gboard collapses to a toolbar — and **a toolbar reports a zero-height
+IME inset**, which means no amount of app-side keyboard handling can respond to
+it. The app is behaving correctly; there is simply nothing to avoid.
+
+Getting a real keyboard, in order:
+
+1. `adb shell settings put secure show_ime_with_hard_keyboard 1` — a *secure*
+   setting, so it survives reboots. Necessary but not sufficient on its own.
+2. **`adb reboot`.** This is the part that actually works. The "physical keyboard
+   is in use" state lives in the system input-method service; force-stopping
+   Gboard, re-selecting the IME and `pm clear`ing Gboard all fail to shift it.
+3. Don't send `adb shell input keyevent` at the emulator while testing the
+   keyboard. Those are injected as *hardware* key events and flip Gboard straight
+   back to the toolbar — which is how this state kept coming back mid-session.
+   Drive it with `input tap` only, or with the mouse.
+
+**Verify with insets, never with your eyes**, because the pill and a real
+keyboard are easy to confuse in a screenshot:
+
+```
+adb shell dumpsys window | grep "type=ime"
+```
+
+- `frame=[0,0][0,0]` or `frame=[0,2400][1080,2400]`, i.e. zero height → the
+  toolbar. **Whatever you are looking at proves nothing.**
+- `frame=[0,1517][1080,2400] … visible=true sideHint=BOTTOM` → a real docked
+  keyboard, and the check is now meaningful.
+
+`adb shell uiautomator dump` then grepping the composer's `EditText` `bounds=`
+gives the other half objectively: its bottom edge should sit just above the IME
+frame's top, and the gap should *shrink* by the navigation-bar inset when the
+keyboard opens (that is `useKeyboardVisible` doing its job). Measured on a Pixel 8
+/ API 36: composer `[152,2206][869,2311]` closed → `[152,1386][869,1491]` open,
+against an IME top of 1517. Jest can't see
+it either — layout is the one thing the suite genuinely cannot check — so the
+guard is `keyboardAvoider.test.tsx` (the props the wrapper asks for, under both
+platform projects) plus a lint rule. **The lint rule blocks the direct spellings
+only**: `no-restricted-imports` on the name, and a `no-restricted-syntax`
+selector for an inline `Platform` ternary in a `behavior` prop. A hoisted
+`const behavior = Platform.OS === 'ios' ? …`, a `Platform.select({ … })`, or
+`import * as RN from 'react-native'` all slip past it. It's a guard against
+copy-paste, which is how this happened, not a proof.
+
+**This is also the app's one deliberate exception to the Reanimated rule above.**
+`react-native-keyboard-controller` is Reanimated-backed and drives a
+`Reanimated.View` in all fifteen call sites, none of it gesture-driven. That's a
+knowing trade for keyboard tracking that follows the finger, and it only avoids
+the documented Jest breakage because `jest.setup.js` mocks the library wholesale
+— which means **a Reanimated or worklets upgrade that breaks the real avoider
+will still show a green suite** and fail only on a device. Worth remembering at
+the next SDK bump.
 
 **Port a helper when a screen needs it, not before.** `formatRelativeTime` was
 deleted for being unused and came back one PR later; that's the rule working, not

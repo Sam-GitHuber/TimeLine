@@ -21,6 +21,7 @@ import {
   View,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { KeyboardProvider } from 'react-native-keyboard-controller';
 
 import { AuthProvider, useAuth } from '@/auth';
 import { PreferencesProvider } from '@/preferences';
@@ -146,14 +147,24 @@ export default function RootLayout() {
     // Modal, but wrapping here is the documented baseline and covers any future
     // gesture surface.
     <GestureHandlerRootView style={styles.root}>
-      <QueryClientProvider client={queryClient}>
-        <AuthProvider>
-          <PreferencesProvider>
-            <StatusBar style="dark" />
-            <AuthGate />
-          </PreferencesProvider>
-        </AuthProvider>
-      </QueryClientProvider>
+      {/* Tracks the keyboard's insets and feeds every `KeyboardAvoider` in the
+          app. It has to be above the navigator, because the thing it measures
+          is the window — and without it the avoiders render but never move,
+          which looks exactly like the Android bug they were added to fix.
+          No `statusBarTranslucent`/`navigationBarTranslucent` needed: those are
+          for apps that make the bars translucent by hand, whereas Expo's
+          edge-to-edge already does it and the library detects the same
+          `edgeToEdgeEnabled` build flag we set. */}
+      <KeyboardProvider>
+        <QueryClientProvider client={queryClient}>
+          <AuthProvider>
+            <PreferencesProvider>
+              <StatusBar style="dark" />
+              <AuthGate />
+            </PreferencesProvider>
+          </AuthProvider>
+        </QueryClientProvider>
+      </KeyboardProvider>
     </GestureHandlerRootView>
   );
 }

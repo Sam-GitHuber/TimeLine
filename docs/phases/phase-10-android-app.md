@@ -275,10 +275,23 @@ it**. Before the fix the second tap did nothing, permanently.
 - **`BlurView`** (`MessageThreadView`, the composer backdrop) is expensive and
   visually different on Android; check `experimentalBlurMethod` or fall back to a
   solid translucent surface.
-- **Keyboard avoidance:** nine screens pass `behavior={Platform.OS === 'ios' ?
-  'padding' : undefined}`, i.e. Android relies entirely on `adjustResize`. That's
-  the correct default, but it's never actually been *looked at* on Android — the
-  message composer and the login screen most of all.
+- **Keyboard avoidance ✅ Fixed (#172), pending an on-device check.** This item
+  said Android "relies entirely on `adjustResize`… but it's never actually been
+  *looked at*", and it never was — a tester then hit it on day one: the keyboard
+  covered the message composer. **`adjustResize` no longer resizes under
+  edge-to-edge**, which Expo SDK 54+ enables and Android 15 mandates, so all
+  eleven `KeyboardAvoidingView` screens were inert by design against a
+  contract that had changed. Replaced by one shared
+  `components/KeyboardAvoider.tsx` over `react-native-keyboard-controller`,
+  which reads the IME insets directly; `KeyboardProvider` is mounted in
+  `app/_layout.tsx`. A lint rule blocks the old pattern. Now **fifteen** call
+  sites, not eleven: four screens had bottom-of-page inputs and no avoider at
+  all (`settings`, `events/[eventId]`, `ReportModal`, `DeleteAccountSection`) —
+  and the last two *needed* one only because mounting the provider strips the
+  `adjustResize` React Native gives modal dialogs. Full write-up, including that
+  modal trap, in `reference/mobile-app.md`. **The emulator hid this** — the AVD's
+  Gboard opens in floating mode and covers nothing, so *dock the keyboard* before
+  believing any keyboard check here.
 - **Action sheets already have Android fallbacks** (four `ActionSheetIOS` sites
   fall back to `Alert.alert`), one of which is explicitly commented "Phase 10
   refines this". They work; they just look like a stack of alert buttons. Worth a

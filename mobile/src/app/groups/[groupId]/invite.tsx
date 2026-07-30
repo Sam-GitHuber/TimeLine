@@ -14,8 +14,6 @@ import { useEffect, useState } from 'react';
 import {
   Alert,
   FlatList,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -26,6 +24,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { dedupeById } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { PersonSummary } from '@/types';
@@ -143,7 +142,7 @@ export default function GroupInviteScreen() {
         />
       </View>
 
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoider style={styles.fill}>
         <FlatList
           data={filtered}
           keyExtractor={(p) => String(p.id)}
@@ -201,7 +200,7 @@ export default function GroupInviteScreen() {
             <Text style={styles.inviteLabel}>{invite.isPending ? 'Inviting…' : 'Invite'}</Text>
           </Pressable>
         </View>
-      </KeyboardAvoidingView>
+      </KeyboardAvoider>
     </SafeAreaView>
   );
 }

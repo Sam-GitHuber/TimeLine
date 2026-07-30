@@ -30,6 +30,7 @@ import {
 } from 'react-native';
 
 import { api } from '@/api';
+import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
 
 export function ReportModal({
@@ -77,96 +78,103 @@ export function ReportModal({
       onRequestClose={onClose}
       accessibilityViewIsModal
     >
-      {/* Backdrop cancels; the card swallows its own presses (a sibling
-          Pressable), matching DisconnectWarningModal. */}
-      <Pressable style={styles.backdrop} onPress={onClose}>
-        <Pressable style={styles.card} onPress={() => {}}>
-          {done ? (
-            <>
-              <Text style={styles.title}>Thanks for letting us know</Text>
-              <Text style={styles.body}>
-                {target === 'message'
-                  ? 'We’ll review this message and act on it if it breaks the rules.'
-                  : `We’ll review this ${target} and take it down if it breaks the rules.`}
-              </Text>
-              <View style={styles.actions}>
-                <Pressable
-                  onPress={onClose}
-                  accessibilityRole="button"
-                  style={({ pressed }) => [styles.btn, styles.primary, pressed && styles.pressed]}
-                >
-                  <Text style={styles.primaryLabel}>Done</Text>
-                </Pressable>
-              </View>
-            </>
-          ) : (
-            <>
-              <Text style={styles.title}>Report this {target}</Text>
-              <Text style={styles.body}>
-                Tell us what’s wrong (optional) — for example it infringes your
-                copyright, or shouldn’t be here. It goes to the site owner to
-                review.
-              </Text>
-              {/* Say plainly what reporting a private message hands over. The
-                  site owner can't read conversations any other way, so this is
-                  the one moment message text leaves the chat. */}
-              {target === 'message' ? (
+      {/* Required since #172 mounted `KeyboardProvider`: that strips the
+          `adjustResize` React Native gives every modal dialog, so the reason box
+          and the Cancel/Send buttons would otherwise sit behind the keyboard,
+          with no scroll to reach them. See `components/KeyboardAvoider.tsx`. */}
+      <KeyboardAvoider style={styles.avoider}>
+        {/* Backdrop cancels; the card swallows its own presses (a sibling
+            Pressable), matching DisconnectWarningModal. */}
+        <Pressable style={styles.backdrop} onPress={onClose}>
+          <Pressable style={styles.card} onPress={() => {}}>
+            {done ? (
+              <>
+                <Text style={styles.title}>Thanks for letting us know</Text>
                 <Text style={styles.body}>
-                  A copy of this message is sent with your report. It’s the only
-                  way the site owner can see it — they can’t read your
-                  conversations otherwise.
+                  {target === 'message'
+                    ? 'We’ll review this message and act on it if it breaks the rules.'
+                    : `We’ll review this ${target} and take it down if it breaks the rules.`}
                 </Text>
-              ) : null}
-              <TextInput
-                style={styles.input}
-                value={reason}
-                onChangeText={setReason}
-                placeholder="What’s the problem?"
-                placeholderTextColor={colors.inkFaint}
-                accessibilityLabel={`Reason for reporting this ${target}`}
-                multiline
-                maxLength={1000}
-                editable={!submitting}
-              />
-              {error ? (
-                <Text style={styles.error} accessibilityRole="alert">
-                  {error}
+                <View style={styles.actions}>
+                  <Pressable
+                    onPress={onClose}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [styles.btn, styles.primary, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.primaryLabel}>Done</Text>
+                  </Pressable>
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={styles.title}>Report this {target}</Text>
+                <Text style={styles.body}>
+                  Tell us what’s wrong (optional) — for example it infringes your
+                  copyright, or shouldn’t be here. It goes to the site owner to
+                  review.
                 </Text>
-              ) : null}
-              <View style={styles.actions}>
-                <Pressable
-                  onPress={onClose}
-                  accessibilityRole="button"
-                  style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
-                >
-                  <Text style={styles.ghostLabel}>Cancel</Text>
-                </Pressable>
-                <Pressable
-                  onPress={submit}
-                  disabled={submitting}
-                  accessibilityRole="button"
-                  style={({ pressed }) => [
-                    styles.btn,
-                    styles.primary,
-                    (pressed || submitting) && styles.pressed,
-                  ]}
-                >
-                  {submitting ? (
-                    <ActivityIndicator color="#ffffff" size="small" />
-                  ) : (
-                    <Text style={styles.primaryLabel}>Send report</Text>
-                  )}
-                </Pressable>
-              </View>
-            </>
-          )}
+                {/* Say plainly what reporting a private message hands over. The
+                    site owner can't read conversations any other way, so this is
+                    the one moment message text leaves the chat. */}
+                {target === 'message' ? (
+                  <Text style={styles.body}>
+                    A copy of this message is sent with your report. It’s the only
+                    way the site owner can see it — they can’t read your
+                    conversations otherwise.
+                  </Text>
+                ) : null}
+                <TextInput
+                  style={styles.input}
+                  value={reason}
+                  onChangeText={setReason}
+                  placeholder="What’s the problem?"
+                  placeholderTextColor={colors.inkFaint}
+                  accessibilityLabel={`Reason for reporting this ${target}`}
+                  multiline
+                  maxLength={1000}
+                  editable={!submitting}
+                />
+                {error ? (
+                  <Text style={styles.error} accessibilityRole="alert">
+                    {error}
+                  </Text>
+                ) : null}
+                <View style={styles.actions}>
+                  <Pressable
+                    onPress={onClose}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.ghostLabel}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={submit}
+                    disabled={submitting}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [
+                      styles.btn,
+                      styles.primary,
+                      (pressed || submitting) && styles.pressed,
+                    ]}
+                  >
+                    {submitting ? (
+                      <ActivityIndicator color="#ffffff" size="small" />
+                    ) : (
+                      <Text style={styles.primaryLabel}>Send report</Text>
+                    )}
+                  </Pressable>
+                </View>
+              </>
+            )}
+          </Pressable>
         </Pressable>
-      </Pressable>
+      </KeyboardAvoider>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
+  avoider: { flex: 1 },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(28,26,22,0.4)',

@@ -16,7 +16,6 @@ import { router } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import {
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -24,6 +23,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BASE_URL } from '@/api';
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { ChangePasswordSection } from '@/components/settings/ChangePasswordSection';
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
@@ -49,7 +49,13 @@ export default function SettingsScreen() {
         <View style={styles.spacer} />
       </View>
 
-      <ScrollView
+      {/* `ChangePasswordSection`'s three fields sit low on a long page, so this
+          screen needs an avoider even though it never had a
+          `KeyboardAvoidingView` to convert — under edge-to-edge nothing resizes
+          the window, so without it the field and its Save button go behind the
+          keyboard. See `components/KeyboardAvoider.tsx`. */}
+      <KeyboardAwareScroll
+        style={styles.fill}
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
       >
@@ -59,7 +65,7 @@ export default function SettingsScreen() {
         <ChangePasswordSection />
         <LegalSection />
         <DeleteAccountSection />
-      </ScrollView>
+      </KeyboardAwareScroll>
     </SafeAreaView>
   );
 }
@@ -109,6 +115,7 @@ const styles = StyleSheet.create({
     color: colors.ink,
   },
   spacer: { width: 48 },
+  fill: { flex: 1 },
   content: {
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.xxl,

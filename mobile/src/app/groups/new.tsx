@@ -6,10 +6,7 @@
 
 import { router } from 'expo-router';
 import {
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -17,6 +14,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { GroupForm } from '@/components/GroupForm';
+import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { colors, fontSize, spacing } from '@/theme';
 
 export default function NewGroupScreen() {
@@ -29,11 +27,9 @@ export default function NewGroupScreen() {
         <Text style={styles.title}>New group</Text>
         <View style={styles.spacer} />
       </View>
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView keyboardShouldPersistTaps="handled">
-          <GroupForm mode="create" />
-        </ScrollView>
-      </KeyboardAvoidingView>
+      <KeyboardAwareScroll style={styles.fill} keyboardShouldPersistTaps="handled">
+        <GroupForm mode="create" />
+      </KeyboardAwareScroll>
     </SafeAreaView>
   );
 }
