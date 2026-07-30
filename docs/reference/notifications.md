@@ -471,9 +471,16 @@ is the first feature that hands user data to a third party.
 
 A push carries: the Expo push token, the title `TimeLine`, the server-phrased
 line (*"Ada replied to your post"*), and the deep-link route. It travels to
-**Expo's push service**, then to **Apple's APNs**, before reaching the phone.
-So both see a recipient's device token and the **display name of the person who
-acted**.
+**Expo's push service**, then to **Apple's APNs** or **Google's FCM** (Phase 10),
+before reaching the phone. So both see a recipient's device token and the
+**display name of the person who acted**.
+
+**The deep-link route is metadata, and it is not nothing.** A message push
+carries `"url": "/messages/<conversation id>"` (`send_pushes.py:287`), so the
+services in the path see a stable identifier for *which* thread buzzed, and can
+count how often it does. That's defensible — it's the price of a push that opens
+the right screen, it names no participant and quotes no text — but it means the
+honest claim is "no content", not "no conversation".
 
 A mention says *"Ada mentioned you"* (Phase 9b M8) — which is the same rule, and
 earns its place because a chat you silenced suddenly buzzing owes you an
@@ -481,9 +488,32 @@ explanation.
 
 Deliberately **not** included: any post, comment **or message** text, any photo,
 any email address. A push names people but never quotes them — so a lock screen
-in a café leaks no content, and the third parties in the path see no
-conversation. That rule is what makes pushing private messages acceptable: a new
-message says *"New message from Ada"* and nothing more.
+in a café leaks no content. That rule is what makes pushing private messages
+acceptable: a new message says *"New message from Ada"* and nothing more.
+
+**The known cost of that rule** (2026-07-30). It collides with the **Reply**
+action a message push carries (Phase 9b M8): you get a text field for a message
+you cannot read. The fix is *not* to start putting message text in the body —
+that would hand every private message's plaintext to Expo, Apple and Google, and
+under E2E the server won't be able to compose one anyway. It's to fill the body
+in **on the device, after the push arrives and before it is shown**, in an iOS
+**Notification Service Extension** and its Android equivalent — so the
+notification gains content without the content ever entering the push path.
+That's [Phase 10b](../phases/phase-10b-notification-content.md), which has the
+extension **fetch** the body over TLS from our own server;
+[Phase 9c](../phases/phase-9c-e2e-encryption.md) later swaps that fetch for a
+local **decrypt**, once there's a ciphertext to decrypt.
+
+**Until 10b ships, the rule above stands exactly as written.** After it, the
+push still carries no message content — but two smaller things change, and this
+section should be rewritten rather than appended to when they do:
+
+- Previews are **per device and off by default**, so a push to an opted-in
+  device sets `mutableContent`. Its presence on the wire is therefore a readout
+  of one privacy setting, visible to Expo and Apple.
+- The **device** learns more, from us, over TLS. That's the point of the design:
+  the extra content moves on the one leg of the journey that has no third party
+  in it.
 
 **Why Expo rather than talking to APNs directly.** Direct APNs would keep
 Apple in the path but remove Expo from it, at the cost of holding and rotating

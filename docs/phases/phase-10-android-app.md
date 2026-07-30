@@ -402,7 +402,13 @@ uploaded manually, internal testing track, tester list, opt-in links out. Plus a
 - **Do the `Alert.alert` action-sheet fallbacks stay?** Decide after seeing them
   on a real Android screen, not before.
 - **Does the message Reply action work from the Android shade?** If not, do we
-  build it another way or drop it on Android?
+  build it another way or drop it on Android? Note that
+  [Phase 10b](phase-10b-notification-content.md) reopens this from the other
+  end: a Reply field on a push you can't read is the problem it exists to fix.
+  Its answer is to give Reply something to reply *to* — the field itself stays
+  exactly as it is on every device, because removing it would delete a shipped
+  feature from everyone to fix it for the few who opt in. Don't settle this one
+  twice: if Reply is awkward on Android, 10b is where it lands.
 - Whether to keep `predictiveBackGestureEnabled: false` past v1.
 
 ---
