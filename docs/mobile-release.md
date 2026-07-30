@@ -1,10 +1,13 @@
-# Releasing the iPhone app (EAS build → TestFlight)
+# Releasing the phone apps (EAS build → TestFlight / Android)
 
-The repeatable runbook for getting a new version of the **iOS app** (`mobile/`,
-the Expo/React Native app) onto testers' phones, **and** the rationale behind each
+The repeatable runbook for getting a new version of the app (`mobile/`, the
+Expo/React Native app) onto testers' phones, **and** the rationale behind each
 step. This is the mobile sibling of [`deploy.md`](deploy.md): where that doc ships
-the backend/web app to the home server, this one ships the phone app to
-**TestFlight** (Apple's beta-distribution service).
+the backend/web app to the home server, this one ships the phone app to testers.
+
+**iOS is below; [Android has its own section](#android-phase-10).** One codebase,
+two quite different distribution stories — Apple's is a single channel
+(TestFlight) with a review gate, Android's is a choice of channels with none.
 
 It assumes the app is already built and working — the "how do I put the newest
 code on a phone" doc, not "how do I write a feature."
@@ -27,9 +30,10 @@ whatever branch you point it at. It never touches `main`, the website, or the ho
 server. So building from a branch to *verify* a change (e.g. seeing an icon on a
 real home screen) is safe and normal.
 
-## One-time setup — already done, do not redo
+## iOS: one-time setup — already done, do not redo
 
 Recorded here so a fresh checkout knows the state. None of this needs repeating.
+(Android's equivalent is [below](#one-time-setup--already-done-do-not-redo-1).)
 
 - **Apple Developer Program** — enrolled and active (account `samejefford@gmail.com`).
 - **EAS project** — `@sam-apples-team/timeline`
@@ -55,7 +59,7 @@ Recorded here so a fresh checkout knows the state. None of this needs repeating.
   `app.json`, so Apple never prompts the "does it use encryption?" question that
   otherwise blocks each build.
 
-## The release, step by step
+## iOS: the release, step by step
 
 The order is **branch → PR → merge → build from `main` → submit → verify**. Build
 from merged `main` so the binary's recorded commit matches history.
@@ -116,7 +120,7 @@ Once processing finishes, the build attaches to the **"Family and Friends"** gro
 app on the iPhone (signed in as the same Apple ID) → the new build installs over
 the old one.
 
-## Testers: internal vs external
+## iOS testers: internal vs external
 
 - **Internal** (current): people added as users on the App Store Connect team
   (max 100). Builds are available **minutes after processing, no Apple review**.
@@ -169,6 +173,122 @@ reviewer would see actual friends'/family's private posts.
 Re-run `create_review_account` (and update the App Store Connect fields) whenever
 you want to rotate the demo password.
 
+## Android (Phase 10)
+
+Same codebase, same `eas build`, different distribution. The mental model above
+(JS-only vs native) applies unchanged.
+
+### One-time setup — already done, do not redo
+
+- **Package name** — `net.yourtimeline.app`, matching the iOS bundle id.
+  **Permanent** once published to Play.
+- **Upload keystore** — generated *in the cloud* by EAS on the first Android
+  build and stored there. Unlike iOS, this needed no interactive login: EAS
+  detected no local `keytool` and made one itself, so the interactive-TTY gotcha
+  above does **not** apply to Android builds.
+- **Firebase project `timeline-e428d`** — Cloud Messaging only. Analytics
+  deliberately off: it's a third-party tracker, which cuts across the
+  privacy-first principle in `SHARED.md`.
+- **`google-services.json`** — committed at `mobile/google-services.json` and
+  referenced by `app.json`'s `android.googleServicesFile`. **Committing it is
+  deliberate**: it ships inside every APK, so anyone with the app already has it,
+  and keeping it out of the repo would buy no security while costing an
+  `app.config.js` to read it from an env var. It cannot send push — that needs
+  the service-account key, which is *not* in the repo and never should be.
+- **FCM v1 service account key** — uploaded to EAS (dashboard → project →
+  Credentials → Android → the application identifier → **Service Credentials**).
+  Note it's on the *identifier's own page*, not the list. Rotate by generating a
+  new key in Firebase → Project settings → Service accounts and re-uploading;
+  delete the downloaded file afterwards, it's a live credential.
+
+Everything Firebase's "Add the Firebase SDK" page tells you to paste into Gradle
+is **already handled** by Expo's config plugin — it injects the
+`com.google.gms:google-services` classpath, applies the plugin, and copies the
+JSON into `android/app/`. Don't hand-edit `mobile/android/`: it's generated and
+gitignored, so `expo prebuild` will wipe your changes.
+
+### Two distribution channels, and when to use each
+
+| | EAS internal distribution | Play internal testing |
+|---|---|---|
+| Cost | free | $25 one-off |
+| Install | link/QR → "install unknown apps" warning | normal Play Store install |
+| Review | none | none (internal track only) |
+| Updates | manual re-install | automatic |
+| Blocked by | nothing | **device verification** (see below) |
+
+**Use the APK for the development loop and for testing before Play is set up.**
+It is a genuine channel — friends can install and use the app today. The Play
+track is what you want for the settled beta, because it's the only option where a
+non-technical relative's experience is the ordinary one.
+
+### Build a shareable APK
+
+```bash
+cd mobile
+eas build --profile preview --platform android
+```
+
+- The `preview` profile sets `android.buildType: "apk"`; `distribution:
+  "internal"` gives a download page with a link and QR code. Send either.
+- **Check what backend it points at.** `mobile/.env` is gitignored, so it is
+  **not** uploaded to EAS and the build falls back to `api.ts`'s default,
+  `https://your-timeline.net`. That's what you want for a tester — but it means a
+  local `.env` pointing at `10.0.2.2` will *not* leak into a shared build, and
+  equally that you cannot point a shared build at a local Django.
+- Testers still need an account, and **sign-ups remain admin-approved**. Handing
+  someone an APK grants them nothing until you approve them in Django admin.
+  That's what makes an open install link safe here.
+
+### Play Store (when the device check is done)
+
+```bash
+eas build --profile production --platform android   # AAB, not APK
+eas submit --platform android --profile production --latest
+```
+
+- `production` builds an **AAB**, which is what Play requires; `autoIncrement`
+  handles the versionCode.
+- **The first upload must be done by hand** in the Play Console — `eas submit`
+  can only target an app record that already has a release.
+- `eas submit` needs a **Google Play Developer API** service-account key, which
+  is a *different* key from the FCM one. Two service accounts, two consoles;
+  they get confused constantly.
+- **Play App Signing** re-signs with Google's key, so a lost upload key is
+  recoverable. Back the upload keystore up anyway:
+  `eas credentials --platform android` can export it — store it with the other
+  deploy secrets (see [`backup-restore.md`](backup-restore.md)), never the repo.
+
+**Device verification** gates a *personal* Play account: Google requires the
+**Play Console mobile app on a non-rooted physical Android device** running
+Android 10+, signed in as the account owner. An emulator will not do — this is
+the one step in the whole phase that needs real hardware, and it takes under a
+minute on a borrowed phone. Note the widely-cited "12 testers for 14 days" rule
+is *not* relevant: it gates **production** access via **closed** testing, and a
+friends-and-family beta lives on the internal track indefinitely.
+
+### Local development build
+
+```bash
+cd mobile && npx expo run:android      # dev build onto a running emulator
+```
+
+Four things that cost time the first time:
+
+- **The first build downloads the ~2.4 GB Android NDK** (reanimated and worklets
+  compile C++ from source) plus whichever Build-Tools the pinned AGP wants —
+  budget ~30 minutes and a few GB. Later builds are minutes; JS-only changes
+  hot-reload and rebuild nothing.
+- **The emulator reaches your Mac at `10.0.2.2`**, never `localhost` — and that
+  host must also be in Django's `DJANGO_ALLOWED_HOSTS` or every request comes
+  back **400 DisallowedHost**. See the comments in `mobile/.env`.
+- **`adb reverse tcp:8081 tcp:8081`** is the reliable way to point the dev client
+  at Metro, especially behind a VPN, which otherwise breaks the LAN-IP URL Expo
+  prints.
+- **Use a Google Play system image** for the AVD. It's required for FCM, and it
+  is what makes Android push testable with no phone at all — see
+  [`reference/notifications.md`](reference/notifications.md).
+
 ## Icon / splash / other asset changes
 
 The app **icon** and **launch (splash) screen** are the brand mark from the web
@@ -208,4 +328,8 @@ as a deliberate rebuild. Until then, use the binary route above for everything.
 | Internal group | Family and Friends |
 | Build | `eas build --profile production --platform ios` |
 | Submit | `eas submit --platform ios --profile production --latest` |
-| Login needed? | Only first-time cred setup — run in a **real Terminal**, not `!` |
+| Login needed? | iOS: only first-time cred setup — run in a **real Terminal**, not `!`. Android: never (EAS makes the keystore itself) |
+| Android package | `net.yourtimeline.app` |
+| Firebase project | `timeline-e428d` (Cloud Messaging only) |
+| Android APK | `eas build --profile preview --platform android` |
+| Android Play build | `eas build --profile production --platform android` (AAB) |
