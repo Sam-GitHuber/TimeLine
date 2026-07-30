@@ -1056,7 +1056,11 @@ since neither state is ever undone:
 **The body never quotes the message.** It reads `New message from Ada`, or
 `Ada in Book Club` for a titled group. Push bodies transit Expo's servers and
 Apple's, so naming the sender is the most we ever say — that rule is what makes
-pushing private messages acceptable at all.
+pushing private messages acceptable at all. Its known cost is the **Reply**
+action below: a text field for a message you can't read. The fix is on-device
+fetch (later decryption) in a notification service extension, not a chattier
+body — see [notifications.md](notifications.md#what-leaves-the-box-and-who-sees-it)
+and [Phase 10b](../phases/phase-10b-notification-content.md).
 
 **Mute** is per-participant (`Participant.muted_at`), not per-conversation, so
 silencing a busy group chat is your choice alone. It lives on `Participant` rather

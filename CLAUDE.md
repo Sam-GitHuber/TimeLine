@@ -27,10 +27,14 @@ Two that are easy to skip and shouldn't be: `messaging.md` is large and its
 
 **Next up: Phase 10 (Android).** Because the app is Expo, Android adds no new
 screens — the work is toolchain, FCM credentials, notification channels, the back
-button, and Android-only layout bugs. **E2E encryption (9c) is deliberately
-scheduled after Android**, at the user's call: friends are waiting on an Android
-build. Phases 11–13 (AWS migration → short video clips) remain sketches in
-`docs/phases/`.
+button, and Android-only layout bugs. Then **Phase 10b (notification content)** —
+a fleshed, confirmed plan in `docs/phases/`: an iOS notification service
+extension (plus the Android equivalent) so a message push can show the message,
+fetched device-side rather than sent through Expo/Apple. It exists to fix the
+Reply-with-no-context problem *and* to build most of 9c's milestone 7 early.
+**E2E encryption (9c) is deliberately scheduled after Android**, at the user's
+call: friends are waiting on an Android build. Phases 11–13 (AWS migration →
+short video clips) remain sketches in `docs/phases/`.
 
 ## Before doing any work
 

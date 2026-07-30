@@ -84,6 +84,35 @@ compromised *device*, or against the other person screenshotting.
 6. **Key verification.** Without a way to compare safety numbers, the server can
    silently insert its own key and read everything. An unverifiable E2E system is
    theatre. Needs a real UI, however simple.
+7. **Decrypting inside the notification extension** (added 2026-07-30). Under
+   E2E the server cannot phrase a push body, because it cannot read the message.
+   The only way a notification ever shows content again is to decrypt it **on
+   the device, before it is displayed**.
+
+   **[Phase 10b](phase-10b-notification-content.md) builds the whole extension
+   ahead of this phase** — the iOS service extension and its config plugin, the
+   Android path, the shared keychain, the auth-in-an-extension rules, the
+   per-device toggle, the fallback discipline — against *plaintext* messages,
+   because all of that is independent of the cryptography. Read it first; it is
+   the starting point for this milestone, not background.
+
+   **What is left for 9c is one substitution**: the extension stops *fetching*
+   the body from an endpoint and starts *decrypting* it locally. Which is still
+   the nastiest thing in the phase:
+
+   - **The extension needs the message keys**, not just an auth token — so 10b's
+     shared keychain has to carry protocol state too.
+   - **It must advance the ratchet**, and so shares mutable protocol state with
+     the main app. Two processes stepping the same double-ratchet is a known
+     source of "message can't be decrypted" bugs — the ordering has to be
+     designed, not discovered. **This is the part 10b cannot de-risk**, and the
+     reason this milestone stays late in the phase.
+   - **An NSE has a hard memory ceiling** (~24 MB) and seconds to finish.
+     Decrypting text is fine; anything touching media is not.
+
+   10b's rule that the fallback is always the server-phrased body carries over —
+   except that under E2E the server can only ever say *"New message from Ada"*,
+   which is precisely what makes that fallback still acceptable.
 
 ## What breaks in the product
 
@@ -91,7 +120,7 @@ compromised *device*, or against the other person screenshotting.
 | --- | --- |
 | Conversation-list previews (server computes them today) | Return the last message's ciphertext; client decrypts for the preview |
 | Server-side message search | Never build it — 9b already avoids it |
-| Push bodies | **Nothing to do** — they already never quote text, only the sender's name. The existing design is E2E-compatible |
+| Push bodies | **Real work — see hard part 7.** Today's contentless body ("New message from Ada") survives E2E untouched, but it's already a product problem: the Reply field on a message push has nothing to reply *to*. The fix is a notification service extension that decrypts on-device, which is E2E work either way |
 | Read receipts | **Nothing to do** — metadata, not content |
 | Reactions | 9b keeps them plaintext metadata by decision. Revisit here, but the case for encrypting a bare emoji is weak |
 | Media | 9b already moves processing client-side; here the bytes get encrypted before upload |
@@ -120,12 +149,16 @@ work is nearly all client-side.
 4. Key verification UI.
 5. Group threads + rekeying on every membership transition.
 6. Media.
-7. Web (or the documented decision not to).
-8. Migration: what happens to existing plaintext history. **Probably: leave it
+7. **On-device notification decryption** (hard part 7): swap
+   [10b](phase-10b-notification-content.md)'s fetch for local decryption.
+   Sequenced after 1:1 messaging works, so the extension is decrypting a format
+   that has stopped moving.
+8. Web (or the documented decision not to).
+9. Migration: what happens to existing plaintext history. **Probably: leave it
    plaintext and encrypt from a cutover date**, since retro-encrypting needs keys
    for devices that didn't exist when the messages were sent. Needs a clear
    in-product explanation.
-9. Privacy-policy rewrite — including what E2E does *not* cover (metadata).
+10. Privacy-policy rewrite — including what E2E does *not* cover (metadata).
 
 ## Open questions for the fleshing-out session
 
@@ -133,6 +166,9 @@ work is nearly all client-side.
   biggest product decision in the phase.
 - Existing plaintext history: cutover, or migrate?
 - Key backup: passphrase-protected, device-transfer, or no recovery at all?
+- ~~Notification previews: does the extension work slip earlier?~~ **Settled
+  2026-07-30: yes** — it became [Phase 10b](phase-10b-notification-content.md),
+  running before this phase. Milestone 7 above inherits it.
 - Does this land before or after Phase 10 (Android)? Adding a second platform
   mid-E2E multiplies the multi-device work; doing E2E first means Android
   inherits it.

@@ -485,6 +485,20 @@ in a café leaks no content, and the third parties in the path see no
 conversation. That rule is what makes pushing private messages acceptable: a new
 message says *"New message from Ada"* and nothing more.
 
+**The known cost of that rule** (2026-07-30). It collides with the **Reply**
+action a message push carries (Phase 9b M8): you get a text field for a message
+you cannot read. The fix is *not* to start putting message text in the body —
+that would hand every private message's plaintext to Expo, Apple and Google, and
+under E2E the server won't be able to compose one anyway. It's to decrypt on the
+device, in an iOS **Notification Service Extension** and its Android equivalent,
+so the notification gains content without the content ever leaving our
+infrastructure. That's [Phase 10b](../phases/phase-10b-notification-content.md),
+which builds the extension against today's plaintext messages and hands it to
+[Phase 9c](../phases/phase-9c-e2e-encryption.md) to swap the fetch for a
+decrypt. **Until 10b ships, the rule above stands exactly as written** — and
+after it, the rule about what a *push* carries is unchanged; only the device
+learns more.
+
 **Why Expo rather than talking to APNs directly.** Direct APNs would keep
 Apple in the path but remove Expo from it, at the cost of holding and rotating
 an APNs key on the box, implementing JWT-signed APNs auth, and writing the
