@@ -181,12 +181,13 @@ real, located thing.
   `requestPermissionsAsync` and treats refusal as normal, so this should work
   unchanged — but it needs verifying, and the prompt's *timing* on Android
   (currently on sign-in) should be checked against how it reads on first launch.
-- **The notification icon.** Android draws the status-bar icon as a **monochrome
-  silhouette**; hand it a colour icon and you get a grey blob. The
-  `expo-notifications` plugin takes `icon` and `color` — we already have
-  `assets/images/android-icon-monochrome.png` from the adaptive icon work, which
-  is likely reusable. This is a visible-quality item, not cosmetic pedantry: it's
-  on every single notification.
+- **The notification icon.** ✅ **Done.** Android builds the status-bar icon from
+  the **alpha channel** — hand it a colour image and you get a solid white blob.
+  `assets/images/android-icon-monochrome.png` turned out to be exactly the right
+  shape already (opaque mark, transparent ground; its grey is irrelevant since
+  only alpha is read), so the `expo-notifications` plugin now takes it as `icon`
+  with the emerald accent as `color`. Verified through `expo config --type
+  introspect` rather than a build.
 - **Verify the message Reply action.** `MESSAGE_CATEGORY` / `REPLY_ACTION` in
   `push.ts` gives iOS an inline reply field on a message push. Expo's
   notification categories are supported on Android too, but the options differ —
@@ -275,11 +276,13 @@ difference rather than a test artefact.
   derives from constants (`SPINE_COLUMN`, `SPINE_CENTRE`) so it should hold, but
   line heights and the day dividers want eyes on them.
 - **Ripple feedback** — Android users expect `android_ripple` on pressables.
-- Narrow the **camera permission**: `app.json` currently sets
-  `cameraPermission` on `expo-image-picker`, which adds `CAMERA` to the manifest.
-  If we only ever open the photo library, drop it — an unexplained permission on
-  a privacy-first app's Play listing is a bad look (`mobile-app.md` already makes
-  this argument about the microphone).
+- **Permissions: checked, nothing to do.** This plan proposed dropping the
+  camera permission; that was wrong. Chat photos can be taken with the camera
+  (Phase 9b M7), so `CAMERA` is a live capability. And `microphonePermission:
+  false` already emits an explicit `tools:node="remove"`, so `RECORD_AUDIO` is
+  stripped at manifest merge rather than merely omitted — it appears in the
+  introspected manifest *as a removal*, which is easy to misread as a leak.
+  `mobile-app.md` corrected, since it still claimed we only open the library.
 
 ### Dev-loop gotcha
 

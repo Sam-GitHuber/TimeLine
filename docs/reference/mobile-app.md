@@ -229,11 +229,16 @@ permission string** — the bug would have surfaced only at the dev-build switch
 an app that dies the moment you tap "Add photos", and as an App Review rejection.
 **When adding any Expo package, check whether it ships a config plugin.** Verify
 without a full build: `npx expo config --type introspect` prints the resolved
-`Info.plist` and Android permissions. Permissions are also narrowed deliberately
-(`cameraPermission: false`, `microphonePermission: false`) — the plugin adds both
-by default plus Android's `RECORD_AUDIO`, and we only ever open the photo library.
-An unexplained microphone permission on a privacy-first app is a bad look, and
-Phase 10 would inherit it on the Play listing.
+`Info.plist` and Android permissions. Permissions are narrowed deliberately:
+**`microphonePermission: false`**, because the picker plugin otherwise adds a
+microphone string *and* Android's `RECORD_AUDIO`, and an unexplained microphone
+permission on a privacy-first app is a bad look — one the Play listing would
+show. Setting it `false` doesn't merely omit the permission, it emits an explicit
+`tools:node="remove"` so the merge strips anything a dependency adds; verified in
+Phase 10, so don't "fix" that entry when you see it in the introspected manifest.
+**The camera permission is real and stays** — chat photos can be taken with the
+camera (Phase 9b M7, `launchCameraAsync`), so this is a live capability, not
+plugin default cruft.
 
 **Don't use `new URL()`.** React Native ships a partial `URL` implementation
 (hence `react-native-url-polyfill`). Paging follows the paginator's `next` URL,
