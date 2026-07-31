@@ -8,6 +8,7 @@
 
 import type { InfiniteData } from '@tanstack/react-query';
 
+import { eventLocalStart } from './eventFormat';
 import type { Event, Paginated, Post } from './types';
 import { dayHeading, dayKey } from './utils';
 
@@ -81,10 +82,10 @@ export function toRows(posts: Post[]): FeedRow[] {
  * those separately; only past events thread the spine here.)
  *
  * Unlike `toRows`, this one **must sort** — posts arrive reverse-chronological
- * from the server, but a past event has to be slotted in by its own time
- * (`starts_at`). Sorting only ever *interleaves* the events with the already-
- * ordered posts; it never reorders the posts among themselves, so the
- * reverse-chronological guarantee still holds. Mirrors the web `Timeline`.
+ * from the server, but a past event has to be slotted in by its own time.
+ * Sorting only ever *interleaves* the events with the already-ordered posts; it
+ * never reorders the posts among themselves, so the reverse-chronological
+ * guarantee still holds. Mirrors the web `Timeline`.
  *
  * `pastEvents` is the full bounded past-events list (the window isn't
  * paginated); it's merged with whatever posts have loaded. An event older than
@@ -93,45 +94,41 @@ export function toRows(posts: Post[]): FeedRow[] {
  */
 export function toGroupRows(posts: Post[], pastEvents: Event[] = []): FeedRow[] {
   const seen = new Set<number>();
-  const items: { time: number; row: FeedRow }[] = [];
+  // `at` is the local Date each item is both sorted and day-grouped by — one
+  // value for both, so a row can never land under a divider it doesn't belong
+  // to.
+  const items: { at: Date; row: FeedRow }[] = [];
 
   for (const post of posts) {
     if (seen.has(post.id)) continue;
     seen.add(post.id);
     items.push({
-      time: new Date(post.created_at).getTime(),
+      at: new Date(post.created_at),
       row: { kind: 'post', key: `post-${post.id}`, post },
     });
   }
   for (const event of pastEvents) {
-    // An all-day event has no start_time; `starts_at` falls back to its date, so
-    // it still sorts onto the right day.
-    const when = event.starts_at ?? event.event_date;
+    // An event's own wall-clock start, *not* the `starts_at` instant: its day
+    // belongs to the event's timezone, and the recap card says so. See
+    // `eventLocalStart`. A date-less event can't be past, but fall back to its
+    // creation instant rather than dropping it to the epoch.
     items.push({
-      time: when ? new Date(when).getTime() : 0,
+      at: eventLocalStart(event) ?? new Date(event.created_at),
       row: { kind: 'event', key: `event-${event.id}`, event },
     });
   }
 
   // Newest-first. A stable sort keeps same-instant posts in server order.
-  items.sort((a, b) => b.time - a.time);
+  items.sort((a, b) => b.at.getTime() - a.at.getTime());
 
   const rows: FeedRow[] = [];
   let lastDay: string | null = null;
-  for (const { row } of items) {
-    const iso =
-      row.kind === 'post'
-        ? row.post.created_at
-        : row.kind === 'event'
-          ? row.event.starts_at ?? row.event.event_date ?? row.event.created_at
-          : null;
-    if (iso) {
-      const day = dayKey(iso);
-      if (day !== lastDay) {
-        const { label, sub } = dayHeading(iso);
-        rows.push({ kind: 'day', key: `day-${day}`, label, sub });
-        lastDay = day;
-      }
+  for (const { at, row } of items) {
+    const day = dayKey(at);
+    if (day !== lastDay) {
+      const { label, sub } = dayHeading(at);
+      rows.push({ kind: 'day', key: `day-${day}`, label, sub });
+      lastDay = day;
     }
     rows.push(row);
   }

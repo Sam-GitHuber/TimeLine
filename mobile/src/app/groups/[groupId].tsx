@@ -44,6 +44,7 @@ import { ComposeBox } from '@/components/ComposeBox';
 import { EventCard } from '@/components/events/EventCard';
 import { MonthGrid } from '@/components/events/MonthGrid';
 import { TimelineList } from '@/components/TimelineList';
+import { eventLocalStart } from '@/eventFormat';
 import { toGroupRows } from '@/feed';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
@@ -109,12 +110,13 @@ export default function GroupScreen() {
   // being planned sit in a small staging strip after them.
   const upcoming = (upcomingQuery.data ?? []).filter((e) => e.status !== 'cancelled');
   const staging = upcoming.filter((e) => !e.event_date);
+  // Ordered by each event's own wall-clock start, the same value the timeline
+  // below groups past events by — see `eventLocalStart`. (Non-null: the filter
+  // above keeps only dated events.)
   const scheduledFuture = upcoming
     .filter((e) => e.event_date)
     .sort(
-      (a, b) =>
-        new Date(b.starts_at ?? b.event_date!).getTime() -
-        new Date(a.starts_at ?? a.event_date!).getTime()
+      (a, b) => eventLocalStart(b)!.getTime() - eventLocalStart(a)!.getTime()
     );
   const upcomingCount = upcoming.length;
 

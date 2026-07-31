@@ -257,6 +257,20 @@ The gate needs a *present* organiser. Two paths:
   now or behind it — not a boxed card wedged into the spine. (`EventCard`, the boxed
   form, is still used *off* the line — the staging strip, month day-lists, the
   personal calendar agenda.)
+- **An event is placed on the line by its own wall-clock start, never by the
+  `starts_at` instant** (`eventLocalStart` — `frontend/src/utils.js` and
+  `mobile/src/eventFormat.ts`; used by the web `Timeline`, mobile `toGroupRows`,
+  and the upcoming sort on both group pages). An event's day is a calendar date
+  in the *event's* timezone, and the card renders that wall clock verbatim —
+  `starts_at` is the same moment expressed as an instant, so reading it back in
+  the **viewer's** zone moves it. An all-day event starts at midnight in its own
+  zone, which anywhere west of that zone is the evening *before*: it used to be
+  filed under the previous day's divider, contradicting the recap directly
+  beneath it (#126; `Event.timezone` defaults to `settings.TIME_ZONE` = UTC, so
+  this hit every viewer in the Americas). Using the same value to sort *and* to
+  group also keeps the divider algorithm's invariant — every row's day key is
+  the local day of the value it was sorted by — which is what makes the dividers
+  come out in order and only once each.
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).
