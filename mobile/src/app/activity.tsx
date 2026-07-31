@@ -74,7 +74,11 @@ export default function ActivityScreen() {
       queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
       queryClient.invalidateQueries({ queryKey: ['notifications'] });
     }
-    router.push(routeForNotification(notification.url));
+    // `navigate`, matching the push-tap path exactly (#177) — the header's claim
+    // that in-app and push click-through agree has to hold for *how* they
+    // navigate, not just where. It also makes a double-tapped row land once
+    // rather than stacking the target twice.
+    router.navigate(routeForNotification(notification.url));
   }
 
   return (

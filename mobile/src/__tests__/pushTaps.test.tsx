@@ -184,7 +184,7 @@ it('navigates again for a genuinely different notification', async () => {
   await waitFor(() => expect(router.navigate).toHaveBeenCalledWith('/u/3'));
 });
 
-it('never stacks a second copy of the screen a push targets (#177)', async () => {
+it('asks the router to collapse onto the target, not push a copy (#177)', async () => {
   // Two pushes for the *same* thread, tapped one after the other. The dedupe ref
   // above doesn't cover this and shouldn't: they're different notifications with
   // different identifiers, so both are acted on — which is exactly why the count
@@ -192,12 +192,14 @@ it('never stacks a second copy of the screen a push targets (#177)', async () =>
   // walked through copies of the thread instead of reaching the list.
   //
   // `router.push` is what stacked them: expo-router's PUSH appends a route with
-  // no regard for what's already on top. `navigate` collapses onto the current
-  // screen when the route name and its path params match. The collapsing itself
-  // belongs to expo-router (`getSingularId`), so what's pinned here is the half
-  // that's ours: a tapped push never asks for an unconditional push.
+  // no regard for what's already on top. **The collapsing itself is expo-router's**
+  // (`getSingularId`) and is mocked away here, so this cannot see a stack — it
+  // pins only the half that is ours, which is the half that regressed: the verb
+  // a tapped push asks for. The stacking itself is a device check.
+  // A message push carries no activity-centre row, hence no id (usePushTaps.ts).
+  const notificationId = undefined;
   mockNotifications.useLastNotificationResponse.mockReturnValue(
-    response({ identifier: 'notif-1', url: '/messages/5' })
+    response({ identifier: 'notif-1', url: '/messages/5', notificationId })
   );
   const view = await render(<Probe />);
   await waitFor(() =>
@@ -205,7 +207,7 @@ it('never stacks a second copy of the screen a push targets (#177)', async () =>
   );
 
   mockNotifications.useLastNotificationResponse.mockReturnValue(
-    response({ identifier: 'notif-2', url: '/messages/5' })
+    response({ identifier: 'notif-2', url: '/messages/5', notificationId })
   );
   await view.rerender(<Probe />);
 

@@ -28,6 +28,7 @@ import type { Notification } from '@/types';
 
 jest.mock('expo-router', () => ({
   router: {
+    navigate: jest.fn(),
     push: jest.fn(),
     back: jest.fn(),
     replace: jest.fn(),
@@ -35,7 +36,11 @@ jest.mock('expo-router', () => ({
   },
 }));
 
-const mockRouter = router as unknown as { push: jest.Mock; back: jest.Mock };
+const mockRouter = router as unknown as {
+  navigate: jest.Mock;
+  push: jest.Mock;
+  back: jest.Mock;
+};
 
 const mockFetch = jest.fn();
 
@@ -105,6 +110,7 @@ function serveList(results: Notification[]) {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockRouter.navigate.mockReset();
   mockRouter.push.mockReset();
   mockRouter.back.mockReset();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
@@ -151,7 +157,7 @@ describe('ActivityScreen', () => {
     );
     // `/p/42` (web shape) is mapped to the mobile post route, the same map push
     // taps use — not the raw web path.
-    expect(mockRouter.push).toHaveBeenCalledWith('/post/42');
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/post/42');
   });
 
   it('maps an event notification through the flat mobile route', async () => {
@@ -167,7 +173,7 @@ describe('ActivityScreen', () => {
 
     await fireEvent.press(await screen.findByText('Event scheduled'));
 
-    await waitFor(() => expect(mockRouter.push).toHaveBeenCalledWith('/events/9'));
+    await waitFor(() => expect(mockRouter.navigate).toHaveBeenCalledWith('/events/9'));
   });
 
   it('does not re-address an already-addressed row, but still navigates', async () => {
@@ -178,7 +184,7 @@ describe('ActivityScreen', () => {
 
     await fireEvent.press(await screen.findByText('Ada accepted'));
 
-    await waitFor(() => expect(mockRouter.push).toHaveBeenCalledWith('/u/5'));
+    await waitFor(() => expect(mockRouter.navigate).toHaveBeenCalledWith('/u/5'));
     expect(made(/\/api\/notifications\/9\/addressed\/$/, 'POST')).toBe(false);
   });
 

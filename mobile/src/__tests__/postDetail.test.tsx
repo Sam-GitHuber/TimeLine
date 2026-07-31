@@ -297,6 +297,71 @@ describe('scrolling to a deep-linked comment', () => {
     expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
+  it('re-aims when a second notification names a different comment (#177)', async () => {
+    // A tapped push reuses this screen now rather than stacking a second copy of
+    // it, so the *only* thing a second notification for the same post changes is
+    // the `comment` param — nothing remounts. The scroll guard and each branch's
+    // collapsed state both used to be seeded once per mount, which left the new
+    // target highlighted inside a still-collapsed branch, off-screen, with the
+    // notification looking answered.
+    const twoBranches = [
+      ...nested,
+      {
+        id: 2,
+        author: { id: 4, display_name: 'Di Dench', avatar_thumb: null },
+        parent: null,
+        text: 'Another top level',
+        created_at: '2026-07-18T13:00:00Z',
+        reactions: [],
+        replies: [
+          {
+            id: 4,
+            author: { id: 5, display_name: 'Ez Ellis', avatar_thumb: null },
+            parent: 2,
+            text: 'The reply the second push is about',
+            created_at: '2026-07-18T14:00:00Z',
+            replies: [],
+            reactions: [],
+          },
+        ],
+      },
+    ];
+    params.comment = '3';
+    serve({ post: jsonResponse(makePost()), comments: twoBranches });
+
+    const view = await renderScreen();
+    await screen.findByText('The reply you were told about');
+
+    // Comment 2's branch is collapsed: it holds no ancestor of the first target.
+    expect(screen.queryByText('The reply the second push is about')).toBeNull();
+
+    await layout('comment-3', 20);
+    await layout('replies-1', 60);
+    await layout('comment-1', 100);
+    await layout('thread', 500);
+    expect(scrollTo).toHaveBeenCalledWith({ y: 600, animated: true });
+
+    // The second push arrives and is tapped: same screen, new target.
+    params.comment = '4';
+    await view.rerender(
+      <QueryClientProvider client={view.client}>
+        <PostScreen />
+      </QueryClientProvider>
+    );
+
+    // Its branch opens, so there is something to highlight and aim at.
+    expect(
+      await screen.findByText('The reply the second push is about')
+    ).toBeTruthy();
+
+    await layout('comment-4', 30);
+    await layout('replies-2', 70);
+    await layout('comment-2', 200);
+
+    // 500 (thread, still known) + 300 (the new reply within it) − 80 (headroom).
+    expect(scrollTo).toHaveBeenLastCalledWith({ y: 720, animated: true });
+  });
+
   it('never scrolls when nothing was deep-linked', async () => {
     serve({ post: jsonResponse(makePost()), comments: nested });
 

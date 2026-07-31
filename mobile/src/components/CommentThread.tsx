@@ -358,6 +358,31 @@ function CommentNode({
   const isHighlighted = highlightId != null && comment.id === highlightId;
 
   /**
+   * A *new* deep-link target reopens the branch it sits in (#177).
+   *
+   * `collapsed` is seeded once, at mount, from the ancestors of whatever was
+   * deep-linked then. Since a tapped push reuses the post screen rather than
+   * stacking a fresh one, a second notification for a different comment on the
+   * same post changes `expandIds` without remounting anything — and a target
+   * buried in a still-collapsed branch isn't rendered at all, so it can neither
+   * be highlighted nor scrolled to.
+   *
+   * Keyed on the target, deliberately not on `expandIds`: that set is rebuilt
+   * on every four-second poll, and reacting to its identity would spring open a
+   * branch the reader had just collapsed by hand.
+   *
+   * Adjusted during render against the previous target rather than in an effect
+   * — React's own pattern for state that follows a prop. An effect would re-run
+   * the tree a second time with the branch still shut, and ESLint rejects
+   * `setState` from one anyway.
+   */
+  const [lastHighlightId, setLastHighlightId] = useState(highlightId);
+  if (highlightId !== lastHighlightId) {
+    setLastHighlightId(highlightId);
+    if (expandIds?.has(comment.id)) setCollapsed(false);
+  }
+
+  /**
    * Where the deep-link target sits, summed on the way up the tree.
    *
    * `onLayout` reports a view's offset **within its immediate parent**, so a
