@@ -28,7 +28,7 @@ from rest_framework.exceptions import (
     ValidationError,
 )
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -1101,6 +1101,8 @@ def healthz(request):
     On a DB error we return **503** (not 500) so the check reads as "temporarily
     unavailable" rather than a code bug. The body is intentionally minimal — this
     is unauthenticated, so it must not leak version strings, hostnames, or counts.
+    The running release is answered by ``version`` below instead, behind staff
+    auth.
     """
     from django.db import connection
 
@@ -1114,6 +1116,27 @@ def healthz(request):
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     return Response({"status": "ok"})
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminUser])
+def version(request):
+    """Which release this backend container is actually running (issue #104).
+
+    ``TIMELINE_VERSION`` is baked into the image at build time from the release
+    tag, so this reports the *running code*, not what the repo or the registry
+    happens to hold — which is the question nobody could answer during the
+    2026-07-20 stall, when autodeploy skipped every deploy and the box served
+    six-day-old code behind a healthy ``/api/healthz/``. Locally it reads
+    ``"dev"``.
+
+    **Staff-only on purpose.** It would have been a line in ``healthz``, but that
+    probe is anonymous and deliberately leaks nothing; the app's source is
+    public, so a version string tells a stranger exactly which fixed bugs this
+    deployment still has. Behind ``IsAdminUser`` the maintainer can still answer
+    it from a browser without SSH, which was the whole point.
+    """
+    return Response({"version": dj_settings.TIMELINE_VERSION})
 
 
 class FeedView(CommentCountMixin, ReactionContextMixin, generics.ListAPIView):

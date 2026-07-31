@@ -4,34 +4,138 @@
 # Run on a schedule by timeline-autodeploy.timer. Each run:
 #   1. syncs config from main (compose files, GHCR override, Caddyfile),
 #   2. pulls the latest release images from GHCR,
-#   3. and ONLY IF an image actually changed, recreates the stack.
+#   3. and ONLY IF a container isn't already running that image, recreates the
+#      stack.
 # The backend entrypoint (entrypoint.prod.sh) runs migrations + collectstatic on
 # start, so a redeploy needs nothing else by hand.
 #
 # This is the "pull-based" half of continuous deploy: the box reaches OUT to
 # GHCR, so GitHub never has to connect in (the box forwards only 80/443, not
 # SSH). Publishing a GitHub Release makes CI push new images; this script is what
-# notices them. A run with no new release is a quiet no-op.
+# notices them. A run with nothing to do is a quiet no-op.
+#
+# WHY THE CHECK ASKS ABOUT CONTAINERS, NOT IMAGES (issue #104)
+# ------------------------------------------------------------
+# This script used to diff *image* digests around the pull and redeploy only when
+# they changed. That answers "did a new image arrive?" — never "are the
+# containers running the image we have?" — so once an image had been pulled,
+# every later run correctly saw no change and skipped `up` entirely. If the
+# containers were on something else (very easily: the fallback deploy/deploy.sh
+# builds `timeline-prod-backend` locally, a different image name this script
+# never inspected), the box ran old code indefinitely while every signal —
+# healthz 200, "deploy complete." in this log, a green release workflow — read as
+# healthy. That happened for real on 2026-07-20.
+#
+# So the question we ask now is the one that actually matters: *is each service's
+# running container built from the release image we just pulled?* That covers the
+# new-image case as a side effect (a new image means the running container no
+# longer matches it), and it self-heals container drift from any cause —
+# including a fallback deploy.sh run, a manual `docker run`, or a container that
+# died and never came back.
 #
 # The manual deploy/deploy.sh (build-on-box from source) remains the fallback.
 #
-# Everything is in one function so the whole script is parsed before a `git pull`
-# can change it on disk mid-run (same guard as deploy.sh).
+# Everything is in functions so the whole script is parsed before a `git pull`
+# can change it on disk mid-run (same guard as deploy.sh). Sourcing the file
+# defines those functions without deploying anything, which is how
+# deploy/tests/test_autodeploy.sh drives the decision logic against a stub
+# `docker`.
 set -euo pipefail
 
 COMPOSE_FILES=(-f docker-compose.prod.yml -f docker-compose.ghcr.yml)
 DATA_MOUNT="/srv/timeline"
+
+# Which release to run. The GHCR override interpolates TIMELINE_TAG too, so this
+# export is what keeps the tag this script *inspects* and the tag compose
+# *deploys* the same one — otherwise a pinned `TIMELINE_TAG=v0.14.0
+# ./deploy/autodeploy.sh` (the rollback path) would compare containers against
+# :latest and redeploy on every run.
+TIMELINE_TAG="${TIMELINE_TAG:-latest}"
+export TIMELINE_TAG
+
+# Services to keep deployed, and the image each one should be running. Index i of
+# SERVICES pairs with index i of IMAGES. (db is deliberately absent: it runs
+# stock postgres:16 from the prod compose file, isn't part of a release, and must
+# not be recreated on every deploy.)
+SERVICES=(backend web)
 IMAGES=(
-  ghcr.io/sam-githuber/timeline-backend:latest
-  ghcr.io/sam-githuber/timeline-web:latest
+  "ghcr.io/sam-githuber/timeline-backend:${TIMELINE_TAG}"
+  "ghcr.io/sam-githuber/timeline-web:${TIMELINE_TAG}"
 )
 
-log() { echo "$(date -Is) autodeploy: $*"; }
+# Spelled out rather than `date -Is`: -I is GNU-only, and the test harness runs
+# on macOS too, where BSD date rejects it and every log line grows an error.
+log() { echo "$(date '+%Y-%m-%dT%H:%M:%S%z') autodeploy: $*"; }
 
-digests() {
-  # Local image IDs for the tracked images, sorted; missing images print
-  # nothing, so a first run (images absent) compares as "changed".
-  docker image inspect --format '{{.Id}}' "${IMAGES[@]}" 2>/dev/null | sort || true
+image_id() {
+  # Local image ID for an image reference; empty if the image isn't on the box.
+  docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true
+}
+
+container_image_id() {
+  # Image ID the named service's running container was created from; empty if
+  # there is no running container for it. `compose ps -q` lists running
+  # containers only, so a stopped/missing container reads as empty — which is
+  # itself a reason to redeploy.
+  local cid
+  cid="$(docker compose "${COMPOSE_FILES[@]}" ps -q "$1" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$cid" ]] || return 0
+  docker container inspect --format '{{.Image}}' "$cid" 2>/dev/null || true
+}
+
+drift_reasons() {
+  # Print one line per service that is NOT running its release image. No output
+  # means the box is already running the release, and there is nothing to do.
+  local i service image want have
+  for i in "${!SERVICES[@]}"; do
+    service="${SERVICES[$i]}"
+    image="${IMAGES[$i]}"
+
+    want="$(image_id "$image")"
+    if [[ -z "$want" ]]; then
+      # Shouldn't happen after a successful pull; redeploy anyway so `up` fails
+      # loudly rather than this script reporting success on a missing image.
+      echo "$service: release image $image is not present on the box"
+      continue
+    fi
+
+    have="$(container_image_id "$service")"
+    if [[ -z "$have" ]]; then
+      echo "$service: no running container"
+    elif [[ "$have" != "$want" ]]; then
+      echo "$service: container is running ${have#sha256:}, release image is ${want#sha256:}"
+    fi
+  done
+}
+
+converge() {
+  # Pull the release images, then make the running containers match them.
+  docker compose "${COMPOSE_FILES[@]}" pull --quiet "${SERVICES[@]}"
+
+  local reasons reason
+  reasons="$(drift_reasons)"
+
+  if [[ -z "$reasons" ]]; then
+    log "containers already running release ${TIMELINE_TAG}; nothing to do."
+    return 0
+  fi
+
+  while IFS= read -r reason; do
+    log "redeploy needed — $reason"
+  done <<<"$reasons"
+
+  # --force-recreate because the drift we're correcting is exactly the case
+  # compose's own "has anything changed?" heuristic can miss: a container created
+  # from a different image name (deploy.sh's local build) under a different
+  # compose invocation. Recreating unconditionally here is cheap — we only get
+  # here when something is already wrong — and it's what makes convergence
+  # guaranteed rather than best-effort. It applies only to the services named on
+  # the command line: compose does not cascade it to dependencies, so Postgres is
+  # never recreated by a deploy.
+  docker compose "${COMPOSE_FILES[@]}" up -d --no-build --force-recreate "${SERVICES[@]}"
+  docker compose "${COMPOSE_FILES[@]}" ps
+  docker image prune -f >/dev/null
+  log "deploy complete: ${SERVICES[*]} now running release ${TIMELINE_TAG}."
 }
 
 main() {
@@ -54,21 +158,11 @@ main() {
   # fails loudly rather than deploying a surprise.
   git pull --ff-only
 
-  local before after
-  before="$(digests)"
-  docker compose "${COMPOSE_FILES[@]}" pull --quiet backend web
-  after="$(digests)"
-
-  if [[ "$before" == "$after" ]]; then
-    log "no new release image; nothing to do."
-    exit 0
-  fi
-
-  log "new release image pulled; redeploying..."
-  docker compose "${COMPOSE_FILES[@]}" up -d --no-build backend web
-  docker compose "${COMPOSE_FILES[@]}" ps
-  docker image prune -f >/dev/null
-  log "deploy complete."
+  converge
 }
 
-main "$@"
+# Executed directly -> deploy. Sourced (the test harness) -> just define the
+# functions above.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

@@ -17,6 +17,16 @@
 #   ghcr.io/sam-githuber/timeline-web
 # Each is tagged with the release tag (e.g. v0.1.0) AND `latest` (what the box
 # pulls). The box is a single amd64 PC, so we build amd64 only.
+#
+# WHY `latest` MOVES LAST
+# -----------------------
+# Each build used to push `latest` itself, as it finished. The box polls `latest`
+# every ~5 minutes with no idea a build is in flight, so a tick landing between
+# the backend and web builds deployed HALF a release — new backend, old web (or
+# the reverse). It self-corrected on the next tick, but on a release with an API
+# change those few minutes are real errors for real users. So the builds now push
+# only their version tag, and a final step moves `latest` on both images once
+# both have pushed (issue #104).
 name: Release images
 
 on:
@@ -50,14 +60,19 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Each build pushes ONLY its version tag. `latest` — the tag the box
+      # actually deploys — is moved in the final step, once both images exist.
+      # See "Why latest moves last" in the header.
       - name: Build + push backend image
         uses: docker/build-push-action@v7
         with:
           context: ./backend
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-backend:latest
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-backend:${{ env.TAG }}
+          # Baked into the image (ENV + label) so the running container can say
+          # which release it is — issue #104, served by /api/version/.
+          build-args: |
+            TIMELINE_VERSION=${{ env.TAG }}
+          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-backend:${{ env.TAG }}
           # Speed up repeat builds by caching layers in the GitHub Actions cache.
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -70,8 +85,19 @@ jobs:
           push: true
           build-args: |
             VITE_API_URL=https://your-timeline.net
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-web:latest
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-web:${{ env.TAG }}
+            TIMELINE_VERSION=${{ env.TAG }}
+          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/timeline-web:${{ env.TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Both images are now on GHCR under the release tag, so `latest` can move
+      # to them together. `imagetools create` only writes a new tag pointing at
+      # the manifest that was just pushed — nothing is rebuilt or re-uploaded, so
+      # the two tag moves land within a second of each other.
+      - name: Point `latest` at this release (both images together)
+        run: |
+          for image in timeline-backend timeline-web; do
+            docker buildx imagetools create \
+              --tag "$REGISTRY/$OWNER/$image:latest" \
+              "$REGISTRY/$OWNER/$image:$TAG"
+          done

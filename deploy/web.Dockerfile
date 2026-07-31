@@ -28,3 +28,10 @@ FROM caddy:2-alpine
 # The compiled SPA. The Caddyfile itself is mounted at runtime (see compose), so
 # it can be tweaked without rebuilding this image.
 COPY --from=build /app/dist /srv/app
+
+# Which release this image is (issue #104), for `docker image inspect` on the
+# box. A label rather than an env var because Caddy serves static files — there's
+# no app process here to read it, unlike the backend, whose version the
+# staff-only /api/version/ reports.
+ARG TIMELINE_VERSION=dev
+LABEL org.opencontainers.image.version=${TIMELINE_VERSION}

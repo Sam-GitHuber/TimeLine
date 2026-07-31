@@ -601,3 +601,18 @@ EXPO_RECEIPTS_URL = os.environ.get(
 EXPO_RECEIPT_CHECK_DELAY_SECONDS = env_int("EXPO_RECEIPT_CHECK_DELAY_SECONDS", 900)
 EXPO_RECEIPT_MAX_AGE_HOURS = env_int("EXPO_RECEIPT_MAX_AGE_HOURS", 24)
 EXPO_RECEIPT_BATCH_SIZE = env_int("EXPO_RECEIPT_BATCH_SIZE", 1000)
+
+
+# --- Which release is actually running (issue #104) ----------------------------
+# Baked into the backend image at build time (Dockerfile ARG -> ENV, set from the
+# release tag by .github/workflows/release-deploy.yml) and served by the
+# staff-only /api/version/ endpoint. Left as "dev" everywhere else — a local
+# `docker compose up` builds from a working tree, which has no release tag.
+#
+# The point of it is diagnosis: on 2026-07-20 the box ran six-day-old code while
+# every signal said healthy, and nothing anywhere could answer "what version is
+# actually serving?" without SSH. Deliberately NOT added to /api/healthz/, which
+# is unauthenticated and must not leak version strings — knowing the exact
+# release of a public-source app tells a stranger which known-fixed bugs this box
+# still has.
+TIMELINE_VERSION = os.environ.get("TIMELINE_VERSION", "dev")

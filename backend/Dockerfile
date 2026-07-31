@@ -18,6 +18,17 @@ RUN uv sync --frozen --no-install-project --no-dev
 # Now copy the application code.
 COPY . .
 
+# Which release this image is (issue #104). The release workflow passes the git
+# tag; a local build stays "dev". config/settings.py reads it and the staff-only
+# /api/version/ serves it, so "what is the box actually running?" is answerable
+# without SSH — the signal whose absence made the 2026-07-20 deploy stall so hard
+# to diagnose. Declared after COPY so it can never invalidate the cached
+# dependency layer above.
+ARG TIMELINE_VERSION=dev
+ENV TIMELINE_VERSION=${TIMELINE_VERSION}
+# Same string as an image label, so `docker image inspect` answers it too.
+LABEL org.opencontainers.image.version=${TIMELINE_VERSION}
+
 # Entrypoint waits for Postgres, runs migrations, then starts the dev server.
 # Invoked via bash (not as an executable) so it works even when the host source
 # is bind-mounted over /app in development, masking the image's file mode bits.
