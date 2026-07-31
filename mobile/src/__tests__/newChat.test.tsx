@@ -2,11 +2,13 @@
  * The new-chat picker (Phase 9 E2b) — the 1:1-vs-group branch and add-people
  * mode.
  *
- * What's worth pinning: one selection with no title is a 1:1 (`openConversation`,
- * `{ user_id }`), while two selections — or a title on one — is a group
- * (`createGroupChat`, `{ participant_ids }`); creating replaces the picker with
- * the new thread. In add-people mode (`?addTo=`) Create instead adds the selected
- * people to that chat and returns to it, with no title field.
+ * What's worth pinning: one selection is a 1:1 (`openConversation`,
+ * `{ user_id }`) and two is a group (`createGroupChat`, `{ participant_ids }`);
+ * creating replaces the picker with the new thread. The name field is only
+ * offered at two-plus, and cleared on the way down, so a title can never turn a
+ * 1:1 into a two-person group behind your back (#156). In add-people mode
+ * (`?addTo=`) Create instead adds the selected people to that chat and returns
+ * to it, with no title field.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -135,11 +137,51 @@ it('two selections creates a group', async () => {
   expect(body.title).toBe('');
 });
 
-it('a title on a single selection still makes a group, not a 1:1', async () => {
+it('offers no name field until a second person is ticked (#156)', async () => {
+  serve();
+  await renderScreen();
+
+  // Nothing selected, and one selected, are both potential 1:1s — a title is
+  // what would turn them into a two-person group, so it isn't on offer.
+  await screen.findByLabelText('Ada Lovelace');
+  expect(screen.queryByLabelText('Chat name')).toBeNull();
+
+  await fireEvent.press(screen.getByLabelText('Ada Lovelace'));
+  expect(screen.queryByLabelText('Chat name')).toBeNull();
+
+  await fireEvent.press(screen.getByLabelText('Grace Hopper'));
+  expect(screen.getByLabelText('Chat name')).toBeTruthy();
+});
+
+it('drops a name typed at two selections when one is unticked (#156)', async () => {
   serve();
   await renderScreen();
 
   await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+  await fireEvent.press(screen.getByLabelText('Grace Hopper'));
+  await fireEvent.changeText(screen.getByLabelText('Chat name'), 'Book club');
+
+  // Untick back to one: the name goes with the field, so what's left is a
+  // plain 1:1 rather than a titled two-person group hiding behind the UI.
+  await fireEvent.press(screen.getByLabelText('Grace Hopper'));
+  expect(screen.queryByLabelText('Chat name')).toBeNull();
+
+  await fireEvent.press(screen.getByLabelText('Create'));
+
+  await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/messages/42'));
+  const post = mockFetch.mock.calls.find(
+    ([url, init]) =>
+      String(url).endsWith('/api/conversations/') && init?.method === 'POST'
+  );
+  expect(bodyOf(post as [string, { body?: string }])).toEqual({ user_id: 2 });
+});
+
+it('a name on two selections still names the group (#156)', async () => {
+  serve();
+  await renderScreen();
+
+  await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+  await fireEvent.press(screen.getByLabelText('Grace Hopper'));
   await fireEvent.changeText(screen.getByLabelText('Chat name'), 'Book club');
   await fireEvent.press(screen.getByLabelText('Create'));
 
@@ -149,7 +191,7 @@ it('a title on a single selection still makes a group, not a 1:1', async () => {
       String(url).endsWith('/api/conversations/') && init?.method === 'POST'
   );
   const body = bodyOf(post as [string, { body?: string }]);
-  expect(body.participant_ids).toEqual([2]);
+  expect(body.participant_ids).toEqual([2, 3]);
   expect(body.title).toBe('Book club');
 });
 

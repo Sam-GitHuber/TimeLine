@@ -4,8 +4,12 @@
  * the tab bar (the E2 structure decision) rather than a drawer view.
  *
  * Check one or more of your connections, optionally name the chat, and Create:
- *   - one person, no title  → a **1:1** (`openConversation`, get-or-create);
- *   - two+ people, or a title → a **group** (`createGroupChat`).
+ *   - one person  → a **1:1** (`openConversation`, get-or-create);
+ *   - two+ people → a **group** (`createGroupChat`).
+ *
+ * The title is what *makes* a chat a group, so the name field only appears once
+ * two people are ticked, and is cleared on the way back down to one — see
+ * `toggle`.
  *
  * **Add-people mode** (`?addTo=<conversationId>`, from a group thread's Add
  * button): the same picker, but Create *adds* the selected people to that chat
@@ -81,12 +85,17 @@ export default function NewChatScreen() {
     : connections;
 
   function toggle(id: number) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelected(next);
+    // A name typed at two selections must not survive an untick back to one:
+    // the field is hidden below two, and a hidden title would silently post
+    // `createGroupChat` — giving you a two-person *group* where you asked for a
+    // 1:1, off the pair's direct thread and outside `unique_conversation_pair`.
+    // Clearing on the way down keeps what's on screen the same as what gets
+    // sent.
+    if (next.size < 2) setTitle('');
   }
 
   const create = useMutation({
@@ -94,7 +103,8 @@ export default function NewChatScreen() {
       const ids = [...selected];
       if (addToId) return api.addParticipants(addToId, ids);
       const label = title.trim();
-      // One person and no title is a 1:1; anything else is a group.
+      // One person is a 1:1; two or more is a group. `label` can only be
+      // non-empty at two-plus, since the name field isn't offered below that.
       if (ids.length === 1 && !label) return api.openConversation(ids[0]);
       return api.createGroupChat({ participantIds: ids, title: label });
     },
@@ -184,11 +194,11 @@ export default function NewChatScreen() {
         <View
           style={[styles.footer, { paddingBottom: FOOTER_PAD + insets.bottom }]}
         >
-          {!addToId && (
+          {!addToId && selected.size > 1 && (
             <TextInput
               value={title}
               onChangeText={setTitle}
-              placeholder="Chat name (optional, for a group)"
+              placeholder="Chat name (optional)"
               placeholderTextColor={colors.inkFaint}
               style={styles.titleInput}
               accessibilityLabel="Chat name"

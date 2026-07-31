@@ -7,11 +7,12 @@ import { useMessaging } from "../messaging.jsx";
 import { useConnections } from "../hooks.js";
 
 // Start a new conversation: check one or more connections, add an optional
-// title, and hit Create. One connection with no title is a 1:1 (get-or-create,
-// same endpoint the old single-tap flow used); two or more — or a title — makes
-// a group chat. Reuses `useConnections` (the same paged/filtered ["users"]
-// source the group-invite picker uses) so this can't drift from it on paging or
-// the connection filter.
+// title, and hit Create. One connection is a 1:1 (get-or-create, same endpoint
+// the old single-tap flow used); two or more makes a group chat. The title is
+// what *makes* a chat a group, so the name field is only offered once two
+// people are ticked — see `toggle`. Reuses `useConnections` (the same
+// paged/filtered ["users"] source the group-invite picker uses) so this can't
+// drift from it on paging or the connection filter.
 //
 // `prefill` narrows the list to a specific group's members and scopes the
 // resulting chat to it — set when this view is opened from a group's "start a
@@ -32,12 +33,17 @@ export default function NewChatPicker({ prefill }) {
     : filtered;
 
   function toggle(id) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelected(next);
+    // A name typed at two selections must not survive an untick back to one:
+    // the field is hidden below two, and a hidden title would silently post
+    // `createGroupChat` — giving you a two-person *group* where you asked for a
+    // 1:1, off the pair's direct thread and outside `unique_conversation_pair`.
+    // Clearing on the way down keeps what's on screen the same as what gets
+    // sent.
+    if (next.size < 2) setTitle("");
   }
 
   const addToConversationId = prefill?.addToConversationId ?? null;
@@ -49,6 +55,8 @@ export default function NewChatPicker({ prefill }) {
         return api.addParticipants(addToConversationId, ids);
       }
       const label = title.trim();
+      // One person is a 1:1; two or more is a group. `label` can only be
+      // non-empty at two-plus, since the name field isn't offered below that.
       if (ids.length === 1 && !label) {
         return api.openConversation(ids[0]);
       }
@@ -144,12 +152,12 @@ export default function NewChatPicker({ prefill }) {
       </div>
 
       <div className="border-t border-line px-3 py-3">
-        {!addToConversationId && (
+        {!addToConversationId && selected.size > 1 && (
           <input
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Chat name (optional, for a group)"
+            placeholder="Chat name (optional)"
             aria-label="Chat name"
             // The column's width. Without it the create endpoint silently
             // truncates at 100 and you'd never be told which half you kept —
