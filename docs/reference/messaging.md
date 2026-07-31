@@ -1811,8 +1811,10 @@ Three implementation notes worth keeping:
 **Editing happens in the composer**, which grows an "Editing message" bar showing
 the original with an ✕ to cancel; the input is prefilled and focused and Send
 becomes Save. Cancelling restores whatever you were half-typing before you
-started editing, and an emptied composer just disables Save — there is no path
-from "editing" to an accidental delete.
+started editing, and emptying the composer just disables Save — the one exception
+being a message carrying a photo of its own, where clearing the caption is a
+legitimate edit ([the full rule](#editing-a-message)) and still leaves the photo
+behind. Either way there is no path from "editing" to an accidental delete.
 
 **Report** was already built end-to-end by M0 (endpoint, `reportContent`,
 `ReportModal`); M1 only added the menu entry that opens it, which is the UI entry

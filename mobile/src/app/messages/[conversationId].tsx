@@ -430,8 +430,11 @@ export default function ThreadScreen() {
    * preview aren't on screen at all. Staging a photo and then long-pressing
    * → Select is an ordinary sequence, and closing the photo underneath would
    * look like a dead press that silently threw the photo away — you'd only find
-   * out after leaving select mode. Edit before photo below it, both being
-   * composer states, and the edit banner sits above the preview.
+   * out after leaving select mode. Edit before photo below it, for the same
+   * reason read the other way round: an edit *hides* the staged preview (#164 —
+   * a `PATCH` can't carry it, so showing it would promise otherwise), so back
+   * ends the edit and brings the photo back into view rather than dismissing
+   * something you can't see and can't tell went.
    *
    * `stopEditing` is a hoisted function declaration, which is what lets this sit
    * next to the state it reads rather than 800 lines further down.
@@ -1104,6 +1107,15 @@ export default function ThreadScreen() {
    * message. Not while one is still being prepared, or the tap would send an
    * empty message and drop the photo.
    *
+   * `preparing` short-circuits *both* modes, which is stricter than an edit
+   * strictly needs — a `PATCH` never carries the queued photo, so a pick still
+   * resizing has nothing to do with it. Left as one gate rather than pushed into
+   * the send branch: reaching it means starting a pick and then opening Edit
+   * inside the second or so the resize takes (the attach button is gone once
+   * you're editing), it clears itself, and the web's composer is the same
+   * expression — a divergence here would be two rules to keep in step for an
+   * edge that lasts a moment.
+   *
    * ⚠️ **An edit and a send ask different questions**, and conflating them was a
    * real bug (#164, the same one #163 fixed on the web): a queued photo made
    * `!value` false, so clearing the field mid-edit fired a `PATCH` with empty
@@ -1726,8 +1738,11 @@ export default function ThreadScreen() {
               <>
                 {/* Edit mode says plainly what's being changed and offers an
                     obvious way out. Cancelling restores the draft you were
-                    typing — and because an empty composer just disables Send,
-                    there's no path from "editing" to an accidental delete. */}
+                    typing — and emptying the composer just disables Save, except
+                    on a message carrying its own photo, where clearing the
+                    caption is a legitimate edit that still leaves the picture
+                    (see `canSubmit`). Either way there's no path from "editing"
+                    to an accidental delete. */}
                 {editing ? (
                   <View style={styles.editingBar}>
                     <View style={styles.editingText}>
