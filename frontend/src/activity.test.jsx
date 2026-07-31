@@ -14,6 +14,9 @@ vi.mock("./api.js", () => ({
   api: {
     getUnreadNotificationCount: vi.fn(),
     getNotifications: vi.fn(),
+    // Following a paginator's `next` goes through getPage, like every other
+    // list on the site (#134).
+    getPage: vi.fn(),
     markNotificationsSeen: vi.fn(),
     markNotificationAddressed: vi.fn(),
     getNotificationPreferences: vi.fn(),
@@ -22,8 +25,8 @@ vi.mock("./api.js", () => ({
   NOTIFICATIONS_POLL_MS: 1_000_000, // effectively off in tests
 }));
 
-function page(results) {
-  return { count: results.length, next: null, previous: null, results };
+function page(results, next = null) {
+  return { count: results.length, next, previous: null, results };
 }
 
 function note(overrides = {}) {
@@ -90,6 +93,83 @@ describe("ActivityCenter", () => {
     renderWithAuth(<ActivityCenter />);
     await user.click(await screen.findByRole("button", { name: /Activity/ }));
     expect(await screen.findByText(/all caught up/i)).toBeInTheDocument();
+  });
+
+  it("loads older notifications behind the paginator's next (#134)", async () => {
+    // The defect: the dropdown rendered `results` and stopped, so everything
+    // past page one was unreachable — while the badge counts *all* unread,
+    // which is how it could promise more than the list would ever show.
+    const user = userEvent.setup();
+    api.getNotifications.mockResolvedValue(
+      page([note({ id: 1, text: "Newest" })], "/api/notifications/?page=2")
+    );
+    api.getPage.mockResolvedValue(page([note({ id: 2, text: "Oldest" })]));
+    renderWithAuth(<ActivityCenter />);
+
+    await user.click(await screen.findByRole("button", { name: /Activity/ }));
+    expect(await screen.findByText("Newest")).toBeInTheDocument();
+    // Page one only, until asked for more.
+    expect(screen.queryByText("Oldest")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Load more/ }));
+
+    expect(await screen.findByText("Oldest")).toBeInTheDocument();
+    expect(api.getPage).toHaveBeenCalledWith("/api/notifications/?page=2");
+    // Nothing more to follow — the control goes away rather than lying.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /Load more/ })
+      ).not.toBeInTheDocument()
+    );
+  });
+
+  it("renders a row once when paging re-sends it", async () => {
+    // Page-number paging shifts its window when a notification arrives
+    // mid-read, so page two can re-send a row page one already showed — two
+    // list items with one React key.
+    const user = userEvent.setup();
+    api.getNotifications.mockResolvedValue(
+      page(
+        [note({ id: 1, text: "Newest" }), note({ id: 2, text: "Middle" })],
+        "/api/notifications/?page=2"
+      )
+    );
+    api.getPage.mockResolvedValue(
+      page([note({ id: 2, text: "Middle" }), note({ id: 3, text: "Oldest" })])
+    );
+    renderWithAuth(<ActivityCenter />);
+
+    await user.click(await screen.findByRole("button", { name: /Activity/ }));
+    await user.click(await screen.findByRole("button", { name: /Load more/ }));
+
+    expect(await screen.findByText("Oldest")).toBeInTheDocument();
+    expect(screen.getAllByText("Middle")).toHaveLength(1);
+  });
+
+  it("drops back to one page when the dropdown closes", async () => {
+    // Reopening otherwise refetches every page loaded last time, one after
+    // another, for rows nobody is looking at — only the first page can hold
+    // anything new.
+    const user = userEvent.setup();
+    api.getNotifications.mockResolvedValue(
+      page([note({ id: 1, text: "Newest" })], "/api/notifications/?page=2")
+    );
+    api.getPage.mockResolvedValue(page([note({ id: 2, text: "Oldest" })]));
+    renderWithAuth(<ActivityCenter />);
+
+    const bell = await screen.findByRole("button", { name: /Activity/ });
+    await user.click(bell);
+    await user.click(await screen.findByRole("button", { name: /Load more/ }));
+    await screen.findByText("Oldest");
+
+    await user.click(bell); // close
+    api.getPage.mockClear();
+    await user.click(bell); // reopen
+
+    expect(await screen.findByText("Newest")).toBeInTheDocument();
+    // Back at page one: the second page isn't re-fetched, and isn't on screen.
+    expect(screen.queryByText("Oldest")).not.toBeInTheDocument();
+    expect(api.getPage).not.toHaveBeenCalled();
   });
 
   it("addresses a notification and deep-links to its target on click", async () => {

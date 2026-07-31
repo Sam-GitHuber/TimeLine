@@ -79,17 +79,56 @@ export function useDayBoundary() {
 // alongside the usual TanStack query state (isLoading, hasNextPage, …). This is
 // the one place paging behaviour lives, so a list page can't silently render
 // only the first page and hide the rest.
-export function useInfiniteList(queryKey, fetchFirstPage) {
+//
+// `options` is spread into the underlying useInfiniteQuery for the occasional
+// caller that needs one (the activity centre only fetches while its dropdown is
+// open, so it passes `enabled`). Paging itself is not configurable — that's the
+// point of the hook.
+export function useInfiniteList(queryKey, fetchFirstPage, options = {}) {
   const query = useInfiniteQuery({
     queryKey,
     queryFn: ({ pageParam }) =>
       pageParam ? api.getPage(pageParam) : fetchFirstPage(),
     initialPageParam: undefined,
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
+    ...options,
   });
 
-  const items = query.data?.pages.flatMap((page) => page.results) ?? [];
+  // Deduped by id. The API pages by page *number*, so the window shifts
+  // whenever the underlying set changes mid-scroll (someone posts, someone
+  // reacts): page 2 then re-sends a row page 1 already showed. Two rows sharing
+  // a React key makes React warn and can render the wrong one. Dropping the
+  // repeat rather than de-duplicating by position leaves the server's order
+  // untouched — on the feed that order is the product's one non-negotiable
+  // guarantee. (The app does the same, in `dedupeById`.)
+  const seen = new Set();
+  const items = [];
+  for (const page of query.data?.pages ?? []) {
+    for (const item of page.results) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      items.push(item);
+    }
+  }
   return { ...query, items };
+}
+
+// Drop every loaded page but the first.
+//
+// For `queryClient.setQueryData(key, trimToFirstPage)` before a list is put
+// away or refetched wholesale. A refetch of an infinite query refetches **all**
+// the pages currently loaded, one after another, so someone five pages deep
+// costs five sequential requests when only the first page can hold anything
+// new. (TanStack v5 removed `refetchPage`; trimming the cache first is the
+// documented replacement.) Returns the input unchanged when there's nothing to
+// trim, so the cache entry keeps its identity and nothing re-renders needlessly.
+export function trimToFirstPage(data) {
+  if (!data?.pages || data.pages.length <= 1) return data;
+  return {
+    ...data,
+    pages: data.pages.slice(0, 1),
+    pageParams: data.pageParams.slice(0, 1),
+  };
 }
 
 // The viewer's accepted connections, for the "pick someone you already know"

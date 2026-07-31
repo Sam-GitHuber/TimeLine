@@ -16,7 +16,7 @@
  * map push taps use (`usePushTaps`), so in-app and push click-through agree.
  */
 
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
 import { useEffect } from 'react';
 import {
@@ -31,6 +31,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
+import { dedupeById } from '@/lists';
 import { dismissActivityNotifications, routeForNotification } from '@/push';
 import { colors, fontSize, spacing } from '@/theme';
 import type { Notification } from '@/types';
@@ -40,11 +41,23 @@ export default function ActivityScreen() {
   const queryClient = useQueryClient();
   const goBack = () => (router.canGoBack() ? router.back() : router.replace('/'));
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['notifications'],
-    queryFn: api.getNotifications,
-  });
-  const notifications = data?.results ?? [];
+  // Paginated (#134), following the paginator's `next` like every other list in
+  // the app. Rendering only `results` silently hid everything past the first
+  // page, while the bell went on counting *all* unread — so the badge could
+  // promise more than the list could ever show.
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } =
+    useInfiniteQuery({
+      queryKey: ['notifications'],
+      queryFn: ({ pageParam }) =>
+        pageParam ? api.getPage<Notification>(pageParam) : api.getNotifications(),
+      initialPageParam: '',
+      getNextPageParam: (lastPage) => lastPage.next ?? undefined,
+    });
+  // Deduped for the same reason the feed is: page-number paging shifts its
+  // window when a notification arrives mid-scroll, so page 2 can re-send a row
+  // page 1 already showed — two rows with one key, which FlatList recycles
+  // wrongly.
+  const notifications = dedupeById(data?.pages.flatMap((page) => page.results) ?? []);
 
   // Opening the screen marks everything currently-unread *seen* — the badge
   // clears, but every item stays in the list (that's the whole point). Fire it
@@ -109,6 +122,7 @@ export default function ActivityScreen() {
         </View>
       ) : (
         <FlatList
+          testID="activity-list"
           data={notifications}
           keyExtractor={(n) => String(n.id)}
           renderItem={({ item }) => (
@@ -125,6 +139,15 @@ export default function ActivityScreen() {
           }
           contentContainerStyle={
             notifications.length === 0 ? styles.emptyContainer : undefined
+          }
+          onEndReached={() => {
+            if (hasNextPage && !isFetchingNextPage) void fetchNextPage();
+          }}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={
+            isFetchingNextPage ? (
+              <ActivityIndicator style={styles.footer} color={colors.accent} />
+            ) : null
           }
         />
       )}
@@ -186,6 +209,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   emptyContainer: { flexGrow: 1 },
+  footer: { paddingVertical: spacing.md },
   emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
   emptyBody: {
     fontSize: fontSize.sm,

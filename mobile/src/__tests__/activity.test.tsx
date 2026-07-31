@@ -100,14 +100,63 @@ function notification(overrides: Partial<Notification> = {}): Notification {
 
 // The list GET, with a fallback for the seen/addressed POSTs the screen fires.
 function serveList(results: Notification[]) {
+  servePages([results]);
+}
+
+/**
+ * The list GET, served as `pages` — page one, then whatever `next` leads to.
+ *
+ * The `next` URL is absolute, as DRF's really is, so the app's `getPage`
+ * host-stripping is exercised rather than assumed.
+ */
+function servePages(pages: Notification[][]) {
+  const total = pages.reduce((n, page) => n + page.length, 0);
   mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
     const method = init?.method ?? 'GET';
-    if (/\/api\/notifications\/$/.test(url) && method === 'GET') {
-      return jsonResponse({ count: results.length, next: null, results });
+    if (/\/api\/notifications\/(\?|$)/.test(url) && method === 'GET') {
+      const index = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1) - 1;
+      return jsonResponse({
+        count: total,
+        next:
+          index + 1 < pages.length
+            ? `https://api.example.test/api/notifications/?page=${index + 2}`
+            : null,
+        results: pages[index] ?? [],
+      });
     }
     // seen POST, addressed POST, unread-count GET — all fine to succeed.
     if (/unread-count/.test(url)) return jsonResponse({ count: 0 });
     return jsonResponse({ updated: 0 });
+  });
+}
+
+function listGets() {
+  return mockFetch.mock.calls
+    .filter(([url, init]) => (init?.method ?? 'GET') === 'GET')
+    .map(([url]) => String(url));
+}
+
+/**
+ * Scroll to the bottom of the list, the way a thumb does.
+ *
+ * The layout and content-size events come first because `VirtualizedList` learns
+ * its metrics only from events, and nothing measures itself under Node: a bare
+ * scroll arrives at a list that believes it is zero pixels tall, and the
+ * `onEndReached` guard bails before it looks at anything. (Same dance as the
+ * transcript's paging test.)
+ */
+async function scrollToEnd() {
+  const list = screen.getByTestId('activity-list');
+  await fireEvent(list, 'layout', {
+    nativeEvent: { layout: { height: 800, width: 400, x: 0, y: 0 } },
+  });
+  await fireEvent(list, 'contentSizeChange', 400, 2000);
+  await fireEvent.scroll(list, {
+    nativeEvent: {
+      contentOffset: { y: 1200, x: 0 },
+      contentSize: { height: 2000, width: 400 },
+      layoutMeasurement: { height: 800, width: 400 },
+    },
   });
 }
 
@@ -222,6 +271,52 @@ describe('ActivityScreen', () => {
 
     await waitFor(() => expect(mockRouter.navigate).toHaveBeenCalledWith('/u/5'));
     expect(made(/\/api\/notifications\/9\/addressed\/$/, 'POST')).toBe(false);
+  });
+
+  it('pages older notifications in when you reach the end (#134)', async () => {
+    // The defect. The screen rendered `results` and stopped, so everything past
+    // page one was unreachable — while the bell counts *all* unread, which is
+    // how a badge could promise more than the list would ever show.
+    servePages([
+      [
+        notification({ id: 1, text: 'Newest' }),
+        notification({ id: 2, text: 'Middle' }),
+      ],
+      [notification({ id: 3, text: 'Oldest' })],
+    ]);
+    await renderWithClient(<ActivityScreen />);
+
+    expect(await screen.findByText('Newest')).toBeTruthy();
+    // Page one only, until asked for more.
+    expect(screen.queryByText('Oldest')).toBeNull();
+    expect(listGets().some((url) => url.includes('page='))).toBe(false);
+
+    await scrollToEnd();
+
+    expect(await screen.findByText('Oldest')).toBeTruthy();
+    // Followed the paginator's `next` — and the absolute URL it came as was
+    // re-based on our own host rather than requested as-is.
+    expect(
+      listGets().some((url) => url.endsWith('/api/notifications/?page=2'))
+    ).toBe(true);
+    expect(listGets().some((url) => url.includes('api.example.test'))).toBe(false);
+  });
+
+  it('renders a row once when paging re-sends it', async () => {
+    // Page-number paging shifts its window when a notification arrives
+    // mid-scroll, so page two can re-send a row page one already showed. Two
+    // rows with one key is a React warning and a recycled-wrong cell.
+    servePages([
+      [notification({ id: 1, text: 'Newest' }), notification({ id: 2, text: 'Middle' })],
+      [notification({ id: 2, text: 'Middle' }), notification({ id: 3, text: 'Oldest' })],
+    ]);
+    await renderWithClient(<ActivityScreen />);
+    await screen.findByText('Newest');
+
+    await scrollToEnd();
+
+    expect(await screen.findByText('Oldest')).toBeTruthy();
+    expect(screen.getAllByText('Middle')).toHaveLength(1);
   });
 
   it('shows the empty state when there are no notifications', async () => {

@@ -732,6 +732,23 @@ dismiss-everything, in the release that just added deliberate targeted dismissal
   then navigates to `url`. Three visual states: unread = bold + accent dot, seen =
   normal weight, addressed = dulled (`opacity-60`). Empty state: "You're all caught
   up." Closes on outside-click / Escape.
+- **The list is paginated on both clients** (#134). `GET /api/notifications/`
+  pages like every other list here, so rendering `results` and stopping left
+  everything older than page one unreachable — while the badge counts *all*
+  unread, which is how the count could promise more than the list would ever
+  show. The web dropdown follows `next` behind the shared `LoadMoreButton`
+  (via `useInfiniteList`, which now takes query options so the list can stay
+  `enabled: open`); the app's `activity.tsx` pages on `onEndReached`, like its
+  feed. Two consequences worth knowing:
+  - **Rows are deduped by id** on both sides (`useInfiniteList`;
+    `dedupeById`). Page-number paging shifts its window when a notification
+    arrives mid-read, so page two can re-send a row page one already showed —
+    otherwise two rows share a React key.
+  - **Closing the web dropdown trims the cache back to one page.** A refetch of
+    an infinite query refetches *every* loaded page, one after another, and
+    both the seen-on-open invalidation and the next open would pay that for
+    rows nobody is looking at. Only the first page can hold anything new.
+    (`trimToFirstPage` in `hooks.js`, the web twin of the app's.)
 - The old **People pending-request** and **Groups invite** nav badges were
   **retired** in `Layout.jsx` (the pages keep their lists; only the badge moved).
 - **`NotificationPreferencesSection`** on `/settings` — a toggle per mutable kind,
