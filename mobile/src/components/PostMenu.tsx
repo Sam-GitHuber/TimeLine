@@ -2,10 +2,12 @@
  * The ⋯ overflow menu on a post header. What it offers depends on whether you
  * own the post (mirrors the web `PostMenu.jsx`, owner check `user.pk === authorId`):
  *
- *   - **your own post** → *Delete* (confirmed, then removed everywhere it shows).
+ *   - **your own post** → *Edit* (opens `PostEditModal`) and *Delete* (confirmed,
+ *     then removed everywhere it shows).
  *   - **someone else's** → *Report* (opens the shared `ReportModal`).
  *
- * Post *edit* is deliberately not here yet — tracked separately, not E4.
+ * Edit sits **above** Delete and is styled plainly: the destructive item goes
+ * last, so the finger heading for the safe action never passes over it.
  *
  * Presented through `useActionMenu` — an `ActionSheetIOS` on iOS, a bottom sheet
  * on Android — the same pattern the group ⋯ menu uses
@@ -20,19 +22,27 @@ import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from './ActionMenu';
 import { KebabIcon } from './icons';
+import { PostEditModal } from './PostEditModal';
 import { ReportModal } from './ReportModal';
 import { colors, radius, spacing } from '@/theme';
 
 export function PostMenu({
   postId,
   authorId,
+  /** The post's current text, the starting point for an edit. */
+  text,
+  /** Whether the post has photos — a photo-only post may be left with no text. */
+  hasImages = false,
 }: {
   postId: number;
   authorId: number;
+  text: string;
+  hasImages?: boolean;
 }) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [reporting, setReporting] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   const isOwner = user != null && user.pk === authorId;
 
@@ -68,7 +78,10 @@ export function PostMenu({
     openMenu({
       title: 'Post options',
       items: isOwner
-        ? [{ label: 'Delete post', destructive: true, onPress: confirmDelete }]
+        ? [
+            { label: 'Edit post', onPress: () => setEditing(true) },
+            { label: 'Delete post', destructive: true, onPress: confirmDelete },
+          ]
         : [{ label: 'Report post', onPress: () => setReporting(true) }],
     });
 
@@ -88,6 +101,15 @@ export function PostMenu({
       </Pressable>
 
       {menu}
+
+      {editing ? (
+        <PostEditModal
+          postId={postId}
+          initialText={text}
+          hasImages={hasImages}
+          onClose={() => setEditing(false)}
+        />
+      ) : null}
 
       {reporting ? (
         <ReportModal postId={postId} onClose={() => setReporting(false)} />

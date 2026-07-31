@@ -40,6 +40,7 @@ import {
   menuDestructiveOption,
   menuOptions,
   pickMenuAction,
+  pickMenuOption,
   pressAlertButton,
   resetMenuSpies,
 } from './helpers';
@@ -108,7 +109,7 @@ afterEach(async () => {
 describe('PostMenu', () => {
   it('reports someone else’s post through the modal', async () => {
     mockFetch.mockResolvedValue(jsonResponse({ id: 99 }, 201));
-    await renderWithClient(<PostMenu postId={5} authorId={2} />);
+    await renderWithClient(<PostMenu postId={5} authorId={2} text="Their post" />);
 
     await fireEvent.press(screen.getByLabelText('Post options'));
     // Not the owner → the menu offers Report, not Delete.
@@ -130,14 +131,17 @@ describe('PostMenu', () => {
 
   it('deletes your own post after a confirm, and invalidates the feeds', async () => {
     mockFetch.mockResolvedValue(jsonResponse(null, 204));
-    const { invalidate } = await renderWithClient(<PostMenu postId={5} authorId={1} />);
+    const { invalidate } = await renderWithClient(
+      <PostMenu postId={5} authorId={1} text="My post" />
+    );
 
     await fireEvent.press(screen.getByLabelText('Post options'));
-    // The owner → Delete, marked destructive.
-    expect(menuOptions()).toEqual(['Delete post']);
+    // The owner → Edit and Delete, with only Delete marked destructive. The
+    // Edit half is covered in postEdit.test.tsx (#146).
+    expect(menuOptions()).toEqual(['Edit post', 'Delete post']);
     expect(menuDestructiveOption()).toBe('Delete post');
 
-    await act(async () => pickMenuAction(0));
+    await act(async () => pickMenuOption('Delete post'));
     // Nothing fires until the confirm is actually pressed.
     expect(made(/\/api\/posts\/5\/$/, 'DELETE')).toBe(false);
 
@@ -149,10 +153,10 @@ describe('PostMenu', () => {
 
   it('cancelling the delete confirm is a no-op', async () => {
     mockFetch.mockResolvedValue(jsonResponse(null, 204));
-    await renderWithClient(<PostMenu postId={5} authorId={1} />);
+    await renderWithClient(<PostMenu postId={5} authorId={1} text="My post" />);
 
     await fireEvent.press(screen.getByLabelText('Post options'));
-    await act(async () => pickMenuAction(0));
+    await act(async () => pickMenuOption('Delete post'));
     // The alert's Cancel has no onPress, so nothing runs.
     await act(async () => pressAlertButton('Delete post?', 'Cancel'));
 

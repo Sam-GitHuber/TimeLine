@@ -1343,6 +1343,24 @@ export const api = {
   getPost: (postId: number | string) => request<Post>(`/api/posts/${postId}/`),
 
   /**
+   * Correct your own post (issue #146) — the app could already *show* that a
+   * post was edited, but not produce an edit, so a typo made on the phone could
+   * only be fixed from the web.
+   *
+   * **Text only**, matching the web client and the endpoint's v1 scope: photos
+   * can't be added or removed by an edit. Owner-only server-side (403 for
+   * someone else's post, 404 for one you can't see), so the client's owner check
+   * only hides an affordance that would fail. A post can't be emptied to nothing
+   * — a blank `text` on a post with no photos is a 400.
+   *
+   * Unlike `editMessage` there is **no time window**: a post is your own entry on
+   * your own timeline, and the quiet "· edited" marker the server stamps is the
+   * agreed transparency floor (see feed-and-posts.md).
+   */
+  updatePost: (postId: number | string, text: string) =>
+    request<Post>(`/api/posts/${postId}/`, { method: 'PATCH', body: { text } }),
+
+  /**
    * Delete your own post (Phase 9 E4a). The backend refuses one that isn't yours,
    * so this needs no client-side owner check beyond hiding the affordance. There
    * is deliberately **no** comment-delete counterpart — the API has no such
