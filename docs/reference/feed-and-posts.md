@@ -66,10 +66,10 @@ The **`⋯` overflow menu** on a post's header (`PostMenu.jsx` / mobile
 clients offer the same three actions**, keyed off the same owner check
 `ReportButton` uses (`user.pk === author.id`):
 
-- **Your own post:** **Edit** and **Delete** (confirms first, since a post can
-  carry comments/reactions/photos). Edit sits **above** Delete and is styled
-  plainly, so the finger heading for the safe action never passes over the
-  destructive one.
+- **Your own post:** **Edit** (opens straight into the editor) and **Delete**
+  (confirms first, since a post can carry comments/reactions/photos). Edit sits
+  **above** Delete and is styled plainly, so the finger heading for the safe
+  action never passes over the destructive one.
 - **Someone else's post:** **Report** — the report control **moved off the footer
   row into this menu**. (Comments still carry an inline `ReportButton`; only posts
   moved.)
@@ -93,7 +93,11 @@ Both clients disable Save when a **text-only** post is emptied (mirroring the
 server's rule below, so the button never 400s), allow a photo post to keep no
 text, and invalidate `["feed"]`, `["userPosts"]`, `["groupPosts"]` and
 `["post", id]` on success so the new text and its marker appear everywhere the
-post shows.
+post shows. **The app additionally treats an unchanged Save as a plain close** —
+the server already refuses to stamp `edited_at` on a no-op, so nothing visible
+differs, but on a phone it saves a round-trip and four refetches (the feed among
+them). That's the rule the message editor already follows; the web still sends
+the no-op PATCH.
 
 Both edit and delete share the permalink route — `PostDetailView` is a
 `RetrieveUpdateDestroyAPIView`:

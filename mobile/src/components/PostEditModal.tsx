@@ -62,9 +62,27 @@ export function PostEditModal({
 
   const trimmed = text.trim();
   // Mirrors the server's guard (`PostDetailView.patch`), so the button is
-  // disabled rather than the save 400ing.
+  // disabled rather than the save 400ing. **One flag, read by both the button's
+  // `disabled` and `save()`** — #164 was exactly the two disagreeing, and a
+  // press that slips past a disabled control would fire a PATCH the server
+  // rejects.
   const canSave = !mutation.isPending && (trimmed.length > 0 || hasImages);
   const dirty = trimmed !== initialText.trim();
+
+  function save() {
+    if (!canSave) return;
+    // Saving the text unchanged just closes. The server already declines to
+    // stamp `edited_at` on a no-op, so this changes nothing a user can see —
+    // what it avoids is a round-trip and four query invalidations (the feed
+    // among them) refetched over a phone connection for no change at all. The
+    // message editor makes the same call for the same reason
+    // (`[conversationId].tsx`).
+    if (!dirty) {
+      onClose();
+      return;
+    }
+    mutation.mutate(trimmed);
+  }
 
   /**
    * Backdrop tap and Android back both land here. Losing typing to a stray tap
@@ -126,13 +144,22 @@ export function PostEditModal({
             <View style={styles.actions}>
               <Pressable
                 onPress={requestClose}
+                // `requestClose` already refuses to close mid-save; saying so
+                // with the control's own state means the press is visibly
+                // declined rather than silently swallowed.
+                disabled={mutation.isPending}
                 accessibilityRole="button"
-                style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
+                accessibilityState={{ disabled: mutation.isPending }}
+                style={({ pressed }) => [
+                  styles.btn,
+                  styles.ghost,
+                  (pressed || mutation.isPending) && styles.pressed,
+                ]}
               >
                 <Text style={styles.ghostLabel}>Cancel</Text>
               </Pressable>
               <Pressable
-                onPress={() => mutation.mutate(trimmed)}
+                onPress={save}
                 disabled={!canSave}
                 accessibilityRole="button"
                 accessibilityState={{ disabled: !canSave }}

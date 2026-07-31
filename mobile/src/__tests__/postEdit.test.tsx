@@ -172,6 +172,19 @@ describe('saving an edit', () => {
     await waitFor(() => expect(screen.queryByLabelText('Edit post text')).toBeNull());
   });
 
+  it('saving unchanged text just closes, without a request', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ id: 5 }));
+    const { invalidate } = await openEditor({ text: 'Original text' });
+
+    await fireEvent.press(screen.getByText('Save'));
+
+    // The server declines to stamp `edited_at` on a no-op anyway, so nothing a
+    // user can see changes — this spares the round-trip and the four refetches.
+    expect(made(PATCH_POST, 'PATCH')).toBe(false);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('Edit post text')).toBeNull();
+  });
+
   it('keeps the sheet open and shows the server’s message when the save fails', async () => {
     mockFetch.mockResolvedValue(
       jsonResponse({ detail: 'You can only edit or delete your own posts.' }, 403)
