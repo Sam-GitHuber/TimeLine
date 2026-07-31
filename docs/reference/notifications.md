@@ -565,6 +565,27 @@ returning the same response on re-renders), and wait for `signedIn` so a
 cold-start tap doesn't race the auth gate's redirect to `/login`. Tapping marks
 the notification **addressed**, matching the web dropdown's click-through.
 
+A tap navigates with **`router.navigate`, never `router.push`** (#177). `push`
+appends a screen unconditionally, so a push for the thread you were already
+reading stacked a second copy of it and Back walked through the duplicates one
+at a time instead of returning to the list — one extra copy per push opened.
+`navigate` replaces the top screen in place when the route name *and* its path
+params match (expo-router's `getSingularId`), reusing the existing screen's key
+so nothing remounts, and pushes normally for a genuinely different target. Tab
+targets (`/`, `/people`, `/groups`) never had the bug: expo-router downgrades
+`PUSH` to `NAVIGATE` outside a stack, which is the behaviour the stack routes
+were missing.
+
+Deliberately **not `dismissTo`**, which would pop back to a match anywhere in the
+stack rather than only the top. No screen sets `dangerouslySingular`, so its
+router matches by route *name* alone — a push for conversation 5 tapped while
+reading conversation 9 would pop 9 off and reuse its screen. Matching on the
+params is the point. The cost of matching only the top is narrow and known: a
+push for `/messages/5` tapped while on `/messages/5/info` still stacks a thread
+above the info screen, and a second `/post/42?comment=` push tapped while that
+post is on display moves the highlight without re-scrolling to it (the scroll
+aims once per mount, `[postId].tsx`).
+
 **Route mapping** (`routeForNotification`) translates the server's one `url`
 into a mobile route: `/p/42` → `/post/42` (`?comment=` preserved), `/u/3`
 unchanged, `/requests` → `/people`, `/group-invites` → `/groups`,

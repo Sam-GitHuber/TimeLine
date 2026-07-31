@@ -11,6 +11,10 @@
  * the words if the send fails. Whether iOS actually draws a text field on a
  * pulled-down push is a device check (the category is registered natively), and
  * the plan says so.
+ *
+ * **How** it navigates matters as much as where (#177): every assertion here is
+ * on `router.navigate`, because `router.push` stacked a fresh copy of the screen
+ * a push targeted even when that screen was the one already on display.
  */
 
 import * as Notifications from 'expo-notifications';
@@ -25,7 +29,7 @@ import { REPLY_ACTION } from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
 
 jest.mock('expo-router', () => ({
-  router: { push: jest.fn(), replace: jest.fn() },
+  router: { navigate: jest.fn(), push: jest.fn(), replace: jest.fn() },
   useRootNavigationState: jest.fn(),
 }));
 
@@ -89,7 +93,7 @@ it('navigates to the notification target when one is tapped', async () => {
 
   await render(<Probe />);
 
-  await waitFor(() => expect(router.push).toHaveBeenCalledWith('/post/42'));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith('/post/42'));
 });
 
 it('marks the notification addressed, matching the web click-through', async () => {
@@ -114,7 +118,7 @@ it('still navigates when marking addressed fails', async () => {
 
   await render(<Probe />);
 
-  await waitFor(() => expect(router.push).toHaveBeenCalledWith('/post/42'));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith('/post/42'));
 });
 
 it('waits for sign-in before navigating on a cold start', async () => {
@@ -125,13 +129,13 @@ it('waits for sign-in before navigating on a cold start', async () => {
   mockNotifications.useLastNotificationResponse.mockReturnValue(response());
 
   const view = await render(<Probe />);
-  expect(router.push).not.toHaveBeenCalled();
+  expect(router.navigate).not.toHaveBeenCalled();
 
   // Auth resolves; the deep link is honoured rather than dropped.
   mockUseAuth.mockReturnValue({ status: 'signedIn' } as never);
   await view.rerender(<Probe />);
 
-  await waitFor(() => expect(router.push).toHaveBeenCalledWith('/post/42'));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith('/post/42'));
 });
 
 it('waits for the router to be ready', async () => {
@@ -141,7 +145,7 @@ it('waits for the router to be ready', async () => {
 
   await render(<Probe />);
 
-  expect(router.push).not.toHaveBeenCalled();
+  expect(router.navigate).not.toHaveBeenCalled();
 });
 
 it('never navigates while signed out', async () => {
@@ -150,7 +154,7 @@ it('never navigates while signed out', async () => {
 
   await render(<Probe />);
 
-  expect(router.push).not.toHaveBeenCalled();
+  expect(router.navigate).not.toHaveBeenCalled();
 });
 
 it('handles a given notification only once across re-renders', async () => {
@@ -159,25 +163,55 @@ it('handles a given notification only once across re-renders', async () => {
   mockNotifications.useLastNotificationResponse.mockReturnValue(response());
 
   const view = await render(<Probe />);
-  await waitFor(() => expect(router.push).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(1));
 
   await view.rerender(<Probe />);
   await view.rerender(<Probe />);
 
-  expect(router.push).toHaveBeenCalledTimes(1);
+  expect(router.navigate).toHaveBeenCalledTimes(1);
 });
 
 it('navigates again for a genuinely different notification', async () => {
   mockNotifications.useLastNotificationResponse.mockReturnValue(response());
   const view = await render(<Probe />);
-  await waitFor(() => expect(router.push).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(1));
 
   mockNotifications.useLastNotificationResponse.mockReturnValue(
     response({ identifier: 'notif-2', url: '/u/3' })
   );
   await view.rerender(<Probe />);
 
-  await waitFor(() => expect(router.push).toHaveBeenCalledWith('/u/3'));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith('/u/3'));
+});
+
+it('never stacks a second copy of the screen a push targets (#177)', async () => {
+  // Two pushes for the *same* thread, tapped one after the other. The dedupe ref
+  // above doesn't cover this and shouldn't: they're different notifications with
+  // different identifiers, so both are acted on — which is exactly why the count
+  // of duplicate screens used to track the count of pushes opened, and why Back
+  // walked through copies of the thread instead of reaching the list.
+  //
+  // `router.push` is what stacked them: expo-router's PUSH appends a route with
+  // no regard for what's already on top. `navigate` collapses onto the current
+  // screen when the route name and its path params match. The collapsing itself
+  // belongs to expo-router (`getSingularId`), so what's pinned here is the half
+  // that's ours: a tapped push never asks for an unconditional push.
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({ identifier: 'notif-1', url: '/messages/5' })
+  );
+  const view = await render(<Probe />);
+  await waitFor(() =>
+    expect(router.navigate).toHaveBeenCalledWith('/messages/5')
+  );
+
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({ identifier: 'notif-2', url: '/messages/5' })
+  );
+  await view.rerender(<Probe />);
+
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
+  expect(router.navigate).toHaveBeenNthCalledWith(2, '/messages/5');
+  expect(router.push).not.toHaveBeenCalled();
 });
 
 it('deep-links an event notification to its flat event screen (E3b)', async () => {
@@ -189,7 +223,7 @@ it('deep-links an event notification to its flat event screen (E3b)', async () =
 
   await render(<Probe />);
 
-  await waitFor(() => expect(router.push).toHaveBeenCalledWith('/events/9'));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith('/events/9'));
 });
 
 it('opens the app rather than crashing when the target has no screen yet', async () => {
@@ -201,7 +235,7 @@ it('opens the app rather than crashing when the target has no screen yet', async
 
   await render(<Probe />);
 
-  await waitFor(() => expect(router.push).toHaveBeenCalledWith('/'));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith('/'));
 });
 
 
@@ -222,7 +256,7 @@ it('sends a reply typed into the notification, without opening the app', async (
 
   // Trimmed, like every other send.
   await waitFor(() => expect(send).toHaveBeenCalledWith(12, 'on my way'));
-  expect(router.push).not.toHaveBeenCalled();
+  expect(router.navigate).not.toHaveBeenCalled();
 });
 
 it('keeps a reply that fails to send', async () => {
@@ -261,5 +295,5 @@ it('sends nothing for an empty reply', async () => {
   await render(<Probe />);
 
   expect(send).not.toHaveBeenCalled();
-  expect(router.push).not.toHaveBeenCalled();
+  expect(router.navigate).not.toHaveBeenCalled();
 });

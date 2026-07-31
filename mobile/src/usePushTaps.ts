@@ -72,7 +72,27 @@ export function usePushNotificationTaps(): void {
       return;
     }
 
-    router.push(routeForNotification(data?.url));
+    // **`navigate`, not `push`** (#177). `push` appends a screen unconditionally,
+    // with no regard for what's already on top — so a push for the thread you are
+    // already reading stacked a second copy of it, and Back walked through the
+    // duplicates one at a time instead of returning to the list. Three pushes
+    // opened on top of each other meant three back-taps.
+    //
+    // `navigate` replaces the top screen in place when the route name *and* its
+    // path params match (expo-router compares `getSingularId`), and pushes
+    // normally for a genuinely different target. For the identical target it
+    // reuses the existing screen's key, so nothing remounts — a tap on a push for
+    // where you already are is the no-op it looks like. The tab targets ('/',
+    // '/people', '/groups') were already fine because expo-router downgrades
+    // `PUSH` to `NAVIGATE` outside a stack; this gives the stack routes the same
+    // behaviour.
+    //
+    // Not `dismissTo`, which pops back to a match anywhere in the stack: without
+    // `dangerouslySingular` (nothing here sets it) its router matches by route
+    // *name* only, so a push for conversation 5 tapped while reading
+    // conversation 9 would pop 9 off and reuse its screen — losing where you
+    // were. Matching on the params is the whole point.
+    router.navigate(routeForNotification(data?.url));
 
     // Tapping a push counts as dealing with it, exactly as clicking a row in
     // the web dropdown does — so the activity centre and the badge stay in
