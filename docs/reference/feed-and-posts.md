@@ -61,16 +61,43 @@ a proxy / on a separate API domain). Nav badges read the paginator's `count`, no
 
 ### Editing & deleting your own posts
 
-The **`⋯` overflow menu** on a post's header (`PostMenu.jsx`, rendered by
-`PostCard`) is where per-post actions live. What it offers keys off the same
-owner check `ReportButton` uses (`user.pk === author.id`):
+The **`⋯` overflow menu** on a post's header (`PostMenu.jsx` / mobile
+`PostMenu.tsx`, rendered by `PostCard`) is where per-post actions live. **Both
+clients offer the same three actions**, keyed off the same owner check
+`ReportButton` uses (`user.pk === author.id`):
 
-- **Your own post:** **Edit** (flips the text into an inline editor — `PostEditor`
-  in `PostCard.jsx`, no separate page) and **Delete** (confirms first, since a
-  post can carry comments/reactions/photos).
+- **Your own post:** **Edit** (opens straight into the editor) and **Delete**
+  (confirms first, since a post can carry comments/reactions/photos). Edit sits
+  **above** Delete and is styled plainly, so the finger heading for the safe
+  action never passes over the destructive one.
 - **Someone else's post:** **Report** — the report control **moved off the footer
   row into this menu**. (Comments still carry an inline `ReportButton`; only posts
   moved.)
+
+**The editor's shape deliberately differs by client** (issue #146 — the app had
+no edit path at all until then, so a typo made on the phone could only be fixed
+from the web):
+
+- **Web:** the card flips its text into an inline editor (`PostEditor` in
+  `PostCard.jsx`), no separate page.
+- **Mobile:** a modal sheet (`PostEditModal.tsx`), *not* an inline editor, and
+  the list is the reason rather than taste. `PostCard` renders inside a
+  virtualised `FlatList`: an inline `TextInput` would open under the keyboard
+  with nothing to scroll, and a row scrolled out of the window unmounts — taking
+  a half-typed edit with it. The sheet follows `ReportModal` (a
+  `KeyboardAvoider` inside a `<Modal>` whose `onRequestClose` handles Android
+  back), and it confirms before discarding an edit in progress, because a stray
+  tap on the backdrop otherwise costs you your typing.
+
+Both clients disable Save when a **text-only** post is emptied (mirroring the
+server's rule below, so the button never 400s), allow a photo post to keep no
+text, and invalidate `["feed"]`, `["userPosts"]`, `["groupPosts"]` and
+`["post", id]` on success so the new text and its marker appear everywhere the
+post shows. **The app additionally treats an unchanged Save as a plain close** —
+the server already refuses to stamp `edited_at` on a no-op, so nothing visible
+differs, but on a phone it saves a round-trip and four refetches (the feed among
+them). That's the rule the message editor already follows; the web still sends
+the no-op PATCH.
 
 Both edit and delete share the permalink route — `PostDetailView` is a
 `RetrieveUpdateDestroyAPIView`:
@@ -95,15 +122,16 @@ Both edit and delete share the permalink route — `PostDetailView` is a
 the first edit** — that's how "created but never edited" is told apart (no
 `updated_at`/timestamp-comparison guesswork). The serializer exposes it read-only;
 `PostCard` shows a quiet **"· edited"** next to the author line **only** when it's
-set, with the exact edit time on hover/focus (`title`/`aria-label`, the same
-pattern `created_at` uses). Silently altering content others have already read is
+set — on the web with the exact edit time on hover/focus (`title`/`aria-label`,
+the same pattern `created_at` uses); the app shows the marker alone, there being
+no hover on a phone. Silently altering content others have already read is
 a trust problem on an app holding real friends'/family's conversations, so the
 marker isn't optional.
 
 **No edit window and no version history** (v1) — this is a private friends/family
 app, not a public record; the "edited + when" marker is the agreed transparency
-floor. On the client, an edit/delete invalidates `["feed"]`, `["userPosts"]`,
-`["groupPosts"]` and `["post", id]` so the change shows wherever the post appears.
+floor — and it applies to a phone edit exactly as it does to a web one, which is
+why the app's edit sheet says so before you save rather than only after.
 - **Why fetch by id rather than reuse a feed row:** notifications
   ([notifications.md](notifications.md)) deep-link here, and the target post may
   be nowhere near the first page of any feed — fetching it directly is the only

@@ -139,10 +139,18 @@ export function PostCard({
             {/* Silently altering content others have read is a trust problem, so
                 the marker is not optional — see feed-and-posts.md. */}
             {post.edited_at ? <Text style={styles.edited}>· edited</Text> : null}
-            {/* The ⋯ menu (Delete own / Report others). A nested Pressable, so it
-                wins its own touch over the body behind it, and pushes itself to
-                the far right via `marginLeft: auto`. */}
-            <PostMenu postId={post.id} authorId={post.author.id} />
+            {/* The ⋯ menu (Edit + Delete own / Report others). A nested
+                Pressable, so it wins its own touch over the body behind it, and
+                pushes itself to the far right via `marginLeft: auto`. It's given
+                the text and whether there are photos because the edit sheet
+                starts from the former and the server's "a post can't be emptied"
+                rule turns on the latter. */}
+            <PostMenu
+              postId={post.id}
+              authorId={post.author.id}
+              text={post.text}
+              hasImages={post.images.length > 0}
+            />
           </View>
 
           {post.group ? (
