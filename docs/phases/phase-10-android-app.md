@@ -181,13 +181,22 @@ real, located thing.
   `requestPermissionsAsync` and treats refusal as normal, so this should work
   unchanged — but it needs verifying, and the prompt's *timing* on Android
   (currently on sign-in) should be checked against how it reads on first launch.
-- **The notification icon.** ✅ **Done.** Android builds the status-bar icon from
-  the **alpha channel** — hand it a colour image and you get a solid white blob.
-  `assets/images/android-icon-monochrome.png` turned out to be exactly the right
-  shape already (opaque mark, transparent ground; its grey is irrelevant since
-  only alpha is read), so the `expo-notifications` plugin now takes it as `icon`
-  with the emerald accent as `color`. Verified through `expo config --type
-  introspect` rather than a build.
+- **The icons.** ✅ **Done (#171).** Android builds the status-bar icon from the
+  **alpha channel** — hand it a colour image and you get a solid white blob. The
+  first pass took that as the whole story and pointed `expo-notifications` at
+  `assets/images/android-icon-monochrome.png`, reasoning that an opaque mark on a
+  transparent ground was already the right shape. Two things were wrong with it.
+  An **adaptive layer has the opposite geometry to a notification icon** — a wide
+  safe-zone margin versus full-bleed — so the icon rendered at ~45% of its 24dp
+  slot, half the size of every neighbouring app's. And the asset was never our
+  mark at all: it was still the **stock Expo chevron**, as were the other two
+  adaptive layers (the background was Expo's blue *blueprint guide*), because the
+  Phase 9 icon commit only replaced `icon.png` and `splash-icon.png`. All three
+  are now rendered from the brand mark by `mobile/scripts/generate-icons.mjs` at
+  the geometry each slot wants, and pinned by `src/__tests__/appIcons.test.ts`.
+  See *The icons* in `../reference/mobile-app.md`. Verified through `expo config
+  --type introspect` **and** the `drawable-*`/`mipmap-*` output of `expo
+  prebuild`, which is where the ~45% was measurable without a build.
 - **Verify the message Reply action.** `MESSAGE_CATEGORY` / `REPLY_ACTION` in
   `push.ts` gives iOS an inline reply field on a message push. Expo's
   notification categories are supported on Android too, but the options differ —
