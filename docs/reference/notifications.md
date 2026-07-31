@@ -63,7 +63,12 @@ Notification:
   silently vanishing rows out from under them.
 - **All target FKs CASCADE**, so a notification never outlives its target — a
   reply notification whose comment was deleted is gone with it. Consequence: there
-  are **no dangling deep-links** to filter at read time.
+  are **no dangling deep-links** to filter at read time. A **soft**-deleted
+  comment (issue #128 — the tombstone that survives to hold replies up) has no
+  CASCADE to ride, so the delete view clears its notifications by hand: the two
+  delete paths must leave the recipient in the same place, and a deep-link into a
+  blank placeholder is exactly the dangling link this bullet promises doesn't
+  exist.
 
 ### The three states (two nullable timestamps)
 

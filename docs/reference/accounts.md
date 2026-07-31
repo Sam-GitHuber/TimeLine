@@ -423,9 +423,10 @@ messages can't be reported.
 
 **Mobile (Phase 9 E4a).** The iOS app surfaces the same controls against the same
 endpoints — App Review requires working report **and** block for a social app. A
-post's ⋯ overflow menu offers **Report** on others' posts (and **Delete** on your
-own — the only own-content management the app has; there is no comment-delete
-endpoint, so comments are report-only there too, via an inline **Report** action).
+post's ⋯ overflow menu offers **Report** on others' posts (and **Edit**/**Delete**
+on your own); a comment carries an inline **Report** on someone else's and its own
+⋯ with **Edit**/**Delete** on yours (issue #128 — see
+[feed-and-posts.md](feed-and-posts.md#editing--deleting-your-own-comment)).
 **Block/Unblock** lives on a person's profile, confirmed through the shared
 disconnect-warning modal (a block severs the same shared group chats — see
 [connections.md](connections.md)); once you've blocked someone the profile shows

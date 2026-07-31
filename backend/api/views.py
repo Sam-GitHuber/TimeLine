@@ -80,6 +80,7 @@ from .serializers import (
     EVERYONE,
     AuthorSerializer,
     CommentCreateSerializer,
+    CommentEditSerializer,
     CommentSerializer,
     ConnectionRequestSerializer,
     ConversationRenameSerializer,
@@ -894,7 +895,7 @@ def connection_status_annotation(user):
     )
 
 
-def build_visible_comment_tree(comments, visible_author_ids):
+def build_visible_comment_tree(comments, visible_author_ids, root_id=None):
     """Turn a flat list of a post's comments into the nested tree a viewer may
     see, pruning whole subtrees rooted at an author they can't see.
 
@@ -910,9 +911,25 @@ def build_visible_comment_tree(comments, visible_author_ids):
     subtrees with them here too, since an orphaned reply is never reached from a
     root.
 
+    **Deleted comments (issue #128) are kept only while they still hold
+    something up.** A tombstone exists to stop a delete taking other people's
+    replies with it, so one with no replies *this viewer can see* is carrying
+    nothing and is dropped — it has no text to show, and an empty "comment
+    deleted" row would be litter. Because the check runs per viewer, the same
+    tombstone can be a placeholder for someone who sees the replies under it and
+    invisible to someone who doesn't; that's the same per-viewer tree the
+    connection prune already produces, applied to one more rule. It also means
+    the row left behind when the last visible reply is later deleted needs no
+    sweeping — it simply stops rendering.
+
     Each surviving comment gets a ``_visible_children`` list of its visible
     replies (read by the serializer). ``comments`` is assumed to arrive in the
     model's ``created_at, id`` order, which we preserve within each sibling set.
+
+    ``root_id`` is where the walk starts: ``None`` for a post's whole thread (the
+    usual call), or a comment id to build just that comment's visible replies —
+    which is how ``CommentDetailView`` renders an edit response without a second
+    copy of these rules.
     """
     children = defaultdict(list)
     for comment in comments:
@@ -924,11 +941,17 @@ def build_visible_comment_tree(comments, visible_author_ids):
             if comment.author_id not in visible_author_ids:
                 # Prune this node AND its whole subtree: don't recurse into it.
                 continue
+            # Recurse first: whether a tombstone survives depends on what's
+            # under it once the rules above have been applied.
             comment._visible_children = build(comment.id)
+            if comment.is_deleted and not comment._visible_children:
+                continue
             nodes.append(comment)
         return nodes
 
-    return build(None)
+    # ``root_id`` is None for a whole thread (the usual call) or a comment id to
+    # build just that comment's visible replies — what the edit response needs.
+    return build(root_id)
 
 
 def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
@@ -972,7 +995,9 @@ def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
     comments_by_post = defaultdict(list)
     for comment in (
         Comment.objects.filter(post_id__in=post_ids, author__is_active=True)
-        .only("id", "post_id", "parent_id", "author_id", "created_at")
+        # ``deleted_at`` is in the field list because the tree builder reads it
+        # (issue #128) — deferring it would make every tombstone cost a query.
+        .only("id", "post_id", "parent_id", "author_id", "created_at", "deleted_at")
     ):
         comments_by_post[comment.post_id].append(comment)
 
@@ -987,8 +1012,14 @@ def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
         total = new = 0
         for node in nodes:
             total += 1
-            if node.author_id != viewer.id and (
-                seen_at is None or node.created_at > seen_at
+            # A surviving tombstone occupies a row in the thread, so it counts
+            # toward the total — but it can never be *new*: there's nothing left
+            # to read, and badging "1 new" for a comment that was written and
+            # deleted between your visits would send you to an empty slot.
+            if (
+                not node.is_deleted
+                and node.author_id != viewer.id
+                and (seen_at is None or node.created_at > seen_at)
             ):
                 new += 1
             sub_total, sub_new = walk(node._visible_children, seen_at)
@@ -1699,6 +1730,14 @@ class PostCommentsView(APIView):
             raise ValidationError(
                 {"parent": "You can only reply to a comment on this post."}
             )
+        if parent is not None and parent.is_deleted:
+            # A tombstone has nothing to answer, and a reply arriving under one
+            # would resurrect a slot its author had finished with. (It would also
+            # keep the tombstone alive indefinitely — the tree only renders one
+            # while replies still hang off it.)
+            raise ValidationError(
+                {"parent": "That comment was deleted, so you can't reply to it."}
+            )
         comment = serializer.save(author=request.user, post=post)
         # Notify the person being replied to (Phase 8). A top-level comment
         # notifies the post's author (post_reply); a reply notifies the parent
@@ -1719,6 +1758,124 @@ class PostCommentsView(APIView):
                 comment=comment,
             )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class CommentDetailView(APIView):
+    """Edit (``PATCH``) or delete (``DELETE``) **your own** comment at
+    ``/comments/<pk>/`` (issue #128).
+
+    Comments were create-and-report-only until now, which meant a typo in a
+    comment was permanent and a comment you regretted could only be removed by
+    asking the maintainer. Posts have had both since issue #62; this is the same
+    contract for the other thing you can write.
+
+    **The permission shape is ``PostDetailView``'s, deliberately identical:**
+
+    - The **author may always** edit or delete their own comment, even one they
+      can no longer see — you can lose sight of your own comment by disconnecting
+      from the person whose comment you replied under, and your words should
+      still be yours to remove. So the owner check runs *before* the visibility
+      gate.
+    - A comment you **can't see** is a **404** (existence isn't leaked, matching
+      the pruned tree, reactions and reports).
+    - A comment you **can** see but don't own is a **403**.
+
+    ``PATCH`` takes ``{"text": ...}`` and stamps ``edited_at``, so the clients can
+    show the same quiet "· edited" marker posts carry. As with posts, a **no-op
+    edit does not stamp** — the marker only ever means the content really
+    changed — and there is **no edit window** (unlike a message, which has 15
+    minutes). A comment is post-shaped content sitting on a page anyone can
+    re-read at leisure, so the honest disclosure is the marker, not a deadline;
+    the window exists in chat because a message is read once, in passing, and
+    usually never scrolled back to.
+
+    ``DELETE`` is **hard when it can be and soft when it must be** — see
+    ``Comment.deleted_at`` for the rule and why. Either way it returns **204**:
+    which of the two happened is a property of the thread, not of your request,
+    and both clients refetch the thread rather than trying to guess. Whichever
+    path runs, everything hanging off the comment goes — reactions, its
+    notifications, its reports — so a tombstone is as gone as a deleted row in
+    every respect except the shape it holds up.
+    """
+
+    def _owned_comment(self, request, pk):
+        comment = get_object_or_404(
+            Comment.objects.select_related("author", "post", "post__author"), pk=pk
+        )
+        if comment.author_id == request.user.id:
+            return comment
+        if not can_view_comment(request.user, comment):
+            raise NotFound()
+        raise PermissionDenied("You can only edit or delete your own comments.")
+
+    def _serialise(self, request, comment):
+        """``comment`` as this viewer's thread would render it.
+
+        The nested ``replies`` have to be the *pruned* ones — a response built
+        without them would tell the client this comment has no replies, and a
+        client that trusted it would drop the subtree from its cache. So the
+        edit response runs the same tree walk ``PostCommentsView`` does, rooted
+        at this comment.
+        """
+        visible_author_ids = connected_user_ids(request.user) | {request.user.id}
+        comments = list(
+            comment.post.comments.select_related("author")
+            .prefetch_related("reactions")
+            .filter(author__is_active=True)
+        )
+        comment._visible_children = build_visible_comment_tree(
+            comments, visible_author_ids, root_id=comment.id
+        )
+        return CommentSerializer(
+            comment,
+            context={
+                "request": request,
+                "visible_reactor_ids": visible_author_ids,
+            },
+        ).data
+
+    def patch(self, request, pk):
+        comment = self._owned_comment(request, pk)
+        if comment.is_deleted:
+            # Nothing left to correct, and re-filling a tombstone would bring
+            # back a comment the thread has already shown as gone (the same rule
+            # the message editor applies).
+            raise ValidationError("That comment was deleted.")
+        serializer = CommentEditSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        new_text = serializer.validated_data["text"]
+        if new_text == comment.text:
+            # A no-op save must NOT mark the comment "edited" — same rule as
+            # posts, so the marker keeps meaning something.
+            return Response(self._serialise(request, comment))
+        comment.text = new_text
+        comment.edited_at = timezone.now()
+        comment.save(update_fields=["text", "edited_at"])
+        return Response(self._serialise(request, comment))
+
+    def delete(self, request, pk):
+        comment = self._owned_comment(request, pk)
+        if comment.is_deleted:
+            # Idempotent: a retry or a double-tap on an already-deleted comment
+            # is a no-op, not an error.
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        with transaction.atomic():
+            # Decided on **all** replies, not the ones this viewer can see, so
+            # one delete has one outcome for everybody.
+            if comment.replies.exists():
+                comment.text = ""
+                comment.deleted_at = timezone.now()
+                comment.save(update_fields=["text", "deleted_at"])
+                # A tombstone keeps the thread's shape and nothing else. These
+                # three are exactly what the hard-delete branch's CASCADE takes,
+                # so the two paths differ in one thing only: whether the row
+                # survives to hold other people's replies up.
+                comment.reactions.all().delete()
+                comment.notifications.all().delete()
+                comment.reports.all().delete()
+            else:
+                comment.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # --- Reactions (Phase 7b) ------------------------------------------------------
@@ -1905,9 +2062,14 @@ class CommentReactionView(APIView):
         return comment
 
     def post(self, request, pk):
+        comment = self._get_comment_or_404(request, pk)
+        if comment.is_deleted:
+            # A tombstone is a placeholder, not content — reacting to one reacts
+            # to nothing, and the delete cleared the existing reactions anyway.
+            raise ValidationError("That comment was deleted.")
         return _toggle_reaction(
             request,
-            {"comment": self._get_comment_or_404(request, pk)},
+            {"comment": comment},
             visible_reactor_ids(request.user),
         )
 
@@ -3634,10 +3796,16 @@ class ReportCreateView(generics.CreateAPIView):
             request.user, post, connected_ids
         ):
             raise NotFound()
-        if comment is not None and not can_view_comment(
-            request.user, comment, connected_ids
-        ):
-            raise NotFound()
+        if comment is not None:
+            if not can_view_comment(request.user, comment, connected_ids):
+                raise NotFound()
+            if comment.is_deleted:
+                # Same rule as a deleted message (issue #128 gave comments a
+                # tombstone too): there's no content left to moderate, and the
+                # blank placeholder is all anyone can see.
+                raise ValidationError(
+                    "That comment was deleted, so there's nothing to report."
+                )
         if message is not None:
             if not can_view_message(request.user, message):
                 raise NotFound()

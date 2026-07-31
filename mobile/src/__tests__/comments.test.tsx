@@ -41,6 +41,8 @@ function comment(overrides: Partial<Comment> & { id: number }): Comment {
     parent: null,
     text: `Comment ${overrides.id}`,
     created_at: '2026-07-18T10:00:00Z',
+    edited_at: null,
+    deleted_at: null,
     replies: [],
     reactions: [],
     ...overrides,

@@ -25,6 +25,16 @@ urlpatterns = [
         views.PostCommentsView.as_view(),
         name="post-comments",
     ),
+    # A single comment — owner-only edit/delete (issue #128). Keyed on the
+    # comment id alone, not nested under its post: the post is reachable from
+    # the comment and the visibility gate consults it anyway, so a post id in
+    # the path would be a second thing to keep consistent. Same shape as the
+    # comment reaction routes below.
+    path(
+        "comments/<int:pk>/",
+        views.CommentDetailView.as_view(),
+        name="comment-detail",
+    ),
     # Reactions (Phase 7b; messages added in 9b M2): POST <path>/react/ toggles;
     # GET <path>/reactions/ lists who reacted. Post and comment reactors are
     # pruned to the viewer's visibility; a message's aren't — see

@@ -171,7 +171,9 @@ class Comment(models.Model):
 
     Deleting a comment cascades to its replies (``on_delete=CASCADE`` on
     ``parent``): removing a node removes the branch under it, which matches how
-    the tree reads — a reply with no visible parent makes no sense.
+    the tree reads — a reply with no visible parent makes no sense. **That
+    cascade is exactly why author-deletion is only sometimes a row delete** —
+    see ``deleted_at``.
 
     Visibility is **not** stored here — it's computed per-viewer against their
     connections when the tree is served (a comment, and everything under it, is
@@ -195,8 +197,32 @@ class Comment(models.Model):
         blank=True,
         related_name="replies",
     )
-    text = models.TextField()
+    text = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # When the author last edited the text (issue #128) — **null until the first
+    # edit**, exactly like ``Post.edited_at``, so "written and never touched" is
+    # told apart without timestamp-comparison guesswork. Set explicitly in the
+    # detail view rather than ``auto_now``, so an incidental ``save()`` (the
+    # soft-delete write below, say) can't mislabel a comment as edited.
+    edited_at = models.DateTimeField(null=True, blank=True)
+    # Set when the author deletes a comment that has replies (issue #128).
+    #
+    # **Deletion is hard when it can be and soft when it must be**, decided by
+    # whether the comment has any replies at all:
+    #
+    # - **No replies** → the row is deleted outright. This is the common case (a
+    #   typo, a comment you regret) and it should leave nothing behind.
+    # - **Has replies** → the row stays, ``text`` blanked and ``deleted_at``
+    #   stamped, so the thread renders a "comment deleted" tombstone with the
+    #   replies still hanging off it. A hard delete here would take *other
+    #   people's* replies down with it via the ``parent`` cascade above, which is
+    #   not a thing your own delete should be able to do.
+    #
+    # The choice is made on **all** replies, not the ones a given viewer can see,
+    # so every viewer gets the same outcome from one delete. A tombstone whose
+    # replies a viewer can't see is then hidden *for that viewer* by the tree
+    # builder — see ``build_visible_comment_tree``.
+    deleted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         # Oldest-first: a comment thread reads top-to-bottom in the order it was
@@ -204,7 +230,17 @@ class Comment(models.Model):
         # share a timestamp in a stable, deterministic order.
         ordering = ["created_at", "id"]
 
+    @property
+    def is_deleted(self):
+        return self.deleted_at is not None
+
+    @property
+    def is_edited(self):
+        return self.edited_at is not None
+
     def __str__(self):
+        if self.is_deleted:
+            return f"{self.author} · (deleted)"
         preview = self.text[:40] + ("…" if len(self.text) > 40 else "")
         return f"{self.author} · {preview}"
 

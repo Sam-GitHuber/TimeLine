@@ -6082,6 +6082,362 @@ class EditDeletePostTests(APITestCase):
         self.assertFalse(Post.objects.filter(pk=gpost.pk).exists())
 
 
+def comment_detail_url(comment):
+    return f"/api/comments/{comment.pk}/"
+
+
+class EditDeleteCommentTests(APITestCase):
+    """Owner-only edit (PATCH) and delete (DELETE) of a comment at
+    ``/comments/<pk>/`` (issue #128) — the same contract posts have, plus the
+    reply-preserving delete a tree needs and a flat post doesn't."""
+
+    def setUp(self):
+        self.author = make_user("author@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.author, self.friend)
+        self.stranger = make_user("stranger@example.com")
+        self.post = Post.objects.create(author=self.author, text="hello")
+        self.comment = Comment.objects.create(
+            post=self.post, author=self.friend, text="nice one"
+        )
+
+    # --- Edit -----------------------------------------------------------------
+
+    def test_owner_can_edit_text_and_edit_is_stamped(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "nice two"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["text"], "nice two")
+        self.assertIsNotNone(resp.data["edited_at"])
+        self.comment.refresh_from_db()
+        self.assertEqual(self.comment.text, "nice two")
+        self.assertIsNotNone(self.comment.edited_at)
+
+    def test_unedited_comment_has_null_edited_at(self):
+        self.client.force_authenticate(self.author)
+        resp = self.client.get(comments_url(self.post))
+        self.assertIsNone(resp.data[0]["edited_at"])
+        self.assertIsNone(resp.data[0]["deleted_at"])
+
+    def test_edit_strips_whitespace(self):
+        self.client.force_authenticate(self.friend)
+        self.client.patch(
+            comment_detail_url(self.comment), {"text": "  spaced  "}, format="json"
+        )
+        self.comment.refresh_from_db()
+        self.assertEqual(self.comment.text, "spaced")
+
+    def test_no_op_edit_does_not_mark_the_comment_edited(self):
+        # Same rule as posts: the "· edited" marker means the content really
+        # changed, so saving identical text must not stamp it.
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "nice one"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["edited_at"])
+        self.comment.refresh_from_db()
+        self.assertIsNone(self.comment.edited_at)
+
+    def test_edit_cannot_reparent_the_comment(self):
+        # CommentEditSerializer has no ``parent`` field precisely so a body
+        # can't move what someone said under a reply they never answered.
+        other = Comment.objects.create(
+            post=self.post, author=self.author, text="elsewhere"
+        )
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            comment_detail_url(self.comment),
+            {"text": "moved?", "parent": other.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.comment.refresh_from_db()
+        self.assertIsNone(self.comment.parent_id)
+
+    def test_edit_response_keeps_the_visible_replies(self):
+        # The response is a whole comment node, so it has to carry the pruned
+        # subtree — a client that trusted an empty ``replies`` would drop the
+        # replies from its cache.
+        reply = Comment.objects.create(
+            post=self.post,
+            author=self.author,
+            parent=self.comment,
+            text="thanks",
+        )
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "edited"}, format="json"
+        )
+        self.assertEqual([r["id"] for r in resp.data["replies"]], [reply.id])
+
+    def test_author_can_edit_a_comment_they_can_no_longer_see(self):
+        # You lose sight of your own reply by disconnecting from the author of
+        # the comment above it — but your words stay yours to fix. The owner
+        # check runs before the visibility gate.
+        mine = Comment.objects.create(
+            post=self.post,
+            author=self.friend,
+            parent=Comment.objects.create(
+                post=self.post, author=self.author, text="theirs"
+            ),
+            text="mine",
+        )
+        Connection.objects.filter(
+            Q(requester=self.author, requestee=self.friend)
+            | Q(requester=self.friend, requestee=self.author)
+        ).delete()
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            comment_detail_url(mine), {"text": "mine, fixed"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        mine.refresh_from_db()
+        self.assertEqual(mine.text, "mine, fixed")
+
+    def test_connected_non_owner_cannot_edit(self):
+        self.client.force_authenticate(self.author)
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "not mine"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.comment.refresh_from_db()
+        self.assertEqual(self.comment.text, "nice one")
+
+    def test_stranger_editing_gets_404_not_existence_leak(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "nope"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cannot_empty_a_comment(self):
+        # A comment has no photo to fall back on, so emptying one is a delete —
+        # and delete has its own reply-preserving semantics.
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "   "}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.comment.refresh_from_db()
+        self.assertEqual(self.comment.text, "nice one")
+
+    def test_edit_without_text_is_rejected(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_put_is_not_allowed(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.put(
+            comment_detail_url(self.comment), {"text": "whole"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_anonymous_cannot_edit(self):
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "x"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_cannot_edit_a_deleted_comment(self):
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="reply"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        resp = self.client.patch(
+            comment_detail_url(self.comment), {"text": "back?"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.comment.refresh_from_db()
+        self.assertEqual(self.comment.text, "")
+
+    # --- Delete: hard when it can be ------------------------------------------
+
+    def test_owner_deleting_a_childless_comment_removes_the_row(self):
+        self.client.force_authenticate(self.friend)
+        resp = self.client.delete(comment_detail_url(self.comment))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Comment.objects.filter(pk=self.comment.pk).exists())
+
+    def test_connected_non_owner_cannot_delete(self):
+        self.client.force_authenticate(self.author)
+        resp = self.client.delete(comment_detail_url(self.comment))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Comment.objects.filter(pk=self.comment.pk).exists())
+
+    def test_stranger_deleting_gets_404(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.delete(comment_detail_url(self.comment))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(Comment.objects.filter(pk=self.comment.pk).exists())
+
+    # --- Delete: soft when it must be -----------------------------------------
+
+    def test_deleting_a_comment_with_replies_keeps_the_replies(self):
+        # The whole reason delete isn't always a row delete: the parent CASCADE
+        # would take someone else's reply down with it.
+        reply = Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        resp = self.client.delete(comment_detail_url(self.comment))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.comment.refresh_from_db()
+        self.assertEqual(self.comment.text, "")
+        self.assertIsNotNone(self.comment.deleted_at)
+        # Not mislabelled as edited by the soft-delete write.
+        self.assertIsNone(self.comment.edited_at)
+        self.assertTrue(Comment.objects.filter(pk=reply.pk).exists())
+
+    def test_tombstone_clears_reactions_notifications_and_reports(self):
+        # A tombstone holds the thread's shape and nothing else — everything a
+        # hard delete's CASCADE would have taken goes with it.
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        reaction = Reaction.objects.create(
+            user=self.author, comment=self.comment, emoji="👍"
+        )
+        note = Notification.objects.create(
+            recipient=self.author,
+            actor=self.friend,
+            kind=Notification.Kind.COMMENT_REPLY,
+            comment=self.comment,
+        )
+        report = Report.objects.create(
+            reporter=self.author, comment=self.comment, reason="rude"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        self.assertFalse(Reaction.objects.filter(pk=reaction.pk).exists())
+        self.assertFalse(Notification.objects.filter(pk=note.pk).exists())
+        self.assertFalse(Report.objects.filter(pk=report.pk).exists())
+
+    def test_second_delete_is_a_no_op(self):
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        resp = self.client.delete(comment_detail_url(self.comment))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_the_tombstone_renders_in_the_thread(self):
+        reply = Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+
+        # The author sees the placeholder holding their own reply up, with no
+        # text on it.
+        self.client.force_authenticate(self.author)
+        tree = self.client.get(comments_url(self.post)).data
+        self.assertEqual(len(tree), 1)
+        self.assertEqual(tree[0]["id"], self.comment.id)
+        self.assertEqual(tree[0]["text"], "")
+        self.assertIsNotNone(tree[0]["deleted_at"])
+        self.assertEqual([r["id"] for r in tree[0]["replies"]], [reply.id])
+
+    def test_a_tombstone_with_no_visible_replies_is_hidden(self):
+        # Same delete, different viewer: someone who can't see the reply under
+        # the tombstone gets no empty placeholder, because it's holding nothing
+        # up for them.
+        onlooker = make_user("onlooker@example.com")
+        make_connection(self.author, onlooker)
+        make_connection(self.friend, onlooker)
+        hidden_replier = make_user("hidden@example.com")
+        make_connection(self.author, hidden_replier)
+        Comment.objects.create(
+            post=self.post,
+            author=hidden_replier,
+            parent=self.comment,
+            text="not for you",
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+
+        self.client.force_authenticate(onlooker)
+        self.assertEqual(self.client.get(comments_url(self.post)).data, [])
+
+    def test_tombstone_stops_rendering_once_its_last_reply_goes(self):
+        reply = Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        self.client.force_authenticate(self.author)
+        self.client.delete(comment_detail_url(reply))
+        # The tombstone row survives, but nothing renders it — which is why the
+        # delete path needs no ancestor sweep.
+        self.assertTrue(Comment.objects.filter(pk=self.comment.pk).exists())
+        self.assertEqual(self.client.get(comments_url(self.post)).data, [])
+
+    # --- What you can't do to a tombstone -------------------------------------
+
+    def test_cannot_reply_to_a_deleted_comment(self):
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        self.client.force_authenticate(self.author)
+        resp = self.client.post(
+            comments_url(self.post),
+            {"text": "late", "parent": self.comment.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_react_to_a_deleted_comment(self):
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        self.client.force_authenticate(self.author)
+        resp = self.client.post(
+            react_comment_url(self.comment), {"emoji": "👍"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_report_a_deleted_comment(self):
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        self.client.force_authenticate(self.author)
+        resp = self.client.post(
+            REPORTS_URL, {"comment": self.comment.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Counts ---------------------------------------------------------------
+
+    def test_a_tombstone_counts_toward_the_total_but_never_as_new(self):
+        # It occupies a row in the thread, so it counts; it holds nothing to
+        # read, so badging it "new" would send you to an empty slot.
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+
+        self.client.force_authenticate(self.author)
+        resp = self.client.get(post_detail_url(self.post))
+        self.assertEqual(resp.data["comment_count"], 2)
+        # The author wrote the surviving reply, so the only candidate for "new"
+        # is the tombstone — and it isn't one.
+        self.assertEqual(resp.data["new_comment_count"], 0)
+
+
 class NotificationPermalinkUrlTests(APITestCase):
     """Notifications deep-link to the post permalink, with ?comment for a
     specific comment so the thread opens right at it."""

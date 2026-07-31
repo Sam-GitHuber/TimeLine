@@ -354,6 +354,18 @@ export const api = {
       body: parent ? { text, parent } : { text },
     }),
 
+  // Edit your own comment (issue #128). Owner-only server-side (a non-owner gets
+  // 403, a comment you can't see 404s); the response is the whole comment node,
+  // replies and all, with `edited_at` stamped so the thread can mark it.
+  updateComment: (id, text) =>
+    request(`/api/comments/${id}/`, { method: "PATCH", body: { text } }),
+
+  // Delete your own comment (issue #128). Returns 204 either way — the server
+  // removes the row outright when the comment has no replies, and leaves a
+  // blanked tombstone when it does, so other people's replies survive. Which
+  // happened is a property of the thread, so refetch it rather than guessing.
+  deleteComment: (id) => request(`/api/comments/${id}/`, { method: "DELETE" }),
+
   // --- Reactions (Phase 7b; messages added in Phase 9b M9c) ----------------
 
   // Toggle your emoji reaction on a post, comment or message: adds it, or

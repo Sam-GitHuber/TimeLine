@@ -1362,9 +1362,7 @@ export const api = {
 
   /**
    * Delete your own post (Phase 9 E4a). The backend refuses one that isn't yours,
-   * so this needs no client-side owner check beyond hiding the affordance. There
-   * is deliberately **no** comment-delete counterpart — the API has no such
-   * endpoint, and comments are report-only on the web too (see accounts.md).
+   * so this needs no client-side owner check beyond hiding the affordance.
    */
   deletePost: (postId: number | string) =>
     request<void>(`/api/posts/${postId}/`, { method: 'DELETE' }),
@@ -1397,6 +1395,32 @@ export const api = {
       method: 'POST',
       body: { text, parent },
     }),
+
+  /**
+   * Edit your own comment (issue #128). Owner-only server-side, so hiding the
+   * affordance is presentation, not the control.
+   *
+   * Like `updatePost` and unlike `editMessage` there is **no time window** — a
+   * comment sits on a page anyone can re-read at leisure, so the honest
+   * disclosure is the "· edited" marker the server stamps, not a deadline. The
+   * response is the whole comment node, its visible replies included.
+   */
+  updateComment: (commentId: number | string, text: string) =>
+    request<Comment>(`/api/comments/${commentId}/`, {
+      method: 'PATCH',
+      body: { text },
+    }),
+
+  /**
+   * Delete your own comment (issue #128).
+   *
+   * 204 either way, because *which* delete happened isn't yours to choose: the
+   * server drops the row when nothing hangs off it, and blanks it into a
+   * tombstone when replies do, so deleting your comment can never take someone
+   * else's reply with it. Refetch the thread rather than guessing which.
+   */
+  deleteComment: (commentId: number | string) =>
+    request<void>(`/api/comments/${commentId}/`, { method: 'DELETE' }),
 
   /**
    * Toggle your emoji reaction on a post, comment or message (Phase 9b M2). Pass

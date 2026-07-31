@@ -171,6 +171,8 @@ describe('comment Report', () => {
       parent: null,
       text: `Comment ${overrides.id}`,
       created_at: '2026-07-23T10:00:00Z',
+      edited_at: null,
+      deleted_at: null,
       replies: [],
       reactions: [],
       ...overrides,

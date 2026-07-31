@@ -8,6 +8,7 @@ import { createPortal } from "react-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import ConfirmDeleteDialog from "./ConfirmDeleteDialog.jsx";
 import { ReportModal } from "./ReportButton.jsx";
 
 // The ⋯ overflow menu on a post header (issue #62). What it offers depends on
@@ -116,6 +117,10 @@ export default function PostMenu({ postId, authorId, onEdit }) {
 
       {confirmingDelete && (
         <ConfirmDeleteDialog
+          title="Delete this post?"
+          description="This can’t be undone. Its comments, reactions and photos will be removed too."
+          label="Delete post"
+          errorFallback="Couldn’t delete the post."
           // Stay in the busy state after success too: on a slow refetch the card
           // hasn't unmounted yet, and a second click would re-fire deletePost on
           // an already-deleted post (404). `isSuccess` keeps the button disabled
@@ -214,81 +219,6 @@ function MenuPanel({ anchorRef, onClose, children }) {
       className="overflow-hidden rounded-xl border border-line bg-raised py-1 shadow-lg"
     >
       {children}
-    </div>,
-    document.body,
-  );
-}
-
-// A confirm step before a delete — a post can carry comments, reactions and
-// photos, so this isn't a one-click action. Same modal shape as `ReportModal`
-// (portal, focus, Escape, backdrop close).
-function ConfirmDeleteDialog({ onConfirm, onCancel, pending, error }) {
-  const dialogRef = useRef(null);
-
-  useEffect(() => {
-    function onKey(event) {
-      if (event.key === "Escape" && !pending) onCancel();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel, pending]);
-
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    dialogRef.current?.focus();
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, []);
-
-  const stop = (event) => event.stopPropagation();
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4 backdrop-blur-sm"
-      onClick={pending ? undefined : onCancel}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Delete post"
-        tabIndex={-1}
-        onClick={stop}
-        className="w-full max-w-sm rounded-2xl border border-line bg-raised p-5 shadow-xl outline-none"
-      >
-        <h2 className="font-display text-lg font-semibold text-ink">
-          Delete this post?
-        </h2>
-        <p className="mt-2 text-sm text-ink-soft">
-          This can’t be undone. Its comments, reactions and photos will be
-          removed too.
-        </p>
-        {error && (
-          <p role="alert" className="mt-2 text-sm text-red-600">
-            {error.message || "Couldn’t delete the post."}
-          </p>
-        )}
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={pending}
-            className="btn btn-ghost btn-sm"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={pending}
-            className="btn btn-sm bg-red-600 text-white hover:bg-red-700"
-          >
-            {pending ? "Deleting…" : "Delete"}
-          </button>
-        </div>
-      </div>
     </div>,
     document.body,
   );

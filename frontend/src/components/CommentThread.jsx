@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
+import ConfirmDeleteDialog from "./ConfirmDeleteDialog.jsx";
 import ReactionBar from "./ReactionBar.jsx";
 import ReportButton from "./ReportButton.jsx";
 import { api } from "../api.js";
+import { useAuth } from "../auth.jsx";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
 // The set of comment ids that are *ancestors* of `targetId` — the nodes whose
@@ -138,6 +140,19 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
 // easier to follow (and less overwhelming) than a wall of nesting. Opening the
 // reply box, or having posted a reply, reveals the sub-thread so you always see
 // your own reply.
+//
+// Your own comment carries **Edit** and **Delete** (issue #128) — inline in the
+// actions row, not behind a ⋯ menu. That's the split posts settled on: a post's
+// controls moved into a menu because its header is crowded and its actions are
+// heavier, while a comment's row is already the home of Reply and Report, and a
+// menu on every node of a deep tree would be more chrome than thread. Edit sits
+// before Delete so the pointer heading for the safe action never crosses the
+// destructive one, the same ordering as `PostMenu`.
+//
+// A **deleted** comment arrives as a tombstone: blank text with `deleted_at`
+// set, kept only because replies hang off it. It renders as a quiet placeholder
+// and offers nothing — no reply, no report, no reactions — except the toggle
+// that opens the replies it exists to hold up.
 function CommentNode({
   comment,
   postId,
@@ -148,8 +163,30 @@ function CommentNode({
   // on to a comment that isn't there — that's what ends a run on a face.
   isLast = true,
 }) {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const isDeleted = comment.deleted_at != null;
+  const isOwner =
+    !isDeleted && user != null && user.pk === comment.author.id;
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteComment(comment.id),
+    onSuccess: () => {
+      // The thread refetches because only the server knows whether the row went
+      // or became a tombstone. The post's `comment_count` moved too, and that
+      // rides the post payload — so the lists showing it need invalidating just
+      // as deleting a post does.
+      queryClient.invalidateQueries({ queryKey: ["comments", postId] });
+      queryClient.invalidateQueries({ queryKey: ["feed"] });
+      queryClient.invalidateQueries({ queryKey: ["userPosts"] });
+      queryClient.invalidateQueries({ queryKey: ["groupPosts"] });
+      queryClient.invalidateQueries({ queryKey: ["post", String(postId)] });
+    },
+  });
   // Replies start collapsed — unless this node is an ancestor of a deep-linked
   // target (expandIds), in which case it opens so the target is reachable.
   const [collapsed, setCollapsed] = useState(
@@ -213,29 +250,80 @@ function CommentNode({
               >
                 {formatRelativeTime(comment.created_at)}
               </time>
+              {/* The same transparency floor posts carry: quietly marked, with
+                  the exact time on hover/focus. Silently altering something
+                  others have already read is the trust problem this exists to
+                  close, so it isn't optional. */}
+              {comment.edited_at && !isDeleted && (
+                <span
+                  className="shrink-0 cursor-default text-xs text-ink-faint"
+                  title={`Edited ${formatAbsoluteTime(comment.edited_at)}`}
+                  aria-label={`Edited ${formatAbsoluteTime(comment.edited_at)}`}
+                >
+                  · edited
+                </span>
+              )}
             </div>
 
-            <p className="mt-1 whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
-              {comment.text}
-            </p>
+            {isDeleted ? (
+              <p className="mt-1 text-[0.95rem] italic leading-relaxed text-ink-faint">
+                Comment deleted
+              </p>
+            ) : editing ? (
+              <CommentEditor
+                commentId={comment.id}
+                postId={postId}
+                initialText={comment.text}
+                onDone={() => setEditing(false)}
+              />
+            ) : (
+              <p className="mt-1 whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-ink">
+                {comment.text}
+              </p>
+            )}
 
             <div className="mt-1.5 flex items-center gap-4 text-sm font-medium text-ink-faint">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowReply((v) => !v);
-                  // Engaging with a sub-thread should show it (for context, and
-                  // so the reply you're about to add is visible).
-                  setCollapsed(false);
-                }}
-                className="transition hover:text-accent-deep"
-              >
-                Reply
-              </button>
-              <ReportButton
-                commentId={comment.id}
-                authorId={comment.author.id}
-              />
+              {!isDeleted && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowReply((v) => !v);
+                    // Engaging with a sub-thread should show it (for context, and
+                    // so the reply you're about to add is visible).
+                    setCollapsed(false);
+                  }}
+                  className="transition hover:text-accent-deep"
+                >
+                  Reply
+                </button>
+              )}
+              {!isDeleted && (
+                <ReportButton
+                  commentId={comment.id}
+                  authorId={comment.author.id}
+                />
+              )}
+              {isOwner && !editing && (
+                <button
+                  type="button"
+                  onClick={() => setEditing(true)}
+                  className="transition hover:text-accent-deep"
+                >
+                  Edit
+                </button>
+              )}
+              {isOwner && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingDelete(true)}
+                  className="text-red-600 transition hover:text-red-700"
+                >
+                  Delete
+                </button>
+              )}
+              {/* Kept even on a tombstone — the replies underneath are the only
+                  reason it's still here, so hiding the way into them would
+                  strand them. */}
               {replies.length > 0 && (
                 <button
                   type="button"
@@ -264,9 +352,14 @@ function CommentNode({
               )}
             </div>
 
-            <ReactionBar commentId={comment.id} reactions={comment.reactions} />
+            {!isDeleted && (
+              <ReactionBar
+                commentId={comment.id}
+                reactions={comment.reactions}
+              />
+            )}
 
-            {showReply && (
+            {showReply && !isDeleted && (
               <div className="mt-2">
                 <CommentComposer
                   postId={postId}
@@ -280,6 +373,30 @@ function CommentNode({
           </div>
         </div>
       </div>
+
+      {confirmingDelete && (
+        <ConfirmDeleteDialog
+          title="Delete this comment?"
+          // What actually happens depends on whether anything is hanging off it,
+          // so say which. The count here is the replies *you* can see, which is
+          // the honest thing to promise: a reply you can't see keeps the
+          // tombstone alive server-side, but from where you're standing the
+          // comment does simply go.
+          description={
+            replies.length > 0
+              ? "This can’t be undone. The replies underneath will stay, with a note where your comment was."
+              : "This can’t be undone."
+          }
+          label="Delete comment"
+          errorFallback="Couldn’t delete the comment."
+          // Held busy through success as well: the thread hasn't refetched yet,
+          // and a second click would re-fire the delete.
+          pending={deleteMutation.isPending || deleteMutation.isSuccess}
+          error={deleteMutation.isError ? deleteMutation.error : null}
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={() => deleteMutation.mutate()}
+        />
+      )}
 
       {/* The replies hang off our line by their own elbows, each of which
           carries the run on to the sibling below it. **No indent and no top
@@ -303,6 +420,70 @@ function CommentNode({
         </ul>
       )}
     </li>
+  );
+}
+
+// Edit your own comment in place (issue #128) — the card-flips-into-an-editor
+// pattern a post uses on the web, one level down. The thread is a plain list, so
+// there's no virtualisation to unmount a half-typed edit and no reason to reach
+// for the modal the phone needs.
+function CommentEditor({ commentId, postId, initialText, onDone }) {
+  const [text, setText] = useState(initialText);
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: (value) => api.updateComment(commentId, value),
+    onSuccess: () => {
+      // Only the thread changes: an edit can't move a comment count, so the
+      // post lists are left alone (unlike delete).
+      queryClient.invalidateQueries({ queryKey: ["comments", postId] });
+      onDone();
+    },
+  });
+
+  const trimmed = text.trim();
+  // Emptying a comment is a delete, and delete is its own button — the server
+  // says the same, so the disabled state means the button can never 400.
+  const canSave = !mutation.isPending && trimmed.length > 0;
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    if (!canSave) return;
+    mutation.mutate(trimmed);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="mt-1">
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={2}
+        autoFocus
+        aria-label="Edit comment text"
+        className="w-full resize-none rounded-xl border border-line-strong bg-raised px-3 py-2 text-sm text-ink transition placeholder:text-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-tint"
+      />
+      {mutation.isError && (
+        <p role="alert" className="text-xs text-red-600">
+          {mutation.error?.message || "Couldn’t save. Try again."}
+        </p>
+      )}
+      <div className="mt-1.5 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onDone}
+          className="rounded-lg px-3 py-1 text-xs font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={!canSave}
+          className="btn btn-primary btn-sm text-xs"
+        >
+          {mutation.isPending ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </form>
   );
 }
 

@@ -280,6 +280,15 @@ class CommentSerializer(serializers.ModelSerializer):
     builder attached after pruning — **not** from the raw ``replies`` relation,
     so hidden branches never appear. The serializer is recursive: each reply is
     rendered with this same serializer.
+
+    ``edited_at`` and ``deleted_at`` are both read-only and both **null until the
+    thing they name happens** (issue #128), which is what lets a client render
+    the "· edited" marker and the "comment deleted" tombstone off the payload
+    alone. A deleted comment's ``text`` is genuinely blank in the database, so
+    the tombstone isn't a client-side courtesy — there is nothing left to leak.
+    The author is still named on a tombstone, matching a deleted message: the
+    connection prune keys on it, and "someone deleted something here" without
+    saying who reads worse than the truth in a thread you can already see.
     """
 
     author = AuthorSerializer(read_only=True)
@@ -294,9 +303,12 @@ class CommentSerializer(serializers.ModelSerializer):
             "parent",
             "text",
             "created_at",
+            "edited_at",
+            "deleted_at",
             "replies",
             "reactions",
         )
+        read_only_fields = ("edited_at", "deleted_at")
 
     def get_replies(self, obj):
         children = getattr(obj, "_visible_children", [])
@@ -328,6 +340,35 @@ class CommentCreateSerializer(serializers.ModelSerializer):
         stripped = value.strip()
         if not stripped:
             raise serializers.ValidationError("A comment can't be empty.")
+        return stripped
+
+
+class CommentEditSerializer(serializers.Serializer):
+    """Edit your own comment's text (issue #128) — ``PATCH /comments/<pk>/``.
+
+    Deliberately **not** ``CommentCreateSerializer`` with ``partial=True``, even
+    though the text rules are identical and duplicated below. That serializer
+    has a writable ``parent``, so a partial update through it would let a body
+    field re-parent a comment into a different branch of the tree — moving what
+    someone said under a reply they never answered. An edit is a statement about
+    the text and nothing else, so text is the only field that exists here.
+
+    ``text`` is required rather than optional: an edit that omits it isn't a
+    no-op request, it's a malformed one, and the same reasoning as the message
+    editor applies (see ``MessageDetailView``).
+    """
+
+    text = serializers.CharField(max_length=POST_MAX_LENGTH)
+
+    def validate_text(self, value):
+        stripped = value.strip()
+        if not stripped:
+            # A comment has no photo to fall back on (unlike a post), so
+            # emptying one is a delete — and delete is its own endpoint, with
+            # its own reply-preserving semantics.
+            raise serializers.ValidationError(
+                "A comment can't be empty — delete it instead."
+            )
         return stripped
 
 
