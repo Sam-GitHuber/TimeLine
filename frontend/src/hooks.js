@@ -86,21 +86,21 @@ export function useDayBoundary() {
 // point of the hook.
 export function useInfiniteList(queryKey, fetchFirstPage, options = {}) {
   const query = useInfiniteQuery({
+    // Spread *first*, so the four keys below win: a caller can pass `enabled`
+    // or `refetchInterval`, but cannot reach in and change how the list pages.
+    ...options,
     queryKey,
     queryFn: ({ pageParam }) =>
       pageParam ? api.getPage(pageParam) : fetchFirstPage(),
     initialPageParam: undefined,
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
-    ...options,
   });
 
-  // Deduped by id. The API pages by page *number*, so the window shifts
-  // whenever the underlying set changes mid-scroll (someone posts, someone
-  // reacts): page 2 then re-sends a row page 1 already showed. Two rows sharing
-  // a React key makes React warn and can render the wrong one. Dropping the
-  // repeat rather than de-duplicating by position leaves the server's order
-  // untouched — on the feed that order is the product's one non-negotiable
-  // guarantee. (The app does the same, in `dedupeById`.)
+  // Deduped by id: page-*number* paging re-sends a row when the underlying set
+  // shifts mid-scroll, and two rows can't share a React key. The repeat is
+  // dropped rather than de-duplicated by position, so the server's order —
+  // the product's one non-negotiable guarantee on the feed — is untouched.
+  // Written up in feed-and-posts.md; the app's twin is `dedupeById`.
   const seen = new Set();
   const items = [];
   for (const page of query.data?.pages ?? []) {
@@ -116,12 +116,12 @@ export function useInfiniteList(queryKey, fetchFirstPage, options = {}) {
 // Drop every loaded page but the first.
 //
 // For `queryClient.setQueryData(key, trimToFirstPage)` before a list is put
-// away or refetched wholesale. A refetch of an infinite query refetches **all**
-// the pages currently loaded, one after another, so someone five pages deep
-// costs five sequential requests when only the first page can hold anything
-// new. (TanStack v5 removed `refetchPage`; trimming the cache first is the
-// documented replacement.) Returns the input unchanged when there's nothing to
-// trim, so the cache entry keeps its identity and nothing re-renders needlessly.
+// away or refetched wholesale: a refetch of an infinite query refetches **all**
+// its loaded pages in turn, when only the first can hold anything new.
+// (TanStack v5 removed `refetchPage`; trimming the cache first is the
+// documented replacement.) The app's twin lives in `mobile/src/lists.ts`.
+// Returns the input unchanged when there's nothing to trim, so the cache entry
+// keeps its identity and nothing re-renders needlessly.
 export function trimToFirstPage(data) {
   if (!data?.pages || data.pages.length <= 1) return data;
   return {

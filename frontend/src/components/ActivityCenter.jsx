@@ -38,10 +38,8 @@ export default function ActivityCenter() {
   const unread = unreadData?.count ?? 0;
 
   // The list: only fetched while the panel is open (no need to pull the full
-  // list just to render a badge), and **paginated** (#134). The endpoint pages
-  // like every other list here, so rendering `results` alone silently hid
-  // everything past the first page — while the badge went on counting *all*
-  // unread, so the count could exceed what the list would ever show.
+  // list just to render a badge), and **paginated** (#134) — see
+  // notifications.md for what rendering `results` alone cost.
   const notificationsQuery = useInfiniteList(
     ["notifications"],
     api.getNotifications,
@@ -67,13 +65,18 @@ export default function ActivityCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Closing the panel drops back to a single page. Without this, someone who
-  // loaded five pages pays five sequential refetches on every reopen (and on
-  // every invalidation), for pages they can't see — only the first page can
-  // hold anything new. Invisible: reopening starts at the top anyway.
+  // Closing the panel drops back to a single page, so a reopen doesn't refetch
+  // pages nobody is looking at (notifications.md; the app trims on unmount).
+  // Cancel first, trim once that settles — an in-flight "Load more" would
+  // otherwise put its page back, and the cancel's revert would undo a trim that
+  // ran ahead of it.
   useEffect(() => {
     if (open) return;
-    queryClient.setQueryData(["notifications"], trimToFirstPage);
+    queryClient
+      .cancelQueries({ queryKey: ["notifications"] })
+      .then(() =>
+        queryClient.setQueryData(["notifications"], trimToFirstPage)
+      );
   }, [open, queryClient]);
 
   // Close on outside click / Escape — the two things any dropdown owes the user.

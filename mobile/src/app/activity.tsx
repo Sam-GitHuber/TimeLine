@@ -16,7 +16,11 @@
  * map push taps use (`usePushTaps`), so in-app and push click-through agree.
  */
 
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  useInfiniteQuery,
+  useQueryClient,
+  type InfiniteData,
+} from '@tanstack/react-query';
 import { router } from 'expo-router';
 import { useEffect } from 'react';
 import {
@@ -31,10 +35,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
-import { dedupeById } from '@/lists';
+import { dedupeById, trimToFirstPage } from '@/lists';
 import { dismissActivityNotifications, routeForNotification } from '@/push';
 import { colors, fontSize, spacing } from '@/theme';
-import type { Notification } from '@/types';
+import type { Notification, Paginated } from '@/types';
 import { formatRelativeTime } from '@/utils';
 
 export default function ActivityScreen() {
@@ -42,9 +46,7 @@ export default function ActivityScreen() {
   const goBack = () => (router.canGoBack() ? router.back() : router.replace('/'));
 
   // Paginated (#134), following the paginator's `next` like every other list in
-  // the app. Rendering only `results` silently hid everything past the first
-  // page, while the bell went on counting *all* unread — so the badge could
-  // promise more than the list could ever show.
+  // the app — see notifications.md for what rendering `results` alone cost.
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } =
     useInfiniteQuery({
       queryKey: ['notifications'],
@@ -53,10 +55,8 @@ export default function ActivityScreen() {
       initialPageParam: '',
       getNextPageParam: (lastPage) => lastPage.next ?? undefined,
     });
-  // Deduped for the same reason the feed is: page-number paging shifts its
-  // window when a notification arrives mid-scroll, so page 2 can re-send a row
-  // page 1 already showed — two rows with one key, which FlatList recycles
-  // wrongly.
+  // `dedupeById` for the reason the feed uses it: a page-number window shifts
+  // when a notification lands mid-scroll.
   const notifications = dedupeById(data?.pages.flatMap((page) => page.results) ?? []);
 
   // Opening the screen marks everything currently-unread *seen* — the badge
@@ -80,6 +80,15 @@ export default function ActivityScreen() {
     });
     return () => {
       cancelled = true;
+      // Leaving drops back to a single page — the app's half of the web
+      // dropdown's trim-on-close (notifications.md). The ['notifications']
+      // cache outlives this screen, so otherwise the next visit, and the
+      // seen-on-open invalidation above it, refetch every page the last visit
+      // scrolled through.
+      queryClient.setQueryData<InfiniteData<Paginated<Notification>, string>>(
+        ['notifications'],
+        trimToFirstPage
+      );
     };
     // Mount-only: `markNotificationsSeen()` with no ids marks all unread seen.
     // eslint-disable-next-line react-hooks/exhaustive-deps

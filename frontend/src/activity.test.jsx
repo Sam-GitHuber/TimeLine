@@ -97,8 +97,7 @@ describe("ActivityCenter", () => {
 
   it("loads older notifications behind the paginator's next (#134)", async () => {
     // The defect: the dropdown rendered `results` and stopped, so everything
-    // past page one was unreachable — while the badge counts *all* unread,
-    // which is how it could promise more than the list would ever show.
+    // past page one was unreachable.
     const user = userEvent.setup();
     api.getNotifications.mockResolvedValue(
       page([note({ id: 1, text: "Newest" })], "/api/notifications/?page=2")
@@ -124,9 +123,8 @@ describe("ActivityCenter", () => {
   });
 
   it("renders a row once when paging re-sends it", async () => {
-    // Page-number paging shifts its window when a notification arrives
-    // mid-read, so page two can re-send a row page one already showed — two
-    // list items with one React key.
+    // Page two can re-send a row page one already showed — two list items with
+    // one React key.
     const user = userEvent.setup();
     api.getNotifications.mockResolvedValue(
       page(
@@ -170,6 +168,33 @@ describe("ActivityCenter", () => {
     // Back at page one: the second page isn't re-fetched, and isn't on screen.
     expect(screen.queryByText("Oldest")).not.toBeInTheDocument();
     expect(api.getPage).not.toHaveBeenCalled();
+  });
+
+  it("still drops to one page when a load lands after the close", async () => {
+    // The race the trim has to survive: a "Load more" in flight is merged
+    // against the pages it saw when it started, so a page that arrives after
+    // the panel closed would otherwise put itself straight back.
+    const user = userEvent.setup();
+    api.getNotifications.mockResolvedValue(
+      page([note({ id: 1, text: "Newest" })], "/api/notifications/?page=2")
+    );
+    let releasePage2;
+    api.getPage.mockReturnValue(
+      new Promise((resolve) => {
+        releasePage2 = () => resolve(page([note({ id: 2, text: "Oldest" })]));
+      })
+    );
+    renderWithAuth(<ActivityCenter />);
+
+    const bell = await screen.findByRole("button", { name: /Activity/ });
+    await user.click(bell);
+    await user.click(await screen.findByRole("button", { name: /Load more/ }));
+    await user.click(bell); // close, page two still in flight
+    releasePage2();
+
+    await user.click(bell); // reopen
+    expect(await screen.findByText("Newest")).toBeInTheDocument();
+    expect(screen.queryByText("Oldest")).not.toBeInTheDocument();
   });
 
   it("addresses a notification and deep-links to its target on click", async () => {

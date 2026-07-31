@@ -38,6 +38,20 @@ firstPageFn)` hook + `<LoadMoreButton>` that follows the response's `next` URL
 a proxy / on a separate API domain). Nav badges read the paginator's `count`, not
 `results.length`.
 
+`useInfiniteList` also **dedupes the flattened rows by id**, and it does so for
+every list on the site, not just the one that prompted it (#134). Page-*number*
+paging shifts its window whenever the underlying set changes mid-scroll —
+someone posts, someone connects — so page 2 re-sends a row page 1 already
+showed, and two rows end up sharing a React key. The repeat is dropped rather
+than de-duplicated by position, which leaves the server's order untouched: on
+the feed that order is the product's one non-negotiable guarantee. The app does
+the same, in `dedupeById` (`mobile/src/lists.ts`). It is a second line of
+defence, not the fix — the `-id` tiebreaker above is what stops the window
+shifting for *equal timestamps*; this covers the set genuinely changing under
+you. A third argument on the hook passes query options straight through
+(`enabled`, and the like); the paging keys are spread last so a caller can't
+reach in and change how the list pages.
+
 ## Posts
 
 - **`Post`** — `author`, `text`, `created_at`, nullable `group` FK (null = a

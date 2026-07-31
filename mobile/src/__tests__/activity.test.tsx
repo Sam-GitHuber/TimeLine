@@ -275,8 +275,7 @@ describe('ActivityScreen', () => {
 
   it('pages older notifications in when you reach the end (#134)', async () => {
     // The defect. The screen rendered `results` and stopped, so everything past
-    // page one was unreachable — while the bell counts *all* unread, which is
-    // how a badge could promise more than the list would ever show.
+    // page one was unreachable.
     servePages([
       [
         notification({ id: 1, text: 'Newest' }),
@@ -303,9 +302,8 @@ describe('ActivityScreen', () => {
   });
 
   it('renders a row once when paging re-sends it', async () => {
-    // Page-number paging shifts its window when a notification arrives
-    // mid-scroll, so page two can re-send a row page one already showed. Two
-    // rows with one key is a React warning and a recycled-wrong cell.
+    // Page two can re-send a row page one already showed. Two rows with one key
+    // is a React warning and a recycled-wrong cell.
     servePages([
       [notification({ id: 1, text: 'Newest' }), notification({ id: 2, text: 'Middle' })],
       [notification({ id: 2, text: 'Middle' }), notification({ id: 3, text: 'Oldest' })],
@@ -317,6 +315,50 @@ describe('ActivityScreen', () => {
 
     expect(await screen.findByText('Oldest')).toBeTruthy();
     expect(screen.getAllByText('Middle')).toHaveLength(1);
+  });
+
+  it('drops back to one page when you leave the screen', async () => {
+    // The ['notifications'] cache outlives this screen, so a second visit would
+    // otherwise refetch every page the first visit scrolled through — including
+    // through the seen-on-open invalidation — for rows nobody is looking at.
+    servePages([
+      [notification({ id: 1, text: 'Newest' })],
+      [notification({ id: 2, text: 'Oldest' })],
+    ]);
+    // `gcTime: Infinity`, unlike the other tests here, because the cache
+    // surviving the screen is the whole premise — with the usual `0` the entry
+    // is collected on unmount and there'd be nothing to assert about. Infinity
+    // also schedules no timer, so nothing is left holding the run open.
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { gcTime: 0 },
+      },
+    });
+    let view!: Awaited<ReturnType<typeof render>>;
+    await act(async () => {
+      view = await render(
+        <QueryClientProvider client={queryClient}>
+          <ActivityScreen />
+        </QueryClientProvider>
+      );
+    });
+    await screen.findByText('Newest');
+    await scrollToEnd();
+    await screen.findByText('Oldest');
+    expect(
+      (queryClient.getQueryData(['notifications']) as { pages: unknown[] }).pages
+    ).toHaveLength(2);
+
+    await act(async () => {
+      await view.unmount();
+    });
+
+    // Page two is gone, so the next visit starts at the top with one request.
+    expect(
+      (queryClient.getQueryData(['notifications']) as { pages: unknown[] }).pages
+    ).toHaveLength(1);
+    queryClient.clear();
   });
 
   it('shows the empty state when there are no notifications', async () => {
