@@ -358,11 +358,11 @@ function CommentNode({
   // because replies hang off it. Everything below keys off this — it offers no
   // affordance at all except the toggle into those replies.
   const isDeleted = comment.deleted_at != null;
-  // Reporting yourself is pointless, so the control is hidden on your own
-  // comment — the same owner check the web's inline `ReportButton` makes. The
-  // backend refuses a self-report regardless.
-  const canReport = !isDeleted && user != null && user.pk !== comment.author.id;
-  const isOwner = !isDeleted && user != null && user.pk === comment.author.id;
+  // Reporting yourself is pointless, so the menu offers Edit/Delete instead on
+  // your own comment. The backend refuses a self-report regardless.
+  const isOwner = user != null && user.pk === comment.author.id;
+  // One ⋯ for everybody, holding whichever pair applies — a tombstone gets none.
+  const hasMenu = !isDeleted && user != null;
 
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteComment(comment.id),
@@ -411,35 +411,42 @@ function CommentNode({
 
   const { openMenu, menu } = useActionMenu();
 
-  // **Your own comment's controls go behind a ⋯, unlike the web's inline pair.**
-  // A phone comment row is already Reply + the replies toggle, indented once per
-  // level, and two more words of text wrap it onto a second line at depth. The
-  // menu costs one tap and keeps the owner's row exactly as wide as anyone
-  // else's — and it's the shape `PostMenu` already uses, Edit above Delete so
-  // the thumb heading for the safe action never crosses the destructive one.
-  // Report stays inline because it only ever shows on *someone else's* comment,
-  // where Edit and Delete aren't competing for the same width.
+  // **A comment's controls all live behind the ⋯**, exactly as a post's do and
+  // exactly as the web's now do: your own offers Edit and Delete, someone else's
+  // offers Report. Keeping Report inline while its two counterparts sat in a menu
+  // made one control look like two different kinds of thing depending on whose
+  // comment you were looking at — and it left a phone row of Reply + Report + a
+  // replies toggle, indented once per level, wrapping onto a second line at
+  // depth. Edit sits above Delete so the thumb heading for the safe action never
+  // crosses the destructive one.
   const showMenu = () =>
     openMenu({
       title: 'Comment options',
-      items: [
-        {
-          label: 'Edit comment',
-          onPress: () => {
-            setEditing(true);
-            // **One write box per comment**, and on Android that's a
-            // correctness rule, not tidiness: `useAndroidBack` is registered
-            // per dismissible state and React Native runs the most recently
-            // registered handler first, so with a reply box *and* an editor
-            // open on the same node, which one hardware back closes is decided
-            // by the order you happened to open them. Closing the other makes
-            // the question unaskable — the shape #168 settled by giving one
-            // screen one deliberate priority rather than racing handlers.
-            setShowReply(false);
-          },
-        },
-        { label: 'Delete comment', destructive: true, onPress: confirmDelete },
-      ],
+      items: isOwner
+        ? [
+            {
+              label: 'Edit comment',
+              onPress: () => {
+                setEditing(true);
+                // **One write box per comment**, and on Android that's a
+                // correctness rule, not tidiness: `useAndroidBack` is registered
+                // per dismissible state and React Native runs the most recently
+                // registered handler first, so with a reply box *and* an editor
+                // open on the same node, which one hardware back closes is
+                // decided by the order you happened to open them. Closing the
+                // other makes the question unaskable — the shape #168 settled by
+                // giving one screen one deliberate priority rather than racing
+                // handlers.
+                setShowReply(false);
+              },
+            },
+            {
+              label: 'Delete comment',
+              destructive: true,
+              onPress: confirmDelete,
+            },
+          ]
+        : [{ label: 'Report comment', onPress: () => setReporting(true) }],
     });
   const [collapsed, setCollapsed] = useState(
     replies.length > 0 && !(expandIds?.has(comment.id) ?? false)
@@ -545,18 +552,7 @@ function CommentNode({
         </Pressable>
       ) : null}
 
-      {canReport ? (
-        <Pressable
-          onPress={() => setReporting(true)}
-          accessibilityRole="button"
-          accessibilityLabel="Report comment"
-          hitSlop={6}
-        >
-          <Text style={styles.action}>Report</Text>
-        </Pressable>
-      ) : null}
-
-      {isOwner ? (
+      {hasMenu ? (
         <Pressable
           onPress={showMenu}
           accessibilityRole="button"

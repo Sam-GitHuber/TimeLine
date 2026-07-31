@@ -1,43 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api.js";
-import { useAuth } from "../auth.jsx";
 
-// A quiet "Report" control for a post or comment (Phase 7 content-takedown
-// path). Pass exactly one of `postId` / `commentId`, plus the content author's
-// id so we can hide the control on your own content (reporting yourself is
-// pointless). Opens a small modal for an optional reason and POSTs a report the
-// maintainer reviews in the Django admin.
-export default function ReportButton({ postId = null, commentId = null, authorId }) {
-  const { user } = useAuth();
-  const [open, setOpen] = useState(false);
-
-  // Don't offer "report" on your own post/comment.
-  if (user && authorId != null && user.pk === authorId) return null;
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="transition hover:text-accent-deep"
-      >
-        Report
-      </button>
-      {open && (
-        <ReportModal
-          postId={postId}
-          commentId={commentId}
-          onClose={() => setOpen(false)}
-        />
-      )}
-    </>
-  );
-}
-
-// The report dialog itself, exported so the post ⋯ overflow menu (issue #62)
-// can open it as its "Report" item without re-rendering the inline trigger.
-// `ReportButton` (the inline trigger) is still used for comments.
+// The report dialog, opened from a ⋯ overflow menu's "Report" item — a post's
+// (issue #62), a comment's (#128) or a message bubble's.
+//
+// There was once an inline `ReportButton` trigger here too, kept for comments
+// while posts moved into a menu. Comments joined them in #128, at which point
+// nothing rendered it, so it went and this file took the name of what's left.
 //
 // Pass exactly one of `postId` / `commentId` / `messageId`. Messages were added
 // in Phase 9b M9b, alongside the ⋯ menu on a message bubble — before that this

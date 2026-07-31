@@ -148,11 +148,14 @@ describe('the ⋯ affordance', () => {
     expect(menuDestructiveOption()).toBe('Delete comment');
   });
 
-  it('is absent on someone else’s comment, which offers Report instead', async () => {
+  it('carries Report instead on someone else’s comment', async () => {
+    // One ⋯ for everybody — what's *in* it is what changes. Report used to sit
+    // inline beside Reply, which made the same control look like two different
+    // kinds of thing depending on whose comment you were looking at.
     await renderThread([theirs({ id: 5 })]);
 
-    expect(screen.queryByLabelText('Comment options')).toBeNull();
-    expect(screen.getByLabelText('Report comment')).toBeTruthy();
+    await fireEvent.press(screen.getByLabelText('Comment options'));
+    expect(menuOptions()).toEqual(['Report comment']);
   });
 });
 

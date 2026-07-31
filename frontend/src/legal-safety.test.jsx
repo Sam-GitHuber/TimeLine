@@ -14,7 +14,7 @@ vi.mock("./api.js", () => ({
 import { api } from "./api.js";
 import { renderWithAuth, fakeUser } from "./test-utils.jsx";
 import DeleteAccountSection from "./components/DeleteAccountSection.jsx";
-import ReportButton from "./components/ReportButton.jsx";
+import { ReportModal } from "./components/ReportModal.jsx";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -79,10 +79,11 @@ describe("Report content", () => {
   it("reports a post with a reason", async () => {
     const user = userEvent.setup();
 
-    // authorId 2 ≠ the logged-in user (pk 1), so the control shows.
-    renderWithAuth(<ReportButton postId={7} authorId={2} />);
+    // The dialog itself, which is what every "Report" item opens — a post's ⋯
+    // menu, a comment's (#128) and a message bubble's. Who may *reach* it is the
+    // menus' business and is covered where they are; this is the flow inside.
+    renderWithAuth(<ReportModal postId={7} onClose={() => {}} />);
 
-    await user.click(screen.getByRole("button", { name: "Report" }));
     await user.type(
       screen.getByPlaceholderText(/what.s the problem/i),
       "not theirs"
@@ -92,17 +93,19 @@ describe("Report content", () => {
     await waitFor(() =>
       expect(api.reportContent).toHaveBeenCalledWith({
         postId: 7,
-        commentId: null,
+        commentId: undefined,
+        messageId: undefined,
         reason: "not theirs",
       })
     );
     expect(await screen.findByText(/thanks for letting us know/i)).toBeInTheDocument();
   });
 
-  it("is hidden on your own content", () => {
-    renderWithAuth(<ReportButton postId={7} authorId={fakeUser.pk} />);
-    expect(
-      screen.queryByRole("button", { name: "Report" })
-    ).not.toBeInTheDocument();
+  it("names the kind of thing being reported", () => {
+    // The dialog takes exactly one target id and words itself from it — before
+    // Phase 9b M9b it derived "post or else comment", so a message report opened
+    // a dialog headed "Report this comment".
+    renderWithAuth(<ReportModal commentId={7} onClose={() => {}} />);
+    expect(screen.getByRole("dialog", { name: "Report comment" })).toBeInTheDocument();
   });
 });

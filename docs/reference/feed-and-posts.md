@@ -85,8 +85,9 @@ clients offer the same three actions**, keyed off the same owner check
   **above** Delete and is styled plainly, so the finger heading for the safe
   action never passes over the destructive one.
 - **Someone else's post:** **Report** — the report control **moved off the footer
-  row into this menu**. (Comments still carry an inline `ReportButton`; only posts
-  moved.)
+  row into this menu**. Comments followed in #128, so a ⋯ with this same
+  owner/non-owner split is now the one shape on both surfaces and both clients;
+  the web's lives in `OverflowMenu.jsx`, shared by the two.
 
 **The editor's shape deliberately differs by client** (issue #146 — the app had
 no edit path at all until then, so a typo made on the phone could only be fixed
@@ -219,26 +220,35 @@ badging it would send you to an empty slot).
 
 #### The two clients
 
+A comment's actions row is **`Reply · ⋯ · Show N replies`** on both, whoever is
+looking. The ⋯ carries **Edit** and **Delete** on your own comment and **Report**
+on someone else's — the shape a post header has had since #62, now drawn the same
+way one level down. Report used to sit *inline* here while its two counterparts
+went in a menu, which made one control look like two different kinds of thing
+depending on whose comment you were reading; #128 moved it in on both clients.
+Edit sits above Delete so the pointer heading for the safe action never crosses
+the destructive one.
+
 Both show the **"· edited"** marker next to the author line, and neither shows any
 affordance on a tombstone **except the replies toggle** — hiding that would strand
 the replies behind a row with no way in.
 
-- **Web:** **Edit** and **Delete** sit *inline* in the actions row that already
-  holds Reply and Report, and the card flips into an inline editor
-  (`CommentEditor` in `CommentThread.jsx`). Only posts moved their controls into a
-  ⋯ menu; a comment's row is already the home of these actions, and a menu on every
-  node of a deep tree would be more chrome than thread. Delete confirms through
-  the shared `ConfirmDeleteDialog` (extracted from `PostMenu.jsx` for this).
-- **Mobile:** the owner's pair goes **behind a ⋯** (`useActionMenu`, Edit above a
-  destructive Delete, confirmed with `Alert`). A phone comment row is indented once
-  per level, and two more words of text wrap it at depth; the menu keeps the
-  owner's row exactly as wide as anyone else's. Report stays inline because it only
-  ever shows on *someone else's* comment, where Edit and Delete aren't competing for
-  the width. The editor is **inline, not a modal sheet** — the opposite of
-  `PostEditModal`, and for the reason that sheet exists: a post card lives in a
-  virtualised `FlatList` where a scrolled-away row unmounts mid-edit, while the
-  thread renders inside the post screen's `KeyboardAwareScroll` next to a reply
-  composer that is already an inline `TextInput`.
+The menu itself is shared code on each client: `OverflowMenu.jsx` on the web
+(portal, viewport flip, click-outside — lifted out of `PostMenu.jsx`, which had
+the only copy) and `useActionMenu` on the phone. So is the delete confirmation:
+`ConfirmDeleteDialog.jsx` on the web, `Alert` on the phone. Each takes its wording
+from the caller, because what a delete takes with it differs — a post's photos, a
+comment's replies — and a vague "this can't be undone" is the one thing the dialog
+exists to make specific.
+
+**The editors differ, and that part is deliberate.** The web flips the comment
+into an inline editor; so does the app, which is the *opposite* of `PostEditModal`
+and for exactly the reason that sheet exists. A post card lives in a virtualised
+`FlatList`, where a row scrolled out of the window unmounts and takes a half-typed
+edit with it. A comment thread renders inside the post screen's
+`KeyboardAwareScroll`, where nothing unmounts, right next to a reply composer that
+is already an inline `TextInput` — a sheet there would be a second pattern for the
+same job, one step away from the first.
 
 The app treats an **unchanged Save as a plain close** (no request), as it does for
 posts and messages; the web still sends the no-op PATCH. Both disable Save on an

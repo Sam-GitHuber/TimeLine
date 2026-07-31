@@ -3,8 +3,9 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import ConfirmDeleteDialog from "./ConfirmDeleteDialog.jsx";
+import OverflowMenu, { MenuItem } from "./OverflowMenu.jsx";
 import ReactionBar from "./ReactionBar.jsx";
-import ReportButton from "./ReportButton.jsx";
+import { ReportModal } from "./ReportModal.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
@@ -141,17 +142,18 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
 // reply box, or having posted a reply, reveals the sub-thread so you always see
 // your own reply.
 //
-// Your own comment carries **Edit** and **Delete** (issue #128) — inline in the
-// actions row, not behind a ⋯ menu. That's the split posts settled on: a post's
-// controls moved into a menu because its header is crowded and its actions are
-// heavier, while a comment's row is already the home of Reply and Report, and a
-// menu on every node of a deep tree would be more chrome than thread. Edit sits
-// before Delete so the pointer heading for the safe action never crosses the
-// destructive one, the same ordering as `PostMenu`.
+// **Everything but Reply lives behind a ⋯** (issue #128), so the actions row is
+// `Reply · ⋯ · Show N replies` whoever is looking: your own comment's menu
+// offers Edit and Delete, someone else's offers Report. That's the shape a post
+// header already had, and both clients now draw it — Report used to sit inline
+// here while its two counterparts went in a menu, which made one control look
+// like two different kinds of thing depending on whose comment you were reading.
+// Edit sits above Delete so the pointer heading for the safe action never
+// crosses the destructive one.
 //
 // A **deleted** comment arrives as a tombstone: blank text with `deleted_at`
 // set, kept only because replies hang off it. It renders as a quiet placeholder
-// and offers nothing — no reply, no report, no reactions — except the toggle
+// and offers nothing — no reply, no menu, no reactions — except the toggle
 // that opens the replies it exists to hold up.
 function CommentNode({
   comment,
@@ -168,6 +170,7 @@ function CommentNode({
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [reporting, setReporting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const isDeleted = comment.deleted_at != null;
   const isOwner =
@@ -306,37 +309,53 @@ function CommentNode({
                   Reply
                 </button>
               )}
-              {!isDeleted && (
-                <ReportButton
-                  commentId={comment.id}
-                  authorId={comment.author.id}
-                />
-              )}
-              {isOwner && !editing && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditing(true);
-                    // One write box per comment. Editing and replying both put
-                    // a textarea on the same node, and two open at once is a
-                    // muddle about which one Cancel belongs to — worse on the
-                    // phone, where hardware back would close whichever happened
-                    // to be opened last.
-                    setShowReply(false);
-                  }}
-                  className="transition hover:text-accent-deep"
-                >
-                  Edit
-                </button>
-              )}
-              {isOwner && (
-                <button
-                  type="button"
-                  onClick={() => setConfirmingDelete(true)}
-                  className="text-red-600 transition hover:text-red-700"
-                >
-                  Delete
-                </button>
+              {/* Everything that isn't Reply lives behind the ⋯, exactly as it
+                  does on a post header and in the app: your own comment offers
+                  Edit and Delete, someone else's offers Report. Keeping Report
+                  inline while its two counterparts sat in a menu made the same
+                  control look like two different kinds of thing depending on
+                  whose comment you were looking at. */}
+              {!isDeleted && user != null && (
+                <OverflowMenu label="Comment options" compact>
+                  {(close) =>
+                    isOwner ? (
+                      <>
+                        <MenuItem
+                          onClick={() => {
+                            close();
+                            setEditing(true);
+                            // One write box per comment. Editing and replying
+                            // both put a textarea on the same node, and two open
+                            // at once is a muddle about which one Cancel belongs
+                            // to — worse on the phone, where hardware back would
+                            // close whichever happened to be opened last.
+                            setShowReply(false);
+                          }}
+                        >
+                          Edit
+                        </MenuItem>
+                        <MenuItem
+                          danger
+                          onClick={() => {
+                            close();
+                            setConfirmingDelete(true);
+                          }}
+                        >
+                          Delete
+                        </MenuItem>
+                      </>
+                    ) : (
+                      <MenuItem
+                        onClick={() => {
+                          close();
+                          setReporting(true);
+                        }}
+                      >
+                        Report
+                      </MenuItem>
+                    )
+                  }
+                </OverflowMenu>
               )}
               {/* Kept even on a tombstone — the replies underneath are the only
                   reason it's still here, so hiding the way into them would
@@ -390,6 +409,13 @@ function CommentNode({
           </div>
         </div>
       </div>
+
+      {reporting && (
+        <ReportModal
+          commentId={comment.id}
+          onClose={() => setReporting(false)}
+        />
+      )}
 
       {confirmingDelete && (
         <ConfirmDeleteDialog

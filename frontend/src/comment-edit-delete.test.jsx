@@ -61,6 +61,22 @@ async function renderThread(comments) {
   return result;
 }
 
+/** Open a comment's ⋯ menu. */
+async function openMenu(user) {
+  await user.click(screen.getByRole("button", { name: "Comment options" }));
+}
+
+/** Open the ⋯ and choose one of its items. */
+async function pickMenuItem(user, name) {
+  await openMenu(user);
+  await user.click(
+    within(screen.getByRole("dialog", { name: "Comment options" })).getByRole(
+      "button",
+      { name },
+    ),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Element.prototype.scrollIntoView = vi.fn();
@@ -68,20 +84,24 @@ beforeEach(() => {
 
 describe("owner controls on a comment", () => {
   it("offers Edit and Delete on your own comment", async () => {
+    const user = userEvent.setup();
     await renderThread([comment()]);
-    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    await openMenu(user);
+    const menu = within(screen.getByRole("dialog", { name: "Comment options" }));
+    expect(menu.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(menu.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(menu.queryByRole("button", { name: "Report" })).not.toBeInTheDocument();
   });
 
   it("offers Report, not Edit/Delete, on someone else's", async () => {
+    // One ⋯ for everybody — what's *in* it is what changes.
+    const user = userEvent.setup();
     await renderThread([someoneElse()]);
-    expect(screen.getByRole("button", { name: /report/i })).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Edit" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Delete" }),
-    ).not.toBeInTheDocument();
+    await openMenu(user);
+    const menu = within(screen.getByRole("dialog", { name: "Comment options" }));
+    expect(menu.getByRole("button", { name: "Report" })).toBeInTheDocument();
+    expect(menu.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+    expect(menu.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
   });
 });
 
@@ -91,7 +111,7 @@ describe("editing your own comment", () => {
     api.updateComment.mockResolvedValue(comment({ text: "fixed comment" }));
     await renderThread([comment()]);
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await pickMenuItem(user, "Edit");
     const box = screen.getByRole("textbox", { name: "Edit comment text" });
     expect(box).toHaveValue("original comment");
     await user.clear(box);
@@ -112,7 +132,7 @@ describe("editing your own comment", () => {
     const user = userEvent.setup();
     await renderThread([comment()]);
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await pickMenuItem(user, "Edit");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(api.updateComment).not.toHaveBeenCalled();
     expect(screen.getByText("original comment")).toBeInTheDocument();
@@ -125,7 +145,7 @@ describe("editing your own comment", () => {
     await user.click(screen.getByRole("button", { name: "Reply" }));
     expect(screen.getByPlaceholderText(/Reply to You/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await pickMenuItem(user, "Edit");
     expect(screen.queryByPlaceholderText(/Reply to You/)).not.toBeInTheDocument();
   });
 
@@ -133,7 +153,7 @@ describe("editing your own comment", () => {
     const user = userEvent.setup();
     await renderThread([comment()]);
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await pickMenuItem(user, "Edit");
     await user.clear(screen.getByRole("textbox", { name: "Edit comment text" }));
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
@@ -159,7 +179,7 @@ describe("deleting your own comment", () => {
     api.deleteComment.mockResolvedValue(null);
     await renderThread([comment()]);
 
-    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await pickMenuItem(user, "Delete");
     expect(api.deleteComment).not.toHaveBeenCalled();
     const dialog = screen.getByRole("dialog", { name: "Delete comment" });
 
@@ -178,7 +198,7 @@ describe("deleting your own comment", () => {
       comment({ replies: [someoneElse({ id: 6, text: "a reply" })] }),
     ]);
 
-    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await pickMenuItem(user, "Delete");
     const dialog = screen.getByRole("dialog", { name: "Delete comment" });
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
@@ -193,7 +213,7 @@ describe("deleting your own comment", () => {
     const user = userEvent.setup();
     await renderThread([comment()]);
 
-    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await pickMenuItem(user, "Delete");
     const dialog = screen.getByRole("dialog", { name: "Delete comment" });
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(api.deleteComment).not.toHaveBeenCalled();
@@ -205,7 +225,7 @@ describe("deleting your own comment", () => {
       comment({ replies: [someoneElse({ id: 6, text: "a reply" })] }),
     ]);
 
-    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await pickMenuItem(user, "Delete");
     const dialog = screen.getByRole("dialog", { name: "Delete comment" });
     expect(within(dialog).getByText(/replies underneath will stay/)).toBeInTheDocument();
   });
