@@ -41,6 +41,7 @@ mobile/
 │   ├── types.ts     # hand-written types for the API's JSON
 │   ├── components/  # RN components (View/Text, not div/span)
 │   └── theme.ts     # design tokens translated from the Tailwind @theme
+├── scripts/         # build-time Node tools (icon generation) — never bundled
 ├── app.json
 └── package.json     # its own deps; does NOT merge with frontend's
 ```
@@ -595,3 +596,41 @@ Three consequences, each of which was a bug (#131, #169, #170):
   Before it did, both bugs above passed the suite — including a regression test
   written for exactly this component, which only ever exercised a React
   conditional.
+
+### The icons — three slots, three geometries
+
+The brand mark (the `Layout.jsx` spine + emerald now-dot) has to be authored
+**three different ways** for Android, and getting that wrong is invisible until
+someone is holding a phone. Both mistakes were made here (#171):
+
+| Asset | Canvas | Glyph fills | Read as |
+|---|---|---|---|
+| `notification-icon.png` | 96px = 24dp | **~92%** (22 of 24dp) | alpha only |
+| `android-icon-foreground.png` | 432px = 108dp | ~31% | full colour |
+| `android-icon-monochrome.png` | 432px = 108dp | ~31% | alpha only |
+
+- **Notification icons are full-bleed.** Android draws a 24dp slot and expects
+  ~22dp of glyph. It also reads **only the alpha channel**, tinting it with the
+  plugin's `color` — hand it a colour image and you get a solid tinted blob.
+- **Adaptive layers are not.** Only the central 72 of their 108dp is visible and
+  only the central 66dp *circle* is safe from a launcher's mask, so they're
+  authored with a wide transparent margin. The mark is sized so its share of that
+  visible 72dp matches its share of the iOS `icon.png` square — otherwise the same
+  app reads at two different sizes on the two platforms.
+
+Passing an adaptive layer to `expo-notifications` therefore *looks* right (it is
+monochrome, it is our mark) and renders at **half** the size of every neighbouring
+app's, on every push. That was shipped for a whole phase.
+
+**Regenerate with `node scripts/generate-icons.mjs`** — dependency-free, and the
+geometry in it is the source of truth. `src/__tests__/appIcons.test.ts` decodes the
+committed PNGs and asserts each slot's fill fraction and the mark's aspect ratio,
+so a wrong-shaped asset is a red test. It deliberately doesn't checksum: a
+checksum fails on every legitimate re-render *and* would have passed on the stock
+Expo logo, which is what was actually there.
+
+`icon.png` (iOS, and Android's legacy square) and `splash-icon.png` are authored
+artwork, not generated. The adaptive icon has **no background image** — Android
+gets `adaptiveIcon.backgroundColor` (`#fbfaf7`) instead, which is the warm surface
+`icon.png` sits on. An icon change is a **native** change: it needs a rebuild and
+resubmit, not an OTA (see *Releasing*).

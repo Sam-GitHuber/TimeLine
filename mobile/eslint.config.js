@@ -73,4 +73,15 @@ module.exports = defineConfig([
       },
     },
   },
+  {
+    // `scripts/` are build-time Node tools, not app code — they never ship in a
+    // bundle, so they get Node's globals (again by hand, per the note above).
+    files: ["scripts/**/*.{js,mjs}"],
+    languageOptions: {
+      globals: {
+        Buffer: "readonly",
+        console: "readonly",
+      },
+    },
+  },
 ]);
