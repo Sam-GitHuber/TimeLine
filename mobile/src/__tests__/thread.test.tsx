@@ -30,6 +30,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
+import * as Notifications from 'expo-notifications';
 import * as ImagePicker from 'expo-image-picker';
 import { Alert, FlatList, Linking, Platform } from 'react-native';
 
@@ -43,6 +44,8 @@ import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
 import { backHandlerCount, captureBackHandler, pressBack } from './helpers';
+
+const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 
 const mockParams: { conversationId: string } = { conversationId: '5' };
 const mockPush = jest.fn();
@@ -474,6 +477,12 @@ beforeEach(() => {
   clearOutbox();
   clearDrafts();
   clearQuotes();
+  // Delivered push notifications (#178). Empty tray by default, so only the
+  // test that cares about dismissal has to say what's in it.
+  mockNotifications.getPresentedNotificationsAsync.mockReset();
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([] as never);
+  mockNotifications.dismissNotificationAsync.mockReset();
+  mockNotifications.dismissNotificationAsync.mockResolvedValue(undefined as never);
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -837,6 +846,31 @@ it('marks the thread read on open', async () => {
           init?.method === 'POST'
       )
     ).toBe(true)
+  );
+});
+
+it('takes back that thread’s notifications on open, and no others (#178)', async () => {
+  // Reading a thread in the app is the commonest way a push goes stale, and
+  // until this landed nothing ever removed a delivered one: you could read
+  // everything and still find it on the lock screen. Matched on the push's own
+  // `/messages/<id>` url, so a notification for a *different* thread has to
+  // survive — dismissing the lot would be worse than dismissing none.
+  serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+    { request: { identifier: 'this-thread', content: { data: { url: '/messages/5' } } } },
+    { request: { identifier: 'another-thread', content: { data: { url: '/messages/9' } } } },
+  ] as never);
+
+  await renderScreen();
+  await screen.findByText('Message 1');
+
+  await waitFor(() =>
+    expect(mockNotifications.dismissNotificationAsync).toHaveBeenCalledWith(
+      'this-thread'
+    )
+  );
+  expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalledWith(
+    'another-thread'
   );
 });
 

@@ -26,7 +26,12 @@ import { useEffect, useRef } from 'react';
 import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { newOutgoing, updateOutbox } from '@/outbox';
-import { conversationIdFromUrl, REPLY_ACTION, routeForNotification } from '@/push';
+import {
+  conversationIdFromUrl,
+  dismissConversationNotifications,
+  REPLY_ACTION,
+  routeForNotification,
+} from '@/push';
 
 export function usePushNotificationTaps(): void {
   const { status } = useAuth();
@@ -107,12 +112,28 @@ export function usePushNotificationTaps(): void {
  * Not marked read: sending marks the thread read server-side, which is the right
  * answer and needs nothing from here. Nothing is invalidated either — the app
  * refetches on foreground.
+ *
+ * A **landed** reply also clears that thread's other notifications (#178) —
+ * answering deals with the whole conversation, not just the one notification
+ * that was pulled down. This is the only dismissal path that runs with the app
+ * deliberately *not* in the foreground, which `opensAppToForeground: false`
+ * makes fine.
+ *
+ * On the success path only, and that ordering is the point. A reply that failed
+ * has changed nothing server-side — the read marker moves inside the send's
+ * transaction, so the thread is still unread — and with no screen in front of
+ * anyone, that notification is the only remaining trace that something is
+ * waiting. Dismissing first would take away the prompt and leave the sender
+ * with no answer.
  */
 function sendReply(conversationId: number, text: string) {
-  api.sendMessage(conversationId, text).catch(() => {
-    updateOutbox(conversationId, (entries) => [
-      ...entries,
-      { ...newOutgoing({ text }), status: 'failed' as const },
-    ]);
-  });
+  api.sendMessage(conversationId, text).then(
+    () => dismissConversationNotifications([conversationId]),
+    () => {
+      updateOutbox(conversationId, (entries) => [
+        ...entries,
+        { ...newOutgoing({ text }), status: 'failed' as const },
+      ]);
+    }
+  );
 }

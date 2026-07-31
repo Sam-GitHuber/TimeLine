@@ -81,6 +81,11 @@ beforeEach(() => {
   jest
     .spyOn(api, 'markNotificationAddressed')
     .mockResolvedValue(undefined as never);
+  // Delivered push notifications (#178) — empty tray unless a test fills it.
+  mockNotifications.getPresentedNotificationsAsync.mockReset();
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([] as never);
+  mockNotifications.dismissNotificationAsync.mockReset();
+  mockNotifications.dismissNotificationAsync.mockResolvedValue(undefined as never);
   clearOutbox();
 });
 
@@ -259,6 +264,61 @@ it('sends a reply typed into the notification, without opening the app', async (
   // Trimmed, like every other send.
   await waitFor(() => expect(send).toHaveBeenCalledWith(12, 'on my way'));
   expect(router.navigate).not.toHaveBeenCalled();
+});
+
+it('clears that thread’s other notifications once the reply lands (#178)', async () => {
+  // Answering deals with the whole thread, not just the notification that was
+  // pulled down — and this is the one dismissal path that runs with the app
+  // deliberately *not* in the foreground, since `opensAppToForeground: false`
+  // launches us in the background to handle the reply.
+  jest.spyOn(api, 'sendMessage').mockResolvedValue({} as never);
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+    { request: { identifier: 'same-thread', content: { data: { url: '/messages/12' } } } },
+    { request: { identifier: 'other-thread', content: { data: { url: '/messages/3' } } } },
+  ] as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  await render(<Probe />);
+
+  await waitFor(() =>
+    expect(mockNotifications.dismissNotificationAsync).toHaveBeenCalledWith(
+      'same-thread'
+    )
+  );
+  expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalledWith(
+    'other-thread'
+  );
+});
+
+it('keeps the notification when the reply doesn’t land (#178)', async () => {
+  // The mirror of the case above, and the reason dismissal hangs off the
+  // *success* path. A failed reply changes nothing server-side — the read
+  // marker moves inside the send's transaction — so the thread is still unread,
+  // and with no screen in front of anyone that notification is the only
+  // remaining trace that something is waiting.
+  jest.spyOn(api, 'sendMessage').mockRejectedValue(new Error('offline'));
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+    { request: { identifier: 'still-waiting', content: { data: { url: '/messages/12' } } } },
+  ] as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  await render(<Probe />);
+
+  // The outbox keeps the words; the notification keeps the prompt.
+  await waitFor(() => expect(outboxFor(12)).toHaveLength(1));
+  expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalled();
 });
 
 it('keeps a reply that fails to send', async () => {

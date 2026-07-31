@@ -38,21 +38,71 @@ import { api } from '@/api';
 const PUSH_TOKEN_KEY = 'timeline.expoPushToken';
 
 /**
+ * The `data` blob the backend puts on every push (`send_pushes.py`'s `_message`).
+ *
+ * `notificationId` is explicitly nullable: a **message** push has no
+ * activity-centre row behind it (issue #118) and sends `null`. That nullness is
+ * what tells the two kinds of push apart down here, where the tray gives us
+ * nothing else to go on.
+ */
+type PushData = { url?: string | null; notificationId?: number | null };
+
+/** The `data` off a delivered notification, never undefined. */
+function pushData(notification: Notifications.Notification): PushData {
+  return (notification.request.content.data ?? {}) as PushData;
+}
+
+/**
+ * The conversation whose thread is on screen right now, or `null`.
+ *
+ * Module state rather than context because its one reader is the notification
+ * handler, which is registered at module scope (it has to exist before any
+ * notification can arrive) and so has no component tree to read from.
+ */
+let onScreenConversation: number | null = null;
+
+/**
+ * Tell the notification handler which thread the user is looking at (#178).
+ *
+ * Set on *focus*, not mount: the thread screen stays mounted underneath its own
+ * info screen, and a screen left behind another must not go on claiming the
+ * pushes meant for what's on top. Pass `null` to clear.
+ */
+export function setOnScreenConversation(conversationId: number | null): void {
+  onScreenConversation = conversationId;
+}
+
+/**
  * Show notifications that arrive while the app is *foregrounded*.
  *
  * Without this iOS suppresses them — the OS assumes an app on screen will
  * surface its own news. We don't (yet): there's no in-app activity centre on
  * mobile until Milestone E, so a suppressed notification would be lost
  * entirely rather than merely redundant.
+ *
+ * **The one exception is a message for the thread you're reading** (#178). The
+ * banner is left alone — it's transient, and a brief "Ada: …" while you're
+ * mid-scroll is at worst redundant — but `shouldShowList: false` keeps it out of
+ * the notification centre, where it would otherwise sit for hours claiming you
+ * have something to read that you read as it arrived.
+ *
+ * iOS honours the two independently. Android has no transient-only notification,
+ * so a banner there *is* a shade entry; the mark-read dismissal below is what
+ * clears it, one message-poll later.
  */
 export function configureNotificationHandler(): void {
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
+    handleNotification: async (notification) => {
+      const inThreadOnScreen =
+        onScreenConversation !== null &&
+        conversationIdFromUrl(pushData(notification).url) === onScreenConversation;
+      return {
+        shouldShowBanner: true,
+        shouldShowList: !inThreadOnScreen,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      };
+    },
   });
 }
 
@@ -303,11 +353,17 @@ export async function forgetLocalPushToken(): Promise<void> {
  * a message rather than opening a screen. Reading it from the same `url` the
  * deep link uses keeps one shape on the wire — the push carries no separate
  * conversation field to fall out of step with it.
+ *
+ * **Total by construction**, and it has to stay that way: the foreground
+ * notification handler calls this on every arriving push, and a handler that
+ * *rejects* means the notification isn't presented at all. `data` is untyped
+ * JSON off the wire, so a `url` that isn't a string is a possibility rather
+ * than a contradiction — hence the type test rather than a bare `?.match`,
+ * which would throw a TypeError on a number and silently swallow the push.
  */
-export function conversationIdFromUrl(
-  url: string | null | undefined
-): number | null {
-  const match = url?.match(/^\/messages\/(\d+)$/);
+export function conversationIdFromUrl(url: unknown): number | null {
+  if (typeof url !== 'string') return null;
+  const match = url.match(/^\/messages\/(\d+)$/);
   return match ? Number(match[1]) : null;
 }
 
@@ -372,4 +428,152 @@ export function routeForNotification(url: string | null | undefined): Href {
   if (conversation) return `/messages/${conversation[1]}` as Href;
 
   return '/';
+}
+
+/**
+ * Taking back notifications the user has since dealt with **inside the app**
+ * (#178).
+ *
+ * The server already does the *pre*-delivery half of this well: a queued message
+ * push whose read marker has moved past it is binned before it ever buzzes
+ * (`send_pushes.py`'s `_should_drop`). The gap was everything after delivery —
+ * read the thread in the app, go back to the home screen, and "New message from
+ * Ada" was still sitting on the lock screen. Nothing ever took one back.
+ *
+ * Everything here is **best-effort and swallows failures**, like the other push
+ * niceties in this file. The worst outcome of a failed dismissal is the
+ * behaviour we had all along: a notification that stays put. So it may never be
+ * allowed to fail *loudly* — into a screen, a retry, or a rejected promise
+ * nobody awaits — at a moment when the user is reading a thread or opening the
+ * activity centre.
+ *
+ * What none of it covers is reading somewhere *else* — the web, a second phone.
+ * There is no APNs/FCM "unsend"; reaching a phone that isn't running the app
+ * means sending it something, and both platforms' silent-delivery paths are
+ * best-effort by construction. That's issue #178's case D, deliberately left to
+ * ride on Phase 10b's spike rather than guessed at here. The foreground
+ * reconcile in `usePushDismissals.ts` — built on `presentedConversations` below
+ * — is the cheap 80% of it.
+ */
+async function dismissDelivered(
+  matches: (data: PushData) => boolean
+): Promise<void> {
+  try {
+    const presented = await Notifications.getPresentedNotificationsAsync();
+    await Promise.all(
+      presented
+        .filter((notification) => matches(pushData(notification)))
+        .map((notification) =>
+          Notifications.dismissNotificationAsync(notification.request.identifier)
+        )
+    );
+  } catch {
+    // See above: an undismissed notification is exactly today's behaviour.
+  }
+}
+
+/**
+ * Drop every delivered notification for these conversations.
+ *
+ * Matched on the push's own `url` (`/messages/<id>`) rather than a dedicated
+ * field, which keeps `conversationIdFromUrl`'s invariant intact: one shape on
+ * the wire, with no second conversation field to fall out of step with it.
+ */
+export function dismissConversationNotifications(
+  conversationIds: Iterable<number>
+): Promise<void> {
+  const wanted = new Set(conversationIds);
+  if (!wanted.size) return Promise.resolve();
+  return dismissDelivered((data) => {
+    const id = conversationIdFromUrl(data.url);
+    return id !== null && wanted.has(id);
+  });
+}
+
+/**
+ * Drop every delivered notification that has an **activity-centre row** behind
+ * it — i.e. everything the bell counts.
+ *
+ * For opening the activity centre, which marks all unread *seen*. That screen's
+ * whole design is that a notification is kept in-app while its badge signal is
+ * cleared, and an OS notification is a badge signal.
+ *
+ * Message pushes are untouched by construction: they carry `notificationId:
+ * null` because messaging sits outside the bell, so reading the activity centre
+ * can't clear a message you haven't read.
+ */
+export function dismissActivityNotifications(): Promise<void> {
+  return dismissDelivered((data) => data.notificationId != null);
+}
+
+/**
+ * What's in the tray right now, grouped by conversation: id → the delivered
+ * notifications for it.
+ *
+ * Two things want this rather than a dismissal helper. The foreground reconcile
+ * has to ask *"is there anything to clean up?"* before spending a network
+ * request finding out what's been read — which, for an empty tray, is every
+ * foreground of every session. And it then has to dismiss **exactly what it
+ * looked at**: re-reading the tray after the round trip would let a message that
+ * arrived *during* it be dismissed on the strength of an `unread_count` fetched
+ * before it existed, which is the one way this feature could hide a genuinely
+ * unread message.
+ */
+export async function presentedConversations(): Promise<Map<number, string[]>> {
+  const byConversation = new Map<number, string[]>();
+  try {
+    const presented = await Notifications.getPresentedNotificationsAsync();
+    for (const notification of presented) {
+      const id = conversationIdFromUrl(pushData(notification).url);
+      if (id === null) continue;
+      const identifiers = byConversation.get(id) ?? [];
+      identifiers.push(notification.request.identifier);
+      byConversation.set(id, identifiers);
+    }
+  } catch {
+    // An unreadable tray is treated as an empty one: the caller does nothing,
+    // which is what it would have done before this existed.
+  }
+  return byConversation;
+}
+
+/** Dismiss exactly these delivered notifications, by identifier. */
+export async function dismissNotifications(
+  identifiers: Iterable<string>
+): Promise<void> {
+  try {
+    await Promise.all(
+      [...identifiers].map((identifier) =>
+        Notifications.dismissNotificationAsync(identifier)
+      )
+    );
+  } catch {
+    // Best-effort, as above.
+  }
+}
+
+/**
+ * Dismiss a message push **as it arrives** for the thread already on screen.
+ *
+ * The handler's `shouldShowList: false` covers this on iOS, where banner and
+ * notification-centre entry are independent options. **Android has no such
+ * split** — `NotificationBehaviorRecord.shouldPresentAlert` is
+ * `shouldShowBanner || shouldShowList`, so anything that banners is also posted
+ * to the shade — and the mark-read effect can't be relied on to mop it up:
+ * that effect re-runs on the message *count*, and the thread's four-second poll
+ * usually adds the message before the push lands. Count unchanged, effect
+ * doesn't re-run, and the entry sits in the shade for a message being read as it
+ * arrived.
+ *
+ * So the arrival itself is the trigger. One listener for the app's lifetime,
+ * registered at launch beside the handler for the same reason: a push can arrive
+ * before anyone signs in. A no-op on iOS, where there's nothing in the tray to
+ * dismiss.
+ */
+export function configureOnScreenDismissal(): void {
+  Notifications.addNotificationReceivedListener((notification) => {
+    const id = conversationIdFromUrl(pushData(notification).url);
+    if (id === null || id !== onScreenConversation) return;
+    void dismissNotifications([notification.request.identifier]);
+  });
 }

@@ -43,6 +43,7 @@ import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import { ComposeIcon } from '@/components/icons';
 import { plainMessageText } from '@/messageText';
+import { dismissConversationNotifications } from '@/push';
 import type { SwipeAction } from '@/components/SwipeableRow';
 import { SwipeableRow } from '@/components/SwipeableRow';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -184,8 +185,15 @@ export default function MessagesScreen() {
         {
           label: 'Mark read',
           tint: colors.accent,
-          onPress: () =>
-            rowAction.mutate(() => api.markConversationRead(convo.id)),
+          onPress: () => {
+            rowAction.mutate(() => api.markConversationRead(convo.id));
+            // The other mark-read path (#178). The thread screen clears this
+            // thread's delivered notifications when it marks itself read, and
+            // dealing with it from the list is the same act — without this the
+            // badge goes but "New message from Ada" stays on the lock screen,
+            // which is the whole bug.
+            void dismissConversationNotifications([convo.id]);
+          },
         },
       ];
     }

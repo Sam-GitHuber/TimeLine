@@ -29,7 +29,9 @@ import {
   configureNotificationCategories,
   configureNotificationChannels,
   configureNotificationHandler,
+  configureOnScreenDismissal,
 } from '@/push';
+import { usePushDismissals } from '@/usePushDismissals';
 import { usePushNotificationTaps } from '@/usePushTaps';
 import { colors } from '@/theme';
 
@@ -45,6 +47,11 @@ configureNotificationCategories();
 // a push naming a channel the device hasn't created yet is dropped silently
 // rather than falling back to a default. No-op on iOS.
 configureNotificationChannels();
+// And, at module scope for the third time and the same reason, the listener that
+// takes back a message push for the thread already on screen (#178). Android
+// posts anything that banners to the shade whatever the handler says about the
+// notification centre, so the arrival itself has to be the trigger there.
+configureOnScreenDismissal();
 
 /**
  * Created once at module scope, not inside the component: a QueryClient holds
@@ -74,9 +81,11 @@ const queryClient = new QueryClient({
 function AuthGate() {
   const { status } = useAuth();
   const segments = useSegments();
-  // Lives here rather than in RootLayout because it reads auth state, and so
-  // must be inside AuthProvider.
+  // Both live here rather than in RootLayout because they read auth state, and
+  // so must be inside AuthProvider (the dismissal reconcile also needs the
+  // QueryClientProvider above it).
   usePushNotificationTaps();
+  usePushDismissals();
   // The router isn't ready to navigate on the very first render; navigating
   // before it is silently does nothing.
   const navigationState = useRootNavigationState();

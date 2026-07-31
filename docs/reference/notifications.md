@@ -624,7 +624,105 @@ its badge instead.
 A foreground `setNotificationHandler` shows banners while the app is open,
 which iOS otherwise suppresses: there's no in-app activity centre on mobile
 until Milestone E, so a suppressed notification would be lost, not merely
-redundant.
+redundant. Its one exception is the on-screen thread — see below.
+
+### Taking a notification back once it's been dealt with (#178)
+
+Push used to be **write-only**: once delivered, a notification sat in the
+phone's notification centre until it was tapped or swiped, however thoroughly
+you had since read it *in the app*. Read everything in a thread, go back to the
+home screen, and "New message from Ada" was still on the lock screen. The server
+already did the *pre*-delivery half well — `_should_drop` bins a queued message
+push whose read marker has moved past it, so a thread you read before the timer
+ticked never buzzes — but nothing existed for after delivery.
+
+Six things now remove one. All of them are **local** —
+`getPresentedNotificationsAsync` + `dismissNotificationAsync` — with no new
+payload field and no backend change.
+
+| When | What it clears | Where |
+|---|---|---|
+| The thread screen marks itself read (on open, and as messages land) | every notification whose `url` is `/messages/<this id>` | `[conversationId].tsx` |
+| **Mark read** swiped on a row in the conversation list | the same | `(tabs)/messages.tsx` |
+| The activity centre marks everything seen (on open) | every notification carrying a `notificationId` | `activity.tsx` |
+| A **Reply** typed into a notification *lands* | that conversation's notifications | `usePushTaps.ts` |
+| A message arrives for the thread already on screen | that one, as it arrives | `push.ts` |
+| The app opens, and each time it returns to the foreground | conversations the payload now reports as `unread_count: 0` | `usePushDismissals.ts` |
+
+Both mark-read paths are listed on purpose: dealing with a thread from the list
+is the same act as reading it, and covering only the thread screen left the badge
+clearing while the lock screen kept its notification.
+
+Notifications are matched on the push's own `url`, parsed with the same
+`conversationIdFromUrl` the deep link uses — one shape on the wire, with no
+second conversation field to fall out of step with it. The activity centre's
+sweep keys on `notificationId` instead, which is exactly what separates the two
+kinds of push down at tray level: a message push has no `Notification` row and
+sends `null`, so opening the bell can never clear a message you haven't read.
+
+**A message for the thread you're looking at is no longer filed.** The handler
+returns `shouldShowList: false` when the push's conversation is the one on
+screen (tracked by `setOnScreenConversation`, set on **focus** — the thread stays
+mounted under its own info screen and must stop claiming pushes once it isn't on
+top). The banner is deliberately kept: it's transient, and at worst redundant.
+
+That covers iOS, which honours banner and notification-centre entry
+independently. **Android has no such split** —
+`NotificationBehaviorRecord.shouldPresentAlert` is `shouldShowBanner ||
+shouldShowList`, so anything that banners is posted to the shade whatever the
+handler says. Nor can the mark-read effect be relied on to mop it up: that effect
+re-runs on the message *count*, and the thread's four-second poll usually adds
+the message before the push lands, so the count doesn't change and the effect
+doesn't fire. So on Android the **arrival itself** is the trigger —
+`configureOnScreenDismissal` registers one `addNotificationReceivedListener` for
+the app's lifetime, which dismisses a push whose conversation is the one on
+screen. A no-op on iOS, where there's nothing in the tray to dismiss.
+
+**Every path swallows its failures**, like the rest of `push.ts`. The worst
+outcome of a failed dismissal is the behaviour we had all along — a notification
+that stays put — so none of it may fail loudly at the moment someone is reading a
+thread. `conversationIdFromUrl` is **total** for the same reason: the foreground
+handler calls it on every arriving push, `data` is untyped JSON off the wire, and
+a handler that *rejects* means the notification isn't presented at all.
+
+Three things about the foreground reconcile specifically:
+
+- **It runs on mount as well as on every AppState foreground.** A cold start —
+  tapping the icon after the process was killed — emits no AppState change at
+  all, and that's the commonest way the app is opened.
+- **It reads the tray before fetching anything.** The overwhelmingly common
+  foreground has nothing waiting, and it must not add a request to every one of
+  them.
+- **It dismisses the notifications it looked at, not whatever is in the tray
+  afterwards.** The `unread_count` it judges by was fetched before the round
+  trip, so a message arriving *during* that window would otherwise be dismissed
+  on the strength of a count that predates it — the one way this feature could
+  hide something genuinely unread. Holding the identifiers from the first read
+  closes that and saves a second trip across the bridge.
+
+It looks only at the first page of conversations, which is safe in the same
+direction as everything else here: a thread too far down simply isn't dismissed.
+
+**A reply dismisses on success only.** A failed reply has changed nothing
+server-side — the read marker moves inside the send's transaction — so the thread
+is still unread, and with no screen in front of anyone (that path runs in the
+background by design) the notification is the only remaining trace that something
+is waiting. The words are kept in the outbox; the prompt is kept in the tray.
+
+**What none of this covers is reading somewhere else** — the web, or a second
+phone. There is no APNs/FCM "unsend"; reaching a phone that isn't running the app
+means sending it something, and both silent-delivery paths are best-effort by
+construction (iOS budgets and throttles `_contentAvailable` and drops it entirely
+after a force-quit; Android may deliver nothing at all from a stopped state).
+That half is deliberately parked on **Phase 10b's** background-delivery spike
+rather than guessed at, and the foreground reconcile is the cheap 80% of it in
+the meantime.
+
+**Still no app-icon badge** (`shouldSetBadge: false`, and no `badge` on the
+outgoing push) — issue #179, which rides on this bookkeeping. Worth knowing
+before starting it: on Android `setBadgeCountAsync(0)` calls
+`notificationManager.cancelAll()`, so reaching for zero there *is* a
+dismiss-everything, in the release that just added deliberate targeted dismissal.
 
 ## Frontend
 
