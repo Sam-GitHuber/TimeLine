@@ -565,6 +565,49 @@ returning the same response on re-renders), and wait for `signedIn` so a
 cold-start tap doesn't race the auth gate's redirect to `/login`. Tapping marks
 the notification **addressed**, matching the web dropdown's click-through.
 
+A tap navigates with **`router.navigate`, never `router.push`** (#177). `push`
+appends a screen unconditionally, so a push for the thread you were already
+reading stacked a second copy of it and Back walked through the duplicates one
+at a time instead of returning to the list — one extra copy per push opened.
+`navigate` replaces the top screen in place when the route name *and* its path
+params match (expo-router's `getSingularId`), reusing the existing screen's key
+so nothing remounts, and pushes normally for a genuinely different target. The
+activity centre's rows go through the same verb, so in-app and push
+click-through still agree.
+
+Deliberately **not `dismissTo`**, which would pop back to a match anywhere in the
+stack rather than only the top. No screen sets `dangerouslySingular`, so its
+router matches by route *name* alone — a push for conversation 5 tapped while
+reading conversation 9 would pop 9 off and reuse its screen. Matching on the
+params is the point.
+
+**What `navigate` does not cover**, all of it a consequence of it comparing only
+the top of the stack:
+
+- A push for `/messages/5` tapped while on `/messages/5/info` still stacks a
+  thread screen above the info screen.
+- A push whose target is a **tab** (`/`, `/people`, `/groups`), tapped from a
+  stack screen like a thread, appends a second `(tabs)` route rather than
+  reusing the one underneath. Not the `PUSH`-vs-`NAVIGATE` distinction: expo
+  -router downgrades `PUSH` outside a stack, but that test is on the navigator
+  where the action and the current state *diverge* (`findDivergentState`), and
+  from a thread that navigator is the root **stack**. It doesn't accumulate —
+  the second tap diverges inside the tab navigator and jumps — and Back returns
+  where you were, so it's left alone.
+- Tapping a message push for the thread already on screen is now visibly
+  nothing: the screen doesn't remount, and its open-at-the-unread-divider jump
+  is deliberately once-per-mount so a poll can't yank a reader back
+  (`[conversationId].tsx`). The message still arrives on the four-second poll,
+  with jump-to-latest one tap away. Making a tap mean "take me to the newest"
+  needs a re-open signal into the screen, which is its own change.
+
+A second deep link **is** honoured within a screen that stays mounted, which
+took two fixes once the remount went away: `[postId].tsx` re-arms its
+scrolled-once guard when the `comment` param changes, and `CommentThread`
+reopens a branch that a *new* target sits in (keyed on the target, not on the
+expand set, which is rebuilt on every poll and would otherwise spring open a
+branch the reader had just collapsed).
+
 **Route mapping** (`routeForNotification`) translates the server's one `url`
 into a mobile route: `/p/42` → `/post/42` (`?comment=` preserved), `/u/3`
 unchanged, `/requests` → `/people`, `/group-invites` → `/groups`,

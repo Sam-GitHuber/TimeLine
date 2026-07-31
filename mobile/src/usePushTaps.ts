@@ -72,7 +72,15 @@ export function usePushNotificationTaps(): void {
       return;
     }
 
-    router.push(routeForNotification(data?.url));
+    // **`navigate`, not `push`** (#177). `push` appends a screen unconditionally,
+    // with no regard for what's already on top — so a push for the thread you are
+    // already reading stacked a second copy of it, and Back walked through the
+    // duplicates one at a time instead of returning to the list. `navigate`
+    // replaces the top screen in place when the route name *and* its path params
+    // match, and pushes normally for a different target. Why that verb and not
+    // `dismissTo`, and what it does **not** cover, are in notifications.md — read
+    // it before changing this line.
+    router.navigate(routeForNotification(data?.url));
 
     // Tapping a push counts as dealing with it, exactly as clicking a row in
     // the web dropdown does — so the activity centre and the badge stay in

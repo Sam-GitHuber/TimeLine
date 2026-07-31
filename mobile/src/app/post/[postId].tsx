@@ -14,7 +14,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -93,6 +93,25 @@ export default function PostScreen() {
       animated: true,
     });
   }, []);
+
+  /**
+   * The guard belongs to the **target**, not the screen (#177).
+   *
+   * A tapped push now reuses this screen instead of stacking a second copy of
+   * it, so a *different* comment on a post already on display arrives as a param
+   * change with no remount. A guard latched by the first deep link would leave
+   * the new target highlighted somewhere off-screen — the notification would
+   * look answered while showing the wrong thing. Re-arming on the id is enough
+   * to aim again: highlighting adds a border and padding, so the newly targeted
+   * comment changes height and re-reports its offset through `onLayout`.
+   *
+   * Only on a change, so the "don't yank a reader back" property above survives:
+   * a re-render with the same target re-runs nothing.
+   */
+  useEffect(() => {
+    scrolled.current = false;
+    pendingY.current = null;
+  }, [highlightCommentId]);
 
   const handleThreadLayout = useCallback(
     (event: LayoutChangeEvent) => {
