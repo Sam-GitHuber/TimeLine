@@ -10,9 +10,21 @@
 # frontend PR only made the PR wait. Read backend.yml's header before changing
 # that arrangement — its skipping is why it isn't a required check.
 #
+# Also here: "deploy-scripts", a fast shell-level test of the box's autodeploy
+# decision (issue #104) — no Docker daemon involved, see the job.
+#
 # The job names here ("frontend", "mobile", "semgrep") plus CodeQL's "Analyze
 # (…)" jobs are the required status checks for branch protection on main — all
 # must pass before a PR can merge.
+#
+# "deploy-scripts" is NOT yet in that branch-protection list — it's new. It runs
+# unfiltered on every PR, so unlike "backend" (see backend.yml) there's no
+# skipped-check hazard in requiring it; add it when convenient with:
+#
+#   gh api repos/Sam-GitHuber/TimeLine/branches/main/protection/required_status_checks \
+#     -X PATCH -f 'contexts[]=frontend' -f 'contexts[]=mobile' \
+#     -f 'contexts[]=semgrep' -f 'contexts[]=deploy-scripts' \
+#     -f 'contexts[]=Analyze (javascript-typescript)' -f 'contexts[]=Analyze (python)'
 name: CI
 
 on: [push, pull_request]
@@ -85,6 +97,20 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  # deploy-scripts — the box's shell scripts. Only autodeploy.sh has tests so
+  # far: its redeploy decision is the piece that silently stopped deploying for
+  # six days (issue #104), and it's pure logic around a handful of `docker`
+  # calls, so a stub `docker` on PATH tests it properly with no daemon here.
+  # Seconds to run — no Docker, no services, no install step.
+  deploy-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Test the autodeploy redeploy decision
+        run: ./deploy/tests/test_autodeploy.sh
 
   # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
   # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't

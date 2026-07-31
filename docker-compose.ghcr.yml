@@ -10,9 +10,13 @@
 #   docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
 #     up -d --no-build backend web
 #
-# TIMELINE_TAG selects which release to run; autodeploy.sh sets it to the exact
-# published tag, and it defaults to `latest` for a manual pull. db/web volumes,
-# Caddyfile mount, ports, and restart policy all still come from the prod file.
+# TIMELINE_TAG selects which release to run, defaulting to `latest` — the tag the
+# release workflow moves once both images are built. Set it to pin the box to a
+# specific release (`TIMELINE_TAG=v0.14.0 ./deploy/autodeploy.sh`, the rollback
+# path in docs/deploy.md); autodeploy.sh exports the same value it checks the
+# running containers against, so the tag deployed and the tag verified can't
+# drift apart. db/web volumes, Caddyfile mount, ports, and restart policy all
+# still come from the prod file.
 #
 # The plain `deploy/deploy.sh` (build-on-box from source) stays as the fallback
 # path — use it for a hotfix or if GHCR is unavailable.

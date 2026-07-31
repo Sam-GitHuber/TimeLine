@@ -11,6 +11,10 @@ urlpatterns = [
     # Public liveness probe for uptime monitoring (Phase 7). 200 = Caddy +
     # gunicorn + database all alive; polled by deploy/healthcheck.sh.
     path("healthz/", views.healthz, name="healthz"),
+    # Which release the running backend container was built from (issue #104).
+    # Staff-only, unlike healthz — see the view for why the version doesn't
+    # belong on an anonymous endpoint.
+    path("version/", views.version, name="version"),
     # Timeline
     path("feed/", views.FeedView.as_view(), name="feed"),
     path("posts/", views.PostCreateView.as_view(), name="post-create"),

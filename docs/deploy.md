@@ -85,6 +85,14 @@ backend entrypoint.
 This build-on-box path stays the **fallback** — use it for a hotfix or if GHCR
 is unavailable. The normal path is now the automated one below.
 
+> **Know what the fallback leaves behind.** `deploy.sh` builds images named
+> `timeline-prod-backend` / `timeline-prod-web`; autodeploy runs
+> `ghcr.io/sam-githuber/timeline-*`. **Same services, different image names**, so
+> after a `deploy.sh` run the containers are pinned to your local build. Autodeploy
+> now notices that and recreates them from the release on its next tick (see
+> below) — but until it does, the box is running your hotfix build, not a release.
+> Cut a real release for anything you want to keep.
+
 ## Continuous deploy (automatic, on release)
 
 The everyday way to ship is now: **publish a GitHub Release, and the box deploys
@@ -95,17 +103,35 @@ so deploys are *pull-based* (the box reaches out to GHCR; nothing reaches in).
 
 1. You publish a Release on GitHub (from green `main` — see below).
 2. The **`Release images`** workflow (`.github/workflows/release-deploy.yml`)
-   builds the `backend` + `web` images and pushes them to GHCR, tagged with the
-   release tag **and** `latest`:
+   builds the `backend` + `web` images and pushes them to GHCR under the release
+   tag, then — **once both have pushed** — moves `latest` to point at them
+   together:
    - `ghcr.io/sam-githuber/timeline-backend`
    - `ghcr.io/sam-githuber/timeline-web`
+
+   The two-step is deliberate. The box polls `latest` every ~5 min, so when each
+   build moved its own `latest` as it finished, a tick landing between the two
+   builds deployed **half a release** — old web against new backend. It
+   self-corrected on the next tick, but on a release with an API change those
+   minutes are real errors for real users.
 3. On the box, **`timeline-autodeploy.timer`** fires every ~5 min and runs
    `deploy/autodeploy.sh`, which: `git pull`s the latest config (compose files,
    GHCR override, Caddyfile), `docker compose pull`s the two `:latest` images,
-   and — **only if an image actually changed** — recreates the stack via the
-   GHCR override (`docker-compose.ghcr.yml`, `--no-build`, so the box runs the
-   pre-built image and never compiles). Migrations + `collectstatic` run in the
-   backend entrypoint as usual. A poll with no new release is a quiet no-op.
+   and — **only if a container isn't already running its release image** —
+   recreates the stack via the GHCR override (`docker-compose.ghcr.yml`,
+   `--no-build`, so the box runs the pre-built image and never compiles).
+   Migrations + `collectstatic` run in the backend entrypoint as usual. A poll
+   with nothing to do is a quiet no-op.
+
+   **Why the check is phrased that way** (issue #104): it used to compare image
+   digests before and after the pull, i.e. "did a new image arrive?" — which is
+   not the same question as "is the box running it". Once an image had been
+   pulled, every later run truthfully saw no change and skipped the deploy, so
+   containers left on anything else (a `deploy.sh` fallback build, a container
+   that died and was restarted from an old image) stayed there **indefinitely**,
+   with `healthz` at 200 and the log reading `nothing to do.` Comparing each
+   running container against the pulled image covers the new-image case as a
+   side effect *and* self-heals drift from any cause.
 
 **Cutting a release (the deploy trigger):**
 
@@ -150,6 +176,48 @@ systemctl status timeline-autodeploy.timer --no-pager
 
 To pause auto-deploy (e.g. during maintenance): `sudo systemctl stop
 timeline-autodeploy.timer`. Re-enable with `start`.
+
+**Changing `autodeploy.sh`?** Run its tests first — they cover the redeploy
+decision (including the stall this section describes) with a stubbed `docker`, so
+they need no daemon and take a second:
+
+```bash
+./deploy/tests/test_autodeploy.sh
+```
+
+### What version is the box actually running?
+
+`healthz` answering 200 says the site is *up*, not that it's **current** — the
+two came apart for six days in the incident above. To check the running release:
+
+```bash
+# From anywhere, logged in as a staff account (no SSH needed). Staff-only on
+# purpose: the endpoint is a version string, and the source is public.
+curl -s https://your-timeline.net/api/version/ -H "Cookie: <your session>"
+# {"version": "v0.15.0"}   ("dev" = built from a working tree, not a release)
+```
+
+Easiest in practice: open `https://your-timeline.net/api/version/` in a browser
+where you're logged in as the maintainer — DRF's browsable API renders it.
+
+The version comes from `TIMELINE_VERSION`, baked into the backend image at build
+time from the release tag, so it reports the **running code** — not what `main`
+holds, and not what's sitting in GHCR. Both images also carry it as an
+`org.opencontainers.image.version` label, so on the box:
+
+```bash
+# What each container is running, and whether that matches the release image.
+docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps
+docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+  $(docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps -q backend web)
+```
+
+If those disagree with the latest release, just let the timer tick — autodeploy
+now recreates drifted containers by itself. To force it immediately:
+
+```bash
+./deploy/autodeploy.sh
+```
 
 ## Going public: dynamic DNS (Cloudflare)
 
@@ -376,7 +444,21 @@ site loads.
 
 ## Rollback
 
-Images are rebuilt from a git checkout, so rolling back is a git operation:
+Every release is still on GHCR under its own tag, so the quickest rollback is to
+run the previous one — no rebuild:
+
+```bash
+sudo systemctl stop timeline-autodeploy.timer   # or the next tick undoes this
+TIMELINE_TAG=v0.14.0 ./deploy/autodeploy.sh     # pins BOTH images to that release
+```
+
+`TIMELINE_TAG` is read by the GHCR override *and* by autodeploy's drift check, so
+the box compares itself against the tag it's meant to be running. Remember to
+restart the timer once you've rolled forward again — while it's stopped, nothing
+deploys.
+
+Or rebuild from a git checkout (the fallback path — note the image-name caveat
+under "Routine deploy"):
 
 ```bash
 git log --oneline -n 10          # find the last-good commit
@@ -589,7 +671,13 @@ so a future change doesn't quietly undo the reasoning.
   80/443, not SSH, so CD must be **outbound from the house** — GitHub can't SSH in.
   So: `gh release create vX.Y.Z` → a workflow builds + pushes images to GHCR (using
   the built-in `GITHUB_TOKEN`, no PAT); a systemd timer on the box polls every
-  ~5 min, `docker compose pull`s, and redeploys **only on a changed digest**.
+  ~5 min, `docker compose pull`s, and redeploys **whenever a container isn't
+  already running the pulled image**. That test is deliberately about *containers*,
+  not images: the original "has the digest changed?" version answered a question
+  that stops being useful the moment the image is already on disk, and the box
+  spent six days serving old code behind a healthy `healthz` because of it
+  (issue #104). Convergence — "make reality match the release" — is checkable on
+  every tick; "did something new arrive?" is a one-shot event you can miss forever.
   Triggering on *release* (not every merge) keeps a deploy a deliberate human
   action with a version/changelog, and fork PRs can't publish releases so untrusted
   code never builds our images. Chosen a systemd timer over Watchtower for

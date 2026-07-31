@@ -4637,6 +4637,58 @@ class HealthzTests(APITestCase):
             resp = self.client.get(HEALTHZ_URL)
         self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
 
+    def test_healthz_does_not_leak_the_running_version(self):
+        # The probe is anonymous, so it deliberately reports nothing but liveness
+        # — the running release is answerable only through the staff-only
+        # /api/version/ below (issue #104).
+        resp = self.client.get(HEALTHZ_URL)
+        self.assertEqual(list(resp.data.keys()), ["status"])
+
+
+# --- Issue #104: which release is actually running ----------------------------
+
+VERSION_URL = "/api/version/"
+
+
+class VersionTests(APITestCase):
+    """The staff-only "what is this box actually running?" endpoint.
+
+    It exists because the box once served six-day-old code for days while
+    ``healthz`` returned 200 and autodeploy logged success — with no way to see
+    the running version short of SSH.
+    """
+
+    def test_reports_the_version_baked_into_the_image(self):
+        staff = make_user("maintainer@example.com", is_staff=True)
+        self.client.force_authenticate(staff)
+        with self.settings(TIMELINE_VERSION="v0.15.0"):
+            resp = self.client.get(VERSION_URL)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["version"], "v0.15.0")
+
+    def test_defaults_to_dev_when_no_release_tag_was_baked_in(self):
+        # A local `docker compose up` builds from a working tree with no release
+        # tag; reporting "dev" is honest, and stops a dev box being mistaken for
+        # a release.
+        staff = make_user("devbox@example.com", is_staff=True)
+        self.client.force_authenticate(staff)
+        resp = self.client.get(VERSION_URL)
+        self.assertEqual(resp.data["version"], "dev")
+
+    def test_non_staff_member_is_denied(self):
+        # An ordinary member has no business knowing the deployment's version,
+        # and the repo is public — the tag maps straight to known-fixed bugs.
+        self.client.force_authenticate(make_user("member@example.com"))
+        resp = self.client.get(VERSION_URL)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_anonymous_is_denied(self):
+        resp = self.client.get(VERSION_URL)
+        self.assertIn(
+            resp.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
+        )
+
 
 # --- Phase 7: content reports (takedown path) ---------------------------------
 
