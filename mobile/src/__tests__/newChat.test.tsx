@@ -5,8 +5,9 @@
  * What's worth pinning: one selection is a 1:1 (`openConversation`,
  * `{ user_id }`) and two is a group (`createGroupChat`, `{ participant_ids }`);
  * creating replaces the picker with the new thread. The name field is only
- * offered at two-plus, and cleared on the way down, so a title can never turn a
- * 1:1 into a two-person group behind your back (#156). In add-people mode
+ * offered at two-plus, and a name left behind by an untick is ignored, so a
+ * title can never turn a 1:1 into a two-person group behind your back (#156).
+ * In add-people mode
  * (`?addTo=`) Create instead adds the selected people to that chat and returns
  * to it, with no title field.
  */
@@ -153,7 +154,7 @@ it('offers no name field until a second person is ticked (#156)', async () => {
   expect(screen.getByLabelText('Chat name')).toBeTruthy();
 });
 
-it('drops a name typed at two selections when one is unticked (#156)', async () => {
+it('ignores a name typed at two selections once one is unticked (#156)', async () => {
   serve();
   await renderScreen();
 
@@ -161,8 +162,8 @@ it('drops a name typed at two selections when one is unticked (#156)', async () 
   await fireEvent.press(screen.getByLabelText('Grace Hopper'));
   await fireEvent.changeText(screen.getByLabelText('Chat name'), 'Book club');
 
-  // Untick back to one: the name goes with the field, so what's left is a
-  // plain 1:1 rather than a titled two-person group hiding behind the UI.
+  // Untick back to one: the name goes off screen with the field, and off the
+  // request with it — a plain 1:1, not a titled two-person group.
   await fireEvent.press(screen.getByLabelText('Grace Hopper'));
   expect(screen.queryByLabelText('Chat name')).toBeNull();
 
@@ -174,6 +175,23 @@ it('drops a name typed at two selections when one is unticked (#156)', async () 
       String(url).endsWith('/api/conversations/') && init?.method === 'POST'
   );
   expect(bodyOf(post as [string, { body?: string }])).toEqual({ user_id: 2 });
+});
+
+it('gives the name back if a second person is re-ticked (#156)', async () => {
+  // The title is read at send time rather than cleared on untick, so a mis-tap
+  // doesn't silently bin what you typed. It's visible again the moment it can
+  // be used, which is what keeps "on screen" and "sent" the same thing.
+  serve();
+  await renderScreen();
+
+  await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+  await fireEvent.press(screen.getByLabelText('Grace Hopper'));
+  await fireEvent.changeText(screen.getByLabelText('Chat name'), 'Book club');
+
+  await fireEvent.press(screen.getByLabelText('Grace Hopper'));
+  await fireEvent.press(screen.getByLabelText('Grace Hopper'));
+
+  expect(screen.getByLabelText('Chat name').props.value).toBe('Book club');
 });
 
 it('a name on two selections still names the group (#156)', async () => {

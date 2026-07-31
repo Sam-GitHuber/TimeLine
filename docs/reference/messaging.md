@@ -1098,8 +1098,11 @@ info → new-message:
 - **New chat** — a multi-select connection picker → 1:1 or group chat. Launched
   from a Group page it's scoped to that group (pool = group members ∩ your
   connections). **The optional name field only appears once two people are
-  ticked, and is cleared if you untick back to one** (#156, both clients): the
-  title is what *makes* a chat a group — `_create_group` writes `kind=GROUP` —
+  ticked, and a name left behind by an untick is ignored rather than sent**
+  (#156, both clients — the title is read on the group branch of the create
+  mutation, not cleared on untick, so a mis-tap doesn't bin your typing and the
+  name is visible again the moment it can be used): the title is what *makes* a
+  chat a group — `_create_group` writes `kind=GROUP` —
   so naming a single selection used to hand you a two-person group in place of
   the pair's direct thread. That's not a cosmetic difference. It sits outside
   `unique_conversation_pair`, so you can make any number of them while the

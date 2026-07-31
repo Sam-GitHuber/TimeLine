@@ -10,9 +10,10 @@ import { useConnections } from "../hooks.js";
 // title, and hit Create. One connection is a 1:1 (get-or-create, same endpoint
 // the old single-tap flow used); two or more makes a group chat. The title is
 // what *makes* a chat a group, so the name field is only offered once two
-// people are ticked — see `toggle`. Reuses `useConnections` (the same
-// paged/filtered ["users"] source the group-invite picker uses) so this can't
-// drift from it on paging or the connection filter.
+// people are ticked, and a name left over from an untick is ignored rather than
+// sent — see `isGroup` and the `create` mutation. Reuses `useConnections` (the
+// same paged/filtered ["users"] source the group-invite picker uses) so this
+// can't drift from it on paging or the connection filter.
 //
 // `prefill` narrows the list to a specific group's members and scopes the
 // resulting chat to it — set when this view is opened from a group's "start a
@@ -33,18 +34,16 @@ export default function NewChatPicker({ prefill }) {
     : filtered;
 
   function toggle(id) {
-    const next = new Set(selected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelected(next);
-    // A name typed at two selections must not survive an untick back to one:
-    // the field is hidden below two, and a hidden title would silently post
-    // `createGroupChat` — giving you a two-person *group* where you asked for a
-    // 1:1, off the pair's direct thread and outside `unique_conversation_pair`.
-    // Clearing on the way down keeps what's on screen the same as what gets
-    // sent.
-    if (next.size < 2) setTitle("");
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
+
+  // Only a group has a name, so the field is only offered at two-plus.
+  const isGroup = selected.size > 1;
 
   const addToConversationId = prefill?.addToConversationId ?? null;
 
@@ -54,15 +53,20 @@ export default function NewChatPicker({ prefill }) {
       if (addToConversationId) {
         return api.addParticipants(addToConversationId, ids);
       }
-      const label = title.trim();
-      // One person is a 1:1; two or more is a group. `label` can only be
-      // non-empty at two-plus, since the name field isn't offered below that.
-      if (ids.length === 1 && !label) {
+      // One person is always a 1:1 — the direct thread the pair already share.
+      // A name can only be typed at two-plus (`isGroup`), and one abandoned by
+      // an untick is ignored rather than quietly making this `createGroupChat`:
+      // that hands you a two-person *group*, which sits off the pair's direct
+      // thread and outside `unique_conversation_pair`. Reading the title only
+      // on the group path means what's on screen is always what gets sent, and
+      // an abandoned name is still there — visible — if you re-tick a second
+      // person.
+      if (ids.length === 1) {
         return api.openConversation(ids[0]);
       }
       return api.createGroupChat({
         participantIds: ids,
-        title: label,
+        title: title.trim(),
         groupId: prefill?.groupId ?? null,
       });
     },
@@ -152,7 +156,7 @@ export default function NewChatPicker({ prefill }) {
       </div>
 
       <div className="border-t border-line px-3 py-3">
-        {!addToConversationId && selected.size > 1 && (
+        {!addToConversationId && isGroup && (
           <input
             type="text"
             value={title}

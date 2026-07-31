@@ -448,7 +448,7 @@ describe("Messages drawer — new chat", () => {
     expect(chatNameField()).toBeInTheDocument();
   });
 
-  it("drops a name typed at two checks when one is unchecked", async () => {
+  it("ignores a name typed at two checks once one is unchecked", async () => {
     const user = userEvent.setup();
     api.getConversations.mockResolvedValue(page([]));
     api.openConversation.mockResolvedValue({ id: 7 });
@@ -458,8 +458,8 @@ describe("Messages drawer — new chat", () => {
     await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
     await user.type(chatNameField(), "Book club");
 
-    // Back down to one: the name goes with the field, so what's left is a plain
-    // 1:1 rather than a titled two-person group hiding behind the UI.
+    // Back down to one: the name goes off screen with the field, and off the
+    // request with it — a plain 1:1, not a titled two-person group.
     await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
     expect(chatNameField()).toBeNull();
 
@@ -467,6 +467,25 @@ describe("Messages drawer — new chat", () => {
 
     await waitFor(() => expect(api.openConversation).toHaveBeenCalledWith(2));
     expect(api.createGroupChat).not.toHaveBeenCalled();
+  });
+
+  it("gives the name back if a second connection is re-checked", async () => {
+    // The title is read at send time rather than cleared on untick, so a
+    // mis-tap doesn't silently bin what you typed. It's visible again the
+    // moment it can be used, which is what keeps "on screen" and "sent" the
+    // same thing.
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+
+    await openPicker(user);
+    await user.click(await screen.findByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.type(chatNameField(), "Book club");
+
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+
+    expect(chatNameField()).toHaveValue("Book club");
   });
 
   it("keeps the name on a group of two", async () => {
