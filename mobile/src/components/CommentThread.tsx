@@ -423,7 +423,21 @@ function CommentNode({
     openMenu({
       title: 'Comment options',
       items: [
-        { label: 'Edit comment', onPress: () => setEditing(true) },
+        {
+          label: 'Edit comment',
+          onPress: () => {
+            setEditing(true);
+            // **One write box per comment**, and on Android that's a
+            // correctness rule, not tidiness: `useAndroidBack` is registered
+            // per dismissible state and React Native runs the most recently
+            // registered handler first, so with a reply box *and* an editor
+            // open on the same node, which one hardware back closes is decided
+            // by the order you happened to open them. Closing the other makes
+            // the question unaskable — the shape #168 settled by giving one
+            // screen one deliberate priority rather than racing handlers.
+            setShowReply(false);
+          },
+        },
         { label: 'Delete comment', destructive: true, onPress: confirmDelete },
       ],
     });
@@ -521,6 +535,8 @@ function CommentNode({
             // Engaging with a sub-thread should reveal it — for context, and so
             // the reply you're about to write lands somewhere visible.
             setCollapsed(false);
+            // One write box per comment — see the ⋯ menu's Edit.
+            setEditing(false);
           }}
           accessibilityRole="button"
           hitSlop={6}
@@ -780,6 +796,11 @@ function CommentEditor({
   const canSave = trimmed.length > 0 && !isPending;
 
   function save() {
+    // Read the same `canSave` the button's `disabled` reads, so the two can't
+    // disagree — the house rule from #164 (the message composer) and #146
+    // (`PostEditModal`). The button already blocks this; a gate that lives only
+    // on a prop is one refactor away from not existing.
+    if (!canSave) return;
     // An unchanged Save is a plain close: the server already refuses to stamp
     // `edited_at` on a no-op, so nothing visible differs, but on a phone this
     // saves a round-trip and a refetch. Same rule the post and message editors

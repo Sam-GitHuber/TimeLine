@@ -1866,13 +1866,31 @@ class CommentDetailView(APIView):
                 comment.text = ""
                 comment.deleted_at = timezone.now()
                 comment.save(update_fields=["text", "deleted_at"])
-                # A tombstone keeps the thread's shape and nothing else. These
-                # three are exactly what the hard-delete branch's CASCADE takes,
-                # so the two paths differ in one thing only: whether the row
-                # survives to hold other people's replies up.
+                # A tombstone keeps the thread's shape and nothing else.
+                # Reactions go because a blank placeholder can't carry them and
+                # can't take new ones; notifications go because each one is a
+                # deep-link, and a link into an empty slot is exactly the
+                # dangling deep-link the activity centre promises never to
+                # render (see notifications.md).
                 comment.reactions.all().delete()
                 comment.notifications.all().delete()
-                comment.reports.all().delete()
+                # 🔒 **Reports deliberately survive.** They were cleared here in
+                # an earlier draft, for symmetry with the CASCADE the hard branch
+                # gets — which would have handed a reported author a way to empty
+                # the maintainer's queue on demand: reply to your own comment,
+                # delete it, and the flag against you is gone before anyone read
+                # it. That's the evasion ``Report.message_text`` exists to close
+                # for messages, and it doesn't need a snapshot here to be wrong.
+                #
+                # A report is not a deep-link, so nothing dangles: the row is
+                # still there in the admin, and "this was reported, and then its
+                # author pulled it" is a fact worth keeping — the text is gone,
+                # but the pattern of a repeat offender is the part a single
+                # comment's wording was never going to tell you anyway.
+                #
+                # The *hard* branch still cascades its reports away, matching a
+                # deleted post since #62. That asymmetry is the honest one: there
+                # the content is genuinely gone with nothing left to point at.
             else:
                 comment.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

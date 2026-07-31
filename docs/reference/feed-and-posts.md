@@ -192,13 +192,22 @@ delete has one outcome for everybody. Either way the endpoint returns **204** �
 which happened is a property of the thread, not of the request — and both clients
 refetch rather than guess.
 
-**A tombstone is as gone as a deleted row in every respect except the shape it
-holds up.** The delete clears its reactions, notifications and reports by hand:
-that's exactly what the hard-delete branch's CASCADE takes, and letting the two
-paths differ would mean a deep-link into a blank placeholder or a moderation queue
-item pointing at nothing. Nothing can be added to one either — replying, reacting
-and reporting a deleted comment are all refused (400), the same rule a deleted
-message follows.
+**A tombstone carries nothing but the shape it holds up.** The delete clears its
+**reactions** (a blank placeholder can't carry them and can't take new ones) and
+its **notifications** (each is a deep-link, and a link into an empty slot is the
+dangling deep-link [notifications.md](notifications.md) promises never to render).
+Nothing can be added to one either — replying, reacting and reporting a deleted
+comment are all refused (400), the same rule a deleted message follows.
+
+🔒 **Its reports deliberately survive**, and that's the one place the two delete
+paths differ on purpose. Clearing them would hand a reported author a way to empty
+the maintainer's queue on demand: reply to your own comment, delete it, and the
+flag is gone before anyone read it — the evasion `Report.message_text` exists to
+close for messages. A report isn't a deep-link, so nothing dangles: the row is
+still in the admin, and "this was reported, then its author pulled it" is signal
+worth keeping. The **hard** branch still cascades its reports away, matching a
+deleted post since #62 — there the content really is gone with nothing left to
+point at.
 
 **A tombstone with no replies *this viewer* can see is hidden from them**, in
 `build_visible_comment_tree`. It's carrying nothing for them and an empty

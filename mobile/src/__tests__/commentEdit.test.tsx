@@ -206,6 +206,22 @@ describe('saving an edit', () => {
     expect(screen.getByText('Comment 5')).toBeTruthy();
   });
 
+  it('closes the reply box, so hardware back has one thing to close', async () => {
+    // `useAndroidBack` registers per dismissible state and RN runs the newest
+    // handler first, so a reply box *and* an editor open on the same node makes
+    // "what does back close?" a matter of which you opened last.
+    await renderThread([comment({ id: 5 })]);
+
+    await act(async () => fireEvent.press(screen.getByText('Reply')));
+    expect(screen.getByLabelText('Reply to Me Myself…')).toBeTruthy();
+
+    await fireEvent.press(screen.getByLabelText('Comment options'));
+    await act(async () => pickMenuOption('Edit comment'));
+
+    expect(screen.queryByLabelText('Reply to Me Myself…')).toBeNull();
+    expect(screen.getByLabelText('Edit comment text')).toBeTruthy();
+  });
+
   it('won’t save an emptied comment — that’s a delete', async () => {
     await openEditor([comment({ id: 5 })]);
 

@@ -6295,9 +6295,11 @@ class EditDeleteCommentTests(APITestCase):
         self.assertIsNone(self.comment.edited_at)
         self.assertTrue(Comment.objects.filter(pk=reply.pk).exists())
 
-    def test_tombstone_clears_reactions_notifications_and_reports(self):
-        # A tombstone holds the thread's shape and nothing else — everything a
-        # hard delete's CASCADE would have taken goes with it.
+    def test_tombstone_clears_reactions_and_notifications_but_keeps_reports(self):
+        # A tombstone can't carry reactions and mustn't be deep-linked to. Its
+        # **reports** are the exception, and the important one: clearing them
+        # would let a reported author empty the maintainer's queue on demand —
+        # reply to your own comment, delete it, flag gone before anyone read it.
         Comment.objects.create(
             post=self.post, author=self.author, parent=self.comment, text="ta"
         )
@@ -6317,7 +6319,23 @@ class EditDeleteCommentTests(APITestCase):
         self.client.delete(comment_detail_url(self.comment))
         self.assertFalse(Reaction.objects.filter(pk=reaction.pk).exists())
         self.assertFalse(Notification.objects.filter(pk=note.pk).exists())
-        self.assertFalse(Report.objects.filter(pk=report.pk).exists())
+        self.assertTrue(Report.objects.filter(pk=report.pk).exists())
+
+    def test_a_reported_author_cannot_clear_the_report_by_deleting(self):
+        # The evasion the rule above exists to block, spelled out: the author
+        # arranges a reply so the delete goes soft, deletes, and the flag
+        # against them must still be sitting in the maintainer's queue.
+        Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, text="ta"
+        )
+        report = Report.objects.create(
+            reporter=self.author, comment=self.comment, reason="rude"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.delete(comment_detail_url(self.comment))
+        report.refresh_from_db()
+        self.assertEqual(report.status, Report.Status.OPEN)
+        self.assertEqual(report.comment_id, self.comment.pk)
 
     def test_second_delete_is_a_no_op(self):
         Comment.objects.create(

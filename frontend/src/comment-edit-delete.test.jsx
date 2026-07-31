@@ -118,6 +118,17 @@ describe("editing your own comment", () => {
     expect(screen.getByText("original comment")).toBeInTheDocument();
   });
 
+  it("closes the reply box, so a comment never has two write boxes open", async () => {
+    const user = userEvent.setup();
+    await renderThread([comment()]);
+
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+    expect(screen.getByPlaceholderText(/Reply to You/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.queryByPlaceholderText(/Reply to You/)).not.toBeInTheDocument();
+  });
+
   it("won't save an emptied comment — that's a delete", async () => {
     const user = userEvent.setup();
     await renderThread([comment()]);
@@ -154,6 +165,28 @@ describe("deleting your own comment", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(api.deleteComment).toHaveBeenCalledWith(5));
+  });
+
+  it("closes the confirm once the delete lands, even on a tombstone", async () => {
+    // A comment with replies survives its own delete as a tombstone, so this
+    // node stays mounted through the refetch — unlike a post's card, which
+    // unmounts and takes its dialog with it. Left open, the dialog is stuck:
+    // `pending` never clears again, and that disables Escape and the backdrop.
+    const user = userEvent.setup();
+    api.deleteComment.mockResolvedValue(null);
+    await renderThread([
+      comment({ replies: [someoneElse({ id: 6, text: "a reply" })] }),
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete comment" });
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Delete comment" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("cancelling the confirm deletes nothing", async () => {

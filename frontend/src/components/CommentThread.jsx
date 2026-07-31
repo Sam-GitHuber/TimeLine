@@ -185,6 +185,13 @@ function CommentNode({
       queryClient.invalidateQueries({ queryKey: ["userPosts"] });
       queryClient.invalidateQueries({ queryKey: ["groupPosts"] });
       queryClient.invalidateQueries({ queryKey: ["post", String(postId)] });
+      // **Close the dialog explicitly**, unlike `PostMenu`, which can leave it
+      // to the card unmounting. A comment that had replies survives its own
+      // delete as a tombstone, so this node stays mounted through the refetch —
+      // and a confirm left open on a `pending` that never clears again is a
+      // modal with Escape and the backdrop both disabled. Closing here also
+      // retires the button, which is what `pending` was guarding against.
+      setConfirmingDelete(false);
     },
   });
   // Replies start collapsed — unless this node is an ancestor of a deep-linked
@@ -291,6 +298,8 @@ function CommentNode({
                     // Engaging with a sub-thread should show it (for context, and
                     // so the reply you're about to add is visible).
                     setCollapsed(false);
+                    // See Edit below: one write box per comment.
+                    setEditing(false);
                   }}
                   className="transition hover:text-accent-deep"
                 >
@@ -306,7 +315,15 @@ function CommentNode({
               {isOwner && !editing && (
                 <button
                   type="button"
-                  onClick={() => setEditing(true)}
+                  onClick={() => {
+                    setEditing(true);
+                    // One write box per comment. Editing and replying both put
+                    // a textarea on the same node, and two open at once is a
+                    // muddle about which one Cancel belongs to — worse on the
+                    // phone, where hardware back would close whichever happened
+                    // to be opened last.
+                    setShowReply(false);
+                  }}
                   className="transition hover:text-accent-deep"
                 >
                   Edit
