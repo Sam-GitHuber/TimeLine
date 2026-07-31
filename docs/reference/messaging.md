@@ -138,6 +138,22 @@ edit is not news, and a correction buzzing everyone's phone a second time is how
 people end up turning notifications off. Nothing had to change for privacy
 either, since [push bodies never quoted message text](#push-notifications).
 
+**An edit and a send don't ask the same question, and both clients have to keep
+them apart.** A send needs text *or* a queued photo. An edit is a `PATCH` of text
+alone, so what's queued in the composer is irrelevant to it: Save comes alive on
+words, *or* on the edited message carrying [a photo of its own](#photo-messages)
+— because a caption may be edited down to nothing and still leave a message,
+which is exactly what `MessageSerializer.validate`'s `has_attachments` allows.
+Conflating the two was a real bug on both clients (web #163, app #164): one guard
+read the composer's attachment for both modes, which let an emptied edit fire a
+`PATCH` the server 400s, *and* blocked the one edit — clearing a caption — the
+server permits. One `canSubmit` per composer answers each mode's own question,
+and the button's `disabled` and the submit handler both read it so they can't
+disagree. A queued photo is **hidden while editing rather than dropped**: it
+can't ride along on the `PATCH`, but losing it because someone stopped to fix a
+typo is the betrayal the stashed draft exists to prevent, so it comes back with
+the draft when the edit ends.
+
 ## Reacting to a message
 
 Added in Phase 9b M2. The model, the emoji validator and the endpoint shape are
