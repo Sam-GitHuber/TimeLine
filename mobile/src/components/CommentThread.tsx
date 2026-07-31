@@ -22,6 +22,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   StyleSheet,
   Text,
@@ -32,7 +33,9 @@ import {
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { useActionMenu } from './ActionMenu';
 import { Avatar } from './Avatar';
+import { KebabIcon } from './icons';
 import { ReactionBar } from './ReactionBar';
 import { ReportModal } from './ReportModal';
 import { SPINE_CENTRE } from './timeline';
@@ -337,8 +340,11 @@ function CommentNode({
   isLast: boolean;
 }) {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
+  const [editing, setEditing] = useState(false);
+  useAndroidBack(editing, () => setEditing(false));
   // Android back closes the reply box rather than the post — it's the only way
   // to abandon a reply without losing the post you were reading (#168).
   //
@@ -348,10 +354,100 @@ function CommentNode({
   // doesn't need a single owner for the whole tree.
   useAndroidBack(showReply, () => setShowReply(false));
   const [reporting, setReporting] = useState(false);
-  // Reporting yourself is pointless, so the control is hidden on your own
-  // comment — the same owner check the web's inline `ReportButton` makes. The
-  // backend refuses a self-report regardless.
-  const canReport = user != null && user.pk !== comment.author.id;
+  // A tombstone (issue #128): the author deleted it, and it only survives
+  // because replies hang off it. Everything below keys off this — it offers no
+  // affordance at all except the toggle into those replies.
+  const isDeleted = comment.deleted_at != null;
+  // Reporting yourself is pointless, so the menu offers Edit/Delete instead on
+  // your own comment. The backend refuses a self-report regardless.
+  const isOwner = user != null && user.pk === comment.author.id;
+  // One ⋯ for everybody, holding whichever pair applies — a tombstone gets none.
+  const hasMenu = !isDeleted && user != null;
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteComment(comment.id),
+    onSuccess: () => {
+      // Refetch rather than splice: only the server knows whether the row went
+      // or turned into a tombstone. The post's `comment_count` moved too, and
+      // that rides the post payload wherever it's shown.
+      for (const key of [
+        ['comments', postId],
+        ['feed'],
+        ['userPosts'],
+        ['groupPosts'],
+        ['post', String(postId)],
+      ]) {
+        queryClient.invalidateQueries({ queryKey: key });
+      }
+    },
+    onError: (err) => {
+      Alert.alert(
+        'Couldn’t delete',
+        err instanceof Error ? err.message : 'Something went wrong.'
+      );
+    },
+  });
+
+  function confirmDelete() {
+    Alert.alert(
+      'Delete comment?',
+      // What actually happens depends on whether anything hangs off it, so say
+      // which. The count is the replies *you* can see, which is the honest
+      // promise to make: a reply you can't see keeps the tombstone alive
+      // server-side, but from where you're standing the comment simply goes.
+      replies.length > 0
+        ? 'This can’t be undone. The replies underneath will stay, with a note where your comment was.'
+        : 'This can’t be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => deleteMutation.mutate(),
+        },
+      ]
+    );
+  }
+
+  const { openMenu, menu } = useActionMenu();
+
+  // **A comment's controls all live behind the ⋯**, exactly as a post's do and
+  // exactly as the web's now do: your own offers Edit and Delete, someone else's
+  // offers Report. Keeping Report inline while its two counterparts sat in a menu
+  // made one control look like two different kinds of thing depending on whose
+  // comment you were looking at — and it left a phone row of Reply + Report + a
+  // replies toggle, indented once per level, wrapping onto a second line at
+  // depth. Edit sits above Delete so the thumb heading for the safe action never
+  // crosses the destructive one.
+  const showMenu = () =>
+    openMenu({
+      title: 'Comment options',
+      items: isOwner
+        ? [
+            {
+              label: 'Edit comment',
+              onPress: () => {
+                setEditing(true);
+                // **One write box per comment**, and on Android that's a
+                // correctness rule, not tidiness: `useAndroidBack` is registered
+                // per dismissible state and React Native runs the most recently
+                // registered handler first, so with a reply box *and* an editor
+                // open on the same node, which one hardware back closes is
+                // decided by the order you happened to open them. Closing the
+                // other makes the question unaskable — the shape #168 settled by
+                // giving one screen one deliberate priority rather than racing
+                // handlers.
+                setShowReply(false);
+              },
+            },
+            {
+              label: 'Delete comment',
+              destructive: true,
+              onPress: confirmDelete,
+            },
+          ]
+        : [{ label: 'Report comment', onPress: () => setReporting(true) }],
+    });
   const [collapsed, setCollapsed] = useState(
     replies.length > 0 && !(expandIds?.has(comment.id) ?? false)
   );
@@ -437,6 +533,75 @@ function CommentNode({
   const showReplies = replies.length > 0 && !collapsed;
   const childIndent = indentFor(depth);
 
+  const actionRow = (
+    <View style={styles.actions}>
+      {!isDeleted ? (
+        <Pressable
+          onPress={() => {
+            setShowReply((open) => !open);
+            // Engaging with a sub-thread should reveal it — for context, and so
+            // the reply you're about to write lands somewhere visible.
+            setCollapsed(false);
+            // One write box per comment — see the ⋯ menu's Edit.
+            setEditing(false);
+          }}
+          accessibilityRole="button"
+          hitSlop={6}
+        >
+          <Text style={styles.action}>Reply</Text>
+        </Pressable>
+      ) : null}
+
+      {hasMenu ? (
+        <Pressable
+          onPress={showMenu}
+          accessibilityRole="button"
+          accessibilityLabel="Comment options"
+          hitSlop={8}
+        >
+          <KebabIcon color={colors.inkFaint} />
+        </Pressable>
+      ) : null}
+
+      {/* Kept even on a tombstone — the replies underneath are the only reason
+          it's still here, so hiding the way in would strand them. */}
+      {replies.length > 0 ? (
+        <Pressable
+          onPress={() => setCollapsed((value) => !value)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: !collapsed }}
+          hitSlop={6}
+        >
+          <Text style={styles.toggle}>
+            {collapsed
+              ? `Show ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`
+              : 'Hide replies'}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+
+  // Reply and the replies toggle are handed to `ReactionBar` rather than
+  // rendered as a row of their own — exactly as `PostCard` hands over its
+  // comments link. On a comment with no reactions the reaction row is just the
+  // add button, so these share that line instead of spending a second one; once
+  // there are chips to read they drop below. Only `ReactionBar` knows which it
+  // is, because it owns the reaction state after a tap.
+  //
+  // A tombstone skips it entirely: its reactions were cleared with the delete
+  // and it can't take new ones, so an add button there would offer a reaction to
+  // nothing.
+  const actions = isDeleted ? (
+    actionRow
+  ) : (
+    <ReactionBar
+      commentId={comment.id}
+      reactions={comment.reactions}
+      trailing={actionRow}
+    />
+  );
+
   return (
     <View
       testID={`comment-${comment.id}`}
@@ -490,9 +655,27 @@ function CommentNode({
               <Text style={styles.time}>
                 {formatRelativeTime(comment.created_at)}
               </Text>
+              {/* The transparency floor, same as a post's (`PostCard`): the
+                  marker alone, there being no hover on a phone to carry the
+                  exact time. Silently changing something others have already
+                  read is the trust problem it exists to close. */}
+              {comment.edited_at && !isDeleted ? (
+                <Text style={styles.edited}>· edited</Text>
+              ) : null}
             </View>
 
-            <Text style={styles.text}>{comment.text}</Text>
+            {isDeleted ? (
+              <Text style={[styles.text, styles.deleted]}>Comment deleted</Text>
+            ) : editing ? (
+              <CommentEditor
+                commentId={comment.id}
+                postId={postId}
+                initialText={comment.text}
+                onDone={() => setEditing(false)}
+              />
+            ) : (
+              <Text style={styles.text}>{comment.text}</Text>
+            )}
 
             {/* Reply and the replies toggle are handed to `ReactionBar` rather
                 than rendered as a row of their own — exactly as `PostCard`
@@ -501,55 +684,9 @@ function CommentNode({
                 line instead of spending a second one; once there are chips to
                 read they drop below. Only `ReactionBar` knows which it is,
                 because it owns the reaction state after a tap. */}
-            <ReactionBar
-              commentId={comment.id}
-              reactions={comment.reactions}
-              trailing={
-                <View style={styles.actions}>
-                  <Pressable
-                    onPress={() => {
-                      setShowReply((open) => !open);
-                      // Engaging with a sub-thread should reveal it — for
-                      // context, and so the reply you're about to write lands
-                      // somewhere visible.
-                      setCollapsed(false);
-                    }}
-                    accessibilityRole="button"
-                    hitSlop={6}
-                  >
-                    <Text style={styles.action}>Reply</Text>
-                  </Pressable>
+            {actions}
 
-                  {canReport ? (
-                    <Pressable
-                      onPress={() => setReporting(true)}
-                      accessibilityRole="button"
-                      accessibilityLabel="Report comment"
-                      hitSlop={6}
-                    >
-                      <Text style={styles.action}>Report</Text>
-                    </Pressable>
-                  ) : null}
-
-                  {replies.length > 0 ? (
-                    <Pressable
-                      onPress={() => setCollapsed((value) => !value)}
-                      accessibilityRole="button"
-                      accessibilityState={{ expanded: !collapsed }}
-                      hitSlop={6}
-                    >
-                      <Text style={styles.toggle}>
-                        {collapsed
-                          ? `Show ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`
-                          : 'Hide replies'}
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              }
-            />
-
-            {showReply ? (
+            {showReply && !isDeleted ? (
               <CommentComposer
                 postId={postId}
                 parentId={comment.id}
@@ -558,6 +695,8 @@ function CommentNode({
                 onDone={() => setShowReply(false)}
               />
             ) : null}
+
+            {menu}
 
             {reporting ? (
               <ReportModal
@@ -605,6 +744,110 @@ function CommentNode({
           ))}
         </View>
       ) : null}
+    </View>
+  );
+}
+
+/**
+ * Edit your own comment in place (issue #128).
+ *
+ * **Inline, not a modal sheet — deliberately the opposite of `PostEditModal`.**
+ * That sheet exists because a post card lives in a virtualised `FlatList`, where
+ * a row scrolled out of the window unmounts and takes a half-typed edit with it.
+ * A comment thread has neither problem: it renders inside the post screen's
+ * `KeyboardAwareScroll`, nothing unmounts, and the reply composer is already an
+ * inline `TextInput` in exactly this spot. A sheet here would be a second
+ * pattern for the same job, one step away from the first.
+ *
+ * Android back closes it (`useAndroidBack` in the node above), so an edit can be
+ * abandoned without leaving the post — the rule the reply box already follows.
+ */
+function CommentEditor({
+  commentId,
+  postId,
+  initialText,
+  onDone,
+}: {
+  commentId: number;
+  postId: number;
+  initialText: string;
+  onDone: () => void;
+}) {
+  const [text, setText] = useState(initialText);
+  const queryClient = useQueryClient();
+
+  const { mutate, isPending, error } = useMutation({
+    mutationFn: (value: string) => api.updateComment(commentId, value),
+    onSuccess: () => {
+      // Only the thread changes — an edit can't move a comment count, so the
+      // post lists are left alone (unlike delete).
+      queryClient.invalidateQueries({ queryKey: ['comments', postId] });
+      onDone();
+    },
+  });
+
+  const trimmed = text.trim();
+  // Emptying a comment is a delete, and delete is its own action — the server
+  // says the same, so a disabled Save can never 400.
+  const canSave = trimmed.length > 0 && !isPending;
+
+  function save() {
+    // Read the same `canSave` the button's `disabled` reads, so the two can't
+    // disagree — the house rule from #164 (the message composer) and #146
+    // (`PostEditModal`). The button already blocks this; a gate that lives only
+    // on a prop is one refactor away from not existing.
+    if (!canSave) return;
+    // An unchanged Save is a plain close: the server already refuses to stamp
+    // `edited_at` on a no-op, so nothing visible differs, but on a phone this
+    // saves a round-trip and a refetch. Same rule the post and message editors
+    // follow.
+    if (trimmed === initialText.trim()) {
+      onDone();
+      return;
+    }
+    mutate(trimmed);
+  }
+
+  return (
+    <View style={styles.composer}>
+      <TextInput
+        style={styles.input}
+        value={text}
+        onChangeText={setText}
+        accessibilityLabel="Edit comment text"
+        multiline
+        autoFocus
+        editable={!isPending}
+      />
+
+      <Text style={styles.note}>Edited comments are marked “edited”.</Text>
+
+      {error ? (
+        <Text style={styles.error} accessibilityRole="alert">
+          {error instanceof Error ? error.message : 'Couldn’t save. Try again.'}
+        </Text>
+      ) : null}
+
+      <View style={styles.composerActions}>
+        <Pressable onPress={onDone} accessibilityRole="button" hitSlop={6}>
+          <Text style={styles.cancel}>Cancel</Text>
+        </Pressable>
+        <Pressable
+          onPress={save}
+          disabled={!canSave}
+          style={({ pressed }) => [
+            styles.submit,
+            pressed && styles.submitPressed,
+            !canSave && styles.submitDisabled,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="Save comment"
+        >
+          <Text style={styles.submitText}>
+            {isPending ? 'Saving…' : 'Save'}
+          </Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -779,9 +1022,12 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   time: { fontSize: 11, color: colors.inkFaint, lineHeight: BEAD },
+  edited: { fontSize: 11, color: colors.inkFaint, lineHeight: BEAD },
   // Its own top margin now `content` has no gap — matching `PostCard`, where
   // the post's text sits the same distance under its header.
   text: { fontSize: 15, color: colors.ink, lineHeight: 21, marginTop: spacing.xs },
+  // A tombstone reads as an absence, not as something someone wrote.
+  deleted: { color: colors.inkFaint, fontStyle: 'italic' },
   actions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   action: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
   toggle: { fontSize: fontSize.sm, color: colors.accentDeep, fontWeight: '600' },
@@ -805,6 +1051,9 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   cancel: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  // The edit sheet's disclosure, worded and styled as `PostEditModal`'s is —
+  // you're told the marker is coming *before* you save, not only after.
+  note: { fontSize: fontSize.sm, color: colors.inkFaint },
   submit: {
     backgroundColor: colors.accent,
     borderRadius: radius.pill,

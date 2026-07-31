@@ -10,7 +10,7 @@ import Avatar from "../Avatar.jsx";
 import LoadMoreButton from "../LoadMoreButton.jsx";
 import { StrokeIcon, PanelHeader } from "../drawer-chrome.jsx";
 import PendingChatPanel from "../PendingChatPanel.jsx";
-import { ReportModal } from "../ReportButton.jsx";
+import { ReportModal } from "../ReportModal.jsx";
 import AvatarStack from "./AvatarStack.jsx";
 import DrawerMenu from "./DrawerMenu.jsx";
 import MentionSuggestions from "./MentionSuggestions.jsx";

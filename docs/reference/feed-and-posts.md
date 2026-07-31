@@ -85,8 +85,9 @@ clients offer the same three actions**, keyed off the same owner check
   **above** Delete and is styled plainly, so the finger heading for the safe
   action never passes over the destructive one.
 - **Someone else's post:** **Report** — the report control **moved off the footer
-  row into this menu**. (Comments still carry an inline `ReportButton`; only posts
-  moved.)
+  row into this menu**. Comments followed in #128, so a ⋯ with this same
+  owner/non-owner split is now the one shape on both surfaces and both clients;
+  the web's lives in `OverflowMenu.jsx`, shared by the two.
 
 **The editor's shape deliberately differs by client** (issue #146 — the app had
 no edit path at all until then, so a typo made on the phone could only be fixed
@@ -152,6 +153,107 @@ why the app's edit sheet says so before you save rather than only after.
   reliable way to open an old thread. `?comment=<id>` on the page scrolls to and
   highlights a specific comment (auto-expanding its collapsed ancestors), so
   "someone replied" lands you on the exact reply, even one deep in the tree.
+
+### Editing & deleting your own comment
+
+Comments were **create-and-report-only** until issue #128: a typo was permanent
+and a comment you regretted could only be removed by the maintainer, in the Django
+admin. `PATCH`/`DELETE /api/comments/<pk>/` (`CommentDetailView`) closes that, on
+both clients.
+
+**The permission shape is `PostDetailView`'s, deliberately identical**: the author
+may always edit or delete their own comment (the owner check runs *before* the
+visibility gate, so you can still remove a reply you've lost sight of by
+disconnecting from the author above it); a comment you can't see is a **404**; one
+you can see but don't own is a **403**. `PATCH` takes `{"text": ...}` only —
+`CommentEditSerializer` has no `parent` field precisely so a body can't re-parent
+a comment into a branch of the tree it was never in.
+
+`Comment.edited_at` works exactly as `Post.edited_at` does — null until the first
+edit, stamped explicitly (never `auto_now`), and **a no-op edit doesn't stamp it**,
+so the "· edited" marker only ever means a real change. **There is no edit window**,
+unlike a message's 15 minutes: a comment sits on a page anyone can re-read at
+leisure, so the honest disclosure is the marker, not a deadline — the window exists
+in chat because a message is read once, in passing.
+
+#### Delete is hard when it can be and soft when it must be
+
+`Comment.parent` cascades, so hard-deleting a comment with replies would take
+**other people's** replies down with it — which is not a thing your own delete
+should be able to do. So the outcome depends on the thread:
+
+- **No replies** → the row is deleted outright. The common case (a typo, a comment
+  you regret) leaves nothing behind.
+- **Has replies** → `text` is blanked and `deleted_at` stamped, leaving a
+  **tombstone**: the thread renders a quiet "Comment deleted" with the replies
+  still hanging off it.
+
+The choice is made on **all** replies, not the ones a given viewer can see, so one
+delete has one outcome for everybody. Either way the endpoint returns **204** —
+which happened is a property of the thread, not of the request — and both clients
+refetch rather than guess.
+
+**A tombstone carries nothing but the shape it holds up.** The delete clears its
+**reactions** (a blank placeholder can't carry them and can't take new ones) and
+its **notifications** (each is a deep-link, and a link into an empty slot is the
+dangling deep-link [notifications.md](notifications.md) promises never to render).
+Nothing can be added to one either — replying, reacting and reporting a deleted
+comment are all refused (400), the same rule a deleted message follows.
+
+🔒 **Its reports deliberately survive**, and that's the one place the two delete
+paths differ on purpose. Clearing them would hand a reported author a way to empty
+the maintainer's queue on demand: reply to your own comment, delete it, and the
+flag is gone before anyone read it — the evasion `Report.message_text` exists to
+close for messages. A report isn't a deep-link, so nothing dangles: the row is
+still in the admin, and "this was reported, then its author pulled it" is signal
+worth keeping. The **hard** branch still cascades its reports away, matching a
+deleted post since #62 — there the content really is gone with nothing left to
+point at.
+
+**A tombstone with no replies *this viewer* can see is hidden from them**, in
+`build_visible_comment_tree`. It's carrying nothing for them and an empty
+placeholder would be litter — and because the rule runs per viewer, the row left
+behind when the last visible reply is later deleted needs no sweeping, it simply
+stops rendering. A tombstone **counts toward `comment_count`** (it occupies a row
+in the thread) but is **never `new_comment_count`** (there's nothing to read, and
+badging it would send you to an empty slot).
+
+#### The two clients
+
+A comment's actions row is **`Reply · ⋯ · Show N replies`** on both, whoever is
+looking. The ⋯ carries **Edit** and **Delete** on your own comment and **Report**
+on someone else's — the shape a post header has had since #62, now drawn the same
+way one level down. Report used to sit *inline* here while its two counterparts
+went in a menu, which made one control look like two different kinds of thing
+depending on whose comment you were reading; #128 moved it in on both clients.
+Edit sits above Delete so the pointer heading for the safe action never crosses
+the destructive one.
+
+Both show the **"· edited"** marker next to the author line, and neither shows any
+affordance on a tombstone **except the replies toggle** — hiding that would strand
+the replies behind a row with no way in.
+
+The menu itself is shared code on each client: `OverflowMenu.jsx` on the web
+(portal, viewport flip, click-outside — lifted out of `PostMenu.jsx`, which had
+the only copy) and `useActionMenu` on the phone. So is the delete confirmation:
+`ConfirmDeleteDialog.jsx` on the web, `Alert` on the phone. Each takes its wording
+from the caller, because what a delete takes with it differs — a post's photos, a
+comment's replies — and a vague "this can't be undone" is the one thing the dialog
+exists to make specific.
+
+**The editors differ, and that part is deliberate.** The web flips the comment
+into an inline editor; so does the app, which is the *opposite* of `PostEditModal`
+and for exactly the reason that sheet exists. A post card lives in a virtualised
+`FlatList`, where a row scrolled out of the window unmounts and takes a half-typed
+edit with it. A comment thread renders inside the post screen's
+`KeyboardAwareScroll`, where nothing unmounts, right next to a reply composer that
+is already an inline `TextInput` — a sheet there would be a second pattern for the
+same job, one step away from the first.
+
+The app treats an **unchanged Save as a plain close** (no request), as it does for
+posts and messages; the web still sends the no-op PATCH. Both disable Save on an
+empty comment — a comment has no photo to fall back on, so emptying one is a
+delete, and delete is its own control.
 
 ### Comment counts next to "Comments" (issue #63)
 

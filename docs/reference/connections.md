@@ -51,11 +51,16 @@ A connection is stored as a **single** `Connection` row: `requester`, `requestee
 ## Comments (threaded, connection-pruned)
 
 Posts have a **threaded comment tree** — `Comment` model: `post`, `author`,
-`parent` (self-FK, null = top-level), `text`, `created_at`.
+`parent` (self-FK, null = top-level), `text`, `created_at`, plus `edited_at` /
+`deleted_at` (issue #128).
 
 - `POST /api/posts/<id>/comments/` adds a comment/reply on a post you can see
   (`author` from the session, never the body; optional `parent`).
 - `GET /api/posts/<id>/comments/` returns the **pruned, nested** visible tree.
+- `PATCH`/`DELETE /api/comments/<pk>/` edit or delete **your own** comment —
+  including the reply-preserving tombstone and the extra prune it adds to the tree
+  builder. That story lives in
+  [feed-and-posts.md](feed-and-posts.md#editing--deleting-your-own-comment).
 
 ### The connection boundary (the important bit)
 

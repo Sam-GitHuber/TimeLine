@@ -159,6 +159,17 @@ export type Comment = {
   parent: number | null;
   text: string;
   created_at: string;
+  /** When the author last edited it — `null` until the first edit (issue #128). */
+  edited_at: string | null;
+  /**
+   * When the author deleted it (issue #128) — `null` on a live comment.
+   *
+   * A deleted comment only reaches you at all when replies still hang off it:
+   * the server removes the row outright otherwise, and hides a tombstone whose
+   * replies *you* can't see. So one that arrives here is a placeholder with a
+   * blank `text`, kept so other people's replies aren't taken down with it.
+   */
+  deleted_at: string | null;
   replies: Comment[];
   reactions: Reaction[];
 };

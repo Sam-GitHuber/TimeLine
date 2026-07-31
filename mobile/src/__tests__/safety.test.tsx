@@ -6,7 +6,8 @@
  * behind a confirmation:
  *   - the post ⋯ menu reports someone else's post and deletes your own (with a
  *     confirm in between, and an owner-gated menu);
- *   - a comment's inline Report flags it, and is hidden on your own comment;
+ *   - a comment's ⋯ menu offers Report on someone else's, and Edit/Delete on
+ *     your own instead;
  *   - a *message* report (Phase 9b M0) posts `{ message: id }` and discloses that
  *     a copy of the message goes with it — the only route by which message text
  *     ever reaches the maintainer;
@@ -171,6 +172,8 @@ describe('comment Report', () => {
       parent: null,
       text: `Comment ${overrides.id}`,
       created_at: '2026-07-23T10:00:00Z',
+      edited_at: null,
+      deleted_at: null,
       replies: [],
       reactions: [],
       ...overrides,
@@ -190,7 +193,8 @@ describe('comment Report', () => {
     await renderWithClient(<CommentThread postId={7} />);
 
     await screen.findByText('Comment 8');
-    await fireEvent.press(screen.getByLabelText('Report comment'));
+    await fireEvent.press(screen.getByLabelText('Comment options'));
+    await act(async () => pickMenuOption('Report comment'));
     await fireEvent.press(screen.getByText('Send report'));
 
     await waitFor(() => expect(made(/\/api\/reports\/$/, 'POST')).toBe(true));
@@ -200,13 +204,15 @@ describe('comment Report', () => {
     });
   });
 
-  it('offers no Report on your own comment', async () => {
-    // Authored by the viewer (pk 1) → self-report is pointless, control hidden.
+  it('offers Edit/Delete, not Report, on your own comment', async () => {
+    // Authored by the viewer (pk 1) → self-report is pointless, so the same ⋯
+    // carries the owner's pair instead.
     serveComments([comment({ id: 9, author: { id: 1, display_name: 'Me Myself', avatar_thumb: null } })]);
     await renderWithClient(<CommentThread postId={7} />);
 
     await screen.findByText('Comment 9');
-    expect(screen.queryByLabelText('Report comment')).toBeNull();
+    await fireEvent.press(screen.getByLabelText('Comment options'));
+    expect(menuOptions()).toEqual(['Edit comment', 'Delete comment']);
   });
 });
 

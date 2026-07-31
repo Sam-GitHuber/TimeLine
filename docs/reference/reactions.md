@@ -61,7 +61,9 @@ answer rather than a gap.
 
 - **Gate:** the toggle endpoints check `can_view_post` / `can_view_comment` — you
   can't react to (or probe) anything you can't see (→ 404, matching the comments
-  view).
+  view). A **deleted** comment additionally refuses new reactions (400): the
+  tombstone is a placeholder, not content, and deleting cleared the ones it had
+  (see [feed-and-posts.md](feed-and-posts.md#delete-is-hard-when-it-can-be-and-soft-when-it-must-be)).
 - **Aggregation is per-viewer:** counts are computed over the viewer plus the
   people they may see — `visible_reactor_ids` = `connected_ids | {viewer}` for
   **both** personal and group posts. Group membership gates *access* to the post;
