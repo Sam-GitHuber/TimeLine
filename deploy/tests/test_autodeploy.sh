@@ -187,6 +187,9 @@ test_missing_image() {
   running_container web c_web sha256:bbb
 
   run_converge
+  # No assert_exit_ok here on purpose: against a real docker, `up --no-build`
+  # with no image fails, and failing loudly is the point. The stub can't model
+  # that, so this case only asserts the decision — redeploy, don't claim success.
   assert_deployed
   assert_output_contains "is not present on the box"
   finish_case

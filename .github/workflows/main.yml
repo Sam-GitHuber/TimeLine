@@ -16,6 +16,15 @@
 # The job names here ("frontend", "mobile", "semgrep") plus CodeQL's "Analyze
 # (…)" jobs are the required status checks for branch protection on main — all
 # must pass before a PR can merge.
+#
+# "deploy-scripts" is NOT yet in that branch-protection list — it's new. It runs
+# unfiltered on every PR, so unlike "backend" (see backend.yml) there's no
+# skipped-check hazard in requiring it; add it when convenient with:
+#
+#   gh api repos/Sam-GitHuber/TimeLine/branches/main/protection/required_status_checks \
+#     -X PATCH -f 'contexts[]=frontend' -f 'contexts[]=mobile' \
+#     -f 'contexts[]=semgrep' -f 'contexts[]=deploy-scripts' \
+#     -f 'contexts[]=Analyze (javascript-typescript)' -f 'contexts[]=Analyze (python)'
 name: CI
 
 on: [push, pull_request]

@@ -11,8 +11,11 @@
 #   containers/<container>  the image ID that container was created from
 #   pull_delivers/<ref>     an image ID a `compose pull` will install for <ref>
 #   calls.log               every invocation, for the test's assertions
-# A missing file means "not on this box", which is exactly what real docker
-# reports by failing — so absence is modelled by exit 1, not by empty output.
+# A missing file means "not on this box", modelled the way the real command
+# reports it: `inspect` fails (exit 1), while `compose ps -q` for a service with
+# no container succeeds and prints nothing. Those differ, and the difference
+# matters — it's what makes "no running container" a redeploy rather than an
+# error.
 #
 # In image-ref filenames `/` and `:` are replaced with `_` (see sanitize below
 # and in the test), since they can't be used in a path.
