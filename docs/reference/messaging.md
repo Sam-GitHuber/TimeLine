@@ -1095,9 +1095,24 @@ Messaging is a **non-modal companion drawer** (`MessagesDrawer.jsx`, driven by
 scrollable behind it and you keep your scroll position. It walks list → thread →
 info → new-message:
 
-- **New chat** — a multi-select connection picker → 1:1 or group chat (+ optional
-  title). Launched from a Group page it's scoped to that group (pool = group
-  members ∩ your connections).
+- **New chat** — a multi-select connection picker → 1:1 or group chat. Launched
+  from a Group page it's scoped to that group (pool = group members ∩ your
+  connections). **The optional name field only appears once two people are
+  ticked, and a name left behind by an untick is ignored rather than sent**
+  (#156, both clients — the title is read on the group branch of the create
+  mutation, not cleared on untick, so a mis-tap doesn't bin your typing and the
+  name is visible again the moment it can be used): the title is what *makes* a
+  chat a group — `_create_group` writes `kind=GROUP` —
+  so naming a single selection used to hand you a two-person group in place of
+  the pair's direct thread. That's not a cosmetic difference. It sits outside
+  `unique_conversation_pair`, so you can make any number of them while the
+  profile Message button still opens the direct thread (history split across
+  two threads, unmergeable); it renders as a group throughout (sender
+  attribution, Add people / Leave / rename); and `_shared_active_chats` severs
+  it on a disconnect, which can 403 the initiator out of a two-person history
+  the direct-thread rule promises stays readable. Pre-existing two-person titled
+  groups are left alone — they're valid group chats; this only closes the way
+  new ones were being made by accident.
 - **Thread** — the header is identity + a `⋯` (Details · Mute · Add people ·
   Leave) since [M9e](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e),
   which also added the [info panel](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e)

@@ -355,6 +355,20 @@ describe("Nav unread badge", () => {
 });
 
 describe("Messages drawer — new chat", () => {
+  // The drawer's header compose icon (the first "New message" control) opens
+  // the picker.
+  async function openPicker(user) {
+    renderAt("/");
+    await openDrawer(user);
+    const composeButtons = await screen.findAllByRole("button", {
+      name: "New message",
+    });
+    await user.click(composeButtons[0]);
+  }
+
+  const chatNameField = () =>
+    screen.queryByRole("textbox", { name: "Chat name" });
+
   beforeEach(() => {
     api.listUsers.mockResolvedValue(
       page([
@@ -408,6 +422,87 @@ describe("Messages drawer — new chat", () => {
       expect(api.createGroupChat).toHaveBeenCalledWith({
         participantIds: [2, 3],
         title: "",
+        groupId: null,
+      })
+    );
+  });
+
+  // The name field is what turns a chat into a group — `createGroupChat` makes a
+  // `kind=group` row, which the `unique_conversation_pair` constraint never sees
+  // and a disconnect can sever. So it's only offered once the chat really is a
+  // group (#156).
+  it("offers no name field until a second connection is checked", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+
+    await openPicker(user);
+
+    // Nothing checked, and one checked, are both potential 1:1s.
+    expect(await screen.findByText("Priya")).toBeInTheDocument();
+    expect(chatNameField()).toBeNull();
+
+    await user.click(screen.getByRole("checkbox", { name: "Priya" }));
+    expect(chatNameField()).toBeNull();
+
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    expect(chatNameField()).toBeInTheDocument();
+  });
+
+  it("ignores a name typed at two checks once one is unchecked", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+    api.openConversation.mockResolvedValue({ id: 7 });
+
+    await openPicker(user);
+    await user.click(await screen.findByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.type(chatNameField(), "Book club");
+
+    // Back down to one: the name goes off screen with the field, and off the
+    // request with it — a plain 1:1, not a titled two-person group.
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    expect(chatNameField()).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(api.openConversation).toHaveBeenCalledWith(2));
+    expect(api.createGroupChat).not.toHaveBeenCalled();
+  });
+
+  it("gives the name back if a second connection is re-checked", async () => {
+    // The title is read at send time rather than cleared on untick, so a
+    // mis-tap doesn't silently bin what you typed. It's visible again the
+    // moment it can be used, which is what keeps "on screen" and "sent" the
+    // same thing.
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+
+    await openPicker(user);
+    await user.click(await screen.findByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.type(chatNameField(), "Book club");
+
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+
+    expect(chatNameField()).toHaveValue("Book club");
+  });
+
+  it("keeps the name on a group of two", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+    api.createGroupChat.mockResolvedValue({ id: 9 });
+
+    await openPicker(user);
+    await user.click(await screen.findByRole("checkbox", { name: "Priya" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sanjay" }));
+    await user.type(chatNameField(), "Book club");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(api.createGroupChat).toHaveBeenCalledWith({
+        participantIds: [2, 3],
+        title: "Book club",
         groupId: null,
       })
     );
