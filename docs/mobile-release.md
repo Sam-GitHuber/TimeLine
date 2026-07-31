@@ -313,9 +313,16 @@ warm surface (`#FBFAF7`).
   the corners itself, so the PNG is a full square with no rounded corners.
 - **Splash** — `mobile/assets/images/splash-icon.png` (the mark, transparent
   background), shown centred on `app.json`'s splash `backgroundColor` (`#fbfaf7`).
-- **Regenerating them** — the mark is rendered from SVG to PNG with
-  `@resvg/resvg-js` (a scratch script; see the icon commit / PR #136 for the exact
-  geometry: spine + dot ratios copied faithfully from the web mark's `viewBox`).
+- **Android has three more, and they are not interchangeable** — the notification
+  icon and the two adaptive-icon layers each have their own geometry rules, and
+  using one in another's slot is a bug you only see on a device (#171).
+  `node mobile/scripts/generate-icons.mjs` regenerates all three; the rules are in
+  *The icons* in [`reference/mobile-app.md`](reference/mobile-app.md), and
+  `mobile/src/__tests__/appIcons.test.ts` fails if an asset stops obeying them.
+- **Regenerating the iOS icon + splash** — these two are authored artwork, not
+  generated: the mark is rendered from SVG to PNG with `@resvg/resvg-js` (a
+  scratch script; see the icon commit / PR #136 for the exact geometry: spine +
+  dot ratios copied faithfully from the web mark's `viewBox`).
 - Icon/splash are **native changes** → they need a full rebuild + resubmit (they
   can't ship OTA).
 

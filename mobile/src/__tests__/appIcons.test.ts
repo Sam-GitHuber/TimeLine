@@ -25,6 +25,13 @@
  * A checksum would be a worse test: it would fail on every legitimate re-render
  * and would still have passed on the stock Expo logo, which is the bug we had.
  * Regenerate with `node scripts/generate-icons.mjs`.
+ *
+ * This is the one suite with nothing platform-specific to say — it reads files
+ * off disk and never touches `Platform.OS` — so `jest.config.js`'s two projects
+ * run it twice for an identical result. Left that way on purpose: scoping it to
+ * one project would mean inventing a `testPathIgnorePatterns` convention the
+ * repo doesn't have, and the duplicate run costs well under a second because
+ * nothing here mounts a component.
  */
 
 import { readFileSync } from 'node:fs';
