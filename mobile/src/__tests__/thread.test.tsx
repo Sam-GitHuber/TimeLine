@@ -2757,6 +2757,117 @@ it('lets you back out of a photo before sending it', async () => {
   alert.mockRestore();
 });
 
+it('won’t let a queued photo turn an emptied edit into a PATCH', async () => {
+  // ⚠️ The composer's photo made `!value` false, so the one guard standing in
+  // front of *both* modes let an empty edit through — a `PATCH` the server
+  // answers "A message can't be empty". A `PATCH` carries text only, so what's
+  // queued in the composer has nothing to say about whether an edit does.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'teh plan' })],
+  });
+  pickFromLibrary.mockResolvedValue(PICKED);
+  const alert = chooseAttachSource('Choose from Library');
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await screen.findByLabelText('Remove photo');
+
+  await openMenu('Your message: teh plan');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  await fireEvent.changeText(screen.getByLabelText('Message'), '');
+
+  const save = screen.getByLabelText('Save');
+  expect(save.props.accessibilityState?.disabled).toBe(true);
+  // And pressing it anyway does nothing — `disabled` alone would leave the
+  // hardware/keyboard route in.
+  await fireEvent.press(save);
+  expect(
+    mockFetch.mock.calls.some(([, init]) => init?.method === 'PATCH')
+  ).toBe(false);
+  alert.mockRestore();
+});
+
+it('keeps a queued photo out of sight while you edit, and gives it back after', async () => {
+  // The attach *button* was hidden during an edit but the preview wasn't, so the
+  // picture sat over the composer looking as though it would go with the edit.
+  // Hidden, not dropped: stopping to fix a typo mustn't cost you the photo.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'teh plan' })],
+  });
+  pickFromLibrary.mockResolvedValue(PICKED);
+  const alert = chooseAttachSource('Choose from Library');
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await screen.findByLabelText('Remove photo');
+
+  await openMenu('Your message: teh plan');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+  await fireEvent.press(screen.getByLabelText('Cancel editing'));
+  expect(screen.getByLabelText('Remove photo')).toBeTruthy();
+  alert.mockRestore();
+});
+
+it('lets a photo message’s caption be edited away, as the server does', async () => {
+  // The mirror case on the same line: with nothing queued, `!value` returned
+  // early — so the one message you *should* be able to empty was the one you
+  // couldn't. A photo with no caption is an ordinary message, and
+  // `MessageSerializer.validate` allows exactly this via `has_attachments`; the
+  // composer mustn't be stricter than the server.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'look', attachments: [photo(9)] }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: look');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  await fireEvent.changeText(screen.getByLabelText('Message'), '');
+
+  expect(screen.getByLabelText('Save').props.accessibilityState?.disabled).toBe(
+    false
+  );
+  await fireEvent.press(screen.getByLabelText('Save'));
+
+  await waitFor(() =>
+    expect(
+      mockFetch.mock.calls.some(
+        ([url, init]) =>
+          String(url).includes('/api/conversations/5/messages/7/') &&
+          init?.method === 'PATCH' &&
+          JSON.parse(init.body).text === ''
+      )
+    ).toBe(true)
+  );
+});
+
+it('still refuses to empty a text-only message, as the server does', async () => {
+  // The other half of the same rule: no photo on the message means an edit needs
+  // words. Deleting a message is a different, deliberate action.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'teh plan' })],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: teh plan');
+  await fireEvent.press(screen.getByLabelText('Edit'));
+  await fireEvent.changeText(screen.getByLabelText('Message'), '   ');
+
+  const save = screen.getByLabelText('Save');
+  expect(save.props.accessibilityState?.disabled).toBe(true);
+  await fireEvent.press(save);
+  expect(
+    mockFetch.mock.calls.some(([, init]) => init?.method === 'PATCH')
+  ).toBe(false);
+});
+
 it('shows a received photo in the bubble and opens it full-screen', async () => {
   serve({
     conversation: detail({}),

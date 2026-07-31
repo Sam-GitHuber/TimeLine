@@ -430,8 +430,11 @@ export default function ThreadScreen() {
    * preview aren't on screen at all. Staging a photo and then long-pressing
    * → Select is an ordinary sequence, and closing the photo underneath would
    * look like a dead press that silently threw the photo away — you'd only find
-   * out after leaving select mode. Edit before photo below it, both being
-   * composer states, and the edit banner sits above the preview.
+   * out after leaving select mode. Edit before photo below it, for the same
+   * reason read the other way round: an edit *hides* the staged preview (#164 —
+   * a `PATCH` can't carry it, so showing it would promise otherwise), so back
+   * ends the edit and brings the photo back into view rather than dismissing
+   * something you can't see and can't tell went.
    *
    * `stopEditing` is a hoisted function declaration, which is what lets this sit
    * next to the state it reads rather than 800 lines further down.
@@ -1097,11 +1100,39 @@ export default function ThreadScreen() {
   const mentions = useMentions({ people: mentionable, text, setText });
 
   /**
-   * Whether Send does anything. Text *or* a photo is enough (M7) — a photo with
-   * no caption is an ordinary message — but not while one is still being
-   * prepared, or the tap would send an empty message and drop the photo.
+   * Whether Send/Save does anything — read by both the button's `disabled` and
+   * `handleSend`, so the two can't disagree about it.
+   *
+   * Sending needs text *or* a photo (M7): a photo with no caption is an ordinary
+   * message. Not while one is still being prepared, or the tap would send an
+   * empty message and drop the photo.
+   *
+   * `preparing` short-circuits *both* modes, which is stricter than an edit
+   * strictly needs — a `PATCH` never carries the queued photo, so a pick still
+   * resizing has nothing to do with it. Left as one gate rather than pushed into
+   * the send branch: reaching it means starting a pick and then opening Edit
+   * inside the second or so the resize takes (the attach button is gone once
+   * you're editing), it clears itself, and the web's composer is the same
+   * expression — a divergence here would be two rules to keep in step for an
+   * edge that lasts a moment.
+   *
+   * ⚠️ **An edit and a send ask different questions**, and conflating them was a
+   * real bug (#164, the same one #163 fixed on the web): a queued photo made
+   * `!value` false, so clearing the field mid-edit fired a `PATCH` with empty
+   * text where the guard should have done nothing. The server 400s that on a
+   * text message ("A message can't be empty") — but it *allows* it on a photo
+   * message, since editing a caption down to nothing is a legitimate thing to
+   * do (`MessageSerializer.validate`'s `has_attachments`). That's the rule
+   * mirrored here: an edit needs words unless the message it's editing carries a
+   * photo of its own. The composer's queued attachment has nothing to do with
+   * it — a `PATCH` can't carry one.
    */
-  const canSubmit = (!!text.trim() || !!attachment) && !busy && !preparing;
+  const editingHasPhoto = (editing?.attachments?.length ?? 0) > 0;
+  const canSubmit = preparing
+    ? false
+    : editing
+      ? (!!text.trim() || editingHasPhoto) && !busy
+      : !!text.trim() || !!attachment;
 
   /**
    * Send a new message, or save the one being edited — the transcript's composer
@@ -1109,11 +1140,9 @@ export default function ThreadScreen() {
    */
   function handleSend() {
     const value = text.trim();
-    // A photo with no caption is a perfectly ordinary message, so "there's
-    // something to send" is now text *or* a photo — the same rule the server
-    // enforces. Not while one is still being prepared: sending then would
-    // silently drop the photo the person is looking at.
-    if ((!value && !attachment) || busy || preparing) return;
+    // One question, asked in one place: see `canSubmit`, which knows that an
+    // edit and a send don't have the same idea of "there's something to send".
+    if (!canSubmit) return;
     if (editing) {
       // Saving the original text unchanged is a no-op, not a pointless PATCH
       // that would stamp the message "Edited" for nothing.
@@ -1709,8 +1738,11 @@ export default function ThreadScreen() {
               <>
                 {/* Edit mode says plainly what's being changed and offers an
                     obvious way out. Cancelling restores the draft you were
-                    typing — and because an empty composer just disables Send,
-                    there's no path from "editing" to an accidental delete. */}
+                    typing — and emptying the composer just disables Save, except
+                    on a message carrying its own photo, where clearing the
+                    caption is a legitimate edit that still leaves the picture
+                    (see `canSubmit`). Either way there's no path from "editing"
+                    to an accidental delete. */}
                 {editing ? (
                   <View style={styles.editingBar}>
                     <View style={styles.editingText}>
@@ -1734,8 +1766,16 @@ export default function ThreadScreen() {
                     you can see it while writing the caption, and where the ✕ to
                     change your mind is nowhere near Send. Only one at a time:
                     picking several photos sends several messages, so each gets
-                    its own bubble and its own reactions and replies. */}
-                {attachment || preparing ? (
+                    its own bubble and its own reactions and replies.
+
+                    Hidden while editing rather than dropped (#164): an edit is a
+                    `PATCH` of *text*, so it can't carry an attachment, and
+                    leaving the picture sitting over the composer would say it
+                    was going with the edit. Throwing it away because someone
+                    stopped to fix a typo would be the same small betrayal
+                    `stashedDraft` exists to prevent, so it comes back with the
+                    draft when the edit ends. */}
+                {!editing && (attachment || preparing) ? (
                   <View style={styles.attachment}>
                     {preparing ? (
                       <View style={styles.attachmentPreparing}>
