@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, NOTIFICATIONS_POLL_MS } from "../api.js";
+import { useInfiniteList, trimToFirstPage } from "../hooks.js";
 import { formatRelativeTime } from "../utils.js";
 import Avatar from "./Avatar.jsx";
+import LoadMoreButton from "./LoadMoreButton.jsx";
 import NavBadge from "./NavBadge.jsx";
 
 // The nav "Activity" bell + dropdown — the single, unified place "something
@@ -36,13 +38,14 @@ export default function ActivityCenter() {
   const unread = unreadData?.count ?? 0;
 
   // The list: only fetched while the panel is open (no need to pull the full
-  // list just to render a badge).
-  const { data: listData, isLoading } = useQuery({
-    queryKey: ["notifications"],
-    queryFn: api.getNotifications,
-    enabled: open,
-  });
-  const notifications = listData?.results ?? [];
+  // list just to render a badge), and **paginated** (#134) — see
+  // notifications.md for what rendering `results` alone cost.
+  const notificationsQuery = useInfiniteList(
+    ["notifications"],
+    api.getNotifications,
+    { enabled: open }
+  );
+  const { items: notifications, isLoading } = notificationsQuery;
 
   // Opening the panel marks everything currently unread as *seen* — the badge
   // clears, but every item stays in the list (that's the whole point). Fire it
@@ -61,6 +64,20 @@ export default function ActivityCenter() {
     // Only when the panel transitions to open; unread is read at that moment.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Closing the panel drops back to a single page, so a reopen doesn't refetch
+  // pages nobody is looking at (notifications.md; the app trims on unmount).
+  // Cancel first, trim once that settles — an in-flight "Load more" would
+  // otherwise put its page back, and the cancel's revert would undo a trim that
+  // ran ahead of it.
+  useEffect(() => {
+    if (open) return;
+    queryClient
+      .cancelQueries({ queryKey: ["notifications"] })
+      .then(() =>
+        queryClient.setQueryData(["notifications"], trimToFirstPage)
+      );
+  }, [open, queryClient]);
 
   // Close on outside click / Escape — the two things any dropdown owes the user.
   useEffect(() => {
@@ -139,13 +156,19 @@ export default function ActivityCenter() {
                 You're all caught up.
               </p>
             ) : (
-              <ul>
-                {notifications.map((n) => (
-                  <li key={n.id}>
-                    <NotificationRow notification={n} onClick={handleClick} />
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul>
+                  {notifications.map((n) => (
+                    <li key={n.id}>
+                      <NotificationRow notification={n} onClick={handleClick} />
+                    </li>
+                  ))}
+                </ul>
+                {/* Older notifications live behind the paginator's `next`. The
+                    same explicit control every other list here uses, rather
+                    than scroll-triggered loading inside a dropdown. */}
+                <LoadMoreButton query={notificationsQuery} />
+              </>
             )}
           </div>
         </div>

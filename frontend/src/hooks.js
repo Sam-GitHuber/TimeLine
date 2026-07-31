@@ -79,8 +79,16 @@ export function useDayBoundary() {
 // alongside the usual TanStack query state (isLoading, hasNextPage, …). This is
 // the one place paging behaviour lives, so a list page can't silently render
 // only the first page and hide the rest.
-export function useInfiniteList(queryKey, fetchFirstPage) {
+//
+// `options` is spread into the underlying useInfiniteQuery for the occasional
+// caller that needs one (the activity centre only fetches while its dropdown is
+// open, so it passes `enabled`). Paging itself is not configurable — that's the
+// point of the hook.
+export function useInfiniteList(queryKey, fetchFirstPage, options = {}) {
   const query = useInfiniteQuery({
+    // Spread *first*, so the four keys below win: a caller can pass `enabled`
+    // or `refetchInterval`, but cannot reach in and change how the list pages.
+    ...options,
     queryKey,
     queryFn: ({ pageParam }) =>
       pageParam ? api.getPage(pageParam) : fetchFirstPage(),
@@ -88,8 +96,39 @@ export function useInfiniteList(queryKey, fetchFirstPage) {
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
 
-  const items = query.data?.pages.flatMap((page) => page.results) ?? [];
+  // Deduped by id: page-*number* paging re-sends a row when the underlying set
+  // shifts mid-scroll, and two rows can't share a React key. The repeat is
+  // dropped rather than de-duplicated by position, so the server's order —
+  // the product's one non-negotiable guarantee on the feed — is untouched.
+  // Written up in feed-and-posts.md; the app's twin is `dedupeById`.
+  const seen = new Set();
+  const items = [];
+  for (const page of query.data?.pages ?? []) {
+    for (const item of page.results) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      items.push(item);
+    }
+  }
   return { ...query, items };
+}
+
+// Drop every loaded page but the first.
+//
+// For `queryClient.setQueryData(key, trimToFirstPage)` before a list is put
+// away or refetched wholesale: a refetch of an infinite query refetches **all**
+// its loaded pages in turn, when only the first can hold anything new.
+// (TanStack v5 removed `refetchPage`; trimming the cache first is the
+// documented replacement.) The app's twin lives in `mobile/src/lists.ts`.
+// Returns the input unchanged when there's nothing to trim, so the cache entry
+// keeps its identity and nothing re-renders needlessly.
+export function trimToFirstPage(data) {
+  if (!data?.pages || data.pages.length <= 1) return data;
+  return {
+    ...data,
+    pages: data.pages.slice(0, 1),
+    pageParams: data.pageParams.slice(0, 1),
+  };
 }
 
 // The viewer's accepted connections, for the "pick someone you already know"

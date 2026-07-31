@@ -732,6 +732,30 @@ dismiss-everything, in the release that just added deliberate targeted dismissal
   then navigates to `url`. Three visual states: unread = bold + accent dot, seen =
   normal weight, addressed = dulled (`opacity-60`). Empty state: "You're all caught
   up." Closes on outside-click / Escape.
+- **The list is paginated on both clients** (#134). `GET /api/notifications/`
+  pages like every other list here, so rendering `results` and stopping left
+  everything older than page one unreachable — while the badge counts *all*
+  unread, which is how the count could promise more than the list would ever
+  show. The web dropdown follows `next` behind the shared `LoadMoreButton`
+  (via `useInfiniteList`, which now takes query options so the list can stay
+  `enabled: open`); the app's `activity.tsx` pages on `onEndReached`, like its
+  feed. Rows are **deduped by id** on both sides — see
+  [feed-and-posts](feed-and-posts.md#pagination), where that now lives for every
+  list.
+- **Putting the list away drops it back to one page** — the web on close, the
+  app when the screen unmounts (`trimToFirstPage`, one in `hooks.js` and one in
+  `mobile/src/lists.ts`). The `["notifications"]` cache outlives both, and a
+  refetch of an infinite query refetches *every* loaded page in turn, so
+  reopening — and the seen-on-open invalidation that follows it — would pay for
+  rows nobody is looking at. Only the first page can hold anything new, and
+  both clients reopen at the top.
+
+  On the web the trim **cancels the query first**: a "Load more" in flight is
+  merged against the pages it saw when it started, so it would put its page
+  back after the trim, and cancelling *reverts* to those same pages, so a trim
+  that ran first would be undone too. Cancel, then trim. The app needs none of
+  this — its trim runs on unmount, by which point there is no live query left
+  to land.
 - The old **People pending-request** and **Groups invite** nav badges were
   **retired** in `Layout.jsx` (the pages keep their lists; only the badge moved).
 - **`NotificationPreferencesSection`** on `/settings` — a toggle per mutable kind,
