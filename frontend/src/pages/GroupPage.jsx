@@ -12,6 +12,7 @@ import EventCard from "../components/events/EventCard.jsx";
 import MonthGrid from "../components/events/MonthGrid.jsx";
 import PlanEventForm from "../components/events/PlanEventForm.jsx";
 import { useInfiniteList } from "../hooks.js";
+import { eventLocalStart } from "../utils.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { useMessaging } from "../messaging.jsx";
@@ -195,13 +196,11 @@ export default function GroupPage() {
   const staging = live.filter((e) => !e.event_date);
   // Furthest-first, so the nearest event ends up at the bottom of the spine's
   // future region — right above the now-node.
+  // Ordered by each event's own wall-clock start, the same value the timeline
+  // below groups past events by — see `eventLocalStart`.
   const scheduledFuture = live
     .filter((e) => e.event_date)
-    .sort(
-      (a, b) =>
-        new Date(b.starts_at || b.event_date) -
-        new Date(a.starts_at || a.event_date)
-    );
+    .sort((a, b) => eventLocalStart(b) - eventLocalStart(a));
   const upcomingCount = live.length;
 
   function confirmLeave() {

@@ -1,6 +1,6 @@
 import PostCard from "./PostCard.jsx";
 import EventTimelineEntry from "./events/EventTimelineEntry.jsx";
-import { dayKey, dayHeading } from "../utils.js";
+import { dayKey, dayHeading, eventLocalStart } from "../utils.js";
 
 // The feed as a literal timeline: posts hang off one continuous vertical line
 // (the spine, drawn by `.tl-feed`), grouped under day dividers. `header` is an
@@ -26,20 +26,29 @@ export default function Timeline({
   futureEvents = [],
   header = null,
 }) {
+  // `at` is the local Date each row is both sorted and day-grouped by. A post
+  // uses its `created_at` instant, read in the viewer's zone. An event uses its
+  // own wall-clock start (`eventLocalStart`), *not* the `starts_at` instant —
+  // an event's day belongs to the event's timezone, and its card says so. See
+  // the note on `eventLocalStart`.
   const items = [
-    ...posts.map((p) => ({ kind: "post", time: p.created_at, data: p })),
-    ...pastEvents.map((e) => ({ kind: "event", time: e.starts_at, data: e })),
+    ...posts.map((p) => ({ kind: "post", at: new Date(p.created_at), data: p })),
+    ...pastEvents.map((e) => ({
+      kind: "event",
+      at: eventLocalStart(e) ?? new Date(e.created_at),
+      data: e,
+    })),
   ]
     // Newest-first. Posts already arrive sorted; merging events needs the sort.
-    .sort((a, b) => new Date(b.time) - new Date(a.time));
+    .sort((a, b) => b.at - a.at);
 
   const rows = [];
   let lastDay = null;
 
   for (const item of items) {
-    const key = dayKey(item.time);
+    const key = dayKey(item.at);
     if (key !== lastDay) {
-      rows.push(<DayDivider key={`day-${key}`} isoString={item.time} />);
+      rows.push(<DayDivider key={`day-${key}`} at={item.at} />);
       lastDay = key;
     }
     if (item.kind === "event") {
@@ -69,8 +78,8 @@ export default function Timeline({
   );
 }
 
-function DayDivider({ isoString }) {
-  const { label, sub } = dayHeading(isoString);
+function DayDivider({ at }) {
+  const { label, sub } = dayHeading(at);
   return (
     <div className="tl-day">
       <span className="tl-day-dot" aria-hidden="true" />

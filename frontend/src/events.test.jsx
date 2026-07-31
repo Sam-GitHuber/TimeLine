@@ -10,6 +10,7 @@ import MonthGrid from "./components/events/MonthGrid.jsx";
 import PlanEventForm from "./components/events/PlanEventForm.jsx";
 import Timeline from "./components/Timeline.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
+import { formatEventDate } from "./utils.js";
 import { api } from "./api.js";
 
 // Phase 8b: group events. The visibility/permission rules are enforced (and
@@ -467,6 +468,47 @@ describe("event timeline entries", () => {
     // It keeps the Date · Time · Where pills, like its future self.
     expect(screen.getByText("Date")).toBeInTheDocument();
     expect(screen.getByText("Where")).toBeInTheDocument();
+  });
+
+  it("files all-day past events under their own date, not the viewer's", () => {
+    // #126: the divider used to come from the `starts_at` *instant*, read in the
+    // viewer's zone — so an all-day event (midnight in the *event's* zone)
+    // landed under the previous day's divider, contradicting the recap right
+    // beneath it. Two events on the same day organised in far-apart zones (this
+    // app is for families spread across the world): whatever zone the suite runs
+    // in, at least one of them is mis-filed by an instant-based key, and both
+    // belong under the one "Sun 5 Apr" divider.
+    const pastEvents = [
+      "2026-04-05T00:00:00+13:00",
+      "2026-04-05T00:00:00-11:00",
+    ].map((starts_at, i) => ({
+      ...makeEvent({
+        id: 12 + i,
+        title: `Egg hunt ${i}`,
+        status: "scheduled",
+        is_past: true,
+        event_date: "2026-04-05",
+        start_time: null,
+        dimensions: {
+          date: { state: "set" },
+          time: { state: "unset" },
+          location: { state: "unset" },
+        },
+        polls: [],
+        rsvp: { counts: { going: 2, maybe: 0, declined: 0, guests: 0 } },
+      }),
+      starts_at,
+    }));
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={pastEvents} />} />
+      </Routes>
+    );
+    const dividers = [...document.querySelectorAll(".tl-day-label")].map(
+      (el) => el.textContent
+    );
+    expect(dividers).toHaveLength(1);
+    expect(dividers[0]).toContain(formatEventDate("2026-04-05"));
   });
 
   it("renders a future event on the spine with its RSVP counts", () => {

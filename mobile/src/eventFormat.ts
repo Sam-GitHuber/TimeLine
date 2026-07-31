@@ -29,6 +29,36 @@ export function parseEventDate(dateStr: string | null | undefined): Date | null 
 }
 
 /**
+ * An event's start as a **local** `Date` built from its own wall-clock parts —
+ * midnight for an all-day (date-only) event, otherwise its `start_time`. Null
+ * while no date is set.
+ *
+ * This is what the group timeline groups and sorts a past event by
+ * (`toGroupRows`), deliberately in preference to the serialized `starts_at`
+ * instant. An event's day is a calendar date in the event's *own* timezone, and
+ * the recap renders that wall-clock date/time verbatim (`formatEventWhen`, and
+ * the rail's `formatEventTimeParts`) — never converted to the viewer's zone.
+ * Deriving the day divider from `starts_at` instead reads it in the *viewer's*
+ * zone, so an all-day event (midnight in the event's zone) falls under the
+ * previous day's divider anywhere west of that zone, contradicting the recap
+ * right beneath it.
+ *
+ * Using it as the *sort* key too keeps the divider algorithm's invariant: every
+ * row's day key is the local calendar day of the value it was sorted by, which
+ * is what makes the dividers come out in order and only once each.
+ */
+export function eventLocalStart(
+  event: Pick<Event, 'event_date' | 'start_time'> | null | undefined
+): Date | null {
+  const d = parseEventDate(event?.event_date);
+  if (!d || !event?.start_time) return d;
+  const [h, min] = event.start_time.split(':').map(Number);
+  if (Number.isNaN(h)) return d;
+  d.setHours(h, Number.isNaN(min) ? 0 : min, 0, 0);
+  return d;
+}
+
+/**
  * "Sat 19 Jul" (adding the year only when it isn't the current one) — the value
  * on a set Date chip and the recap line.
  */

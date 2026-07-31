@@ -114,23 +114,29 @@ export function formatMessageTime(isoString: string): string {
 /**
  * A stable per-calendar-day key (local time), used to group consecutive posts
  * under a single day divider.
+ *
+ * Takes either an ISO instant string (a post's `created_at`, read in the
+ * viewer's zone) or an already-local `Date`. The second form is for events,
+ * whose day is a wall-clock date in the *event's* timezone rather than an
+ * instant — see `eventLocalStart` in `eventFormat.ts`.
  */
-export function dayKey(isoString: string): string {
-  const d = new Date(isoString);
+export function dayKey(value: string | Date): string {
+  const d = new Date(value);
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
 /**
  * The heading for a day divider: a friendly primary label plus, where it adds
  * information, a secondary date. "Today"/"Yesterday" for the obvious ones, the
- * weekday within the past week, else the full date stands on its own.
+ * weekday within the past week, else the full date stands on its own. Same
+ * accepted values as `dayKey`.
  */
 export function dayHeading(
-  isoString: string,
+  value: string | Date,
   now: Date = new Date()
 ): { label: string; sub: string | null } {
-  const d = new Date(isoString);
-  const key = dayKey(isoString);
+  const d = new Date(value);
+  const key = dayKey(d);
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
 
@@ -142,9 +148,8 @@ export function dayHeading(
     ...(sameYear ? {} : { year: 'numeric' }),
   });
 
-  if (key === dayKey(now.toISOString())) return { label: 'Today', sub: full };
-  if (key === dayKey(yesterday.toISOString()))
-    return { label: 'Yesterday', sub: full };
+  if (key === dayKey(now)) return { label: 'Today', sub: full };
+  if (key === dayKey(yesterday)) return { label: 'Yesterday', sub: full };
 
   const withinWeek = now.getTime() - d.getTime() < 7 * 24 * 60 * 60 * 1000;
   if (withinWeek) {

@@ -7,12 +7,14 @@
  */
 
 import {
+  eventLocalStart,
   formatEventDate,
   formatEventTime,
   formatEventTimeParts,
   formatEventWhen,
   parseEventDate,
 } from '@/eventFormat';
+import { dayHeading, dayKey } from '@/utils';
 
 describe('parseEventDate', () => {
   it('parses a YYYY-MM-DD string to a local midnight, not a UTC one', () => {
@@ -82,5 +84,49 @@ describe('formatEventWhen', () => {
 
   it('is blank with no date, even if a time is present', () => {
     expect(formatEventWhen({ event_date: null, start_time: '19:00' })).toBe('');
+  });
+});
+
+describe('eventLocalStart', () => {
+  it('puts an all-day event at local midnight on its own date', () => {
+    const d = eventLocalStart({ event_date: '2026-04-05', start_time: null });
+    expect([d!.getFullYear(), d!.getMonth(), d!.getDate()]).toEqual([2026, 3, 5]);
+    expect([d!.getHours(), d!.getMinutes()]).toEqual([0, 0]);
+  });
+
+  it("uses the event's own wall clock for a timed event", () => {
+    const d = eventLocalStart({ event_date: '2026-04-05', start_time: '19:30:00' });
+    expect([d!.getHours(), d!.getMinutes()]).toEqual([19, 30]);
+  });
+
+  it('is null while no date is set', () => {
+    expect(eventLocalStart({ event_date: null, start_time: null })).toBeNull();
+    expect(eventLocalStart(null)).toBeNull();
+  });
+
+  it('gives every all-day event the day its own recap shows', () => {
+    // #126: the day divider used to come from the `starts_at` *instant*, read in
+    // the viewer's zone — so an all-day event landed under the previous (or
+    // next) day's divider, contradicting the recap right beneath it.
+    //
+    // `starts_at` is midnight in the *event's* own zone, and the bug is a
+    // disagreement between that zone and the viewer's — which here is whatever
+    // machine runs the suite. No single offset is mis-read everywhere, but
+    // between +13 and -11 at least one is mis-read in every zone from -12 to
+    // +14, so this can't pass by accident on a lucky runner.
+    const events = ['2026-04-05T00:00:00+13:00', '2026-04-05T00:00:00-11:00'].map(
+      (starts_at) => ({ event_date: '2026-04-05', start_time: null, starts_at })
+    );
+
+    for (const event of events) {
+      expect(dayHeading(eventLocalStart(event)!).label).toBe(
+        formatEventDate(event.event_date)
+      );
+    }
+    // …and this zone really is one where the old instant-based key was wrong for
+    // at least one of them, so the assertions above aren't passing by luck.
+    expect(
+      events.some((e) => dayKey(e.starts_at) !== dayKey(eventLocalStart(e)!))
+    ).toBe(true);
   });
 });

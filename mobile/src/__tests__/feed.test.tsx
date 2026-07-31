@@ -11,9 +11,10 @@ import { render, screen } from '@testing-library/react-native';
 import type { ReactNode } from 'react';
 
 import FeedScreen from '@/app/(tabs)/index';
-import { toRows, trimToFirstPage, type FeedPages } from '@/feed';
+import { toGroupRows, toRows, trimToFirstPage, type FeedPages } from '@/feed';
 import { AuthProvider } from '@/auth';
-import type { Post } from '@/types';
+import { formatEventDate } from '@/eventFormat';
+import type { Event, Post } from '@/types';
 
 // The include-groups preference moved out of the feed header into Settings
 // (E4b), so the feed just *reads* it. Mock the preference here so a test can set
@@ -49,6 +50,40 @@ function makePost(overrides: Partial<Post> & { id: number }): Post {
     new_comment_count: 0,
     created_at: '2026-07-18T10:00:00Z',
     edited_at: null,
+    ...overrides,
+  };
+}
+
+function makeEvent(overrides: Partial<Event> & { id: number }): Event {
+  return {
+    group: { id: 7, name: 'The Andersons' },
+    organiser: { id: 2, display_name: 'Ada Lovelace', avatar_thumb: null },
+    title: `Event ${overrides.id}`,
+    description: '',
+    event_date: null,
+    start_time: null,
+    end_time: null,
+    timezone: 'UTC',
+    location_name: '',
+    location_url: '',
+    location_note: '',
+    status: 'scheduled',
+    is_past: true,
+    starts_at: null,
+    dimensions: {
+      date: { state: 'set', poll: null },
+      time: { state: 'unset', poll: null },
+      location: { state: 'unset', poll: null },
+    },
+    rsvp: {
+      counts: { going: 1, maybe: 0, declined: 0, guests: 0 },
+      your_response: null,
+    },
+    can_manage: false,
+    can_moderate: false,
+    created_at: '2026-07-18T10:00:00Z',
+    updated_at: '2026-07-18T10:00:00Z',
+    polls: [],
     ...overrides,
   };
 }
@@ -144,6 +179,83 @@ describe('day grouping', () => {
         .filter((r): r is Extract<typeof r, { kind: 'post' }> => r.kind === 'post')
         .map((r) => r.post.id)
     ).toEqual([20, 19, 18]);
+  });
+});
+
+describe('group day grouping', () => {
+  function dividers(rows: ReturnType<typeof toGroupRows>) {
+    return rows
+      .filter((r): r is Extract<typeof r, { kind: 'day' }> => r.kind === 'day')
+      .map((r) => r.label);
+  }
+
+  // A post's day is its `created_at` instant read in the viewer's zone, so a
+  // fixed UTC string names a different day depending on where the suite runs.
+  // Build the instant *from* local parts instead, and it's the 5th of April
+  // everywhere.
+  const localNoon = (day: number) =>
+    new Date(2026, 3, day, 12, 0, 0).toISOString();
+
+  it("files all-day past events under their own date, not the viewer's", () => {
+    // #126: the divider used to come from the `starts_at` *instant*, read in the
+    // viewer's zone — so an all-day event (midnight in the *event's* zone)
+    // landed under the previous day's divider, contradicting its own recap line.
+    // Two events on the same day organised in far-apart zones (this app is for
+    // families spread across the world): whatever zone the suite runs in, at
+    // least one is mis-filed by an instant-based key, and both belong under the
+    // one 5 April divider.
+    const rows = toGroupRows(
+      [],
+      ['2026-04-05T00:00:00+13:00', '2026-04-05T00:00:00-11:00'].map(
+        (starts_at, i) =>
+          makeEvent({ id: 21 + i, event_date: '2026-04-05', starts_at })
+      )
+    );
+
+    expect(dividers(rows)).toEqual([formatEventDate('2026-04-05')]);
+    expect(rows.map((r) => r.kind)).toEqual(['day', 'event', 'event']);
+  });
+
+  it('interleaves events with posts and emits each divider once, in order', () => {
+    const rows = toGroupRows(
+      [
+        makePost({ id: 1, created_at: localNoon(5) }),
+        makePost({ id: 2, created_at: localNoon(4) }),
+      ],
+      [
+        makeEvent({
+          id: 21,
+          event_date: '2026-04-05',
+          starts_at: '2026-04-05T00:00:00+13:00',
+        }),
+      ]
+    );
+
+    // The event belongs to the 5th, so it sits under that divider, below the
+    // 5th's post (midnight is earlier than noon) and above the 4th's.
+    expect(rows.map((r) => r.kind)).toEqual([
+      'day',
+      'post',
+      'event',
+      'day',
+      'post',
+    ]);
+    expect(dividers(rows)).toEqual([
+      formatEventDate('2026-04-05'),
+      formatEventDate('2026-04-04'),
+    ]);
+  });
+
+  it('keeps a date-less event on the line rather than dropping it to the epoch', () => {
+    // Defensive: a date-less event can't be past, so it shouldn't arrive here —
+    // but if it does it should sit by its creation time, not in 1970 under a
+    // divider of its own.
+    const rows = toGroupRows(
+      [makePost({ id: 1, created_at: '2026-07-18T15:00:00Z' })],
+      [makeEvent({ id: 21, created_at: '2026-07-18T09:00:00Z' })]
+    );
+
+    expect(rows.map((r) => r.kind)).toEqual(['day', 'post', 'event']);
   });
 });
 

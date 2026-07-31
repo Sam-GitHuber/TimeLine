@@ -51,17 +51,23 @@ export function formatClockTime(isoString) {
 
 // A stable per-calendar-day key (local time) used to group consecutive posts
 // under a single day divider.
-export function dayKey(isoString) {
-  const d = new Date(isoString);
+//
+// Takes either an ISO instant string (a post's `created_at`, read in the
+// viewer's zone) or an already-local Date. The second form is for events, whose
+// day is a wall-clock date in the *event's* timezone rather than an instant —
+// see `eventLocalStart`.
+export function dayKey(value) {
+  const d = new Date(value);
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
 // The heading for a day divider: a friendly primary label plus, where it adds
 // information, a mono secondary date. "Today"/"Yesterday" for the obvious ones,
 // the weekday within the past week, else the full date stands on its own.
-export function dayHeading(isoString, now = new Date()) {
-  const d = new Date(isoString);
-  const key = dayKey(isoString);
+// Same accepted values as `dayKey`.
+export function dayHeading(value, now = new Date()) {
+  const d = new Date(value);
+  const key = dayKey(d);
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
 
@@ -97,6 +103,32 @@ export function parseEventDate(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   if (!y || !m || !d) return null;
   return new Date(y, m - 1, d);
+}
+
+// An event's start as a *local* Date built from its own wall-clock parts —
+// midnight for an all-day (date-only) event, otherwise its `start_time`.
+// Returns null while no date is set.
+//
+// This is what the timeline groups and sorts a past event by, deliberately in
+// preference to the serialized `starts_at` instant. An event's day is a
+// calendar date in the event's own timezone, and the card renders that
+// wall-clock date/time verbatim (`formatEventWhen`, and the rail's
+// `formatEventTimeParts`) — never converted to the viewer's zone. Deriving the
+// day divider from the `starts_at` instant instead reads it in the *viewer's*
+// zone, so an all-day event (midnight in the event's zone) lands under the
+// previous day's divider anywhere west of that zone, disagreeing with the card
+// right beneath it.
+//
+// Using it as the *sort* key too keeps the divider algorithm's invariant: every
+// row's day key is the local calendar day of the value it was sorted by, which
+// is what guarantees the dividers come out in order and only once each.
+export function eventLocalStart(event) {
+  const d = parseEventDate(event?.event_date);
+  if (!d || !event.start_time) return d;
+  const [h, min] = event.start_time.split(":").map(Number);
+  if (Number.isNaN(h)) return d;
+  d.setHours(h, Number.isNaN(min) ? 0 : min, 0, 0);
+  return d;
 }
 
 // "Sat 19 Jul" (adds the year only when it isn't the current one). The value
