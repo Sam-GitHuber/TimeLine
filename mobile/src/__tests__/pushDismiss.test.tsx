@@ -30,15 +30,17 @@ import { api } from '@/api';
 import { useAuth } from '@/auth';
 import {
   configureNotificationHandler,
+  configureOnScreenDismissal,
   dismissActivityNotifications,
   dismissConversationNotifications,
-  presentedConversationIds,
+  presentedConversations,
   setOnScreenConversation,
 } from '@/push';
 import { usePushDismissals } from '@/usePushDismissals';
 
 jest.mock('expo-notifications', () => ({
   setNotificationHandler: jest.fn(),
+  addNotificationReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
   getPresentedNotificationsAsync: jest.fn(async () => []),
   dismissNotificationAsync: jest.fn(async () => {}),
   // Read at module scope by the channel table, so it has to exist even though
@@ -160,8 +162,8 @@ describe('dismissing the activity centre’s notifications', () => {
   });
 });
 
-describe('presentedConversationIds', () => {
-  it('reports the conversations waiting in the tray, deduplicated', async () => {
+describe('presentedConversations', () => {
+  it('groups what’s waiting in the tray by conversation', async () => {
     tray(
       presented('a', { url: '/messages/5' }),
       presented('b', { url: '/messages/5' }),
@@ -169,7 +171,10 @@ describe('presentedConversationIds', () => {
       presented('d', {})
     );
 
-    expect(await presentedConversationIds()).toEqual(new Set([5]));
+    // Identifiers, not just ids: the reconcile has to dismiss *what it looked
+    // at*, or a notification arriving during its round trip gets dismissed on
+    // the strength of an unread count that predates it.
+    expect(await presentedConversations()).toEqual(new Map([[5, ['a', 'b']]]));
   });
 
   it('treats an unreadable tray as an empty one', async () => {
@@ -177,7 +182,7 @@ describe('presentedConversationIds', () => {
       new Error('no notification access')
     );
 
-    expect(await presentedConversationIds()).toEqual(new Set());
+    expect(await presentedConversations()).toEqual(new Map());
   });
 });
 
@@ -223,13 +228,53 @@ describe('a message arriving while its thread is on screen', () => {
   });
 });
 
-describe('reconciling on foreground', () => {
+describe('a message arriving for the thread on screen (Android)', () => {
+  /** Deliver a notification to the listener registered at launch. */
+  function deliver(identifier: string, url: string) {
+    configureOnScreenDismissal();
+    const [listener] =
+      mockNotifications.addNotificationReceivedListener.mock.calls.at(-1)!;
+    listener({ request: { identifier, content: { data: { url } } } } as never);
+  }
+
+  it('is taken back as it arrives', async () => {
+    // `shouldShowList: false` handles this on iOS. Android has no
+    // transient-only notification — anything that banners is posted to the
+    // shade — and the mark-read effect can't be relied on to mop it up: it
+    // re-runs on the message *count*, and the four-second poll usually adds the
+    // message before the push lands.
+    setOnScreenConversation(5);
+
+    deliver('arriving', '/messages/5');
+
+    await act(async () => {});
+    expect(dismissed()).toEqual(['arriving']);
+  });
+
+  it('is left alone when it’s for a thread you’re not reading', async () => {
+    setOnScreenConversation(5);
+
+    deliver('elsewhere', '/messages/9');
+
+    await act(async () => {});
+    expect(dismissed()).toEqual([]);
+  });
+
+  it('is left alone when no thread is on screen', async () => {
+    deliver('anything', '/messages/5');
+
+    await act(async () => {});
+    expect(dismissed()).toEqual([]);
+  });
+});
+
+describe('reconciling what was read elsewhere', () => {
   function Harness() {
     usePushDismissals();
     return null;
   }
 
-  function renderHarness() {
+  async function renderHarness() {
     // `gcTime: 0` is about the *test runner*, not the assertions. The reconcile
     // fetches through `fetchQuery`, which leaves a query with no observers
     // behind it, and Query schedules its garbage collection five minutes out —
@@ -238,11 +283,18 @@ describe('reconciling on foreground', () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, gcTime: 0 } },
     });
-    render(
-      <QueryClientProvider client={client}>
-        <Harness />
-      </QueryClientProvider>
-    );
+    // Wrapped in `act`, the way every other suite here renders: RNTL's own
+    // render opens an async act scope, and opening a second one before it has
+    // settled leaves React with overlapping scopes — after which later renders
+    // are queued and never flushed, so the *next* test's component silently
+    // never mounts.
+    await act(async () => {
+      render(
+        <QueryClientProvider client={client}>
+          <Harness />
+        </QueryClientProvider>
+      );
+    });
   }
 
   /** The AppState listener the hook subscribed with, once it has. */
@@ -259,25 +311,24 @@ describe('reconciling on foreground', () => {
       }) as never);
   });
 
-  /** One turn of the event loop, for effects to run in. */
+  /** One turn of the event loop, for effects and the reconcile to run in. */
   function tick() {
     return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   /**
-   * Mount the hook and bring the app to the foreground.
+   * Open the app and let the reconcile finish.
    *
-   * Both waits are load-bearing. Effects flush *after* `render` returns, so
-   * without the first there is no listener to call yet. The second gives the
-   * reconcile — which is several awaits deep — a real tick to finish in, so
-   * each test can assert on a settled world instead of polling for one.
+   * This is the **cold-start** path, and it's the one most tests drive: tapping
+   * the icon after the process was killed emits no AppState change at all, so
+   * mounting has to reconcile on its own or the wall of already-read
+   * notifications survives exactly the moment it's most visible. The `act` is
+   * load-bearing twice over — effects run *after* `render` returns, and the
+   * reconcile behind them is several awaits deep.
    */
-  async function foreground() {
-    renderHarness();
-    await tick();
-    expect(listener).toBeDefined();
+  async function openApp() {
+    await renderHarness();
     await act(async () => {
-      listener!('active');
       await tick();
     });
   }
@@ -295,15 +346,64 @@ describe('reconciling on foreground', () => {
     );
     conversations({ id: 5, unread_count: 0 }, { id: 9, unread_count: 2 });
 
-    await foreground();
+    await openApp();
 
     expect(dismissed()).toEqual(['a']);
+  });
+
+  it('runs again each time the app returns to the foreground', async () => {
+    // The other half of the same job: a phone that sat next to a laptop all
+    // afternoon shouldn't be a wall of already-read notifications when it's
+    // picked up, and that arrival is an AppState transition, not a mount.
+    conversations({ id: 5, unread_count: 0 });
+    await openApp();
+    expect(dismissed()).toEqual([]);
+
+    tray(presented('later', { url: '/messages/5' }));
+    await act(async () => {
+      listener!('active');
+      await tick();
+    });
+
+    expect(dismissed()).toEqual(['later']);
+  });
+
+  it('ignores an AppState change that isn’t a foreground', async () => {
+    conversations({ id: 5, unread_count: 0 });
+    await openApp();
+
+    tray(presented('later', { url: '/messages/5' }));
+    await act(async () => {
+      listener!('background');
+      await tick();
+    });
+
+    expect(dismissed()).toEqual([]);
+  });
+
+  it('does not dismiss a notification that arrived during its round trip', async () => {
+    // The unread count it judges by was fetched before that notification
+    // existed. Dismissing on the strength of it is the one way this feature
+    // could hide a genuinely unread message, so the reconcile dismisses what it
+    // *looked at* rather than whatever is in the tray afterwards.
+    tray(presented('before', { url: '/messages/5' }));
+    jest.spyOn(api, 'getConversations').mockImplementation(async () => {
+      tray(
+        presented('before', { url: '/messages/5' }),
+        presented('during', { url: '/messages/5' })
+      );
+      return { results: [{ id: 5, unread_count: 0 }] } as never;
+    });
+
+    await openApp();
+
+    expect(dismissed()).toEqual(['before']);
   });
 
   it('spends no request when the tray is empty', async () => {
     const getConversations = conversations({ id: 5, unread_count: 0 });
 
-    await foreground();
+    await openApp();
 
     expect(mockNotifications.getPresentedNotificationsAsync).toHaveBeenCalled();
     expect(getConversations).not.toHaveBeenCalled();
@@ -314,7 +414,7 @@ describe('reconciling on foreground', () => {
     tray(presented('a', { url: '/messages/77' }));
     conversations({ id: 5, unread_count: 0 });
 
-    await foreground();
+    await openApp();
 
     expect(api.getConversations).toHaveBeenCalled();
     expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalled();
@@ -326,21 +426,20 @@ describe('reconciling on foreground', () => {
       .spyOn(api, 'getConversations')
       .mockRejectedValue(Object.assign(new Error('offline'), { status: 500 }));
 
-    await foreground();
+    await openApp();
 
     expect(api.getConversations).toHaveBeenCalled();
     expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalled();
   });
 
-  it('does not subscribe at all while signed out', async () => {
+  it('does nothing at all while signed out', async () => {
     mockUseAuth.mockReturnValue({ status: 'signedOut' } as never);
+    tray(presented('a', { url: '/messages/5' }));
+    conversations({ id: 5, unread_count: 0 });
 
-    renderHarness();
-    // The same tick the signed-in path needs before its listener exists —
-    // load-bearing here because the assertion is a *negative* one, and without
-    // it would pass whether or not the hook subscribed.
-    await tick();
+    await openApp();
 
     expect(AppState.addEventListener).not.toHaveBeenCalled();
+    expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalled();
   });
 });

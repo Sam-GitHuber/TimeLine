@@ -17,6 +17,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import * as Notifications from 'expo-notifications';
 import { Alert } from 'react-native';
 
 import MessagesScreen from '@/app/(tabs)/messages';
@@ -43,6 +44,8 @@ jest.mock('expo-router', () => ({
   // factory runs before the `const` initialises — the trap the C4 notes describe).
   router: { push: (...args: unknown[]) => mockPush(...args) },
 }));
+
+const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 
 const mockFetch = jest.fn();
 
@@ -121,6 +124,11 @@ async function renderScreen() {
 beforeEach(() => {
   mockFetch.mockReset();
   mockPush.mockReset();
+  // Delivered push notifications (#178) — empty tray unless a test fills it.
+  mockNotifications.getPresentedNotificationsAsync.mockReset();
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([] as never);
+  mockNotifications.dismissNotificationAsync.mockReset();
+  mockNotifications.dismissNotificationAsync.mockResolvedValue(undefined as never);
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -452,6 +460,40 @@ it('offers Mark read on a thread that has unread messages', async () => {
           init?.method === 'POST'
       )
     ).toBe(true)
+  );
+});
+
+it('takes back that thread’s notifications when Mark read is swiped (#178)', async () => {
+  // The other mark-read path. Dealing with a thread from the list is the same
+  // act as reading it, and without this the badge clears while "New message
+  // from Ada" stays on the lock screen — the whole bug.
+  serve([
+    convo({
+      id: 18,
+      unread_count: 4,
+      last_message: {
+        text: 'still on for Tuesday?',
+        is_deleted: false,
+        sender_id: 2,
+        created_at: '2026-07-22T10:00:00Z',
+      },
+    }),
+  ]);
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+    { request: { identifier: 'this-thread', content: { data: { url: '/messages/18' } } } },
+    { request: { identifier: 'another-thread', content: { data: { url: '/messages/9' } } } },
+  ] as never);
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Mark read'));
+
+  await waitFor(() =>
+    expect(mockNotifications.dismissNotificationAsync).toHaveBeenCalledWith(
+      'this-thread'
+    )
+  );
+  expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalledWith(
+    'another-thread'
   );
 });
 

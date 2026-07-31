@@ -68,6 +68,10 @@ jest.mock('expo-notifications', () => ({
   // returning undefined would throw on `.filter` of a non-array.
   getPresentedNotificationsAsync: jest.fn(async () => []),
   dismissNotificationAsync: jest.fn(async () => {}),
+  // Fires when a push is delivered while the app is running, which is how a
+  // message for the thread already on screen is taken back on Android. Returns
+  // a subscription because that's what the real one does.
+  addNotificationReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
   AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
   useLastNotificationResponse: jest.fn(() => null),
 }));

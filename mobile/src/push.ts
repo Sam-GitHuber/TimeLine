@@ -353,11 +353,17 @@ export async function forgetLocalPushToken(): Promise<void> {
  * a message rather than opening a screen. Reading it from the same `url` the
  * deep link uses keeps one shape on the wire — the push carries no separate
  * conversation field to fall out of step with it.
+ *
+ * **Total by construction**, and it has to stay that way: the foreground
+ * notification handler calls this on every arriving push, and a handler that
+ * *rejects* means the notification isn't presented at all. `data` is untyped
+ * JSON off the wire, so a `url` that isn't a string is a possibility rather
+ * than a contradiction — hence the type test rather than a bare `?.match`,
+ * which would throw a TypeError on a number and silently swallow the push.
  */
-export function conversationIdFromUrl(
-  url: string | null | undefined
-): number | null {
-  const match = url?.match(/^\/messages\/(\d+)$/);
+export function conversationIdFromUrl(url: unknown): number | null {
+  if (typeof url !== 'string') return null;
+  const match = url.match(/^\/messages\/(\d+)$/);
   return match ? Number(match[1]) : null;
 }
 
@@ -445,8 +451,9 @@ export function routeForNotification(url: string | null | undefined): Href {
  * There is no APNs/FCM "unsend"; reaching a phone that isn't running the app
  * means sending it something, and both platforms' silent-delivery paths are
  * best-effort by construction. That's issue #178's case D, deliberately left to
- * ride on Phase 10b's spike rather than guessed at here.
- * `reconcileDeliveredNotifications` is the cheap 80% of it.
+ * ride on Phase 10b's spike rather than guessed at here. The foreground
+ * reconcile in `usePushDismissals.ts` — built on `presentedConversations` below
+ * — is the cheap 80% of it.
  */
 async function dismissDelivered(
   matches: (data: PushData) => boolean
@@ -500,22 +507,73 @@ export function dismissActivityNotifications(): Promise<void> {
 }
 
 /**
- * The conversations that currently have a notification sitting in the tray.
+ * What's in the tray right now, grouped by conversation: id → the delivered
+ * notifications for it.
  *
- * Exists so the foreground reconcile can ask *"is there anything to clean up?"*
- * before spending a network request finding out what's been read — which, for
- * an empty tray, is every foreground of every session.
+ * Two things want this rather than a dismissal helper. The foreground reconcile
+ * has to ask *"is there anything to clean up?"* before spending a network
+ * request finding out what's been read — which, for an empty tray, is every
+ * foreground of every session. And it then has to dismiss **exactly what it
+ * looked at**: re-reading the tray after the round trip would let a message that
+ * arrived *during* it be dismissed on the strength of an `unread_count` fetched
+ * before it existed, which is the one way this feature could hide a genuinely
+ * unread message.
  */
-export async function presentedConversationIds(): Promise<Set<number>> {
+export async function presentedConversations(): Promise<Map<number, string[]>> {
+  const byConversation = new Map<number, string[]>();
   try {
     const presented = await Notifications.getPresentedNotificationsAsync();
-    const ids = presented
-      .map((notification) => conversationIdFromUrl(pushData(notification).url))
-      .filter((id): id is number => id !== null);
-    return new Set(ids);
+    for (const notification of presented) {
+      const id = conversationIdFromUrl(pushData(notification).url);
+      if (id === null) continue;
+      const identifiers = byConversation.get(id) ?? [];
+      identifiers.push(notification.request.identifier);
+      byConversation.set(id, identifiers);
+    }
   } catch {
     // An unreadable tray is treated as an empty one: the caller does nothing,
     // which is what it would have done before this existed.
-    return new Set();
   }
+  return byConversation;
+}
+
+/** Dismiss exactly these delivered notifications, by identifier. */
+export async function dismissNotifications(
+  identifiers: Iterable<string>
+): Promise<void> {
+  try {
+    await Promise.all(
+      [...identifiers].map((identifier) =>
+        Notifications.dismissNotificationAsync(identifier)
+      )
+    );
+  } catch {
+    // Best-effort, as above.
+  }
+}
+
+/**
+ * Dismiss a message push **as it arrives** for the thread already on screen.
+ *
+ * The handler's `shouldShowList: false` covers this on iOS, where banner and
+ * notification-centre entry are independent options. **Android has no such
+ * split** — `NotificationBehaviorRecord.shouldPresentAlert` is
+ * `shouldShowBanner || shouldShowList`, so anything that banners is also posted
+ * to the shade — and the mark-read effect can't be relied on to mop it up:
+ * that effect re-runs on the message *count*, and the thread's four-second poll
+ * usually adds the message before the push lands. Count unchanged, effect
+ * doesn't re-run, and the entry sits in the shade for a message being read as it
+ * arrived.
+ *
+ * So the arrival itself is the trigger. One listener for the app's lifetime,
+ * registered at launch beside the handler for the same reason: a push can arrive
+ * before anyone signs in. A no-op on iOS, where there's nothing in the tray to
+ * dismiss.
+ */
+export function configureOnScreenDismissal(): void {
+  Notifications.addNotificationReceivedListener((notification) => {
+    const id = conversationIdFromUrl(pushData(notification).url);
+    if (id === null || id !== onScreenConversation) return;
+    void dismissNotifications([notification.request.identifier]);
+  });
 }

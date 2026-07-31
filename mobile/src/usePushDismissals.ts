@@ -31,10 +31,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
-import {
-  dismissConversationNotifications,
-  presentedConversationIds,
-} from '@/push';
+import { dismissNotifications, presentedConversations } from '@/push';
 
 export function usePushDismissals(): void {
   const { status } = useAuth();
@@ -43,6 +40,19 @@ export function usePushDismissals(): void {
   useEffect(() => {
     // Nothing to reconcile against while signed out, and the fetch would 401.
     if (status !== 'signedIn') return;
+
+    // **Once on the way in, not only on later transitions.** A cold start is
+    // the commonest way the app is opened — tap the icon after the process has
+    // been killed — and it emits no AppState `change` at all: the app is
+    // already active by the time anything here mounts. Subscribing without this
+    // would leave the wall of already-read notifications standing at exactly
+    // the moment it's most visible, clearing only on the *second* foreground.
+    //
+    // Unconditional rather than gated on `AppState.currentState`: this runs
+    // when the session becomes `signedIn`, which is a launch or a login, and a
+    // reconcile that happens to fire while backgrounded is both harmless and
+    // the thing we'd want anyway.
+    void reconcile(queryClient);
 
     const subscription = AppState.addEventListener(
       'change',
@@ -62,6 +72,13 @@ export function usePushDismissals(): void {
  * notifications waiting at all, and this must not add a request to every one of
  * them.
  *
+ * **It dismisses the notifications it looked at, not whatever is in the tray
+ * afterwards.** The `unread_count` it judges by was fetched before the round
+ * trip; a message arriving during that window would be dismissed on the
+ * strength of a count that predates it — the one way this could hide something
+ * genuinely unread. Holding the identifiers from the first read closes that,
+ * and saves a second trip across the bridge.
+ *
  * `fetchQuery` rather than a bare `api.getConversations()` so the answer lands
  * in the same `['conversations']` cache the messages tab reads — the app is
  * refetching this on foreground anyway when that tab is mounted, and going
@@ -75,21 +92,24 @@ export function usePushDismissals(): void {
  * delivered notification is near the top by definition.
  */
 async function reconcile(queryClient: QueryClient): Promise<void> {
-  try {
-    const waiting = await presentedConversationIds();
-    if (!waiting.size) return;
+  const waiting = await presentedConversations();
+  if (!waiting.size) return;
 
-    const conversations = await queryClient.fetchQuery({
+  let conversations;
+  try {
+    conversations = await queryClient.fetchQuery({
       queryKey: ['conversations'],
       queryFn: api.getConversations,
     });
-
-    const read = conversations.results
-      .filter((convo) => waiting.has(convo.id) && convo.unread_count === 0)
-      .map((convo) => convo.id);
-    await dismissConversationNotifications(read);
   } catch {
-    // Best-effort, like every dismissal path: a failed reconcile leaves the
-    // notification where it was, which is the behaviour this replaced.
+    // The only call here that can throw — both of the others swallow their own
+    // failures. A reconcile that can't ask what's been read leaves the
+    // notifications where they are, which is the behaviour this replaced.
+    return;
   }
+
+  const stale = conversations.results
+    .filter((convo) => convo.unread_count === 0)
+    .flatMap((convo) => waiting.get(convo.id) ?? []);
+  await dismissNotifications(stale);
 }
