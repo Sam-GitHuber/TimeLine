@@ -61,7 +61,7 @@ import {
 } from '@tanstack/react-query';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -109,6 +109,10 @@ import { getDraft, setDraft } from '@/drafts';
 import { useMentions } from '@/mentions';
 import type { Outgoing, OutgoingPhoto } from '@/outbox';
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
+import {
+  dismissConversationNotifications,
+  setOnScreenConversation,
+} from '@/push';
 import { useQuotedMessages } from '@/quotes';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
@@ -810,6 +814,15 @@ export default function ThreadScreen() {
   const detailLoaded = !!detail;
   useEffect(() => {
     if (convoQuery.isError || isPending || !detailLoaded) return;
+    // Take back this thread's notifications from the phone's notification
+    // centre (#178). Reading a thread in the app is the commonest way a
+    // notification goes stale, and until this landed nothing ever removed one:
+    // you could read everything and still find "New message from Ada" on the
+    // lock screen. Deliberately *not* chained onto the POST below — whether the
+    // server hears about it doesn't change the fact the user has read it, and
+    // the shade is local. Re-runs with the effect, so a push that arrives while
+    // this thread is open is mopped up on the next poll.
+    void dismissConversationNotifications([id]);
     // The unread count has already been latched during render, above — this is
     // the write it has to survive.
     api.markConversationRead(id).then(() => {
@@ -820,6 +833,22 @@ export default function ThreadScreen() {
     // `CONVERSATION_DETAIL_POLL_MS`, so depending on the object itself would
     // turn this into a mark-read poll of its own. A boolean flips once.
   }, [id, messageCount, convoQuery.isError, isPending, detailLoaded, queryClient]);
+
+  /**
+   * Tell the notification handler this thread is the one on screen (#178), so a
+   * message arriving for it banners without also being filed in the
+   * notification centre for you to find later and re-read.
+   *
+   * On focus rather than mount: this screen stays mounted underneath its own
+   * info screen, and a thread the user has navigated away from must stop
+   * claiming its pushes.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      setOnScreenConversation(id);
+      return () => setOnScreenConversation(null);
+    }, [id])
+  );
 
   /**
    * Keep the draft store in step with the composer (M5).

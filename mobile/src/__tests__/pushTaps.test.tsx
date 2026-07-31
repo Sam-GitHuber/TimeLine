@@ -81,6 +81,11 @@ beforeEach(() => {
   jest
     .spyOn(api, 'markNotificationAddressed')
     .mockResolvedValue(undefined as never);
+  // Delivered push notifications (#178) — empty tray unless a test fills it.
+  mockNotifications.getPresentedNotificationsAsync.mockReset();
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([] as never);
+  mockNotifications.dismissNotificationAsync.mockReset();
+  mockNotifications.dismissNotificationAsync.mockResolvedValue(undefined as never);
   clearOutbox();
 });
 
@@ -259,6 +264,36 @@ it('sends a reply typed into the notification, without opening the app', async (
   // Trimmed, like every other send.
   await waitFor(() => expect(send).toHaveBeenCalledWith(12, 'on my way'));
   expect(router.navigate).not.toHaveBeenCalled();
+});
+
+it('clears that thread’s other notifications once it’s been replied to (#178)', async () => {
+  // Answering deals with the whole thread, not just the notification that was
+  // pulled down — and this is the one dismissal path that runs with the app
+  // deliberately *not* in the foreground, since `opensAppToForeground: false`
+  // launches us in the background to handle the reply.
+  jest.spyOn(api, 'sendMessage').mockResolvedValue({} as never);
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+    { request: { identifier: 'same-thread', content: { data: { url: '/messages/12' } } } },
+    { request: { identifier: 'other-thread', content: { data: { url: '/messages/3' } } } },
+  ] as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  await render(<Probe />);
+
+  await waitFor(() =>
+    expect(mockNotifications.dismissNotificationAsync).toHaveBeenCalledWith(
+      'same-thread'
+    )
+  );
+  expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalledWith(
+    'other-thread'
+  );
 });
 
 it('keeps a reply that fails to send', async () => {

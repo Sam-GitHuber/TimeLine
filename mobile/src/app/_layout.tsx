@@ -30,6 +30,7 @@ import {
   configureNotificationChannels,
   configureNotificationHandler,
 } from '@/push';
+import { usePushDismissals } from '@/usePushDismissals';
 import { usePushNotificationTaps } from '@/usePushTaps';
 import { colors } from '@/theme';
 
@@ -74,9 +75,11 @@ const queryClient = new QueryClient({
 function AuthGate() {
   const { status } = useAuth();
   const segments = useSegments();
-  // Lives here rather than in RootLayout because it reads auth state, and so
-  // must be inside AuthProvider.
+  // Both live here rather than in RootLayout because they read auth state, and
+  // so must be inside AuthProvider (the dismissal reconcile also needs the
+  // QueryClientProvider above it).
   usePushNotificationTaps();
+  usePushDismissals();
   // The router isn't ready to navigate on the very first render; navigating
   // before it is silently does nothing.
   const navigationState = useRootNavigationState();

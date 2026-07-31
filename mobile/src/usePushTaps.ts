@@ -26,7 +26,12 @@ import { useEffect, useRef } from 'react';
 import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { newOutgoing, updateOutbox } from '@/outbox';
-import { conversationIdFromUrl, REPLY_ACTION, routeForNotification } from '@/push';
+import {
+  conversationIdFromUrl,
+  dismissConversationNotifications,
+  REPLY_ACTION,
+  routeForNotification,
+} from '@/push';
 
 export function usePushNotificationTaps(): void {
   const { status } = useAuth();
@@ -68,7 +73,15 @@ export function usePushNotificationTaps(): void {
     if (response.actionIdentifier === REPLY_ACTION) {
       const text = response.userText?.trim();
       const conversationId = conversationIdFromUrl(data?.url);
-      if (text && conversationId) sendReply(conversationId, text);
+      if (text && conversationId) {
+        sendReply(conversationId, text);
+        // Answering a thread deals with every notification for it, not just the
+        // one that was pulled down (#178). This is the one dismissal path that
+        // runs with the app deliberately *not* in the foreground —
+        // `opensAppToForeground: false` launches us in the background to handle
+        // the reply, and a dismissal call works fine there.
+        void dismissConversationNotifications([conversationId]);
+      }
       return;
     }
 

@@ -1053,6 +1053,14 @@ since neither state is ever undone:
   "message deleted". The two together are what make "a push for deleted content
   cannot fire" true for messages in both senses.
 
+**Reading the thread takes the notification back** (#178). The two drops above
+are both *pre*-delivery; once a push is on the phone, opening the thread (or
+replying from the lock screen, or foregrounding the app after reading it on the
+web) dismisses it from the notification centre, and a message arriving for the
+thread you're looking at banners without being filed there at all. That's app-side
+bookkeeping with no messaging endpoint behind it — see
+[notifications.md](notifications.md#taking-a-notification-back-once-its-been-dealt-with-178).
+
 **The body never quotes the message.** It reads `New message from Ada`, or
 `Ada in Book Club` for a titled group. Push bodies transit Expo's servers and
 Apple's, so naming the sender is the most we ever say — that rule is what makes

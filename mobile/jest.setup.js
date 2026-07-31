@@ -62,6 +62,12 @@ jest.mock('expo-notifications', () => ({
   // `configureNotificationChannels` attaches a `.catch`, and a mock returning
   // undefined would throw at import time in every suite that pulls this in.
   setNotificationChannelAsync: jest.fn(async () => ({})),
+  // Taking back a delivered notification once it's been dealt with in the app
+  // (#178). Resolved rather than bare jest.fn()s for the same reason as the two
+  // above: every dismissal path awaits these inside a try/catch, and a mock
+  // returning undefined would throw on `.filter` of a non-array.
+  getPresentedNotificationsAsync: jest.fn(async () => []),
+  dismissNotificationAsync: jest.fn(async () => {}),
   AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
   useLastNotificationResponse: jest.fn(() => null),
 }));

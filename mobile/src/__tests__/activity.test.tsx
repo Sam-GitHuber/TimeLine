@@ -19,6 +19,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react-native';
+import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import type { ReactElement } from 'react';
 
@@ -41,6 +42,8 @@ const mockRouter = router as unknown as {
   push: jest.Mock;
   back: jest.Mock;
 };
+
+const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 
 const mockFetch = jest.fn();
 
@@ -113,6 +116,12 @@ beforeEach(() => {
   mockRouter.navigate.mockReset();
   mockRouter.push.mockReset();
   mockRouter.back.mockReset();
+  // Delivered push notifications (#178). Empty tray unless a test says
+  // otherwise.
+  mockNotifications.getPresentedNotificationsAsync.mockReset();
+  mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([] as never);
+  mockNotifications.dismissNotificationAsync.mockReset();
+  mockNotifications.dismissNotificationAsync.mockResolvedValue(undefined as never);
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -144,6 +153,33 @@ describe('ActivityScreen', () => {
     );
     // No `ids` — the empty body means "mark every unread seen".
     expect(requestBody(/\/api\/notifications\/seen\/$/, 'POST')).toEqual({});
+  });
+
+  it('takes back the OS notifications behind those rows (#178)', async () => {
+    // The screen's whole design is that a notification is *kept* in-app while
+    // its badge signal is cleared — and one sitting in the phone's notification
+    // centre is a badge signal. A message push must survive it: messaging keeps
+    // its own unread badge and is deliberately outside the bell, and its push
+    // carries no `notificationId`, which is what tells the two apart here.
+    serveList([notification()]);
+    mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+      { request: { identifier: 'bell', content: { data: { url: '/p/42', notificationId: 1 } } } },
+      {
+        request: {
+          identifier: 'message',
+          content: { data: { url: '/messages/5', notificationId: null } },
+        },
+      },
+    ] as never);
+
+    await renderWithClient(<ActivityScreen />);
+
+    await waitFor(() =>
+      expect(mockNotifications.dismissNotificationAsync).toHaveBeenCalledWith('bell')
+    );
+    expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalledWith(
+      'message'
+    );
   });
 
   it('addresses a row and deep-links to its mapped route on tap', async () => {

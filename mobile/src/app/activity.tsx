@@ -31,7 +31,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
-import { routeForNotification } from '@/push';
+import { dismissActivityNotifications, routeForNotification } from '@/push';
 import { colors, fontSize, spacing } from '@/theme';
 import type { Notification } from '@/types';
 import { formatRelativeTime } from '@/utils';
@@ -53,6 +53,13 @@ export default function ActivityScreen() {
   // the web behaves the same (it marks seen on the open transition).
   useEffect(() => {
     let cancelled = false;
+    // …and takes back the OS notifications behind them (#178). The same
+    // reasoning one line up: the row is *kept*, its badge signal is cleared,
+    // and a notification sitting in the shade is a badge signal. Fired
+    // alongside the POST rather than after it — the user has read these
+    // whatever the server makes of it — and it can't touch a message push,
+    // which carries no `notificationId`.
+    void dismissActivityNotifications();
     api.markNotificationsSeen().then(() => {
       if (cancelled) return;
       queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
