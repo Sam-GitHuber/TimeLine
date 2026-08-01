@@ -1,3 +1,4 @@
+import logging
 from collections import defaultdict
 from datetime import timedelta
 
@@ -109,6 +110,8 @@ from .serializers import (
 )
 
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 ACCEPTED = Connection.Status.ACCEPTED
 PENDING = Connection.Status.PENDING
@@ -1075,32 +1078,38 @@ class CommentCountMixin:
 
 # --- Media cleanup on delete --------------------------------------------------
 #
-# Deleting a row does NOT delete the file it points at. Django dropped that
-# behaviour deliberately (a rolled-back transaction would otherwise leave you
-# with a live row and a missing file), so every delete path has to sweep up
-# after itself. Skipping it isn't merely untidy here: `media_auth` authorises
-# media requests on "are you signed in", not "is this yours", so an orphaned
-# JPEG stays *fetchable* by any member who still holds its URL — a deleted
-# photo that isn't really deleted. These helpers keep the sweep in one place so
-# each new delete path doesn't have to rediscover the rule.
+# Deleting a row does NOT delete the file it points at, so every delete path has
+# to sweep up after itself. That isn't merely untidy: an orphaned JPEG stays
+# *fetchable* by anyone holding its URL (`media_auth` gates on being signed in,
+# not on owning the file), so a "deleted" photo isn't deleted. Use these helpers
+# for any new delete path. See docs/reference/accounts.md, "Account deletion".
 
 
-def _post_image_files(post_ids):
-    """Every stored file belonging to the given posts' images."""
-    files = []
-    for img in PostImage.objects.filter(post_id__in=list(post_ids)):
-        files.append(img.image)
-        files.append(img.thumbnail)
-    return files
+def _stored_files(rows, *field_names):
+    """Every stored file on ``rows``, for the named file fields."""
+    return [getattr(row, name) for row in rows for name in field_names]
 
 
-def _attachment_files(attachments):
-    """Every stored file belonging to the given message attachments."""
-    files = []
-    for att in attachments:
-        files.append(att.file)
-        files.append(att.thumbnail)
-    return files
+def _group_files(group):
+    """Every stored file that dies with ``group``.
+
+    Its avatar, its posts' photos and its chats' attachments — **including
+    those belonging to other people**. A group's posts and group-chat messages
+    outlive their author leaving the group (leaving drops only the membership
+    row), so "the departing member's own files" is not the same set and gathering
+    only that leaves other members' photos orphaned.
+    """
+    return (
+        [group.avatar, group.avatar_thumb]
+        + _stored_files(
+            PostImage.objects.filter(post__group=group), "image", "thumbnail"
+        )
+        + _stored_files(
+            MessageAttachment.objects.filter(message__conversation__group=group),
+            "file",
+            "thumbnail",
+        )
+    )
 
 
 def delete_files_on_commit(files):
@@ -1112,12 +1121,23 @@ def delete_files_on_commit(files):
     ordering can only err on the safe side — a crash between commit and sweep
     leaves an orphaned file (recoverable, invisible in the app), never a live
     row pointing at nothing.
-    """
-    kept = [f for f in files if f]
 
-    def _remove(fs=kept):
-        for f in fs:
-            f.delete(save=False)
+    Each file is swept independently. These callbacks run *after* the commit, so
+    letting one storage error abort the loop would both strand every remaining
+    file and raise out of a delete that has already succeeded — turning a
+    best-effort cleanup into a 500 for an account that is genuinely gone.
+    """
+    files = list(files)
+
+    def _remove():
+        for f in files:
+            try:
+                f.delete(save=False)
+            except Exception:
+                # Already-missing files are a no-op in Django, so reaching here
+                # means storage itself refused (permissions, read-only mount, a
+                # remote-storage blip). Log it for manual cleanup and continue.
+                logger.exception("Could not delete stored file %r", getattr(f, "name", f))
 
     transaction.on_commit(_remove)
 
@@ -1432,12 +1452,11 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
 
     def delete(self, request, *args, **kwargs):
         post = self._owned_object()
-        # Gather the photo files *before* the cascade drops their rows, then
-        # sweep them once the delete commits — see delete_files_on_commit.
-        # Without this a deleted post's photos stayed on disk and stayed
-        # fetchable by URL, which is the opposite of what deleting a post you
-        # regret is for.
-        files = _post_image_files([post.pk])
+        # Gather before the cascade drops the rows; delete_files_on_commit
+        # explains why the sweep waits for the commit.
+        files = _stored_files(
+            PostImage.objects.filter(post=post), "image", "thumbnail"
+        )
         with transaction.atomic():
             post.delete()
             delete_files_on_commit(files)
@@ -3163,13 +3182,16 @@ class MessageDetailView(APIView):
                 # removed the caption and left the picture on the internet. When
                 # someone deletes a photo they sent, the photo is what they mean.
                 #
-                # ``.delete()`` on the queryset would drop the rows and orphan
-                # the files on disk, so this walks them and deletes each file
-                # first. ``save=False`` because the row is about to go anyway.
-                for attachment in message.attachments.all():
-                    attachment.file.delete(save=False)
-                    attachment.thumbnail.delete(save=False)
-                    attachment.delete()
+                # Deleting the rows alone would orphan the files on disk, so
+                # gather them first — then sweep *after* this transaction
+                # commits. Doing it inline (as this did originally) means a
+                # rollback restores the attachment rows with their JPEGs already
+                # destroyed: a live row pointing at nothing, which renders as a
+                # permanently broken image. See delete_files_on_commit.
+                attachments = list(message.attachments.all())
+                files = _stored_files(attachments, "file", "thumbnail")
+                message.attachments.all().delete()
+                delete_files_on_commit(files)
         return Response(
             {"detail": "Message deleted."}, status=status.HTTP_200_OK
         )
@@ -3445,15 +3467,8 @@ class GroupDetailView(APIView):
             raise PermissionDenied("Only an admin can delete this group.")
         # Cascades to memberships, the group's posts (and their image rows +
         # comments) and its chats (and their messages + attachment rows) via
-        # the FKs. The rows go; the files behind them have to be gathered now
-        # and swept after the commit, or the group's photos and every chat
-        # photo in it stay on disk and stay fetchable by URL.
-        post_ids = list(Post.objects.filter(group=group).values_list("id", flat=True))
-        files = [group.avatar, group.avatar_thumb]
-        files += _post_image_files(post_ids)
-        files += _attachment_files(
-            MessageAttachment.objects.filter(message__conversation__group=group)
-        )
+        # the FKs. The rows go; the files behind them have to be gathered first.
+        files = _group_files(group)
         with transaction.atomic():
             group.delete()
             delete_files_on_commit(files)
@@ -4013,16 +4028,11 @@ def delete_account(user):
     # hold the storage + path) but only delete them after the transaction commits
     # — see docstring point 1. An already-removed file just no-ops.
     files_to_delete = [user.avatar, user.avatar_thumb]
-    files_to_delete += _post_image_files(
-        Post.objects.filter(author=user).values_list("id", flat=True)
+    files_to_delete += _stored_files(
+        PostImage.objects.filter(post__author=user), "image", "thumbnail"
     )
-    # Chat photos, which are the same problem as PostImage one table over: the
-    # rows cascade, the JPEGs don't. Missing these meant every photo a departing
-    # user ever sent in a chat stayed on disk *and* stayed fetchable at its
-    # /media/messages/<uuid>.jpg URL — `media_auth` gates on being signed in,
-    # not on owning the file — which is not what "delete my data" promises.
-    #
-    # Two sets, because two different cascades reach messages:
+    # Chat photos need two sets gathered, because two different cascades reach
+    # messages:
     #   - `Message.sender` — their own messages, in every chat.
     #   - `Conversation.user_a`/`user_b` — deleting the user deletes their 1:1
     #     conversations outright, and *that* takes the other person's messages
@@ -4033,10 +4043,12 @@ def delete_account(user):
     direct_convo_ids = Conversation.objects.filter(
         Q(user_a=user) | Q(user_b=user), kind=Conversation.Kind.DIRECT
     ).values_list("id", flat=True)
-    files_to_delete += _attachment_files(
+    files_to_delete += _stored_files(
         MessageAttachment.objects.filter(
             Q(message__sender=user) | Q(message__conversation_id__in=direct_convo_ids)
-        )
+        ),
+        "file",
+        "thumbnail",
     )
 
     with transaction.atomic():
@@ -4061,12 +4073,16 @@ def delete_account(user):
         # read markers, group memberships, reports made.
         user.delete()
 
-        # Now-memberless groups: remove them (capturing their avatar files for the
-        # same on-commit sweep). Their posts — all by the departed sole member —
-        # and those posts' image files are already accounted for above.
+        # Now-memberless groups: remove them, gathering everything that dies
+        # with each for the same on-commit sweep. It is NOT enough to take the
+        # avatar and assume the rest was covered above: `files_to_delete` holds
+        # only this user's *own* posts and messages, but a group can still hold
+        # posts and chat photos from members who have since left it (leaving
+        # drops the membership row, not the content). Those files die with the
+        # group and would otherwise be orphaned. `_group_files` is the same
+        # gather `GroupDetailView.delete` uses.
         for group in Group.objects.filter(id__in=groups_to_delete):
-            files_to_delete.append(group.avatar)
-            files_to_delete.append(group.avatar_thumb)
+            files_to_delete += _group_files(group)
             group.delete()
 
         # Only once the whole delete has committed do we touch storage.

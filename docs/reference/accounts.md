@@ -524,7 +524,16 @@ this meant:
   hand-written reset view equalises PBKDF2 timing to close.
 
 Listing routes explicitly is the fix and the guard: anything unnamed isn't routed,
-and `path()` matches the slash exactly, so there is no second spelling. The
+and `path()` matches the slash exactly, so there is no second spelling. Only the
+four the clients actually use are registered — `login/`, `password/change/`,
+`logout/`, `user/`. dj-rest-auth's `token/verify` + `token/refresh` pair is
+deliberately left out on the same reasoning that made the reset pair dangerous:
+no client calls either (the web session is a 1-day cookie and simply re-logs in),
+and an anonymous endpoint nothing calls is surface without a purpose. Our own
+reset-confirm route is named `password_reset_code_confirm` rather than
+`password_reset_confirm`, so it no longer squats on the name allauth/dj-rest-auth
+reverse with `(uid, key)` — which is what made their view 500 in the first place,
+and would re-arm if an `allauth` include were ever added. The
 `AuthUrlSurfaceTests` in `accounts/tests.py` assert on `resolve()` for both the
 paths that must reach a throttled view and the ones that must reach nothing —
 behaviour tests against the slashed URL cannot catch this class of bug.

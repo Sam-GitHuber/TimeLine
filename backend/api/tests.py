@@ -1872,9 +1872,12 @@ class MessagePhotoTests(MessagingBase):
         thumb_path = Path(attachment.thumbnail.path)
         self.assertTrue(path.exists())
 
-        delete = self.client.delete(
-            f"{messages_url(self.convo)}{message_id}/"
-        )
+        # The file sweep runs on commit (so a rolled-back delete can't destroy
+        # files whose rows survive), so run the callbacks to observe it.
+        with self.captureOnCommitCallbacks(execute=True):
+            delete = self.client.delete(
+                f"{messages_url(self.convo)}{message_id}/"
+            )
 
         self.assertEqual(delete.status_code, status.HTTP_200_OK)
         self.assertFalse(MessageAttachment.objects.exists())
@@ -5281,7 +5284,7 @@ class DeletedContentLeavesNoFilesTests(APITestCase):
         # The other half of doing this on_commit: someone else's delete is
         # refused, and nothing is swept. A file deleted for a delete that never
         # happened would be unrecoverable.
-        post, storage, name, _thumb = self._post_with_photo()
+        post, storage, name, thumb = self._post_with_photo()
         intruder = make_user("intruder@example.com")
         self.client.force_authenticate(intruder)
 
@@ -5292,6 +5295,7 @@ class DeletedContentLeavesNoFilesTests(APITestCase):
             resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND)
         )
         self.assertTrue(storage.exists(name))
+        self.assertTrue(storage.exists(thumb))
 
     def test_deleting_a_group_removes_its_avatar_posts_and_chat_photos(self):
         group = make_group(self.me)
@@ -5361,6 +5365,10 @@ class DeletedContentLeavesNoFilesTests(APITestCase):
 class DeleteAccountTests(APITestCase):
     def setUp(self):
         cache.clear()  # /account/delete/ is throttled per user — isolate it
+        # The media root is shared by the two file tests below, so clear it
+        # via addCleanup: doing it at the end of a test body leaks a directory
+        # of real JPEGs whenever an assertion above it fails.
+        self.addCleanup(shutil.rmtree, _DELETE_MEDIA_ROOT, ignore_errors=True)
         self.me = make_user("leaver@example.com")
         self.client.force_authenticate(self.me)
 
@@ -5414,7 +5422,6 @@ class DeleteAccountTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(storage.exists(name))
         self.assertFalse(storage.exists(thumb))
-        shutil.rmtree(_DELETE_MEDIA_ROOT, ignore_errors=True)
 
     @override_settings(MEDIA_ROOT=_DELETE_MEDIA_ROOT)
     def test_deletes_chat_photos_from_storage(self):
@@ -5471,7 +5478,54 @@ class DeleteAccountTests(APITestCase):
         for storage, name, thumb in files:
             self.assertFalse(storage.exists(name), f"{name} survived the delete")
             self.assertFalse(storage.exists(thumb), f"{thumb} survived the delete")
-        shutil.rmtree(_DELETE_MEDIA_ROOT, ignore_errors=True)
+
+    @override_settings(MEDIA_ROOT=_DELETE_MEDIA_ROOT)
+    def test_deleting_an_emptied_group_takes_a_departed_members_photos(self):
+        """🔒 A group that dies with its last member takes content that was
+        never the leaver's.
+
+        The teardown used to gather only the group's avatar, on the reasoning
+        that its posts were "all by the departed sole member" and therefore
+        already covered. They aren't: leaving a group drops the membership row
+        and nothing else, so posts and chat photos from people who left are
+        still in the group when it's deleted — and were orphaned on disk.
+        """
+        group = make_group(self.me)
+        ex_member = make_user("exmember@example.com")
+        add_member(group, ex_member)
+
+        self.client.force_authenticate(ex_member)
+        self.client.post(
+            POSTS_URL,
+            {
+                "text": "before I left",
+                "group": group.pk,
+                "images": [make_image_upload()],
+            },
+            format="multipart",
+        )
+        image = Post.objects.get(author=ex_member).images.get()
+        storage, name, thumb = (
+            image.image.storage,
+            image.image.name,
+            image.thumbnail.name,
+        )
+        self.assertTrue(storage.exists(name))
+
+        # They leave, so `me` is the group's only active member and the group
+        # dies with the account — but their post stays in it until then.
+        GroupMembership.objects.filter(group=group, user=ex_member).delete()
+        self.client.force_authenticate(self.me)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Group.objects.filter(pk=group.pk).exists())
+        self.assertFalse(storage.exists(name), f"{name} survived the delete")
+        self.assertFalse(storage.exists(thumb), f"{thumb} survived the delete")
 
     def test_sole_admin_hands_the_group_to_the_longest_standing_member(self):
         group = make_group(self.me)  # me = the only admin

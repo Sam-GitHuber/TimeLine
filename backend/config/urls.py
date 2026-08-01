@@ -15,13 +15,12 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 
-from dj_rest_auth.jwt_auth import get_refresh_view
 from dj_rest_auth.views import LogoutView, UserDetailsView
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
-from rest_framework_simplejwt.views import TokenBlacklistView, TokenVerifyView
+from rest_framework_simplejwt.views import TokenBlacklistView
 
 from accounts.views import (
     InactiveRegisterView,
@@ -68,22 +67,15 @@ urlpatterns = [
         ThrottledPasswordChangeView.as_view(),
         name="rest_password_change",
     ),
-    # The rest of dj-rest-auth, unmodified. logout/ and user/ are what the web
-    # app calls; the token/ pair is the cookie session's own refresh path,
-    # unused by our clients today but kept so that stays true by choice rather
-    # than by accident.
+    # The rest of dj-rest-auth, unmodified: logout/ and user/, which are the
+    # only two the web app calls. Its token/verify + token/refresh pair is
+    # deliberately NOT registered — no client calls either (the web session is
+    # a 1-day cookie and simply re-logs in), and "mounted but uncalled" is
+    # precisely the state that turned the password/reset pair into an
+    # account-existence oracle. Four lines to add back if a client ever needs
+    # them; until then they're anonymous surface earning nothing.
     path("api/auth/logout/", LogoutView.as_view(), name="rest_logout"),
     path("api/auth/user/", UserDetailsView.as_view(), name="rest_user_details"),
-    path(
-        "api/auth/token/verify/",
-        TokenVerifyView.as_view(),
-        name="token_verify",
-    ),
-    path(
-        "api/auth/token/refresh/",
-        get_refresh_view().as_view(),
-        name="token_refresh",
-    ),
     # Native-app auth (Phase 9). Deliberately separate from the web endpoints
     # above: these return both tokens in the response body and set no cookies,
     # because JWT_AUTH_HTTPONLY (the web app's XSS mitigation) blanks the refresh
@@ -144,7 +136,12 @@ urlpatterns = [
     path(
         "api/auth/password-reset/confirm/",
         PasswordResetConfirmView.as_view(),
-        name="password_reset_confirm",
+        # NOT named `password_reset_confirm`: that is the name dj-rest-auth and
+        # allauth reverse with (uid, key) arguments, and our zero-argument path
+        # squatting on it is what made their reset view 500 for real accounts.
+        # Dropping their routes defused it; the distinct name means re-adding an
+        # allauth include later can't re-arm it.
+        name="password_reset_code_confirm",
     ),
     # Lets the SPA obtain a CSRF cookie on load.
     path("api/auth/csrf/", csrf, name="csrf"),

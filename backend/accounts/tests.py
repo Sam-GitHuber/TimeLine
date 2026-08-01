@@ -201,11 +201,16 @@ class AuthUrlSurfaceTests(APITestCase):
             "/api/auth/mobile/login/",
             "/api/auth/mobile/refresh/",
             "/api/auth/mobile/logout/",
-            "/api/auth/token/refresh/",
-            "/api/auth/token/verify/",
         ):
             with self.subTest(path=path):
                 resolve(path)  # raises Resolver404 if we dropped one
+
+    def test_dj_rest_auths_token_pair_is_not_routed(self):
+        # No client calls either, and an anonymous endpoint that nothing calls
+        # is exactly what the password/reset pair was. Add them back deliberately
+        # if a client ever needs them.
+        self.assert_not_routed("/api/auth/token/refresh/")
+        self.assert_not_routed("/api/auth/token/verify/")
 
     def test_login_and_password_change_resolve_to_the_throttled_views(self):
         for path, scope in (
