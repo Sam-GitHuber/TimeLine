@@ -21,6 +21,7 @@ import {
   registerForPush,
   REPLY_ACTION,
   routeForNotification,
+  setAppBadge,
   unregisterPush,
 } from '@/push';
 
@@ -42,6 +43,7 @@ jest.mock('expo-notifications', () => ({
   setNotificationHandler: jest.fn(),
   setNotificationCategoryAsync: jest.fn(async () => ({})),
   setNotificationChannelAsync: jest.fn(async () => ({})),
+  setBadgeCountAsync: jest.fn(async () => true),
   AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
 }));
 
@@ -313,6 +315,57 @@ describe('configureNotificationChannels (Phase 10)', () => {
   iosOnly('creates nothing on iOS, where channels do not exist', () => {
     configureNotificationChannels();
     expect(mockNotifications.setNotificationChannelAsync).not.toHaveBeenCalled();
+  });
+});
+
+describe('setAppBadge', () => {
+  const androidOnly = Platform.OS === 'android' ? it : it.skip;
+  const iosOnly = Platform.OS === 'ios' ? it : it.skip;
+
+  iosOnly('puts the count on the icon', () => {
+    setAppBadge(3);
+
+    expect(mockNotifications.setBadgeCountAsync).toHaveBeenCalledWith(3);
+  });
+
+  iosOnly('clears the icon with zero', () => {
+    // The count that matters most: the one that takes the badge away. It has to
+    // go through the same call, which is why this isn't guarded against zero.
+    setAppBadge(0);
+
+    expect(mockNotifications.setBadgeCountAsync).toHaveBeenCalledWith(0);
+  });
+
+  iosOnly('never hands the native side a negative count', () => {
+    setAppBadge(-1);
+
+    expect(mockNotifications.setBadgeCountAsync).toHaveBeenCalledWith(0);
+  });
+
+  androidOnly('does nothing at all on Android', async () => {
+    // **The load-bearing test in this file.** `setBadgeCountAsync(0)` on
+    // Android doesn't clear a badge — `BadgeHelper` calls
+    // `notificationManager.cancelAll()` and dismisses *every* notification the
+    // app has posted. A well-meaning "clear the badge on foreground" would
+    // silently wipe the shade, in the release right after #178 taught this app
+    // to dismiss notifications only once they've genuinely been dealt with.
+    setAppBadge(0);
+    setAppBadge(5);
+
+    expect(mockNotifications.setBadgeCountAsync).not.toHaveBeenCalled();
+  });
+
+  iosOnly('survives a badge the OS refuses to set', async () => {
+    // Best-effort like every other push nicety here: the worst a failure may do
+    // is leave the number where it was. It must not reject into a screen — and
+    // nothing awaits this, so a rejection would surface as an unhandled one.
+    mockNotifications.setBadgeCountAsync.mockRejectedValue(
+      new Error('no badge permission') as never
+    );
+
+    expect(() => setAppBadge(2)).not.toThrow();
+    // Let the rejection settle inside the call's own `.catch`.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 });
 

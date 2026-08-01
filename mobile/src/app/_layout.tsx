@@ -31,6 +31,7 @@ import {
   configureNotificationHandler,
   configureOnScreenDismissal,
 } from '@/push';
+import { useBadgeCount } from '@/useBadgeCount';
 import { usePushDismissals } from '@/usePushDismissals';
 import { usePushNotificationTaps } from '@/usePushTaps';
 import { colors } from '@/theme';
@@ -81,11 +82,14 @@ const queryClient = new QueryClient({
 function AuthGate() {
   const { status } = useAuth();
   const segments = useSegments();
-  // Both live here rather than in RootLayout because they read auth state, and
-  // so must be inside AuthProvider (the dismissal reconcile also needs the
-  // QueryClientProvider above it).
+  // All three live here rather than in RootLayout because they read auth state,
+  // and so must be inside AuthProvider (the dismissal reconcile and the badge
+  // count also need the QueryClientProvider above it).
   usePushNotificationTaps();
   usePushDismissals();
+  // The app icon's badge (#179). Here rather than on a screen so it holds
+  // whichever tab is on top — and so that signing out clears it.
+  useBadgeCount();
   // The router isn't ready to navigate on the very first render; navigating
   // before it is silently does nothing.
   const navigationState = useRootNavigationState();

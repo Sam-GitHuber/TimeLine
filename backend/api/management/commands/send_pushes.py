@@ -50,6 +50,7 @@ from django.utils import timezone
 from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
 from ...notifications import MENTION_CHANNEL, channel_for_kind
 from ...serializers import NotificationSerializer
+from ...views import badge_count_for
 
 # Expo's reply carries one ticket per message, in the order sent.
 _DEVICE_NOT_REGISTERED = "DeviceNotRegistered"
@@ -96,6 +97,10 @@ class Command(BaseCommand):
             sent_at__isnull=True,
             attempts__lt=PushOutbox.MAX_ATTEMPTS,
         ).select_related(
+            # The icon-badge count is per *recipient* (issue #179), so the drain
+            # needs the user object, not just its id. Joined here rather than
+            # fetched per row.
+            "recipient",
             "notification",
             "notification__actor",
             # The serializer reads through these for the text and deep-link
@@ -132,6 +137,8 @@ class Command(BaseCommand):
             devices_by_user.setdefault(device.user_id, []).append(device)
 
         read_markers = self._read_markers(pending)
+        # recipient_id → icon-badge count, filled in on demand by `_badge`.
+        badges = {}
 
         messages = []
         for row in pending:
@@ -161,8 +168,11 @@ class Command(BaseCommand):
                     row.save(update_fields=["sent_at"])
                 continue
             payload = self._payload(row)
+            badge = self._badge(row, badges)
             for device in outstanding:
-                messages.append((row, device, self._message(device, payload)))
+                messages.append(
+                    (row, device, self._message(device, payload, badge))
+                )
 
         if not messages:
             self.stdout.write(f"{len(pending)} queued, nothing outstanding to send.")
@@ -192,6 +202,29 @@ class Command(BaseCommand):
             (read.conversation_id, read.user_id): read.last_read_at
             for read in ConversationRead.objects.filter(pairs)
         }
+
+    def _badge(self, row, cache):
+        """The number to put on this recipient's **app icon** (issue #179).
+
+        Cached per recipient for the batch: a group message queues one row per
+        member, and a burst queues several for the same person, but the count is
+        a property of the *recipient*, not of the row — so computing it once
+        each is both cheaper and more consistent (every push in a drain agrees
+        on the number, rather than two arriving milliseconds apart disagreeing).
+
+        Counted *now* rather than at enqueue time, and deliberately so: the row
+        may have sat in the queue for a tick or two, and what belongs on the
+        icon is what's waiting when the push lands, not what was waiting when it
+        was written. That's also why it includes the message this push is
+        about — it's unread by definition at this point.
+
+        It is **not free** — ``badge_count_for`` runs a query per conversation,
+        the same family-scale trade-off ``UnreadMessageCountView`` makes. The
+        cache is what keeps that from multiplying by the batch size.
+        """
+        if row.recipient_id not in cache:
+            cache[row.recipient_id] = badge_count_for(row.recipient)
+        return cache[row.recipient_id]
 
     def _should_drop(self, row, read_markers):
         """Whether this queued *message* push should be dropped instead of sent.
@@ -302,7 +335,7 @@ class Command(BaseCommand):
             "channel": MENTION_CHANNEL if mentioned else channel_for_kind("message"),
         }
 
-    def _message(self, device, data):
+    def _message(self, device, data, badge):
         """One Expo push message from a payload.
 
         Deliberately carries **no post, comment or message content** — only the
@@ -314,12 +347,21 @@ class Command(BaseCommand):
         ``data`` is what the app reads on tap to deep-link: ``url`` is the same
         route string the web app uses (e.g. ``/p/12?comment=34``), which the app
         maps onto its native route.
+
+        ``badge`` is the icon count (issue #179). A number, never omitted and
+        never ``None``: this is the only lever that can set an icon badge on a
+        phone that isn't running the app, so it has to be on every push,
+        including the one that brings the count back to zero. Expo maps it to
+        APNs' ``aps.badge`` and it is **iOS-only** — Android gets no equivalent
+        field, which is why the app's own badge calls are iOS-only too (see
+        ``push.ts``).
         """
         message = {
             "to": device.expo_token,
             "title": "TimeLine",
             "body": data["text"],
             "sound": "default",
+            "badge": badge,
             "data": {
                 "notificationId": data["id"],
                 "kind": data["kind"],

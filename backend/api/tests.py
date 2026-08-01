@@ -42,6 +42,7 @@ from api.views import (
     MESSAGE_IDS_MAX,
     activate,
     active_participant_ids,
+    badge_count_for,
     deactivate,
     must_connect_with,
     promote_participants,
@@ -8312,6 +8313,94 @@ class SendPushesCommandTests(APITestCase):
         urlopen = self._run()
 
         self.assertNotIn("categoryId", self._sent_body(urlopen)[0])
+
+    def test_every_push_carries_the_recipients_icon_badge(self):
+        # Issue #179. Unlike `categoryId`/`channelId`, which a kind opts into,
+        # the badge is on *every* push: it's the only lever that can put a
+        # number on the icon of a phone that isn't running the app, so a kind
+        # that skipped it would leave the last number sitting there.
+        self._queue()
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["badge"], 1)
+
+    def test_the_icon_badge_sums_unread_messages_and_unread_activity(self):
+        # One icon badge is one number and there are deliberately two counts.
+        # They can't double-count — messaging sits outside the activity centre —
+        # which is what makes the sum honest rather than merely convenient.
+        # This also pins that a burst *agrees*: two pushes drained together must
+        # not disagree about what's waiting.
+        self._queue()  # one unread notification
+        self._queue_message()  # one unread message
+
+        urlopen = self._run(payload=_ok_tickets(2))
+
+        badges = [message["badge"] for message in self._sent_body(urlopen)]
+        self.assertEqual(badges, [2, 2])
+
+    def test_the_icon_badge_is_zero_once_everything_is_dealt_with(self):
+        # Seen on the web between enqueue and drain. The push still goes —
+        # there's no recalling one — and what it must carry is what's actually
+        # waiting, which is nothing. Omitting the field on this path would leave
+        # a stale number on the icon precisely when it's most obviously wrong.
+        notification = self._queue()
+        Notification.objects.filter(pk=notification.pk).update(
+            seen_at=timezone.now()
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["badge"], 0)
+
+    def test_the_icon_badge_is_counted_per_recipient(self):
+        # A group message queues one row per member. Each phone gets *that
+        # person's* number: the recipient with an extra unread notification sees
+        # a higher count than the one without.
+        other = make_user("drain-third@example.com")
+        DevicePushToken.objects.create(
+            user=other, expo_token="ExponentPushToken[bbb]", platform="android"
+        )
+        convo = Conversation.objects.create(
+            kind="group", title="Trip", created_by=self.actor
+        )
+        for user in (self.me, self.actor, other):
+            participant = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=participant, started_at=convo.created_at
+            )
+        message = Message.objects.create(
+            conversation=convo, sender=self.actor, text="who's driving"
+        )
+        notifications.enqueue_message_pushes(message)
+        # …and one extra thing waiting for me alone.
+        self._queue()
+
+        urlopen = self._run(payload=_ok_tickets(3))
+
+        badges = {
+            message["to"]: message["badge"]
+            for message in self._sent_body(urlopen)
+        }
+        self.assertEqual(badges["ExponentPushToken[aaa]"], 2)
+        self.assertEqual(badges["ExponentPushToken[bbb]"], 1)
+
+    def test_the_icon_badge_is_counted_once_per_recipient_in_a_batch(self):
+        # The count runs a query per conversation (the same family-scale
+        # trade-off the nav badge makes), so a drain that recomputed it per row
+        # would multiply that by the batch. Two rows, one recipient, one count.
+        self._queue()
+        self._queue_message()
+
+        with mock.patch(
+            "api.management.commands.send_pushes.badge_count_for",
+            side_effect=badge_count_for,
+        ) as counted:
+            self._run(payload=_ok_tickets(2))
+
+        self.assertEqual(counted.call_count, 1)
 
     def test_every_notification_kind_maps_to_a_known_android_channel(self):
         """No kind may fall through to the default without someone noticing.

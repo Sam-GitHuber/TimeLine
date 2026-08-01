@@ -3096,29 +3096,40 @@ class MessageDetailView(APIView):
         )
 
 
+def unread_message_total(user):
+    """``user``'s unread-message count across every conversation they can see.
+
+    Mirrors the per-thread unread rule (not yours, not deleted, newer than your
+    read marker) applied to each conversation's interval-clipped visible set (a
+    query per conversation — family scale, same trade-off
+    ``decorate_conversations`` makes), and ignores blocked/inactive threads via
+    ``user_conversations``.
+
+    Extracted from ``UnreadMessageCountView`` so the push drain's icon-badge
+    count (issue #179) is the *same* number the nav badge shows rather than a
+    second, subtly-different reimplementation of the unread rule — the failure
+    mode being an icon that says 3 over an app that says 2.
+    """
+    conversations = user_conversations(user)
+    if not conversations:
+        return 0
+    read_at_by_convo = dict(
+        ConversationRead.objects.filter(
+            conversation_id__in=[c.id for c in conversations], user=user
+        ).values_list("conversation_id", "last_read_at")
+    )
+    return sum(
+        unread_count_for(convo, user, read_at_by_convo.get(convo.id))
+        for convo in conversations
+    )
+
+
 class UnreadMessageCountView(APIView):
     """Your total unread-message count across all conversations, for the nav
-    badge (``GET /messages/unread-count/``). Mirrors the per-thread unread
-    rule (not yours, not deleted, newer than your read marker) applied to each
-    conversation's interval-clipped visible set (a query per conversation —
-    family scale, same trade-off ``decorate_conversations`` makes), and
-    ignores blocked/inactive threads via ``user_conversations``."""
+    badge (``GET /messages/unread-count/``). See ``unread_message_total``."""
 
     def get(self, request):
-        user = request.user
-        conversations = user_conversations(user)
-        if not conversations:
-            return Response({"count": 0})
-        read_at_by_convo = dict(
-            ConversationRead.objects.filter(
-                conversation_id__in=[c.id for c in conversations], user=user
-            ).values_list("conversation_id", "last_read_at")
-        )
-        total = sum(
-            unread_count_for(convo, user, read_at_by_convo.get(convo.id))
-            for convo in conversations
-        )
-        return Response({"count": total})
+        return Response({"count": unread_message_total(request.user)})
 
 
 class BlockView(APIView):
@@ -3633,16 +3644,40 @@ class NotificationListView(generics.ListAPIView):
         return _notifications_for(self.request.user)
 
 
+def unread_notification_total(user):
+    """``user``'s unread (not-yet-*seen*) notification count. One aggregate."""
+    return Notification.objects.filter(
+        recipient=user, seen_at__isnull=True
+    ).count()
+
+
+def badge_count_for(user):
+    """The number on ``user``'s **app icon** (issue #179): unread messages plus
+    unread activity.
+
+    One icon badge is one number, and there are deliberately two counts — the
+    Messages badge and the activity bell — because messaging sits outside the
+    activity centre (``docs/reference/notifications.md``). So the icon has to
+    pick, and it sums: the icon means "things waiting for you", and precisely
+    *because* messages are excluded from the bell there is nothing counted
+    twice. The same decision that makes two in-app badges correct is what makes
+    one summed icon badge honest.
+
+    Deliberately the sum of the two numbers the app itself shows, via the same
+    helpers the two endpoints use — the server's badge and the app's own
+    ``setBadgeCountAsync`` have to agree, or the icon flickers between two
+    answers every time a push lands.
+    """
+    return unread_message_total(user) + unread_notification_total(user)
+
+
 class NotificationUnreadCountView(APIView):
     """Your unread (not-yet-*seen*) notification count, for the nav bell badge
     (``GET /notifications/unread-count/``). Unread = ``seen_at IS NULL`` — opening
     the centre clears the badge even though the items stay in the list."""
 
     def get(self, request):
-        count = Notification.objects.filter(
-            recipient=request.user, seen_at__isnull=True
-        ).count()
-        return Response({"count": count})
+        return Response({"count": unread_notification_total(request.user)})
 
 
 class NotificationSeenView(APIView):

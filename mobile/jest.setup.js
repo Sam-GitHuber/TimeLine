@@ -72,6 +72,10 @@ jest.mock('expo-notifications', () => ({
   // message for the thread already on screen is taken back on Android. Returns
   // a subscription because that's what the real one does.
   addNotificationReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
+  // The app icon's badge (#179). Resolved rather than a bare jest.fn() for the
+  // same reason as the others: `setAppBadge` attaches a `.catch`, and a mock
+  // returning undefined would throw wherever the badge is set.
+  setBadgeCountAsync: jest.fn(async () => true),
   AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
   useLastNotificationResponse: jest.fn(() => null),
 }));
