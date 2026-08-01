@@ -1872,9 +1872,12 @@ class MessagePhotoTests(MessagingBase):
         thumb_path = Path(attachment.thumbnail.path)
         self.assertTrue(path.exists())
 
-        delete = self.client.delete(
-            f"{messages_url(self.convo)}{message_id}/"
-        )
+        # The file sweep runs on commit (so a rolled-back delete can't destroy
+        # files whose rows survive), so run the callbacks to observe it.
+        with self.captureOnCommitCallbacks(execute=True):
+            delete = self.client.delete(
+                f"{messages_url(self.convo)}{message_id}/"
+            )
 
         self.assertEqual(delete.status_code, status.HTTP_200_OK)
         self.assertFalse(MessageAttachment.objects.exists())
@@ -4204,6 +4207,87 @@ class AddParticipantsTests(APITestCase):
         self.assertIn(p.status, ("active", "pending"))
 
 
+class DirectChatParticipantsTests(APITestCase):
+    """🔒 A 1:1 is closed. Nobody can be added to someone else's private thread.
+
+    ``ConversationParticipantsView`` checked only that the caller was an active
+    participant — never that the chat was a *group*. Every direct thread has two
+    active Participant rows, so one half of a 1:1 could POST a third user's id
+    at their own conversation and put a stranger in it. The other party got no
+    say and no signal: a direct thread's UI shows no sender attribution and
+    names nobody in its header, so the newcomer was visible only to someone who
+    thought to open the info panel — while seeing every message sent from that
+    moment on.
+
+    Both clients have always hidden "Add people" on a 1:1, so the server was
+    strictly more permissive than anything the product promised.
+    """
+
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        self.c = User.objects.create_user(email="c@x.com", password=PASSWORD)
+        # c is connected to both, so the clique rule would happily promote them
+        # straight to active — the guard, not a lack of connections, is what has
+        # to stop this.
+        Connection.objects.create(requester=self.a, requestee=self.b, status="accepted")
+        Connection.objects.create(requester=self.a, requestee=self.c, status="accepted")
+        Connection.objects.create(requester=self.b, requestee=self.c, status="accepted")
+        self.client.force_authenticate(self.a)
+        self.cid = self.client.post(
+            CONVERSATIONS_URL, {"user_id": self.b.id}, format="json"
+        ).data["id"]
+
+    def test_a_third_person_cannot_be_added_to_a_1to1(self):
+        resp = self.client.post(
+            f"/api/conversations/{self.cid}/participants/",
+            {"user_ids": [self.c.id]},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(
+            Participant.objects.filter(conversation_id=self.cid, user=self.c).exists()
+        )
+
+    def test_the_would_be_addition_cannot_read_the_thread(self):
+        # The consequence the guard exists to prevent, asserted end to end.
+        self.client.post(
+            f"/api/conversations/{self.cid}/messages/",
+            {"text": "just between us"},
+            format="json",
+        )
+        self.client.post(
+            f"/api/conversations/{self.cid}/participants/",
+            {"user_ids": [self.c.id]},
+            format="json",
+        )
+
+        self.client.force_authenticate(self.c)
+        resp = self.client.get(f"/api/conversations/{self.cid}/messages/")
+        self.assertIn(
+            resp.status_code,
+            (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND),
+        )
+
+    def test_a_group_chat_is_still_addable(self):
+        # The guard must not have broken the feature it narrows.
+        gid = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": [self.b.id]}, format="json"
+        ).data["id"]
+
+        resp = self.client.post(
+            f"/api/conversations/{gid}/participants/",
+            {"user_ids": [self.c.id]},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            Participant.objects.filter(conversation_id=gid, user=self.c).exists()
+        )
+
+
 class LeaveChatTests(APITestCase):
     def setUp(self):
         self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
@@ -5154,6 +5238,128 @@ class AdminMessagePrivacyTests(APITestCase):
 
 DELETE_ACCOUNT_URL = "/api/account/delete/"
 _DELETE_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-delete-")
+_ORPHAN_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-orphan-")
+
+
+@override_settings(MEDIA_ROOT=_ORPHAN_MEDIA_ROOT)
+class DeletedContentLeavesNoFilesTests(APITestCase):
+    """🔒 Deleting a post or a group must take its photos off disk, not just
+    their rows.
+
+    Django deliberately doesn't delete files when a row goes (a rolled-back
+    transaction would otherwise leave a live row pointing at nothing), so every
+    delete path has to sweep up. Account deletion always did; the ordinary post
+    and group delete paths didn't. Because `media_auth` authorises media on
+    "are you signed in" rather than "is this yours", an orphaned file stays
+    fetchable by anyone who kept the URL — so "delete the post I regret" left
+    the photo of it retrievable indefinitely.
+    """
+
+    def setUp(self):
+        self.me = make_user("owner@example.com")
+        self.client.force_authenticate(self.me)
+
+    def tearDown(self):
+        shutil.rmtree(_ORPHAN_MEDIA_ROOT, ignore_errors=True)
+
+    def _post_with_photo(self):
+        self.client.post(
+            POSTS_URL,
+            {"text": "with a photo", "images": [make_image_upload()]},
+            format="multipart",
+        )
+        post = Post.objects.get(author=self.me)
+        image = post.images.get()
+        return post, image.image.storage, image.image.name, image.thumbnail.name
+
+    def test_deleting_a_post_removes_its_photos(self):
+        post, storage, name, thumb = self._post_with_photo()
+        self.assertTrue(storage.exists(name))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.delete(f"{POSTS_URL}{post.pk}/")
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(storage.exists(name))
+        self.assertFalse(storage.exists(thumb))
+
+    def test_a_failed_post_delete_leaves_the_photos_alone(self):
+        # The other half of doing this on_commit: someone else's delete is
+        # refused, and nothing is swept. A file deleted for a delete that never
+        # happened would be unrecoverable.
+        post, storage, name, thumb = self._post_with_photo()
+        intruder = make_user("intruder@example.com")
+        self.client.force_authenticate(intruder)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.delete(f"{POSTS_URL}{post.pk}/")
+
+        self.assertIn(
+            resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND)
+        )
+        self.assertTrue(storage.exists(name))
+        self.assertTrue(storage.exists(thumb))
+
+    def test_deleting_a_group_removes_its_avatar_posts_and_chat_photos(self):
+        group = make_group(self.me)
+        group.avatar = make_image_upload("group.jpg")
+        group.avatar_thumb = make_image_upload("group-t.jpg")
+        group.save(update_fields=["avatar", "avatar_thumb"])
+
+        self.client.post(
+            POSTS_URL,
+            {
+                "text": "in the group",
+                "group": group.pk,
+                "images": [make_image_upload()],
+            },
+            format="multipart",
+        )
+        # A group-scoped chat with a photo in it. Its conversation cascades away
+        # with the group, so its attachments are orphaned the same way.
+        mate = make_user("mate@example.com")
+        make_connection(self.me, mate)
+        add_member(group, mate)
+        cid = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [mate.pk], "group_id": group.pk},
+            format="json",
+        ).data["id"]
+        self.client.post(
+            f"/api/conversations/{cid}/messages/",
+            {
+                "text": "",
+                "attachments": make_image_upload("chat.jpg"),
+                "attachment_thumbnails": make_image_upload("t.jpg"),
+                "attachment_widths": 120,
+                "attachment_heights": 90,
+            },
+            format="multipart",
+        )
+
+        image = Post.objects.get(group=group).images.get()
+        storage = image.image.storage
+        expected_gone = [
+            image.image.name,
+            image.thumbnail.name,
+            group.avatar.name,
+            group.avatar_thumb.name,
+        ]
+        attachments = MessageAttachment.objects.filter(
+            message__conversation__group=group
+        )
+        self.assertEqual(attachments.count(), 1)  # the chat photo really landed
+        for att in attachments:
+            expected_gone += [att.file.name, att.thumbnail.name]
+        for name in expected_gone:
+            self.assertTrue(storage.exists(name), f"{name} missing before delete")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.delete(f"/api/groups/{group.pk}/")
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        for name in expected_gone:
+            self.assertFalse(storage.exists(name), f"{name} survived the delete")
 
 
 @override_settings(
@@ -5162,6 +5368,10 @@ _DELETE_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-delete-")
 class DeleteAccountTests(APITestCase):
     def setUp(self):
         cache.clear()  # /account/delete/ is throttled per user — isolate it
+        # The media root is shared by the two file tests below, so clear it
+        # via addCleanup: doing it at the end of a test body leaks a directory
+        # of real JPEGs whenever an assertion above it fails.
+        self.addCleanup(shutil.rmtree, _DELETE_MEDIA_ROOT, ignore_errors=True)
         self.me = make_user("leaver@example.com")
         self.client.force_authenticate(self.me)
 
@@ -5215,7 +5425,110 @@ class DeleteAccountTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(storage.exists(name))
         self.assertFalse(storage.exists(thumb))
-        shutil.rmtree(_DELETE_MEDIA_ROOT, ignore_errors=True)
+
+    @override_settings(MEDIA_ROOT=_DELETE_MEDIA_ROOT)
+    def test_deletes_chat_photos_from_storage(self):
+        """🔒 "Delete my data" has to mean the photos too.
+
+        Only avatars and post images were gathered, so every photo the leaver
+        had ever sent in a chat stayed on disk — and stayed *fetchable* at its
+        /media/messages/<uuid>.jpg URL by any member who still had the link,
+        because `media_auth` gates on being signed in, not on owning the file.
+        For a GDPR erasure path that is the whole promise unkept.
+        """
+        friend = make_user("chatpal@example.com")
+        make_connection(self.me, friend)
+        cid = self.client.post(
+            CONVERSATIONS_URL, {"user_id": friend.id}, format="json"
+        ).data["id"]
+
+        def send_photo(name):
+            return self.client.post(
+                f"/api/conversations/{cid}/messages/",
+                {
+                    "text": "",
+                    "attachments": make_image_upload(name),
+                    "attachment_thumbnails": make_image_upload("t.jpg"),
+                    "attachment_widths": 120,
+                    "attachment_heights": 90,
+                },
+                format="multipart",
+            )
+
+        send_photo("mine.jpg")
+        # The other party's photo in the same 1:1 matters too: deleting the user
+        # cascades the *conversation* away (user_a/user_b), which takes their
+        # messages with it — so those files are orphaned just as surely.
+        self.client.force_authenticate(friend)
+        send_photo("theirs.jpg")
+        self.client.force_authenticate(self.me)
+
+        self.assertEqual(MessageAttachment.objects.count(), 2)
+        files = [
+            (a.file.storage, a.file.name, a.thumbnail.name)
+            for a in MessageAttachment.objects.all()
+        ]
+        for storage, name, thumb in files:
+            self.assertTrue(storage.exists(name))
+            self.assertTrue(storage.exists(thumb))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        for storage, name, thumb in files:
+            self.assertFalse(storage.exists(name), f"{name} survived the delete")
+            self.assertFalse(storage.exists(thumb), f"{thumb} survived the delete")
+
+    @override_settings(MEDIA_ROOT=_DELETE_MEDIA_ROOT)
+    def test_deleting_an_emptied_group_takes_a_departed_members_photos(self):
+        """🔒 A group that dies with its last member takes content that was
+        never the leaver's.
+
+        The teardown used to gather only the group's avatar, on the reasoning
+        that its posts were "all by the departed sole member" and therefore
+        already covered. They aren't: leaving a group drops the membership row
+        and nothing else, so posts and chat photos from people who left are
+        still in the group when it's deleted — and were orphaned on disk.
+        """
+        group = make_group(self.me)
+        ex_member = make_user("exmember@example.com")
+        add_member(group, ex_member)
+
+        self.client.force_authenticate(ex_member)
+        self.client.post(
+            POSTS_URL,
+            {
+                "text": "before I left",
+                "group": group.pk,
+                "images": [make_image_upload()],
+            },
+            format="multipart",
+        )
+        image = Post.objects.get(author=ex_member).images.get()
+        storage, name, thumb = (
+            image.image.storage,
+            image.image.name,
+            image.thumbnail.name,
+        )
+        self.assertTrue(storage.exists(name))
+
+        # They leave, so `me` is the group's only active member and the group
+        # dies with the account — but their post stays in it until then.
+        GroupMembership.objects.filter(group=group, user=ex_member).delete()
+        self.client.force_authenticate(self.me)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Group.objects.filter(pk=group.pk).exists())
+        self.assertFalse(storage.exists(name), f"{name} survived the delete")
+        self.assertFalse(storage.exists(thumb), f"{thumb} survived the delete")
 
     def test_sole_admin_hands_the_group_to_the_longest_standing_member(self):
         group = make_group(self.me)  # me = the only admin

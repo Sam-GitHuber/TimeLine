@@ -123,9 +123,10 @@ Both edit and delete share the permalink route — `PostDetailView` is a
   create). `PUT` is disallowed (405) — text is the only writable field.
 - **`DELETE /api/posts/<id>/`** — **owner-only**, 204 on success. The model's
   CASCADE relations take the post's images, comments (and replies), reactions,
-  reports and notifications with it. *(As with group deletion, the DB rows
-  cascade but the image **files** on disk aren't swept — deferred with the S3
-  media work in Phase 11.)*
+  reports and notifications with it. The image **files** are swept off storage
+  too (on commit, so a rolled-back delete can't strand a live row without its
+  file) — as with group deletion. See `docs/reference/accounts.md`, "Account
+  deletion", for the shared helpers any new delete path must use.
 - **Permission shape mirrors `GroupDetailView`:** a post you can't see is a
   **404** (existence stays hidden); a post you can see but don't own is a **403**.
   The **author path bypasses the visibility gate** — you can always edit/delete

@@ -343,13 +343,29 @@ The same code machinery backs forgotten-password reset — see
 re-auth, like a bank transfer). `delete_account()` does the teardown a naive
 `user.delete()` gets wrong:
 
-1. Deletes the user's media **files** off storage first (a row cascade alone
-   leaves orphaned JPEGs on disk).
+1. Deletes the user's media **files** off storage (a row cascade alone leaves
+   orphaned JPEGs on disk). That means avatars, their posts' images, **and their
+   chat attachments** — the last of these was missed originally, so every photo a
+   leaver had ever sent in a chat stayed on disk and stayed *fetchable* at its
+   `/media/messages/<uuid>.jpg` URL by any member who still had the link, since
+   `media_auth` gates on being signed in rather than on owning the file. Chat
+   photos are gathered from two cascades, not one: the user's own messages
+   (`Message.sender`), and *every* message in their 1:1 conversations — deleting
+   the user drops those conversations via `user_a`/`user_b`, which takes the other
+   person's messages in them too. Files are swept `on_commit`, so a rolled-back
+   delete can never destroy files whose rows survived.
 2. **Last-admin guardrail:** a group whose only admin is leaving hands admin to
    the longest-standing remaining member (`Group.creator` is `SET_NULL`, so a
    group outlives its creator).
 3. A group the user was the *sole* member of is deleted outright rather than left
    as dead space.
+
+The same file-sweep rule applies to the *ordinary* delete paths, which originally
+had none: deleting a post now removes its photos, and deleting a group removes its
+avatar, its posts' photos and its chats' attachments. `_post_image_files`,
+`_attachment_files` and `delete_files_on_commit` in `api/views.py` keep that in one
+place — **any new delete path has to use them**, because an orphaned file stays
+retrievable by URL, so "delete the post I regret" otherwise doesn't.
 
 All in one transaction. Chosen over anonymise-and-keep because it's the cleaner
 erasure story for a privacy-first app; the accepted trade-off is that replies
@@ -379,8 +395,9 @@ flow instead, for the same reasons codes won for verification: friendlier UX
 `FRONTEND_URL`** needed (there's no link to build). The two flows share their
 machinery — `EmailVerificationCode` and `PasswordResetCode` both subclass the
 abstract `EmailCode` (hashed code only, 15-min expiry, 5-attempt budget, 60-sec
-resend cooldown). The dj-rest-auth link endpoints remain mounted (via
-`dj_rest_auth.urls`) but nothing calls them, exactly as with verify-email.
+resend cooldown). dj-rest-auth's link endpoints are **not routed at all** — see
+"The auth URL surface" below for why leaving them mounted-but-uncalled turned out
+not to be harmless.
 
 **Flow.** `/reset-password` in the SPA (reached from a "Forgot your password?"
 link on login):
@@ -484,17 +501,60 @@ This is the layer holding real credentials, so:
 - **Author/sender is never trusted from the client** — every create endpoint sets
   it from `request.user`, ignoring any value in the body.
 
+### The auth URL surface
+
+**Every dj-rest-auth route is registered individually in `config/urls.py`. Do not
+re-introduce `include("dj_rest_auth.urls")`.** The include registers its routes as
+`re_path(r"login/?$", ...)` — the trailing slash is *optional* — so a `path()`
+override placed above it only ever shadows the slashed spelling. For a long time
+this meant:
+
+- `POST /api/auth/login` (no slash) resolved to dj-rest-auth's own `LoginView`
+  instead of `ThrottledLoginView`. It was a fully working login — the global
+  `LOGIN_SERIALIZER` still applied both the verified-email and `is_active` gates,
+  and the JWT cookies were still set — with **no rate limit at all**, since that
+  view declares no throttle classes and `DEFAULT_THROTTLE_CLASSES` is deliberately
+  unset. The 10/min limit could be skipped by deleting one character.
+- `POST /api/auth/password/change` (no slash) was unthrottled the same way.
+- dj-rest-auth's link-based `password/reset` pair stayed live, anonymous and
+  unthrottled. Worse, its URL generator reverses `password_reset_confirm` — a name
+  we rebind to our own zero-argument path — so it raised `NoReverseMatch` and
+  **500'd for addresses that had an account while returning 200 for those that
+  didn't**: a clean account-existence oracle sitting in front of the very leak the
+  hand-written reset view equalises PBKDF2 timing to close.
+
+Listing routes explicitly is the fix and the guard: anything unnamed isn't routed,
+and `path()` matches the slash exactly, so there is no second spelling. Only the
+four the clients actually use are registered — `login/`, `password/change/`,
+`logout/`, `user/`. dj-rest-auth's `token/verify` + `token/refresh` pair is
+deliberately left out on the same reasoning that made the reset pair dangerous:
+no client calls either (the web session is a 1-day cookie and simply re-logs in),
+and an anonymous endpoint nothing calls is surface without a purpose. Our own
+reset-confirm route is named `password_reset_code_confirm` rather than
+`password_reset_confirm`, so it no longer squats on the name allauth/dj-rest-auth
+reverse with `(uid, key)` — which is what made their view 500 in the first place,
+and would re-arm if an `allauth` include were ever added. The
+`AuthUrlSurfaceTests` in `accounts/tests.py` assert on `resolve()` for both the
+paths that must reach a throttled view and the ones that must reach nothing —
+behaviour tests against the slashed URL cannot catch this class of bug.
+
 ### Rate-limiting (auth-sensitive endpoints)
 
-`login`, `password/change/`, `account/delete/`, the email-verification endpoints,
-and the password-reset endpoints are throttled via DRF's `ScopedRateThrottle`
-(login 10/min, password-change 10/min, account-delete 5/min, resend-verification
-5/min, verify-email 20/min, password-reset 5/min, password-reset-confirm 20/min;
-all env-overridable). The two reset scopes mirror their verification counterparts:
+`login`, `registration/`, `password/change/`, `account/delete/`, the
+email-verification endpoints, and the password-reset endpoints are throttled via
+DRF's `ScopedRateThrottle` (login 10/min, register 5/min, password-change 10/min,
+account-delete 5/min, resend-verification 5/min, verify-email 20/min,
+password-reset 5/min, password-reset-confirm 20/min; all env-overridable). The two reset scopes mirror their verification counterparts:
 per-IP (the caller is anonymous), with the request side kept low to blunt inbox-
 spamming and the confirm side generous so a real user retrying a weak password
 isn't blocked. A tripped limit is a clean `429`. Two non-obvious decisions:
 
+- **Sign-up is throttled because it sends mail on an anonymous caller's say-so.**
+  Each request creates a `User` row *and* emails a code to an address the caller
+  chose, so an unthrottled endpoint is an inbox-bomb aimed at third parties, sent
+  from our own domain at the cost of its sending reputation. It inherited
+  dj-rest-auth's `dj_rest_auth` scope, which has no rate configured and no default
+  throttle class behind it — i.e. no limit — until it was given its own.
 - **Login is keyed on IP, not the submitted email.** An email-keyed limit would
   let an attacker lock a real member out of their *own* login by spamming wrong
   passwords for their address (a DoS). Per-IP blunts online guessing without that

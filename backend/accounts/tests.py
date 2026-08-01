@@ -15,6 +15,7 @@ from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
+from django.urls import Resolver404, resolve
 from django.utils import timezone
 from PIL import Image
 from rest_framework import status
@@ -136,7 +137,108 @@ class EmailConfigTests(APITestCase):
         self.assertEqual(mail.outbox[0].from_email, settings.DEFAULT_FROM_EMAIL)
 
 
+class AuthUrlSurfaceTests(APITestCase):
+    """🔒 The auth URL surface is exactly the routes we register — no more.
+
+    These are routing tests rather than behaviour tests on purpose. We used to
+    mount dj-rest-auth with ``include("dj_rest_auth.urls")`` and override two of
+    its endpoints with ``path()`` above the include. That looked right and was
+    not: the library registers every route as ``re_path(r"login/?$", ...)``,
+    where the trailing slash is OPTIONAL, so the override only ever shadowed the
+    *slashed* spelling. ``/api/auth/login`` — one character shorter — resolved
+    straight to the library's own view, which declares no throttle classes and
+    therefore (``DEFAULT_THROTTLE_CLASSES`` being deliberately unset) had no
+    rate limit at all, while still being a fully working login that set the JWT
+    cookies. The login throttle could be skipped by deleting a slash.
+
+    A test that only exercises the slashed URL cannot catch that, which is why
+    these assert on ``resolve()``: they pin *which view* each spelling reaches,
+    and that the spellings we never meant to serve reach nothing.
+    """
+
+    def assert_not_routed(self, path):
+        with self.assertRaises(Resolver404):
+            resolve(path)
+
+    def test_login_without_a_trailing_slash_is_not_routed(self):
+        self.assert_not_routed("/api/auth/login")
+
+    def test_password_change_without_a_trailing_slash_is_not_routed(self):
+        self.assert_not_routed("/api/auth/password/change")
+
+    def test_dj_rest_auths_own_password_reset_is_not_routed(self):
+        # We ship a 6-digit-code reset at /api/auth/password-reset/. The
+        # library's link-based pair was still live behind the include and
+        # nothing called it — but it was anonymous, unthrottled, and its url
+        # generator reversed `password_reset_confirm`, a name we rebind to a
+        # zero-argument path. So it 500'd for real accounts and 200'd for
+        # unknown ones: a "does this person have an account here?" oracle, in
+        # front of the very leak our own reset view equalises timings to close.
+        for path in (
+            "/api/auth/password/reset",
+            "/api/auth/password/reset/",
+            "/api/auth/password/reset/confirm",
+            "/api/auth/password/reset/confirm/",
+        ):
+            with self.subTest(path=path):
+                self.assert_not_routed(path)
+
+    def test_the_endpoints_the_clients_call_still_resolve(self):
+        # The other half of the guard: dropping the include must not have taken
+        # anything real with it. These are every auth path the web and mobile
+        # clients actually request.
+        for path in (
+            "/api/auth/login/",
+            "/api/auth/logout/",
+            "/api/auth/user/",
+            "/api/auth/csrf/",
+            "/api/auth/registration/",
+            "/api/auth/password/change/",
+            "/api/auth/password-reset/",
+            "/api/auth/password-reset/confirm/",
+            "/api/auth/verify-email/",
+            "/api/auth/resend-verification/",
+            "/api/auth/mobile/login/",
+            "/api/auth/mobile/refresh/",
+            "/api/auth/mobile/logout/",
+        ):
+            with self.subTest(path=path):
+                resolve(path)  # raises Resolver404 if we dropped one
+
+    def test_dj_rest_auths_token_pair_is_not_routed(self):
+        # No client calls either, and an anonymous endpoint that nothing calls
+        # is exactly what the password/reset pair was. Add them back deliberately
+        # if a client ever needs them.
+        self.assert_not_routed("/api/auth/token/refresh/")
+        self.assert_not_routed("/api/auth/token/verify/")
+
+    def test_login_and_password_change_resolve_to_the_throttled_views(self):
+        for path, scope in (
+            ("/api/auth/login/", "login"),
+            ("/api/auth/password/change/", "password_change"),
+            ("/api/auth/registration/", "register"),
+        ):
+            with self.subTest(path=path):
+                view = resolve(path).func.cls
+                self.assertTrue(
+                    view.throttle_classes,
+                    f"{path} has no throttle classes — a scope alone does "
+                    "nothing without one, since DEFAULT_THROTTLE_CLASSES is unset",
+                )
+                self.assertEqual(view.throttle_scope, scope)
+
+
+@override_settings(CACHES=LOCMEM_CACHE)
 class RegistrationTests(APITestCase):
+    # Sign-up is throttled per IP (the `register` scope), and several tests here
+    # register more than once, so pin an isolated cache and empty the bucket
+    # around each test — same treatment as the login and password-change suites.
+    def setUp(self):
+        cache.clear()
+
+    def tearDown(self):
+        cache.clear()
+
     def _register(self, email):
         return self.client.post(
             REGISTER_URL,
@@ -263,6 +365,37 @@ class RegistrationTests(APITestCase):
         self.assertFalse(
             User.objects.filter(email="refusing@example.com").exists()
         )
+
+    def test_registration_bursts_are_throttled_too(self):
+        """🔒 Sign-up creates a row *and* emails a verification code to whatever
+        address the (anonymous) caller supplies. Unthrottled — which it was,
+        inheriting dj-rest-auth's rate-less `dj_rest_auth` scope — that's an
+        inbox-bomb aimed at third parties, sent from our own domain at the cost
+        of its sending reputation, plus unbounded growth in the approval queue.
+        """
+        limit = configured_throttle_limit("register")
+
+        def register(n):
+            return self.client.post(
+                REGISTER_URL,
+                {
+                    "email": f"flood{n}@example.com",
+                    "password1": PASSWORD,
+                    "password2": PASSWORD,
+                    "first_name": "Flood",
+                    "last_name": "Er",
+                    "accept_terms": True,
+                },
+                format="json",
+            )
+
+        for n in range(limit):
+            self.assertEqual(register(n).status_code, status.HTTP_201_CREATED)
+        resp = register(limit)
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        # And crucially the refused attempt sent no mail and made no account.
+        self.assertFalse(User.objects.filter(email=f"flood{limit}@example.com").exists())
+        self.assertEqual(len(mail.outbox), limit)
 
 
 @override_settings(CACHES=LOCMEM_CACHE)

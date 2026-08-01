@@ -15,6 +15,7 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 
+from dj_rest_auth.views import LogoutView, UserDetailsView
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
@@ -37,9 +38,25 @@ from accounts.views import (
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("api.urls")),
-    # Rate-limited overrides of two dj-rest-auth endpoints. These must come
-    # BEFORE the include below — Django resolves URLs top-down and stops at the
-    # first match, so our throttled views win over the library's defaults.
+    # dj-rest-auth's endpoints are registered ONE BY ONE below rather than with
+    # `include("dj_rest_auth.urls")`. That include is not safe to override:
+    # every route in it is an `re_path(r"login/?$", ...)` — note the OPTIONAL
+    # trailing slash — so a `path()` above it only ever shadows the *slashed*
+    # spelling. `/api/auth/login` (no slash) fell straight through to the
+    # library's own view, which declares no throttle classes; because
+    # DEFAULT_THROTTLE_CLASSES is deliberately unset (see settings.py), that
+    # means no rate limit at all rather than a different one. The login limit
+    # the settings comment calls "the crux" of the brute-force defence could
+    # therefore be skipped by deleting one character, on a fully working login
+    # that still set the JWT cookies. The same held for password/change, and
+    # the include also left dj-rest-auth's link-based password/reset pair live
+    # even though we ship our own code-based flow (see below) — where its
+    # url generator reversed a name we'd rebound, making it 500 for real
+    # accounts and 200 for unknown ones: an account-existence oracle.
+    #
+    # Listing routes explicitly is what stops that recurring: anything not
+    # named here is not routed, and `path()` matches the trailing slash
+    # exactly, so there is no second spelling to slip through.
     path(
         "api/auth/login/",
         ThrottledLoginView.as_view(),
@@ -50,6 +67,15 @@ urlpatterns = [
         ThrottledPasswordChangeView.as_view(),
         name="rest_password_change",
     ),
+    # The rest of dj-rest-auth, unmodified: logout/ and user/, which are the
+    # only two the web app calls. Its token/verify + token/refresh pair is
+    # deliberately NOT registered — no client calls either (the web session is
+    # a 1-day cookie and simply re-logs in), and "mounted but uncalled" is
+    # precisely the state that turned the password/reset pair into an
+    # account-existence oracle. Four lines to add back if a client ever needs
+    # them; until then they're anonymous surface earning nothing.
+    path("api/auth/logout/", LogoutView.as_view(), name="rest_logout"),
+    path("api/auth/user/", UserDetailsView.as_view(), name="rest_user_details"),
     # Native-app auth (Phase 9). Deliberately separate from the web endpoints
     # above: these return both tokens in the response body and set no cookies,
     # because JWT_AUTH_HTTPONLY (the web app's XSS mitigation) blanks the refresh
@@ -78,8 +104,6 @@ urlpatterns = [
         TokenBlacklistView.as_view(),
         name="mobile_logout",
     ),
-    # Auth API (dj-rest-auth): logout/, user/, password/reset*, token/*.
-    path("api/auth/", include("dj_rest_auth.urls")),
     # Registration is our inactive-by-default view, not dj-rest-auth's default.
     path(
         "api/auth/registration/",
@@ -100,10 +124,10 @@ urlpatterns = [
         name="resend_verification",
     ),
     # Forgotten-password reset (issue #38): our own 6-digit-code flow, mirroring
-    # verify-email above — NOT dj-rest-auth's link/token endpoints (which the
-    # include below still exposes but nothing calls). Hyphenated paths so they
-    # never collide with the library's `password/reset/`. See accounts.md for why
-    # a code over a link.
+    # verify-email above. dj-rest-auth's link/token endpoints are no longer
+    # routed at all (see the note at the top of this list), so this is the only
+    # reset path that exists. The hyphenated spelling is kept for the clients
+    # that already call it. See accounts.md for why a code over a link.
     path(
         "api/auth/password-reset/",
         PasswordResetRequestView.as_view(),
@@ -112,7 +136,12 @@ urlpatterns = [
     path(
         "api/auth/password-reset/confirm/",
         PasswordResetConfirmView.as_view(),
-        name="password_reset_confirm",
+        # NOT named `password_reset_confirm`: that is the name dj-rest-auth and
+        # allauth reverse with (uid, key) arguments, and our zero-argument path
+        # squatting on it is what made their reset view 500 for real accounts.
+        # Dropping their routes defused it; the distinct name means re-adding an
+        # allauth include later can't re-arm it.
+        name="password_reset_code_confirm",
     ),
     # Lets the SPA obtain a CSRF cookie on load.
     path("api/auth/csrf/", csrf, name="csrf"),
