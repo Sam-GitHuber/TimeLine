@@ -12,7 +12,7 @@
  * not 403** — the app must not become a way to discover that a post exists.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef } from 'react';
 import {
@@ -63,6 +63,17 @@ export default function PostScreen() {
     // retrying — and retrying would just delay the message.
     retry: false,
   });
+
+  // Fetching the post just marked its notifications seen server-side (viewing
+  // is seeing — notifications.md). Refresh the unread count now rather than on
+  // the bell's next poll, so the icon badge is already right if the reader
+  // backgrounds the app straight from here.
+  const queryClient = useQueryClient();
+  const loadedPostId = post?.id;
+  useEffect(() => {
+    if (loadedPostId == null) return;
+    void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+  }, [loadedPostId, queryClient]);
 
   /**
    * Scroll a deep-linked comment into view, once.

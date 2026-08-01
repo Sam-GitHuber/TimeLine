@@ -374,3 +374,24 @@ describe('scrolling to a deep-linked comment', () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 });
+
+it('refreshes the unread notification count once the post lands (seen-on-view)', async () => {
+  // Fetching the post marks its notifications seen server-side, so the screen
+  // must invalidate the count the icon badge watches — otherwise the badge
+  // holds its stale number until the bell's next poll or the next foreground.
+  serve({ post: jsonResponse(makePost()) });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { gcTime: 0 } },
+  });
+  // A spy rather than reading query state back: with `gcTime: 0` and no
+  // observer mounted here, the count query would be collected the moment it's
+  // touched, leaving nothing to inspect.
+  const invalidate = jest.spyOn(client, 'invalidateQueries');
+
+  await renderScreen(client);
+  await screen.findByText('A day on the hills');
+
+  await waitFor(() =>
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] })
+  );
+});

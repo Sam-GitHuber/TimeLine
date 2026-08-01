@@ -88,6 +88,25 @@ Notification:
      accepting *or* rejecting a group invite addresses the `group_invite` one.
      Without this the unified badge would keep counting something you've already
      dealt with. (See `address_connection_request` / `address_group_invite`.)
+- **Viewing the content marks its notifications seen** (2026-08-01) — the
+  content half of resolve-elsewhere. Fetching a post's permalink
+  (`PostDetailView` GET) or its comment tree (`PostCommentsView` GET) marks
+  every unread notification pointing at that post *or any comment on it* seen;
+  opening an event (`EventDetailView` GET) does the same for the five event
+  kinds. Reading the reply **is** reading the notification: without this, the
+  badge kept counting a reply someone had gone and read via the feed, which
+  read as "the badge won't clear". Seen only, never addressed — the row keeps
+  its not-yet-dealt-with weight in the centre. Matched on the target FKs, not
+  kinds (anything aimed at content you're looking at is, by definition, seen).
+  See `see_post_notifications` / `see_event_notifications` in
+  `notifications.py`; the comment-tree hook sits beside the `PostCommentRead`
+  stamp, which is the same "opening the thread is the seen event" rule for the
+  "N new comments" count. Safe from scroll-by: both clients load comments only
+  on a deliberate open (the web feed's thread is lazy; mobile's lives on the
+  post screen). The mobile post/event screens invalidate
+  `['notificationsUnread']` once their fetch lands, so the icon badge drops
+  immediately rather than on the bell's next poll; the web bell self-corrects
+  on its 12s poll.
 - The **badge count is unread** (`seen_at is null`) — the number that means "new
   since I last looked."
 

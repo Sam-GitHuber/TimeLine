@@ -17,7 +17,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -84,6 +84,16 @@ export default function EventScreen() {
     retry: false,
   });
   const event = eventQuery.data;
+
+  // Fetching the event just marked its notifications seen server-side (viewing
+  // is seeing — notifications.md), so refresh the unread count now rather than
+  // on the bell's next poll: the icon badge should already be right if the
+  // reader backgrounds the app straight from here.
+  const loadedEventId = event?.id;
+  useEffect(() => {
+    if (loadedEventId == null) return;
+    void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+  }, [loadedEventId, queryClient]);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['event', id] });

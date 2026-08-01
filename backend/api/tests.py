@@ -5840,6 +5840,92 @@ class NotificationEndpointTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
 
+class NotificationSeenOnViewTests(APITestCase):
+    """Viewing the content marks its notifications seen — the content half of
+    resolve-elsewhere (issue #192's cousin). Opening a post's permalink or its
+    comment thread clears the badge for the replies/reactions pointing at it,
+    without the bell or the push ever being touched."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        self.post = Post.objects.create(author=self.me, text="mine")
+        self.other_post = Post.objects.create(author=self.me, text="other")
+        # A reply comment by friend on `post` — the comment-FK target shape.
+        self.reply = Comment.objects.create(
+            post=self.post, author=self.friend, text="re"
+        )
+        self.n_post_reply = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.POST_REPLY, post=self.post,
+        )
+        self.n_comment_reply = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.COMMENT_REPLY, comment=self.reply,
+        )
+        self.n_other_post = Notification.objects.create(
+            recipient=self.me, actor=self.friend,
+            kind=KIND.REACTION, post=self.other_post,
+        )
+
+    def _my_unread_count(self):
+        self.client.force_authenticate(self.me)
+        return self.client.get(NOTIF_UNREAD_URL).data["count"]
+
+    def test_post_detail_marks_post_and_comment_notifications_seen(self):
+        self.client.force_authenticate(self.me)
+        self.assertEqual(self._my_unread_count(), 3)
+        resp = self.client.get(post_detail_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.n_post_reply.refresh_from_db()
+        self.n_comment_reply.refresh_from_db()
+        self.n_other_post.refresh_from_db()
+        # Both notifications pointing at this post (post FK and comment FK) are
+        # seen; the other post's is untouched.
+        self.assertIsNotNone(self.n_post_reply.seen_at)
+        self.assertIsNotNone(self.n_comment_reply.seen_at)
+        self.assertIsNone(self.n_other_post.seen_at)
+        self.assertEqual(self._my_unread_count(), 1)
+
+    def test_comment_thread_fetch_marks_seen_too(self):
+        self.client.force_authenticate(self.me)
+        resp = self.client.get(comments_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.n_post_reply.refresh_from_db()
+        self.n_comment_reply.refresh_from_db()
+        self.assertIsNotNone(self.n_post_reply.seen_at)
+        self.assertIsNotNone(self.n_comment_reply.seen_at)
+
+    def test_viewing_marks_seen_not_addressed(self):
+        # Seen clears the badge; addressed is reserved for acting on the row.
+        # The activity centre must still show these with their undulled weight.
+        self.client.force_authenticate(self.me)
+        self.client.get(post_detail_url(self.post))
+        self.n_post_reply.refresh_from_db()
+        self.assertIsNone(self.n_post_reply.addressed_at)
+
+    def test_another_viewer_does_not_touch_my_notifications(self):
+        # friend can view the post too (connected) — their GET must not mark
+        # *my* notifications seen.
+        self.client.force_authenticate(self.friend)
+        resp = self.client.get(post_detail_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.n_post_reply.refresh_from_db()
+        self.assertIsNone(self.n_post_reply.seen_at)
+
+    def test_mutations_do_not_mark_seen(self):
+        # Only reading is seeing: the author PATCHing their own post goes
+        # through the ownership gate, not the viewing path.
+        self.client.force_authenticate(self.me)
+        resp = self.client.patch(
+            post_detail_url(self.post), {"text": "edited"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.n_post_reply.refresh_from_db()
+        self.assertIsNone(self.n_post_reply.seen_at)
+
+
 class NotificationPreferenceTests(APITestCase):
     def setUp(self):
         self.me = make_user("me@example.com")
@@ -7991,6 +8077,37 @@ class ConversationRenameTests(APITestCase):
             if c["id"] == self.convo_id
         ][0]
         self.assertEqual(row["title"], "Sunday lunch")
+
+
+class EventSeenOnViewTests(EventsBase):
+    """Opening an event marks its notifications seen — the same
+    viewing-is-seeing rule as the post permalink, for the five event kinds."""
+
+    def test_event_detail_marks_its_notifications_seen(self):
+        event = self.make_event()
+        other = self.make_event(title="Other")
+        mine = Notification.objects.create(
+            recipient=self.me, actor=self.org,
+            kind=Notification.Kind.EVENT_CREATED, event=event,
+        )
+        mine_other = Notification.objects.create(
+            recipient=self.me, actor=self.org,
+            kind=Notification.Kind.EVENT_CREATED, event=other,
+        )
+        anas = Notification.objects.create(
+            recipient=self.ana, actor=self.org,
+            kind=Notification.Kind.EVENT_CREATED, event=event,
+        )
+        self.client.force_authenticate(self.me)
+        resp = self.client.get(event_url(event))
+        self.assertEqual(resp.status_code, 200)
+        mine.refresh_from_db()
+        mine_other.refresh_from_db()
+        anas.refresh_from_db()
+        self.assertIsNotNone(mine.seen_at)
+        self.assertIsNone(mine.addressed_at)  # seen, not acted on
+        self.assertIsNone(mine_other.seen_at)  # a different event's news
+        self.assertIsNone(anas.seen_at)  # another recipient's row
 
 
 class MarkConversationUnreadTests(APITestCase):
