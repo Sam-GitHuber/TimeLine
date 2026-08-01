@@ -12,7 +12,7 @@
  * not 403** — the app must not become a way to discover that a post exists.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef } from 'react';
 import {
@@ -32,6 +32,7 @@ import {
   type KeyboardAwareScrollRef,
 } from '@/components/KeyboardAvoider';
 import { PostCard } from '@/components/PostCard';
+import { dismissPostNotifications } from '@/push';
 import { colors, fontSize, spacing } from '@/theme';
 
 export default function PostScreen() {
@@ -63,6 +64,17 @@ export default function PostScreen() {
     // retrying — and retrying would just delay the message.
     retry: false,
   });
+
+  // The fetch marked this post's notifications seen server-side (viewing is
+  // seeing — notifications.md), so mirror it locally: refresh the count the
+  // icon badge watches, and take the delivered pushes out of the tray.
+  const queryClient = useQueryClient();
+  const loadedPostId = post?.id;
+  useEffect(() => {
+    if (loadedPostId == null) return;
+    void dismissPostNotifications(loadedPostId);
+    void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+  }, [loadedPostId, queryClient]);
 
   /**
    * Scroll a deep-linked comment into view, once.

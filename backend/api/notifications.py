@@ -367,6 +367,40 @@ def _mentioned_despite_mute(message, audience):
     )
 
 
+def see_post_notifications(recipient, post):
+    """Mark ``recipient``'s unread notifications about ``post`` — the post itself
+    or any comment on it — as seen, because they've opened the post or its
+    thread directly (issue #192's cousin: "I read the reply, why is the badge
+    still counting it?").
+
+    This is the content half of "resolve-elsewhere": the ``address_*`` helpers
+    above stop the badge counting a request/invite dealt with on its own page,
+    and this stops it counting a reply/reaction whose target you've gone and
+    read without ever touching the bell or the push. Only **seen** is set — the
+    row keeps its not-yet-addressed emphasis in the activity centre, exactly as
+    if the bell had been opened, because seen is what the badge counts.
+
+    Matched on the target FKs rather than on kinds: anything pointing at this
+    post (or a comment on it) is news you have now, by definition, seen.
+    """
+    Notification.objects.filter(
+        Q(post=post) | Q(comment__post=post),
+        recipient=recipient,
+        seen_at__isnull=True,
+    ).update(seen_at=timezone.now())
+
+
+def see_event_notifications(recipient, event):
+    """Mark ``recipient``'s unread notifications about ``event`` as seen when
+    they open the event itself — the same viewing-is-seeing rule as
+    ``see_post_notifications``, for the five event kinds."""
+    Notification.objects.filter(
+        recipient=recipient,
+        event=event,
+        seen_at__isnull=True,
+    ).update(seen_at=timezone.now())
+
+
 def address_connection_request(recipient, connection):
     """Mark ``recipient``'s unaddressed ``connection_request`` notification for
     ``connection`` as addressed — called when they approve it on the People page

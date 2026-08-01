@@ -17,7 +17,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -37,6 +37,7 @@ import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEd
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
 import { formatEventWhen } from '@/eventFormat';
+import { dismissEventNotifications } from '@/push';
 import { useAndroidBack } from '@/useAndroidBack';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 
@@ -84,6 +85,15 @@ export default function EventScreen() {
     retry: false,
   });
   const event = eventQuery.data;
+
+  // Same viewing-is-seeing mirror as post/[postId].tsx, for the event's
+  // notifications.
+  const loadedEventId = event?.id;
+  useEffect(() => {
+    if (loadedEventId == null) return;
+    void dismissEventNotifications(loadedEventId);
+    void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+  }, [loadedEventId, queryClient]);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['event', id] });

@@ -33,6 +33,8 @@ import {
   configureOnScreenDismissal,
   dismissActivityNotifications,
   dismissConversationNotifications,
+  dismissEventNotifications,
+  dismissPostNotifications,
   presentedConversations,
   setOnScreenConversation,
 } from '@/push';
@@ -86,6 +88,44 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.clearAllMocks();
+});
+
+describe('dismissing a viewed post’s / event’s notifications', () => {
+  it('clears the post’s — comment deep-links included — and nothing else', async () => {
+    tray(
+      presented('a', { url: '/p/42', notificationId: 7 }),
+      presented('b', { url: '/p/42?comment=9', notificationId: 8 }),
+      presented('c', { url: '/p/43', notificationId: 9 }),
+      presented('d', { url: '/messages/5', notificationId: null })
+    );
+
+    await dismissPostNotifications(42);
+
+    expect(dismissed()).toEqual(['a', 'b']);
+  });
+
+  it('clears the event’s, matching the wire’s nested URL shape', async () => {
+    tray(
+      presented('a', { url: '/g/1/events/9', notificationId: 7 }),
+      presented('b', { url: '/g/2/events/10', notificationId: 8 }),
+      presented('c', { url: '/p/9', notificationId: 9 })
+    );
+
+    await dismissEventNotifications(9);
+
+    expect(dismissed()).toEqual(['a']);
+  });
+
+  it('survives a tray entry whose url is not a string', async () => {
+    tray(
+      presented('a', { url: null, notificationId: 7 }),
+      presented('b', { url: '/p/42', notificationId: 8 })
+    );
+
+    await dismissPostNotifications(42);
+
+    expect(dismissed()).toEqual(['b']);
+  });
 });
 
 describe('dismissing a conversation’s notifications', () => {
