@@ -34,6 +34,7 @@ import {
 import { useBadgeCount } from '@/useBadgeCount';
 import { usePushDismissals } from '@/usePushDismissals';
 import { usePushNotificationTaps } from '@/usePushTaps';
+import { useSessionReset } from '@/useSessionReset';
 import { colors } from '@/theme';
 
 // Module scope, not an effect: the handler decides whether a notification that
@@ -90,6 +91,10 @@ function AuthGate() {
   // The app icon's badge (#179). Here rather than on a screen so it holds
   // whichever tab is on top — and so that signing out clears it.
   useBadgeCount();
+  // 🔒 Empties the query cache — the bulk of a session's data — whenever the
+  // session ends (#191), so the next person to sign in on this phone starts
+  // from nothing rather than from the previous person's cached screens.
+  useSessionReset();
   // The router isn't ready to navigate on the very first render; navigating
   // before it is silently does nothing.
   const navigationState = useRootNavigationState();

@@ -20,6 +20,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -53,6 +54,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<User | null>(null);
 
+  // 🔒 Whose words the module stores (outbox/drafts/quotes) may still hold.
+  //
+  // A session *expiry* deliberately does not clear them: your unsent messages
+  // and half-written drafts surviving a token refresh failing under you is the
+  // point of having them, and an expiry doesn't change whose phone it is. But
+  // the expiry lands on the login screen, where anyone can sign in — so the
+  // clearing `signOut` does is instead done at the next sign-*in*, if and only
+  // if it's by someone else (#191). Same person back: their words are waiting.
+  // Different person: nothing crosses over.
+  //
+  // A ref, not state: nothing renders from it, and it must survive the expiry
+  // handler's `setUser(null)` — being forgotten alongside the user is exactly
+  // what it exists to avoid. (A process death forgets it too, but takes the
+  // in-memory stores with it, so there's nothing left to guard.)
+  const lastUserPk = useRef<number | null>(null);
+
   // Let `api.ts` end the session from outside React. It has no way to reach this
   // state otherwise, and a failed refresh has to be able to log the user out.
   useEffect(() => {
@@ -84,6 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // common case for an app opened days later.
         const me = await api.getCurrentUser();
         if (cancelled) return;
+        lastUserPk.current = me.pk;
         setUser(me);
         setStatus('signedIn');
         // Re-register on every launch, not just at login: Expo can rotate a
@@ -121,6 +139,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback(async (email: string, password: string) => {
     const me = await api.login(email, password);
+    // 🔒 The stores can only be non-empty here after a session ended without
+    // `signOut` — an expiry, which keeps them so their owner can retry. If the
+    // person now signing in is someone else, the previous person's unsent
+    // words must not follow them into this session.
+    if (lastUserPk.current !== null && lastUserPk.current !== me.pk) {
+      clearOutbox();
+      clearDrafts();
+      clearQuotes();
+    }
+    lastUserPk.current = me.pk;
     setUser(me);
     setStatus('signedIn');
     // Not awaited: registering asks for the OS permission prompt and talks to
@@ -145,6 +173,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearOutbox();
     clearDrafts();
     clearQuotes();
+    // The stores are empty now, so the next sign-in has nothing to guard.
+    lastUserPk.current = null;
     setUser(null);
     setStatus('signedOut');
   }, []);

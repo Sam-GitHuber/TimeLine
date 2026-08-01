@@ -1974,8 +1974,10 @@ source of truth, which also keeps it one opaque blob under E2E. A message that i
 **one to three emoji and nothing else** drops its bubble and renders large.
 
 **Drafts survive leaving the thread** (`drafts.ts`, in memory, keyed by
-conversation, 🔒 cleared on sign-out with the outbox). Deliberately *not* while
-editing: in edit mode the composer holds someone's sent words rather than a draft
+conversation, 🔒 cleared on sign-out with the outbox; a session *expiry*
+deliberately keeps both, and a sign-in by a *different* person clears them —
+see [accounts.md](accounts.md#what-leaves-the-phone-with-the-session-191)).
+Deliberately *not* while editing: in edit mode the composer holds someone's sent words rather than a draft
 of yours, so persisting them would mean coming back to a message you never wrote.
 
 **Quotes are fetched when they haven't paged in.** This is the debt M3 left, and
