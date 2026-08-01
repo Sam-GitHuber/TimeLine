@@ -89,6 +89,13 @@ export function setOnScreenConversation(conversationId: number | null): void {
  * iOS honours the two independently. Android has no transient-only notification,
  * so a banner there *is* a shade entry; the mark-read dismissal below is what
  * clears it, one message-poll later.
+ *
+ * **`shouldSetBadge` stays `false`, deliberately** (#179). Every push now carries
+ * a server-computed `badge`, and turning this on would apply it while the app is
+ * on screen — usually right, and wrong in exactly the case that matters most:
+ * a push for the thread you are reading, whose count was computed a tick before
+ * you read it. While the app is running, `useBadgeCount` owns the number, from
+ * the same counts the in-app badges are showing.
  */
 export function configureNotificationHandler(): void {
   Notifications.setNotificationHandler({
@@ -104,6 +111,37 @@ export function configureNotificationHandler(): void {
       };
     },
   });
+}
+
+/**
+ * Put a number on the **app icon** (#179), or clear it with `0`.
+ *
+ * **iOS only, and that is a decision rather than an oversight.** Two reasons,
+ * either of which would be enough:
+ *
+ * 1. `Notifications.setBadgeCountAsync(0)` on Android does not merely clear a
+ *    badge — the module's `BadgeHelper` calls `notificationManager.cancelAll()`,
+ *    dismissing **every** notification the app has posted. Clearing the icon on
+ *    the way to zero would silently wipe the notification shade, in the release
+ *    right after #178 taught this app to dismiss notifications precisely and
+ *    only when they've genuinely been dealt with.
+ * 2. Android badges are launcher-dependent (the module goes through
+ *    ShortcutBadger and simply resolves `false` where the launcher has no
+ *    concept of one), and Expo's push API has no Android badge field at all. So
+ *    the most we could offer is a number we can set but never take back —
+ *    strictly worse than none.
+ *
+ * Android is not left with nothing: launchers derive their dot from the
+ * notification shade, and #178 is what keeps that honest.
+ *
+ * Best-effort and silent on failure, like every other push nicety in this file.
+ * A badge that didn't update is the behaviour we had before this existed.
+ */
+export function setAppBadge(count: number): void {
+  if (Platform.OS !== 'ios') return;
+  // Negative would be a bug upstream, but it's a native call — clamp rather
+  // than hand UIKit something it has no defined behaviour for.
+  void Notifications.setBadgeCountAsync(Math.max(0, count)).catch(() => {});
 }
 
 /**

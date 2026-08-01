@@ -491,6 +491,12 @@ A mention says *"Ada mentioned you"* (Phase 9b M8) — which is the same rule, a
 earns its place because a chat you silenced suddenly buzzing owes you an
 explanation.
 
+**The icon badge is metadata too** (#179). Every push carries a `badge` — the
+recipient's total unread count — so the services in the path also see *how much*
+is waiting for a device, and can watch that number rise and fall. Same category
+as the deep-link route above: a count, naming nobody and quoting nothing, and
+the only way to put a number on the icon of a phone that isn't running the app.
+
 Deliberately **not** included: any post, comment **or message** text, any photo,
 any email address. A push names people but never quotes them — so a lock screen
 in a café leaks no content. That rule is what makes pushing private messages
@@ -723,11 +729,102 @@ That half is deliberately parked on **Phase 10b's** background-delivery spike
 rather than guessed at, and the foreground reconcile is the cheap 80% of it in
 the meantime.
 
-**Still no app-icon badge** (`shouldSetBadge: false`, and no `badge` on the
-outgoing push) — issue #179, which rides on this bookkeeping. Worth knowing
-before starting it: on Android `setBadgeCountAsync(0)` calls
-`notificationManager.cancelAll()`, so reaching for zero there *is* a
-dismiss-everything, in the release that just added deliberate targeted dismissal.
+### The app-icon badge (#179)
+
+The home-screen icon carries a number: **unread messages + unread activity**.
+
+**Why the sum.** There are deliberately two counts — the Messages tab badge and
+the activity bell — because messaging sits outside the activity centre (see
+*Out of scope*). One icon badge is one number, so it has to be a sum, a choice,
+or nothing. It sums, and the *same* decision that makes two in-app badges
+correct is what makes one summed icon badge honest: because messages are
+excluded from the bell, there is nothing counted twice. `badge_count_for`
+(`views.py`) adds `unread_message_total` to `unread_notification_total` — the
+very functions the two count endpoints serve, so the icon and the app can't
+disagree about what's waiting.
+
+**Two halves, because there are exactly two levers.**
+
+- **The server, on every push.** `_message` puts `badge` on every outgoing
+  message — not just message pushes, and never omitted, because this is the only
+  thing that can reach a phone that isn't running the app, and a kind that
+  skipped it would leave the previous number sitting there. Counted at *send*
+  time, not enqueue: what belongs on the icon is what's waiting when the push
+  lands. `_badge` caches per recipient for the batch — **not** for the group
+  case (a group message's twenty rows are twenty different people, so it's
+  twenty counts regardless) but for one person holding several rows at once, a
+  message and a reaction say. The count runs a query per conversation, the same
+  family-scale trade-off `UnreadMessageCountView` makes, so that cache is also
+  the only way every push in a drain agrees on the number.
+- **The app, whenever it knows better** — `useBadgeCount`, mounted in the root
+  layout. It **watches the two count caches** (`['unreadMessages']`,
+  `['notificationsUnread']`) rather than setting the badge at each place a count
+  changes: every mark-read path in the app already invalidates one of those two
+  keys, so subscribing means all of them — and every future one — move the icon
+  by construction. The badge is therefore exactly as fresh as the in-app badges
+  are. Those observers don't poll — the tab bar and the bell already do, and a
+  third poller on the same key would double the traffic to learn what we're
+  already being told — but they do fetch on mount and on foreground, so the icon
+  is right when the phone is picked up.
+
+**Which means the icon and the in-app badges are the same numbers**, not two
+counts that agree by convention: `badge_count_for` is `unread_message_total` +
+`unread_notification_total`, and those are the two functions
+`GET /messages/unread-count/` and `GET /notifications/unread-count/` serve. If
+the Messages tab says 2 and the bell says 1, the icon says 3. And every drop is
+a **recount**, not a decrement — reading a thread with three unread in it makes
+the server re-add the whole total from scratch — so the number can't drift out
+of step no matter how many events it misses.
+
+Every action that changes a count invalidates the key behind it, and **that is
+the property the badge depends on**, so it's worth listing:
+
+| Action | Invalidates | Where |
+| --- | --- | --- |
+| Open a thread | `unreadMessages` | `[conversationId].tsx`, after the `read/` POST |
+| Swipe read / unread in the list | `unreadMessages` | `(tabs)/messages.tsx`'s `rowAction` |
+| Block, leave, accept a pending chat | `unreadMessages` | `BlockButton`, `info.tsx`, `PendingChatPanel` |
+| Open the activity centre | `notificationsUnread` | `activity.tsx`, after `seen` |
+| Click a row in the activity centre | `notificationsUnread` | `activity.tsx`'s `handlePress` |
+| **Tap a push** | `notificationsUnread` | `usePushTaps.ts` — addressed implies *seen* (`NotificationAddressedView` sets `seen_at` too), so this drops the count and has to say so |
+| **Reply from the lock screen** | `unreadMessages` | `usePushTaps.ts`'s `sendReply`, success path only |
+
+The last two are #179's doing. Both previously relied on "the app refetches on
+foreground", which was a fine answer while nothing outside the app showed a
+count. The lock-screen reply is the sharper of the pair: it is the one path that
+deals with a message while the app is deliberately *not* in front of anyone, so
+the next thing the user sees is the home screen — an icon still claiming the
+message they just answered is the most visible possible version of this being
+wrong. Both hang off the **success** path, for the same reason the #178
+dismissal beside them does: a reply that failed moved no read marker, so the
+thread is still unread and the badge is still right.
+
+**Three rules that are easy to get backwards:**
+
+- **`shouldSetBadge` stays `false`.** With a server-sent badge, flipping it
+  would apply the push's count while the app is on screen — usually right, and
+  wrong in the case that matters most: a push for the thread you're reading,
+  counted a tick before you read it. While the app runs, the app owns the number.
+- **The app never sets a badge it hasn't earned.** Both counts start unknown at
+  launch; treating that as zero would wipe a badge the server had set correctly,
+  on every launch. `useBadgeCount` sets nothing until both have landed — and
+  sets `0` on `signedOut` (not on `loading`), so a count can't outlive the
+  session it belonged to.
+- **Badge writes are iOS-only, and that's a decision.** On Android
+  `setBadgeCountAsync(0)` doesn't clear a badge: `BadgeHelper` calls
+  `notificationManager.cancelAll()` and dismisses *every* notification the app
+  has posted — a "clear the badge on foreground" would silently wipe the shade
+  this release just taught us to manage precisely. Android badges are also
+  launcher-dependent (best-effort through ShortcutBadger) and Expo's push API
+  has no Android badge field at all, so the most we could offer there is a
+  number we can set and never take back. Android instead gets what its launcher
+  derives from the notification shade, which the dismissal work above keeps
+  honest.
+
+**The known stale case is the same one as above:** read a thread on the web and
+this phone's badge is wrong until the next push or the next foreground. Nothing
+in APNs corrects a badge without sending something, so it inherits Phase 10b's
+background-delivery question along with everything else in this section.
 
 ## Frontend
 

@@ -17,6 +17,7 @@
  * a push targeted even when that screen was the one already on display.
  */
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
 import { router, useRootNavigationState } from 'expo-router';
 import { render, waitFor } from '@testing-library/react-native';
@@ -69,12 +70,41 @@ function response({
   } as never;
 }
 
+/**
+ * The hook reaches for a `QueryClient` to invalidate the counts behind the app
+ * icon's badge (#179), so every render here needs a provider around it. Kept
+ * inside `Probe` rather than at each call site so the existing tests read
+ * exactly as they did.
+ */
 function Probe() {
+  return (
+    <QueryClientProvider client={client}>
+      <Taps />
+    </QueryClientProvider>
+  );
+}
+
+function Taps() {
   usePushNotificationTaps();
   return <Text>probe</Text>;
 }
 
+let client: QueryClient;
+
+/** The query keys `invalidateQueries` was asked for, flattened. */
+function invalidated(): string[] {
+  return (client.invalidateQueries as jest.Mock).mock.calls.flatMap(
+    ([filters]) => filters?.queryKey ?? []
+  );
+}
+
 beforeEach(() => {
+  // `gcTime: 0` for the reason the other suites set it: an idle five-minute
+  // collection timer keeps Node alive long after the suite has passed.
+  client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  jest.spyOn(client, 'invalidateQueries');
   mockUseAuth.mockReturnValue({ status: 'signedIn' } as never);
   mockNavState.mockReturnValue({ key: 'root' } as never);
   mockNotifications.useLastNotificationResponse.mockReturnValue(null as never);
@@ -111,6 +141,38 @@ it('marks the notification addressed, matching the web click-through', async () 
   await waitFor(() =>
     expect(api.markNotificationAddressed).toHaveBeenCalledWith(99)
   );
+});
+
+it('drops the unread count once the notification is addressed', async () => {
+  // Addressed implies *seen* server-side (`NotificationAddressedView` sets
+  // `seen_at` too), so tapping a push takes one off the bell — and off the app
+  // icon (#179). Without this the icon went on claiming it for a poll cycle,
+  // while the in-app click-through on the same row updated at once.
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({ notificationId: 99 })
+  );
+
+  await render(<Probe />);
+
+  await waitFor(() =>
+    expect(invalidated()).toEqual(
+      expect.arrayContaining(['notificationsUnread'])
+    )
+  );
+});
+
+it('leaves the count alone when marking addressed fails', async () => {
+  // Nothing moved server-side, so the badge is still right — and a refetch
+  // here would only overwrite a correct number with the same one.
+  jest
+    .spyOn(api, 'markNotificationAddressed')
+    .mockRejectedValue(new Error('offline'));
+  mockNotifications.useLastNotificationResponse.mockReturnValue(response());
+
+  await render(<Probe />);
+
+  await waitFor(() => expect(router.navigate).toHaveBeenCalled());
+  expect(invalidated()).not.toContain('notificationsUnread');
 });
 
 it('still navigates when marking addressed fails', async () => {
@@ -294,6 +356,46 @@ it('clears that thread’s other notifications once the reply lands (#178)', asy
   expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalledWith(
     'other-thread'
   );
+});
+
+it('takes the answered message off the app icon (#179)', async () => {
+  // The one path that deals with a message while the app is deliberately *not*
+  // in front of anyone — so the next thing the user sees is the home screen.
+  // An icon still claiming the message they just answered is the most visible
+  // possible version of the badge being wrong, which is why this path stopped
+  // relying on "the app refetches on foreground".
+  jest.spyOn(api, 'sendMessage').mockResolvedValue({} as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  await render(<Probe />);
+
+  await waitFor(() =>
+    expect(invalidated()).toEqual(expect.arrayContaining(['unreadMessages']))
+  );
+});
+
+it('leaves the icon alone when the reply doesn’t land (#179)', async () => {
+  // Same success-only rule as the dismissal beside it: a failed reply moved no
+  // read marker, so the thread is still unread and the badge is still right.
+  jest.spyOn(api, 'sendMessage').mockRejectedValue(new Error('offline'));
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  await render(<Probe />);
+
+  await waitFor(() => expect(api.sendMessage).toHaveBeenCalled());
+  expect(invalidated()).not.toContain('unreadMessages');
 });
 
 it('keeps the notification when the reply doesn’t land (#178)', async () => {
