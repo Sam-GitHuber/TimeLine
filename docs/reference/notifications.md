@@ -757,13 +757,45 @@ disagree about what's waiting.
 - **The app, whenever it knows better** — `useBadgeCount`, mounted in the root
   layout. It **watches the two count caches** (`['unreadMessages']`,
   `['notificationsUnread']`) rather than setting the badge at each place a count
-  changes: six screens already invalidate the first and the activity centre
-  invalidates the second, so subscribing means every existing mark-read path,
-  and every future one, moves the icon by construction. The badge is therefore
-  exactly as fresh as the in-app badges are. Those observers don't poll — the
-  tab bar and the bell already do, and a third poller on the same key would
-  double the traffic to learn what we're already being told — but they do fetch
-  on mount and on foreground, so the icon is right when the phone is picked up.
+  changes: every mark-read path in the app already invalidates one of those two
+  keys, so subscribing means all of them — and every future one — move the icon
+  by construction. The badge is therefore exactly as fresh as the in-app badges
+  are. Those observers don't poll — the tab bar and the bell already do, and a
+  third poller on the same key would double the traffic to learn what we're
+  already being told — but they do fetch on mount and on foreground, so the icon
+  is right when the phone is picked up.
+
+**Which means the icon and the in-app badges are the same numbers**, not two
+counts that agree by convention: `badge_count_for` is `unread_message_total` +
+`unread_notification_total`, and those are the two functions
+`GET /messages/unread-count/` and `GET /notifications/unread-count/` serve. If
+the Messages tab says 2 and the bell says 1, the icon says 3. And every drop is
+a **recount**, not a decrement — reading a thread with three unread in it makes
+the server re-add the whole total from scratch — so the number can't drift out
+of step no matter how many events it misses.
+
+Every action that changes a count invalidates the key behind it, and **that is
+the property the badge depends on**, so it's worth listing:
+
+| Action | Invalidates | Where |
+| --- | --- | --- |
+| Open a thread | `unreadMessages` | `[conversationId].tsx`, after the `read/` POST |
+| Swipe read / unread in the list | `unreadMessages` | `(tabs)/messages.tsx`'s `rowAction` |
+| Block, leave, accept a pending chat | `unreadMessages` | `BlockButton`, `info.tsx`, `PendingChatPanel` |
+| Open the activity centre | `notificationsUnread` | `activity.tsx`, after `seen` |
+| Click a row in the activity centre | `notificationsUnread` | `activity.tsx`'s `handlePress` |
+| **Tap a push** | `notificationsUnread` | `usePushTaps.ts` — addressed implies *seen* (`NotificationAddressedView` sets `seen_at` too), so this drops the count and has to say so |
+| **Reply from the lock screen** | `unreadMessages` | `usePushTaps.ts`'s `sendReply`, success path only |
+
+The last two are #179's doing. Both previously relied on "the app refetches on
+foreground", which was a fine answer while nothing outside the app showed a
+count. The lock-screen reply is the sharper of the pair: it is the one path that
+deals with a message while the app is deliberately *not* in front of anyone, so
+the next thing the user sees is the home screen — an icon still claiming the
+message they just answered is the most visible possible version of this being
+wrong. Both hang off the **success** path, for the same reason the #178
+dismissal beside them does: a reply that failed moved no read marker, so the
+thread is still unread and the badge is still right.
 
 **Three rules that are easy to get backwards:**
 

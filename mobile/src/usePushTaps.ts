@@ -19,6 +19,7 @@
  * doing.
  */
 
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
 import { router, useRootNavigationState } from 'expo-router';
 import { useEffect, useRef } from 'react';
@@ -38,6 +39,9 @@ export function usePushNotificationTaps(): void {
   const response = Notifications.useLastNotificationResponse();
   const navigationState = useRootNavigationState();
   const handled = useRef<string | null>(null);
+  // Both branches below deal with something that was waiting, so both move a
+  // count `useBadgeCount` is watching (#179).
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     // Three reasons to hold off, all of which resolve later:
@@ -73,7 +77,7 @@ export function usePushNotificationTaps(): void {
     if (response.actionIdentifier === REPLY_ACTION) {
       const text = response.userText?.trim();
       const conversationId = conversationIdFromUrl(data?.url);
-      if (text && conversationId) sendReply(conversationId, text);
+      if (text && conversationId) sendReply(conversationId, text, queryClient);
       return;
     }
 
@@ -91,10 +95,23 @@ export function usePushNotificationTaps(): void {
     // the web dropdown does — so the activity centre and the badge stay in
     // step across devices. Best-effort: a failure here must not undo the
     // navigation the user actually asked for.
+    //
+    // **Addressed implies seen** (`NotificationAddressedView` sets `seen_at`
+    // too), so this drops the unread count — which means the bell and the app
+    // icon (#179) are both now wrong until something refetches. Invalidating
+    // the same two keys the activity centre's own click-through invalidates is
+    // what keeps in-app and push click-through agreeing about the number, the
+    // way the comment above already claims they agree about everything else.
     if (data?.notificationId) {
-      api.markNotificationAddressed(data.notificationId).catch(() => {});
+      api
+        .markNotificationAddressed(data.notificationId)
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+          queryClient.invalidateQueries({ queryKey: ['notifications'] });
+        })
+        .catch(() => {});
     }
-  }, [response, status, navigationState?.key]);
+  }, [response, status, navigationState?.key, queryClient]);
 }
 
 /**
@@ -110,8 +127,18 @@ export function usePushNotificationTaps(): void {
  * typed into a notification is no different.
  *
  * Not marked read: sending marks the thread read server-side, which is the right
- * answer and needs nothing from here. Nothing is invalidated either — the app
- * refetches on foreground.
+ * answer and needs nothing from here.
+ *
+ * **The unread count is invalidated, though** (#179), and that's a change of
+ * mind rather than an oversight corrected. "The app refetches on foreground"
+ * was a fine answer while nothing outside the app showed a count: by the time
+ * you looked, you were looking at the app. The icon badge broke that — this is
+ * the one path that deals with a message while the app is deliberately *not* in
+ * front of anyone, so the next thing the user sees is the home screen, and an
+ * icon still claiming an unread message they just answered is the most visible
+ * possible version of this being wrong. One cheap GET, on the success path only
+ * (see below), and a failure to complete it leaves the badge exactly where it
+ * would have been anyway.
  *
  * A **landed** reply also clears that thread's other notifications (#178) —
  * answering deals with the whole conversation, not just the one notification
@@ -126,9 +153,20 @@ export function usePushNotificationTaps(): void {
  * waiting. Dismissing first would take away the prompt and leave the sender
  * with no answer.
  */
-function sendReply(conversationId: number, text: string) {
+function sendReply(
+  conversationId: number,
+  text: string,
+  queryClient: QueryClient
+) {
   api.sendMessage(conversationId, text).then(
-    () => dismissConversationNotifications([conversationId]),
+    () => {
+      void dismissConversationNotifications([conversationId]);
+      // Same success-only rule as the dismissal it sits beside: a reply that
+      // failed moved no read marker, so the thread is still unread and the
+      // badge is still right.
+      void queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
+      void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    },
     () => {
       updateOutbox(conversationId, (entries) => [
         ...entries,
