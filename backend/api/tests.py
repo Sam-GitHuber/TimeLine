@@ -4252,8 +4252,11 @@ class DirectChatParticipantsTests(APITestCase):
 
     def test_the_would_be_addition_cannot_read_the_thread(self):
         # The consequence the guard exists to prevent, asserted end to end.
-        self.client.post(messages_url(Conversation.objects.get(pk=self.cid)),
-                         {"text": "just between us"}, format="json")
+        self.client.post(
+            f"/api/conversations/{self.cid}/messages/",
+            {"text": "just between us"},
+            format="json",
+        )
         self.client.post(
             f"/api/conversations/{self.cid}/participants/",
             {"user_ids": [self.c.id]},

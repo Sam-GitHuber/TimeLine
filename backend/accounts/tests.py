@@ -366,6 +366,37 @@ class RegistrationTests(APITestCase):
             User.objects.filter(email="refusing@example.com").exists()
         )
 
+    def test_registration_bursts_are_throttled_too(self):
+        """🔒 Sign-up creates a row *and* emails a verification code to whatever
+        address the (anonymous) caller supplies. Unthrottled — which it was,
+        inheriting dj-rest-auth's rate-less `dj_rest_auth` scope — that's an
+        inbox-bomb aimed at third parties, sent from our own domain at the cost
+        of its sending reputation, plus unbounded growth in the approval queue.
+        """
+        limit = configured_throttle_limit("register")
+
+        def register(n):
+            return self.client.post(
+                REGISTER_URL,
+                {
+                    "email": f"flood{n}@example.com",
+                    "password1": PASSWORD,
+                    "password2": PASSWORD,
+                    "first_name": "Flood",
+                    "last_name": "Er",
+                    "accept_terms": True,
+                },
+                format="json",
+            )
+
+        for n in range(limit):
+            self.assertEqual(register(n).status_code, status.HTTP_201_CREATED)
+        resp = register(limit)
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        # And crucially the refused attempt sent no mail and made no account.
+        self.assertFalse(User.objects.filter(email=f"flood{limit}@example.com").exists())
+        self.assertEqual(len(mail.outbox), limit)
+
 
 @override_settings(CACHES=LOCMEM_CACHE)
 class LoginLogoutTests(APITestCase):
@@ -585,37 +616,6 @@ class LoginThrottleTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
         # A `detail` message the SPA already surfaces to the user.
         self.assertIn("detail", resp.data)
-
-    def test_registration_bursts_are_throttled_too(self):
-        """🔒 Sign-up creates a row *and* emails a verification code to whatever
-        address the (anonymous) caller supplies. Unthrottled — which it was,
-        inheriting dj-rest-auth's rate-less `dj_rest_auth` scope — that's an
-        inbox-bomb aimed at third parties, sent from our own domain at the cost
-        of its sending reputation, plus unbounded growth in the approval queue.
-        """
-        limit = configured_throttle_limit("register")
-
-        def register(n):
-            return self.client.post(
-                REGISTER_URL,
-                {
-                    "email": f"flood{n}@example.com",
-                    "password1": PASSWORD,
-                    "password2": PASSWORD,
-                    "first_name": "Flood",
-                    "last_name": "Er",
-                    "accept_terms": True,
-                },
-                format="json",
-            )
-
-        for n in range(limit):
-            self.assertEqual(register(n).status_code, status.HTTP_201_CREATED)
-        resp = register(limit)
-        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
-        # And crucially the refused attempt sent no mail and made no account.
-        self.assertFalse(User.objects.filter(email=f"flood{limit}@example.com").exists())
-        self.assertEqual(len(mail.outbox), limit)
 
     def test_a_normal_login_within_the_limit_still_succeeds(self):
         resp = self.client.post(
