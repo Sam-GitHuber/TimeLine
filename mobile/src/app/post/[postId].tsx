@@ -32,6 +32,7 @@ import {
   type KeyboardAwareScrollRef,
 } from '@/components/KeyboardAvoider';
 import { PostCard } from '@/components/PostCard';
+import { dismissPostNotifications } from '@/push';
 import { colors, fontSize, spacing } from '@/theme';
 
 export default function PostScreen() {
@@ -64,14 +65,14 @@ export default function PostScreen() {
     retry: false,
   });
 
-  // Fetching the post just marked its notifications seen server-side (viewing
-  // is seeing — notifications.md). Refresh the unread count now rather than on
-  // the bell's next poll, so the icon badge is already right if the reader
-  // backgrounds the app straight from here.
+  // The fetch marked this post's notifications seen server-side (viewing is
+  // seeing — notifications.md), so mirror it locally: refresh the count the
+  // icon badge watches, and take the delivered pushes out of the tray.
   const queryClient = useQueryClient();
   const loadedPostId = post?.id;
   useEffect(() => {
     if (loadedPostId == null) return;
+    void dismissPostNotifications(loadedPostId);
     void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
   }, [loadedPostId, queryClient]);
 

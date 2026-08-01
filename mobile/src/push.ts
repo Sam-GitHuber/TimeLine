@@ -545,6 +545,37 @@ export function dismissActivityNotifications(): Promise<void> {
 }
 
 /**
+ * Drop every delivered notification aimed at one post, for the post screen —
+ * whose GET just marked those notifications seen server-side (viewing is
+ * seeing, see notifications.md). An OS notification is a badge signal, so it
+ * goes the same way the badge count does.
+ *
+ * Matched on the push's `url`, like the conversation dismissal above: a post
+ * push is `/p/<id>`, with a comment deep-link riding as `?comment=<id>` —
+ * still the same post, so the query string is ignored.
+ */
+export function dismissPostNotifications(postId: number): Promise<void> {
+  return dismissDelivered((data) => {
+    if (typeof data.url !== 'string') return false;
+    const match = data.url.split('?')[0].match(/^\/p\/(\d+)$/);
+    return match !== null && Number(match[1]) === postId;
+  });
+}
+
+/**
+ * The event screen's version of `dismissPostNotifications`. The wire shape is
+ * the web's nested one (`/g/<gid>/events/<eid>`); only the event id matters —
+ * an event's five push kinds all point at the same target.
+ */
+export function dismissEventNotifications(eventId: number): Promise<void> {
+  return dismissDelivered((data) => {
+    if (typeof data.url !== 'string') return false;
+    const match = data.url.match(/^\/g\/\d+\/events\/(\d+)$/);
+    return match !== null && Number(match[1]) === eventId;
+  });
+}
+
+/**
  * What's in the tray right now, grouped by conversation: id → the delivered
  * notifications for it.
  *

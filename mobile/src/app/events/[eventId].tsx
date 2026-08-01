@@ -37,6 +37,7 @@ import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEd
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
 import { formatEventWhen } from '@/eventFormat';
+import { dismissEventNotifications } from '@/push';
 import { useAndroidBack } from '@/useAndroidBack';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 
@@ -85,13 +86,12 @@ export default function EventScreen() {
   });
   const event = eventQuery.data;
 
-  // Fetching the event just marked its notifications seen server-side (viewing
-  // is seeing — notifications.md), so refresh the unread count now rather than
-  // on the bell's next poll: the icon badge should already be right if the
-  // reader backgrounds the app straight from here.
+  // Same viewing-is-seeing mirror as post/[postId].tsx, for the event's
+  // notifications.
   const loadedEventId = event?.id;
   useEffect(() => {
     if (loadedEventId == null) return;
+    void dismissEventNotifications(loadedEventId);
     void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
   }, [loadedEventId, queryClient]);
 

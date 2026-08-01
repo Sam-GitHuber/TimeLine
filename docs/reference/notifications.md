@@ -105,8 +105,9 @@ Notification:
   on a deliberate open (the web feed's thread is lazy; mobile's lives on the
   post screen). The mobile post/event screens invalidate
   `['notificationsUnread']` once their fetch lands, so the icon badge drops
-  immediately rather than on the bell's next poll; the web bell self-corrects
-  on its 12s poll.
+  immediately rather than on the bell's next poll — and dismiss the delivered
+  pushes for that post/event from the tray (the #178 rule below: an OS
+  notification is a badge signal). The web bell self-corrects on its 12s poll.
 - The **badge count is unread** (`seen_at is null`) — the number that means "new
   since I last looked."
 
@@ -666,7 +667,7 @@ already did the *pre*-delivery half well — `_should_drop` bins a queued messag
 push whose read marker has moved past it, so a thread you read before the timer
 ticked never buzzes — but nothing existed for after delivery.
 
-Six things now remove one. All of them are **local** —
+Seven things now remove one. All of them are **local** —
 `getPresentedNotificationsAsync` + `dismissNotificationAsync` — with no new
 payload field and no backend change.
 
@@ -678,6 +679,7 @@ payload field and no backend change.
 | A **Reply** typed into a notification *lands* | that conversation's notifications | `usePushTaps.ts` |
 | A message arrives for the thread already on screen | that one, as it arrives | `push.ts` |
 | The app opens, and each time it returns to the foreground | conversations the payload now reports as `unread_count: 0` | `usePushDismissals.ts` |
+| The post / event screen loads (its GET marked the notifications seen — viewing is seeing, above) | that post's (`/p/<id>`, `?comment=` included) / that event's | `post/[postId].tsx`, `events/[eventId].tsx` via `dismissPostNotifications` / `dismissEventNotifications` |
 
 Both mark-read paths are listed on purpose: dealing with a thread from the list
 is the same act as reading it, and covering only the thread screen left the badge
@@ -807,6 +809,8 @@ the property the badge depends on**, so it's worth listing:
 | Click a row in the activity centre | `notificationsUnread` | `activity.tsx`'s `handlePress` |
 | **Tap a push** | `notificationsUnread` | `usePushTaps.ts` — addressed implies *seen* (`NotificationAddressedView` sets `seen_at` too), so this drops the count and has to say so |
 | **Reply from the lock screen** | `unreadMessages` | `usePushTaps.ts`'s `sendReply`, success path only |
+| **Open a post** | `notificationsUnread` | `post/[postId].tsx` — its GET marked the post's notifications seen (viewing is seeing, above) |
+| **Open an event** | `notificationsUnread` | `events/[eventId].tsx` — same |
 
 The last two are #179's doing. Both previously relied on "the app refetches on
 foreground", which was a fine answer while nothing outside the app showed a

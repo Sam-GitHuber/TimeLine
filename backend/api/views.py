@@ -1334,11 +1334,9 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
         post = self._fetch_post()
         if not can_view_post(self.request.user, post):
             raise NotFound()
-        # Opening the permalink is reading it: any unread notification pointing
-        # at this post (or a comment on it) stops counting toward the badge,
-        # whether or not the reader ever touches the bell or the push. Safe to
-        # do in get_object because only GET reaches here — PATCH/DELETE gate
-        # through _owned_object.
+        # Viewing is seeing — see notifications.see_post_notifications. Safe in
+        # get_object because only GET reaches it; PATCH/DELETE gate through
+        # _owned_object.
         notifications.see_post_notifications(self.request.user, post)
         return post
 
@@ -1704,10 +1702,8 @@ class PostCommentsView(APIView):
             PostCommentRead.objects.filter(post=post, user=request.user).update(
                 last_seen_at=now
             )
-        # The same seen event, applied to the activity centre: reading the
-        # thread is reading the reply/reaction you were notified about, so its
-        # notification stops counting toward the badge (the content half of
-        # resolve-elsewhere — see notifications.see_post_notifications).
+        # The same seen event, applied to the activity centre — see
+        # notifications.see_post_notifications.
         notifications.see_post_notifications(request.user, post)
         # Drop comments by deactivated (banned) authors before building the
         # tree, so a banned member's comments vanish just like their posts do —
@@ -4276,9 +4272,7 @@ class EventDetailView(APIView):
 
     def get(self, request, pk):
         event = _event_or_404(request.user, pk)
-        # Viewing the event is seeing the news about it — the created / poll /
-        # scheduled / updated / cancelled notifications stop counting toward
-        # the badge, same viewing-is-seeing rule as the post permalink.
+        # Viewing is seeing — see notifications.see_event_notifications.
         notifications.see_event_notifications(request.user, event)
         return _event_response(event.id, request)
 
