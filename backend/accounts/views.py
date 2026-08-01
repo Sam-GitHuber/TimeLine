@@ -169,7 +169,16 @@ class InactiveRegisterView(RegisterView):
     The email/password are stored (password hashed) and an allauth EmailAddress
     row is created by the serializer's ``setup_user_email``, so login works once
     the maintainer flips the account to active in the admin.
+
+    Rate-limited per IP (``register``): the caller is anonymous, and every
+    request both creates a row and sends mail to an address the caller chose.
+    dj-rest-auth's own ``throttle_scope`` is inherited as ``"dj_rest_auth"``,
+    which has no rate configured and no default throttle class behind it — so
+    without the two lines below this endpoint had no limit whatsoever.
     """
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "register"
 
     def perform_create(self, serializer):
         # is_active=False is set inside the serializer's save().

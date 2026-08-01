@@ -349,6 +349,13 @@ REST_FRAMEWORK = {
         # it caps how fast one account can accumulate DevicePushToken rows by
         # POSTing distinct fabricated token values.
         "push_register": os.environ.get("DJANGO_THROTTLE_PUSH_REGISTER", "20/min"),
+        # sign up (per-IP; the caller is anonymous). Registration creates a User
+        # row and emails a verification code, so an unthrottled endpoint is both
+        # an inbox-bomb aimed at whatever addresses are submitted (from our own
+        # sending domain, costing us its reputation) and unbounded growth in the
+        # admin's approval queue. Matched to resend_verification below — the two
+        # send the same mail.
+        "register": os.environ.get("DJANGO_THROTTLE_REGISTER", "5/min"),
         # resend a verification code (per-IP; the caller is anonymous). Blunts
         # using the resend endpoint to spam an inbox / probe. A per-email cooldown
         # (EmailVerificationCode.RESEND_COOLDOWN) guards a single address on top.

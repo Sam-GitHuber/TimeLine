@@ -1073,6 +1073,55 @@ class CommentCountMixin:
         return Response(serializer.data)
 
 
+# --- Media cleanup on delete --------------------------------------------------
+#
+# Deleting a row does NOT delete the file it points at. Django dropped that
+# behaviour deliberately (a rolled-back transaction would otherwise leave you
+# with a live row and a missing file), so every delete path has to sweep up
+# after itself. Skipping it isn't merely untidy here: `media_auth` authorises
+# media requests on "are you signed in", not "is this yours", so an orphaned
+# JPEG stays *fetchable* by any member who still holds its URL — a deleted
+# photo that isn't really deleted. These helpers keep the sweep in one place so
+# each new delete path doesn't have to rediscover the rule.
+
+
+def _post_image_files(post_ids):
+    """Every stored file belonging to the given posts' images."""
+    files = []
+    for img in PostImage.objects.filter(post_id__in=list(post_ids)):
+        files.append(img.image)
+        files.append(img.thumbnail)
+    return files
+
+
+def _attachment_files(attachments):
+    """Every stored file belonging to the given message attachments."""
+    files = []
+    for att in attachments:
+        files.append(att.file)
+        files.append(att.thumbnail)
+    return files
+
+
+def delete_files_on_commit(files):
+    """Remove ``files`` from storage once the current transaction commits.
+
+    On-commit rather than inline because file deletion isn't transactional: if
+    the surrounding delete rolls back, an inline sweep would already have
+    destroyed files whose rows are still live and still referencing them. The
+    ordering can only err on the safe side — a crash between commit and sweep
+    leaves an orphaned file (recoverable, invisible in the app), never a live
+    row pointing at nothing.
+    """
+    kept = [f for f in files if f]
+
+    def _remove(fs=kept):
+        for f in fs:
+            f.delete(save=False)
+
+    transaction.on_commit(_remove)
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def hello(request):
@@ -1383,7 +1432,15 @@ class PostDetailView(ReactionContextMixin, generics.RetrieveUpdateDestroyAPIView
 
     def delete(self, request, *args, **kwargs):
         post = self._owned_object()
-        post.delete()
+        # Gather the photo files *before* the cascade drops their rows, then
+        # sweep them once the delete commits — see delete_files_on_commit.
+        # Without this a deleted post's photos stayed on disk and stayed
+        # fetchable by URL, which is the opposite of what deleting a post you
+        # regret is for.
+        files = _post_image_files([post.pk])
+        with transaction.atomic():
+            post.delete()
+            delete_files_on_commit(files)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -2392,17 +2449,32 @@ class ConversationParticipantsView(APIView):
     """Add more people to an existing chat
     (``POST /conversations/<pk>/participants/`` body ``{user_ids: [...]}``).
 
-    Any *active* member (not pending, not left) can invite more of their own
-    connections — same gate as opening the chat (``can_add_to_group``), plus
-    group membership for a group-scoped chat, consistent with
-    ``_create_group``. New rows land pending, then ``promote_participants``
-    runs the clique rule immediately, so an invitee connected to everyone
-    already active goes straight in. ``get_or_create`` keeps re-adding an
-    existing participant a no-op rather than a duplicate row.
+    Only a **group** chat can be added to. A 1:1 is a closed thing between two
+    people: neither of them agreed to an audience, and the other party gets no
+    say in — or signal of — a third person arriving, because a direct thread's
+    UI has no sender attribution and names nobody in its header. Both clients
+    have always hidden "Add people" on a 1:1, so this is the server catching up
+    with what they already promise; without the guard, a hand-made POST to a
+    direct conversation's id let one participant put a stranger into the other
+    participant's private thread, with every message from that moment on
+    visible to them. ``_mentionable_user_ids`` refuses the analogous thing for
+    mentions and this now matches it.
+
+    Beyond that: any *active* member (not pending, not left) can invite more of
+    their own connections — same gate as opening the chat
+    (``can_add_to_group``), plus group membership for a group-scoped chat,
+    consistent with ``_create_group``. New rows land pending, then
+    ``promote_participants`` runs the clique rule immediately, so an invitee
+    connected to everyone already active goes straight in. ``get_or_create``
+    keeps re-adding an existing participant a no-op rather than a duplicate row.
     """
 
     def post(self, request, pk):
         convo = get_object_or_404(Conversation, pk=pk)
+        if convo.kind != Conversation.Kind.GROUP:
+            raise ValidationError(
+                {"user_ids": "Only a group chat can have people added to it."}
+            )
         me = convo.participants.filter(
             user=request.user, status=ACTIVE_P, left_at__isnull=True
         ).first()
@@ -3371,9 +3443,20 @@ class GroupDetailView(APIView):
         group = _member_group_or_404(request.user, pk)
         if group._your_role != ADMIN:
             raise PermissionDenied("Only an admin can delete this group.")
-        # Cascades to memberships and the group's posts (and their photos +
-        # comments) via the FKs.
-        group.delete()
+        # Cascades to memberships, the group's posts (and their image rows +
+        # comments) and its chats (and their messages + attachment rows) via
+        # the FKs. The rows go; the files behind them have to be gathered now
+        # and swept after the commit, or the group's photos and every chat
+        # photo in it stay on disk and stay fetchable by URL.
+        post_ids = list(Post.objects.filter(group=group).values_list("id", flat=True))
+        files = [group.avatar, group.avatar_thumb]
+        files += _post_image_files(post_ids)
+        files += _attachment_files(
+            MessageAttachment.objects.filter(message__conversation__group=group)
+        )
+        with transaction.atomic():
+            group.delete()
+            delete_files_on_commit(files)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -3905,11 +3988,11 @@ def delete_account(user):
     comments, messages, connections, memberships, blocks and reports all go.
     Three things a naive ``user.delete()`` gets wrong, handled here:
 
-    1. **Media files.** The cascade drops ``PostImage``/avatar *rows* but leaves
-       the actual JPEGs on disk/in storage. We gather them up front and delete
-       them **on commit** — file deletes aren't transactional, so doing them only
-       once the rows are certainly gone means a rolled-back delete can't leave the
-       account intact but its images vanished.
+    1. **Media files.** The cascade drops ``PostImage``/avatar/``MessageAttachment``
+       *rows* but leaves the actual JPEGs on disk/in storage. We gather them up
+       front and delete them **on commit** — file deletes aren't transactional, so
+       doing them only once the rows are certainly gone means a rolled-back delete
+       can't leave the account intact but its images vanished.
     2. **Last-admin groups.** A group outlives its members (``Group.creator`` is
        SET_NULL, admin memberships CASCADE), so deleting a group's *only* admin
        would leave it ungovernable. If other active members remain, we promote
@@ -3930,9 +4013,31 @@ def delete_account(user):
     # hold the storage + path) but only delete them after the transaction commits
     # — see docstring point 1. An already-removed file just no-ops.
     files_to_delete = [user.avatar, user.avatar_thumb]
-    for img in PostImage.objects.filter(post__author=user):
-        files_to_delete.append(img.image)
-        files_to_delete.append(img.thumbnail)
+    files_to_delete += _post_image_files(
+        Post.objects.filter(author=user).values_list("id", flat=True)
+    )
+    # Chat photos, which are the same problem as PostImage one table over: the
+    # rows cascade, the JPEGs don't. Missing these meant every photo a departing
+    # user ever sent in a chat stayed on disk *and* stayed fetchable at its
+    # /media/messages/<uuid>.jpg URL — `media_auth` gates on being signed in,
+    # not on owning the file — which is not what "delete my data" promises.
+    #
+    # Two sets, because two different cascades reach messages:
+    #   - `Message.sender` — their own messages, in every chat.
+    #   - `Conversation.user_a`/`user_b` — deleting the user deletes their 1:1
+    #     conversations outright, and *that* takes the other person's messages
+    #     in those threads with it. Those attachments are orphaned just as
+    #     surely, so they're gathered too.
+    # Group-chat messages by anyone else survive (the conversation does), which
+    # is why this isn't simply "every message in every chat they were in".
+    direct_convo_ids = Conversation.objects.filter(
+        Q(user_a=user) | Q(user_b=user), kind=Conversation.Kind.DIRECT
+    ).values_list("id", flat=True)
+    files_to_delete += _attachment_files(
+        MessageAttachment.objects.filter(
+            Q(message__sender=user) | Q(message__conversation_id__in=direct_convo_ids)
+        )
+    )
 
     with transaction.atomic():
         groups_to_delete = []
@@ -3965,12 +4070,7 @@ def delete_account(user):
             group.delete()
 
         # Only once the whole delete has committed do we touch storage.
-        def _remove_files(files=files_to_delete):
-            for f in files:
-                if f:
-                    f.delete(save=False)
-
-        transaction.on_commit(_remove_files)
+        delete_files_on_commit(files_to_delete)
 
 
 class DeleteAccountView(APIView):

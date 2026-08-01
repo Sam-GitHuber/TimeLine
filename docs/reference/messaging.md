@@ -991,8 +991,16 @@ Direct and group chats share the endpoints:
   message's caption may be edited, including down to nothing (there's still a
   message); swapping the *picture* under something someone has already looked at
   is not a change the "Edited" marker can honestly disclose.
-- `POST /api/conversations/<id>/participants/` — add people; any active member,
-  each an addable connection.
+- `POST /api/conversations/<id>/participants/` — add people; **group chats only**,
+  any active member, each an addable connection. A 1:1 is a closed thing between
+  two people and 400s here. That guard was missing at first, and the server was
+  therefore more permissive than either client: both have always hidden "Add
+  people" on a 1:1, but a hand-made POST at a direct conversation's id let one
+  participant drop a third person into the other's private thread — with no
+  consent from them and no signal, since a direct thread shows no sender
+  attribution and names nobody in its header, so the arrival was visible only to
+  someone who opened the info panel. `_mentionable_user_ids` refuses the analogous
+  thing for mentions; this now matches it.
 - `POST /api/conversations/<id>/leave/` — self-leave **or** decline-invite.
 - `GET /api/users/<id>/disconnect-impact/` — the shared active chats a
   disconnect/block would pull you from, to drive the warning modal.
