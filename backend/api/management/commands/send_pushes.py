@@ -206,11 +206,15 @@ class Command(BaseCommand):
     def _badge(self, row, cache):
         """The number to put on this recipient's **app icon** (issue #179).
 
-        Cached per recipient for the batch: a group message queues one row per
-        member, and a burst queues several for the same person, but the count is
-        a property of the *recipient*, not of the row — so computing it once
-        each is both cheaper and more consistent (every push in a drain agrees
-        on the number, rather than two arriving milliseconds apart disagreeing).
+        Cached per recipient for the batch, because the count is a property of
+        the *recipient* and not of the row. **A group message is not the case
+        this helps** — it queues one row per member, and those are twenty
+        different people, so it's twenty counts either way. What it catches is
+        one person holding several rows at once: a message in one thread and a
+        reaction on a post, two threads busy at the same time, or a retry
+        backlog. That's cheaper, and it's also the only way every push in a
+        drain can *agree* on the number rather than two arriving milliseconds
+        apart disagreeing.
 
         Counted *now* rather than at enqueue time, and deliberately so: the row
         may have sat in the queue for a tick or two, and what belongs on the

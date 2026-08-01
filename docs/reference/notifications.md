@@ -750,10 +750,12 @@ disagree about what's waiting.
   thing that can reach a phone that isn't running the app, and a kind that
   skipped it would leave the previous number sitting there. Counted at *send*
   time, not enqueue: what belongs on the icon is what's waiting when the push
-  lands. `_badge` caches per recipient for the batch, so a group message's
-  twenty rows cost one count each rather than twenty (it runs a query per
-  conversation — the same family-scale trade-off `UnreadMessageCountView`
-  makes), and every push in a drain agrees on the number.
+  lands. `_badge` caches per recipient for the batch — **not** for the group
+  case (a group message's twenty rows are twenty different people, so it's
+  twenty counts regardless) but for one person holding several rows at once, a
+  message and a reaction say. The count runs a query per conversation, the same
+  family-scale trade-off `UnreadMessageCountView` makes, so that cache is also
+  the only way every push in a drain agrees on the number.
 - **The app, whenever it knows better** — `useBadgeCount`, mounted in the root
   layout. It **watches the two count caches** (`['unreadMessages']`,
   `['notificationsUnread']`) rather than setting the badge at each place a count
