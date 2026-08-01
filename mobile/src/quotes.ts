@@ -35,7 +35,8 @@
  *    memory has to outlive a render, and outliving the *screen* costs nothing
  *    and saves a refetch when you come back to a thread.
  *
- * 🔒 **Cleared on sign-out** (`auth.tsx`), like the outbox and drafts: what it
+ * 🔒 **Cleared on sign-out** (`auth.tsx`) — and, like the outbox and drafts, at
+ * the next sign-in when a *different* person follows an expiry (#191): what it
  * holds is other people's message text, and the next person to pick the phone up
  * is not this person.
  */
@@ -135,7 +136,8 @@ function remember(
   listeners.get(conversationId)?.forEach((notify) => notify());
 }
 
-/** 🔒 Drop every resolved quote. Sign-out, and resetting between tests. */
+/** 🔒 Drop every resolved quote. Sign-out, a different person's sign-in after
+ * an expiry (#191), and resetting between tests. */
 export function clearQuotes() {
   const conversations = [...resolved.keys()];
   resolved.clear();

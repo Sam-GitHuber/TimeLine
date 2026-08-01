@@ -196,6 +196,35 @@ On the device the tokens live in **`expo-secure-store`** (Keychain-backed), neve
 JS, so: never log them, never put them in an error report, never append them to a
 URL query string.
 
+### What leaves the phone with the session (#191)
+
+The threat model is a **shared or handed-on phone**: a session ends, someone
+else signs in, and nothing of the previous person's may still be on the device.
+A session ends three ways — explicit sign-out, the session-expiry handler, and
+the cold-start 401 — and the app's session data lives in two kinds of place,
+each with its own rule:
+
+- **The TanStack Query cache** (feed, conversation previews, profiles, unread
+  counts — the bulk of a session) is emptied by `useSessionReset`
+  (`mobile/src/useSessionReset.ts`) on **every** transition to `signedOut`,
+  covering all three paths with one rule. It watches auth `status` from
+  `AuthGate` rather than being called inside `auth.tsx`, which deliberately has
+  no React Query dependency. The cache is in-memory only (never persisted), so
+  a process death is its own clear.
+- **The module stores** — outbox, drafts, resolved quotes (`outbox.ts`,
+  `drafts.ts`, `quotes.ts`) — are cleared by `signOut` itself. A session
+  *expiry* deliberately keeps them: unsent words surviving a token failure so
+  their owner can retry is the point of the outbox, and an expiry doesn't
+  change whose phone it is. The leak that leaves open — a *different* person
+  signing in on the login screen the expiry landed on — is closed at sign-in:
+  `signIn` compares the new `pk` against the last session's and clears all
+  three stores when they differ, so the same person gets their words back and
+  anyone else gets nothing.
+
+The web (`frontend/src/auth.jsx`) clears its drafts/outbox on logout but does
+**not** yet clear its query cache — the same gap #191 closed on mobile,
+tracked as #194.
+
 ### Push device registration
 
 `POST`/`DELETE /api/push-tokens/` registers or removes one device's **Expo push

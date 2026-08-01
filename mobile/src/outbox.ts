@@ -26,8 +26,10 @@
  * A module-level store keyed by conversation id survives that; the thread
  * subscribes to its own conversation's slice and re-renders when it moves.
  *
- * 🔒 It is **cleared on sign-out** (`auth.tsx`). Unsent text is one person's
- * words, and the next person to use the phone is not that person.
+ * 🔒 It is **cleared on sign-out** (`auth.tsx`) — and, because a session
+ * *expiry* deliberately keeps it so its owner can retry, also at the next
+ * sign-in when that's by a different person (#191). Unsent text is one
+ * person's words, and the next person to use the phone is not that person.
  */
 
 import { useCallback, useSyncExternalStore } from 'react';
@@ -133,10 +135,11 @@ export function useOutbox(conversationId: number): Outgoing[] {
 /**
  * Throw away every unsent message, everywhere.
  *
- * 🔒 Called on sign-out, and that's the point of it: now that the outbox
- * outlives the screen it would otherwise outlive the *session* too, leaving one
- * person's unsent words on a phone the next person is holding. Also used to
- * reset the module between tests.
+ * 🔒 Called on sign-out — and on a sign-in by a *different* person after an
+ * expiry (#191) — and that's the point of it: now that the outbox outlives the
+ * screen it would otherwise outlive the *session* too, leaving one person's
+ * unsent words on a phone the next person is holding. Also used to reset the
+ * module between tests.
  */
 export function clearOutbox() {
   const conversations = [...byConversation.keys()];

@@ -24,9 +24,10 @@
  * decision about where they live rather than a `SecureStore` call added in
  * passing.
  *
- * 🔒 **Cleared on sign-out** (`auth.tsx`), for exactly the reason the outbox is:
- * a draft is one person's words, and the next person to pick the phone up isn't
- * them.
+ * 🔒 **Cleared on sign-out** (`auth.tsx`) — and, like the outbox, at the next
+ * sign-in when a *different* person follows an expiry (#191) — for exactly the
+ * reason the outbox is: a draft is one person's words, and the next person to
+ * pick the phone up isn't them.
  */
 
 const drafts = new Map<number, string>();
@@ -42,7 +43,8 @@ export function setDraft(conversationId: number, text: string) {
   else drafts.delete(conversationId);
 }
 
-/** 🔒 Drop every draft. Sign-out, and resetting the module between tests. */
+/** 🔒 Drop every draft. Sign-out, a different person's sign-in after an
+ * expiry (#191), and resetting the module between tests. */
 export function clearDrafts() {
   drafts.clear();
 }
