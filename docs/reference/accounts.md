@@ -222,7 +222,8 @@ each with its own rule:
   anyone else gets nothing.
 
 The web (`frontend/src/auth.jsx`) clears its drafts/outbox on logout but does
-**not** yet clear its query cache — the same gap #191 closed on mobile.
+**not** yet clear its query cache — the same gap #191 closed on mobile,
+tracked as #194.
 
 ### Push device registration
 
