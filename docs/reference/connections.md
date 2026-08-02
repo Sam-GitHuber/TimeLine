@@ -71,13 +71,12 @@ surfaces in the same family (#237–#240):
   not "something went wrong" — knowing *which* of the four things the button does
   didn't happen is most of the value. It's reached whenever the server didn't
   write anything readable, which is **two** cases, not one: a network failure
-  never reaches our error code at all (it rejects out of `fetch` as a bare
-  `TypeError` carrying the *browser's* words — "Failed to fetch"), and a server
-  error with no DRF body (a 500 rendered as a Django HTML page) leaves
-  `firstErrorMessage` nothing to pull out, so `api.js` synthesizes "Request
-  failed (500)". Both clients' `ApiError` therefore carries a **`fromServer`**
-  flag, and `serverMessage` gates on it — a bare `instanceof` catches only the
-  first case and puts the stand-in string on screen.
+  (offline, DNS, the connection dropped — the browser's own "Failed to fetch"),
+  and a server error with no DRF body (a 500 rendered as a Django HTML page)
+  which leaves `firstErrorMessage` nothing to pull out, so `api.js` synthesizes
+  "Request failed (500)". Both clients' `ApiError` therefore carries a
+  **`fromServer`** flag, and `serverMessage` gates on it — nothing cruder
+  separates the two, since the second case has a message *and* a status.
 
   **Issue #240 made this the whole web client's rule, not three buttons'.**
   `frontend/src/api.js` now wraps the `fetch` itself and re-raises a network

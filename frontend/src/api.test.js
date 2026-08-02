@@ -327,6 +327,21 @@ describe("api network-failure handling", () => {
     expect(err.cause.message).toBe("Failed to fetch");
   });
 
+  it("does not disguise a body we built wrong as a connection problem", async () => {
+    // `JSON.stringify` throwing is a bug at the call site, not a dropped
+    // connection. Caught by the guard it would tell someone to check a
+    // connection that is fine, so the serialization happens outside it.
+    const fetchMock = stubFetch({ body: "{}" });
+    const circular = {};
+    circular.self = circular;
+
+    const err = await api.createPost(circular).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err.message).not.toMatch(/connection/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("still reports a reachable server's rejection as the server's", async () => {
     // The guard wraps `fetch` only. A response that arrives and is refused must
     // keep coming through the existing path, flagged `fromServer`.

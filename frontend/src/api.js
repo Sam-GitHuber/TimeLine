@@ -93,6 +93,14 @@ async function request(path, { method = "GET", body } = {}) {
     if (csrf) headers["X-CSRFToken"] = csrf;
   }
 
+  // Serialized *before* the try below, deliberately: `JSON.stringify` throws on
+  // a body we built wrong (a circular reference, a BigInt), and that is a bug in
+  // our code, not a connectivity problem. Inside the try it would be caught and
+  // dressed up as "check your connection", sending someone to reset a router
+  // over a mistake at the call site.
+  const payload =
+    body === undefined ? undefined : isFormData ? body : JSON.stringify(body);
+
   // A network-level failure — offline, DNS, the connection dropped mid-request —
   // rejects out of `fetch` itself as a bare `TypeError` carrying the *browser's*
   // words ("Failed to fetch" in Chrome, "Load failed" in Safari). Left alone it
@@ -111,12 +119,7 @@ async function request(path, { method = "GET", body } = {}) {
       method,
       headers,
       credentials: "include",
-      body:
-        body === undefined
-          ? undefined
-          : isFormData
-            ? body
-            : JSON.stringify(body),
+      body: payload,
     });
   } catch (err) {
     throw new ApiError(
