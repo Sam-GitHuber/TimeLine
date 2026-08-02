@@ -52,6 +52,29 @@ you. A third argument on the hook passes query options straight through
 (`enabled`, and the like); the paging keys are spread last so a caller can't
 reach in and change how the list pages.
 
+A few lists are wanted *whole* rather than a page at a time, because something
+real bounds them — your connections (the two message/invite pickers) and the
+replies to one message ([messaging](messaging.md)). They use
+**`useFetchAllPages(query)`**, which asks for the next page as soon as the one
+before it lands, and it is one shared hook rather than an effect per caller
+because of the way that effect fails:
+
+⚠️ **A page that fails must stop the walk, not restart it** (#214). The obvious
+guard — `if (hasNextPage && !isFetchingNextPage) fetchNextPage()` — re-arms
+itself on a failure. The server never said there was no page 2, so `hasNextPage`
+stays true; `isFetchingNextPage` going false again *is* the condition the effect
+waits for. So a 500 or a dropped connection turned into one request per render
+commit, for as long as the view stayed open, with TanStack's own three retries
+stacked on each — against an endpoint that by definition had just failed, from a
+phone whose connection had just dropped. Adding `!isError` stops it: what loaded
+stays on screen as a partial list, the callers that show `isError` say so, and
+recovery is automatic, since any later fetch that succeeds (a poll, a refocus)
+clears the flag and the remaining pages resume.
+
+This is only a hazard for the *effect-driven* walk. A list that pages from a
+scroll handler or a `<LoadMoreButton>` needs no such guard: a failed page there
+produces no scroll and no click, so nothing re-fires it.
+
 ## Posts
 
 - **`Post`** — `author`, `text`, `created_at`, nullable `group` FK (null = a

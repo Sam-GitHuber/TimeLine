@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App.jsx";
 import {
@@ -96,6 +96,26 @@ const preparedPhoto = {
 
 function page(results, next = null) {
   return { results, count: results.length, next };
+}
+
+// Turn the event loop over enough times that a *repeating* request has room to
+// show itself as more than one call (#214). A single `waitFor` can't tell "asked
+// once and stopped" from "asked once so far" — the hot loop it guards against
+// re-fires on the failure itself, so it needs no timer to keep going, just
+// another turn. Anything still looping is hundreds of calls by the time this
+// returns; anything that stopped is still on one.
+async function settle(turns = 20) {
+  for (let i = 0; i < turns; i += 1) {
+    // A real macrotask each turn, not just a microtask flush: the loop this
+    // guards against is one request per *commit*, and a rejection that resolves
+    // inside the same batch as the render that caused it never produces the
+    // second commit the effect needs to see. That's an artefact of a mock
+    // rejecting instantly — a real failed request always spans commits — so the
+    // turn has to be long enough for one to land.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
 }
 
 function renderAt(path = "/") {
@@ -382,6 +402,42 @@ describe("Messages drawer — new chat", () => {
         { id: 4, display_name: "Stranger", connection_status: "none" },
       ])
     );
+  });
+
+  it("stops paging your connections when a page fails, instead of looping on it", async () => {
+    const user = userEvent.setup();
+    api.listUsers.mockResolvedValue(
+      page(
+        [{ id: 2, display_name: "Priya", connection_status: "connected" }],
+        "http://localhost:8000/api/users/?page=2"
+      )
+    );
+    api.getPage.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(unauthoredError(500)), 0)
+        )
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+    const composeButtons = await screen.findAllByRole("button", {
+      name: "New message",
+    });
+    await user.click(composeButtons[0]);
+
+    expect(
+      await screen.findByText("Couldn’t load your connections.")
+    ).toBeInTheDocument();
+    // A stopped walk still leaves you the pages that did land, rather than an
+    // empty picker.
+    expect(screen.getByText("Priya")).toBeInTheDocument();
+
+    // #214: the failure re-armed the effect that asks for the page — the server
+    // never said there was no page 2, so `hasNextPage` stayed true, and
+    // `isFetchingNextPage` going false again *is* the condition it waits for.
+    await settle();
+    expect(api.getPage).toHaveBeenCalledTimes(1);
   });
 
   it("checks one connection with no title and opens a 1:1 thread", async () => {
@@ -1675,6 +1731,36 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // transcript, which pages lazily. Reading only page one would cut a busy
     // strand off at its *oldest* twenty and hide the reply you just sent.
     expect(await within(strand()).findByText("the newest reply")).toBeInTheDocument();
+  });
+
+  it("stops a strand's page walk when a page fails, instead of looping on it", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+    api.getThread.mockResolvedValue(
+      page(
+        [msg({ id: 5, text: "dinner?" })],
+        "http://localhost:8000/api/conversations/7/messages/?thread_root=5&page=2"
+      )
+    );
+    api.getPage.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(unauthoredError(500)), 0)
+        )
+    );
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    await waitFor(() => expect(api.getPage).toHaveBeenCalledTimes(1));
+    // What did load stays readable — the strand keeps its root.
+    expect(await within(strand()).findByText("dinner?")).toBeInTheDocument();
+
+    // #214, the other half: this panel polls, so a loop here runs for as long as
+    // the strand is open, against a server that just failed.
+    await settle();
+    expect(api.getPage).toHaveBeenCalledTimes(1);
   });
 
   it("lands a reply-to-a-reply in the same strand, quoting who you answered", async () => {

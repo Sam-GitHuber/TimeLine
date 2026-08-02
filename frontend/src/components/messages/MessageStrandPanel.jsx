@@ -4,6 +4,7 @@ import LoadMoreButton from "../LoadMoreButton.jsx";
 import MentionSuggestions from "./MentionSuggestions.jsx";
 import MessageBubble from "./MessageBubble.jsx";
 import { api, MESSAGE_POLL_MS } from "../../api.js";
+import { useFetchAllPages } from "../../hooks.js";
 import { useMentions } from "../../mentions.js";
 
 export function threadQueryKey(conversationId, rootId) {
@@ -123,10 +124,7 @@ export default function MessageStrandPanel({
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
     refetchInterval: MESSAGE_POLL_MS,
   });
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = threadQuery;
-  useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  useFetchAllPages(threadQuery);
 
   const loaded =
     threadQuery.data?.pages.flatMap((page) => page.results) ?? [];
