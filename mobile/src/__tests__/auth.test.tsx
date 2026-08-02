@@ -87,6 +87,26 @@ it('keeps the tokens when the cold-start check fails on a network error', async 
   expect(await getAccessToken()).toBe('access-1');
 });
 
+it('keeps the tokens when the blink lands on the refresh, not the first request', async () => {
+  // The train case in #245, and the reason the test above isn't enough: the
+  // connection works long enough for the 401 that starts a refresh, and dies
+  // before the refresh itself. That reaches a different code path — the refresh
+  // failure handler, not the cold-start catch — and it used to wipe the 90-day
+  // refresh token, so signal returning left nothing to recover with.
+  await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+  mockFetch.mockImplementation(async (url: string) => {
+    if (url.endsWith('/api/auth/mobile/refresh/')) {
+      throw new TypeError('Network request failed');
+    }
+    return jsonResponse(null, 401);
+  });
+
+  await renderProbe();
+
+  expect(await screen.findByText('signedOut:none')).toBeTruthy();
+  expect(await getAccessToken()).toBe('stale');
+});
+
 it('signs in silently when only the access token has expired', async () => {
   // The common case for an app reopened days later: the access token is stale
   // but the 90-day refresh token is good, so the user should never see login.

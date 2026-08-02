@@ -7,7 +7,9 @@
  *   - attaching `Authorization: Bearer <access>` to every request;
  *   - silently refreshing on a 401 and replaying the request once;
  *   - collapsing parallel refreshes into one (the "stampede" guard below);
- *   - telling the app to log out when refresh itself fails.
+ *   - logging the app out when the *server refuses* the refresh token — and,
+ *     since #245, only then: a refresh that fails for any other reason keeps the
+ *     session, because the server has said nothing about it.
  *
  * It deliberately does NOT do CSRF. CSRF is a cookie-session problem: it exists
  * because a browser attaches cookies to a cross-site request automatically. A
@@ -185,14 +187,44 @@ export class ApiError extends Error {
    */
   fromServer: boolean;
 
-  constructor(message: string, status: number, data: unknown, fromServer = true) {
-    super(message);
+  /**
+   * `options` is passed through to `Error` so a network failure can keep the
+   * original `TypeError` as its `cause` — unreadable to a user, but the only
+   * thing that says *why* the connection died when debugging.
+   */
+  constructor(
+    message: string,
+    status: number,
+    data: unknown,
+    fromServer = true,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
     this.fromServer = fromServer;
   }
 }
+
+/**
+ * What we say when the request never reached the server, in our words rather
+ * than React Native's `Network request failed` — which names no cause and
+ * suggests no action. Paired with `status: 0`, since no response ever arrived
+ * and there is no HTTP status to report.
+ */
+const NETWORK_ERROR_MESSAGE =
+  'Couldn’t reach the server — check your connection and try again.';
+
+/**
+ * What we say when the server answered but couldn't do the job — a 5xx from the
+ * refresh endpoint, which is the box redeploying or Django down behind Caddy.
+ * Deliberately not "your session has expired": it hasn't, and until #243 lands
+ * ~25 call sites render `.message` whatever `fromServer` says, so a wrong
+ * sentence here is a wrong sentence on a real screen.
+ */
+const SERVER_ERROR_MESSAGE =
+  'Something went wrong on the server — please try again in a moment.';
 
 /**
  * A rejection worth showing a person, or the caller's own sentence.
@@ -262,20 +294,64 @@ async function refreshAccessToken(): Promise<string> {
     const refresh = await getRefreshToken();
     if (!refresh) throw new ApiError('No refresh token', 401, null);
 
-    const response = await fetch(`${BASE_URL}/api/auth/mobile/refresh/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh }),
-    });
+    // Serialized *before* the guard below, the lesson #244 encodes on the web:
+    // `JSON.stringify` throws on a body we built wrong, and that's a bug in our
+    // code rather than a connectivity problem. Inside the `try` it would be
+    // caught and dressed up as a lost connection, sending someone to check their
+    // signal over a mistake here.
+    const payload = JSON.stringify({ refresh });
+
+    // Guarded, because the caller cannot tell these apart otherwise and the
+    // consequence of guessing wrong is a destroyed session (#245). A
+    // network-level failure rejects out of `fetch` itself as a bare `TypeError`
+    // — and a phone's connection working for one request and failing for the
+    // next is the ordinary condition of a mobile network, not an exotic one.
+    // Re-raised in the same shape every other rejection has, with `status: 0`
+    // so `isTokenRejection` below reads it as "we never asked" rather than "the
+    // server said no".
+    let response;
+    try {
+      response = await fetch(`${BASE_URL}/api/auth/mobile/refresh/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+    } catch (err) {
+      throw new ApiError(NETWORK_ERROR_MESSAGE, 0, null, false, { cause: err });
+    }
 
     if (!response.ok) {
-      throw new ApiError('Session expired', response.status, null);
+      // The status travels because it's the whole basis on which the caller
+      // decides whether the session is over: a 400/401 is the server refusing
+      // this token, while a 502 while the box redeploys is not.
+      //
+      // Which is also why the two get different sentences. A refusal's message
+      // is never seen — `request` replaces it with the one written for a dead
+      // session — but a 5xx now *propagates* to whatever screen made the call,
+      // and "Session expired" would be a lie told to everyone at once during a
+      // deploy. `fromServer` is false on both because neither is the server's
+      // own words, so `serverMessage` prefers the call site's.
+      throw new ApiError(
+        isRefusalStatus(response.status) ? 'Session expired' : SERVER_ERROR_MESSAGE,
+        response.status,
+        null,
+        false
+      );
     }
 
     // Rotation: the response carries a *new* refresh token and the old one is
     // now blacklisted, so both must be stored — keeping the old one would log
     // the user out at the next refresh.
-    const pair = (await response.json()) as RefreshResponse;
+    //
+    // A 200 whose body isn't that pair didn't come from our server: a captive
+    // portal intercepting the request answers with its own login page, and
+    // that's a connection problem wearing a success status. Left alone the
+    // `.json()` would throw a `SyntaxError`, which is indistinguishable from a
+    // refused token at the catch below — the same sign-out by a different door.
+    const pair = (await response.json().catch(() => null)) as RefreshResponse | null;
+    if (!pair?.access || !pair?.refresh) {
+      throw new ApiError(NETWORK_ERROR_MESSAGE, 0, null, false);
+    }
     await saveTokens({ access: pair.access, refresh: pair.refresh });
     return pair.access;
   })();
@@ -287,6 +363,31 @@ async function refreshAccessToken(): Promise<string> {
     // wedge every future request behind a permanently rejected promise.
     refreshInFlight = null;
   }
+}
+
+/**
+ * The two answers the refresh endpoint gives when it has refused the token.
+ *
+ * simplejwt's `TokenRefreshView` answers a token that is expired, rotated away
+ * or blacklisted with a **401**, and a malformed request body with a **400**;
+ * either way the token on this device is dead and there is nothing left to keep.
+ * Every other status — a 502 while the box redeploys, a 503 — says nothing at
+ * all about the token.
+ */
+function isRefusalStatus(status: number): boolean {
+  return status === 401 || status === 400;
+}
+
+/**
+ * Did the *server* refuse the refresh token, as opposed to us never managing to
+ * ask it?
+ *
+ * Only the first ends a session. `status: 0` is the shape a request that never
+ * landed is re-raised in, so it falls on the "we never asked" side along with
+ * every server-side wobble, and the tokens stay put.
+ */
+function isTokenRejection(err: unknown): boolean {
+  return err instanceof ApiError && isRefusalStatus(err.status);
 }
 
 type RequestOptions = {
@@ -335,10 +436,20 @@ async function request<T>(
   if (response.status === 401 && retry && access) {
     try {
       await refreshAccessToken();
-    } catch {
-      // Refresh failed: the refresh token is expired, rotated away, or
-      // blacklisted. Nothing left to try — drop the session and send the user
-      // to login rather than leaving the app in a half-authenticated state.
+    } catch (err) {
+      if (!isTokenRejection(err)) {
+        // We never got an answer — the request didn't land, or the server is
+        // having a bad minute. It has said nothing about this token, so we
+        // destroy nothing: the refresh token is very likely still valid, and
+        // wiping it costs the user a password to type back in for what a
+        // dropped packet did (#245). Reject as the network failure it is; the
+        // next request, once there's signal, refreshes and carries on.
+        throw err;
+      }
+      // The server refused the token — a 401 (expired, rotated away or
+      // blacklisted) or a 400 (a body it couldn't read). Nothing left to try:
+      // drop the session and send the user to login rather than leaving the app
+      // in a half-authenticated state.
       await clearTokens();
       onSessionExpired();
       throw new ApiError('Your session has expired. Please log in again.', 401, null);

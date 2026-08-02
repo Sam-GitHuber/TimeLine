@@ -132,7 +132,7 @@ describe('silent refresh', () => {
     expect(refreshCalls).toHaveLength(1);
   });
 
-  it('clears tokens and signals session-expired when refresh fails', async () => {
+  it('clears tokens and signals session-expired when the server refuses the refresh token', async () => {
     await saveTokens({ access: 'stale', refresh: 'dead' });
     const onExpired = jest.fn();
     setSessionExpiredHandler(onExpired);
@@ -145,6 +145,151 @@ describe('silent refresh', () => {
     expect(onExpired).toHaveBeenCalledTimes(1);
     expect(await getAccessToken()).toBeNull();
     expect(await getRefreshToken()).toBeNull();
+  });
+
+  it('keeps the session when the refresh request never reaches the server', async () => {
+    // The reported failure (#245): the access token has expired, so the first
+    // request 401s — proving the network was up a moment ago — and then the
+    // refresh lands in a tunnel. The server has said nothing about this token,
+    // so wiping a still-valid 90-day refresh token would cost the user their
+    // password for what a dropped packet did.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockRejectedValueOnce(new TypeError('Network request failed'));
+
+    await expect(api.getCurrentUser()).rejects.toMatchObject({
+      status: 0,
+      fromServer: false,
+    });
+
+    expect(onExpired).not.toHaveBeenCalled();
+    expect(await getAccessToken()).toBe('stale');
+    expect(await getRefreshToken()).toBe('refresh-1');
+  });
+
+  it('reports a lost connection in our words, keeping the cause for debugging', async () => {
+    // React Native's own `Network request failed` names no cause and suggests
+    // no action, and it's what ~25 call sites would render (#243). The original
+    // TypeError travels as `cause` — no use to a user, the only thing that says
+    // *why* when debugging.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const cause = new TypeError('Network request failed');
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockRejectedValueOnce(cause);
+
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).message).toBe(
+      'Couldn’t reach the server — check your connection and try again.'
+    );
+    expect((err as ApiError).cause).toBe(cause);
+  });
+
+  it('keeps the session when the refresh endpoint 5xxs', async () => {
+    // The box redeploys and Caddy answers 502 for a few seconds. That is the
+    // server being unwell, not the server refusing this token — and a release
+    // must not sign every phone out.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(null, 502));
+
+    await expect(api.getCurrentUser()).rejects.toBeInstanceOf(ApiError);
+
+    expect(onExpired).not.toHaveBeenCalled();
+    expect(await getRefreshToken()).toBe('refresh-1');
+  });
+
+  it('does not tell a screen the session expired when it was the server that failed', async () => {
+    // This one *reaches* a call site, unlike the refusal message `request`
+    // replaces — and until #243 lands ~25 of them render `.message` whatever
+    // `fromServer` says. "Session expired" during a deploy would be a lie told
+    // to every phone at once, on the screen the user was already looking at.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(null, 503));
+
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect((err as ApiError).message).toBe(
+      'Something went wrong on the server — please try again in a moment.'
+    );
+    expect((err as ApiError).fromServer).toBe(false);
+  });
+
+  it('ends the session when the refresh endpoint 400s on the body it was sent', async () => {
+    // The other half of a refusal: simplejwt answers 400 when it can't read the
+    // request, and the device has nothing usable either way. Without this the
+    // 400 arm of `isRefusalStatus` could be deleted and the suite stay green.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse({ refresh: ['This field is required.'] }, 400));
+
+    await expect(api.getCurrentUser()).rejects.toThrow(
+      'Your session has expired. Please log in again.'
+    );
+
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(await getAccessToken()).toBeNull();
+    expect(await getRefreshToken()).toBeNull();
+  });
+
+  it('keeps the session when a 200 carries something other than the token pair', async () => {
+    // A captive portal answering with its own login page: a connection problem
+    // wearing a success status. Unguarded, the JSON parse throws and the catch
+    // reads it as a refused token — the same sign-out by a different door.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+    mockFetch.mockResolvedValueOnce(jsonResponse(null, 401)).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => '<html>Sign in to WiFi</html>',
+      json: async () => {
+        throw new SyntaxError('Unexpected token <');
+      },
+    });
+
+    await expect(api.getCurrentUser()).rejects.toMatchObject({ status: 0 });
+
+    expect(onExpired).not.toHaveBeenCalled();
+    expect(await getRefreshToken()).toBe('refresh-1');
+  });
+
+  it('does not end the session for any of the parallel 401s during a blink', async () => {
+    // The stampede guard shares one refresh between every request that 401s, so
+    // one blink is one failure — but it's handed to all three callers, and any
+    // one of them clearing the tokens would sign the other two out too.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.endsWith('/api/auth/mobile/refresh/')) {
+        throw new TypeError('Network request failed');
+      }
+      return jsonResponse(null, 401);
+    });
+
+    const results = await Promise.allSettled([
+      api.getCurrentUser(),
+      api.getCurrentUser(),
+      api.getCurrentUser(),
+    ]);
+
+    expect(results.every((r) => r.status === 'rejected')).toBe(true);
+    expect(onExpired).not.toHaveBeenCalled();
+    expect(await getRefreshToken()).toBe('refresh-1');
   });
 
   it('retries only once, so a server that always 401s cannot loop', async () => {
