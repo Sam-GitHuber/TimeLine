@@ -2,6 +2,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import PostCard from "../components/PostCard.jsx";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // A single post on its own page — the permalink (`/p/:id`). Notifications
 // deep-link here so "someone replied to your post" opens the actual thread,
@@ -53,7 +54,7 @@ export default function PostPage() {
 
       {isError && !notFound && (
         <p className="px-6 py-10 text-center text-red-600">
-          {error?.message || "Couldn’t load this post."}
+          {serverMessage(error, "Couldn’t load this post.")}
         </p>
       )}
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { serverMessage } from "../errors.js";
 
 // A confirm step before a destructive action. Deleting something that carries
 // other people's replies, reactions or photos isn't a one-click action, so both
@@ -62,7 +63,7 @@ export default function ConfirmDeleteDialog({
         <p className="mt-2 text-sm text-ink-soft">{description}</p>
         {error && (
           <p role="alert" className="mt-2 text-sm text-red-600">
-            {error.message || errorFallback}
+            {serverMessage(error, errorFallback)}
           </p>
         )}
         <div className="mt-4 flex justify-end gap-2">

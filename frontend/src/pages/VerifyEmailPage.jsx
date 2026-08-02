@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 import { AuthShell, Field } from "./LoginPage.jsx";
 
 // Email verification step. Sign-up sends a 6-digit code to the new address; the
@@ -31,7 +32,7 @@ export default function VerifyEmailPage() {
       await api.verifyEmail(email.trim(), code.trim());
       setVerified(true);
     } catch (err) {
-      setError(err.message || "Could not verify that code.");
+      setError(serverMessage(err, "Could not verify that code."));
     } finally {
       setSubmitting(false);
     }
@@ -48,7 +49,7 @@ export default function VerifyEmailPage() {
           "If that address still needs verifying, we've sent a new code."
       );
     } catch (err) {
-      setError(err.message || "Could not resend the code.");
+      setError(serverMessage(err, "Could not resend the code."));
     } finally {
       setResending(false);
     }

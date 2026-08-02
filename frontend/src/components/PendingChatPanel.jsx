@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 import { useMessaging } from "../messaging.jsx";
 
 // The locked view for a group chat you've been added to but aren't an active
@@ -60,7 +61,7 @@ export default function PendingChatPanel({ mustConnectWith, conversationId }) {
 
       {connectMutation.isError && (
         <p className="text-sm text-red-600">
-          {connectMutation.error?.message || "Couldn't send that request."}
+          {serverMessage(connectMutation.error, "Couldn't send that request.")}
         </p>
       )}
 

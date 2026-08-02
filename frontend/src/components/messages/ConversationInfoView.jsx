@@ -8,6 +8,7 @@ import { PanelHeader } from "../drawer-chrome.jsx";
 import AvatarStack from "./AvatarStack.jsx";
 import { api } from "../../api.js";
 import { useAuth } from "../../auth.jsx";
+import { serverMessage } from "../../errors.js";
 import { useMessaging } from "../../messaging.jsx";
 
 /**
@@ -209,7 +210,10 @@ export default function ConversationInfoView() {
             )}
             {renameMutation.isError && (
               <p role="alert" className="text-sm text-red-600">
-                {renameMutation.error?.message || "Couldn’t rename this chat."}
+                {serverMessage(
+                  renameMutation.error,
+                  "Couldn’t rename this chat."
+                )}
               </p>
             )}
             {detail.group && (

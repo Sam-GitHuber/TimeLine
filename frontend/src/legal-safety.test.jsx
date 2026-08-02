@@ -12,7 +12,7 @@ vi.mock("./api.js", () => ({
 }));
 
 import { api } from "./api.js";
-import { renderWithAuth, fakeUser } from "./test-utils.jsx";
+import { renderWithAuth, fakeUser, apiError } from "./test-utils.jsx";
 import DeleteAccountSection from "./components/DeleteAccountSection.jsx";
 import { ReportModal } from "./components/ReportModal.jsx";
 
@@ -60,7 +60,9 @@ describe("Delete account", () => {
 
   it("shows an error and keeps the account on a wrong password", async () => {
     const user = userEvent.setup();
-    api.deleteAccount.mockRejectedValue(new Error("Password is incorrect."));
+    api.deleteAccount.mockRejectedValue(
+      apiError("Password is incorrect.", 400)
+    );
 
     renderWithAuth(<DeleteAccountSection />);
 

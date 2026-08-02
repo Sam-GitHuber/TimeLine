@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App.jsx";
-import { renderWithAuth, fakeUser } from "./test-utils.jsx";
+import {
+  renderWithAuth,
+  fakeUser,
+  apiError,
+  unauthoredError,
+} from "./test-utils.jsx";
 import { api } from "./api.js";
 import { MessagingProvider } from "./messaging.jsx";
 import { clearDrafts } from "./drafts.js";
@@ -1275,7 +1280,7 @@ describe("Messages drawer — reactions, send state and ticks (Phase 9b M9c)", (
     // The server owns the rules that can reject one — the per-target cap, emoji
     // validation, a thread you've been severed from — so its message is shown.
     api.toggleReaction.mockRejectedValue(
-      new Error("You can only use 4 different emoji here.")
+      apiError("You can only use 4 different emoji here.", 400)
     );
 
     renderAt("/messages/7");
@@ -2247,7 +2252,7 @@ describe("Messages drawer — photos (Phase 9b M9e)", () => {
     api.getMessages.mockResolvedValue(page([]));
     prepareChatPhoto.mockResolvedValue(preparedPhoto);
     api.sendMessage.mockRejectedValue(
-      new Error("Each photo must be under 4 MB.")
+      apiError("Each photo must be under 4 MB.", 400)
     );
 
     renderAt("/messages/7");
@@ -3289,23 +3294,6 @@ describe("Profile messaging + block controls", () => {
     });
     api.getUserPosts.mockResolvedValue(page([]));
     api.getDisconnectImpact.mockResolvedValue({ chats: [] });
-  }
-
-  /** What api.js raises when the server authored the message (DRF's `detail`). */
-  function apiError(message, status) {
-    return Object.assign(new Error(message), { status, fromServer: true });
-  }
-
-  /**
-   * What api.js raises when the server answered but wrote nothing showable — a
-   * 500 rendered as a Django HTML page, say. `firstErrorMessage` finds no
-   * `detail`, so the message is our own synthesized stand-in.
-   */
-  function unauthoredError(status) {
-    return Object.assign(new Error(`Request failed (${status})`), {
-      status,
-      fromServer: false,
-    });
   }
 
   it("holds the block dialog open on a rejection and says they are not blocked", async () => {

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
 import AvatarCropModal from "../components/AvatarCropModal.jsx";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // Create a new group, or edit an existing one (same form). In edit mode we
 // prefill from the group and only admins can reach a useful result — the backend
@@ -99,7 +100,7 @@ export default function GroupFormPage() {
       <p className="px-6 py-10 text-center text-red-600">
         {existing.error?.status === 404
           ? "This group doesn't exist, or you're not in it."
-          : existing.error?.message || "Couldn't load the group."}
+          : serverMessage(existing.error, "Couldn't load the group.")}
       </p>
     );
   }
@@ -185,7 +186,7 @@ export default function GroupFormPage() {
 
         {mutation.isError && (
           <p role="alert" className="text-sm text-red-600">
-            {mutation.error?.message || "Couldn't save the group."}
+            {serverMessage(mutation.error, "Couldn't save the group.")}
           </p>
         )}
 

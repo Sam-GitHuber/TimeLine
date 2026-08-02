@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // A "Change password" section on the settings page (Phase 7 account hygiene).
 // The current password is required — both because the backend enforces it and so
@@ -59,7 +60,7 @@ function ChangePasswordForm({ onDone }) {
       setNext("");
       setConfirm("");
     } catch (err) {
-      setError(err.message || "Couldn’t change your password.");
+      setError(serverMessage(err, "Couldn’t change your password."));
     } finally {
       setSaving(false);
     }

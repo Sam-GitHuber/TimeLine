@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 import { AuthShell, Field } from "./LoginPage.jsx";
 
 // Forgotten-password reset (issue #38). Two phases on one page, mirroring the
@@ -41,7 +42,7 @@ export default function ResetPasswordPage() {
           "Enter it below with your new password."
       );
     } catch (err) {
-      setError(err.message || "Could not start a password reset.");
+      setError(serverMessage(err, "Could not start a password reset."));
     } finally {
       setSubmitting(false);
     }
@@ -56,7 +57,7 @@ export default function ResetPasswordPage() {
       await api.confirmPasswordReset(email.trim(), code.trim(), password, confirm);
       setDone(true);
     } catch (err) {
-      setError(err.message || "Could not reset your password.");
+      setError(serverMessage(err, "Could not reset your password."));
     } finally {
       setSubmitting(false);
     }
@@ -70,7 +71,7 @@ export default function ResetPasswordPage() {
       await api.requestPasswordReset(email.trim());
       setNote("If that email belongs to an account, we've sent a new code.");
     } catch (err) {
-      setError(err.message || "Could not resend the code.");
+      setError(serverMessage(err, "Could not resend the code."));
     } finally {
       setSubmitting(false);
     }

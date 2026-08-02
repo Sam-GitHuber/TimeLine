@@ -8,6 +8,7 @@ import ReactionBar from "./ReactionBar.jsx";
 import { ReportModal } from "./ReportModal.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
 // The set of comment ids that are *ancestors* of `targetId` — the nodes whose
@@ -96,7 +97,7 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
 
       {isError && (
         <p className="tl-thread-foot text-sm text-red-600">
-          {error?.message || "Couldn't load comments."}
+          {serverMessage(error, "Couldn't load comments.")}
         </p>
       )}
 
@@ -507,7 +508,7 @@ function CommentEditor({ commentId, postId, initialText, onDone }) {
       />
       {mutation.isError && (
         <p role="alert" className="text-xs text-red-600">
-          {mutation.error?.message || "Couldn’t save. Try again."}
+          {serverMessage(mutation.error, "Couldn’t save. Try again.")}
         </p>
       )}
       <div className="mt-1.5 flex justify-end gap-2">
@@ -572,7 +573,7 @@ function CommentComposer({
       />
       {mutation.isError && (
         <p className="text-xs text-red-600">
-          {mutation.error?.message || "Couldn't post. Try again."}
+          {serverMessage(mutation.error, "Couldn't post. Try again.")}
         </p>
       )}
       <div className="mt-1.5 flex justify-end gap-2">

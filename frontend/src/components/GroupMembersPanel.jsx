@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 
 // The members of a group, each with their role. If the viewer is an admin, each
 // other member gets promote/demote + remove controls. The backend enforces the
@@ -48,7 +49,17 @@ export default function GroupMembersPanel({ groupId, isAdmin }) {
 
       {actionError && (
         <p role="alert" className="mb-2 text-sm text-red-600">
-          {actionError.message}
+          {/* The server's rules here are the point — "a group must keep at
+              least one admin", "only admins can remove members" — so its own
+              words are shown whenever it wrote any. It didn't always: offline,
+              or on a 500 with no readable body, this rendered a bare
+              `err.message` and put the browser's "Failed to fetch" above the
+              member list (issue #240). Hence a sentence of our own to fall back
+              to, which until now this panel didn't have. */}
+          {serverMessage(
+            actionError,
+            "That didn’t work — check your connection and try again."
+          )}
         </p>
       )}
 

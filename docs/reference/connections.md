@@ -76,10 +76,28 @@ surfaces in the same family (#237–#240):
   error with no DRF body (a 500 rendered as a Django HTML page) leaves
   `firstErrorMessage` nothing to pull out, so `api.js` synthesizes "Request
   failed (500)". Both clients' `ApiError` therefore carries a **`fromServer`**
-  flag, and `serverMessage` gates on it — a status check or a bare `instanceof`
-  catches only the first case and puts the stand-in string on screen. Issue #240
-  tracks raising a network failure as an `ApiError` too; the flag stays correct
-  when it does.
+  flag, and `serverMessage` gates on it — a bare `instanceof` catches only the
+  first case and puts the stand-in string on screen.
+
+  **Issue #240 made this the whole web client's rule, not three buttons'.**
+  `frontend/src/api.js` now wraps the `fetch` itself and re-raises a network
+  failure as an `ApiError` with `status: 0`, `fromServer: false` and a sentence
+  of ours ("Couldn't reach the server — check your connection and try again."),
+  keeping the original `TypeError` as its `cause` for debugging. Every web site
+  that renders a rejection — ~45 of them, across the feed, comments, profiles,
+  groups, events, messaging and the auth pages — goes through
+  `serverMessage(err, fallback)`. Before that they read `err?.message ||
+  fallback`, and since a `TypeError` *has* a message the fallback never ran:
+  being offline is the most likely way any write fails, so the sentence written
+  for exactly that case was the one that could never appear. Two consequences
+  worth knowing: **a status check no longer distinguishes anything** (a network
+  failure now carries a numeric status of its own — the web `RsvpBar` sniffed for
+  one and had to change), and **`GroupMembersPanel` had no fallback to reach**,
+  rendering `actionError.message` bare, so one had to be written. The rule now
+  reads in one line: *the server's own words when it wrote any, ours otherwise,
+  the browser's never.* Pinned in `frontend/src/offline-writes.test.jsx` and
+  `api.test.js`. The mobile client has the same unguarded `fetch` at ~25 sites —
+  tracked separately in #243.
 
 - **A message is retired only by the server moving to the answer the attempt was
   reaching for** — the request landed and only its response was lost, so the

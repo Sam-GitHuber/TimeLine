@@ -6,6 +6,7 @@ import ConnectButton from "../components/ConnectButton.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // The people hub. Three segments share one page:
 //   • Connections — people you're already connected with (the default: this is
@@ -195,7 +196,7 @@ function ConnectionsList({ onFindPeople }) {
   if (isError)
     return (
       <p className="px-6 py-10 text-center text-red-600">
-        {error?.message || "Couldn't load your connections."}
+        {serverMessage(error, "Couldn't load your connections.")}
       </p>
     );
   if (people.length === 0)
@@ -254,7 +255,7 @@ function DiscoverList() {
   if (isError)
     return (
       <p className="px-6 py-10 text-center text-red-600">
-        {error?.message || "Couldn't load people."}
+        {serverMessage(error, "Couldn't load people.")}
       </p>
     );
   if (users.length === 0)
@@ -312,7 +313,7 @@ function RequestsList() {
   if (isError)
     return (
       <p className="px-6 py-10 text-center text-red-600">
-        {error?.message || "Couldn't load requests."}
+        {serverMessage(error, "Couldn't load requests.")}
       </p>
     );
   if (requests.length === 0)

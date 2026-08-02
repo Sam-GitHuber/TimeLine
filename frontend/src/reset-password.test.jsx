@@ -11,7 +11,7 @@ vi.mock("./api.js", () => ({
 }));
 
 import { api } from "./api.js";
-import { renderWithAuth } from "./test-utils.jsx";
+import { renderWithAuth, apiError } from "./test-utils.jsx";
 import ResetPasswordPage from "./pages/ResetPasswordPage.jsx";
 
 beforeEach(() => {
@@ -93,7 +93,7 @@ describe("Reset password", () => {
     const user = userEvent.setup();
     api.requestPasswordReset.mockResolvedValue({ detail: "sent" });
     api.confirmPasswordReset.mockRejectedValue(
-      new Error("That code is invalid or has expired.")
+      apiError("That code is invalid or has expired.", 400)
     );
 
     renderWithAuth(<ResetPasswordPage />);

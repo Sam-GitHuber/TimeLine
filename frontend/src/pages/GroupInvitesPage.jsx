@@ -3,6 +3,7 @@ import Avatar from "../components/Avatar.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // Your inbox of group invitations: groups someone has invited you to join.
 // Accept adds you as a member; Decline discards the invite. Mirrors the
@@ -38,7 +39,7 @@ export default function GroupInvitesPage() {
 
       {isError && (
         <p className="px-6 py-10 text-center text-red-600">
-          {error?.message || "Couldn't load invitations."}
+          {serverMessage(error, "Couldn't load invitations.")}
         </p>
       )}
 

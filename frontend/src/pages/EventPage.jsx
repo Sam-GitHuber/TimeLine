@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 import Avatar from "../components/Avatar.jsx";
 import DimensionChips from "../components/events/DimensionChips.jsx";
 import DimensionEditor from "../components/events/DimensionEditor.jsx";
@@ -226,9 +227,10 @@ export default function EventPage() {
               />
               {(finalise.isError || createPoll.isError) && (
                 <p role="alert" className="mt-2 text-sm text-red-600">
-                  {finalise.error?.message ||
-                    createPoll.error?.message ||
-                    "That didn't work — try again."}
+                  {serverMessage(
+                    finalise.error || createPoll.error,
+                    "That didn't work — try again."
+                  )}
                 </p>
               )}
             </div>

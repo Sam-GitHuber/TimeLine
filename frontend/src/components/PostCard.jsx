@@ -7,6 +7,7 @@ import Lightbox from "./Lightbox.jsx";
 import ReactionBar from "./ReactionBar.jsx";
 import PostMenu from "./PostMenu.jsx";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 import { markPostCommentsSeen } from "../postCache.js";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
@@ -280,7 +281,7 @@ function PostEditor({ postId, initialText, hasImages = false, onDone }) {
       />
       {mutation.isError && (
         <p role="alert" className="mt-1 text-sm text-red-600">
-          {mutation.error?.message || "Couldn’t save your changes."}
+          {serverMessage(mutation.error, "Couldn’t save your changes.")}
         </p>
       )}
       <div className="mt-1.5 flex justify-end gap-2">

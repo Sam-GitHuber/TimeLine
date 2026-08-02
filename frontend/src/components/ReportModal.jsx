@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // The report dialog, opened from a ⋯ overflow menu's "Report" item — a post's
 // (issue #62), a comment's (#128) or a message bubble's.
@@ -52,7 +53,7 @@ export function ReportModal({ postId, commentId, messageId, onClose }) {
       });
       setDone(true);
     } catch (err) {
-      setError(err.message || "Couldn’t send the report.");
+      setError(serverMessage(err, "Couldn’t send the report."));
       setSubmitting(false);
     }
   }

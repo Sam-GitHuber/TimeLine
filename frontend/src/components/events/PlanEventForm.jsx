@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api.js";
+import { serverMessage } from "../../errors.js";
 
 // "Plan an event" — the low-friction first step. Any active member can create an
 // event with just a title (title + date is enough to be real; time, place and
@@ -54,7 +55,7 @@ export default function PlanEventForm({ groupId, onClose }) {
       </label>
       {create.isError && (
         <p role="alert" className="mt-2 text-sm text-red-600">
-          {create.error?.message || "Couldn't create the event."}
+          {serverMessage(create.error, "Couldn't create the event.")}
         </p>
       )}
       <div className="mt-3 flex gap-2">
