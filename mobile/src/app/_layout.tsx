@@ -147,11 +147,22 @@ function AuthGate() {
  * NetInfo. Deferred: it's another dependency, and v1 is deliberately online-only.
  * Note before wiring it: leaving it unwired is what makes an offline mutation
  * *reject*. Wired, React Query's default `networkMode: 'online'` **pauses** it
- * instead, and anything awaiting `mutateAsync` to report a failure would hang
- * there instead — silently, since the `catch` that says so never runs. Two
- * components depend on that today: `components/events/PollTally.tsx` (rolls its
- * optimistic tick back) and `components/events/RsvpBar.tsx` (shows that your
- * guests/note didn't save). Check both before wiring it.)
+ * instead, and anything awaiting `mutateAsync` — or waiting on `onError` — to
+ * report a failure would hang there instead, silently, since the `catch` or
+ * callback that says so never runs. Five components depend on that today:
+ *
+ *   - `components/events/PollTally.tsx` — rolls its optimistic tick back.
+ *   - `components/events/RsvpBar.tsx` — shows that your guests/note didn't save.
+ *   - `components/BlockButton.tsx` and `components/ConnectButton.tsx` (#236) —
+ *     say that a block/connect didn't land. **These two are the sharp ones:**
+ *     they hold `DisconnectWarningModal` open while the write is in flight, and
+ *     that dialog refuses Cancel, the backdrop, and Android back while busy. A
+ *     paused mutation never settles, so the user is sealed inside a "Working…"
+ *     dialog with no way out — worse than the silence #236 fixed.
+ *   - `components/MessageButton.tsx` (#236) — alerts from `onError`; paused, the
+ *     button sticks on "Opening…" forever.
+ *
+ * Check all five before wiring it.)
  */
 function useRefetchOnForeground() {
   useEffect(() => {

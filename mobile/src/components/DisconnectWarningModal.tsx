@@ -18,9 +18,14 @@
  * of dismissing the moment you tap Confirm. Dismissing first is what made a
  * failed block invisible on both clients (issue #236); the caller alerts on the
  * rejection and this stays put behind it, so the confirm button is the retry.
- * The web's copy renders the message inside the dialog instead — an Alert is the
- * phone's house pattern for a rejected write (ReactionBar, PollTally), and it
- * sits over the modal rather than under it.
+ *
+ * The web's copy renders the message inside the dialog instead. The app is
+ * genuinely mixed on this — `ReactionBar` alerts a rejected reaction, while
+ * `events/PollTally` and `events/RsvpBar` render theirs inline under the control
+ * — and the split is about where the control lives. Inline text needs somewhere
+ * to sit that the user is already looking at; the block/connect controls are a
+ * button in a row with a dialog over it, so an Alert, which sits *over* the
+ * modal, is the only surface that survives the dialog staying up.
  */
 
 import { useQuery } from '@tanstack/react-query';

@@ -14,6 +14,16 @@ const FAILURES = {
   connected: "Couldn’t disconnect — try again.",
 };
 
+// Where each state lands when its action succeeds — the answer a failure
+// message is retired against. Both "undo" states collapse to none: withdrawing a
+// request and disconnecting both leave you unconnected.
+const RESULTS = {
+  none: "requested",
+  incoming: "connected",
+  requested: "none",
+  connected: "none",
+};
+
 // A connection control reflecting the private, mutual connection flow.
 // `connectionStatus` is one of "none" | "requested" | "incoming" | "connected":
 //   none      → "Connect"   → sends a connection request
@@ -57,11 +67,31 @@ export default function ConnectButton({ userId, displayName, connectionStatus })
     },
   });
 
+  // Retire the message once the server's own answer moves to the one the
+  // attempt was reaching for — the request landed and only its response was
+  // lost, so "couldn't withdraw that request" would now be sitting under a
+  // button that reads Connect. Only that answer clears it: a refetch bearing
+  // some *third* status (they accepted, someone blocked someone) is not
+  // confirmation of your attempt, and swallowing the message there is the same
+  // bug again, silently. Both halves are judged against what was recorded at the
+  // attempt rather than against when the sync lands, so a refetch in the same
+  // render batch as the rejection can't eat the message before it's painted —
+  // the trap #231 describes. Same discipline, and same render-phase shape, as
+  // RsvpBar's clear-condition.
+  if (
+    failure &&
+    connectionStatus !== failure.from &&
+    connectionStatus === failure.to
+  ) {
+    setFailure(null);
+  }
+
   // Awaited rather than fired-and-forgotten so the disconnect path can keep its
   // warning dialog up until the write lands, and show the failure there instead
   // of closing over it — see DisconnectWarningModal.
   async function run() {
-    const fallback = FAILURES[connectionStatus] ?? FAILURES.none;
+    const from = connectionStatus;
+    const fallback = FAILURES[from] ?? FAILURES.none;
     setFailure(null);
     try {
       await mutation.mutateAsync();
@@ -70,7 +100,11 @@ export default function ConnectButton({ userId, displayName, connectionStatus })
       // Here the server's own words are worth showing: ConnectView rejects with
       // sentences written for a person ("You can't connect with this person."
       // when a block bars it), which say more than any fallback could.
-      setFailure(serverMessage(err, fallback));
+      setFailure({
+        text: serverMessage(err, fallback),
+        from,
+        to: RESULTS[from] ?? "none",
+      });
     }
   }
 
@@ -122,7 +156,7 @@ export default function ConnectButton({ userId, displayName, connectionStatus })
             role="alert"
             className="max-w-56 text-right text-xs leading-snug text-red-600"
           >
-            {failure}
+            {failure.text}
           </span>
         )}
       </span>
@@ -132,7 +166,7 @@ export default function ConnectButton({ userId, displayName, connectionStatus })
           userName={displayName}
           action="disconnect"
           busy={mutation.isPending}
-          error={failure}
+          error={failure?.text ?? null}
           onConfirm={run}
           onCancel={() => setShowWarning(false)}
         />

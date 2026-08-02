@@ -176,6 +176,25 @@ describe('a rejected write', () => {
     alert.mockRestore();
   });
 
+  // The other half of "the server never spoke": it answered, but with nothing a
+  // person can read. `request` synthesizes "Request failed (500)" for that, and
+  // that string carries a status and a message — so a bare `instanceof ApiError`
+  // check would put it straight on screen. `fromServer` is what keeps it out.
+  it('never shows the synthesized message from a body-less server error', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    // A 500 rendered as an HTML page: no DRF `detail` to pull out.
+    mockFetch.mockResolvedValueOnce(jsonResponse('<html>Server Error</html>', 500));
+    await renderButton('requested');
+
+    fireEvent.press(screen.getByText('Requested'));
+
+    await waitFor(() => expect(alert).toHaveBeenCalled());
+    expect(alert.mock.calls[0][1]).toBe(
+      'Couldn’t withdraw that request — try again.'
+    );
+    alert.mockRestore();
+  });
+
   it('holds the disconnect warning open so its confirm is the retry', async () => {
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     mockFetch.mockResolvedValueOnce(jsonResponse({ chats: [] }));

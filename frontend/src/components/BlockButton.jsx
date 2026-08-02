@@ -50,11 +50,23 @@ export default function BlockButton({ userId, displayName, isBlocked }) {
     },
   });
 
-  // Resolved at the attempt and held as a string: a successful block flips
-  // `isBlocked` underneath us, and the message must keep describing the action
-  // that actually failed.
+  // Retire the message once the server's own answer moves to the one the
+  // attempt was reaching for: the request landed after all and only its response
+  // was lost. Left standing, "they're not blocked" would sit under a block that
+  // has since taken effect — and on this control that stale sentence is a claim
+  // about someone's safety, so it must not outlive the fact. Judged against the
+  // answer recorded *at the attempt*, never against when the refetch arrives, so
+  // a sync landing in the same render batch as the rejection can't swallow the
+  // message before it's painted (the trap #231 describes). Render-phase, like
+  // RsvpBar's equivalent — no effect, no extra paint.
+  if (failure && isBlocked !== failure.from) setFailure(null);
+
+  // The wording is resolved at the attempt and held as a string: a successful
+  // block flips `isBlocked` underneath us, and the message must keep describing
+  // the action that actually failed.
   async function run() {
-    const wording = isBlocked
+    const from = isBlocked;
+    const wording = from
       ? `Couldn’t unblock ${displayName} — they’re still blocked. Try again.`
       : `Couldn’t block ${displayName} — they’re not blocked. Try again.`;
     setFailure(null);
@@ -62,7 +74,7 @@ export default function BlockButton({ userId, displayName, isBlocked }) {
       await mutation.mutateAsync();
       setShowWarning(false);
     } catch {
-      setFailure(wording);
+      setFailure({ text: wording, from });
     }
   }
 
@@ -96,7 +108,7 @@ export default function BlockButton({ userId, displayName, isBlocked }) {
             pressed Confirm. */}
         {failure && !showWarning && (
           <span role="alert" className="text-right text-sm text-red-600">
-            {failure}
+            {failure.text}
           </span>
         )}
       </span>
@@ -106,7 +118,7 @@ export default function BlockButton({ userId, displayName, isBlocked }) {
           userName={displayName}
           action="block"
           busy={mutation.isPending}
-          error={failure}
+          error={failure?.text ?? null}
           onConfirm={run}
           onCancel={() => setShowWarning(false)}
         />

@@ -33,7 +33,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text } from 'react-native';
 
-import { ApiError, api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { DisconnectWarningModal } from '@/components/DisconnectWarningModal';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { ProfileUser } from '@/types';
@@ -94,20 +94,25 @@ export function ConnectButton({
 
   // Awaited rather than fired-and-forgotten so the disconnect path can keep its
   // warning dialog up until the write lands — see DisconnectWarningModal.
+  //
+  // That leans on a deferral recorded in `app/_layout.tsx`: with `onlineManager`
+  // left unwired to NetInfo, an offline write *rejects*. Wire it and React
+  // Query's default `networkMode: 'online'` would **pause** the mutation instead
+  // — `mutateAsync` never settles, so no catch, no alert, and on the disconnect
+  // path the dialog it's holding open (which refuses Cancel, backdrop and back
+  // while busy) never lets go. The tripwire is invisible from either file alone.
   async function run() {
     const fallback = FAILURES[connectionStatus] ?? FAILURES.none;
     try {
       await mutation.mutateAsync();
       setShowWarning(false);
     } catch (err) {
-      // Only the server's own words are fit to show: an `ApiError` carries DRF's
-      // `detail`, written for a person ("You can't connect with this person."
-      // when a block bars it). Everything else is a runtime string — offline,
-      // React Native rejects with `TypeError: Network request failed`.
-      Alert.alert(
-        'Couldn’t do that',
-        err instanceof ApiError ? err.message : fallback
-      );
+      // Only the server's own words are fit to show: an `ApiError` it authored
+      // carries DRF's `detail`, written for a person ("You can't connect with
+      // this person." when a block bars it). Anything else is a runtime string —
+      // offline, React Native rejects with `TypeError: Network request failed` —
+      // or our own "Request failed (500)" stand-in. See `serverMessage`.
+      Alert.alert('Couldn’t do that', serverMessage(err, fallback));
     }
   }
 

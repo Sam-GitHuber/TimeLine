@@ -69,6 +69,14 @@ export function BlockButton({
     },
   });
 
+  // Like `PollTally`'s rollback, this leans on a deferral recorded in
+  // `app/_layout.tsx`: with `onlineManager` left unwired to NetInfo, an offline
+  // block *rejects*. Wire it and React Query's default `networkMode: 'online'`
+  // would **pause** the mutation instead — `mutateAsync` never settles, so no
+  // catch, no alert, and worse than the silence this fixes: `busy` stays true,
+  // and the warning dialog refuses Cancel, backdrop and back while busy, so the
+  // user is sealed inside it. The tripwire is invisible from either file alone.
+  //
   // The wording is resolved at the attempt: a successful block flips `isBlocked`
   // underneath us, and the message must keep describing the action that failed.
   async function run() {

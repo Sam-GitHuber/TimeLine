@@ -3291,9 +3291,21 @@ describe("Profile messaging + block controls", () => {
     api.getDisconnectImpact.mockResolvedValue({ chats: [] });
   }
 
-  /** What api.js raises once the server has answered: DRF's words + a status. */
+  /** What api.js raises when the server authored the message (DRF's `detail`). */
   function apiError(message, status) {
-    return Object.assign(new Error(message), { status });
+    return Object.assign(new Error(message), { status, fromServer: true });
+  }
+
+  /**
+   * What api.js raises when the server answered but wrote nothing showable — a
+   * 500 rendered as a Django HTML page, say. `firstErrorMessage` finds no
+   * `detail`, so the message is our own synthesized stand-in.
+   */
+  function unauthoredError(status) {
+    return Object.assign(new Error(`Request failed (${status})`), {
+      status,
+      fromServer: false,
+    });
   }
 
   it("holds the block dialog open on a rejection and says they are not blocked", async () => {
@@ -3400,6 +3412,30 @@ describe("Profile messaging + block controls", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Failed to fetch")).not.toBeInTheDocument();
   });
+
+  // The other half of "the server never spoke": it answered, but with nothing a
+  // person can read. api.js synthesizes "Request failed (500)" for that, which
+  // carries a status and a message and would sail through any check that only
+  // asked "is this an ApiError?" — putting a stack-trace-shaped string under a
+  // button. `fromServer` is what keeps it out.
+  it("never shows the synthesized message from a body-less server error", async () => {
+    const user = userEvent.setup();
+    profile({ connection_status: "requested" });
+    api.disconnect.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Requested" }));
+
+    expect(
+      await screen.findByText("Couldn’t withdraw that request — try again.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Request failed/)).not.toBeInTheDocument();
+  });
+
+  // The rule for *retiring* one of these messages — that it goes only when the
+  // server itself moves to the answer the attempt was reaching for — is pinned
+  // at component level in `connection-buttons.test.jsx`, where the server's
+  // answer can be changed under a mounted button without remounting it.
 
   it("says so when Message can't open the thread", async () => {
     const user = userEvent.setup();

@@ -69,16 +69,37 @@ surfaces in the same family (#237–#240):
   stating outright: see [messaging.md](messaging.md#blocking).
 - **The fallback is per state, not generic.** "Couldn't withdraw that request",
   not "something went wrong" — knowing *which* of the four things the button does
-  didn't happen is most of the value. It's reached whenever the server never
-  answered, which on the web means `errors.js`'s `serverMessage` sniff: a network
-  failure rejects out of `fetch` as a bare `TypeError` carrying the *browser's*
-  words ("Failed to fetch"), and being offline is the likeliest way any of these
-  fails. Mobile makes the same call on `err instanceof ApiError`. Issue #240
-  tracks fixing that at the source in `api.js`.
+  didn't happen is most of the value. It's reached whenever the server didn't
+  write anything readable, which is **two** cases, not one: a network failure
+  never reaches our error code at all (it rejects out of `fetch` as a bare
+  `TypeError` carrying the *browser's* words — "Failed to fetch"), and a server
+  error with no DRF body (a 500 rendered as a Django HTML page) leaves
+  `firstErrorMessage` nothing to pull out, so `api.js` synthesizes "Request
+  failed (500)". Both clients' `ApiError` therefore carries a **`fromServer`**
+  flag, and `serverMessage` gates on it — a status check or a bare `instanceof`
+  catches only the first case and puts the stand-in string on screen. Issue #240
+  tracks raising a network failure as an `ApiError` too; the flag stays correct
+  when it does.
+
+- **A message is retired only by the server moving to the answer the attempt was
+  reaching for** — the request landed and only its response was lost, so the
+  message would now sit under the very thing it denies. Any *other* answer leaves
+  it standing: a refetch bearing some third status isn't confirmation of your
+  attempt, and clearing on any resync is the swallow issue #231 describes. Both
+  halves are judged against what was recorded at the attempt, never against when
+  the sync arrives, so a refetch landing in the same render batch as the
+  rejection can't eat the message before it's painted. This is the discipline
+  [events.md](events.md) records for the RSVP, applied to a four-state button;
+  the phone doesn't need it, since an `Alert` is dismissed rather than kept.
 
 The disconnect and block paths additionally hold their confirmation modal open
 until the write lands, so the failure has somewhere to go — see
 [messaging.md](messaging.md#blocking) for why that matters most on the block.
+**On mobile that hold is a tripwire**: it depends on `onlineManager` being left
+unwired to NetInfo, because wiring it makes React Query *pause* an offline
+mutation rather than reject it, and a dialog that refuses Cancel while busy would
+then never let go. The deferral note in `mobile/src/app/_layout.tsx` names every
+component that depends on it — add to that list, don't just add the dependency.
 
 ## Comments (threaded, connection-pruned)
 
