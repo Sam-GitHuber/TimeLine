@@ -30,7 +30,26 @@ export default function PollTally({
   onDelete,
   busy,
 }) {
-  const [selected, setSelected] = useState(new Set(poll.your_votes || []));
+  // Your ticks are optimistic — they appear the moment you click, before the
+  // server has agreed. Two things keep that from turning into a lie (issue
+  // #216): `toggle` rolls them back if the request fails, and the server's
+  // answer wins whenever it changes underneath us (you voted on your phone with
+  // this page open, or your own vote round-tripped). `serverVotes` is a fresh
+  // array on every refetch, so we compare its *contents* — comparing identity
+  // would reset your ticks on every poll of the event, mid-vote included.
+  const serverVotes = poll.your_votes || [];
+  const serverKey = voteKey(serverVotes);
+  const [selected, setSelected] = useState(() => new Set(serverVotes));
+  const [syncedKey, setSyncedKey] = useState(serverKey);
+  const [voteError, setVoteError] = useState(null);
+  if (syncedKey !== serverKey) {
+    setSyncedKey(serverKey);
+    setSelected(new Set(serverVotes));
+    // The server has just told us where your votes stand, so a message about an
+    // earlier attempt is out of date — clearing it stops "your vote didn't go
+    // through" sitting under a tick the server has since confirmed.
+    setVoteError(null);
+  }
   const [editing, setEditing] = useState(false);
   const open = poll.status === "open";
   const options = poll.options || [];
@@ -41,15 +60,29 @@ export default function PollTally({
   // honest signal. The server enforces the same guard with a 409.
   const canEdit = canManage && (poll.vote_count || 0) === 0;
 
-  function toggle(optionId) {
+  async function toggle(optionId) {
     if (!open) return;
+    const before = selected;
     const next = new Set(poll.allow_multiple ? selected : []);
     if (selected.has(optionId) && poll.allow_multiple) next.delete(optionId);
     else next.add(optionId);
     // A single-choice re-click on the same option clears it.
     if (!poll.allow_multiple && selected.has(optionId)) next.clear();
     setSelected(next);
-    onVote(Array.from(next));
+    setVoteError(null);
+    try {
+      await onVote(Array.from(next));
+    } catch (err) {
+      // The vote didn't happen — put the tick back where it was and say so.
+      // Leaving it showing is what makes a dropped answer invisible: the tally
+      // not moving reads as "nobody else has voted", not "you never voted".
+      //
+      // Roll back only what we ourselves put there: if the sync above replaced
+      // `next` while this request was in flight, the server has since spoken and
+      // its answer must not be undone by a snapshot taken before the click.
+      setSelected((current) => (current === next ? before : current));
+      setVoteError(err?.message || "Your vote didn't go through — try again.");
+    }
   }
 
   if (editing) {
@@ -135,6 +168,12 @@ export default function PollTally({
 
       {options.every((o) => (o.count || 0) === 0) && (
         <p className="mt-2 text-sm text-ink-faint">No votes yet.</p>
+      )}
+
+      {voteError && (
+        <p role="alert" className="mt-2 text-sm text-red-600">
+          {voteError}
+        </p>
       )}
 
       {canManage && !isCustom && (
@@ -386,6 +425,12 @@ function FreeValueFinalise({ dimension, onFinalise, busy }) {
       </button>
     </form>
   );
+}
+
+// A stable, order-independent fingerprint of a vote list, so a refetch that
+// returns the same votes in a different order isn't mistaken for a change.
+function voteKey(votes) {
+  return [...votes].sort((a, b) => a - b).join(",");
 }
 
 function optionLabel(poll, opt) {

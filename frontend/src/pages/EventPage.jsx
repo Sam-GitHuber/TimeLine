@@ -60,6 +60,9 @@ export default function EventPage() {
       api.createPoll(eventId, { dimension, question, allowMultiple, options }),
     onSuccess: closeAndRefresh,
   });
+  // Voting is the one mutation the tally shows optimistically, so it's handed to
+  // PollTally as `mutateAsync`: a rejection has to reach the component that put
+  // the tick on screen, which rolls it back and states the failure (issue #216).
   const vote = useMutation({
     mutationFn: ({ pollId, optionIds }) => api.votePoll(pollId, optionIds),
     onSuccess: invalidate,
@@ -249,7 +252,9 @@ export default function EventPage() {
                 poll={poll}
                 canManage={event.can_manage}
                 busy={busy}
-                onVote={(optionIds) => vote.mutate({ pollId: poll.id, optionIds })}
+                onVote={(optionIds) =>
+                  vote.mutateAsync({ pollId: poll.id, optionIds })
+                }
                 onFinalise={(dimension, opts) => finalise.mutate({ dimension, ...opts })}
                 onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, ...payload })}
                 onClose={() => closePoll.mutate(poll.id)}

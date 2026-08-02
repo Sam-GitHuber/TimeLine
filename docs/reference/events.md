@@ -271,6 +271,17 @@ The gate needs a *present* organiser. Two paths:
   group also keeps the divider algorithm's invariant — every row's day key is
   the local day of the value it was sorted by — which is what makes the dividers
   come out in order and only once each.
+- **A tick in the tally is optimistic, and owes two debts for it** (#216). It
+  appears the instant you click, before the server has agreed, so `PollTally`
+  (a) takes it back and shows the error if the request is rejected, which is why
+  `EventPage` hands voting down as `mutateAsync` rather than `mutate` — the
+  rejection has to reach the component holding the tick — and (b) re-derives your
+  ticks whenever `poll.your_votes` *changes* (compared by contents, not identity —
+  every refetch brings a fresh array), so a vote cast on another device shows up
+  here. Without the rollback a dropped vote is invisible: the tally not moving
+  reads as "nobody else has voted yet", and you believe you answered while the
+  organiser counts you as silent — the worst failure available to a feature whose
+  job is collecting answers before a date.
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).
@@ -290,6 +301,11 @@ complete-counts / connection-gated-names rules hold — they're server-side, so 
 client just renders what arrives. Date/time render through a mobile copy of the
 `formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
 `frontend/src/utils.js`.
+
+**Known divergence:** the mobile `PollTally` still votes fire-and-forget with a
+seeded-once selection — the shape the web had before #216 — so a failed vote
+leaves its tick showing there, and it's the client with the worse network.
+Tracked in #227; the fix is the same two moves.
 
 The **organiser's control surface** arrives in **E3c**, split into two PRs:
 
