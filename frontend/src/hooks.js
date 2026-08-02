@@ -145,10 +145,16 @@ export function trimToFirstPage(data) {
 // hammers an endpoint that is by definition already unhealthy, and flattens the
 // battery of the phone doing it.
 //
-// Stopping instead leaves a partial list — callers show `isError` — and hands
-// the transient case to the query's own retry/backoff. Recovery is automatic:
-// any later fetch that succeeds (a poll, a refocus) clears `isError` and the
-// remaining pages resume from where they stopped.
+// Stopping instead leaves a partial list and hands the transient case to the
+// query's own retry/backoff. Recovery is automatic: any later fetch that
+// succeeds (a poll, a refocus) clears `isError` and the remaining pages resume
+// from where they stopped.
+//
+// ⚠️ **A caller of this hook owes the viewer an `isError` branch**, because a
+// list that stops short looks exactly like a list that ended. That's the cost of
+// not looping, and it's only paid if it's rendered: a picker missing the person
+// you're looking for reads as "they aren't in your connections", which is a
+// wrong answer, not a missing one. All three call sites render it.
 //
 // One place, so the next list that wants every page can't reintroduce the loop.
 export function useFetchAllPages(query) {

@@ -115,6 +115,13 @@ export default function MessageStrandPanel({
    * hiding the newest replies and, worse, the one you just sent from the
    * composer right there — while the root's count went on climbing past what the
    * strand showed, with nothing on screen to explain it.
+   *
+   * "Every page" means every page that *loads*: a failed one stops the walk
+   * rather than restarting it (#214), which can leave the strand in the clipped
+   * state above until a poll gets through. That's a deliberate trade — the
+   * alternative was a request per render commit for as long as the strand stayed
+   * open — and it isn't silent, because the error branch below and the
+   * `LoadMoreButton` both come from `threadQuery`.
    */
   const threadQuery = useInfiniteQuery({
     queryKey: threadQueryKey(conversationId, rootId),

@@ -67,9 +67,17 @@ waits for. So a 500 or a dropped connection turned into one request per render
 commit, for as long as the view stayed open, with TanStack's own three retries
 stacked on each — against an endpoint that by definition had just failed, from a
 phone whose connection had just dropped. Adding `!isError` stops it: what loaded
-stays on screen as a partial list, the callers that show `isError` say so, and
-recovery is automatic, since any later fetch that succeeds (a poll, a refocus)
-clears the flag and the remaining pages resume.
+stays on screen as a partial list, and recovery is automatic, since any later
+fetch that succeeds (a poll, a refocus) clears the flag and the remaining pages
+resume.
+
+⚠️ **The price of not looping is that a caller has to render `isError`**, since a
+list that stopped short is indistinguishable from one that ended. On a picker
+that matters more than it sounds: a connection missing from a truncated list
+reads as *"you aren't connected to that person"*, which is a wrong answer rather
+than an absent one, and the empty state ("You can only invite people you're
+connected with") is the same lie in stronger terms — so it's gated on `isError`
+too. All three call sites render it.
 
 This is only a hazard for the *effect-driven* walk. A list that pages from a
 scroll handler or a `<LoadMoreButton>` needs no such guard: a failed page there
