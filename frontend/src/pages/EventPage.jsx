@@ -46,6 +46,9 @@ export default function EventPage() {
     invalidate();
   };
 
+  // Handed to RsvpBar as `mutateAsync` for the same reason as voting: the guests
+  // and note are typed into that component, so a rejection has to reach it to be
+  // said out loud (issue #229). Nothing here renders `rsvp.isError`.
   const rsvp = useMutation({
     mutationFn: (body) => api.rsvpEvent(eventId, body),
     onSuccess: invalidate,
@@ -271,7 +274,11 @@ export default function EventPage() {
           <h2 className="mb-3 font-display text-base font-semibold text-ink">
             Are you going?
           </h2>
-          <RsvpBar event={event} onRsvp={(b) => rsvp.mutate(b)} busy={rsvp.isPending} />
+          <RsvpBar
+            event={event}
+            onRsvp={(b) => rsvp.mutateAsync(b)}
+            busy={rsvp.isPending}
+          />
         </section>
       )}
 

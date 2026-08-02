@@ -112,6 +112,9 @@ export default function EventScreen() {
     else router.replace('/groups');
   };
 
+  // Handed to `RsvpBar` as `mutateAsync` for the same reason as voting: the
+  // guests and note are typed into that component, so a rejection has to reach
+  // it to be said out loud (#229). Nothing here renders `rsvp.isError`.
   const rsvp = useMutation({
     mutationFn: (body: Parameters<typeof api.rsvpEvent>[1]) => api.rsvpEvent(id, body),
     onSuccess: invalidate,
@@ -320,7 +323,7 @@ export default function EventScreen() {
           {event.status !== 'cancelled' ? (
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Are you going?</Text>
-              <RsvpBar event={event} busy={rsvp.isPending} onRsvp={(b) => rsvp.mutate(b)} />
+              <RsvpBar event={event} busy={rsvp.isPending} onRsvp={(b) => rsvp.mutateAsync(b)} />
             </View>
           ) : null}
 

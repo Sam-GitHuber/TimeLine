@@ -627,6 +627,160 @@ describe('optimistic vote ticks', () => {
   });
 });
 
+// --- RSVP guests/note (#229) -----------------------------------------------
+
+/**
+ * `guests` and `note` are typed into `RsvpBar`, but the server owns the answer:
+ * `your_response` changes under a mounted screen on every refetch — a poll vote,
+ * a pull-to-refresh, or just coming back to the foreground. Seeded once, the two
+ * inputs kept a stale answer beside a fresh "+ N guests" summary, and Update
+ * posted the stale number back, silently reverting an RSVP made on the web. The
+ * second half is the same optimism debt as the poll ticks: a rejected PATCH said
+ * nothing at all.
+ */
+describe('RSVP guests and note', () => {
+  const GOING = { response: 'going' as const, guests: 2, note: '' };
+
+  function rsvpEvent(mine: { response: 'going'; guests: number; note: string }) {
+    return makeEvent({
+      polls: [CUSTOM_POLL],
+      rsvp: {
+        counts: { going: 1, maybe: 0, declined: 0, guests: mine.guests },
+        your_response: mine,
+        going_list: [],
+        maybe_list: [],
+        declined_list: [],
+      },
+    });
+  }
+
+  let served: Event;
+  function serve(event: Event) {
+    served = event;
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/')) return jsonResponse(served);
+      return jsonResponse(null, 404);
+    });
+  }
+
+  const guestsField = () => screen.getByLabelText("Number of guests you're bringing");
+  const noteField = () => screen.getByLabelText('A note on your RSVP');
+
+  it('re-derives your guests and note when your RSVP changes underneath', async () => {
+    serve(rsvpEvent(GOING));
+    // Your own RSVP round-trips, and the refetch carries the answer you changed
+    // on the web a moment ago.
+    const rsvp = jest.spyOn(api, 'rsvpEvent').mockImplementation(async () => {
+      serve(rsvpEvent({ response: 'going', guests: 4, note: 'bringing wine' }));
+      return served;
+    });
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    expect(guestsField().props.value).toBe('2');
+
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+    await waitFor(() => expect(guestsField().props.value).toBe('4'));
+    expect(noteField().props.value).toBe('bringing wine');
+
+    // ...and Update sends the newer answer, not the 2 it was seeded with.
+    await fireEvent.press(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() =>
+      expect(rsvp).toHaveBeenLastCalledWith(9, {
+        response: 'going',
+        guests: 4,
+        note: 'bringing wine',
+      })
+    );
+    rsvp.mockRestore();
+  });
+
+  it('says an RSVP that failed didn’t save, and keeps what you typed', async () => {
+    serve(rsvpEvent(GOING));
+    const rsvp = jest
+      .spyOn(api, 'rsvpEvent')
+      .mockRejectedValue(new ApiError('Couldn’t reach the server.', 500, null));
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+
+    await fireEvent.changeText(noteField(), 'bringing wine');
+    await fireEvent.press(screen.getByRole('button', { name: 'Update' }));
+
+    expect(await screen.findByText('Couldn’t reach the server.')).toBeTruthy();
+    // Your text stays put, so pressing Update again retries it as typed.
+    expect(noteField().props.value).toBe('bringing wine');
+    rsvp.mockRestore();
+  });
+
+  it('falls back to our own words when the failure isn’t the server’s', async () => {
+    serve(rsvpEvent(GOING));
+    // Offline, React Native rejects with this — the very case the message
+    // exists for, and not a sentence to show a person.
+    const rsvp = jest
+      .spyOn(api, 'rsvpEvent')
+      .mockRejectedValue(new TypeError('Network request failed'));
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    await fireEvent.press(screen.getByRole('button', { name: 'Update' }));
+
+    expect(await screen.findByText(/didn’t save/)).toBeTruthy();
+    expect(screen.queryByText(/Network request failed/)).toBeNull();
+    rsvp.mockRestore();
+  });
+
+  /**
+   * Re-pressing a response you already hold sends exactly what the server
+   * already has, so "the server is confirming the attempt" can't be judged on
+   * the answer alone — without also remembering what the server said *before*
+   * the attempt, this failure would be cleared the instant it was set.
+   */
+  it('still says so when the rejected RSVP changed nothing', async () => {
+    serve(rsvpEvent(GOING));
+    const rsvp = jest
+      .spyOn(api, 'rsvpEvent')
+      .mockRejectedValue(new ApiError('Couldn’t reach the server.', 500, null));
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+
+    expect(await screen.findByText('Couldn’t reach the server.')).toBeTruthy();
+    rsvp.mockRestore();
+  });
+
+  /**
+   * The request had landed after all — only its response was lost. Once the
+   * server states that very answer, "didn't save" would be sitting under one
+   * that did.
+   */
+  it('stops saying so once the server confirms the answer that failed', async () => {
+    serve(rsvpEvent(GOING));
+    const rsvp = jest
+      .spyOn(api, 'rsvpEvent')
+      .mockRejectedValue(new ApiError('Couldn’t reach the server.', 500, null));
+    const vote = jest.spyOn(api, 'votePoll').mockImplementation(async () => {
+      serve(rsvpEvent({ response: 'going', guests: 2, note: 'bringing wine' }));
+      return CUSTOM_POLL;
+    });
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    await fireEvent.changeText(noteField(), 'bringing wine');
+    await fireEvent.press(screen.getByRole('button', { name: 'Update' }));
+    expect(await screen.findByText('Couldn’t reach the server.')).toBeTruthy();
+
+    // Anything that refetches the event carries the server's answer with it.
+    await fireEvent.press(screen.getByRole('button', { name: /Drinks/ }));
+
+    await waitFor(() => expect(screen.queryByText('Couldn’t reach the server.')).toBeNull());
+    vote.mockRestore();
+    rsvp.mockRestore();
+  });
+});
+
 // --- The personal Calendar tab ---------------------------------------------
 
 describe('calendar tab', () => {

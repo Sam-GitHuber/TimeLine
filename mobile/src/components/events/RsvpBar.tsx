@@ -6,6 +6,8 @@
  *
  * Ported from `frontend/src/components/events/RsvpBar.jsx`. The guests + note
  * detail appears only once you've chosen "Going"; changing them re-submits.
+ * `onRsvp` must return a promise that *rejects* on failure — that rejection is
+ * the only thing that says an RSVP didn't save (#229).
  */
 
 import { useState } from 'react';
@@ -18,6 +20,7 @@ import {
 } from 'react-native';
 
 import { Avatar } from '../Avatar';
+import { ApiError } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Author, Event } from '@/types';
 
@@ -35,21 +38,88 @@ export function RsvpBar({
   busy,
 }: {
   event: Event;
-  onRsvp: (body: { response: Response; guests: number; note: string }) => void;
+  // A promise, not `void`: the rejection has to reach this component, because
+  // the guests and note are typed in here and nothing else says they failed to
+  // save (#229). `EventScreen` hands it down as `mutateAsync` for that reason.
+  onRsvp: (body: { response: Response; guests: number; note: string }) => Promise<unknown>;
   busy: boolean;
 }) {
   const rsvp = event.rsvp;
   const mine = rsvp?.your_response ?? null;
   const counts = rsvp?.counts ?? { going: 0, maybe: 0, declined: 0, guests: 0 };
+  const cancelled = event.status === 'cancelled';
+
+  // Guests and note are yours to type, but the server owns the answer:
+  // `your_response` changes underneath this component whenever the event
+  // refetches, and every RSVP/vote/finalise on the screen ends in an invalidate
+  // while the screen stays mounted — a foreground return alone is enough, since
+  // `_layout.tsx` wires `AppState` to `focusManager`. Seeded once, the two
+  // inputs kept a stale answer next to a "+ N guests" summary read from the
+  // fresh payload — and pressing Update then posted the stale number back,
+  // silently reverting an RSVP made on the web (#229). So they're re-derived
+  // whenever the server's answer *changes*, compared by contents: a refetch
+  // hands back a fresh object every time, and comparing identity would wipe
+  // what you're half-way through typing on every poll of the event.
+  const serverKey = rsvpKey(mine);
   const [guests, setGuests] = useState(String(mine?.guests ?? 0));
   const [note, setNote] = useState(mine?.note ?? '');
-  const cancelled = event.status === 'cancelled';
+  const [syncedKey, setSyncedKey] = useState(serverKey);
+  // A rejected RSVP: what it tried to save, what the server said at the time,
+  // and the message to show.
+  const [failed, setFailed] = useState<
+    { saved: string; from: string; message: string } | null
+  >(null);
+  if (syncedKey !== serverKey) {
+    setSyncedKey(serverKey);
+    setGuests(String(mine?.guests ?? 0));
+    setNote(mine?.note ?? '');
+  }
+  // Clear the failure only once the server has *moved* to the very answer we
+  // thought failed — the request landed and only its response was lost, so
+  // "didn't save" would now be sitting under an answer that did. Any other
+  // change to `your_response` leaves the message standing: it's about your
+  // attempt, not about whatever else has happened since.
+  //
+  // Both halves are compared against keys recorded at the attempt, never
+  // against when the sync arrives, so this holds even when the refetch and the
+  // rejection land in the same render batch — the trap #231 describes, where a
+  // blanket "clear on sync" swallows the message before it is ever painted.
+  // `from` is what makes an unchanged Update honest too: re-pressing it without
+  // editing anything means `saved` already equals the server's answer, and
+  // without `from` the message would be cleared the instant it was set.
+  if (failed && serverKey !== failed.from && serverKey === failed.saved) {
+    setFailed(null);
+  }
 
   const guestsNum = () => Math.max(0, Math.min(50, Number(guests) || 0));
 
-  function choose(response: Response) {
+  // Your typed values stay put on a rejection — the message, not a snap-back,
+  // is what tells you it didn't save, and pressing Update again retries without
+  // retyping the note.
+  async function submit(body: { response: Response; guests: number; note: string }) {
     if (cancelled) return;
-    onRsvp({ response, guests: guestsNum(), note });
+    setFailed(null);
+    try {
+      await onRsvp(body);
+    } catch (err) {
+      // Without this the failure is silent: the fields keep your text as if it
+      // had saved, and the count simply not moving reads as "nobody else has
+      // RSVP'd yet" rather than "your change was rejected". Only the server's
+      // own words are fit to show — an `ApiError` carries DRF's `detail`,
+      // written for a person; everything else is a runtime string (offline,
+      // React Native rejects with `TypeError: Network request failed`), and
+      // offline is the case this exists for.
+      setFailed({
+        saved: rsvpKey(body),
+        from: serverKey,
+        message:
+          err instanceof ApiError ? err.message : 'Your RSVP didn’t save — try again.',
+      });
+    }
+  }
+
+  function choose(response: Response) {
+    void submit({ response, guests: guestsNum(), note });
   }
 
   return (
@@ -104,13 +174,19 @@ export function RsvpBar({
           </View>
           <Pressable
             disabled={busy}
-            onPress={() => onRsvp({ response: 'going', guests: guestsNum(), note })}
+            onPress={() => void submit({ response: 'going', guests: guestsNum(), note })}
             accessibilityRole="button"
             style={[styles.btn, styles.btnGhost]}
           >
             <Text style={styles.btnText}>Update</Text>
           </Pressable>
         </View>
+      ) : null}
+
+      {failed ? (
+        <Text style={styles.error} accessibilityRole="alert">
+          {failed.message}
+        </Text>
       ) : null}
 
       {counts.guests > 0 ? (
@@ -123,6 +199,15 @@ export function RsvpBar({
       <NamedList title="Maybe" people={rsvp?.maybe_list} />
     </View>
   );
+}
+
+/**
+ * A fingerprint of an RSVP answer — the server's `your_response` or a body we
+ * tried to save — so the two can be compared by contents rather than identity.
+ */
+function rsvpKey(r: { response: string; guests: number; note: string } | null): string {
+  if (!r) return '';
+  return `${r.response}|${r.guests || 0}|${r.note || ''}`;
 }
 
 function NamedList({ title, people }: { title: string; people?: Author[] }) {
@@ -180,6 +265,7 @@ const styles = StyleSheet.create({
     color: colors.ink,
     fontSize: fontSize.sm,
   },
+  error: { fontSize: fontSize.sm, color: colors.danger },
   guestsLine: { fontSize: 11, color: colors.inkFaint },
   named: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.xs },
   namedTitle: { fontSize: 11, fontWeight: '600', color: colors.inkFaint },

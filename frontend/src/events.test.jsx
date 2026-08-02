@@ -170,6 +170,121 @@ describe("EventPage", () => {
     );
   });
 
+  // Issue #229. `guests`/`note` are typed into RsvpBar but the server owns the
+  // answer: `your_response` changes under the mounted page on every refetch,
+  // and every RSVP/vote/finalise here ends in one. Seeded once, the fields kept
+  // a stale answer beside a fresh "+ N guests" summary — and Update then posted
+  // the stale number back, reverting an RSVP made elsewhere.
+  function makeRsvpEvent(mine) {
+    return makeEvent({
+      can_manage: false,
+      can_moderate: false,
+      rsvp: {
+        counts: { going: 2, maybe: 1, declined: 0, guests: mine?.guests || 0 },
+        your_response: mine,
+        going_list: [you],
+        maybe_list: [],
+        declined_list: [],
+      },
+    });
+  }
+
+  it("re-derives your guests and note when your RSVP changes underneath", async () => {
+    api.getEvent
+      .mockResolvedValueOnce(
+        makeRsvpEvent({ response: "going", guests: 2, note: "" })
+      )
+      .mockResolvedValue(
+        makeRsvpEvent({ response: "going", guests: 4, note: "bringing wine" })
+      );
+    renderEventPage();
+    await screen.findByText("Picnic");
+    expect(screen.getByLabelText(/Bringing guests/)).toHaveValue(2);
+
+    // Voting invalidates the event; the refetch carries the RSVP you changed on
+    // your phone a moment ago.
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Bringing guests/)).toHaveValue(4)
+    );
+    expect(screen.getByLabelText(/^Note$/)).toHaveValue("bringing wine");
+
+    // ...and Update sends the newer answer, not the 2 it was seeded with.
+    await userEvent.click(screen.getByRole("button", { name: "Update" }));
+    await waitFor(() =>
+      expect(api.rsvpEvent).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({ guests: 4, note: "bringing wine" })
+      )
+    );
+  });
+
+  // The other half of #229: nothing rendered `rsvp.isError`, so a rejected PATCH
+  // left the fields showing your text as if it had saved and the count simply
+  // not moving — which reads as "nobody else has RSVP'd yet".
+  it("says an RSVP that failed didn't save, and keeps what you typed", async () => {
+    api.getEvent.mockResolvedValue(
+      makeRsvpEvent({ response: "going", guests: 2, note: "" })
+    );
+    api.rsvpEvent.mockRejectedValueOnce(new Error("Couldn't reach the server."));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.type(screen.getByLabelText(/^Note$/), "bringing wine");
+    await userEvent.click(screen.getByRole("button", { name: "Update" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn't reach the server."
+    );
+    // Your text stays put, so pressing Update again retries it as typed.
+    expect(screen.getByLabelText(/^Note$/)).toHaveValue("bringing wine");
+  });
+
+  // Re-pressing a response you already hold sends exactly what the server
+  // already has, so "the server is confirming the attempt" can't be judged on
+  // the answer alone — without also remembering what the server said *before*
+  // the attempt, this failure would be cleared the instant it was set.
+  it("still says so when the rejected RSVP changed nothing", async () => {
+    api.getEvent.mockResolvedValue(
+      makeRsvpEvent({ response: "going", guests: 2, note: "" })
+    );
+    api.rsvpEvent.mockRejectedValueOnce(new Error("Couldn't reach the server."));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getByRole("button", { name: /^Going/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn't reach the server."
+    );
+  });
+
+  // The request had landed after all — only its response was lost. Once the
+  // server states that very answer, "didn't save" would be sitting under one
+  // that did.
+  it("stops saying so once the server confirms the answer that failed", async () => {
+    api.getEvent
+      .mockResolvedValueOnce(
+        makeRsvpEvent({ response: "going", guests: 2, note: "" })
+      )
+      .mockResolvedValue(
+        makeRsvpEvent({ response: "going", guests: 2, note: "bringing wine" })
+      );
+    api.rsvpEvent.mockRejectedValueOnce(new Error("Couldn't reach the server."));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.type(screen.getByLabelText(/^Note$/), "bringing wine");
+    await userEvent.click(screen.getByRole("button", { name: "Update" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+
+    // Anything that refetches the event carries the server's answer with it.
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+    );
+  });
+
   it("lets a member vote in a poll", async () => {
     api.getEvent.mockResolvedValue(makeEvent({ can_manage: false, can_moderate: false }));
     renderEventPage();
