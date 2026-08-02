@@ -10,9 +10,13 @@
  *
  * This file is in `__tests__/` but is **not itself a suite** — `testMatch` only
  * collects `*test.ts(x)` / `*spec.ts(x)`.
+ *
+ * It also holds `settle`, which differs by nothing at all: three suites need it
+ * and it is fiddly enough (see its docblock) that the fourth hand-written copy
+ * would be the one that's subtly wrong.
  */
 
-import { fireEvent, screen } from '@testing-library/react-native';
+import { act, fireEvent, screen } from '@testing-library/react-native';
 import { ActionSheetIOS, Alert, BackHandler, Platform } from 'react-native';
 
 /**
@@ -288,4 +292,32 @@ export async function pickDateTimeValue(
     );
   }
   await fireEvent.press(screen.getByLabelText('Pick a value'));
+}
+
+// --- Settling ---------------------------------------------------------------
+
+/**
+ * Turn the event loop over `turns` times, so a **repeating** request has room to
+ * show itself as more than one call (#248).
+ *
+ * A `waitFor` can't tell "asked once and stopped" from "asked once *so far*" —
+ * and the loop this exists to catch re-fires on the failure itself, so it needs
+ * no timer to keep going, just another turn. Anything still looping is hundreds
+ * of calls by the time this returns; anything that stopped is still on one.
+ *
+ * Each turn is a real **macrotask**, not a microtask flush, and that is the part
+ * that's easy to get wrong: the loop is one request per render *commit*, so a
+ * mock that rejects instantly settles inside the same React batch as the render
+ * that fired it and never produces the second commit the effect waits for. The
+ * loop would then show up as two calls rather than the two hundred it really is,
+ * which makes a passing test out of a broken guard. (A real failed request
+ * always spans commits — hence also the deliberate `setTimeout` in the mocks
+ * that fail.)
+ */
+export async function settle(turns = 20): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
 }

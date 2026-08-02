@@ -18,6 +18,8 @@ import { router } from 'expo-router';
 import GroupInviteScreen from '@/app/groups/[groupId]/invite';
 import type { GroupMember, PersonSummary } from '@/types';
 
+import { settle } from './helpers';
+
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ groupId: '7' }),
   router: { back: jest.fn() },
@@ -55,10 +57,37 @@ const MEMBERS: GroupMember[] = [
   { user: { id: 1, display_name: 'Me Myself', avatar_thumb: null }, role: 'admin' },
 ];
 
-/** `failUserIds` are the user ids whose invite POST the server rejects with 400. */
-function serve({ failUserIds = [] as number[] } = {}) {
+/**
+ * `failUserIds` are the user ids whose invite POST the server rejects with 400.
+ *
+ * `connections` stages the two #248 shapes: `'partial'` lands page one carrying
+ * a `next` and 500s the page it points at; `'fail'` 500s the list outright. Both
+ * failures are a macrotask late on purpose — a mock that rejects instantly
+ * settles inside the same React batch as the render that fired it, which is not
+ * how a real request behaves and would hide the loop (see `settle`).
+ */
+function serve({
+  failUserIds = [] as number[],
+  connections = 'ok' as 'ok' | 'partial' | 'fail',
+} = {}) {
   mockFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
-    if (url.includes('/api/users/?filter=connected')) return jsonResponse(page(CONNECTIONS));
+    if (url.includes('/api/users/?filter=connected')) {
+      if (connections === 'fail' || (connections === 'partial' && url.includes('page=2'))) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: 'Server error.' }, 500);
+      }
+      if (connections === 'partial') {
+        return jsonResponse({
+          count: 2,
+          next: 'http://localhost:8000/api/users/?filter=connected&page=2',
+          previous: null,
+          // Only Ada fits on page one; the person you're looking for is on the
+          // page that never arrives.
+          results: [CONNECTIONS[0]],
+        });
+      }
+      return jsonResponse(page(CONNECTIONS));
+    }
     if (url.includes('/api/groups/7/members/') && init?.method === 'POST') {
       const { user_id } = JSON.parse(init.body ?? '{}');
       return failUserIds.includes(user_id)
@@ -129,6 +158,38 @@ it('keeps the ones that succeed when one fails, and reports the tally', async ()
   );
   // Some landed, so the picker closes.
   await waitFor(() => expect(router.back).toHaveBeenCalled());
+});
+
+it('stops paging your connections when a page fails, instead of looping on it', async () => {
+  serve({ connections: 'partial' });
+  await renderScreen();
+
+  // What did land is still invitable — a stopped walk keeps its pages.
+  expect(await screen.findByLabelText('Ada Lovelace')).toBeTruthy();
+  // And says why it might be short. Without this, Bob's absence reads as "you
+  // aren't connected to Bob" — a wrong answer rather than a missing one, whose
+  // one suggested action is to go and request a connection you already have.
+  expect(await screen.findByText('Couldn’t load your connections.')).toBeTruthy();
+
+  // #248: the failure re-armed the effect that asked for the page — the server
+  // never said there was no page 2, so `hasNextPage` stayed true, and
+  // `isFetchingNextPage` going false again *is* the condition it waits for.
+  await settle();
+  expect(
+    mockFetch.mock.calls.filter(([url]) => String(url).includes('page=2'))
+  ).toHaveLength(1);
+});
+
+it('doesn’t claim everyone is already in the group when the load failed', async () => {
+  // Nothing loaded at all: the empty state is the same lie in stronger terms,
+  // since the truth is that we failed to ask.
+  serve({ connections: 'fail' });
+  await renderScreen();
+
+  expect(await screen.findByText('Couldn’t load your connections.')).toBeTruthy();
+  expect(
+    screen.queryByText('Everyone you’re connected with is already in this group.')
+  ).toBeNull();
 });
 
 it('keeps the picker open when no invite succeeds', async () => {

@@ -5,11 +5,17 @@
  * row across a page boundary when the set shifts mid-scroll, and duplicate keys
  * make FlatList recycle the wrong row. The order-preservation is the part worth
  * pinning — the feed's reverse-chronological guarantee is not ours to reorder.
+ *
+ * `useFetchAllPages` guards a worse one: the walk it replaced answered a *failed*
+ * page by asking for it again, on every render commit, for as long as the screen
+ * stayed open (#248). Its four states are pinned here directly, so the rule
+ * survives even if all three screens are rewritten.
  */
 
 import type { InfiniteData } from '@tanstack/react-query';
+import { renderHook } from '@testing-library/react-native';
 
-import { dedupeById, trimToFirstPage } from '@/lists';
+import { dedupeById, trimToFirstPage, useFetchAllPages } from '@/lists';
 import type { Paginated } from '@/types';
 
 describe('dedupeById', () => {
@@ -52,5 +58,75 @@ describe('trimToFirstPage', () => {
     // Identity preserved so no needless cache-driven re-render fires.
     expect(trimToFirstPage(one)).toBe(one);
     expect(trimToFirstPage(undefined)).toBeUndefined();
+  });
+});
+
+describe('useFetchAllPages', () => {
+  /** The three query flags the walk reads; each defaults to "another page is
+   *  there for the asking". */
+  type State = {
+    hasNextPage?: boolean;
+    isFetchingNextPage?: boolean;
+    isError?: boolean;
+  };
+
+  async function walk(initialProps: State = {}) {
+    const fetchNextPage = jest.fn();
+    const { rerender } = await renderHook(
+      (state: State) =>
+        useFetchAllPages({
+          hasNextPage: state.hasNextPage ?? true,
+          isFetchingNextPage: state.isFetchingNextPage ?? false,
+          isError: state.isError ?? false,
+          // Stable across renders, like TanStack's own — an identity that
+          // changed every render would re-run the effect for a reason the real
+          // hook never has.
+          fetchNextPage,
+        }),
+      { initialProps }
+    );
+    return { fetchNextPage, rerender };
+  }
+
+  it('pulls the next page as soon as one is available', async () => {
+    const { fetchNextPage } = await walk();
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks for nothing once the server says there is no more', async () => {
+    const { fetchNextPage } = await walk({ hasNextPage: false });
+    expect(fetchNextPage).not.toHaveBeenCalled();
+  });
+
+  it('waits for the page in flight rather than asking twice', async () => {
+    const { fetchNextPage } = await walk({ isFetchingNextPage: true });
+    expect(fetchNextPage).not.toHaveBeenCalled();
+  });
+
+  it('stops on a failed page instead of re-arming on it', async () => {
+    const { fetchNextPage, rerender } = await walk();
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
+
+    // The page goes out, and comes back a failure. That leaves exactly the
+    // state the effect was waiting for — the server never said there was no
+    // next page, so `hasNextPage` is still true, and `isFetchingNextPage` going
+    // back to false *is* the trigger. Without `isError` in the guard, every
+    // commit from here on is another request (#248).
+    await rerender({ isFetchingNextPage: true });
+    await rerender({ isFetchingNextPage: false, isError: true });
+    await rerender({ isFetchingNextPage: false, isError: true });
+
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes the walk when a later fetch clears the error', async () => {
+    // Recovery needs no retry of our own: a poll or a refocus that succeeds
+    // clears the flag, and the remaining pages carry on from where they
+    // stopped.
+    const { fetchNextPage, rerender } = await walk({ isError: true });
+    expect(fetchNextPage).not.toHaveBeenCalled();
+
+    await rerender({ isError: false });
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
   });
 });

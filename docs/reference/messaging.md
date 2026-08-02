@@ -1921,6 +1921,17 @@ gave this screen a third "Replying to X" mode; see
 [Every route to a reply goes through the strand](#every-route-to-a-reply-goes-through-the-strand)
 for why it went.
 
+**The strand pulls every page**, like its web twin and for the same reason — page
+one is a strand's *oldest* twenty, so reading only it hides the newest replies
+and the one you just sent, while the root's count climbs past what's on screen.
+It walks them through the shared `useFetchAllPages` (`mobile/src/lists.ts`), with
+the guard that stops a *failed* page becoming an unthrottled retry loop: this
+query polls and the strand is a `Modal` that stays mounted, so before #248 that
+loop ran for the whole time the strand was open. The cost of stopping is that the
+strand can sit clipped until a poll gets through, so a footer line says the
+newest replies are missing rather than letting a short strand pass for a whole
+one; see [feed-and-posts](feed-and-posts.md#pagination).
+
 **The focused view** (`MessageThreadView`) is an `expo-blur` `BlurView` over the
 transcript with the strand floating on it. The blur is doing real work rather
 than decoration: a plain dim scrim reads as "a modal over a list", where the blur

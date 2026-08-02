@@ -28,7 +28,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   FlatList,
   Pressable,
@@ -42,7 +42,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
-import { dedupeById } from '@/lists';
+import { dedupeById, useFetchAllPages } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation, PersonSummary } from '@/types';
 
@@ -62,6 +62,10 @@ export default function NewChatScreen() {
 
   // All your connections (following `next`), so search covers everyone, not just
   // the first page. Same key + query as the People screen's Connections list.
+  // A page that fails stops the walk rather than retrying it forever (#248), so
+  // the list can end short of someone you know — which on a picker reads as
+  // "you aren't connected to them". The banner below is what stops it saying
+  // that, and is the obligation `useFetchAllPages` documents.
   const query = useInfiniteQuery({
     queryKey: ['connections'],
     queryFn: ({ pageParam }) =>
@@ -69,10 +73,7 @@ export default function NewChatScreen() {
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
-  useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  useFetchAllPages(query);
 
   const connections = dedupeById(
     query.data?.pages.flatMap((page) => page.results) ?? []
@@ -175,11 +176,26 @@ export default function NewChatScreen() {
               onToggle={() => toggle(item.id)}
             />
           )}
+          ListHeaderComponent={
+            // Above the rows rather than in the empty state, because the case
+            // this exists for is the list that *isn't* empty: page one landed
+            // and page two didn't, so the names you can see look like all the
+            // names there are (#248).
+            // Not a `ListMessage`: that one centres itself in the whole list
+            // (`flex: 1`), which as a header would push every row off the
+            // screen.
+            query.isError ? (
+              <Text style={[styles.messageText, styles.messageError, styles.banner]}>
+                Couldn’t load your connections.
+              </Text>
+            ) : null
+          }
           ListEmptyComponent={
             query.isLoading ? (
               <ListMessage>Loading…</ListMessage>
             ) : query.isError ? (
-              <ListMessage error>Couldn’t load your connections.</ListMessage>
+              // The header already said it, and it says it in both cases.
+              null
             ) : connections.length === 0 ? (
               <View style={styles.emptyBlock}>
                 <Text style={styles.emptyTitle}>No connections yet</Text>
@@ -358,6 +374,12 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   messageError: { color: colors.danger },
+  banner: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
   emptyBlock: {
     flex: 1,
     padding: spacing.xl,

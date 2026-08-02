@@ -55,11 +55,14 @@ reach in and change how the list pages.
 A few lists are wanted *whole* rather than a page at a time, because something
 real bounds them — your connections (the two message/invite pickers) and the
 replies to one message ([messaging](messaging.md)). They use
-**`useFetchAllPages(query)`**, which asks for the next page as soon as the one
-before it lands, and it is one shared hook rather than an effect per caller
-because of the way that effect fails:
+**`useFetchAllPages(query)`** — one on each client, `frontend/src/hooks.js` and
+`mobile/src/lists.ts`, over the same three lists — which asks for the next page
+as soon as the one before it lands, and it is one shared hook per client rather
+than an effect per caller because of the way that effect fails:
 
-⚠️ **A page that fails must stop the walk, not restart it** (#214). The obvious
+⚠️ **A page that fails must stop the walk, not restart it** (#214 for the web,
+#248 for the app, which had the same effect copy-pasted into all three screens).
+The obvious
 guard — `if (hasNextPage && !isFetchingNextPage) fetchNextPage()` — re-arms
 itself on a failure. The server never said there was no page 2, so `hasNextPage`
 stays true; `isFetchingNextPage` going false again *is* the condition the effect
@@ -77,11 +80,20 @@ that matters more than it sounds: a connection missing from a truncated list
 reads as *"you aren't connected to that person"*, which is a wrong answer rather
 than an absent one, and the empty state ("You can only invite people you're
 connected with") is the same lie in stronger terms — so it's gated on `isError`
-too. All three call sites render it.
+too. All six call sites render it.
+
+⚠️ **And it has to be rendered where a *partial* list can show it.** The case
+this obligation exists for is the list that isn't empty — page one landed, page
+two didn't — so on the app an error branch inside `ListEmptyComponent` doesn't
+discharge it, and both pickers put the line in a `ListHeaderComponent` above the
+rows instead. The strand puts its equivalent in the footer, because its pages run
+oldest-first and so the replies it's missing are the newest ones.
 
 This is only a hazard for the *effect-driven* walk. A list that pages from a
-scroll handler or a `<LoadMoreButton>` needs no such guard: a failed page there
-produces no scroll and no click, so nothing re-fires it.
+scroll handler, an `onEndReached`, or a `<LoadMoreButton>` needs no such guard: a
+failed page there produces no scroll and no click, so nothing re-fires it. That
+covers every other paged list on both clients — the feed, activity, people,
+groups, profiles, and the message transcript's `loadOlder`.
 
 ## Posts
 

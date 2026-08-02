@@ -43,7 +43,7 @@ import { clearQuotes } from '@/quotes';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
-import { backHandlerCount, captureBackHandler, pressBack } from './helpers';
+import { backHandlerCount, captureBackHandler, pressBack, settle } from './helpers';
 
 const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 
@@ -293,6 +293,7 @@ function serve({
   quotable,
   reactionsAfterToggle = [{ emoji: '👍', count: 1, reacted: true }],
   reactors = [{ emoji: '👍', count: 1, users: [ADA] }],
+  threadPageTwoFails = false,
 }: {
   conversation: Conversation;
   /** The transcript, **oldest-first** — the order the model has them in. */
@@ -315,6 +316,14 @@ function serve({
   quotable?: Message[];
   reactionsAfterToggle?: { emoji: string; count: number; reacted: boolean }[];
   reactors?: { emoji: string; count: number; users: typeof ADA[] }[];
+  /**
+   * Stage #248: the strand's first page lands carrying a `next`, and the page it
+   * points at 500s — without needing a 21-message fixture to get there. The
+   * failure is a macrotask late on purpose, since a mock that rejects instantly
+   * settles inside the same React batch as the render that fired it, which is
+   * not how a real request behaves and would hide the loop (see `settle`).
+   */
+  threadPageTwoFails?: boolean;
 }) {
   const meAuthor = { id: ME.pk, display_name: ME.display_name, avatar_thumb: null };
   mockFetch.mockImplementation(
@@ -342,12 +351,17 @@ function serve({
         // every other test here is unaffected.
         const all = thread ?? [];
         const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1);
+        if (threadPageTwoFails && page > 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return jsonResponse({ detail: 'Server error.' }, 500);
+        }
         const results = all.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
         const base = url.replace(/[?&]page=\d+/, '');
+        const hasMore = threadPageTwoFails || all.length > page * PAGE_SIZE;
         return jsonResponse({
           count: all.length,
           // Absolute, like DRF's — `getPage` re-bases it on BASE_URL.
-          next: all.length > page * PAGE_SIZE ? `${base}&page=${page + 1}` : null,
+          next: hasMore ? `${base}&page=${page + 1}` : null,
           previous: null,
           results,
         });
@@ -1880,6 +1894,44 @@ it('opens the focused thread from a root’s reply count', async () => {
       String(url).includes('/api/conversations/5/messages/?thread_root=8')
     )
   ).toBe(true);
+});
+
+it('stops a strand’s page walk when a page fails, instead of looping on it', async () => {
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 21,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root],
+    thread: [
+      root,
+      message({ id: 9, sender: MINE, text: 'yes', reply_to: { id: 8 }, thread_root_id: 8 }),
+    ],
+    threadPageTwoFails: true,
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('21 replies — open thread'));
+
+  // What did load stays readable, and the gap is named at the end it's at:
+  // pages run oldest-first, so a failed page two is the *newest* replies
+  // missing — while the root's count goes on claiming 21.
+  expect(await screen.findByText('yes')).toBeTruthy();
+  expect(await screen.findByText('Couldn’t load the newest replies.')).toBeTruthy();
+
+  // #248, the worst of the three: this query polls and the strand is a Modal
+  // that stays mounted, so a loop here ran for the whole time the strand was
+  // open, against a server that had just failed.
+  await settle();
+  expect(
+    mockFetch.mock.calls.filter(
+      ([url]) =>
+        String(url).includes('thread_root=8') && String(url).includes('page=2')
+    )
+  ).toHaveLength(1);
 });
 
 it('sends a reply into the thread from inside the focused view', async () => {
