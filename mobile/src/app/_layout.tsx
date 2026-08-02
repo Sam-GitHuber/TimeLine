@@ -144,7 +144,11 @@ function AuthGate() {
  * reopening it.
  *
  * (Network reconnection is the sibling case, and needs `onlineManager` wired to
- * NetInfo. Deferred: it's another dependency, and v1 is deliberately online-only.)
+ * NetInfo. Deferred: it's another dependency, and v1 is deliberately online-only.
+ * Note before wiring it: leaving it unwired is what makes an offline mutation
+ * *reject*. Wired, React Query's default `networkMode: 'online'` **pauses** it
+ * instead, and anything awaiting `mutateAsync` to undo an optimistic update —
+ * `components/events/PollTally.tsx` — would hang there instead of rolling back.)
  */
 function useRefetchOnForeground() {
   useEffect(() => {

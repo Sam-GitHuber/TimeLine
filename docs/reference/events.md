@@ -302,12 +302,14 @@ client just renders what arrives. Date/time render through a mobile copy of the
 `formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
 `frontend/src/utils.js`.
 
-**Known divergence:** the mobile `PollTally` still votes fire-and-forget with a
-seeded-once selection — the shape the web had before #216 — so a failed vote
-leaves its tick showing there, and it's the client with the worse network.
-Tracked in #227; the fix is the same two moves.
+The **optimistic tick and its two debts** (the "Frontend notes" bullet above) hold
+here too, as of #227: `PollTally` awaits the vote and rolls its tick back with a
+message if it's rejected — which is why `EventScreen` hands voting down as
+`mutateAsync` — and re-derives your ticks whenever `poll.your_votes` changes by
+*contents*. The rollback earns its keep more here than on the web: a phone's
+network is the one that actually drops a request mid-tap.
 
-The **organiser's control surface** arrives in **E3c**, split into two PRs:
+The **organiser's control surface** landed in **E3c**, across two PRs:
 
 - **E3c-a — plan & set.** **Plan an event** (a `groups/<id>/plan` form reached from
   the group ⋯ menu), the chip **Set/Change** → a contextual `DimensionEditor` →
@@ -320,7 +322,8 @@ The **organiser's control surface** arrives in **E3c**, split into two PRs:
   the web too (no UI), so the app ports the method but no form.
 - **E3c-b — polls.** The chip **Poll** affordance + the poll builder and lifecycle
   (open / edit-while-unvoted / close / reopen / delete, and finalising a custom
-  poll). Until it lands, a `polling` chip is read-only on mobile.
+  poll). A `polling` chip stays read-only — its poll is managed from the
+  `PollTally` card below it, not from the chip.
 
 ## Scope / non-goals (v1)
 

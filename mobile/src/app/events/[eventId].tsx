@@ -8,11 +8,11 @@
  * detail. An event you're not connected to the organiser of is a **404**; it
  * renders as "not available" rather than leaking that it exists (events.md).
  *
- * **E3b was read + participate.** **E3c-a** adds the organiser's *set* surface —
+ * **E3b was read + participate.** **E3c-a** added the organiser's *set* surface —
  * the chip **Set/Change** → the contextual `DimensionEditor` → **finalise**, plus
- * **cancel/delete**. The **poll** control (open/edit/close/reopen) is E3c-b, so
- * `PollTally` here is still vote-only. Ported from
- * `frontend/src/pages/EventPage.jsx`.
+ * **cancel/delete** — and **E3c-b** the poll lifecycle, so `PollTally` is handed
+ * the organiser's controls (open/edit/close/reopen/remove) as well as voting.
+ * Ported from `frontend/src/pages/EventPage.jsx`.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -116,6 +116,9 @@ export default function EventScreen() {
     mutationFn: (body: Parameters<typeof api.rsvpEvent>[1]) => api.rsvpEvent(id, body),
     onSuccess: invalidate,
   });
+  // Voting is the one mutation the tally shows optimistically, so it's handed to
+  // `PollTally` as `mutateAsync`: a rejection has to reach the component that put
+  // the tick on screen, which rolls it back and states the failure (#227).
   const vote = useMutation({
     mutationFn: ({ pollId, optionIds }: { pollId: number; optionIds: number[] }) =>
       api.votePoll(pollId, optionIds),
@@ -302,7 +305,7 @@ export default function EventScreen() {
                   key={poll.id}
                   poll={poll}
                   busy={vote.isPending || pollBusy}
-                  onVote={(optionIds) => vote.mutate({ pollId: poll.id, optionIds })}
+                  onVote={(optionIds) => vote.mutateAsync({ pollId: poll.id, optionIds })}
                   canManage={event.can_manage}
                   onFinalise={(arg) => finalise.mutate(arg)}
                   onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, payload })}
