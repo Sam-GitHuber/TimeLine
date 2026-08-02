@@ -240,6 +240,46 @@ describe("EventPage", () => {
     );
   });
 
+  // The rollback undoes our own optimistic tick, not whatever the server has
+  // said since: a vote that arrives from another device while this request is in
+  // flight is the newer truth, and a snapshot taken before the click mustn't
+  // wipe it.
+  it("doesn't roll back over an answer the server gave mid-vote", async () => {
+    const member = { can_manage: false, can_moderate: false };
+    const after = makeEvent(member);
+    after.polls[1].your_votes = [202]; // Drinks, cast elsewhere
+    api.getEvent.mockResolvedValueOnce(makeEvent(member)).mockResolvedValue(after);
+    // The Cake vote fails, but only after a refetch (triggered by the RSVP) has
+    // brought the Drinks vote in.
+    let rejectVote;
+    api.votePoll.mockImplementationOnce(
+      () => new Promise((_, reject) => (rejectVote = reject))
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    await userEvent.click(screen.getByRole("button", { name: /^Going/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Drinks/ })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      )
+    );
+
+    rejectVote(new Error("Offline."));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Offline.");
+    // The failure is stated, and the newer vote survives it.
+    expect(screen.getByRole("button", { name: /Drinks/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByRole("button", { name: /Cake/ })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+  });
+
   it("shows chip-level Set/Poll controls to the organiser only", async () => {
     api.getEvent.mockResolvedValue(makeEvent());
     const { unmount } = renderEventPage();

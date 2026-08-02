@@ -69,8 +69,10 @@ export function PollTally({
   // silently redefined. The server enforces the same with a 409.
   const canEdit = canManage && (poll.vote_count || 0) === 0;
 
-  // Seeded once from the server, then owned locally (no prop→state sync effect,
-  // which React flags) — same as the web. A cast refetches for fresh *counts*.
+  // Seeded once from the server, then owned locally. A cast refetches for fresh
+  // *counts*. This was "same as the web" until #216, which gave the web copy a
+  // rollback on a failed vote and a re-derive when `your_votes` changes; until
+  // that's ported, a failed vote leaves its tick showing here (events.md).
   const [selected, setSelected] = useState<Set<number>>(new Set(poll.your_votes ?? []));
   const [editing, setEditing] = useState(false);
 

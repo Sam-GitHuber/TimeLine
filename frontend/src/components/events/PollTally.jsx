@@ -41,11 +41,15 @@ export default function PollTally({
   const serverKey = voteKey(serverVotes);
   const [selected, setSelected] = useState(() => new Set(serverVotes));
   const [syncedKey, setSyncedKey] = useState(serverKey);
+  const [voteError, setVoteError] = useState(null);
   if (syncedKey !== serverKey) {
     setSyncedKey(serverKey);
     setSelected(new Set(serverVotes));
+    // The server has just told us where your votes stand, so a message about an
+    // earlier attempt is out of date — clearing it stops "your vote didn't go
+    // through" sitting under a tick the server has since confirmed.
+    setVoteError(null);
   }
-  const [voteError, setVoteError] = useState(null);
   const [editing, setEditing] = useState(false);
   const open = poll.status === "open";
   const options = poll.options || [];
@@ -72,7 +76,11 @@ export default function PollTally({
       // The vote didn't happen — put the tick back where it was and say so.
       // Leaving it showing is what makes a dropped answer invisible: the tally
       // not moving reads as "nobody else has voted", not "you never voted".
-      setSelected(before);
+      //
+      // Roll back only what we ourselves put there: if the sync above replaced
+      // `next` while this request was in flight, the server has since spoken and
+      // its answer must not be undone by a snapshot taken before the click.
+      setSelected((current) => (current === next ? before : current));
       setVoteError(err?.message || "Your vote didn't go through — try again.");
     }
   }
