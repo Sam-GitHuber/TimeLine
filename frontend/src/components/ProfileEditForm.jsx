@@ -4,6 +4,7 @@ import Avatar from "./Avatar.jsx";
 import AvatarCropModal from "./AvatarCropModal.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 
 // Inline profile editor, rendered in place on your own profile page (issue #53).
 // Edits your real name (first + last — the display name here, since there are no
@@ -169,7 +170,7 @@ export default function ProfileEditForm({ onDone }) {
 
       {mutation.isError && (
         <p role="alert" className="text-sm text-red-600">
-          {mutation.error?.message || "Couldn't save your profile."}
+          {serverMessage(mutation.error, "Couldn't save your profile.")}
         </p>
       )}
 

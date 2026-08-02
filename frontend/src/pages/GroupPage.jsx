@@ -15,6 +15,7 @@ import { useInfiniteList } from "../hooks.js";
 import { eventLocalStart } from "../utils.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 import { useMessaging } from "../messaging.jsx";
 
 // A single group: a pinned header + its timeline. Members only — the backend
@@ -167,7 +168,7 @@ export default function GroupPage() {
     return (
       <div className="px-6 py-16 text-center">
         <p className="text-lg font-medium text-red-600">
-          {groupQuery.error?.message || "Couldn't load this group."}
+          {serverMessage(groupQuery.error, "Couldn't load this group.")}
         </p>
         <button
           type="button"
@@ -306,7 +307,10 @@ export default function GroupPage() {
 
       {(leave.isError || remove.isError) && (
         <p role="alert" className="px-5 py-2 text-sm text-red-600">
-          {leave.error?.message || remove.error?.message || "Something went wrong."}
+          {serverMessage(
+            leave.error || remove.error,
+            "Something went wrong."
+          )}
         </p>
       )}
 

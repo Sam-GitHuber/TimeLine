@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import BlockButton from "./components/BlockButton.jsx";
 import ConnectButton from "./components/ConnectButton.jsx";
 import { api } from "./api.js";
+import { unauthoredError } from "./test-utils.jsx";
 
 /**
  * When a failure message on the Block / Connect controls is allowed to *retire*
@@ -36,18 +37,6 @@ vi.mock("./api.js", () => ({
     getDisconnectImpact: vi.fn(),
   },
 }));
-
-/**
- * What api.js raises when the server answered but wrote nothing showable — a 500
- * rendered as a Django HTML page. `firstErrorMessage` finds no `detail`, so the
- * message is our own synthesized stand-in and `fromServer` is false.
- */
-function unauthoredError(status) {
-  return Object.assign(new Error(`Request failed (${status})`), {
-    status,
-    fromServer: false,
-  });
-}
 
 /** Render a control, and hand back a rerender that keeps the same provider. */
 function renderButton(ui) {

@@ -7,6 +7,7 @@ import {
 } from "../useDropdownMenu.js";
 import PollOptionFields from "./PollOptionFields.jsx";
 import { optionValuePayload } from "./pollOptions.js";
+import { serverMessage } from "../../errors.js";
 import { formatEventDate, formatEventTime } from "../../utils.js";
 
 // A poll's tally — a Doodle/when2meet feel without the coldness: each candidate
@@ -81,7 +82,9 @@ export default function PollTally({
       // `next` while this request was in flight, the server has since spoken and
       // its answer must not be undone by a snapshot taken before the click.
       setSelected((current) => (current === next ? before : current));
-      setVoteError(err?.message || "Your vote didn't go through — try again.");
+      setVoteError(
+        serverMessage(err, "Your vote didn't go through — try again.")
+      );
     }
   }
 
@@ -333,7 +336,7 @@ function PollEditForm({ poll, onSave, onDone }) {
       await onSave(payload);
       onDone();
     } catch (err) {
-      setError(err?.message || "Couldn't save your changes.");
+      setError(serverMessage(err, "Couldn't save your changes."));
       setSaving(false);
     }
   }

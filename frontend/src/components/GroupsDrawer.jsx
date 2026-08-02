@@ -6,6 +6,7 @@ import Avatar from "./Avatar.jsx";
 import LoadMoreButton from "./LoadMoreButton.jsx";
 import { SpineMark, StrokeIcon, IconButton } from "./drawer-chrome.jsx";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 import { useGroupsDrawer } from "../groups-drawer.jsx";
 import { useInfiniteList } from "../hooks.js";
 
@@ -110,7 +111,7 @@ function GroupsListView() {
 
         {isError && (
           <p className="px-5 py-10 text-center text-red-600">
-            {error?.message || "Couldn't load your groups."}
+            {serverMessage(error, "Couldn't load your groups.")}
           </p>
         )}
 

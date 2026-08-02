@@ -4,6 +4,7 @@ import { SpineMark, StrokeIcon, IconButton, PanelHeader } from "../drawer-chrome
 import ConversationRow from "./ConversationRow.jsx";
 import { api, CONVERSATION_LIST_POLL_MS } from "../../api.js";
 import { useAuth } from "../../auth.jsx";
+import { serverMessage } from "../../errors.js";
 import { useMessaging } from "../../messaging.jsx";
 
 /**
@@ -203,12 +204,12 @@ export default function ConversationListView() {
         )}
         {isError && (
           <p className="px-5 py-10 text-center text-red-600">
-            {error?.message || "Couldn't load your messages."}
+            {serverMessage(error, "Couldn't load your messages.")}
           </p>
         )}
         {rowAction.isError && (
           <p role="alert" className="px-5 py-2 text-center text-sm text-red-600">
-            {rowAction.error?.message || "Couldn’t do that."}
+            {serverMessage(rowAction.error, "Couldn’t do that.")}
           </p>
         )}
         {!isLoading && !isError && all.length === 0 && (

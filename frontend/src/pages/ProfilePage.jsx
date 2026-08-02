@@ -11,6 +11,7 @@ import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 
 // A single person's page: their details plus their own posts, newest-first.
 // Users are identified by numeric id in the URL (there is no username).
@@ -64,7 +65,7 @@ export default function ProfilePage() {
     return (
       <div className="px-6 py-16 text-center">
         <p className="text-lg font-medium text-red-600">
-          {userQuery.error?.message || "Couldn't load this profile."}
+          {serverMessage(userQuery.error, "Couldn't load this profile.")}
         </p>
         <button
           type="button"

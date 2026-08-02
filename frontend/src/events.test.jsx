@@ -9,7 +9,7 @@ import EventCard from "./components/events/EventCard.jsx";
 import MonthGrid from "./components/events/MonthGrid.jsx";
 import PlanEventForm from "./components/events/PlanEventForm.jsx";
 import Timeline from "./components/Timeline.jsx";
-import { renderWithAuth } from "./test-utils.jsx";
+import { renderWithAuth, apiError, offlineError } from "./test-utils.jsx";
 import { formatEventDate } from "./utils.js";
 import { api } from "./api.js";
 
@@ -169,12 +169,6 @@ describe("EventPage", () => {
       )
     );
   });
-
-  // What `api.js` raises once a response has come back: DRF's `detail` plus the
-  // status. A network-level failure has no status — see the fallback test.
-  function apiError(message, status = 500) {
-    return Object.assign(new Error(message), { name: "ApiError", status });
-  }
 
   // Issue #229. `guests`/`note` are typed into RsvpBar but the server owns the
   // answer: `your_response` changes under the mounted page on every refetch,
@@ -359,7 +353,7 @@ describe("EventPage", () => {
   // invisible — the tally not moving reads as "nobody else has voted yet".
   it("takes a failed vote's tick back and says what happened", async () => {
     api.getEvent.mockResolvedValue(makeEvent({ can_manage: false, can_moderate: false }));
-    api.votePoll.mockRejectedValueOnce(new Error("This poll is closed."));
+    api.votePoll.mockRejectedValueOnce(apiError("This poll is closed.", 400));
     renderEventPage();
     await screen.findByText("Picnic");
 
@@ -440,8 +434,13 @@ describe("EventPage", () => {
       )
     );
 
-    rejectVote(new Error("Offline."));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Offline.");
+    // Genuinely offline, which since #240 arrives as an `ApiError` carrying our
+    // own sentence rather than the browser's "Failed to fetch" — so what the
+    // component shows is `PollTally`'s fallback, not anything the server said.
+    rejectVote(offlineError());
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Your vote didn't go through — try again."
+    );
     // The failure is stated, and the newer vote survives it.
     expect(screen.getByRole("button", { name: /Drinks/ })).toHaveAttribute(
       "aria-pressed",

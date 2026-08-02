@@ -305,13 +305,16 @@ The gate needs a *present* organiser. Two paths:
   that are judged on keys recorded **at the attempt**, never on when the sync
   arrives, so it survives a refetch landing in the same render batch as the
   rejection (the trap #231 describes), an unchanged re-press, and a refetch
-  bearing some third answer alike. Only the server's own words are shown; a
-  network-level failure rejects out of `fetch` as a bare `TypeError` with no
-  status, and offline is exactly the case the message exists for. **Both
-  clients, one PR** — splitting #216 from #227 is what left the phone lying for
-  a day. The two copies stay behaviourally identical; they differ only in how
-  each spots a server-authored error (mobile's `ApiError` instance, the web's
-  numeric `status`).
+  bearing some third answer alike. Only the server's own words are shown, and
+  offline is exactly the case the fallback exists for. **Both clients, one PR** —
+  splitting #216 from #227 is what left the phone lying for a day. The two copies
+  stay behaviourally identical; they differ only in how each spots a
+  server-authored error. On the web that is `serverMessage`'s `fromServer` flag
+  (see [connections.md](connections.md#reporting-a-refused-write)): it used to be
+  a numeric-`status` sniff, which #240 retired when it made `api.js` re-raise a
+  network failure as an `ApiError` carrying `status: 0` — a status check stopped
+  separating anything the moment offline had one. Mobile still sniffs an
+  `ApiError` instance, and has the same unguarded `fetch` the web did (#243).
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).

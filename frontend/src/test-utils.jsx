@@ -43,3 +43,59 @@ export function renderWithAuth(ui, { route = "/", auth = {} } = {}) {
     </QueryClientProvider>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Stand-ins for the three rejections `request()` in `api.js` can produce.
+//
+// Tests can't use the real `ApiError`: the class is only reachable as
+// `api.ApiError`, and every suite here replaces that whole object with
+// `vi.mock("./api.js")`. So the shapes are rebuilt by hand — and getting them
+// *right* is the point, because `serverMessage` (`errors.js`) reads
+// `fromServer` to decide whether a rejection carries words a person should see.
+// A fake that omits the flag silently tests the wrong branch: it reads as a
+// server rejection and behaves like a network blink.
+//
+// Three near-copies had grown across the suites by the time issue #240 made
+// every call site depend on them, so they live in one place now.
+// ---------------------------------------------------------------------------
+
+/**
+ * What the server said, in its own words — DRF's `detail`, written for a person
+ * ("That code is invalid or has expired."). The only kind `serverMessage` shows.
+ */
+export function apiError(message, status = 500) {
+  return Object.assign(new Error(message), {
+    name: "ApiError",
+    status,
+    fromServer: true,
+  });
+}
+
+/**
+ * The server answered, but with nothing readable — a 500 rendered as a Django
+ * HTML page, say. `api.js` synthesizes "Request failed (500)", which carries a
+ * message *and* a status and so defeats any check cruder than the flag.
+ */
+export function unauthoredError(status = 500) {
+  return Object.assign(new Error(`Request failed (${status})`), {
+    name: "ApiError",
+    status,
+    fromServer: false,
+  });
+}
+
+/**
+ * No response at all — offline, DNS, the connection dropped. Since #240 this is
+ * converted at the source, so it reaches a component as an `ApiError` with
+ * `status: 0` and a sentence of ours rather than the browser's raw `TypeError`.
+ * `fromServer` stays false because the sentence is ours, which is what still
+ * lets a call site prefer its own, more specific copy.
+ */
+export function offlineError() {
+  return Object.assign(
+    new Error(
+      "Couldn’t reach the server — check your connection and try again."
+    ),
+    { name: "ApiError", status: 0, fromServer: false }
+  );
+}

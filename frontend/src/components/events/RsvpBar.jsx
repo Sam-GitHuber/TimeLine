@@ -1,5 +1,6 @@
 import { useState } from "react";
 import Avatar from "../Avatar.jsx";
+import { serverMessage } from "../../errors.js";
 
 // The RSVP control + summary. Counts are **complete** across the whole audience
 // (decision 2); the named avatar lists are **connection-gated** — you see who's
@@ -70,19 +71,16 @@ export default function RsvpBar({ event, onRsvp, busy }) {
       // had saved, and the count simply not moving reads as "nobody else has
       // RSVP'd yet" rather than "your change was rejected".
       //
-      // Only the server's own words are fit to show. `api.js` raises an
-      // `ApiError` — carrying DRF's `detail`, written for a person — only once
-      // a response has come back; a network-level failure rejects out of
-      // `fetch` itself as a bare `TypeError` ("Failed to fetch"), and offline
-      // is the very case this message exists for. A numeric `status` is what
-      // separates the two, the same sniff the rest of the app uses.
+      // Only the server's own words are fit to show — DRF's `detail`, written
+      // for a person. `serverMessage` is what decides that; offline (issue
+      // #240) and a body-less 500 both fall through to the sentence below,
+      // which is the case this message exists for. This used to sniff for a
+      // numeric `status` instead, which stopped being enough once a network
+      // failure started carrying one (`status: 0`).
       setFailed({
         saved: rsvpKey(body),
         from: serverKey,
-        message:
-          typeof err?.status === "number" && err.message
-            ? err.message
-            : "Your RSVP didn't save — try again.",
+        message: serverMessage(err, "Your RSVP didn't save — try again."),
       });
     }
   }

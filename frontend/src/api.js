@@ -63,8 +63,12 @@ class ApiError extends Error {
   // showable. Only that first kind is fit to put in front of a user — see
   // `errors.js`. Hand-constructed ApiErrors default to true because the point of
   // writing one by hand is to give a person a sentence.
-  constructor(message, status, data, fromServer = true) {
-    super(message);
+  //
+  // `options` is passed through to `Error` so a network failure can keep the
+  // original `TypeError` as its `cause` — unreadable to a user, but the only
+  // thing that says *why* the connection died when debugging.
+  constructor(message, status, data, fromServer = true, options = undefined) {
+    super(message, options);
     this.name = "ApiError";
     this.status = status;
     this.data = data;
@@ -89,17 +93,43 @@ async function request(path, { method = "GET", body } = {}) {
     if (csrf) headers["X-CSRFToken"] = csrf;
   }
 
-  const response = await fetch(BASE_URL + path, {
-    method,
-    headers,
-    credentials: "include",
-    body:
-      body === undefined
-        ? undefined
-        : isFormData
-          ? body
-          : JSON.stringify(body),
-  });
+  // Serialized *before* the try below, deliberately: `JSON.stringify` throws on
+  // a body we built wrong (a circular reference, a BigInt), and that is a bug in
+  // our code, not a connectivity problem. Inside the try it would be caught and
+  // dressed up as "check your connection", sending someone to reset a router
+  // over a mistake at the call site.
+  const payload =
+    body === undefined ? undefined : isFormData ? body : JSON.stringify(body);
+
+  // A network-level failure — offline, DNS, the connection dropped mid-request —
+  // rejects out of `fetch` itself as a bare `TypeError` carrying the *browser's*
+  // words ("Failed to fetch" in Chrome, "Load failed" in Safari). Left alone it
+  // propagates out of here untouched, and because it has a `message` it defeats
+  // every `err?.message || "our sentence"` at a call site: the sentence written
+  // for exactly this case becomes the one that never shows. So it's converted at
+  // the source into the same shape every other rejection has.
+  //
+  // `status: 0` because no response ever arrived (there is no HTTP status to
+  // report), and `fromServer: false` because the sentence below is ours, not the
+  // server's — that flag is what keeps `serverMessage` honest, and it's the whole
+  // reason a caller can still choose its own more specific copy.
+  let response;
+  try {
+    response = await fetch(BASE_URL + path, {
+      method,
+      headers,
+      credentials: "include",
+      body: payload,
+    });
+  } catch (err) {
+    throw new ApiError(
+      "Couldn’t reach the server — check your connection and try again.",
+      0,
+      null,
+      false,
+      { cause: err }
+    );
+  }
 
   // 204 No Content (and empty bodies) have nothing to parse.
   let data = null;

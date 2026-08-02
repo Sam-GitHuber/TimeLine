@@ -27,6 +27,7 @@ import {
 import { useAuth } from "../../auth.jsx";
 import { prepareChatPhoto } from "../../chatPhotos.js";
 import { getDraft, setDraft } from "../../drafts.js";
+import { serverMessage } from "../../errors.js";
 import { useDayBoundary } from "../../hooks.js";
 import { useMentions } from "../../mentions.js";
 import { insertMessage, patchReactions } from "../../messageCache.js";
@@ -630,7 +631,7 @@ export default function ConversationThreadView() {
       setOutbox((entries) =>
         entries.map((e) =>
           e.tempId === tempId
-            ? { ...e, status: "failed", error: error?.message ?? null }
+            ? { ...e, status: "failed", error: serverMessage(error, null) }
             : e
         )
       ),
@@ -1661,12 +1662,12 @@ export default function ConversationThreadView() {
               )}
               {reactMutation.isError && (
                 <p role="alert" className="mt-1 text-sm text-red-600">
-                  {reactMutation.error?.message || "Couldn’t react."}
+                  {serverMessage(reactMutation.error, "Couldn’t react.")}
                 </p>
               )}
               {editMutation.isError && (
                 <p role="alert" className="mt-1 text-sm text-red-600">
-                  {editMutation.error?.message || "Couldn’t save the edit."}
+                  {serverMessage(editMutation.error, "Couldn’t save the edit.")}
                 </p>
               )}
               {/* A bulk delete that fell over has no bubble to fail on and no

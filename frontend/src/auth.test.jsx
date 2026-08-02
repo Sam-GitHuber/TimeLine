@@ -36,6 +36,7 @@ vi.mock("./api.js", () => ({
 import { api } from "./api.js";
 import { AuthProvider } from "./auth.jsx";
 import { getDraft, setDraft } from "./drafts.js";
+import { apiError } from "./test-utils.jsx";
 import App from "./App.jsx";
 
 // The real provider, exactly as main.jsx wires it, at a given URL — including
@@ -120,7 +121,7 @@ describe("Login flow", () => {
     const emailField = await screen.findByLabelText("Email");
 
     api.login.mockRejectedValue(
-      new Error("Unable to log in with provided credentials.")
+      apiError("Unable to log in with provided credentials.", 400)
     );
 
     await user.type(emailField, "sam@example.com");

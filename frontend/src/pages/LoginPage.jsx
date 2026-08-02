@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 
 // Log-in form. On success, send the user back to wherever they were trying to
 // go (ProtectedRoute stashes that in location.state.from), or the feed.
@@ -27,10 +28,10 @@ export default function LoginPage() {
       await login(email, password);
       navigate(from, { replace: true });
     } catch (err) {
-      setError(err.message || "Could not log in.");
+      setError(serverMessage(err, "Could not log in."));
       // The backend's unverified-email message is distinctive; when we see it,
       // surface a shortcut to verify rather than leaving the person stuck.
-      if (/verify your email/i.test(err.message || "")) {
+      if (/verify your email/i.test(serverMessage(err, ""))) {
         setNeedsVerify(true);
       }
     } finally {

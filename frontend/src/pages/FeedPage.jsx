@@ -4,6 +4,7 @@ import Timeline from "../components/Timeline.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // Remember the "include groups" choice per browser so it survives reloads —
 // it's a viewing preference, not something worth a round-trip to save.
@@ -61,7 +62,7 @@ export default function FeedPage() {
 
       {isError && (
         <p className="px-6 py-10 text-center text-red-600">
-          {error?.message || "Couldn't load the feed."}
+          {serverMessage(error, "Couldn't load the feed.")}
         </p>
       )}
 

@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { useConnections } from "../hooks.js";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // Pick one of your connections to invite to a group. You can only invite people
 // you're connected with (the backend enforces it), so — like the new-message
@@ -28,7 +29,10 @@ export default function GroupInvitePicker({ groupId, onClose }) {
     onError: (error, userId) =>
       setSent((s) => ({
         ...s,
-        [userId]: { ok: false, message: error?.message || "Couldn't invite." },
+        [userId]: {
+          ok: false,
+          message: serverMessage(error, "Couldn't invite."),
+        },
       })),
   });
 

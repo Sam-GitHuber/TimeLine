@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 
 // The "danger zone" on the profile-edit page: permanently delete your account
 // and everything you've posted (UK GDPR erasure — Phase 7). Because it's
@@ -76,7 +77,7 @@ function ConfirmDeleteModal({ onCancel }) {
       }
       window.location.assign("/login");
     } catch (err) {
-      setError(err.message || "Couldn’t delete your account.");
+      setError(serverMessage(err, "Couldn’t delete your account."));
       setDeleting(false);
     }
   }

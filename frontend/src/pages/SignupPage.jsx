@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 import { AuthShell, Field } from "./LoginPage.jsx";
 
 // Sign-up form. On success the account exists but must be verified (email code)
@@ -34,7 +35,7 @@ export default function SignupPage() {
       // pre-addressed (the code entry is the only thing left to do there).
       navigate("/verify-email", { state: { email } });
     } catch (err) {
-      setError(err.message || "Could not create the account.");
+      setError(serverMessage(err, "Could not create the account."));
       setSubmitting(false);
     }
   }

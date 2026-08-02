@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { PanelHeader } from "./drawer-chrome.jsx";
 import { api } from "../api.js";
+import { serverMessage } from "../errors.js";
 import { useMessaging } from "../messaging.jsx";
 import { useConnections } from "../hooks.js";
 
@@ -188,10 +189,12 @@ export default function NewChatPicker({ prefill }) {
         </div>
         {create.isError && (
           <p className="mt-2 text-sm text-red-600">
-            {create.error?.message ||
-              (addToConversationId
+            {serverMessage(
+              create.error,
+              addToConversationId
                 ? "Couldn’t add them to this chat."
-                : "Couldn’t start that chat.")}
+                : "Couldn’t start that chat."
+            )}
           </p>
         )}
       </div>

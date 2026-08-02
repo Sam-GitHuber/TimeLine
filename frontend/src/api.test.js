@@ -257,4 +257,104 @@ describe("api CSRF + fetch wiring", () => {
       /unable to log in/i
     );
   });
+
+  it("flags the server's own words as such, and its own stand-in as not", async () => {
+    stubFetch({
+      ok: false,
+      status: 403,
+      body: JSON.stringify({ detail: "You can’t message this person." }),
+    });
+    await expect(api.openConversation(2)).rejects.toMatchObject({
+      message: "You can’t message this person.",
+      status: 403,
+      fromServer: true,
+    });
+
+    // A 500 rendered as a Django HTML page: nothing for `firstErrorMessage` to
+    // pull out, so the message below is ours and must say so.
+    stubFetch({ ok: false, status: 500, body: "<html>Server Error</html>" });
+    await expect(api.openConversation(2)).rejects.toMatchObject({
+      message: "Request failed (500)",
+      status: 500,
+      fromServer: false,
+    });
+  });
+});
+
+// Issue #240. A network-level failure — offline, DNS, the connection dropped —
+// rejects out of `fetch` itself as a bare `TypeError` carrying the *browser's*
+// words. Left to propagate it defeats every `serverMessage(err, "our sentence")`
+// at a call site, because a `TypeError` has a message and would be shown in
+// place of the sentence written for exactly this case. So it's converted here,
+// at the one place every request passes through.
+describe("api network-failure handling", () => {
+  function stubOfflineFetch() {
+    const fn = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  }
+
+  it("turns a fetch rejection into an ApiError with a sentence of ours", async () => {
+    stubOfflineFetch();
+
+    await expect(api.createPost({ text: "hi" })).rejects.toMatchObject({
+      name: "ApiError",
+      // No response ever arrived, so there is no HTTP status to report.
+      status: 0,
+      // Ours, not the server's — which is what keeps `serverMessage` honest and
+      // lets a call site show its own, more specific copy instead.
+      fromServer: false,
+    });
+  });
+
+  it("never lets the browser's own wording reach a caller", async () => {
+    stubOfflineFetch();
+
+    const err = await api.createPost({ text: "hi" }).catch((e) => e);
+
+    expect(err.message).not.toMatch(/failed to fetch/i);
+    expect(err.message).toMatch(/connection/i);
+  });
+
+  it("keeps the original TypeError as the cause", async () => {
+    stubOfflineFetch();
+
+    const err = await api.getCurrentUser().catch((e) => e);
+
+    // Unreadable to a user, but the only thing that says *why* the connection
+    // died when someone is debugging one of these.
+    expect(err.cause).toBeInstanceOf(TypeError);
+    expect(err.cause.message).toBe("Failed to fetch");
+  });
+
+  it("does not disguise a body we built wrong as a connection problem", async () => {
+    // `JSON.stringify` throwing is a bug at the call site, not a dropped
+    // connection. Caught by the guard it would tell someone to check a
+    // connection that is fine, so the serialization happens outside it.
+    const fetchMock = stubFetch({ body: "{}" });
+    const circular = {};
+    circular.self = circular;
+
+    const err = await api.createPost(circular).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err.message).not.toMatch(/connection/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still reports a reachable server's rejection as the server's", async () => {
+    // The guard wraps `fetch` only. A response that arrives and is refused must
+    // keep coming through the existing path, flagged `fromServer`.
+    stubFetch({
+      ok: false,
+      status: 400,
+      body: JSON.stringify({ detail: "That poll is closed." }),
+    });
+
+    await expect(api.votePoll(12, [201])).rejects.toMatchObject({
+      message: "That poll is closed.",
+      status: 400,
+      fromServer: true,
+    });
+  });
 });

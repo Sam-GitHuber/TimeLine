@@ -10,7 +10,7 @@ vi.mock("./api.js", () => ({
 }));
 
 import { api } from "./api.js";
-import { renderWithAuth } from "./test-utils.jsx";
+import { renderWithAuth, apiError } from "./test-utils.jsx";
 import ChangePasswordSection from "./components/ChangePasswordSection.jsx";
 
 beforeEach(() => {
@@ -70,7 +70,7 @@ describe("Change password", () => {
   it("surfaces a backend error (e.g. wrong current password)", async () => {
     const user = userEvent.setup();
     api.changePassword.mockRejectedValue(
-      new Error("Your old password was entered incorrectly.")
+      apiError("Your old password was entered incorrectly.", 400)
     );
 
     renderWithAuth(<ChangePasswordSection />);

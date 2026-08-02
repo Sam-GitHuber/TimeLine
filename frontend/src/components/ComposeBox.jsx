@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
+import { serverMessage } from "../errors.js";
 
 // Kept in step with the backend cap (api.imaging.MAX_IMAGES_PER_POST) so we
 // stop the user before a doomed request rather than after a 400.
@@ -127,7 +128,7 @@ export default function ComposeBox({ group = null }) {
 
           {mutation.isError && (
             <p className="mt-1 text-sm text-red-600">
-              {mutation.error?.message || "Couldn't post. Try again."}
+              {serverMessage(mutation.error, "Couldn't post. Try again.")}
             </p>
           )}
 
