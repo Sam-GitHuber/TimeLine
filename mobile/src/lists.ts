@@ -1,10 +1,14 @@
 /**
  * Small, generic helpers for the paginated infinite lists in the app (feed,
- * people, requests). Kept out of any route/screen file so they're directly
- * unit-testable and shared rather than re-derived per screen.
+ * people, requests), plus the one hook that walks such a list to its end. Kept
+ * out of any route/screen file so they're directly unit-testable and shared
+ * rather than re-derived per screen — which for `useFetchAllPages` is the whole
+ * point, since the three screens that had their own copy of it all had the same
+ * bug (#248).
  */
 
 import type { InfiniteData } from '@tanstack/react-query';
+import { useEffect } from 'react';
 
 import type { Paginated } from './types';
 
@@ -50,4 +54,53 @@ export function trimToFirstPage<T>(
     pages: data.pages.slice(0, 1),
     pageParams: data.pageParams.slice(0, 1),
   };
+}
+
+/** The four fields of an infinite query the walk below reads. */
+type PagedQuery = {
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  isError: boolean;
+  fetchNextPage: () => unknown;
+};
+
+/**
+ * Walk an infinite query to the end, pulling each remaining page as soon as the
+ * one before it lands. For the handful of lists bounded by something real (your
+ * connections; the replies to one message) and so wanted whole, as opposed to
+ * the unbounded ones that page on scroll from `onEndReached`.
+ *
+ * **`isError` is load-bearing, not defensive.** Without it a *failed* page fetch
+ * re-arms this effect the instant it fails: `hasNextPage` stays true, because
+ * the server never said there was no more, while `isFetchingNextPage` flips back
+ * to false — which is exactly the condition below. So a 500 or a dropped signal
+ * on page 2 doesn't stop the walk, it restarts it, one request per render commit
+ * for as long as the screen stays mounted, with the client's own retry stacked
+ * on each attempt (one here — `_layout.tsx` bounds it deliberately, where the
+ * web takes TanStack's default of three). That hammers an endpoint that is by
+ * definition already unhealthy, from a phone whose connection has just dropped —
+ * so it spins the radio flat at the exact moment there's least to gain (#248,
+ * and #214 for the web twin).
+ *
+ * Stopping instead leaves a partial list and hands the transient case to the
+ * query's own retry/backoff. Recovery is automatic: any later fetch that
+ * succeeds (a poll, a refocus) clears `isError` and the remaining pages resume
+ * from where they stopped.
+ *
+ * ⚠️ **A caller of this hook owes the viewer an `isError` branch**, because a
+ * list that stops short looks exactly like a list that ended. That's the cost of
+ * not looping, and it's only paid if it's rendered: a picker missing the person
+ * you're looking for reads as "they aren't in your connections", which is a
+ * wrong answer, not a missing one. Note that a `ListEmptyComponent` alone
+ * doesn't discharge it — the partial case is precisely the one where the list
+ * isn't empty.
+ *
+ * One place, so the next screen that wants every page can't reintroduce the
+ * loop. The web's equivalent is `useFetchAllPages` in `frontend/src/hooks.js`.
+ */
+export function useFetchAllPages(query: PagedQuery): void {
+  const { hasNextPage, isFetchingNextPage, isError, fetchNextPage } = query;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && !isError) fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, isError, fetchNextPage]);
 }

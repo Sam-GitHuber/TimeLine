@@ -18,6 +18,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react-nativ
 import NewChatScreen from '@/app/messages/new';
 import type { PersonSummary } from '@/types';
 
+import { settle } from './helpers';
+
 const mockParams: { addTo?: string } = {};
 const mockPush = jest.fn();
 const mockReplace = jest.fn();
@@ -57,12 +59,28 @@ function person(id: number, name: string): PersonSummary {
 const ADA = person(2, 'Ada Lovelace');
 const GRACE = person(3, 'Grace Hopper');
 
-function serve(connections: PersonSummary[] = [ADA, GRACE]) {
+/**
+ * `pageTwoFails` stages #248: page one lands carrying a `next`, and the page it
+ * points at 500s. The failure is deliberately a macrotask late — a mock that
+ * rejects instantly settles inside the same React batch as the render that
+ * fired it, which is not how a real request behaves and would hide the loop
+ * (see `settle`).
+ */
+function serve(
+  connections: PersonSummary[] = [ADA, GRACE],
+  { pageTwoFails = false } = {}
+) {
   mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
     if (url.includes('filter=connected')) {
+      if (pageTwoFails && url.includes('page=2')) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: 'Server error.' }, 500);
+      }
       return jsonResponse({
         count: connections.length,
-        next: null,
+        next: pageTwoFails
+          ? 'http://localhost:8000/api/users/?filter=connected&page=2'
+          : null,
         previous: null,
         results: connections,
       });
@@ -93,6 +111,12 @@ async function renderScreen() {
 
 function bodyOf(call: [string, { body?: string }]) {
   return JSON.parse(call[1].body ?? '{}');
+}
+
+/** Every request for the second page of connections — one is a walk that
+ *  stopped, many is the loop. */
+function pageTwoRequests() {
+  return mockFetch.mock.calls.filter(([url]) => String(url).includes('page=2'));
 }
 
 beforeEach(() => {
@@ -251,4 +275,43 @@ it('filters the connection list by the search term', async () => {
 
   expect(screen.getByLabelText('Grace Hopper')).toBeTruthy();
   expect(screen.queryByLabelText('Ada Lovelace')).toBeNull();
+});
+
+it('stops paging your connections when a page fails, instead of looping on it', async () => {
+  serve([ADA], { pageTwoFails: true });
+  await renderScreen();
+
+  // What did land is still pickable — a stopped walk keeps its pages.
+  expect(await screen.findByLabelText('Ada Lovelace')).toBeTruthy();
+  // And the list says why it might be short, rather than letting the names on
+  // screen pass for all the names there are.
+  expect(
+    await screen.findByText('Couldn’t load your connections.')
+  ).toBeTruthy();
+
+  // #248: the failure re-armed the effect that asked for the page — the server
+  // never said there was no page 2, so `hasNextPage` stayed true, and
+  // `isFetchingNextPage` going false again *is* the condition it waits for.
+  await settle();
+  expect(pageTwoRequests()).toHaveLength(1);
+});
+
+it('keeps asking for nothing while you type into a truncated list', async () => {
+  // Typing is what makes this screen's loop worse than a pure idle one: every
+  // keystroke is another commit, so before the fix, searching for the person
+  // missing from the truncated list was itself what hammered the server.
+  serve([ADA], { pageTwoFails: true });
+  await renderScreen();
+  await screen.findByText('Couldn’t load your connections.');
+  await settle();
+
+  for (const term of ['g', 'gr', 'gra']) {
+    await fireEvent.changeText(
+      screen.getByLabelText('Search your connections'),
+      term
+    );
+  }
+
+  await settle();
+  expect(pageTwoRequests()).toHaveLength(1);
 });

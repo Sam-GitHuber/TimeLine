@@ -44,7 +44,7 @@
 
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { BlurView } from 'expo-blur';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -64,6 +64,7 @@ import {
   KeyboardAvoider,
   useKeyboardVisible,
 } from '@/components/KeyboardAvoider';
+import { useFetchAllPages } from '@/lists';
 import type { Mentionable } from '@/mentions';
 import { useMentions } from '@/mentions';
 import type { SendState } from '@/readReceipts';
@@ -166,6 +167,13 @@ export function MessageThreadView({
    * upward; a strand is one exchange inside it, bounded by how much anyone says
    * in reply to a single message. Loading a short list whole is right here and
    * was wrong there.
+   *
+   * "Every page" means every page that *loads*: a failed one stops the walk
+   * rather than restarting it (`useFetchAllPages`, #248), which on this panel
+   * would otherwise have run for the whole time the strand stayed open — it
+   * polls, so the loop had no natural end. The cost is that the strand can sit
+   * in the clipped state above until a poll gets through, which is why the
+   * footer below says so rather than leaving the gap unexplained.
    */
   const threadQuery = useInfiniteQuery({
     queryKey: threadQueryKey(conversationId, rootId),
@@ -177,10 +185,7 @@ export function MessageThreadView({
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
     refetchInterval: MESSAGE_POLL_MS,
   });
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = threadQuery;
-  useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  useFetchAllPages(threadQuery);
 
   const loaded = threadQuery.data?.pages.flatMap((page) => page.results) ?? [];
   // Unsent replies go last: one that hasn't been accepted is by definition
@@ -272,7 +277,16 @@ export function MessageThreadView({
                 // Only when the root itself is clipped out — the replies below
                 // are ones this viewer *is* entitled to, so the thread is
                 // genuinely headless rather than empty.
-                !root && messages.length > 0 ? (
+                //
+                // Never on a failure, which its web twin has always been gated
+                // on and this one now needs to be: a missing root is a claim
+                // about *permission*, and until #248 a failed fetch cleared
+                // itself within a render or two because the broken walk kept
+                // re-firing. Now the flag is sticky until a poll gets through,
+                // so an unsent reply against a strand that didn't load would
+                // hold this on screen — telling you you're not entitled to a
+                // message the network merely failed to fetch.
+                !root && !threadQuery.isError && messages.length > 0 ? (
                   <Text style={styles.missingRoot}>
                     The start of this thread isn’t available to you
                   </Text>
@@ -331,6 +345,28 @@ export function MessageThreadView({
                     The start of this thread isn’t available to you
                   </Text>
                 )
+              }
+              ListFooterComponent={
+                // A stopped walk (#248) leaves the strand clipped at its
+                // *oldest* replies, so the gap is at this end — the newest
+                // replies, and the count on the root will have gone on climbing
+                // past what's here. Say so instead of letting it read as the
+                // whole thread. The poll clears it on its own once a fetch gets
+                // through.
+                //
+                // Which of the two lines depends on `loaded`, not `messages`:
+                // `messages` counts unsent replies too, so a strand where
+                // *nothing* came back but you've queued a reply anyway isn't
+                // empty as far as the list is concerned, and the branch below
+                // never runs. Saying "the newest replies" there would claim a
+                // tail is missing when in fact none of it arrived.
+                threadQuery.isError && messages.length > 0 ? (
+                  <Text style={styles.pagesFailed}>
+                    {loaded.length > 0
+                      ? 'Couldn’t load the newest replies.'
+                      : 'Couldn’t load this thread. Close and try again.'}
+                  </Text>
+                ) : null
               }
             />
           )}
@@ -436,6 +472,12 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     fontStyle: 'italic',
     color: colors.inkFaint,
+    textAlign: 'center',
+  },
+  pagesFailed: {
+    marginTop: spacing.sm,
+    fontSize: fontSize.sm,
+    color: colors.danger,
     textAlign: 'center',
   },
   composerBar: {

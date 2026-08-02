@@ -10,7 +10,7 @@
 
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Alert,
   FlatList,
@@ -25,7 +25,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
-import { dedupeById } from '@/lists';
+import { dedupeById, useFetchAllPages } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { PersonSummary } from '@/types';
 
@@ -39,6 +39,11 @@ export default function GroupInviteScreen() {
   const [term, setTerm] = useState('');
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
 
+  // Every page of your connections, since the person you want to invite can
+  // sort past the first twenty. A page that fails stops the walk rather than
+  // retrying it forever (#248) — so the list can end short, and the banner
+  // below is what keeps that from reading as "you aren't connected to them",
+  // which is a wrong answer rather than a missing one.
   const connectionsQuery = useInfiniteQuery({
     queryKey: ['connections'],
     queryFn: ({ pageParam }) =>
@@ -46,10 +51,7 @@ export default function GroupInviteScreen() {
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = connectionsQuery;
-  useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  useFetchAllPages(connectionsQuery);
 
   // Existing members are excluded from the pool — you can't invite someone
   // already in the group (the server would reject it too).
@@ -169,9 +171,27 @@ export default function GroupInviteScreen() {
               </Pressable>
             );
           }}
+          ListHeaderComponent={
+            // Above the rows, not in the empty state, because the case this
+            // exists for is the list that *isn't* empty: page one landed and
+            // page two didn't, so the names on screen look like all the names
+            // there are (#248).
+            connectionsQuery.isError ? (
+              <Text style={styles.banner}>
+                Couldn’t load your connections.
+              </Text>
+            ) : null
+          }
           ListEmptyComponent={
             connectionsQuery.isLoading || membersQuery.isLoading ? (
               <Text style={styles.message}>Loading…</Text>
+            ) : connectionsQuery.isError ? (
+              // The header already says it, and says it whether the list came
+              // back empty or merely short. What must not happen here is the
+              // line below: with nothing loaded, "everyone is already in this
+              // group" is the same lie in stronger terms — the truth is that we
+              // failed to ask.
+              null
             ) : connections.length === 0 ? (
               <Text style={styles.message}>
                 Everyone you’re connected with is already in this group.
@@ -259,6 +279,16 @@ const styles = StyleSheet.create({
   checkMark: { color: '#ffffff', fontSize: 13, fontWeight: '800' },
   name: { flex: 1, fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
   message: { padding: spacing.xl, textAlign: 'center', fontSize: fontSize.sm, color: colors.inkFaint, lineHeight: 20 },
+  banner: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    textAlign: 'center',
+    fontSize: fontSize.sm,
+    color: colors.danger,
+    lineHeight: 20,
+  },
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
