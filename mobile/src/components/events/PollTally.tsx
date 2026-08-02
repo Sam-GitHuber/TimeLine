@@ -72,7 +72,7 @@ export function PollTally({
   // Seeded once from the server, then owned locally. A cast refetches for fresh
   // *counts*. This was "same as the web" until #216, which gave the web copy a
   // rollback on a failed vote and a re-derive when `your_votes` changes; until
-  // that's ported, a failed vote leaves its tick showing here (events.md).
+  // that's ported, a failed vote leaves its tick showing here (#227).
   const [selected, setSelected] = useState<Set<number>>(new Set(poll.your_votes ?? []));
   const [editing, setEditing] = useState(false);
 

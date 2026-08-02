@@ -304,7 +304,8 @@ client just renders what arrives. Date/time render through a mobile copy of the
 
 **Known divergence:** the mobile `PollTally` still votes fire-and-forget with a
 seeded-once selection — the shape the web had before #216 — so a failed vote
-leaves its tick showing there. Tracked separately; the fix is the same two moves.
+leaves its tick showing there, and it's the client with the worse network.
+Tracked in #227; the fix is the same two moves.
 
 The **organiser's control surface** arrives in **E3c**, split into two PRs:
 
