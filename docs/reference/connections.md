@@ -96,7 +96,10 @@ surfaces in the same family (#237–#240):
   reads in one line: *the server's own words when it wrote any, ours otherwise,
   the browser's never.* Pinned in `frontend/src/offline-writes.test.jsx` and
   `api.test.js`. The mobile client has the same unguarded `fetch` at ~25 sites —
-  tracked separately in #243.
+  tracked separately in #243. Its *second* unguarded `fetch`, on the token
+  refresh path, is guarded as of #245, where the same root cause signed the user
+  out rather than mis-wording a message — see
+  [accounts.md](accounts.md#only-the-server-may-end-a-session-245).
 
 - **A message is retired only by the server moving to the answer the attempt was
   reaching for** — the request landed and only its response was lost, so the

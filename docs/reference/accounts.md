@@ -196,6 +196,50 @@ On the device the tokens live in **`expo-secure-store`** (Keychain-backed), neve
 JS, so: never log them, never put them in an error report, never append them to a
 URL query string.
 
+### Only the server may end a session (#245)
+
+The silent refresh in `mobile/src/api.ts` is the one place the app destroys
+credentials without being asked to, so it has to be certain *why* it is doing it.
+Until #245 it wasn't: the refresh `fetch` sat outside any `try`, and the single
+`catch` around it treated every failure as the server's verdict — the comment
+there listed three causes (expired, rotated away, blacklisted) and all three were
+things the server says. A fourth it didn't list, the request never arriving, took
+the same branch and ran `clearTokens()` on a refresh token still perfectly valid
+90 days out.
+
+That window is the ordinary condition of a mobile network rather than an exotic
+one. It needs the connection to work for one request and fail for the next, which
+is what a foreground-after-a-while does: the first call 401s (so the network was
+up), the app goes to refresh, and the train enters a cutting. The user lands on
+the login screen with nothing left to recover with and no way to describe what
+happened beyond "it logged me out". `onlineManager` is deliberately left unwired
+to NetInfo (see [connections.md](connections.md#reporting-a-refused-write)), so
+React Query rejects an offline request rather than pausing it — which is what
+makes this reachable rather than theoretical.
+
+The rule now: **a session ends only when the server refuses the token.**
+`isTokenRejection` reads the status — 401 (expired, rotated away, blacklisted) or
+400 (a malformed body), the two answers simplejwt's `TokenRefreshView` gives —
+and only those clear the tokens and fire the session-expired handler. Everything
+else rethrows and keeps them:
+
+- **The request never landed.** The `fetch` is guarded and re-raised as an
+  `ApiError` with `status: 0`, `fromServer: false` and a sentence of ours,
+  keeping the `TypeError` as `cause` — the same shape the web's `request` uses
+  (#240/#244).
+- **A 200 that isn't the token pair.** A captive portal answering with its own
+  login page is a connection problem wearing a success status; unguarded, the
+  JSON parse throws and reads exactly like a refused token.
+- **A 5xx.** The box redeploying and answering 502 for a few seconds says nothing
+  about anyone's token, and a release must not sign every phone out.
+
+The user retries when signal returns and stays signed in. The two paths that end
+a session for real are unchanged, and the `'Your session has expired.'` message
+is now only shown when it's true. Pinned in `mobile/src/__tests__/api.test.ts`
+and `auth.test.tsx`; the cold-start half of the same rule is the `status === 401`
+check in `auth.tsx`, which this makes consistent — the two used to disagree about
+what a lost connection meant.
+
 ### What leaves the phone with the session (#191)
 
 The threat model is a **shared or handed-on phone**: a session ends, someone
