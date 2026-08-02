@@ -1499,7 +1499,11 @@ the label above the composer names the target, and clears back to the root.
 the difference between the two views rather than an inconsistency — a transcript
 is unbounded, a strand is one exchange inside it. Reading only page one would cut
 a busy strand off at its *oldest* twenty and hide the reply you just sent, while
-the root's count climbed past what the strand showed.
+the root's count climbed past what the strand showed. It walks those pages
+through the shared `useFetchAllPages` — with the guard that stops a *failed* page
+becoming an unthrottled retry loop, which on this panel would have run for as
+long as the strand stayed open; see
+[feed-and-posts](feed-and-posts.md#pagination) (#214).
 
 Replies go through the **same outbox** as everything else, so one appears the
 instant you send it and a failed one keeps its place with Retry — in the strand

@@ -471,6 +471,45 @@ describe("GroupInvitePicker", () => {
     await userEvent.click(within(row).getByRole("button", { name: "Invite" }));
     expect(api.inviteToGroup).toHaveBeenCalledWith(7, 3);
   });
+
+  it("says so when a page of connections fails, rather than looking short", async () => {
+    // The walk stops on a failed page instead of retrying it forever (#214), so
+    // the list can end early — and a list that stopped short looks exactly like
+    // a list that ended. Here that would read as "you aren't connected to them",
+    // which is a wrong answer rather than a missing one.
+    api.listUsers.mockResolvedValue({
+      results: [
+        {
+          id: 2,
+          display_name: "Page One Pal",
+          connection_status: "connected",
+          avatar_thumb: null,
+        },
+      ],
+      next: "/api/users/?page=2",
+    });
+    api.getPage.mockRejectedValue(new Error("boom"));
+
+    renderWithAuth(<GroupInvitePicker groupId={7} onClose={() => {}} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn’t load your connections."
+    );
+    // And what did load is still invitable.
+    expect(screen.getByText("Page One Pal")).toBeInTheDocument();
+  });
+
+  it("doesn't claim you have no connections when the load failed", async () => {
+    // Nothing loaded at all: the empty state is the same lie in stronger terms.
+    api.listUsers.mockRejectedValue(new Error("boom"));
+
+    renderWithAuth(<GroupInvitePicker groupId={7} onClose={() => {}} />);
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/You can only invite people you're connected with/)
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("GroupFormPage create", () => {

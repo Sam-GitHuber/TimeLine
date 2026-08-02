@@ -16,10 +16,14 @@ export default function GroupInvitePicker({ groupId, onClose }) {
 
   // The shared hook lists your connections (paged across every page) and
   // narrows by the search term — the same source the new-message picker uses.
+  // `isError` is read for the same reason that picker reads it: the walk stops
+  // on a failed page (#214) rather than retrying it forever, so a list short of
+  // someone you know has to say why instead of just being short.
   const {
     connections,
     filtered,
     isLoading: usersLoading,
+    isError: usersError,
   } = useConnections(needle);
 
   const invite = useMutation({
@@ -60,7 +64,16 @@ export default function GroupInvitePicker({ groupId, onClose }) {
         <p className="py-2 text-sm text-ink-faint">Loading…</p>
       )}
 
-      {!usersLoading && connections.length === 0 && (
+      {usersError && (
+        <p role="alert" className="py-2 text-sm text-red-600">
+          Couldn’t load your connections.
+        </p>
+      )}
+
+      {/* Gated on `usersError` too: with nothing loaded, "you aren't connected
+          to anyone" is the one reading this must not offer, since the truth is
+          that we failed to ask. */}
+      {!usersLoading && !usersError && connections.length === 0 && (
         <p className="py-2 text-sm text-ink-faint">
           You can only invite people you're connected with. Connect with someone
           first.
