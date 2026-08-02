@@ -177,13 +177,38 @@ async function toFilePart(upload: PhotoUpload): Promise<FilePart> {
 export class ApiError extends Error {
   status: number;
   data: unknown;
+  /**
+   * The message is one the *server* wrote for a person (DRF's `detail`), rather
+   * than one we synthesized because it sent nothing showable. Only the first
+   * kind is fit to put in front of a user — see `serverMessage` below. Defaults
+   * true because the point of hand-writing one is to give a person a sentence.
+   */
+  fromServer: boolean;
 
-  constructor(message: string, status: number, data: unknown) {
+  constructor(message: string, status: number, data: unknown, fromServer = true) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
+    this.fromServer = fromServer;
   }
+}
+
+/**
+ * A rejection worth showing a person, or the caller's own sentence.
+ *
+ * Two common failures carry no readable words. A network-level failure never
+ * becomes an `ApiError` at all — React Native rejects with
+ * `TypeError: Network request failed`, and offline is the likeliest way any
+ * write fails. And a server error with no DRF body (a 500 rendered as an HTML
+ * page) leaves `firstErrorMessage` nothing to pull out, so `request` synthesizes
+ * "Request failed (500)" — which has a status and a message, and would sail
+ * through a bare `instanceof ApiError` check straight onto the screen.
+ *
+ * Mirrors `frontend/src/errors.js`.
+ */
+export function serverMessage(err: unknown, fallback: string): string {
+  return err instanceof ApiError && err.fromServer ? err.message : fallback;
 }
 
 /**
@@ -333,10 +358,14 @@ async function request<T>(
   }
 
   if (!response.ok) {
+    // A body that isn't DRF's error JSON leaves nothing a person can read, so
+    // the synthesized stand-in is flagged as *not* the server's own words.
+    const authored = firstErrorMessage(data);
     throw new ApiError(
-      firstErrorMessage(data) ?? `Request failed (${response.status})`,
+      authored ?? `Request failed (${response.status})`,
       response.status,
-      data
+      data,
+      authored !== null
     );
   }
   return data as T;

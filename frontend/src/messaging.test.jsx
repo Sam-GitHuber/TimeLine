@@ -3270,4 +3270,190 @@ describe("Profile messaging + block controls", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/You’ve blocked Priya/)).toBeInTheDocument();
   });
+
+  // --- Issue #236: a rejected write must not look like one that worked -------
+  //
+  // All three of these controls fired a mutation with no error path at all, so
+  // a POST that never landed left the screen exactly as it was. On the block
+  // that isn't a cosmetic problem: you walk away believing someone can no longer
+  // message you or see your posts, and they can.
+
+  function profile(overrides = {}) {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "none",
+      is_blocked: false,
+      bio: "",
+      ...overrides,
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    api.getDisconnectImpact.mockResolvedValue({ chats: [] });
+  }
+
+  /** What api.js raises when the server authored the message (DRF's `detail`). */
+  function apiError(message, status) {
+    return Object.assign(new Error(message), { status, fromServer: true });
+  }
+
+  /**
+   * What api.js raises when the server answered but wrote nothing showable — a
+   * 500 rendered as a Django HTML page, say. `firstErrorMessage` finds no
+   * `detail`, so the message is our own synthesized stand-in.
+   */
+  function unauthoredError(status) {
+    return Object.assign(new Error(`Request failed (${status})`), {
+      status,
+      fromServer: false,
+    });
+  }
+
+  it("holds the block dialog open on a rejection and says they are not blocked", async () => {
+    const user = userEvent.setup();
+    profile();
+    api.blockUser.mockRejectedValue(apiError("Request failed (500)", 500));
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Block" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: /block confirmation/i,
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    // The failure lands where you pressed Confirm, and says the thing that
+    // matters rather than repeating the server's 500 — which says nothing about
+    // whether you're safe.
+    expect(
+      await within(dialog).findByText(
+        "Couldn’t block Priya — they’re not blocked. Try again."
+      )
+    ).toBeInTheDocument();
+    // Dismissing on confirm is what left the message nowhere to go; staying up
+    // also makes the same button the retry.
+    expect(
+      within(dialog).getByRole("button", { name: "Try again" })
+    ).toBeInTheDocument();
+    // And nothing anywhere claims the block landed.
+    expect(screen.getByRole("button", { name: "Block" })).toBeInTheDocument();
+    expect(screen.queryByText(/You’ve blocked Priya/)).not.toBeInTheDocument();
+  });
+
+  it("keeps saying so after you close the dialog on a failed block", async () => {
+    const user = userEvent.setup();
+    profile();
+    api.blockUser.mockRejectedValue(apiError("Request failed (500)", 500));
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Block" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: /block confirmation/i,
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+    await within(dialog).findByText(/they’re not blocked/);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    // The dialog is gone but the profile must not look untouched: the message
+    // moves to the button you pressed, which still reads "Block".
+    expect(
+      screen.queryByRole("dialog", { name: /block confirmation/i })
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Couldn’t block Priya — they’re not blocked. Try again."
+    );
+  });
+
+  // Offline is the likeliest way any of these fails, and `fetch` rejects with a
+  // bare TypeError carrying the *browser's* words ("Failed to fetch") — never
+  // fit to show a person. See `errors.js`.
+  it("says what is still true when an unblock never reaches the server", async () => {
+    const user = userEvent.setup();
+    profile({ is_blocked: true });
+    api.unblockUser.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Unblock" }));
+
+    expect(
+      await screen.findByText(
+        "Couldn’t unblock Priya — they’re still blocked. Try again."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Failed to fetch")).not.toBeInTheDocument();
+  });
+
+  it("reports a refused connection change in the server's own words", async () => {
+    const user = userEvent.setup();
+    profile({ connection_status: "requested" });
+    api.disconnect.mockRejectedValue(
+      apiError("That request no longer exists.", 404)
+    );
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Requested" }));
+
+    // Without this the button simply re-enabled, still reading "Requested" —
+    // nothing repaints, because no invalidation runs on the failure path.
+    expect(
+      await screen.findByText("That request no longer exists.")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Requested" })).toBeInTheDocument();
+  });
+
+  it("names which connection action failed when the server never spoke", async () => {
+    const user = userEvent.setup();
+    profile({ connection_status: "requested" });
+    api.disconnect.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Requested" }));
+
+    expect(
+      await screen.findByText("Couldn’t withdraw that request — try again.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Failed to fetch")).not.toBeInTheDocument();
+  });
+
+  // The other half of "the server never spoke": it answered, but with nothing a
+  // person can read. api.js synthesizes "Request failed (500)" for that, which
+  // carries a status and a message and would sail through any check that only
+  // asked "is this an ApiError?" — putting a stack-trace-shaped string under a
+  // button. `fromServer` is what keeps it out.
+  it("never shows the synthesized message from a body-less server error", async () => {
+    const user = userEvent.setup();
+    profile({ connection_status: "requested" });
+    api.disconnect.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Requested" }));
+
+    expect(
+      await screen.findByText("Couldn’t withdraw that request — try again.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Request failed/)).not.toBeInTheDocument();
+  });
+
+  // The rule for *retiring* one of these messages — that it goes only when the
+  // server itself moves to the answer the attempt was reaching for — is pinned
+  // at component level in `connection-buttons.test.jsx`, where the server's
+  // answer can be changed under a mounted button without remounting it.
+
+  it("says so when Message can't open the thread", async () => {
+    const user = userEvent.setup();
+    profile({ connection_status: "connected" });
+    api.openConversation.mockRejectedValue(
+      apiError("You can’t message this person.", 403)
+    );
+
+    renderAt("/u/2");
+    await user.click(await screen.findByRole("button", { name: "Message" }));
+
+    // The label used to flip back to "Message" with no drawer — a tap that
+    // silently did nothing.
+    expect(
+      await screen.findByText("You can’t message this person.")
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Messages" })
+    ).not.toBeInTheDocument();
+  });
 });

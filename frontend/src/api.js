@@ -58,11 +58,17 @@ function getCookie(name) {
 }
 
 class ApiError extends Error {
-  constructor(message, status, data) {
+  // `fromServer` says the message is one the *server* wrote for a person (DRF's
+  // `detail`), as opposed to one we synthesized because it sent nothing
+  // showable. Only that first kind is fit to put in front of a user — see
+  // `errors.js`. Hand-constructed ApiErrors default to true because the point of
+  // writing one by hand is to give a person a sentence.
+  constructor(message, status, data, fromServer = true) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.data = data;
+    this.fromServer = fromServer;
   }
 }
 
@@ -107,10 +113,15 @@ async function request(path, { method = "GET", body } = {}) {
   }
 
   if (!response.ok) {
+    // A 500 rendered as a Django HTML page, or any body that isn't DRF's error
+    // JSON, leaves nothing a person can read — so the synthesized stand-in is
+    // flagged as *not* the server's own words.
+    const authored = firstErrorMessage(data);
     throw new ApiError(
-      firstErrorMessage(data) || `Request failed (${response.status})`,
+      authored || `Request failed (${response.status})`,
       response.status,
-      data
+      data,
+      Boolean(authored)
     );
   }
   return data;

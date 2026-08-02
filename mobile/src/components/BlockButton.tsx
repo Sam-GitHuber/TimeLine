@@ -11,11 +11,29 @@
  * `isBlocked` is whether *you* have blocked them (from the profile payload's
  * `is_blocked`). App Review requires a working block, so this must be reachable
  * from any other person's profile.
+ *
+ * A rejected block used to be completely silent (issue #236): the warning modal
+ * dismissed before the mutation was even fired, the mutation had no error path,
+ * and nothing alerted — so a POST that never landed left the button still
+ * reading "Block" and looked exactly like one that worked. You then believed
+ * someone was blocked who could still message you and read your posts. This is
+ * the one place in the app where a silently-failed write leaves a person with a
+ * false belief about their own safety, so two things follow from it:
+ *
+ *   1. The write has to land before the modal dismisses. `mutateAsync` is
+ *      awaited so the dialog stays up behind the alert and its confirm button
+ *      becomes the retry.
+ *   2. The alert states what is still true rather than repeating the server's
+ *      words. `BlockView`'s only authored rejection is "You can't block
+ *      yourself" — unreachable, since the button isn't rendered on your own
+ *      profile — so every failure a real person hits here is a 404, a 500 or a
+ *      dropped connection, none of which say the thing that matters. (Offline,
+ *      React Native rejects with `TypeError: Network request failed`.)
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text } from 'react-native';
 
 import { api } from '@/api';
 import { DisconnectWarningModal } from './DisconnectWarningModal';
@@ -51,9 +69,31 @@ export function BlockButton({
     },
   });
 
+  // Like `PollTally`'s rollback, this leans on a deferral recorded in
+  // `app/_layout.tsx`: with `onlineManager` left unwired to NetInfo, an offline
+  // block *rejects*. Wire it and React Query's default `networkMode: 'online'`
+  // would **pause** the mutation instead — `mutateAsync` never settles, so no
+  // catch, no alert, and worse than the silence this fixes: `busy` stays true,
+  // and the warning dialog refuses Cancel, backdrop and back while busy, so the
+  // user is sealed inside it. The tripwire is invisible from either file alone.
+  //
+  // The wording is resolved at the attempt: a successful block flips `isBlocked`
+  // underneath us, and the message must keep describing the action that failed.
+  async function run() {
+    const wording = isBlocked
+      ? `Couldn’t unblock ${displayName} — they’re still blocked. Try again.`
+      : `Couldn’t block ${displayName} — they’re not blocked. Try again.`;
+    try {
+      await mutation.mutateAsync();
+      setShowWarning(false);
+    } catch {
+      Alert.alert(isBlocked ? 'Couldn’t unblock' : 'Couldn’t block', wording);
+    }
+  }
+
   function handlePress() {
     if (isBlocked) {
-      mutation.mutate();
+      run();
       return;
     }
     setShowWarning(true);
@@ -81,10 +121,8 @@ export function BlockButton({
           userId={userId}
           userName={displayName}
           action="block"
-          onConfirm={() => {
-            setShowWarning(false);
-            mutation.mutate();
-          }}
+          busy={mutation.isPending}
+          onConfirm={run}
           onCancel={() => setShowWarning(false)}
         />
       ) : null}

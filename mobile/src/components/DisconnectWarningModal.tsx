@@ -13,6 +13,19 @@
  * *and* the same shared group chats, so it warns exactly the same way. The
  * `action` prop swaps only the verb/label; the impact fetch and shape are
  * identical (`getDisconnectImpact` covers both — see api.ts).
+ *
+ * `busy` holds the dialog up while the write it confirmed is in flight, instead
+ * of dismissing the moment you tap Confirm. Dismissing first is what made a
+ * failed block invisible on both clients (issue #236); the caller alerts on the
+ * rejection and this stays put behind it, so the confirm button is the retry.
+ *
+ * The web's copy renders the message inside the dialog instead. The app is
+ * genuinely mixed on this — `ReactionBar` alerts a rejected reaction, while
+ * `events/PollTally` and `events/RsvpBar` render theirs inline under the control
+ * — and the split is about where the control lives. Inline text needs somewhere
+ * to sit that the user is already looking at; the block/connect controls are a
+ * button in a row with a dialog over it, so an Alert, which sits *over* the
+ * modal, is the only surface that survives the dialog staying up.
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -34,6 +47,8 @@ type Props = {
   userName: string;
   /** Swaps the verb/label; the warning is otherwise identical. Default disconnect. */
   action?: 'disconnect' | 'block';
+  /** The confirmed write is in flight — hold the dialog and take no more taps. */
+  busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -42,6 +57,7 @@ export function DisconnectWarningModal({
   userId,
   userName,
   action = 'disconnect',
+  busy = false,
   onConfirm,
   onCancel,
 }: Props) {
@@ -60,12 +76,15 @@ export function DisconnectWarningModal({
       transparent
       animationType="fade"
       visible
-      onRequestClose={onCancel}
+      onRequestClose={busy ? undefined : onCancel}
       accessibilityViewIsModal
     >
       {/* Tapping the dimmed backdrop cancels; taps inside the card don't, since
-          the card is a sibling Pressable that swallows its own presses. */}
-      <Pressable style={styles.backdrop} onPress={onCancel}>
+          the card is a sibling Pressable that swallows its own presses. Neither
+          the backdrop nor Android's back button dismisses out from under a write
+          that has already gone to the server — you'd never see how it turned
+          out. */}
+      <Pressable style={styles.backdrop} onPress={busy ? undefined : onCancel}>
         <Pressable style={styles.card} onPress={() => {}}>
           {impactQuery.isLoading ? (
             <Text style={styles.body}>Checking shared chats…</Text>
@@ -96,22 +115,27 @@ export function DisconnectWarningModal({
           <View style={styles.actions}>
             <Pressable
               onPress={onCancel}
+              disabled={busy}
               accessibilityRole="button"
-              style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.btn,
+                styles.ghost,
+                (pressed || busy) && styles.pressed,
+              ]}
             >
               <Text style={styles.ghostLabel}>Cancel</Text>
             </Pressable>
             <Pressable
               onPress={onConfirm}
-              disabled={impactQuery.isLoading}
+              disabled={busy || impactQuery.isLoading}
               accessibilityRole="button"
               style={({ pressed }) => [
                 styles.btn,
                 styles.danger,
-                (pressed || impactQuery.isLoading) && styles.pressed,
+                (pressed || busy || impactQuery.isLoading) && styles.pressed,
               ]}
             >
-              {impactQuery.isLoading ? (
+              {busy || impactQuery.isLoading ? (
                 <ActivityIndicator color="#ffffff" size="small" />
               ) : (
                 <Text style={styles.dangerLabel}>{label}</Text>

@@ -48,6 +48,59 @@ A connection is stored as a **single** `Connection` row: `requester`, `requestee
   existing row instead of creating a competing one (which the unique constraint
   would reject anyway).
 
+### Reporting a refused write
+
+The Connect button, the Message button and the disconnect path had no error path
+at all until issue #236: nothing rendered `isError`, mobile never alerted, and
+`onSuccess` is the only place an invalidation runs — so a rejection left the cache
+untouched and the button exactly as it was. Press **Requested** to withdraw after
+they've already accepted (or closed their account) and the 400 repainted nothing;
+the click read as never having registered, so the natural response was to press it
+again. Both clients now report it where the action was taken — inline under the
+button on the web, `Alert.alert` on the phone.
+
+Two rules the copy follows, worth keeping when this pattern spreads to the other
+surfaces in the same family (#237–#240):
+
+- **The server's own words win where it has any.** `ConnectView` rejects with
+  sentences written for a person — "You can't connect with this person." when a
+  block bars it — which say more than any fallback could. The exception is the
+  block itself, where the server has nothing useful to say and safety needs
+  stating outright: see [messaging.md](messaging.md#blocking).
+- **The fallback is per state, not generic.** "Couldn't withdraw that request",
+  not "something went wrong" — knowing *which* of the four things the button does
+  didn't happen is most of the value. It's reached whenever the server didn't
+  write anything readable, which is **two** cases, not one: a network failure
+  never reaches our error code at all (it rejects out of `fetch` as a bare
+  `TypeError` carrying the *browser's* words — "Failed to fetch"), and a server
+  error with no DRF body (a 500 rendered as a Django HTML page) leaves
+  `firstErrorMessage` nothing to pull out, so `api.js` synthesizes "Request
+  failed (500)". Both clients' `ApiError` therefore carries a **`fromServer`**
+  flag, and `serverMessage` gates on it — a status check or a bare `instanceof`
+  catches only the first case and puts the stand-in string on screen. Issue #240
+  tracks raising a network failure as an `ApiError` too; the flag stays correct
+  when it does.
+
+- **A message is retired only by the server moving to the answer the attempt was
+  reaching for** — the request landed and only its response was lost, so the
+  message would now sit under the very thing it denies. Any *other* answer leaves
+  it standing: a refetch bearing some third status isn't confirmation of your
+  attempt, and clearing on any resync is the swallow issue #231 describes. Both
+  halves are judged against what was recorded at the attempt, never against when
+  the sync arrives, so a refetch landing in the same render batch as the
+  rejection can't eat the message before it's painted. This is the discipline
+  [events.md](events.md) records for the RSVP, applied to a four-state button;
+  the phone doesn't need it, since an `Alert` is dismissed rather than kept.
+
+The disconnect and block paths additionally hold their confirmation modal open
+until the write lands, so the failure has somewhere to go — see
+[messaging.md](messaging.md#blocking) for why that matters most on the block.
+**On mobile that hold is a tripwire**: it depends on `onlineManager` being left
+unwired to NetInfo, because wiring it makes React Query *pause* an offline
+mutation rather than reject it, and a dialog that refuses Cancel while busy would
+then never let go. The deferral note in `mobile/src/app/_layout.tsx` names every
+component that depends on it — add to that list, don't just add the dependency.
+
 ## Comments (threaded, connection-pruned)
 
 Posts have a **threaded comment tree** — `Comment` model: `post`, `author`,

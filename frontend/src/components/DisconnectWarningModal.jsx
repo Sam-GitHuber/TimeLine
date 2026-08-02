@@ -9,10 +9,19 @@ import { api } from "../api.js";
 // the actual mutation, this fetches that impact and, if it's non-empty, makes
 // the caller read the list and explicitly confirm. Modelled on Lightbox.jsx's
 // dialog pattern (portal, role="dialog", focus management, Esc-to-cancel).
+//
+// The dialog stays up until the write it confirmed has actually landed (`busy`
+// while it's in flight, `error` if it was rejected), rather than closing the
+// moment you press Confirm. Closing first is what made a failed block invisible
+// — the caller was left with no surface to report on and a button that still
+// read "Block" (issue #236). Staying open also makes Confirm the retry, with
+// the failure in front of you.
 export default function DisconnectWarningModal({
   userId,
   userName,
   action,
+  busy = false,
+  error = null,
   onConfirm,
   onCancel,
 }) {
@@ -23,14 +32,16 @@ export default function DisconnectWarningModal({
     queryFn: () => api.getDisconnectImpact(userId),
   });
 
-  // Esc cancels, like every other dialog in the app.
+  // Esc cancels, like every other dialog in the app — but not out from under a
+  // write that's already gone to the server, which would leave you unable to
+  // see how it turned out.
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") onCancel();
+      if (event.key === "Escape" && !busy) onCancel();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  }, [onCancel, busy]);
 
   // Lock background scroll, move focus into the dialog, restore it on close.
   useEffect(() => {
@@ -55,7 +66,7 @@ export default function DisconnectWarningModal({
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4 backdrop-blur-sm"
-      onClick={onCancel}
+      onClick={busy ? undefined : onCancel}
     >
       <div
         ref={dialogRef}
@@ -90,10 +101,17 @@ export default function DisconnectWarningModal({
           </p>
         )}
 
+        {error && (
+          <p role="alert" className="mt-3 text-sm text-red-600">
+            {error}
+          </p>
+        )}
+
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
             onClick={onCancel}
+            disabled={busy}
             className="btn btn-ghost btn-sm"
           >
             Cancel
@@ -101,10 +119,10 @@ export default function DisconnectWarningModal({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={impactQuery.isLoading}
+            disabled={busy || impactQuery.isLoading}
             className="btn btn-primary btn-sm"
           >
-            Confirm
+            {busy ? "Working…" : error ? "Try again" : "Confirm"}
           </button>
         </div>
       </div>

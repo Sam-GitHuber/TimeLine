@@ -21,13 +21,19 @@
  * On success it invalidates every view the change touches (the people lists, the
  * feed, this person's profile + posts, and the requests inbox) so nothing shows
  * a stale button or a post that just (dis)appeared.
+ *
+ * A rejection alerts (issue #236). Without it, a withdraw that 400s — they
+ * accepted, or closed their account, while your screen was open — re-enabled a
+ * button still reading "Requested" and repainted nothing, since no invalidation
+ * runs on the failure path. The tap read as not having registered, so the
+ * natural response was to press it again.
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { DisconnectWarningModal } from '@/components/DisconnectWarningModal';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { ProfileUser } from '@/types';
@@ -39,6 +45,16 @@ const LABELS: Record<ConnectionStatus, string> = {
   requested: 'Requested',
   incoming: 'Approve',
   connected: 'Connected',
+};
+
+// What each state's failure sounds like when the server didn't say anything
+// usable itself. Named per state because "it didn't work" is much less helpful
+// than knowing *which* of the four things you were doing didn't work.
+const FAILURES: Record<ConnectionStatus, string> = {
+  none: 'Couldn’t send that request — try again.',
+  incoming: 'Couldn’t accept that request — try again.',
+  requested: 'Couldn’t withdraw that request — try again.',
+  connected: 'Couldn’t disconnect — try again.',
 };
 
 type Props = {
@@ -76,6 +92,30 @@ export function ConnectButton({
     },
   });
 
+  // Awaited rather than fired-and-forgotten so the disconnect path can keep its
+  // warning dialog up until the write lands — see DisconnectWarningModal.
+  //
+  // That leans on a deferral recorded in `app/_layout.tsx`: with `onlineManager`
+  // left unwired to NetInfo, an offline write *rejects*. Wire it and React
+  // Query's default `networkMode: 'online'` would **pause** the mutation instead
+  // — `mutateAsync` never settles, so no catch, no alert, and on the disconnect
+  // path the dialog it's holding open (which refuses Cancel, backdrop and back
+  // while busy) never lets go. The tripwire is invisible from either file alone.
+  async function run() {
+    const fallback = FAILURES[connectionStatus] ?? FAILURES.none;
+    try {
+      await mutation.mutateAsync();
+      setShowWarning(false);
+    } catch (err) {
+      // Only the server's own words are fit to show: an `ApiError` it authored
+      // carries DRF's `detail`, written for a person ("You can't connect with
+      // this person." when a block bars it). Anything else is a runtime string —
+      // offline, React Native rejects with `TypeError: Network request failed` —
+      // or our own "Request failed (500)" stand-in. See `serverMessage`.
+      Alert.alert('Couldn’t do that', serverMessage(err, fallback));
+    }
+  }
+
   function handlePress() {
     // Disconnecting a live connection can sever shared group chats, so it goes
     // through the warning first; every other transition mutates immediately.
@@ -83,7 +123,7 @@ export function ConnectButton({
       setShowWarning(true);
       return;
     }
-    mutation.mutate();
+    run();
   }
 
   // The two "act to connect" states get the filled accent; the two "already in
@@ -114,10 +154,8 @@ export function ConnectButton({
         <DisconnectWarningModal
           userId={userId}
           userName={displayName}
-          onConfirm={() => {
-            setShowWarning(false);
-            mutation.mutate();
-          }}
+          busy={mutation.isPending}
+          onConfirm={run}
           onCancel={() => setShowWarning(false)}
         />
       )}
