@@ -294,6 +294,7 @@ function serve({
   reactionsAfterToggle = [{ emoji: '👍', count: 1, reacted: true }],
   reactors = [{ emoji: '👍', count: 1, users: [ADA] }],
   threadPageTwoFails = false,
+  threadFails = false,
 }: {
   conversation: Conversation;
   /** The transcript, **oldest-first** — the order the model has them in. */
@@ -324,6 +325,8 @@ function serve({
    * not how a real request behaves and would hide the loop (see `settle`).
    */
   threadPageTwoFails?: boolean;
+  /** The strand's *first* page 500s, so nothing about it ever loads. */
+  threadFails?: boolean;
 }) {
   const meAuthor = { id: ME.pk, display_name: ME.display_name, avatar_thumb: null };
   mockFetch.mockImplementation(
@@ -351,7 +354,7 @@ function serve({
         // every other test here is unaffected.
         const all = thread ?? [];
         const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1);
-        if (threadPageTwoFails && page > 1) {
+        if (threadFails || (threadPageTwoFails && page > 1)) {
           await new Promise((resolve) => setTimeout(resolve, 0));
           return jsonResponse({ detail: 'Server error.' }, 500);
         }
@@ -1932,6 +1935,52 @@ it('stops a strand’s page walk when a page fails, instead of looping on it', a
         String(url).includes('thread_root=8') && String(url).includes('page=2')
     )
   ).toHaveLength(1);
+});
+
+it('doesn’t blame permissions for a strand the network failed to fetch', async () => {
+  // The two failure lines have to stay distinguishable, and an unsent reply is
+  // what makes them collide: the strand's list counts outbox entries, so one
+  // queued against a strand that never loaded stops the list being *empty* —
+  // and both the "no root" header and the empty state key off that. A missing
+  // root is a claim about permission, and the flag is sticky since #248, so
+  // without the guard the phone would go on telling you you're not entitled to
+  // a message it merely failed to fetch.
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({ conversation: detail({}), messages: [only], threadFails: true });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    // The reply fails too, so it stays an outbox entry rather than being
+    // written into the strand's cache (which would clear the error with it).
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      return jsonResponse({ detail: 'Nope.' }, 500);
+    }
+    return base(url, init);
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+
+  // Nothing loaded, nothing queued: the empty state carries the line.
+  expect(
+    await screen.findByText('Couldn’t load this thread. Close and try again.')
+  ).toBeTruthy();
+
+  await fireEvent.changeText(
+    await screen.findByLabelText('Reply to thread'),
+    'yes, see you'
+  );
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+  await screen.findByText('Not sent');
+
+  // Still the load failure, and still only that.
+  expect(
+    screen.getByText('Couldn’t load this thread. Close and try again.')
+  ).toBeTruthy();
+  expect(screen.queryByText('Couldn’t load the newest replies.')).toBeNull();
+  expect(
+    screen.queryByText('The start of this thread isn’t available to you')
+  ).toBeNull();
 });
 
 it('sends a reply into the thread from inside the focused view', async () => {

@@ -277,7 +277,16 @@ export function MessageThreadView({
                 // Only when the root itself is clipped out — the replies below
                 // are ones this viewer *is* entitled to, so the thread is
                 // genuinely headless rather than empty.
-                !root && messages.length > 0 ? (
+                //
+                // Never on a failure, which its web twin has always been gated
+                // on and this one now needs to be: a missing root is a claim
+                // about *permission*, and until #248 a failed fetch cleared
+                // itself within a render or two because the broken walk kept
+                // re-firing. Now the flag is sticky until a poll gets through,
+                // so an unsent reply against a strand that didn't load would
+                // hold this on screen — telling you you're not entitled to a
+                // message the network merely failed to fetch.
+                !root && !threadQuery.isError && messages.length > 0 ? (
                   <Text style={styles.missingRoot}>
                     The start of this thread isn’t available to you
                   </Text>
@@ -342,12 +351,20 @@ export function MessageThreadView({
                 // *oldest* replies, so the gap is at this end — the newest
                 // replies, and the count on the root will have gone on climbing
                 // past what's here. Say so instead of letting it read as the
-                // whole thread. Only when something did load: an empty strand
-                // is covered above, and would otherwise say it twice. The poll
-                // clears this on its own once a fetch gets through.
+                // whole thread. The poll clears it on its own once a fetch gets
+                // through.
+                //
+                // Which of the two lines depends on `loaded`, not `messages`:
+                // `messages` counts unsent replies too, so a strand where
+                // *nothing* came back but you've queued a reply anyway isn't
+                // empty as far as the list is concerned, and the branch below
+                // never runs. Saying "the newest replies" there would claim a
+                // tail is missing when in fact none of it arrived.
                 threadQuery.isError && messages.length > 0 ? (
                   <Text style={styles.pagesFailed}>
-                    Couldn’t load the newest replies.
+                    {loaded.length > 0
+                      ? 'Couldn’t load the newest replies.'
+                      : 'Couldn’t load this thread. Close and try again.'}
                   </Text>
                 ) : null
               }

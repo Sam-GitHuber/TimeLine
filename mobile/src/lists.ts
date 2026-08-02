@@ -75,11 +75,12 @@ type PagedQuery = {
  * the server never said there was no more, while `isFetchingNextPage` flips back
  * to false — which is exactly the condition below. So a 500 or a dropped signal
  * on page 2 doesn't stop the walk, it restarts it, one request per render commit
- * for as long as the screen stays mounted, with TanStack's own three retries
- * stacked on each attempt. That hammers an endpoint that is by definition
- * already unhealthy, from a phone whose connection has just dropped — so it
- * spins the radio flat at the exact moment there's least to gain (#248, and
- * #214 for the web twin).
+ * for as long as the screen stays mounted, with the client's own retry stacked
+ * on each attempt (one here — `_layout.tsx` bounds it deliberately, where the
+ * web takes TanStack's default of three). That hammers an endpoint that is by
+ * definition already unhealthy, from a phone whose connection has just dropped —
+ * so it spins the radio flat at the exact moment there's least to gain (#248,
+ * and #214 for the web twin).
  *
  * Stopping instead leaves a partial list and hands the transient case to the
  * query's own retry/backoff. Recovery is automatic: any later fetch that

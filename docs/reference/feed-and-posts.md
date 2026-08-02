@@ -67,8 +67,11 @@ guard — `if (hasNextPage && !isFetchingNextPage) fetchNextPage()` — re-arms
 itself on a failure. The server never said there was no page 2, so `hasNextPage`
 stays true; `isFetchingNextPage` going false again *is* the condition the effect
 waits for. So a 500 or a dropped connection turned into one request per render
-commit, for as long as the view stayed open, with TanStack's own three retries
-stacked on each — against an endpoint that by definition had just failed, from a
+commit, for as long as the view stayed open, with the client's own retries
+stacked on each — three on the web, which takes TanStack's default, and one on
+the app, where `_layout.tsx` bounds it deliberately because "phones drop
+connections constantly" — against an endpoint that by definition had just
+failed, from a
 phone whose connection had just dropped. Adding `!isError` stops it: what loaded
 stays on screen as a partial list, and recovery is automatic, since any later
 fetch that succeeds (a poll, a refocus) clears the flag and the remaining pages
