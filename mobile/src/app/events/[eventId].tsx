@@ -116,6 +116,9 @@ export default function EventScreen() {
     mutationFn: (body: Parameters<typeof api.rsvpEvent>[1]) => api.rsvpEvent(id, body),
     onSuccess: invalidate,
   });
+  // Voting is the one mutation the tally shows optimistically, so it's handed to
+  // `PollTally` as `mutateAsync`: a rejection has to reach the component that put
+  // the tick on screen, which rolls it back and states the failure (#227).
   const vote = useMutation({
     mutationFn: ({ pollId, optionIds }: { pollId: number; optionIds: number[] }) =>
       api.votePoll(pollId, optionIds),
@@ -302,7 +305,7 @@ export default function EventScreen() {
                   key={poll.id}
                   poll={poll}
                   busy={vote.isPending || pollBusy}
-                  onVote={(optionIds) => vote.mutate({ pollId: poll.id, optionIds })}
+                  onVote={(optionIds) => vote.mutateAsync({ pollId: poll.id, optionIds })}
                   canManage={event.can_manage}
                   onFinalise={(arg) => finalise.mutate(arg)}
                   onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, payload })}

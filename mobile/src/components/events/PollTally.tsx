@@ -52,7 +52,10 @@ export function PollTally({
   onDelete,
 }: {
   poll: Poll;
-  onVote: (optionIds: number[]) => void;
+  // A promise, not `void`: the rejection has to reach this component so the tick
+  // it put on screen can be taken back (#227). `EventScreen` hands it down as
+  // `mutateAsync` for that reason.
+  onVote: (optionIds: number[]) => Promise<unknown>;
   busy: boolean;
   canManage?: boolean;
   onFinalise?: (arg: FinaliseArg) => void;
@@ -69,24 +72,54 @@ export function PollTally({
   // silently redefined. The server enforces the same with a 409.
   const canEdit = canManage && (poll.vote_count || 0) === 0;
 
-  // Seeded once from the server, then owned locally. A cast refetches for fresh
-  // *counts*. This was "same as the web" until #216, which gave the web copy a
-  // rollback on a failed vote and a re-derive when `your_votes` changes; until
-  // that's ported, a failed vote leaves its tick showing here (#227).
-  const [selected, setSelected] = useState<Set<number>>(new Set(poll.your_votes ?? []));
+  // Your ticks are optimistic — they appear the moment you tap, before the server
+  // has agreed. Two things keep that from turning into a lie (#227, the web's
+  // #216): `toggle` rolls them back if the request fails, and the server's answer
+  // wins whenever it changes underneath us (you voted on the web with this screen
+  // open, or your own vote round-tripped). `serverVotes` is a fresh array on every
+  // refetch, so we compare its *contents* — comparing identity would reset your
+  // ticks on every poll of the event, mid-vote included.
+  const serverVotes = poll.your_votes ?? [];
+  const serverKey = voteKey(serverVotes);
+  const [selected, setSelected] = useState<Set<number>>(() => new Set(serverVotes));
+  const [syncedKey, setSyncedKey] = useState(serverKey);
+  const [voteError, setVoteError] = useState<string | null>(null);
+  if (syncedKey !== serverKey) {
+    setSyncedKey(serverKey);
+    setSelected(new Set(serverVotes));
+    // The server has just told us where your votes stand, so a message about an
+    // earlier attempt is out of date — clearing it stops "your vote didn't go
+    // through" sitting under a tick the server has since confirmed.
+    setVoteError(null);
+  }
   const [editing, setEditing] = useState(false);
 
   // Android back leaves the edit form rather than the event screen — the
   // hardware equivalent of its Cancel (#168).
   useAndroidBack(editing, () => setEditing(false));
 
-  function toggle(optionId: number) {
+  async function toggle(optionId: number) {
     if (!open || busy) return;
+    const before = selected;
     const next = new Set(poll.allow_multiple ? selected : []);
     if (selected.has(optionId)) next.delete(optionId);
     else next.add(optionId);
     setSelected(next);
-    onVote(Array.from(next));
+    setVoteError(null);
+    try {
+      await onVote(Array.from(next));
+    } catch (err) {
+      // The vote didn't happen — put the tick back where it was and say so.
+      // Leaving it showing is what makes a dropped answer invisible: the tally
+      // not moving reads as "nobody else has voted", not "you never voted".
+      //
+      // Roll back only what we ourselves put there: if the sync above replaced
+      // `next` while this request was in flight, the server has since spoken and
+      // its answer must not be undone by a snapshot taken before the tap.
+      setSelected((current) => (current === next ? before : current));
+      const said = err instanceof Error ? err.message : '';
+      setVoteError(said || 'Your vote didn’t go through — try again.');
+    }
   }
 
   const { openMenu, menu } = useActionMenu();
@@ -193,6 +226,12 @@ export function PollTally({
 
       {noVotes ? <Text style={styles.empty}>No votes yet.</Text> : null}
 
+      {voteError ? (
+        <Text style={styles.error} accessibilityRole="alert">
+          {voteError}
+        </Text>
+      ) : null}
+
       {menu}
     </View>
   );
@@ -298,6 +337,12 @@ function PollEditForm({
       </View>
     </View>
   );
+}
+
+/** A stable, order-independent fingerprint of a vote list, so a refetch that
+ *  returns the same votes in a different order isn't mistaken for a change. */
+function voteKey(votes: number[]): string {
+  return [...votes].sort((a, b) => a - b).join(',');
 }
 
 function optionLabel(poll: Poll, opt: PollResultOption): string {

@@ -302,10 +302,12 @@ client just renders what arrives. Date/time render through a mobile copy of the
 `formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
 `frontend/src/utils.js`.
 
-**Known divergence:** the mobile `PollTally` still votes fire-and-forget with a
-seeded-once selection — the shape the web had before #216 — so a failed vote
-leaves its tick showing there, and it's the client with the worse network.
-Tracked in #227; the fix is the same two moves.
+The **optimistic tick and its two debts** (the "Frontend notes" bullet above) hold
+here too, as of #227: `PollTally` awaits the vote and rolls its tick back with a
+message if it's rejected — which is why `EventScreen` hands voting down as
+`mutateAsync` — and re-derives your ticks whenever `poll.your_votes` changes by
+*contents*. This client matters more for it than the web does: the network is
+worse, and it's where most voting happens.
 
 The **organiser's control surface** arrives in **E3c**, split into two PRs:
 

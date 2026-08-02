@@ -155,6 +155,47 @@ const CUSTOM_POLL: Poll = {
   decided_option: null,
 };
 
+// A second plain-text poll you've *already* voted in, so a test can watch one
+// poll's ticks move while the tap happens in the other — which is what a vote
+// cast on the web with this screen open looks like from here.
+const PLACE_POLL: Poll = {
+  id: 5,
+  event: 9,
+  dimension: 'location',
+  question: 'Where should we meet?',
+  allow_multiple: false,
+  status: 'open',
+  closes_at: null,
+  created_at: '2026-07-18T10:00:00Z',
+  options: [
+    {
+      id: 50,
+      label: 'The park',
+      date_value: null,
+      time_value: null,
+      text_value: 'The park',
+      order: 0,
+      count: 1,
+      voters: [],
+      you_voted: true,
+    },
+    {
+      id: 51,
+      label: 'The pub',
+      date_value: null,
+      time_value: null,
+      text_value: 'The pub',
+      order: 1,
+      count: 0,
+      voters: [],
+      you_voted: false,
+    },
+  ],
+  vote_count: 1,
+  your_votes: [50],
+  decided_option: null,
+};
+
 function makeEvent(overrides: Partial<Event> = {}): Event {
   return {
     id: 9,
@@ -324,6 +365,135 @@ describe('event detail', () => {
 
     await waitFor(() => expect(vote).toHaveBeenCalledWith(4, [41]));
     vote.mockRestore();
+  });
+});
+
+// --- Optimistic ticks (#227) -----------------------------------------------
+
+/**
+ * Your tick appears the moment you tap, before the server has agreed — the web
+ * fixed this in #216, and mobile is the client with the worse network. Both
+ * halves of that debt: the tick comes back if the vote is rejected, and the
+ * server's answer wins whenever it changes underneath us.
+ */
+describe('optimistic vote ticks', () => {
+  // What the next fetch of the event returns. Reassign it to model data that
+  // changed elsewhere — a vote cast on the web, or your own round-tripping.
+  let served: Event;
+  function serveEvent(event: Event) {
+    served = event;
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/')) return jsonResponse(served);
+      return jsonResponse(null, 404);
+    });
+  }
+
+  /**
+   * Left showing, a dropped vote is invisible: the tally not moving reads as
+   * "nobody else has voted yet" rather than "you never voted", so you believe
+   * you answered and the organiser counts you as silent.
+   */
+  it('takes a failed vote’s tick back and says what happened', async () => {
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest
+      .spyOn(api, 'votePoll')
+      .mockRejectedValue(new Error('This poll is closed.'));
+
+    await renderWith(<EventScreen />);
+
+    const drinks = await screen.findByRole('button', { name: /Drinks/ });
+    expect(drinks).not.toBeSelected();
+    await fireEvent.press(drinks);
+
+    expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Drinks/ })).not.toBeSelected();
+    vote.mockRestore();
+  });
+
+  /**
+   * The other half: ticks were seeded once and then owned locally, so a vote
+   * cast elsewhere never reached this copy of the screen — the counts refreshed
+   * and the ticks didn't, and the card contradicted itself until it unmounted.
+   */
+  it('re-syncs your ticks when the server’s answer changes underneath', async () => {
+    serveEvent(makeEvent({ polls: [PLACE_POLL, CUSTOM_POLL] }));
+    // What the refetch carries: you moved your place vote on the web, and the
+    // Drinks vote you're about to cast here has landed.
+    const vote = jest.spyOn(api, 'votePoll').mockImplementation(async () => {
+      serveEvent(
+        makeEvent({
+          polls: [
+            { ...PLACE_POLL, your_votes: [51] },
+            { ...CUSTOM_POLL, your_votes: [41] },
+          ],
+        })
+      );
+      return CUSTOM_POLL;
+    });
+
+    await renderWith(<EventScreen />);
+    expect(await screen.findByRole('button', { name: /The park/ })).toBeSelected();
+
+    // Voting in the *other* poll invalidates the event; the refetch brings the
+    // place vote with it.
+    await fireEvent.press(screen.getByRole('button', { name: /Drinks/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /The pub/ })).toBeSelected()
+    );
+    expect(screen.getByRole('button', { name: /The park/ })).not.toBeSelected();
+    vote.mockRestore();
+  });
+
+  /**
+   * The rollback undoes our own optimistic tick, not whatever the server has
+   * said since: a vote arriving from another device while this request is in
+   * flight is the newer truth, and a snapshot taken before the tap mustn't wipe
+   * it.
+   */
+  it('doesn’t roll back over an answer the server gave mid-vote', async () => {
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    // The Snacks vote fails, but only after a refetch — triggered by the RSVP —
+    // has brought in a Drinks vote cast elsewhere.
+    let rejectVote: (err: Error) => void = () => {};
+    const vote = jest.spyOn(api, 'votePoll').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectVote = reject;
+        })
+    );
+    const rsvp = jest.spyOn(api, 'rsvpEvent').mockImplementation(async () => {
+      serveEvent(makeEvent({ polls: [{ ...CUSTOM_POLL, your_votes: [41] }] }));
+      return served;
+    });
+
+    await renderWith(<EventScreen />);
+
+    // `act`, not `await fireEvent.press`: the press hands back `toggle`'s
+    // promise, and this vote deliberately never settles until we reject it.
+    const snacks = await screen.findByRole('button', { name: /Snacks/ });
+    await act(async () => {
+      fireEvent.press(snacks);
+    });
+    await waitFor(() => expect(vote).toHaveBeenCalledWith(4, [40]));
+    expect(screen.getByRole('button', { name: /Snacks/ })).toBeSelected();
+
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Drinks/ })).toBeSelected()
+    );
+
+    await act(async () => {
+      rejectVote(new Error('Offline.'));
+    });
+
+    // The failure is stated, and the newer vote survives it.
+    expect(await screen.findByText('Offline.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Drinks/ })).toBeSelected();
+    expect(screen.getByRole('button', { name: /Snacks/ })).not.toBeSelected();
+    vote.mockRestore();
+    rsvp.mockRestore();
   });
 });
 
