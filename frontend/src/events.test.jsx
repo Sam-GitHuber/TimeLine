@@ -170,6 +170,12 @@ describe("EventPage", () => {
     );
   });
 
+  // What `api.js` raises once a response has come back: DRF's `detail` plus the
+  // status. A network-level failure has no status — see the fallback test.
+  function apiError(message, status = 500) {
+    return Object.assign(new Error(message), { name: "ApiError", status });
+  }
+
   // Issue #229. `guests`/`note` are typed into RsvpBar but the server owns the
   // answer: `your_response` changes under the mounted page on every refetch,
   // and every RSVP/vote/finalise here ends in one. Seeded once, the fields kept
@@ -226,7 +232,7 @@ describe("EventPage", () => {
     api.getEvent.mockResolvedValue(
       makeRsvpEvent({ response: "going", guests: 2, note: "" })
     );
-    api.rsvpEvent.mockRejectedValueOnce(new Error("Couldn't reach the server."));
+    api.rsvpEvent.mockRejectedValueOnce(apiError("Couldn't reach the server."));
     renderEventPage();
     await screen.findByText("Picnic");
 
@@ -240,6 +246,58 @@ describe("EventPage", () => {
     expect(screen.getByLabelText(/^Note$/)).toHaveValue("bringing wine");
   });
 
+  // Offline, `fetch` rejects out of itself with a bare TypeError ("Failed to
+  // fetch") — no status, and not a sentence to show a person. Offline is also
+  // the case this message exists for, so it's the one a tester hits first.
+  it("falls back to our own words when the failure isn't the server's", async () => {
+    api.getEvent.mockResolvedValue(
+      makeRsvpEvent({ response: "going", guests: 2, note: "" })
+    );
+    api.rsvpEvent.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getByRole("button", { name: "Update" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/didn't save/);
+    expect(screen.queryByText(/Failed to fetch/)).not.toBeInTheDocument();
+  });
+
+  // The clear is deliberately narrower than "the server said something": only
+  // the server *arriving at your attempt* retires the message. A refetch
+  // carrying some third answer is not confirmation, and swallowing the failure
+  // there would put us back where #229 started — silently.
+  it("keeps the failure showing when the server moves to a different answer", async () => {
+    api.getEvent
+      .mockResolvedValueOnce(
+        makeRsvpEvent({ response: "going", guests: 2, note: "" })
+      )
+      .mockResolvedValue(
+        makeRsvpEvent({ response: "maybe", guests: 5, note: "from my phone" })
+      );
+    api.rsvpEvent.mockRejectedValueOnce(apiError("Couldn't reach the server."));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.type(screen.getByLabelText(/^Note$/), "bringing wine");
+    await userEvent.click(screen.getByRole("button", { name: "Update" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+
+    // A refetch brings an answer that is neither what we sent nor what the
+    // server held when we sent it. Your attempt still didn't land, so it still
+    // says so — even though the fields have moved on to the newer truth.
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Maybe/ })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      )
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Couldn't reach the server."
+    );
+  });
+
   // Re-pressing a response you already hold sends exactly what the server
   // already has, so "the server is confirming the attempt" can't be judged on
   // the answer alone — without also remembering what the server said *before*
@@ -248,7 +306,7 @@ describe("EventPage", () => {
     api.getEvent.mockResolvedValue(
       makeRsvpEvent({ response: "going", guests: 2, note: "" })
     );
-    api.rsvpEvent.mockRejectedValueOnce(new Error("Couldn't reach the server."));
+    api.rsvpEvent.mockRejectedValueOnce(apiError("Couldn't reach the server."));
     renderEventPage();
     await screen.findByText("Picnic");
 
@@ -270,7 +328,7 @@ describe("EventPage", () => {
       .mockResolvedValue(
         makeRsvpEvent({ response: "going", guests: 2, note: "bringing wine" })
       );
-    api.rsvpEvent.mockRejectedValueOnce(new Error("Couldn't reach the server."));
+    api.rsvpEvent.mockRejectedValueOnce(apiError("Couldn't reach the server."));
     renderEventPage();
     await screen.findByText("Picnic");
 

@@ -57,7 +57,9 @@ export default function RsvpBar({ event, onRsvp, busy }) {
 
   // Your typed values stay put on a rejection — the message, not a snap-back,
   // is what tells you it didn't save, and pressing Update again retries without
-  // retyping the note.
+  // retyping the note. (Until the server itself says otherwise: a later answer
+  // arriving from elsewhere is the newer truth and re-seeds the fields above,
+  // while the message stands, because your attempt still didn't land.)
   async function submit(body) {
     if (cancelled) return;
     setFailed(null);
@@ -67,10 +69,20 @@ export default function RsvpBar({ event, onRsvp, busy }) {
       // Without this the failure is silent: the fields keep your text as if it
       // had saved, and the count simply not moving reads as "nobody else has
       // RSVP'd yet" rather than "your change was rejected".
+      //
+      // Only the server's own words are fit to show. `api.js` raises an
+      // `ApiError` — carrying DRF's `detail`, written for a person — only once
+      // a response has come back; a network-level failure rejects out of
+      // `fetch` itself as a bare `TypeError` ("Failed to fetch"), and offline
+      // is the very case this message exists for. A numeric `status` is what
+      // separates the two, the same sniff the rest of the app uses.
       setFailed({
         saved: rsvpKey(body),
         from: serverKey,
-        message: err?.message || "Your RSVP didn't save — try again.",
+        message:
+          typeof err?.status === "number" && err.message
+            ? err.message
+            : "Your RSVP didn't save — try again.",
       });
     }
   }

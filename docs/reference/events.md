@@ -297,13 +297,21 @@ The gate needs a *present* organiser. Two paths:
   count not moving reads as "nobody else has RSVP'd yet". **Its rejection keeps
   your typed values** and states the failure in place — deliberately unlike the
   poll tick's rollback, because a tick is one click to redo and a note isn't, so
-  the message does the work and Update retries as typed. That message retires
-  only when the server *moves to* the very answer that failed (the request
-  landed; only its response was lost), judged on both keys recorded **at the
-  attempt** — so it survives a refetch landing in the same render batch as the
-  rejection (the trap #231 describes) and an unchanged re-press alike. **Both
-  clients, one PR** — the components are line-for-line the same, and splitting
-  #216 from #227 is what left the phone lying for a day.
+  the message does the work and Update retries as typed. (Only the server
+  outranks them: a later answer arriving from elsewhere re-seeds the fields per
+  the rule above, and the message stands, since your attempt still didn't land.)
+  That message retires **only** when the server *moves to* the very answer that
+  failed — the request landed and only its response was lost. Both halves of
+  that are judged on keys recorded **at the attempt**, never on when the sync
+  arrives, so it survives a refetch landing in the same render batch as the
+  rejection (the trap #231 describes), an unchanged re-press, and a refetch
+  bearing some third answer alike. Only the server's own words are shown; a
+  network-level failure rejects out of `fetch` as a bare `TypeError` with no
+  status, and offline is exactly the case the message exists for. **Both
+  clients, one PR** — splitting #216 from #227 is what left the phone lying for
+  a day. The two copies stay behaviourally identical; they differ only in how
+  each spots a server-authored error (mobile's `ApiError` instance, the web's
+  numeric `status`).
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).

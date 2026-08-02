@@ -95,7 +95,15 @@ export function RsvpBar({
 
   // Your typed values stay put on a rejection — the message, not a snap-back,
   // is what tells you it didn't save, and pressing Update again retries without
-  // retyping the note.
+  // retyping the note. (Until the server itself says otherwise: a later answer
+  // arriving from elsewhere is the newer truth and re-seeds the fields above,
+  // while the message stands, because your attempt still didn't land.)
+  //
+  // Like `PollTally`'s rollback, this leans on a deferral recorded in
+  // `app/_layout.tsx`: with `onlineManager` left unwired to NetInfo, an offline
+  // RSVP *rejects*. Wire it and React Query's default `networkMode: 'online'`
+  // would **pause** the mutation instead — `mutateAsync` never settles, so no
+  // catch, no message, and the airplane-mode case is silent again.
   async function submit(body: { response: Response; guests: number; note: string }) {
     if (cancelled) return;
     setFailed(null);

@@ -732,6 +732,39 @@ describe('RSVP guests and note', () => {
   });
 
   /**
+   * The clear is deliberately narrower than "the server said something": only
+   * the server *arriving at your attempt* retires the message. A refetch
+   * carrying some third answer is not confirmation, and swallowing the failure
+   * there would put us back where #229 started — silently.
+   */
+  it('keeps the failure showing when the server moves to a different answer', async () => {
+    serve(rsvpEvent(GOING));
+    const rsvp = jest
+      .spyOn(api, 'rsvpEvent')
+      .mockRejectedValue(new ApiError('Couldn’t reach the server.', 500, null));
+    const vote = jest.spyOn(api, 'votePoll').mockImplementation(async () => {
+      // Neither what we sent nor what the server held when we sent it.
+      serve(rsvpEvent({ response: 'going', guests: 5, note: 'from the web' }));
+      return CUSTOM_POLL;
+    });
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    await fireEvent.changeText(noteField(), 'bringing wine');
+    await fireEvent.press(screen.getByRole('button', { name: 'Update' }));
+    expect(await screen.findByText('Couldn’t reach the server.')).toBeTruthy();
+
+    await fireEvent.press(screen.getByRole('button', { name: /Drinks/ }));
+
+    // The fields have moved on to the newer truth, but your attempt still
+    // didn't land — so it still says so.
+    await waitFor(() => expect(guestsField().props.value).toBe('5'));
+    expect(screen.getByText('Couldn’t reach the server.')).toBeTruthy();
+    vote.mockRestore();
+    rsvp.mockRestore();
+  });
+
+  /**
    * Re-pressing a response you already hold sends exactly what the server
    * already has, so "the server is confirming the attempt" can't be judged on
    * the answer alone — without also remembering what the server said *before*
