@@ -895,6 +895,30 @@ A block in either direction hides the conversation from both lists, 404s the
 thread, bars (re)connecting, and flows through the sever path above. Unblock lifts
 only *your* own block (a mutual block is two independent rows).
 
+**A block that fails has to say so — this is the one place where a silent write
+failure is a safety problem** (issue #236). The clients originally closed the
+confirmation modal *before* firing the mutation and had no error path at all, so a
+POST that never landed (offline, or a 500) was pixel-identical to one that worked:
+the button still read "Block", and you walked away believing someone could no
+longer message you or see your posts. Both `BlockButton`s now `await
+mutateAsync`, so:
+
+- **The warning modal stays up until the write lands.** It closes on success
+  only; on a rejection it holds, which is what gives the failure somewhere to go
+  and makes its confirm button the retry (relabelled "Try again" on the web).
+  While the write is in flight the dialog takes no further taps — no backdrop,
+  Esc, or Android back — because dismissing it would hide the outcome.
+- **The message states what is still true**, rather than repeating the server's:
+  *"Couldn't block Priya — they're not blocked. Try again."* `BlockView`'s only
+  authored rejection is "You can't block yourself", which this UI can't reach, so
+  every failure a real person hits here is a 404, a 500 or a dropped connection —
+  none of which mention the fact that matters. That's the deliberate exception to
+  the house rule (see [connections.md](connections.md#reporting-a-refused-write))
+  that the server's own words win where it has any.
+
+Web renders the message inside the dialog (and beneath the button once the dialog
+is dismissed); mobile alerts over it. Same behaviour, each client's idiom.
+
 ## API
 
 Direct and group chats share the endpoints:

@@ -30,6 +30,7 @@ import {
   waitFor,
 } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
+import { Alert } from 'react-native';
 
 import { BlockButton } from '@/components/BlockButton';
 import { CommentThread } from '@/components/CommentThread';
@@ -288,5 +289,72 @@ describe('BlockButton', () => {
     );
     // No confirmation modal on the unblock path.
     expect(screen.queryByText(/will remove you from these chats/)).toBeNull();
+  });
+
+  // Issue #236. A block that never landed used to be pixel-identical to one
+  // that did: the modal dismissed on confirm, the mutation had no error path,
+  // and the trigger still read "Block". You walked away believing someone was
+  // blocked who could still message you and read your posts.
+  it('says so — and does not dismiss — when a block is rejected', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockFetch.mockImplementation(async (url: string) => {
+      if (/disconnect-impact\/$/.test(url)) return jsonResponse({ chats: [] });
+      return jsonResponse({ detail: 'Nope.' }, 500);
+    });
+    await renderWithClient(
+      <BlockButton userId={2} displayName="Ada Lovelace" isBlocked={false} />
+    );
+
+    await fireEvent.press(screen.getByLabelText('Block'));
+    const confirms = await screen.findAllByText('Block');
+    await fireEvent.press(confirms.at(-1)!);
+
+    await waitFor(() => expect(alert).toHaveBeenCalled());
+    // The message has to carry the fact that matters — that they are *not*
+    // blocked — not the server's 500, which says nothing about safety.
+    expect(alert.mock.calls[0][1]).toBe(
+      'Couldn’t block Ada Lovelace — they’re not blocked. Try again.'
+    );
+    // The dialog is still up, so its confirm is the retry. (Waited for: the
+    // alert fires inside the catch, before React has repainted the confirm from
+    // its in-flight spinner back to a label.)
+    // The dialog is still up — Cancel exists only inside it — so its confirm is
+    // the retry. (RNTL hides everything outside an `accessibilityViewIsModal`
+    // view from queries, which is why the modal's own controls are what's
+    // reachable here.)
+    expect(screen.getByText('Cancel')).toBeTruthy();
+    alert.mockRestore();
+  });
+
+  it('says so when an unblock is rejected, naming what is still true', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Nope.' }, 500));
+    await renderWithClient(
+      <BlockButton userId={2} displayName="Ada Lovelace" isBlocked />
+    );
+
+    await fireEvent.press(screen.getByLabelText('Unblock'));
+
+    await waitFor(() => expect(alert).toHaveBeenCalled());
+    expect(alert.mock.calls[0][1]).toBe(
+      'Couldn’t unblock Ada Lovelace — they’re still blocked. Try again.'
+    );
+    alert.mockRestore();
+  });
+
+  // Offline is the likeliest way this fails, and React Native rejects with a
+  // bare `TypeError: Network request failed` — never fit to show.
+  it('shows our own words when the request never reached the server', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockFetch.mockRejectedValue(new TypeError('Network request failed'));
+    await renderWithClient(
+      <BlockButton userId={2} displayName="Ada Lovelace" isBlocked />
+    );
+
+    await fireEvent.press(screen.getByLabelText('Unblock'));
+
+    await waitFor(() => expect(alert).toHaveBeenCalled());
+    expect(alert.mock.calls[0][1]).not.toMatch(/Network request failed/);
+    alert.mockRestore();
   });
 });

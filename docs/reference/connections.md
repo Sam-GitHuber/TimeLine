@@ -48,6 +48,38 @@ A connection is stored as a **single** `Connection` row: `requester`, `requestee
   existing row instead of creating a competing one (which the unique constraint
   would reject anyway).
 
+### Reporting a refused write
+
+The Connect button, the Message button and the disconnect path had no error path
+at all until issue #236: nothing rendered `isError`, mobile never alerted, and
+`onSuccess` is the only place an invalidation runs — so a rejection left the cache
+untouched and the button exactly as it was. Press **Requested** to withdraw after
+they've already accepted (or closed their account) and the 400 repainted nothing;
+the click read as never having registered, so the natural response was to press it
+again. Both clients now report it where the action was taken — inline under the
+button on the web, `Alert.alert` on the phone.
+
+Two rules the copy follows, worth keeping when this pattern spreads to the other
+surfaces in the same family (#237–#240):
+
+- **The server's own words win where it has any.** `ConnectView` rejects with
+  sentences written for a person — "You can't connect with this person." when a
+  block bars it — which say more than any fallback could. The exception is the
+  block itself, where the server has nothing useful to say and safety needs
+  stating outright: see [messaging.md](messaging.md#blocking).
+- **The fallback is per state, not generic.** "Couldn't withdraw that request",
+  not "something went wrong" — knowing *which* of the four things the button does
+  didn't happen is most of the value. It's reached whenever the server never
+  answered, which on the web means `errors.js`'s `serverMessage` sniff: a network
+  failure rejects out of `fetch` as a bare `TypeError` carrying the *browser's*
+  words ("Failed to fetch"), and being offline is the likeliest way any of these
+  fails. Mobile makes the same call on `err instanceof ApiError`. Issue #240
+  tracks fixing that at the source in `api.js`.
+
+The disconnect and block paths additionally hold their confirmation modal open
+until the write lands, so the failure has somewhere to go — see
+[messaging.md](messaging.md#blocking) for why that matters most on the block.
+
 ## Comments (threaded, connection-pruned)
 
 Posts have a **threaded comment tree** — `Comment` model: `post`, `author`,
