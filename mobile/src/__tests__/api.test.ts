@@ -207,6 +207,44 @@ describe('silent refresh', () => {
     expect(await getRefreshToken()).toBe('refresh-1');
   });
 
+  it('does not tell a screen the session expired when it was the server that failed', async () => {
+    // This one *reaches* a call site, unlike the refusal message `request`
+    // replaces — and until #243 lands ~25 of them render `.message` whatever
+    // `fromServer` says. "Session expired" during a deploy would be a lie told
+    // to every phone at once, on the screen the user was already looking at.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(null, 503));
+
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect((err as ApiError).message).toBe(
+      'Something went wrong on the server — please try again in a moment.'
+    );
+    expect((err as ApiError).fromServer).toBe(false);
+  });
+
+  it('ends the session when the refresh endpoint 400s on the body it was sent', async () => {
+    // The other half of a refusal: simplejwt answers 400 when it can't read the
+    // request, and the device has nothing usable either way. Without this the
+    // 400 arm of `isRefusalStatus` could be deleted and the suite stay green.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse({ refresh: ['This field is required.'] }, 400));
+
+    await expect(api.getCurrentUser()).rejects.toThrow(
+      'Your session has expired. Please log in again.'
+    );
+
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(await getAccessToken()).toBeNull();
+    expect(await getRefreshToken()).toBeNull();
+  });
+
   it('keeps the session when a 200 carries something other than the token pair', async () => {
     // A captive portal answering with its own login page: a connection problem
     // wearing a success status. Unguarded, the JSON parse throws and the catch

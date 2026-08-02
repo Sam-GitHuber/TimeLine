@@ -64,8 +64,16 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       // A 401 is handled by the refresh path in `api.ts`; if a request still
-      // fails after that the session is genuinely gone, so retrying is pointless
-      // noise. Retry other failures once — phones drop connections constantly.
+      // carries one after that, the server has refused the refresh token and the
+      // session is genuinely gone, so retrying is pointless noise. Retry other
+      // failures once — phones drop connections constantly.
+      //
+      // Since #245 that no longer means "every failure the refresh path
+      // produces". A refresh that never reached the server rejects with
+      // `status: 0` and keeps the session, so it lands in the retry-once branch
+      // — which is what we want: the retry runs a second later on the still-good
+      // token, and if signal came back in between the screen loads instead of
+      // erroring. Bounded at one, so a connection that's still down can't loop.
       retry: (failureCount, error) =>
         (error as { status?: number })?.status === 401 ? false : failureCount < 1,
     },
