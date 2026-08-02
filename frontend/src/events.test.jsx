@@ -181,6 +181,65 @@ describe("EventPage", () => {
     );
   });
 
+  // Issue #216: the tally shows your tick before the server has agreed, so a
+  // failed vote must take the tick back with it. Left showing, a dropped vote is
+  // invisible — the tally not moving reads as "nobody else has voted yet".
+  it("takes a failed vote's tick back and says what happened", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ can_manage: false, can_moderate: false }));
+    api.votePoll.mockRejectedValueOnce(new Error("This poll is closed."));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    const cake = screen.getByRole("button", { name: /Cake/ });
+    expect(cake).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(cake);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This poll is closed."
+    );
+    expect(screen.getByRole("button", { name: /Cake/ })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+  });
+
+  // Issue #216, the other half: your ticks were seeded once and then owned
+  // locally, so a vote cast elsewhere never reached this copy of the page — the
+  // counts refreshed and the ticks didn't, and the component contradicted itself.
+  it("re-syncs your ticks when the server's answer changes underneath", async () => {
+    const member = { can_manage: false, can_moderate: false };
+    const before = makeEvent(member);
+    // What the next fetch carries: you moved your date vote on your phone, and
+    // the Cake vote you're about to cast here has landed.
+    const after = makeEvent(member);
+    after.polls[0].your_votes = [102];
+    after.polls[1].your_votes = [201];
+    api.getEvent.mockResolvedValueOnce(before).mockResolvedValue(after);
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    const sat = new RegExp(formatEventDate("2026-07-19"));
+    const sun = new RegExp(formatEventDate("2026-07-20"));
+    expect(screen.getByRole("button", { name: sat })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    // Voting on the *other* poll invalidates the event; the refetch brings the
+    // date vote with it.
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: sun })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      )
+    );
+    expect(screen.getByRole("button", { name: sat })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+  });
+
   it("shows chip-level Set/Poll controls to the organiser only", async () => {
     api.getEvent.mockResolvedValue(makeEvent());
     const { unmount } = renderEventPage();
