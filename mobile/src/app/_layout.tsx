@@ -147,8 +147,11 @@ function AuthGate() {
  * NetInfo. Deferred: it's another dependency, and v1 is deliberately online-only.
  * Note before wiring it: leaving it unwired is what makes an offline mutation
  * *reject*. Wired, React Query's default `networkMode: 'online'` **pauses** it
- * instead, and anything awaiting `mutateAsync` to undo an optimistic update —
- * `components/events/PollTally.tsx` — would hang there instead of rolling back.)
+ * instead, and anything awaiting `mutateAsync` to report a failure would hang
+ * there instead — silently, since the `catch` that says so never runs. Two
+ * components depend on that today: `components/events/PollTally.tsx` (rolls its
+ * optimistic tick back) and `components/events/RsvpBar.tsx` (shows that your
+ * guests/note didn't save). Check both before wiring it.)
  */
 function useRefetchOnForeground() {
   useEffect(() => {

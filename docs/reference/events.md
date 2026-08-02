@@ -282,6 +282,36 @@ The gate needs a *present* organiser. Two paths:
   reads as "nobody else has voted yet", and you believe you answered while the
   organiser counts you as silent — the worst failure available to a feature whose
   job is collecting answers before a date.
+- **The RSVP's guests and note are yours to type, and the server's to correct**
+  (#229). They're local state seeded from `rsvp.your_response` — which changes
+  under a *mounted* event page on every refetch, since each RSVP/vote/finalise
+  here ends in an invalidate. Seeded once, they drifted stale beside the
+  `+ N guests` summary read from the fresh payload, and pressing **Update** then
+  posted the stale number back, silently reverting an RSVP made on the other
+  client. So they're **re-derived whenever that answer changes, compared by
+  contents** — the same discipline as the poll ticks above; a refetch hands back
+  a fresh object every time, and comparing identity would wipe what you're
+  half-way through typing. `RsvpBar` gets the mutation as **`mutateAsync`** for
+  the same reason `PollTally` gets voting: a rejected PATCH is otherwise
+  *completely* silent, the fields keeping your text as though it saved while the
+  count not moving reads as "nobody else has RSVP'd yet". **Its rejection keeps
+  your typed values** and states the failure in place — deliberately unlike the
+  poll tick's rollback, because a tick is one click to redo and a note isn't, so
+  the message does the work and Update retries as typed. (Only the server
+  outranks them: a later answer arriving from elsewhere re-seeds the fields per
+  the rule above, and the message stands, since your attempt still didn't land.)
+  That message retires **only** when the server *moves to* the very answer that
+  failed — the request landed and only its response was lost. Both halves of
+  that are judged on keys recorded **at the attempt**, never on when the sync
+  arrives, so it survives a refetch landing in the same render batch as the
+  rejection (the trap #231 describes), an unchanged re-press, and a refetch
+  bearing some third answer alike. Only the server's own words are shown; a
+  network-level failure rejects out of `fetch` as a bare `TypeError` with no
+  status, and offline is exactly the case the message exists for. **Both
+  clients, one PR** — splitting #216 from #227 is what left the phone lying for
+  a day. The two copies stay behaviourally identical; they differ only in how
+  each spots a server-authored error (mobile's `ApiError` instance, the web's
+  numeric `status`).
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).
@@ -307,7 +337,11 @@ here too, as of #227: `PollTally` awaits the vote and rolls its tick back with a
 message if it's rejected — which is why `EventScreen` hands voting down as
 `mutateAsync` — and re-derives your ticks whenever `poll.your_votes` changes by
 *contents*. The rollback earns its keep more here than on the web: a phone's
-network is the one that actually drops a request mid-tap.
+network is the one that actually drops a request mid-tap. The **RSVP guests/note
+bullet** above holds here too and landed on both clients together (#229) — with
+one extra way in on a phone: `_layout.tsx` wires `AppState` to `focusManager`,
+so merely returning to the foreground refetches the event and moves
+`your_response` under the open screen.
 
 The **organiser's control surface** landed in **E3c**, across two PRs:
 
