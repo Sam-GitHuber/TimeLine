@@ -8,11 +8,11 @@
  * detail. An event you're not connected to the organiser of is a **404**; it
  * renders as "not available" rather than leaking that it exists (events.md).
  *
- * **E3b was read + participate.** **E3c-a** adds the organiser's *set* surface —
+ * **E3b was read + participate.** **E3c-a** added the organiser's *set* surface —
  * the chip **Set/Change** → the contextual `DimensionEditor` → **finalise**, plus
- * **cancel/delete**. The **poll** control (open/edit/close/reopen) is E3c-b, so
- * `PollTally` here is still vote-only. Ported from
- * `frontend/src/pages/EventPage.jsx`.
+ * **cancel/delete** — and **E3c-b** the poll lifecycle, so `PollTally` is handed
+ * the organiser's controls (open/edit/close/reopen/remove) as well as voting.
+ * Ported from `frontend/src/pages/EventPage.jsx`.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';

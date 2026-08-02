@@ -6,7 +6,9 @@
  *
  * A member sees a **vote** affordance while the poll is open: tap an option to
  * cast (or, single-choice, tap again to clear); `onVote` gets your *full*
- * selection each time and the server replaces your prior votes with it.
+ * selection each time and the server replaces your prior votes with it. **Your
+ * tick is optimistic**, so `onVote` must return a promise that *rejects* on
+ * failure — that rejection is what takes the tick back (#227).
  *
  * **The organiser (`canManage`, E3c-b) also gets the lifecycle:** a **Set/Pin**
  * on each option (finalise it — the tally informs, the organiser decides; there
@@ -26,6 +28,7 @@ import {
   type OptionRow,
   type PollDimension,
 } from './pollOptions';
+import { ApiError } from '@/api';
 import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 import type { Poll, PollOptionPayload, PollResultOption } from '@/types';
@@ -79,6 +82,12 @@ export function PollTally({
   // open, or your own vote round-tripped). `serverVotes` is a fresh array on every
   // refetch, so we compare its *contents* — comparing identity would reset your
   // ticks on every poll of the event, mid-vote included.
+  //
+  // The rollback leans on a deferral recorded in `app/_layout.tsx`: with
+  // `onlineManager` left unwired to NetInfo, an offline vote *rejects*. Wire it
+  // and React Query's default `networkMode: 'online'` would **pause** the
+  // mutation instead — `mutateAsync` never settles, so no catch, no rollback, no
+  // message, and the airplane-mode case is the bug again.
   const serverVotes = poll.your_votes ?? [];
   const serverKey = voteKey(serverVotes);
   const [selected, setSelected] = useState<Set<number>>(() => new Set(serverVotes));
@@ -117,8 +126,14 @@ export function PollTally({
       // `next` while this request was in flight, the server has since spoken and
       // its answer must not be undone by a snapshot taken before the tap.
       setSelected((current) => (current === next ? before : current));
-      const said = err instanceof Error ? err.message : '';
-      setVoteError(said || 'Your vote didn’t go through — try again.');
+      // Only the server's own words are fit to show: an `ApiError` carries DRF's
+      // `detail`, written for a person ("This poll is closed."). Everything else
+      // is a runtime string — offline, React Native rejects with
+      // `TypeError: Network request failed` — and offline is the very case this
+      // rollback exists for, so it's the message a tester will hit first.
+      setVoteError(
+        err instanceof ApiError ? err.message : 'Your vote didn’t go through — try again.'
+      );
     }
   }
 

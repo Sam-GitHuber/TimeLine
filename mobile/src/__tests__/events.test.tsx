@@ -11,7 +11,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 
-import { api } from '@/api';
+import { api, ApiError } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
 import CalendarScreen from '@/app/(tabs)/calendar';
 import GroupScreen from '@/app/groups/[groupId]';
@@ -379,6 +379,18 @@ describe('event detail', () => {
 describe('optimistic vote ticks', () => {
   // What the next fetch of the event returns. Reassign it to model data that
   // changed elsewhere — a vote cast on the web, or your own round-tripping.
+  // A copy of a poll with your votes moved to `ids`. The per-option `you_voted`
+  // flags move with them: the component reads only `your_votes`, but a fixture
+  // whose two halves disagree would mislead the next person about which of them
+  // drives the sync.
+  function movedVotes(poll: Poll, ids: number[]): Poll {
+    return {
+      ...poll,
+      your_votes: ids,
+      options: poll.options.map((o) => ({ ...o, you_voted: ids.includes(o.id) })),
+    };
+  }
+
   let served: Event;
   function serveEvent(event: Event) {
     served = event;
@@ -396,9 +408,11 @@ describe('optimistic vote ticks', () => {
    */
   it('takes a failed vote’s tick back and says what happened', async () => {
     serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    // A 409 — the organiser closed the poll moments before your tap. DRF's
+    // `detail` reaches us as an ApiError, and it's written for a person.
     const vote = jest
       .spyOn(api, 'votePoll')
-      .mockRejectedValue(new Error('This poll is closed.'));
+      .mockRejectedValue(new ApiError('This poll is closed.', 409, null));
 
     await renderWith(<EventScreen />);
 
@@ -407,6 +421,27 @@ describe('optimistic vote ticks', () => {
     await fireEvent.press(drinks);
 
     expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Drinks/ })).not.toBeSelected();
+    vote.mockRestore();
+  });
+
+  /**
+   * The dominant mobile failure isn't a 409, it's no signal — and React Native
+   * rejects that with `TypeError: Network request failed`. Rendering a rejection's
+   * message blindly would put that string on the poll card, in exactly the case
+   * this whole guard was built for.
+   */
+  it('shows plain copy, not a runtime string, when the tap finds no signal', async () => {
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest
+      .spyOn(api, 'votePoll')
+      .mockRejectedValue(new TypeError('Network request failed'));
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByRole('button', { name: /Drinks/ }));
+
+    expect(await screen.findByText(/didn’t go through/)).toBeTruthy();
+    expect(screen.queryByText(/Network request failed/)).toBeNull();
     expect(screen.getByRole('button', { name: /Drinks/ })).not.toBeSelected();
     vote.mockRestore();
   });
@@ -423,10 +458,7 @@ describe('optimistic vote ticks', () => {
     const vote = jest.spyOn(api, 'votePoll').mockImplementation(async () => {
       serveEvent(
         makeEvent({
-          polls: [
-            { ...PLACE_POLL, your_votes: [51] },
-            { ...CUSTOM_POLL, your_votes: [41] },
-          ],
+          polls: [movedVotes(PLACE_POLL, [51]), movedVotes(CUSTOM_POLL, [41])],
         })
       );
       return CUSTOM_POLL;
@@ -464,7 +496,7 @@ describe('optimistic vote ticks', () => {
         })
     );
     const rsvp = jest.spyOn(api, 'rsvpEvent').mockImplementation(async () => {
-      serveEvent(makeEvent({ polls: [{ ...CUSTOM_POLL, your_votes: [41] }] }));
+      serveEvent(makeEvent({ polls: [movedVotes(CUSTOM_POLL, [41])] }));
       return served;
     });
 
@@ -485,13 +517,111 @@ describe('optimistic vote ticks', () => {
     );
 
     await act(async () => {
-      rejectVote(new Error('Offline.'));
+      rejectVote(new TypeError('Network request failed'));
     });
 
     // The failure is stated, and the newer vote survives it.
-    expect(await screen.findByText('Offline.')).toBeTruthy();
+    expect(await screen.findByText(/didn’t go through/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Drinks/ })).toBeSelected();
     expect(screen.getByRole('button', { name: /Snacks/ })).not.toBeSelected();
+    vote.mockRestore();
+    rsvp.mockRestore();
+  });
+
+  /**
+   * A message about an earlier attempt is out of date once the server says where
+   * your votes stand — otherwise "your vote didn't go through" can sit under a
+   * tick the server has since confirmed, which is its own small lie.
+   */
+  it('clears a stale failure once the server states your votes', async () => {
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest
+      .spyOn(api, 'votePoll')
+      .mockRejectedValue(new ApiError('This poll is closed.', 409, null));
+    const rsvp = jest.spyOn(api, 'rsvpEvent').mockImplementation(async () => {
+      // The vote had in fact landed — only its response was lost.
+      serveEvent(makeEvent({ polls: [movedVotes(CUSTOM_POLL, [41])] }));
+      return served;
+    });
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByRole('button', { name: /Drinks/ }));
+    expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+
+    // Anything that refetches the event carries the server's answer with it.
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Drinks/ })).toBeSelected()
+    );
+    expect(screen.queryByText('This poll is closed.')).toBeNull();
+    vote.mockRestore();
+    rsvp.mockRestore();
+  });
+
+  /**
+   * The re-sync compares `your_votes` by *contents*, not identity. A refetch that
+   * returns the same votes in a different order is not a change, and treating it
+   * as one would wipe the tick you're mid-way through casting — the failure mode
+   * an identity check hides, since every refetch hands back a fresh array.
+   */
+  it('keeps an in-flight tick when a refetch only reorders your votes', async () => {
+    // Pick-any, and you've already voted twice in it.
+    const multi: Poll = {
+      ...CUSTOM_POLL,
+      allow_multiple: true,
+      your_votes: [40, 41],
+      vote_count: 2,
+      options: [
+        ...CUSTOM_POLL.options,
+        {
+          id: 42,
+          label: 'Cake',
+          date_value: null,
+          time_value: null,
+          text_value: 'Cake',
+          order: 2,
+          count: 0,
+          voters: [],
+          you_voted: false,
+        },
+      ],
+    };
+    serveEvent(makeEvent({ polls: [multi] }));
+    let rejectVote: (err: Error) => void = () => {};
+    const vote = jest.spyOn(api, 'votePoll').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectVote = reject;
+        })
+    );
+    const rsvp = jest.spyOn(api, 'rsvpEvent').mockImplementation(async () => {
+      // Same two votes, listed the other way round — DRF doesn't promise an
+      // order on a reverse relation.
+      serveEvent(makeEvent({ polls: [movedVotes(multi, [41, 40])] }));
+      return served;
+    });
+
+    await renderWith(<EventScreen />);
+    const cake = await screen.findByRole('button', { name: /Cake/ });
+    await act(async () => {
+      fireEvent.press(cake);
+    });
+    await waitFor(() => expect(vote).toHaveBeenCalledWith(4, [40, 41, 42]));
+
+    // A refetch lands mid-vote. Your votes haven't changed, so neither should
+    // the tick you're waiting on.
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+    await waitFor(() => expect(rsvp).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: /Cake/ })).toBeSelected();
+
+    // And because nothing replaced it, the rollback still recognises it as ours.
+    await act(async () => {
+      rejectVote(new TypeError('Network request failed'));
+    });
+    expect(await screen.findByText(/didn’t go through/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Cake/ })).not.toBeSelected();
+    expect(screen.getByRole('button', { name: /Snacks/ })).toBeSelected();
     vote.mockRestore();
     rsvp.mockRestore();
   });
