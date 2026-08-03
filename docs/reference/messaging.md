@@ -1480,17 +1480,36 @@ send already followed. Consequences to know before adding another: the handler
 the bubble is given must return a **rejecting promise** (`mutateAsync`, not
 `mutate`), and a mutation-level `isError` can't serve, since one mutation covers
 every bubble on both screens and a flag on it can't say which one failed. See
-[reactions.md](reactions.md#in-the-messages-drawer-phase-9b-m9c). Two of this
-file's other mutations — `editMutation` and `deleteManyMutation` — still render
-into the composer. Neither can be *triggered* from a strand, because
-`getStrandActions` passes `allowEdit: false` and omits `onSelect`; but that gates
-the trigger, and the `hidden` is on the renderer. A strand opened while one of
-them is still in flight hides its message just the same, and `deleteManyMutation`
-leaves select mode the instant you confirm while its DELETEs run one at a time —
-so that isn't even a race. Filed as **#253**; fix it by moving those lines out of
-the column rather than by reasoning about who can reach what. The invariant is
-about the *rendering*: nothing in that column may be the only renderer of a write
-that can outlive the transcript being visible.
+[reactions.md](reactions.md#in-the-messages-drawer-phase-9b-m9c).
+
+**Three others had no bubble to move to, so they moved out of the column
+instead** (issue #253). `editMutation`, `deleteManyMutation` and `photoError`
+rendered in the composer, and M9d's first reading of the rule above was that they
+were safe because neither Edit nor Select can be *triggered* from a strand
+(`getStrandActions` passes `allowEdit: false` and omits `onSelect`). That gates
+the trigger; the `hidden` is on the renderer. A strand opened while one of them
+was still in flight hid the answer just the same — and for the bulk delete there
+was no race to win at all, since `confirmDeleteSelected` ends select mode on the
+line *after* `mutate()` while its DELETEs go out one at a time, leaving the
+transcript fully interactive for the length of the selection. A failed edit,
+likewise, is reachable from an open strand because edit mode doesn't stand the
+reply counts down. All three now render in a small bar that is a **sibling** of
+the transcript column rather than a child of it, so it survives whichever of the
+two is on screen; and it's kept out of the column rather than merely conditioned
+on `!strand`, because the message is worth *more* over an open strand — backing
+out of one to the conversation list unmounts the whole view (keyed on
+`conversationId` in `MessagesDrawer`) and takes the message with it. A
+`role="alert"` in a `display: none` subtree isn't announced either, so this was
+silent to a screen reader as well as invisible.
+
+**So the invariant is about the rendering, not about who can reach what:**
+nothing in that column may be the only renderer of a write that can outlive the
+transcript being visible. Both halves are pinned in `messaging.test.jsx` — that
+the column really is hidden, and that the message isn't inside it. (`toBeVisible`
+can't stand in for the second: jsdom loads no stylesheet, so Tailwind's `hidden`
+is only a class name there.) This is the same class as
+[#254/#255](connections.md#reporting-a-refused-write), one dismissal-route
+spelling over.
 
 **The two halves in the transcript.** A reply renders a **collapsed quote** inside
 its bubble (name, two lines, `line-clamp`ed so a long quote can't push the reply

@@ -1654,7 +1654,8 @@ export default function ConversationThreadView() {
               {/* A failed *send* is reported on its own bubble, not here (M9c) —
                   nearer the thing that went wrong, and the only place that works
                   when two messages are in flight and one of them fell over. A
-                  failed edit still belongs here: it has no bubble of its own. */}
+                  failed edit has no bubble of its own, so it goes in the bar
+                  below this column rather than inside it — see there for why. */}
               {/* A failed *reaction* isn't reported here either, and that was a
                   bug for as long as it was (#251): the composer sits in the
                   transcript column, which is given `hidden` whenever a strand is
@@ -1662,30 +1663,6 @@ export default function ConversationThreadView() {
                   from. Anything rendered here while one is open paints into a
                   `display: none` subtree. It says so on the bubble now, which
                   both ways in can see. */}
-              {/* A photo that couldn't be prepared never reached the outbox, so
-                  it has no bubble to fail on — the composer is the only place
-                  left to say so. */}
-              {photoError && (
-                <p role="alert" className="mt-1 text-sm text-red-600">
-                  {photoError}
-                </p>
-              )}
-              {editMutation.isError && (
-                <p role="alert" className="mt-1 text-sm text-red-600">
-                  {serverMessage(editMutation.error, "Couldn’t save the edit.")}
-                </p>
-              )}
-              {/* A bulk delete that fell over has no bubble to fail on and no
-                  mode left to report in — the selection ends the moment you
-                  confirm, so this is the only place left to say so. Its own
-                  wording rather than the server's: a partial failure means
-                  *some* of them are still there, which is what you need to know
-                  and not what any one response says. */}
-              {deleteManyMutation.isError && (
-                <p role="alert" className="mt-1 text-sm text-red-600">
-                  Some messages are still there. Try again.
-                </p>
-              )}
             </div>
           </div>
 
@@ -1735,6 +1712,56 @@ export default function ConversationThreadView() {
               onDiscard={(message) => discardSend(message.id)}
               onClose={() => setStrand(null)}
             />
+          )}
+        </div>
+      )}
+
+      {/* The three failures with nowhere nearer to go, in a bar under whichever
+          of the transcript and the strand is on screen.
+
+          **They used to sit in the composer, and that was the bug (#253).** The
+          composer belongs to the transcript column, which is given `hidden` — a
+          real `display: none` — for as long as a strand is open, and neither
+          the write nor the strand waits for the other. #251 checked that Edit
+          and Select can't be *reached* from inside a strand (`getStrandActions`
+          passes `allowEdit: false` and omits `onSelect`) and concluded these
+          were safe; but that gates the trigger, and the `hidden` is on the
+          renderer. A strand opened while one of them is still out hid the
+          answer just the same — and for the bulk delete there wasn't even a
+          race to win, since `confirmDeleteSelected` ends select mode on the
+          line after `mutate()` while its DELETEs go out one at a time.
+
+          So the fix is where they render, not who can reach what: out here they
+          are a sibling of the column rather than a child of it, and there is no
+          longer a state of this view in which they paint into a hidden subtree.
+          The invariant, stated as the class it is: **nothing in that column may
+          be the only renderer of a write that can outlive the transcript being
+          visible.** A `role="alert"` in a `display: none` subtree isn't
+          announced either, so this was silent to a screen reader too.
+
+          Kept out of the column, not merely conditioned on `!strand` — the
+          message is worth *more* over an open strand, not less, because backing
+          out of one to the conversation list unmounts this view (keyed on
+          `conversationId` in `MessagesDrawer`) and takes the message with it. */}
+      {(photoError || editMutation.isError || deleteManyMutation.isError) && (
+        <div className="space-y-1 px-3 pb-3 text-sm text-red-600">
+          {/* A photo that couldn't be prepared never reached the outbox, so it
+              has no bubble to fail on. Same window as the other two: preparing
+              one is async (it's decoded and re-encoded to strip EXIF), and the
+              transcript stays live while it runs. */}
+          {photoError && <p role="alert">{photoError}</p>}
+          {editMutation.isError && (
+            <p role="alert">
+              {serverMessage(editMutation.error, "Couldn’t save the edit.")}
+            </p>
+          )}
+          {/* A bulk delete that fell over has no bubble to fail on and no mode
+              left to report in — the selection ends the moment you confirm.
+              Its own wording rather than the server's: a partial failure means
+              *some* of them are still there, which is what you need to know and
+              not what any one response says. */}
+          {deleteManyMutation.isError && (
+            <p role="alert">Some messages are still there. Try again.</p>
           )}
         </div>
       )}
