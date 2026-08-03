@@ -28,6 +28,13 @@
  * focus, which is the whole point — you haven't gone anywhere, you've narrowed to
  * a strand of the thread you're already in.
  *
+ * **Android has no blur to do that work, so the wash does it instead** (Phase
+ * 10). `expo-blur` is iOS-first: on Android it paints a flat translucent tint
+ * unless you both opt into `blurMethod` *and* give it a `<BlurTargetView>` in
+ * the same window — and this is a `Modal`, which is a window of its own. The
+ * near-solid `washAndroid` below is the honest version of the same intent; see
+ * the note on it.
+ *
  * **Deliberately no long-press menu in here.** Copy/Edit/Delete/Report and the
  * reaction row all live in `MessageActionMenu`, which is itself a `Modal` — and
  * presenting a modal from inside a presented modal is the iOS trap `ReactionTray`
@@ -49,6 +56,7 @@ import {
   ActivityIndicator,
   FlatList,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -231,8 +239,15 @@ export function MessageThreadView({
     >
       <BlurView intensity={28} tint="light" style={StyleSheet.absoluteFill}>
         {/* A wash over the blur: on a light surface, blur alone doesn't drop the
-            transcript back far enough for the thread to read as the foreground. */}
-        <View style={styles.wash} />
+            transcript back far enough for the thread to read as the foreground.
+
+            On Android it isn't "over the blur", because there is no blur — see
+            the note on `washAndroid`, which is why the two are different
+            strengths rather than one shared value. */}
+        <View
+          testID="thread-wash"
+          style={Platform.OS === 'android' ? styles.washAndroid : styles.wash}
+        />
 
         <Pressable
           style={StyleSheet.absoluteFill}
@@ -262,6 +277,10 @@ export function MessageThreadView({
           ) : (
             <FlatList
               ref={listRef}
+              // Named for the same reason the transcript is: a test can't reach
+              // a list through an accessibility label, and the scroll behaviour
+              // below is only reachable by driving its props.
+              testID="strand"
               data={messages}
               style={styles.list}
               contentContainerStyle={styles.listContent}
@@ -270,9 +289,25 @@ export function MessageThreadView({
               // view as later pages land and as replies arrive. Without this a
               // strand longer than the screen opens at the root and the reply
               // you just sent is off the bottom.
-              onContentSizeChange={() =>
-                listRef.current?.scrollToEnd({ animated: false })
-              }
+              //
+              // **Twice, and the second one is the one Android needs** (Phase
+              // 10). `scrollToEnd` is a command to the *native* list, and on
+              // Android it arrives before the new content height has been
+              // committed — so it scrolls to a bottom that is still the old one,
+              // which on a strand that has just opened is 0. Nothing fires
+              // afterwards to correct it (the next event is a `layout`, not a
+              // content size), so the strand sat at the root with its newest
+              // replies under the composer. A frame later the height is there.
+              //
+              // iOS commits synchronously and is already at the end by then, so
+              // the deferred call is a no-op rather than a second jump — which
+              // is why the immediate one stays rather than being replaced.
+              onContentSizeChange={() => {
+                listRef.current?.scrollToEnd({ animated: false });
+                requestAnimationFrame(() =>
+                  listRef.current?.scrollToEnd({ animated: false })
+                );
+              }}
               ListHeaderComponent={
                 // Only when the root itself is clipped out — the replies below
                 // are ones this viewer *is* entitled to, so the thread is
@@ -445,12 +480,31 @@ export function MessageThreadView({
 
 const styles = StyleSheet.create({
   wash: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    ...StyleSheet.absoluteFill,
+    // `colors.surface` with an alpha — RN has no colour-with-opacity helper, so
+    // the token is spelled out. Both literals here must follow it if it moves.
     backgroundColor: 'rgba(251,250,247,0.55)',
+  },
+  // Android gets a near-solid wash because `expo-blur` gives it no blur at all:
+  // `blurMethod` defaults to `'none'` (a flat translucent tint), and turning it
+  // on needs a `<BlurTargetView>` wrapping the content to be blurred *in the
+  // same window* — which a `Modal` is not, it's a window of its own. So on
+  // Android the strand was floating over a perfectly legible transcript at
+  // roughly 35% show-through, and two conversations' worth of text overlapped:
+  // the "messy" look this fixes.
+  //
+  // A blur can be light because it destroys the detail behind it; a wash can't,
+  // so it has to be heavy enough to do the same job. **What lands on screen is
+  // ~5% show-through, not the 6% this alpha alone would give**: the `BlurView`
+  // is still mounted underneath and contributes its own flat tint (~0.22 at
+  // `intensity={28}`), so the two compose. Measured on a Pixel 8 emulator, ink
+  // behind the wash reads (240,239,236) against a (251,250,247) ground. That
+  // margin is deliberate — the transcript's colour stays faintly present, so it
+  // still reads as this conversation pushed back rather than a screen you
+  // navigated to. Tune this number against the composite, not on its own.
+  washAndroid: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(251,250,247,0.94)',
   },
   sheet: { flex: 1 },
   header: {
