@@ -108,7 +108,7 @@ import { getDraft, setDraft } from '@/drafts';
 import { useMentions } from '@/mentions';
 import type { Outgoing, OutgoingPhoto } from '@/outbox';
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
-import { askPhotoSource, launchPhotoPicker } from '@/photoSource';
+import { usePhotoPicker } from '@/photoSource';
 import {
   dismissConversationNotifications,
   setOnScreenConversation,
@@ -393,6 +393,7 @@ export default function ThreadScreen() {
    */
   const [attachment, setAttachment] = useState<OutgoingPhoto | null>(null);
   const [preparing, setPreparing] = useState(false);
+  const { pickPhotos, photoMenu } = usePhotoPicker();
   /** The photo open in the full-screen viewer, if any. */
   const [lightbox, setLightbox] = useState<MessageAttachment | null>(null);
   /**
@@ -1176,20 +1177,17 @@ export default function ThreadScreen() {
    * what's in front of you is at least half of what a photo in a chat is for,
    * and bouncing someone out to the camera app and back is the kind of friction
    * that makes an app feel like a website with a wrapper. The prompt itself
-   * lives in `photoSource.ts` so every screen that takes a photo asks the same
-   * way — see there for why it's an `Alert` and not an action sheet.
+   * lives in `photoSource.tsx` so every screen that takes a photo asks the same
+   * way — see there for why it's the shared action menu and not an `Alert`.
+   *
+   * The pick is full quality: every photo is resized and re-encoded a moment
+   * later by `prepareChatPhoto`, and compressing twice would only throw away
+   * detail before the step that decides how much to keep.
    */
   async function attachPhoto() {
-    const source = await askPhotoSource('Send a photo');
-    if (!source) return;
-
-    // `quality: 1`: this is the *pick*, and every photo is resized and
-    // re-encoded a moment later by `prepareChatPhoto`. Compressing twice would
-    // only throw away detail before the step that decides how much to keep.
-    const picked = await launchPhotoPicker(source, { quality: 1 });
-    if (!picked || picked.canceled) return;
-    const asset = picked.assets[0];
-    if (!asset) return;
+    const assets = await pickPhotos('Send a photo');
+    if (!assets) return;
+    const asset = assets[0];
 
     setPreparing(true);
     try {
@@ -2015,6 +2013,11 @@ export default function ThreadScreen() {
           onClose={() => setReportingId(null)}
         />
       ) : null}
+
+      {/* The camera/library sheet. `null` on iOS, where it's native. It's
+          opened from the composer, never from inside the focused strand, so it
+          can't end up as a modal stacked on a modal. */}
+      {photoMenu}
     </SafeAreaView>
   );
 }

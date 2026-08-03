@@ -29,7 +29,7 @@ import {
 
 import { api, type PhotoUpload } from '@/api';
 import { useAuth } from '@/auth';
-import { askPhotoSource, launchPhotoPicker } from '@/photoSource';
+import { usePhotoPicker } from '@/photoSource';
 import { AvatarCropModal } from './AvatarCropModal';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -51,6 +51,7 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
   const [removeAvatar, setRemoveAvatar] = useState(false);
   // A just-chosen photo waiting to be reframed in the crop modal.
   const [pendingCrop, setPendingCrop] = useState<PendingCrop | null>(null);
+  const { pickPhotos, photoMenu } = usePhotoPicker();
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -85,18 +86,13 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
 
   async function pickAvatar() {
     // Camera as well as library: a profile photo is the one picture most people
-    // want to take on the spot rather than dig out of a camera roll.
-    const source = await askPhotoSource('Profile photo');
-    if (!source) return;
+    // want to take on the spot rather than dig out of a camera roll. No
+    // `allowsEditing` — we want the *full* image so our round cropper can
+    // reframe it, not the OS square crop.
+    const assets = await pickPhotos('Profile photo');
+    if (!assets) return;
 
-    // No explicit permission request for the library: the modern iOS picker runs
-    // out of process and returns only what the user picked. No `allowsEditing` —
-    // we want the *full* image so our round cropper can reframe it, not the OS
-    // square crop.
-    const result = await launchPhotoPicker(source, { quality: 1 });
-    if (!result || result.canceled) return;
-
-    const asset = result.assets[0];
+    const asset = assets[0];
     setPendingCrop({ uri: asset.uri, width: asset.width, height: asset.height });
   }
 
@@ -226,6 +222,10 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
           onCancel={() => setPendingCrop(null)}
         />
       ) : null}
+
+      {/* The camera/library sheet. `null` on iOS, where it's native. It closes
+          before the cropper opens, so the two modals never stack. */}
+      {photoMenu}
     </View>
   );
 }

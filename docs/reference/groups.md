@@ -152,7 +152,11 @@ actions live behind a **⋯ menu** (ActionSheetIOS): Invite, Members, Leave, and
 for admins — Edit, Delete. Members is its own roster screen (admin controls via a
 per-row action sheet; the last-admin guardrail surfaces the server's 400); invite
 and create/edit are pushed screens reusing the connection-picker and the profile
-editor's round avatar cropper. The **include-groups feed preference**
+editor's round avatar cropper. The group photo can be **taken with the camera as
+well as picked from the library** — that step is the shared `usePhotoPicker`, and
+its contract (one `await`, assets or `null`, plus a `{photoMenu}` to render) is
+written up in
+[`mobile-app.md`](mobile-app.md#taking-a-photo-camera-or-library). The **include-groups feed preference**
 (`?include_groups=1`, off by default) is a switch in **Settings → Feed**, not a
 header control — it's a low-frequency choice, persisted per-device via
 `expo-secure-store` (the web's per-browser `localStorage` equivalent); it merges

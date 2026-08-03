@@ -241,36 +241,68 @@ show. Setting it `false` doesn't merely omit the permission, it emits an explici
 Phase 10, so don't "fix" that entry when you see it in the introspected manifest.
 **The camera permission is real and stays** — every photo picker in the app can
 take a shot (`launchCameraAsync`), so this is a live capability, not plugin
-default cruft. Its usage string names posts, chats *and* profiles, because Apple
-shows that sentence to the person in the prompt and it's the only explanation
-they get.
+default cruft. **Both** usage strings name posts, chats *and* profiles: Apple
+shows those sentences to the person in the prompt and to App Review, and they're
+the only explanation either gets.
 
 ### Taking a photo: camera or library
 
 Every place that adds a photo — a post, a chat message, a profile or group
 avatar — asks **"Take Photo / Choose from Library"** first, through the shared
-`src/photoSource.ts`. Only chat had the camera when photos first shipped
+`src/photoSource.tsx`. Only chat had the camera when photos first shipped
 (Phase 9b M7); the rest opened the camera roll and nothing else, which on a phone
 is the wrong default — "add a photo" to what you're writing about *right now*
 very often means the thing in front of you, and a trip out to the camera app and
 back is the friction that makes an app feel like a website in a wrapper.
 
-It's one module rather than a copied block per screen so the wording, the button
-order and the permission handling can't drift apart. Two things in it are worth
-knowing before touching it:
+**`usePhotoPicker` owns the whole flow, not just the wording.** One `await`
+returns assets or `null`:
 
-- **`askPhotoSource` wraps `Alert` in a promise, and includes `onDismiss`.**
-  Android's Back dismisses an alert without firing any button, so without that
-  the caller would await a promise that never settles and the button would be
-  dead for the rest of the screen's life. `photoSource.test.ts` pins it.
+```tsx
+const { pickPhotos, photoMenu } = usePhotoPicker();
+const assets = await pickPhotos('Add a photo');
+if (!assets) return;   // backed out, refused, or failed — already explained
+// …and render {photoMenu}, which is null on iOS.
+```
+
+That shape is deliberate. The fragile part was never the prompt; it was the
+five-step dance around it (ask → guard → launch → guard → `assets[0]`), which
+drifted the first time it was copied — one screen guarded an empty `assets`, two
+didn't, and that guard is the difference between a cancelled pick and
+`cannot read property 'uri' of undefined`. Collapsing it to one guard per screen
+is what keeps four surfaces honest.
+
+Four things in it are worth knowing before touching it:
+
+- **It's a menu, so it uses `useActionMenu`, not `Alert`.** Android's `Alert`
+  maps buttons to neutral/negative/positive in *reverse* array order, so "Cancel"
+  would land in the emphasised primary slot and "Take Photo" in the throwaway
+  neutral one, and it defaults to `cancelable: false` so Back wouldn't dismiss
+  it. `ActionMenu.tsx` records that war story in full.
+- **Dismissal is a third outcome, and it has to be delivered.** `ActionMenuRequest`
+  grew an `onCancel` for this: the menu's result is *awaited*, and a sheet closed
+  by Cancel, the backdrop or Back must settle the promise or the button is dead
+  for the rest of the screen's life.
 - **Only the camera path asks permission.** The modern library picker runs out of
   process and hands back only what was chosen, so prompting for library access
-  would be a prompt for nothing. A refused camera resolves `null` after telling
-  the person why — silently doing nothing reads as a broken button.
+  would be a prompt for nothing. A refused camera resolves `null` after saying
+  why — and *which* sentence depends on `canAskAgain`, because on Android a first
+  "Deny" leaves the OS willing to ask again, and sending someone to a Settings
+  toggle that doesn't exist yet reads as the app being broken.
+- **A rejected picker is reported, not swallowed.** The native side rejects for
+  real reasons (no camera on a simulator, no current view controller, a failed
+  write); uncaught, that's a floating promise and a button that quietly does
+  nothing.
 
 Multi-select is a library-only option (`allowsMultipleSelection`,
 `selectionLimit`): the camera returns one shot. The post composer is the only
-caller that asks for several at once.
+caller that asks for several at once, and the only one that picks at less than
+full quality (0.9) — its photos go up as picked, while chat photos and avatars
+are re-encoded on the phone afterwards and would only lose detail twice.
+
+In tests, the press that opens the sheet **must not be awaited** — `pickPhotos`
+doesn't resolve until a source is chosen — and `helpers.choosePhotoSource()`
+answers it on either platform.
 
 **Don't use `new URL()`.** React Native ships a partial `URL` implementation
 (hence `react-native-url-polyfill`). Paging follows the paginator's `next` URL,

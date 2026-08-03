@@ -593,10 +593,11 @@ path that forgot.
 - **The composer** offers **camera and library**, not just the library. Sending a
   picture of what's in front of you is at least half of what a photo in a chat is
   for, and routing someone out to the camera app and back is the friction that
-  makes an app feel like a website in a wrapper. The prompt itself now lives in
-  `mobile/src/photoSource.ts` and is shared with every other picker in the app
-  (post composer, profile and group avatars) — see
-  [`mobile-app.md`](mobile-app.md#taking-a-photo-camera-or-library).
+  makes an app feel like a website in a wrapper. The whole flow now lives in
+  `mobile/src/photoSource.tsx` (`usePhotoPicker`) and is shared with every other
+  picker in the app (post composer, profile and group avatars) — see
+  [`mobile-app.md`](mobile-app.md#taking-a-photo-camera-or-library) for why it's
+  the shared action menu rather than an `Alert`, and what a caller has to handle.
 
   🔒 **The camera permission is load-bearing config.**
   `mobile/app.json` must keep a real `cameraPermission` *string* in the

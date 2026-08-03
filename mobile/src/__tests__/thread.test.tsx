@@ -43,7 +43,14 @@ import { clearQuotes } from '@/quotes';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
-import { backHandlerCount, captureBackHandler, pressBack, settle } from './helpers';
+import {
+  backHandlerCount,
+  captureBackHandler,
+  choosePhotoSource,
+  pressBack,
+  resetMenuSpies,
+  settle,
+} from './helpers';
 
 const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 
@@ -162,24 +169,6 @@ const PICKED = {
   canceled: false,
   assets: [{ uri: 'file:///camera-roll/IMG_1.jpg', width: 4032, height: 3024 }],
 };
-
-/**
- * Drive the composer's attach flow by answering its Alert.
- *
- * The choice between camera and library is an `Alert` with three buttons, so
- * "the user tapped Take Photo" is "the second button's onPress fired" — there is
- * no rendered sheet to press under Node.
- */
-function chooseAttachSource(label: 'Take Photo' | 'Choose from Library') {
-  const spy = jest.spyOn(Alert, 'alert').mockImplementation(((
-    _title: string,
-    _message: string | undefined,
-    buttons: { text: string; onPress?: () => void }[]
-  ) => {
-    buttons.find((button) => button.text === label)?.onPress?.();
-  }) as unknown as typeof Alert.alert);
-  return spy;
-}
 
 const mockFetch = jest.fn();
 
@@ -500,6 +489,9 @@ beforeEach(() => {
   mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([] as never);
   mockNotifications.dismissNotificationAsync.mockReset();
   mockNotifications.dismissNotificationAsync.mockResolvedValue(undefined as never);
+  // The camera/library sheet is a `useActionMenu`, so its spies need resetting
+  // like any other menu test.
+  resetMenuSpies();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -2754,10 +2746,11 @@ it('does not leave a message you were editing sitting in the composer', async ()
 it('sends a photo picked from the library, prepared on the phone', async () => {
   serve({ conversation: detail({}), messages: [message({ id: 1 })] });
   pickFromLibrary.mockResolvedValue(PICKED);
-  const alert = chooseAttachSource('Choose from Library');
 
   await renderScreen();
-  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  // Not awaited: the press doesn't settle until the sheet is answered.
+  fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await choosePhotoSource('Choose from Library');
   // The prepared thumbnail sits on the composer until you send it, so you can
   // see what you're about to send and back out of it.
   await screen.findByLabelText('Remove photo');
@@ -2779,7 +2772,6 @@ it('sends a photo picked from the library, prepared on the phone', async () => {
     expect(send![1].body).toBeInstanceOf(FormData);
     expect(send![1].headers['Content-Type']).toBeUndefined();
   });
-  alert.mockRestore();
 });
 
 it('offers the camera as well as the library', async () => {
@@ -2788,14 +2780,14 @@ it('offers the camera as well as the library', async () => {
   // an app feel like a website.
   serve({ conversation: detail({}), messages: [message({ id: 1 })] });
   takePhoto.mockResolvedValue(PICKED);
-  const alert = chooseAttachSource('Take Photo');
 
   await renderScreen();
-  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  // Not awaited: the press doesn't settle until the sheet is answered.
+  fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await choosePhotoSource('Take Photo');
 
   await waitFor(() => expect(takePhoto).toHaveBeenCalled());
   expect(pickFromLibrary).not.toHaveBeenCalled();
-  alert.mockRestore();
 });
 
 it('declares the camera permission the camera path needs', () => {
@@ -2826,28 +2818,29 @@ it('sends a photo with no caption at all', async () => {
   // send anything.
   serve({ conversation: detail({}), messages: [message({ id: 1 })] });
   pickFromLibrary.mockResolvedValue(PICKED);
-  const alert = chooseAttachSource('Choose from Library');
 
   await renderScreen();
   const send = await screen.findByLabelText('Send');
   expect(send.props.accessibilityState?.disabled).toBe(true);
 
-  await fireEvent.press(screen.getByLabelText('Add a photo'));
+  // Not awaited: the press doesn't settle until the sheet is answered.
+  fireEvent.press(screen.getByLabelText('Add a photo'));
+  await choosePhotoSource('Choose from Library');
   await screen.findByLabelText('Remove photo');
 
   expect(screen.getByLabelText('Send').props.accessibilityState?.disabled).toBe(
     false
   );
-  alert.mockRestore();
 });
 
 it('lets you back out of a photo before sending it', async () => {
   serve({ conversation: detail({}), messages: [message({ id: 1 })] });
   pickFromLibrary.mockResolvedValue(PICKED);
-  const alert = chooseAttachSource('Choose from Library');
 
   await renderScreen();
-  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  // Not awaited: the press doesn't settle until the sheet is answered.
+  fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await choosePhotoSource('Choose from Library');
   await fireEvent.press(await screen.findByLabelText('Remove photo'));
 
   expect(screen.queryByLabelText('Remove photo')).toBeNull();
@@ -2855,7 +2848,6 @@ it('lets you back out of a photo before sending it', async () => {
   expect(screen.getByLabelText('Send').props.accessibilityState?.disabled).toBe(
     true
   );
-  alert.mockRestore();
 });
 
 it('won’t let a queued photo turn an emptied edit into a PATCH', async () => {
@@ -2868,10 +2860,11 @@ it('won’t let a queued photo turn an emptied edit into a PATCH', async () => {
     messages: [message({ id: 7, sender: MINE, text: 'teh plan' })],
   });
   pickFromLibrary.mockResolvedValue(PICKED);
-  const alert = chooseAttachSource('Choose from Library');
 
   await renderScreen();
-  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  // Not awaited: the press doesn't settle until the sheet is answered.
+  fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await choosePhotoSource('Choose from Library');
   await screen.findByLabelText('Remove photo');
 
   await openMenu('Your message: teh plan');
@@ -2886,7 +2879,6 @@ it('won’t let a queued photo turn an emptied edit into a PATCH', async () => {
   expect(
     mockFetch.mock.calls.some(([, init]) => init?.method === 'PATCH')
   ).toBe(false);
-  alert.mockRestore();
 });
 
 it('keeps a queued photo out of sight while you edit, and gives it back after', async () => {
@@ -2898,10 +2890,11 @@ it('keeps a queued photo out of sight while you edit, and gives it back after', 
     messages: [message({ id: 7, sender: MINE, text: 'teh plan' })],
   });
   pickFromLibrary.mockResolvedValue(PICKED);
-  const alert = chooseAttachSource('Choose from Library');
 
   await renderScreen();
-  await fireEvent.press(await screen.findByLabelText('Add a photo'));
+  // Not awaited: the press doesn't settle until the sheet is answered.
+  fireEvent.press(await screen.findByLabelText('Add a photo'));
+  await choosePhotoSource('Choose from Library');
   await screen.findByLabelText('Remove photo');
 
   await openMenu('Your message: teh plan');
@@ -2910,7 +2903,6 @@ it('keeps a queued photo out of sight while you edit, and gives it back after', 
 
   await fireEvent.press(screen.getByLabelText('Cancel editing'));
   expect(screen.getByLabelText('Remove photo')).toBeTruthy();
-  alert.mockRestore();
 });
 
 it('lets a photo message’s caption be edited away, as the server does', async () => {
@@ -3311,14 +3303,15 @@ it('selects several messages and deletes them in one action', async () => {
   'unwinds a staged photo and an edit one at a time, innermost first',
   async () => {
     captureBackHandler();
-    const alert = chooseAttachSource('Choose from Library');
     serve({
       conversation: detail({}),
       messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
     });
 
     await renderScreen();
-    await fireEvent.press(await screen.findByLabelText('Add a photo'));
+    // Not awaited: the press doesn't settle until the sheet is answered.
+    fireEvent.press(await screen.findByLabelText('Add a photo'));
+    await choosePhotoSource('Choose from Library');
     await screen.findByLabelText('Remove photo');
 
     await openMenu('Your message: teh quick fox');
@@ -3341,7 +3334,6 @@ it('selects several messages and deletes them in one action', async () => {
     // Only now is there nothing left to close, so back means back.
     expect(mockBack).not.toHaveBeenCalled();
     expect(backHandlerCount()).toBe(0);
-    alert.mockRestore();
   }
 );
 
@@ -3357,14 +3349,15 @@ it('selects several messages and deletes them in one action', async () => {
   'clears the selection before a staged photo it is covering',
   async () => {
     captureBackHandler();
-    const alert = chooseAttachSource('Choose from Library');
     serve({
       conversation: detail({}),
       messages: [message({ id: 7, sender: MINE, text: 'one' })],
     });
 
     await renderScreen();
-    await fireEvent.press(await screen.findByLabelText('Add a photo'));
+    // Not awaited: the press doesn't settle until the sheet is answered.
+    fireEvent.press(await screen.findByLabelText('Add a photo'));
+    await choosePhotoSource('Choose from Library');
     await screen.findByLabelText('Remove photo');
 
     // Select mode replaces the composer — the photo is staged but off screen.
@@ -3389,7 +3382,6 @@ it('selects several messages and deletes them in one action', async () => {
 
     expect(mockBack).not.toHaveBeenCalled();
     expect(backHandlerCount()).toBe(0);
-    alert.mockRestore();
   }
 );
 

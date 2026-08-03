@@ -19,11 +19,11 @@ import { saveTokens } from '@/tokens';
 import type { Post, ProfileUser, User } from '@/types';
 
 import {
-  alertSpy,
   androidIt,
-  answerPhotoSource,
   captureBackHandler,
+  choosePhotoSource,
   pressBack,
+  resetMenuSpies,
 } from './helpers';
 
 // A mutable route param so each test can view a different person. Both this and
@@ -205,8 +205,8 @@ beforeEach(() => {
   mockFetch.mockReset();
   pick.mockReset();
   takePhoto.mockReset();
-  askCamera.mockReset().mockResolvedValue({ granted: true });
-  alertSpy.mockReset().mockImplementation(() => {});
+  askCamera.mockReset().mockResolvedValue({ granted: true, canAskAgain: true });
+  resetMenuSpies();
   resetMe();
   mockParams.userId = '1';
   mockPush.mockReset();
@@ -270,7 +270,6 @@ describe('editing your profile', () => {
   });
 
   it('reframes a picked photo through the crop modal, then attaches it', async () => {
-    answerPhotoSource('Choose from Library');
     pick.mockResolvedValue({
       canceled: false,
       assets: [{ uri: 'file:///tmp/orig.jpg', width: 1000, height: 800 }],
@@ -280,8 +279,10 @@ describe('editing your profile', () => {
     await renderScreen();
 
     await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
-    // No avatar yet, so the button offers to add one.
-    await fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    // No avatar yet, so the button offers to add one. The press isn't awaited:
+    // it doesn't settle until the camera-or-library sheet is answered.
+    fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    await choosePhotoSource('Choose from Library');
     // The picked photo goes to the crop modal, which returns the reframed square.
     await fireEvent.press(await screen.findByText('Use photo (test)'));
 
@@ -293,7 +294,6 @@ describe('editing your profile', () => {
   it('lets you take a new profile photo with the camera', async () => {
     // A profile photo is the picture people most often want to take on the
     // spot; the camera shot goes through the same cropper as a picked one.
-    answerPhotoSource('Take Photo');
     takePhoto.mockResolvedValue({
       canceled: false,
       assets: [{ uri: 'file:///tmp/selfie.jpg', width: 1000, height: 1000 }],
@@ -303,7 +303,8 @@ describe('editing your profile', () => {
     await renderScreen();
 
     await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
-    await fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    await choosePhotoSource('Take Photo');
     await fireEvent.press(await screen.findByText('Use photo (test)'));
 
     expect(await screen.findByRole('button', { name: 'Change photo' })).toBeTruthy();

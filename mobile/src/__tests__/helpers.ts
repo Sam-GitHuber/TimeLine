@@ -16,7 +16,7 @@
  * would be the one that's subtly wrong.
  */
 
-import { act, fireEvent, screen } from '@testing-library/react-native';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react-native';
 import { ActionSheetIOS, Alert, BackHandler, Platform } from 'react-native';
 
 /**
@@ -181,27 +181,33 @@ export function pressAlertButton(title: string, buttonText: string): void {
 }
 
 /**
- * Answer the "camera or library?" prompt every photo picker opens first.
+ * Answer the "camera or library?" menu every photo picker opens first.
  *
- * `askPhotoSource` is an `Alert`, so "the user tapped Take Photo" is "the second
- * button's `onPress` fired" — there's no rendered sheet to press under Node. The
- * answer has to be armed *before* the press that opens it, because the prompt
- * goes up and is answered inside that same press.
+ * It's the same `useActionMenu` sheet as every other menu, so this is just
+ * "wait for it, then pick" — but it needs its own name because the *shape* of
+ * the surrounding test is unusual: `pickPhotos` doesn't resolve until the choice
+ * is made, so the press that opens the menu must **not** be awaited.
  *
- * Unmatched alerts are left alone rather than auto-pressed: the camera path can
- * raise a *second* alert ("Camera access needed") with none of these buttons,
- * and a test asserting on that one needs it to still be a plain recorded call.
+ * ```ts
+ * fireEvent.press(screen.getByLabelText('Add photos'));  // no await — see above
+ * await choosePhotoSource('Take Photo');
+ * ```
+ *
+ * Requires `resetMenuSpies()` in `beforeEach`, like any other menu test.
  */
-export function answerPhotoSource(
-  choice: 'Take Photo' | 'Choose from Library'
-): void {
-  alertSpy.mockImplementation(((
-    _title: string,
-    _message: string | undefined,
-    buttons: AlertButton[] | undefined
-  ) => {
-    buttons?.find((button) => button.text === choice)?.onPress?.();
-  }) as unknown as typeof Alert.alert);
+export async function choosePhotoSource(
+  label: 'Take Photo' | 'Choose from Library'
+): Promise<void> {
+  await waitFor(() => {
+    if (!menuWasShown()) throw new Error('the photo source menu never opened');
+  });
+  // Inside `act`, and *async* so the microtasks after the choice run inside it
+  // too. Everything the caller then does — launching the picker, storing what
+  // came back — hangs off that promise chain, and outside `act` every one of
+  // those state updates is an "not wrapped in act(...)" warning in the console.
+  await act(async () => {
+    pickMenuAction(menuOptions().indexOf(label));
+  });
 }
 
 /**
