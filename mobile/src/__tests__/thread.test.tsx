@@ -32,7 +32,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-
 import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
 import * as ImagePicker from 'expo-image-picker';
-import { Alert, FlatList, Linking, Platform } from 'react-native';
+import { Alert, FlatList, Linking, Platform, StyleSheet } from 'react-native';
 
 import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
@@ -1552,6 +1552,124 @@ it('Reply opens the strand, even on a message with no replies yet', async () => 
   await fireEvent.press(screen.getByLabelText('Send reply'));
 
   await waitFor(() => expect(sendCalls()).toEqual([['yes, see you', 8]]));
+});
+
+/**
+ * The strand hides the transcript on Android too (Phase 10).
+ *
+ * `expo-blur` is iOS-first: on Android it paints a flat translucent tint, and
+ * real blur needs a `<BlurTargetView>` in the same window — which a `Modal`
+ * isn't. So the strand sat over a fully legible transcript and the two
+ * conversations' text overlapped. The wash is what covers for the missing blur,
+ * and this is the assertion that keeps the two platforms' values from being
+ * "tidied" back into one.
+ *
+ * Runs on both platforms because the iOS half is the other side of the same
+ * decision: a blurred transcript should still show through.
+ *
+ * Asserted as a *threshold* rather than the exact rgba, so that tuning the wash
+ * against a real screen doesn't fail a test with nothing to say — only losing
+ * the platform split does, which is the thing worth defending.
+ */
+it(`washes the transcript out enough to read the strand on ${Platform.OS}`, async () => {
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({
+    conversation: detail({}),
+    messages: [only],
+    thread: [only],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+  await screen.findByText('Thread');
+
+  const wash = StyleSheet.flatten(screen.getByTestId('thread-wash').props.style);
+  const alpha = Number(
+    /rgba\([^)]*,\s*([\d.]+)\)/.exec(String(wash.backgroundColor))?.[1]
+  );
+  if (Platform.OS === 'android') {
+    // Near-solid: the blur that would have destroyed the detail behind it
+    // doesn't exist here, so the wash has to. Anything much below this and the
+    // transcript is legible through it again.
+    expect(alpha).toBeGreaterThanOrEqual(0.9);
+  } else {
+    // Light, because the blur underneath is doing the rest — a wash this heavy
+    // on iOS would hide the blurred conversation the design is keeping.
+    expect(alpha).toBeLessThanOrEqual(0.6);
+  }
+});
+
+/**
+ * The strand opens at its newest reply, a frame late if that's what it takes
+ * (Phase 10).
+ *
+ * `scrollToEnd` is a command to the *native* list. On Android it arrives before
+ * the new content height has been committed, so it scrolls to a bottom that is
+ * still the old one — 0, on a strand that has just opened — and the next event
+ * is a `layout` rather than a content size, so nothing corrects it. The strand
+ * sat at the root with its newest replies under the composer.
+ *
+ * The fix is the deferred second call, so that's what this pins: a `scrollToEnd`
+ * that happens *after* a frame. Asserting merely that it was called would pass
+ * against the broken version, which called it too — just too early.
+ */
+it('scrolls the strand to its end again a frame after the content lands', async () => {
+  const scrollToEnd = jest
+    .spyOn(FlatList.prototype, 'scrollToEnd')
+    .mockImplementation(() => {});
+  const frames: FrameRequestCallback[] = [];
+  const raf = jest
+    .spyOn(global, 'requestAnimationFrame')
+    .mockImplementation((cb) => {
+      frames.push(cb);
+      return 0;
+    });
+  try {
+    const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+    serve({
+      conversation: detail({}),
+      messages: [only],
+      thread: [only],
+    });
+
+    await renderScreen();
+    await openMenu('Message from Ada Lovelace: dinner at 7?');
+    await fireEvent.press(screen.getByLabelText('Reply'));
+    await screen.findByText('Thread');
+    // The list, not the spinner it replaces once the strand's first page lands.
+    const strand = await screen.findByTestId('strand');
+
+    // Cleared here, not at the top: both spies are global — one is on
+    // `FlatList.prototype`, which the transcript's list shares — so anything
+    // either of them caught while the screen mounted belongs to something else.
+    // From this line on, every call is one this handler made.
+    scrollToEnd.mockClear();
+    frames.length = 0;
+
+    // Driven by hand: there's no native layout under the test renderer, so the
+    // list never measures itself and the event this all hangs off never fires
+    // on its own.
+    await act(async () => {
+      strand.props.onContentSizeChange(400, 800);
+    });
+
+    // Nothing has run the frame yet, so this is the scroll the strand asked for
+    // synchronously — the one Android drops on the floor.
+    expect(scrollToEnd).toHaveBeenCalledTimes(1);
+    expect(frames).toHaveLength(1);
+
+    await act(async () => {
+      frames.forEach((frame) => frame(0));
+    });
+
+    // …and the frame brought the second one, which is the fix.
+    expect(scrollToEnd).toHaveBeenCalledTimes(2);
+    expect(scrollToEnd).toHaveBeenLastCalledWith({ animated: false });
+  } finally {
+    raf.mockRestore();
+    scrollToEnd.mockRestore();
+  }
 });
 
 it('replying to a reply answers *that* message, still in the one strand', async () => {

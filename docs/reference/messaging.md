@@ -1998,6 +1998,51 @@ you've narrowed to one strand. **It deliberately offers no long-press menu**:
 presented one is the iOS trap the emoji picker already documents. Close the
 thread and act on the message in the transcript.
 
+**On Android there is no blur, and the wash covers for it** (Phase 10).
+`expo-blur` is iOS-first: its Android `blurMethod` defaults to `'none'`, which
+paints a flat translucent tint, and switching it on additionally needs a
+`<BlurTargetView>` wrapping the content to be blurred *in the same window* — a
+`Modal` is a window of its own, so that route isn't open here. The strand
+therefore sat over a perfectly legible transcript (roughly 35% show-through once
+the tint and the wash were combined) and the two conversations' text overlapped.
+Android now takes a near-solid wash (`rgba(251,250,247,0.94)`) where iOS keeps
+the light one (`0.55`); a blur can be light because it destroys the detail
+behind it, a wash can't. **What lands on screen is ~5% show-through, not the 6%
+that alpha alone implies** — the `BlurView` stays mounted underneath and adds its
+own flat tint (~0.22 at `intensity={28}`), so the two compose; measured on a
+Pixel 8 emulator, ink behind the wash reads (240,239,236) against a
+(251,250,247) ground. That margin is deliberate: the transcript's colour stays
+faintly present, so it still reads as this conversation pushed back rather than a
+screen you navigated to. Tune the number against the composite, not on its own.
+A test pins the split (Android ≥ 0.9, iOS ≤ 0.6) in each platform project,
+deliberately as a threshold rather than an exact colour so that retuning against
+a real screen doesn't fail a test with nothing to say.
+
+**The strand opens at its newest reply, and on Android that takes two goes**
+(Phase 10). Unlike the transcript below, this list isn't inverted — it reads
+oldest-first with the root at the top — so it keeps the `scrollToEnd`-on-content-size
+that inversion let the transcript delete. `scrollToEnd` is a command to the
+*native* list, and on Android it arrives before the new content height has been
+committed: it scrolls to a bottom that is still the old one (0, on a strand
+that has just opened), and the next event is a `layout` rather than a content
+size, so nothing corrects it. The strand opened at the root with its newest
+replies hidden behind the composer. The call is now made twice, the second
+inside a `requestAnimationFrame`; iOS commits synchronously and is already at
+the end by then, so its second call is a no-op rather than a second jump.
+Inverting this list the way the transcript is inverted would remove the need for
+either call, and is the better fix if this area is reworked — it was judged too
+much surface area to flip (header/footer swap, `ListEmptyComponent`, row order)
+for a bug that has a one-line answer.
+
+**Known limitation, unchanged by that fix and older than it**: the strand only
+re-scrolls on a *content size* change, so anything that shrinks the list's
+**viewport** without changing its content leaves it where it was — the keyboard
+coming up on a strand longer than the screen, or the composer growing to a
+second line, can put the newest reply behind them. The transcript doesn't have
+this because inversion pins it to the newest message through a resize. Fixing it
+here means either an `onLayout` re-scroll (which would also yank someone who had
+scrolled up to read the root) or the inversion above.
+
 ### The transcript (Phase 9b M5)
 
 The milestone with no new feature in it, and most of the reason the thread felt
