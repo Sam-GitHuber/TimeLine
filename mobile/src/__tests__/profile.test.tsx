@@ -18,7 +18,13 @@ import { PostCard } from '@/components/PostCard';
 import { saveTokens } from '@/tokens';
 import type { Post, ProfileUser, User } from '@/types';
 
-import { androidIt, captureBackHandler, pressBack } from './helpers';
+import {
+  androidIt,
+  captureBackHandler,
+  choosePhotoSource,
+  pressBack,
+  resetMenuSpies,
+} from './helpers';
 
 // A mutable route param so each test can view a different person. Both this and
 // the router spy are `mock`-prefixed so Jest lets the factory below close over
@@ -48,6 +54,8 @@ jest.mock('expo-router', () => ({
 
 jest.mock('expo-image-picker', () => ({
   launchImageLibraryAsync: jest.fn(),
+  launchCameraAsync: jest.fn(),
+  requestCameraPermissionsAsync: jest.fn(),
 }));
 
 // The real crop modal pulls in reanimated + gesture-handler + native image
@@ -84,6 +92,8 @@ jest.mock('@/components/AvatarCropModal', () => {
 });
 
 const pick = ImagePicker.launchImageLibraryAsync as jest.Mock;
+const takePhoto = ImagePicker.launchCameraAsync as jest.Mock;
+const askCamera = ImagePicker.requestCameraPermissionsAsync as jest.Mock;
 const mockFetch = jest.fn();
 
 function jsonResponse(body: unknown, status = 200) {
@@ -194,6 +204,9 @@ async function renderScreen() {
 beforeEach(() => {
   mockFetch.mockReset();
   pick.mockReset();
+  takePhoto.mockReset();
+  askCamera.mockReset().mockResolvedValue({ granted: true, canAskAgain: true });
+  resetMenuSpies();
   resetMe();
   mockParams.userId = '1';
   mockPush.mockReset();
@@ -266,14 +279,36 @@ describe('editing your profile', () => {
     await renderScreen();
 
     await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
-    // No avatar yet, so the button offers to add one.
-    await fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    // No avatar yet, so the button offers to add one. The press isn't awaited:
+    // it doesn't settle until the camera-or-library sheet is answered.
+    fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    await choosePhotoSource('Choose from Library');
     // The picked photo goes to the crop modal, which returns the reframed square.
     await fireEvent.press(await screen.findByText('Use photo (test)'));
 
     // A cropped avatar is now staged: the editor lets you change or remove it.
     expect(await screen.findByRole('button', { name: 'Remove' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Change photo' })).toBeTruthy();
+  });
+
+  it('lets you take a new profile photo with the camera', async () => {
+    // A profile photo is the picture people most often want to take on the
+    // spot; the camera shot goes through the same cropper as a picked one.
+    takePhoto.mockResolvedValue({
+      canceled: false,
+      assets: [{ uri: 'file:///tmp/selfie.jpg', width: 1000, height: 1000 }],
+    });
+    serve({ user: profile({ id: 1 }), posts: [] });
+
+    await renderScreen();
+
+    await fireEvent.press(await screen.findByRole('button', { name: 'Edit profile' }));
+    fireEvent.press(await screen.findByRole('button', { name: 'Add photo' }));
+    await choosePhotoSource('Take Photo');
+    await fireEvent.press(await screen.findByText('Use photo (test)'));
+
+    expect(await screen.findByRole('button', { name: 'Change photo' })).toBeTruthy();
+    expect(pick).not.toHaveBeenCalled();
   });
 
   it('will not save with an empty first name', async () => {

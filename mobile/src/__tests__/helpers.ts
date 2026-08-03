@@ -16,7 +16,7 @@
  * would be the one that's subtly wrong.
  */
 
-import { act, fireEvent, screen } from '@testing-library/react-native';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react-native';
 import { ActionSheetIOS, Alert, BackHandler, Platform } from 'react-native';
 
 /**
@@ -178,6 +178,36 @@ export function pressAlertButton(title: string, buttonText: string): void {
     );
   }
   button.onPress?.();
+}
+
+/**
+ * Answer the "camera or library?" menu every photo picker opens first.
+ *
+ * It's the same `useActionMenu` sheet as every other menu, so this is just
+ * "wait for it, then pick" — but it needs its own name because the *shape* of
+ * the surrounding test is unusual: `pickPhotos` doesn't resolve until the choice
+ * is made, so the press that opens the menu must **not** be awaited.
+ *
+ * ```ts
+ * fireEvent.press(screen.getByLabelText('Add photos'));  // no await — see above
+ * await choosePhotoSource('Take Photo');
+ * ```
+ *
+ * Requires `resetMenuSpies()` in `beforeEach`, like any other menu test.
+ */
+export async function choosePhotoSource(
+  label: 'Take Photo' | 'Choose from Library'
+): Promise<void> {
+  await waitFor(() => {
+    if (!menuWasShown()) throw new Error('the photo source menu never opened');
+  });
+  // Inside `act`, and *async* so the microtasks after the choice run inside it
+  // too. Everything the caller then does — launching the picker, storing what
+  // came back — hangs off that promise chain, and outside `act` every one of
+  // those state updates is an "not wrapped in act(...)" warning in the console.
+  await act(async () => {
+    pickMenuAction(menuOptions().indexOf(label));
+  });
 }
 
 /**

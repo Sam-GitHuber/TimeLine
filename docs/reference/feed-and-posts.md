@@ -384,6 +384,15 @@ counts exclude your own messages.
   nudged by hand, so changing the node size or the bead gap moves the body with
   them. `BEAD_GAP` is deliberately wider than the node needs — it's what keeps
   the two pairs reading as two statements rather than one stack.
+- **"Add photos" on mobile offers the camera as well as the library**, through
+  the shared `usePhotoPicker` — see
+  [`mobile-app.md`](mobile-app.md#taking-a-photo-camera-or-library) for the
+  contract and for why the sheet is a menu rather than an `Alert`. The composer
+  is the only caller that takes **several** photos at once (multi-select is
+  library-only; the camera returns one shot) and the only one that picks at
+  `quality: 0.9` — a post photo is uploaded as picked, so that's the one
+  compression it gets, whereas chat photos and avatars are re-encoded on the
+  phone afterwards and take the full-quality pick.
 
 ### Photo layout & the full-screen viewer
 
@@ -500,6 +509,12 @@ square* (`cropImage.js`), capped at 1024px and re-encoded as JPEG.
   runs but is a no-op on an already-square upload.
 - **Shared by user and group avatars** — the same modal wires into both
   `ProfileEditForm` and `GroupFormPage`, since both render the same circle.
+- **On mobile the photo can come from the camera**, not just the library
+  (shared `usePhotoPicker`, see
+  [`mobile-app.md`](mobile-app.md#taking-a-photo-camera-or-library)) — a profile
+  photo is the picture people most often want to take on the spot. Either source
+  hands the **full** image to the cropper, never the OS square crop, because
+  reframing is the whole point.
 - **Undecodable files fail early with a message.** The modal probes whether the
   browser can decode the chosen file; if not (an unsupported type the file picker
   let through — e.g. HEIC on a browser without HEIC support — or a corrupt file),

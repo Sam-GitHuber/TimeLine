@@ -44,6 +44,15 @@ export type ActionMenuRequest = {
   /** Shown as the sheet's heading on Android; iOS sheets take no title here. */
   title?: string;
   items: ActionMenuItem[];
+  /**
+   * Closed without choosing anything — Cancel, the backdrop, or Android's Back.
+   *
+   * Optional, and most menus want nothing here: the caller simply carries on.
+   * It exists for a menu whose result is *awaited* (`usePhotoPicker` wraps this
+   * one in a promise), where "dismissed" has to be delivered or the caller waits
+   * forever and its button is dead for the rest of the screen's life.
+   */
+  onCancel?: () => void;
 };
 
 /**
@@ -77,7 +86,12 @@ export function useActionMenu(): {
             destructiveIndex >= 0 ? destructiveIndex : undefined,
           cancelButtonIndex: labels.length - 1,
         },
-        (index) => next.items[index]?.onPress()
+        (index) => {
+          // The cancel index has no item behind it — that's the dismissal.
+          const item = next.items[index];
+          if (item) item.onPress();
+          else next.onCancel?.();
+        }
       );
       return;
     }
@@ -87,27 +101,39 @@ export function useActionMenu(): {
   return {
     openMenu,
     menu: request ? (
-      <AndroidSheet request={request} onClose={() => setRequest(null)} />
+      <AndroidSheet
+        request={request}
+        onChoose={(item) => {
+          setRequest(null);
+          item.onPress();
+        }}
+        onDismiss={() => {
+          setRequest(null);
+          request.onCancel?.();
+        }}
+      />
     ) : null,
   };
 }
 
 function AndroidSheet({
   request,
-  onClose,
+  onChoose,
+  onDismiss,
 }: {
   request: ActionMenuRequest;
-  onClose: () => void;
+  onChoose: (item: ActionMenuItem) => void;
+  onDismiss: () => void;
 }) {
   const insets = useSafeAreaInsets();
 
-  // Close *before* acting: the action may navigate or open a confirmation, and
-  // leaving a sheet mounted over either is how you get a modal stacked on a
-  // modal — which on Android is a dead screen.
-  const choose = (item: ActionMenuItem) => {
-    onClose();
-    item.onPress();
-  };
+  // Choosing and dismissing are separate paths, not one `onClose` — a menu whose
+  // result is awaited has to be able to tell "they picked nothing" from "they
+  // picked something", and only the first should fire `onCancel`.
+  //
+  // Both close the sheet *before* anything else happens: the action may navigate
+  // or open a confirmation, and leaving a sheet mounted over either is how you
+  // get a modal stacked on a modal — which on Android is a dead screen.
 
   return (
     <Modal
@@ -115,12 +141,12 @@ function AndroidSheet({
       animationType="fade"
       // Android's back button. Without this the press falls through to the
       // navigator and leaves the screen with the sheet still notionally open.
-      onRequestClose={onClose}
+      onRequestClose={onDismiss}
       accessibilityViewIsModal
     >
       <Pressable
         style={styles.backdrop}
-        onPress={onClose}
+        onPress={onDismiss}
         accessibilityRole="button"
         accessibilityLabel="Dismiss menu"
       >
@@ -144,7 +170,7 @@ function AndroidSheet({
               testID={
                 item.destructive ? 'action-menu-item-destructive' : 'action-menu-item'
               }
-              onPress={() => choose(item)}
+              onPress={() => onChoose(item)}
               accessibilityRole="button"
               accessibilityLabel={item.label}
               android_ripple={{ color: colors.line }}
@@ -160,7 +186,7 @@ function AndroidSheet({
 
           <Pressable
             testID="action-menu-cancel"
-            onPress={onClose}
+            onPress={onDismiss}
             accessibilityRole="button"
             accessibilityLabel="Cancel"
             android_ripple={{ color: colors.line }}

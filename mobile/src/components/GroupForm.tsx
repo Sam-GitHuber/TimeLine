@@ -8,12 +8,12 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { api, type PhotoUpload } from '@/api';
+import { usePhotoPicker } from '@/photoSource';
 import { AvatarCropModal } from './AvatarCropModal';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -39,6 +39,7 @@ export function GroupForm({
   const [avatarFile, setAvatarFile] = useState<PhotoUpload | null>(null);
   const [removeAvatar, setRemoveAvatar] = useState(false);
   const [pendingCrop, setPendingCrop] = useState<PendingCrop | null>(null);
+  const { pickPhotos, photoMenu } = usePhotoPicker();
 
   const mutation = useMutation({
     mutationFn: (): Promise<Group> => {
@@ -69,12 +70,10 @@ export function GroupForm({
   });
 
   async function pickAvatar() {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 1,
-    });
-    if (result.canceled) return;
-    const asset = result.assets[0];
+    // Full image, not the OS square crop — our round cropper reframes it.
+    const assets = await pickPhotos('Group photo');
+    if (!assets) return;
+    const asset = assets[0];
     setPendingCrop({ uri: asset.uri, width: asset.width, height: asset.height });
   }
 
@@ -176,6 +175,9 @@ export function GroupForm({
           onCancel={() => setPendingCrop(null)}
         />
       ) : null}
+
+      {/* The camera/library sheet. `null` on iOS, where it's native. */}
+      {photoMenu}
     </View>
   );
 }

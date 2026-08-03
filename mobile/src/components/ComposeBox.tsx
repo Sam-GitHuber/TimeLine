@@ -12,7 +12,6 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import * as ImagePicker from 'expo-image-picker';
 import { useState } from 'react';
 import {
   ActivityIndicator,
@@ -27,6 +26,7 @@ import {
 } from 'react-native';
 
 import { api, type PhotoUpload } from '@/api';
+import { usePhotoPicker } from '@/photoSource';
 import { Avatar } from './Avatar';
 import { NowNode } from './NowNode';
 import { SPINE_COLUMN, Spine } from './timeline';
@@ -111,6 +111,7 @@ export function ComposeBox({
 }) {
   const [text, setText] = useState('');
   const [photos, setPhotos] = useState<PhotoUpload[]>([]);
+  const { pickPhotos, photoMenu } = usePhotoPicker();
   const queryClient = useQueryClient();
 
   const { mutate, isPending } = useMutation({
@@ -140,21 +141,30 @@ export function ComposeBox({
     },
   });
 
-  async function pickPhotos() {
-    // No explicit permission request: the modern iOS picker runs out of process
-    // and returns only what the user picked, so it needs no library access.
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
+  /**
+   * Add photos: take one, or pick from the library.
+   *
+   * The camera is offered first — on a phone, "add a photo" to what you're
+   * writing about right now often means the thing in front of you. Only the
+   * library can return several at once, which is why this is a choice rather
+   * than a camera button beside a library button.
+   *
+   * `quality: 0.9` is the one thing here that isn't the shared default: post
+   * photos go up as picked, so this is the only compression they get. Chat
+   * photos and avatars are re-encoded afterwards and take the full-quality pick.
+   */
+  async function addPhotos() {
+    const assets = await pickPhotos('Add a photo', {
       allowsMultipleSelection: true,
       selectionLimit: MAX_PHOTOS - photos.length,
       quality: 0.9,
     });
-    if (result.canceled) return;
+    if (!assets) return;
 
     setPhotos((current) =>
       [
         ...current,
-        ...result.assets.map((asset, index) => ({
+        ...assets.map((asset, index) => ({
           uri: asset.uri,
           // The picker often has no filename (a camera-roll asset isn't a file
           // on disk). The server validates by decoding the bytes, not by
@@ -231,7 +241,7 @@ export function ComposeBox({
 
         <View style={styles.actions}>
           <Pressable
-            onPress={pickPhotos}
+            onPress={addPhotos}
             disabled={isPending || photos.length >= MAX_PHOTOS}
             accessibilityRole="button"
             accessibilityLabel="Add photos"
@@ -267,6 +277,9 @@ export function ComposeBox({
           </Pressable>
         </View>
       </View>
+
+      {/* The source sheet. `null` on iOS, where the sheet is native. */}
+      {photoMenu}
     </View>
   );
 }

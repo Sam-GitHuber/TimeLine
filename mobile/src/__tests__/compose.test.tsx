@@ -7,19 +7,30 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react-native';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
 
 import { api } from '@/api';
 import { ComposeBox } from '@/components/ComposeBox';
 import type { User } from '@/types';
+import {
+  alertSpy,
+  cancelMenu,
+  choosePhotoSource,
+  menuWasShown,
+  resetMenuSpies,
+} from './helpers';
 
 jest.mock('expo-image-picker', () => ({
   launchImageLibraryAsync: jest.fn(),
+  launchCameraAsync: jest.fn(),
+  requestCameraPermissionsAsync: jest.fn(),
 }));
 
 const mockFetch = jest.fn();
 const pick = ImagePicker.launchImageLibraryAsync as jest.Mock;
+const takePhoto = ImagePicker.launchCameraAsync as jest.Mock;
+const askCamera = ImagePicker.requestCameraPermissionsAsync as jest.Mock;
 
 const user: User = {
   pk: 1,
@@ -75,6 +86,9 @@ let createPost: jest.SpiedFunction<typeof api.createPost>;
 beforeEach(() => {
   mockFetch.mockReset();
   pick.mockReset();
+  takePhoto.mockReset();
+  askCamera.mockReset().mockResolvedValue({ granted: true, canAskAgain: true });
+  resetMenuSpies();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
   createPost = jest.spyOn(api, 'createPost');
 });
@@ -150,6 +164,18 @@ it('keeps what you typed when posting fails', async () => {
 });
 
 describe('photos', () => {
+  /**
+   * Add a photo, answering the camera-or-library sheet.
+   *
+   * The press is deliberately **not** awaited: `pickPhotos` doesn't resolve
+   * until a source is chosen, so awaiting it here would hang the test on a
+   * sheet nobody has answered yet.
+   */
+  async function addPhoto(from: 'Take Photo' | 'Choose from Library') {
+    fireEvent.press(screen.getByLabelText('Add photos'));
+    await choosePhotoSource(from);
+  }
+
   it('attaches a picked photo and lets you post with no text', async () => {
     pick.mockResolvedValue({
       canceled: false,
@@ -158,7 +184,7 @@ describe('photos', () => {
     mockFetch.mockResolvedValue(jsonResponse({ id: 1 }, 201));
     await renderCompose();
 
-    await fireEvent.press(screen.getByLabelText('Add photos'));
+    await addPhoto('Choose from Library');
 
     // A photo-only post is allowed.
     expect(await screen.findByText('1 photo')).toBeTruthy();
@@ -184,7 +210,7 @@ describe('photos', () => {
     mockFetch.mockResolvedValue(jsonResponse({ id: 1 }, 201));
     await renderCompose();
 
-    await fireEvent.press(screen.getByLabelText('Add photos'));
+    await addPhoto('Choose from Library');
     expect(await screen.findByText('1 photo')).toBeTruthy();
     await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
 
@@ -197,15 +223,86 @@ describe('photos', () => {
     expect(photos![0].type).toBe('image/jpeg');
   });
 
+  it('picks at a lower quality than the pickers that re-encode afterwards', async () => {
+    // Post photos are uploaded as picked — this is the only compression they
+    // ever get. Chat photos and avatars are re-encoded on the phone a moment
+    // later, so they take the full-quality pick instead.
+    pick.mockResolvedValue({ canceled: true });
+    await renderCompose();
+
+    await addPhoto('Choose from Library');
+
+    await waitFor(() =>
+      expect(pick).toHaveBeenCalledWith(expect.objectContaining({ quality: 0.9 }))
+    );
+  });
+
   it('adds nothing when the picker is cancelled', async () => {
     pick.mockResolvedValue({ canceled: true });
     await renderCompose();
 
-    await fireEvent.press(screen.getByLabelText('Add photos'));
+    await addPhoto('Choose from Library');
 
     // The button keeps its "Add photos" label; what must NOT appear is a count.
     expect(screen.queryByText(/^\d+ photos?$/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Post' })).toBeDisabled();
+  });
+
+  it('lets you take a photo instead of picking one', async () => {
+    // "Add photos" used to open the camera roll and nothing else, which meant
+    // posting the thing in front of you was a trip out to the camera app and
+    // back. Both paths end in the same attached photo.
+    takePhoto.mockResolvedValue({
+      canceled: false,
+      assets: [{ uri: 'file:///tmp/shot.jpg', fileName: null, mimeType: null }],
+    });
+    await renderCompose();
+
+    await addPhoto('Take Photo');
+
+    expect(await screen.findByText('1 photo')).toBeTruthy();
+    expect(pick).not.toHaveBeenCalled();
+  });
+
+  it('says so and picks nothing when camera access is refused', async () => {
+    // 🔒 The camera is the one path here that needs permission — the modern
+    // library picker runs out of process. Silently doing nothing after someone
+    // taps "Take Photo" reads as a broken button, so this asserts the telling.
+    askCamera.mockResolvedValue({ granted: false, canAskAgain: false });
+    await renderCompose();
+
+    await addPhoto('Take Photo');
+
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Camera access needed',
+        expect.stringContaining('Settings')
+      )
+    );
+    expect(takePhoto).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^\d+ photos?$/)).toBeNull();
+  });
+
+  it('adds nothing when the source sheet is dismissed', async () => {
+    await renderCompose();
+
+    fireEvent.press(screen.getByLabelText('Add photos'));
+    await waitFor(() => expect(menuWasShown()).toBe(true));
+    cancelMenu();
+
+    // Nothing opened, and — the part that matters — the button still works
+    // afterwards, which it wouldn't if the dismissal left a promise hanging.
+    await waitFor(() => expect(screen.queryByTestId('action-menu')).toBeNull());
+    expect(pick).not.toHaveBeenCalled();
+    expect(takePhoto).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Post' })).toBeDisabled();
+
+    pick.mockResolvedValue({
+      canceled: false,
+      assets: [{ uri: 'file:///tmp/d.jpg', fileName: 'd.jpg', mimeType: 'image/jpeg' }],
+    });
+    await addPhoto('Choose from Library');
+    expect(await screen.findByText('1 photo')).toBeTruthy();
   });
 
   it('lets you remove a chosen photo', async () => {
@@ -215,7 +312,7 @@ describe('photos', () => {
     });
     await renderCompose();
 
-    await fireEvent.press(screen.getByLabelText('Add photos'));
+    await addPhoto('Choose from Library');
     await fireEvent.press(await screen.findByLabelText('Remove photo 1'));
 
     expect(screen.getByRole('button', { name: 'Post' })).toBeDisabled();
