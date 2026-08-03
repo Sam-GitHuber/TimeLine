@@ -140,11 +140,21 @@ is indistinguishable from never having pressed Send.
 
 Two things a change here has to keep:
 
-- **Release the flag on success.** The web and mobile `ReportModal`s both stay
-  mounted after a successful send to show that thanks screen, so `submitting`
-  clears alongside `done` — otherwise the gate holds the success screen shut too,
-  behind its Done button. Pinned in `frontend/src/legal-safety.test.jsx` and
-  `mobile/src/__tests__/safety.test.tsx`.
+- **Release the flag the moment the write lands, not when the screen goes.** The
+  gate exists so a *rejection* has somewhere to render; once the request has
+  succeeded there's no rejection left, so holding it any longer only creates a
+  second trap. Both `ReportModal`s stay mounted afterwards to show the thanks
+  screen, so `submitting` clears alongside `done` or the gate would hold that
+  screen shut behind its Done button. Both `DeleteAccountSection`s then do the
+  same for a subtler reason: they lean on the screen being torn down, but the
+  teardown is *itself* a network round trip — `logout()` on the web,
+  `signOut()`'s `unregisterPush`/`logout` on the phone — and those are the one
+  part of the flow that can hang. A gate held across them would seal someone into
+  a "Deleting…" box with no way out. Both clear the flag right after the delete
+  returns and keep the button spent with a separate `done`, so a second press
+  can't fire a delete at a session that no longer exists. Pinned in
+  `frontend/src/legal-safety.test.jsx`, `mobile/src/__tests__/safety.test.tsx`
+  and `mobile/src/__tests__/settings.test.tsx`.
 - These four run their request with plain `async`/`await` and `useState`, **not a
   React Query mutation**, so the `onlineManager` tripwire above doesn't reach
   them: an offline `fetch` rejects rather than pausing, and the gate lets go. Move

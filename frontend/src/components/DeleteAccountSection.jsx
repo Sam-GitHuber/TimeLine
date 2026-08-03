@@ -40,6 +40,10 @@ function ConfirmDeleteModal({ onCancel }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  // The delete landed and we're on our way out. Keeps the button spent — the
+  // gate below has already let go by then, and a second press would fire a
+  // delete at a session that no longer exists.
+  const [done, setDone] = useState(false);
 
   // Esc cancels; lock background scroll and move focus in — same dialog pattern
   // as DisconnectWarningModal.
@@ -68,11 +72,19 @@ function ConfirmDeleteModal({ onCancel }) {
 
   async function handleDelete(event) {
     event.preventDefault();
-    if (deleting || !password) return;
+    if (deleting || done || !password) return;
     setError(null);
     setDeleting(true);
     try {
       await api.deleteAccount(password);
+      // The write landed, so there's no rejection left for this dialog to show
+      // and the gate has done its job — let go of it *before* the best-effort
+      // teardown below, which is the one part of this that can hang. Holding it
+      // across a slow `logout()` would seal someone into a "Deleting…" box with
+      // no way out, which is the trap this issue exists to avoid rather than
+      // move somewhere else.
+      setDeleting(false);
+      setDone(true);
       // The account (and session) is gone. Clear the auth cookie best-effort,
       // then hard-reload to /login so the whole app re-boots logged-out with no
       // stale cache.
@@ -144,10 +156,10 @@ function ConfirmDeleteModal({ onCancel }) {
           </button>
           <button
             type="submit"
-            disabled={deleting || !password}
+            disabled={deleting || done || !password}
             className="btn btn-sm bg-red-600 text-white hover:bg-red-700"
           >
-            {deleting ? "Deleting…" : "Delete forever"}
+            {deleting || done ? "Deleting…" : "Delete forever"}
           </button>
         </div>
       </form>
