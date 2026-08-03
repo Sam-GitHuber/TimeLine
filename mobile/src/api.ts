@@ -734,28 +734,6 @@ export const api = {
     ),
 
   /**
-   * Specific messages by id, through the same interval-clipped endpoint (Phase
-   * 9b M5).
-   *
-   * 🔒 **This is how a reply's collapsed quote gets its words and its author.**
-   * A reply carries a bare `{ id }` — never the text, never the sender — so both
-   * have to be fetched, and the rule is that they come through the *same* gate
-   * as the thread. Until M5 the transcript could resolve a quote from its own
-   * loaded messages because it eagerly loaded the entire history; with lazy
-   * paging a miss also means "not paged in yet", and "Original message
-   * unavailable" would start lying about messages the viewer is perfectly
-   * entitled to.
-   *
-   * An id the viewer is clipped out of is simply **absent** from the response,
-   * indistinguishable from one that never existed — so a caller learns nothing
-   * from asking, and the unresolved quote renders the honest message.
-   */
-  getMessagesByIds: (conversationId: number | string, ids: number[]) =>
-    request<Paginated<Message>>(
-      `/api/conversations/${conversationId}/messages/?ids=${ids.join(',')}`
-    ),
-
-  /**
    * One reply thread — a root message and every reply hanging off it (Phase 9b
    * M3). What the focused thread view loads.
    *

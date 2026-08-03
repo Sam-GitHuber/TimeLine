@@ -95,6 +95,13 @@ export default function DrawerPopover({
   return createPortal(
     <div
       ref={wrapRef}
+      // Marks the portalled panel for handlers on whatever *rendered* it. React
+      // events propagate through the React tree, not the DOM one, so a click in
+      // here bubbles up to the element that owns this popover even though the
+      // node lives on `<body>` — which is how a click on a menu's padding used
+      // to reach the bubble underneath and open its strand. `role="dialog"`
+      // can't do the job: `bare` panels deliberately have no role.
+      data-popover=""
       role={bare ? undefined : "dialog"}
       aria-label={bare ? undefined : label}
       style={{

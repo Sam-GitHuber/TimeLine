@@ -75,11 +75,13 @@
  * and open full-screen on tap. A message may be a photo with no caption at all —
  * which is why the text is now rendered conditionally rather than always.
  *
- * **Select mode** (Phase 9b M8) is the one state where a bubble's own tap does
- * something: it ticks the message, and the row takes an accent wash. That's a
- * suspension of the rule below rather than an exception to it — while selecting,
- * a tap means exactly one thing everywhere on screen, so there's nothing to
- * mistake it for.
+ * **Select mode** (Phase 9b M8): a tap ticks the message and the row takes an
+ * accent wash. It **wins over the strand edge's own tap** — while selecting, a
+ * tap means exactly one thing everywhere on screen, so there's nothing to
+ * mistake it for. The caller enforces that by withholding `onOpenThread` for as
+ * long as a selection is on, which matters because an *unsent* message gets no
+ * `onPress` even mid-selection (it has no server id to tick), and would
+ * otherwise be the one bubble in a selection that opened a Modal instead.
  *
  * **One gesture per target**, the rule M2 settled: **long-press** = the action
  * menu (Reply included), **tap** = open the thread, on the bubbles that show a
@@ -139,6 +141,18 @@ import { formatMessageTime } from '@/utils';
  * `maxWidth`: the wrapper owns that, so a copy rendered into a fixed-width slot
  * fills it exactly.
  */
+/**
+ * Does this bubble wear the strand edge (M9g)? **The bar and the tap that opens
+ * the strand both read this**, so a bubble is tappable exactly when it's marked.
+ *
+ * An emoji-only message is drawn without a bubble, so there'd be no edge to draw
+ * on — but `large` already excludes replies for that reason, which is why this
+ * doesn't need to ask.
+ */
+function wearsStrandEdge(message: Message, insideStrand: boolean) {
+  return !!message.reply_to && !insideStrand;
+}
+
 export function BubbleBody({
   message,
   mine,
@@ -226,7 +240,7 @@ export function BubbleBody({
    * The strand edge (M9g) — a reply in the transcript wears one bar on its outer
    * side and nothing else. Inside a strand it wears nothing: see `insideStrand`.
    */
-  const edged = !large && !!message.reply_to && !insideStrand;
+  const edged = wearsStrandEdge(message, insideStrand);
 
   return (
     <View
@@ -680,9 +694,15 @@ export function MessageBubble({
    * replaces, passed it the same way on a smaller target.
    *
    * Only a *reply*. A root keeps its "3 replies" branch, so a bubble is tappable
-   * exactly when it wears a bar. And `onPress` — select mode — still wins.
+   * **exactly when it wears a bar** — which is why this asks the same predicate
+   * the bar does rather than restating it. Two spellings of "is this a reply in
+   * the transcript" in two components is one prop away from a bubble that opens
+   * a strand while showing nothing that says it would, and the invariant above
+   * is the whole justification for widening the gesture. And `onPress` — select
+   * mode — still wins.
    */
-  const opensThread = !onPress && !!message.reply_to && !!onOpenThread;
+  const opensThread =
+    !onPress && !!onOpenThread && wearsStrandEdge(message, insideStrand);
 
   return (
     // Tighter inside a run than between them (Phase 9b M5): the gap is what
@@ -802,10 +822,12 @@ export function MessageBubble({
         />
       ) : null}
 
-      {/* The way into the focused thread, and the *only* tap that opens it —
-          the bubble's own tap stays free. Drawn as a branch off the bubble, the
-          same living line the feed's comment threads use, so a thread reads as
-          growing out of the message rather than as a button stuck under it. */}
+      {/* The way into the focused thread from its **root** — a root wears no
+          strand edge, so this is the only tap that opens one from here. (A reply
+          is the other way in: since M9g the bubble's own tap does it.) Drawn as
+          a branch off the bubble, the same living line the feed's comment
+          threads use, so a thread reads as growing out of the message rather
+          than as a button stuck under it. */}
       {replyCount > 0 && onOpenThread ? (
         <View style={mine ? styles.alignEnd : styles.alignStart}>
           <Pressable

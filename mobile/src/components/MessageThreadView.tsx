@@ -6,7 +6,7 @@
  * back into the thread.
  *
  * **Every route to a reply comes through here**, whether you tapped "3 replies"
- * on a root, tapped a reply's quote, or hit Reply on a message that has no
+ * on a root, tapped a reply (its strand edge), or hit Reply on a message that has no
  * replies at all — the last of those opens a strand one bubble long, on purpose.
  * You reply *inside* the conversation you're joining, with the thing you're
  * answering on screen while you write it. The alternative (aim the transcript's
@@ -20,8 +20,8 @@
  * back-and-forth inside a busy chat can never be *read* as a conversation; you
  * reconstruct it by scrolling and matching quotes by eye. Bringing the thread
  * forward means a side conversation stays legible without the main thread having
- * to reorder itself around it. The collapsed quote still exists — it's what you
- * tap.
+ * to reorder itself around it. The collapsed quote is gone entirely as of M9g; a
+ * reply in the transcript wears a **strand edge**, and tapping it opens this.
  *
  * **The blur is doing real work, and isn't decoration.** A plain dim scrim reads
  * as "a modal over a list"; the blur reads as the same conversation pushed out of
@@ -45,8 +45,8 @@
  * **A missing root is a real state, not a loading one.** The thread is fetched
  * through the same interval-clipped endpoint as the transcript, so a member who
  * was out of the chat when the root was sent gets the replies they're entitled
- * to and no head. That renders as "Original message unavailable" rather than an
- * error, because nothing has gone wrong — see `messaging.md`.
+ * to and no head. That says "The start of this thread isn't available to you"
+ * rather than erroring, because nothing has gone wrong — see `messaging.md`.
  */
 
 import { useInfiniteQuery } from '@tanstack/react-query';
@@ -106,8 +106,8 @@ export function MessageThreadView({
   /**
    * The message a reply will answer. Defaults to the root, which is right when
    * you got here by browsing; **Reply** passes the message you actually tapped,
-   * so a reply to a reply quotes the person you meant rather than whoever
-   * happened to start the strand.
+   * so a reply to a reply names the person you meant above the composer rather
+   * than whoever happened to start the strand.
    */
   replyToId?: number;
   /** Reply brought you here, so open with the keyboard already up. */

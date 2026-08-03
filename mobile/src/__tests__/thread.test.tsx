@@ -3261,6 +3261,84 @@ it('highlights a mention by resolving its id against the participants', async ()
  * everything ticked — and that it isn't offered for someone else's messages,
  * where a bulk action could only ever half-work.
  */
+it('ticks a reply rather than opening its strand while selecting', async () => {
+  // Select mode has to win the tap on *every* bubble, and a reply is the one
+  // that would otherwise have somewhere else to go — its strand edge makes the
+  // whole bubble a way into the thread.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'one', reply_count: 1 }),
+      message({
+        id: 8,
+        sender: MINE,
+        text: 'two',
+        reply_to: { id: 7 },
+        thread_root_id: 7,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await screen.findByText('1 selected');
+
+  await fireEvent.press(screen.getByLabelText('Your message: two'));
+
+  await screen.findByText('2 selected');
+  // Not "Thread": the strand never opened, and nothing was asked for.
+  expect(screen.queryByText('Thread')).toBeNull();
+  expect(
+    mockFetch.mock.calls.some(([url]) => String(url).includes('thread_root='))
+  ).toBe(false);
+  // The branch into the strand stands down with the tap, the way the long-press
+  // menu does — two modes racing for one gesture is what the mode prevents.
+  expect(screen.queryByLabelText('1 reply — open thread')).toBeNull();
+});
+
+it('ticks an unsent reply too, rather than opening its strand', async () => {
+  // The case the first version of this got wrong. A bubble decides it opens a
+  // strand from "no tap handler, but a strand handler" — and an unsent message
+  // has no tap handler even mid-selection, because it has no server id to tick
+  // by. It would have been the one bubble in a selection that opened a Modal.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: ADA, text: 'dinner at 7?' })],
+    thread: [message({ id: 7, sender: ADA, text: 'dinner at 7?' })],
+  });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      return jsonResponse({ detail: 'Nope.' }, 500);
+    }
+    return base(url, init);
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+  await fireEvent.changeText(
+    screen.getByLabelText('Reply to thread'),
+    'yes please'
+  );
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+  await screen.findByText('Not sent');
+  // Two of these are on screen (the scrim and the header button); either closes.
+  await fireEvent.press(screen.getAllByLabelText('Close thread')[0]);
+
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await screen.findByText('1 selected');
+
+  // The unsent reply is still on screen, still untickable — and tapping it must
+  // do *nothing at all* rather than reopening the strand over the selection.
+  await fireEvent.press(screen.getByLabelText('Your message: yes please'));
+
+  expect(screen.getByText('1 selected')).toBeTruthy();
+  expect(screen.queryByText('Thread')).toBeNull();
+});
+
 it('selects several messages and deletes them in one action', async () => {
   serve({
     conversation: detail({}),

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Avatar from "../Avatar.jsx";
 import Lightbox from "../Lightbox.jsx";
 import DrawerPopover from "./DrawerPopover.jsx";
@@ -8,6 +8,14 @@ import ReactorsPopover from "../ReactorsPopover.jsx";
 import { isEmojiOnly } from "../../messageText.js";
 import { useReactionFailures } from "../../reactionFailures.js";
 import { formatClockTime } from "../../utils.js";
+
+/**
+ * How long a click on a reply waits before opening its strand — long enough for
+ * the second click of a double to land and select a word. Comfortably inside
+ * the platform double-click thresholds (~500ms on macOS and Windows) while
+ * staying under what reads as lag.
+ */
+const DOUBLE_CLICK_GRACE_MS = 250;
 
 // One message row — yours align right (filled accent), theirs left. A deleted
 // message leaves a muted placeholder in its original spot (and skips the
@@ -113,6 +121,10 @@ export default function MessageBubble({
   // clicked doesn't need revisiting the day it isn't.
   const [photoIndex, setPhotoIndex] = useState(null);
   const pillsRef = useRef(null);
+  // Pending strand-open (see `handleBubbleClick`), cancelled if this bubble goes
+  // away first — a poll that replaces an optimistic bubble remounts the row.
+  const openTimer = useRef(null);
+  useEffect(() => () => clearTimeout(openTimer.current), []);
 
   /**
    * Reacting, and holding on to a rejection (issue #251).
@@ -188,14 +200,41 @@ export default function MessageBubble({
    * equivalent guard.
    */
   function handleBubbleClick(event) {
-    if (!opensThread) return;
     // Anything inside the bubble with a job of its own keeps it: the ⋯ menu, a
     // link in the text, a photo, and the edge's own button below — which is why
     // that one doesn't need to stop propagation to avoid firing twice.
     if (event.target.closest("button, a")) return;
+    // ⚠️ And anything inside a **portalled** panel this bubble rendered. The ⋯
+    // menu is a child of this element in the React tree while living on
+    // `<body>` in the DOM, and React events follow the React tree — so a click
+    // on the menu's own padding, the gap around its emoji row, or the picker's
+    // search box arrives here having missed the `button, a` test above. It
+    // would open the strand *under* the open menu, hide the transcript, and
+    // leave the panel floating over a trigger that no longer exists.
+    if (event.target.closest("[data-popover]")) return;
+    // A click that ends a drag-selection isn't a click on the bubble.
     const selection = window.getSelection?.();
     if (selection && !selection.isCollapsed) return;
-    onOpenThread();
+    /**
+     * ⚠️ **Deferred, and the delay is the point.** Selecting a word is a
+     * *double*-click, and its first click arrives here indistinguishable from a
+     * single one — same target, same still-collapsed selection. Opening
+     * immediately would hide the transcript before the word was ever selected,
+     * on the commonest way there is to select one with a mouse.
+     *
+     * So the open waits out the double-click window and re-reads the selection
+     * when it fires: by then a double-click has made one, and this bails. No
+     * `dblclick` handler is needed, and nothing has to guess at click counts.
+     * The cost is ~a quarter-second before a panel that then goes to the
+     * network anyway. The phone has neither the problem nor the delay — there,
+     * selecting text is a long-press, which is the action menu.
+     */
+    clearTimeout(openTimer.current);
+    openTimer.current = setTimeout(() => {
+      const after = window.getSelection?.();
+      if (after && !after.isCollapsed) return;
+      onOpenThread();
+    }, DOUBLE_CLICK_GRACE_MS);
   }
   /**
    * 🔒 Clipped per viewer by the server (`_with_reply_counts`), not a plain
@@ -267,12 +306,20 @@ export default function MessageBubble({
               // yours takes white on the accent fill on the right, inside a
               // 1px `accent-deep` ring — white against the warm ground has no
               // outer edge of its own, and the ring is what it ends against.
-              // `ring` rather than a border on both counts: it draws outside the
-              // box, so the words don't move when a message becomes a reply.
+              // The ring is a `ring` (a box-shadow) rather than a border
+              // precisely because it draws *outside* the box and so costs no
+              // layout; the bar itself has to be a border, so that it follows
+              // the corner radius instead of ending square against it.
+              //
+              // The 3px therefore comes back off that side's padding, or a
+              // message would move its own words 3px sideways on becoming a
+              // reply. `msg-bubble-body` sets `padding-inline: 0.875rem` in the
+              // components layer and these are utilities, so they win — the
+              // one direction of that cascade this drawer doesn't have to fight.
               edged
                 ? mine
-                  ? "border-r-[3px] border-r-white/85 ring-1 ring-accent-deep"
-                  : "border-l-[3px] border-l-accent"
+                  ? "border-r-[3px] border-r-white/85 pr-[11px] ring-1 ring-accent-deep"
+                  : "border-l-[3px] border-l-accent pl-[11px]"
                 : ""
             } ${opensThread ? "cursor-pointer" : ""}`}
           >
@@ -493,15 +540,17 @@ export default function MessageBubble({
         </p>
       ))}
 
-      {/* The way into a strand from its root (M9d), and the *only* click that
-          opens it from here — the bubble's own click stays free, the gesture
-          budget M2 settled. Drawn as a branch off the bubble, the same living
-          line the feed's comment threads use, so a strand reads as growing out
-          of the message rather than as a button stuck under it.
+      {/* The way into a strand from its **root** (M9d) — a root wears no strand
+          edge, so this is the only click that opens one from here. (A reply is
+          the other way in: since M9g the bubble's own click does it.) Drawn as a
+          branch off the bubble, the same living line the feed's comment threads
+          use, so a strand reads as growing out of the message rather than as a
+          button stuck under it.
 
-          Its absence is what makes the quote load-bearing: a root the viewer was
-          clipped out of never renders, so its replies stand alone with no count
-          to click, and the quote is the only way in left. */}
+          Its absence is what makes the reply clickable rather than merely
+          convenient: a root the viewer was clipped out of never renders, so its
+          replies stand alone with no count to click, and clicking one of them is
+          the only way in left. */}
       {replyCount > 0 && onOpenThread && (
         <div
           className={`mt-0.5 flex ${mine ? "justify-end pr-1" : "justify-start pl-1"}`}

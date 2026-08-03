@@ -327,7 +327,8 @@ what they said. The quote said more, and that was the problem.
   transcript read as mostly chrome.
 - **It still couldn't separate two live strands**, because a quote names a
   *message*, never a conversation — the same limitation that made the
-  quote-only design wrong [in the first place](#why-a-focused-thread-and-not-just-a-quote).
+  quote-only design wrong in the first place (see
+  [Reply threads](#reply-threads), *Why a focused thread and not just a quote*).
 - **And it announced privacy clips in the middle of the chat.** A reply whose
   root you were clipped out of read *"Original message unavailable"* on every one
   of its bubbles. With the bar it simply looks like a reply, which is all a
@@ -375,6 +376,20 @@ Two client-specific notes, both about the web:
   mouse, selecting text is the gesture the bubble would otherwise steal; the
   phone has no equivalent problem, because selecting text there is a long-press,
   which is the action menu.
+- ⚠️ **The open is deferred ~250ms, and that delay is load-bearing.** Selecting a
+  word is a *double*-click, and its first click is indistinguishable from a
+  single one at the moment it arrives — same target, still-collapsed selection.
+  Opening straight away would hide the transcript before the word was ever
+  selected. The timer re-reads the selection when it fires, so a double-click
+  has made one by then and the open is abandoned; no `dblclick` handler and no
+  click-counting is involved. The cost is a quarter-second before a panel that
+  goes to the network anyway.
+- ⚠️ **A click inside the ⋯ menu doesn't reach the bubble**, which needs saying
+  because it looks like it couldn't. The menu is portalled to `<body>`, but
+  React events travel the *React* tree, so a click on the panel's padding or the
+  gaps around its emoji row arrived at the bubble that rendered it — opening the
+  strand under the open menu and hiding the transcript from beneath it.
+  `DrawerPopover` marks its panel `data-popover` and the handler bails on it.
 - **The bar is also a `<button>`** spanning the bubble's edge, invisible until
   focused. A `div` with an `onClick` is a mouse-only affordance, and this is a
   route into a conversation — it can't be one. Its label says "Part of a thread —
@@ -2258,11 +2273,16 @@ Four decisions:
 - **The pressed message comes with you into the mode.** A burst is exactly where
   you already know you want the next few, so entering with nothing ticked would
   waste the tap you just made.
-- **A tap on a bubble ticks it** — the one state where a bubble's own tap does
-  anything. That's a *suspension* of the [one-gesture-per-target
+- **A tap on a bubble ticks it**, and it ticks *every* bubble — including a
+  reply, whose tap would otherwise open its [strand](#the-strand-edge). That's a
+  *suspension* of the [one-gesture-per-target
   rule](#the-long-press-action-menu-phase-9b-m1) rather than an exception to it:
   while selecting, a tap means one thing everywhere on screen. The long-press
-  menu stands down for the same reason, so two modes can't race.
+  menu stands down for the same reason, so two modes can't race. ⚠️ Both clients
+  enforce it by **withholding the strand handler while selecting**, not by
+  ordering the two: a bubble decides it opens a strand from that handler being
+  present and its tap handler being absent, and an *unsent* message has no tap
+  handler even mid-selection, since it has no server id to tick.
 - **Delete is offered only when every ticked message is one you could delete on
   its own.** A bulk action that silently did *part* of what it says — yours,
   quietly skipping theirs — is worse than one that isn't there. Absent reads as

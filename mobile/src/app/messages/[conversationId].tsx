@@ -1568,10 +1568,28 @@ export default function ThreadScreen() {
                     // own strand, a reply opens the one it belongs to. The server
                     // owns the flattening, so this is a read of it, never a second
                     // copy of the rule.
-                    onOpenThread={() => {
-                      const rootId = message.thread_root_id ?? message.id;
-                      setThread({ rootId, replyToId: rootId, composing: false });
-                    }}
+                    //
+                    // **Withheld while selecting**, which is what makes "select
+                    // mode wins the tap" true rather than nearly true. A bubble
+                    // decides it opens a strand from `onOpenThread` being present
+                    // and `onPress` being absent — and `onPress` is absent on an
+                    // *unsent* message even mid-selection, since it has no server
+                    // id to tick. Without this the one bubble in a selection you
+                    // can't tick would be the one that opens a Modal over it.
+                    // Drops the "N replies" branch too, exactly as the web drops
+                    // its strand links while selecting.
+                    onOpenThread={
+                      selecting
+                        ? undefined
+                        : () => {
+                            const rootId = message.thread_root_id ?? message.id;
+                            setThread({
+                              rootId,
+                              replyToId: rootId,
+                              composing: false,
+                            });
+                          }
+                    }
                     // No menu on an unsent message: every action it offers —
                     // edit, delete, react, report — needs a server id this one
                     // hasn't got. Retry and Discard are on the bubble instead.

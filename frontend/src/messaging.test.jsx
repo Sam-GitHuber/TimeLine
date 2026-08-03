@@ -38,7 +38,6 @@ vi.mock("./api.js", () => ({
     createGroupChat: vi.fn(),
     getConversation: vi.fn(),
     getMessages: vi.fn(),
-    getMessagesByIds: vi.fn(),
     getThread: vi.fn(),
     sendMessage: vi.fn(),
     editMessage: vi.fn(),
@@ -217,9 +216,6 @@ beforeEach(() => {
   // Unsent messages outlive the view too (Phase 9b M9c), for the same reason,
   // so a failed send in one test would otherwise turn up in the next.
   clearOutbox();
-  // 🔒 So do resolved quotes (Phase 9b M9d) — and this one holds *other
-  // people's* message text, so it's cleared here for exactly the reason
-  // sign-out clears it.
   api.getFeed.mockResolvedValue(page([]));
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
@@ -230,7 +226,6 @@ beforeEach(() => {
   api.getConversations.mockResolvedValue(page([]));
   api.listUsers.mockResolvedValue(page([]));
   api.getMessages.mockResolvedValue(page([]));
-  api.getMessagesByIds.mockResolvedValue(page([]));
   api.getThread.mockResolvedValue(page([]));
   api.getConversation.mockResolvedValue(convoDetail());
   api.markConversationRead.mockResolvedValue({ detail: "Marked read." });
@@ -1881,9 +1876,49 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     expect(screen.getAllByText("dinner?")).toHaveLength(1);
     // 🔒 And nothing was fetched to draw it. The transcript used to resolve
     // every quote by id through the clipped endpoint; a bar is drawn from
-    // `reply_to`'s bare `{ id }` alone, so the one request that could ever have
-    // leaked a clipped body is no longer made at all.
-    expect(api.getMessagesByIds).not.toHaveBeenCalled();
+    // `reply_to`'s bare `{ id }` alone, so that call was removed from the client
+    // altogether — asserted here rather than "wasn't called", because a method
+    // that doesn't exist can't be reintroduced by accident without this failing.
+    expect(api.getMessagesByIds).toBeUndefined();
+  });
+
+  it("leaves the strand shut for a click that belongs to something else", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?", reply_count: 1 });
+    const reply = msg({
+      id: 6,
+      text: "where though",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([root, reply]));
+    api.getThread.mockResolvedValue(page([root, reply]));
+
+    renderAt("/messages/7");
+    const bubble = (await screen.findByText("where though")).closest(
+      ".msg-bubble-body"
+    );
+
+    // A double-click is how you select a word, and its *first* click arrives
+    // while the selection is still collapsed — indistinguishable from a single
+    // click at the moment it happens. The open is deferred past the
+    // double-click window for exactly this, so the wait is the assertion:
+    // nothing must have opened once the grace period has come and gone.
+    await user.dblClick(bubble);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(api.getThread).not.toHaveBeenCalled();
+
+    // ⚠️ And a click inside the ⋯ menu. It's portalled to `<body>`, but React
+    // events travel the React tree, so a click on the panel's own padding
+    // arrives at the bubble that rendered it — which would open the strand
+    // *under* the open menu and hide the transcript from beneath it.
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    const menu = await screen.findByRole("dialog", { name: "Message options" });
+    await user.click(menu);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(api.getThread).not.toHaveBeenCalled();
   });
 
   it("opens the strand when you click a reply itself", async () => {
@@ -1902,8 +1937,9 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     await user.click(await screen.findByText("where though"));
 
     // The strand it belongs to, not the message clicked: the server owns the
-    // flattening and `thread_root_id` is a read of it.
-    expect(api.getThread).toHaveBeenCalledWith(7, 5);
+    // flattening and `thread_root_id` is a read of it. Awaited because the open
+    // is deferred past the double-click window — see `handleBubbleClick`.
+    await waitFor(() => expect(api.getThread).toHaveBeenCalledWith(7, 5));
     expect(within(strand()).getByText("where though")).toBeInTheDocument();
   });
 
@@ -1930,6 +1966,9 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
 
     renderAt("/messages/7");
     await user.click(await screen.findByText("where though"));
+    // The open is deferred past the double-click window, so wait for the panel
+    // rather than assuming it's up — see `handleBubbleClick`.
+    await screen.findByRole("region", { name: "Reply thread" });
 
     // Everything in here belongs to this one strand, so a mark saying so on
     // each bubble would say nothing, and a quote would repeat words already on
@@ -1968,7 +2007,7 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // exactly the person whose view of it is already partial.
     await user.click(await screen.findByText("where though"));
 
-    expect(api.getThread).toHaveBeenCalledWith(7, 5);
+    await waitFor(() => expect(api.getThread).toHaveBeenCalledWith(7, 5));
     // Different wording from a quote's "Original message unavailable", which on
     // a whole strand reads as an error. Two different things to tell someone.
     expect(

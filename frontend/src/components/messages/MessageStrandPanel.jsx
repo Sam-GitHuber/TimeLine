@@ -273,12 +273,17 @@ export default function MessageStrandPanel({
                     // chronological context, so "who said this" is worth the
                     // repetition.
                     showSender={isGroup && message.sender.id !== meId}
-                    // The one place a reply still shows what it answers (M9g) —
-                    // out in the transcript it wears the strand edge instead.
+                    // Plain bubbles in here (M9g): no strand edge, no quote.
+                    // Everything in this list belongs to the one thread, so a
+                    // mark saying so on each bubble would say nothing, and a
+                    // quote would repeat words already on screen a few rows up.
+                    // What you're answering is named above the composer instead,
+                    // and only when it isn't the root.
                     insideStrand
                     mentionNames={mentionNames}
-                    // No `onOpenThread`: you're already in the strand, and there
-                    // is nowhere further to go. The quote renders inert.
+                    // No `onOpenThread`: you're already in the strand, and
+                    // there is nowhere further to go — so the bubble's click
+                    // stays inert in here, as it is on any plain message.
                     status={status}
                     meId={meId}
                     animate={!justSent?.has(message.id)}
