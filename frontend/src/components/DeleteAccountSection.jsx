@@ -40,16 +40,26 @@ function ConfirmDeleteModal({ onCancel }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  // The delete landed and we're on our way out. Keeps the button spent — the
+  // gate below has already let go by then, and a second press would fire a
+  // delete at a session that no longer exists.
+  const [done, setDone] = useState(false);
 
   // Esc cancels; lock background scroll and move focus in — same dialog pattern
   // as DisconnectWarningModal.
+  //
+  // Not while the delete is in flight, though (issue #254): the rejection —
+  // "wrong password", most often — is rendered inside this dialog, so a
+  // dismissal mid-request unmounts the only thing that could say why nothing
+  // happened, and leaves you unsure whether your account still exists. Same
+  // gate `ConfirmDeleteDialog` puts on a half-done delete.
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") onCancel();
+      if (event.key === "Escape" && !deleting) onCancel();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  }, [onCancel, deleting]);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -62,11 +72,19 @@ function ConfirmDeleteModal({ onCancel }) {
 
   async function handleDelete(event) {
     event.preventDefault();
-    if (deleting || !password) return;
+    if (deleting || done || !password) return;
     setError(null);
     setDeleting(true);
     try {
       await api.deleteAccount(password);
+      // The write landed, so there's no rejection left for this dialog to show
+      // and the gate has done its job — let go of it *before* the best-effort
+      // teardown below, which is the one part of this that can hang. Holding it
+      // across a slow `logout()` would seal someone into a "Deleting…" box with
+      // no way out, which is the trap this issue exists to avoid rather than
+      // move somewhere else.
+      setDeleting(false);
+      setDone(true);
       // The account (and session) is gone. Clear the auth cookie best-effort,
       // then hard-reload to /login so the whole app re-boots logged-out with no
       // stale cache.
@@ -87,7 +105,7 @@ function ConfirmDeleteModal({ onCancel }) {
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4 backdrop-blur-sm"
-      onClick={onCancel}
+      onClick={deleting ? undefined : onCancel}
     >
       <form
         ref={dialogRef}
@@ -131,16 +149,17 @@ function ConfirmDeleteModal({ onCancel }) {
           <button
             type="button"
             onClick={onCancel}
+            disabled={deleting}
             className="btn btn-ghost btn-sm"
           >
             Cancel
           </button>
           <button
             type="submit"
-            disabled={deleting || !password}
+            disabled={deleting || done || !password}
             className="btn btn-sm bg-red-600 text-white hover:bg-red-700"
           >
-            {deleting ? "Deleting…" : "Delete forever"}
+            {deleting || done ? "Deleting…" : "Delete forever"}
           </button>
         </div>
       </form>

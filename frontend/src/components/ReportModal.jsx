@@ -22,13 +22,18 @@ export function ReportModal({ postId, commentId, messageId, onClose }) {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
 
+  // Escape closes — but not while the report is in flight (issue #254). The
+  // rejection is rendered *inside* this dialog, so dismissing it mid-request
+  // unmounts the only thing that could have told you the report didn't send,
+  // and the silence is indistinguishable from never having pressed the button.
+  // Same gate `ConfirmDeleteDialog` puts on a half-done delete.
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !submitting) onClose();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, submitting]);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -51,6 +56,9 @@ export function ReportModal({ postId, commentId, messageId, onClose }) {
         messageId,
         reason: reason.trim(),
       });
+      // Clear `submitting` alongside `done`: the dismissal gates below read it,
+      // and the success screen must stay dismissable by Escape and the backdrop.
+      setSubmitting(false);
       setDone(true);
     } catch (err) {
       setError(serverMessage(err, "Couldn’t send the report."));
@@ -65,7 +73,7 @@ export function ReportModal({ postId, commentId, messageId, onClose }) {
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4 backdrop-blur-sm"
-      onClick={onClose}
+      onClick={submitting ? undefined : onClose}
     >
       <div
         ref={dialogRef}
@@ -137,6 +145,7 @@ export function ReportModal({ postId, commentId, messageId, onClose }) {
               <button
                 type="button"
                 onClick={onClose}
+                disabled={submitting}
                 className="btn btn-ghost btn-sm"
               >
                 Cancel

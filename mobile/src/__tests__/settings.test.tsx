@@ -258,6 +258,75 @@ describe('DeleteAccountSection', () => {
     expect(await screen.findByText('Incorrect password.')).toBeTruthy();
     expect(mockSignOut).not.toHaveBeenCalled();
   });
+
+  // Issue #254. The rejection — "wrong password", most often — renders inside
+  // this modal, so dismissing it mid-request tears down the only thing that
+  // could say why nothing happened, and leaves you unsure whether the account
+  // you just asked to erase still exists. On Android it's one hardware-back
+  // press away, which is why `onRequestClose` is in here too.
+  it('holds every way out shut while the delete is in flight', async () => {
+    let settle: (value: unknown) => void = () => {};
+    mockFetch.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      })
+    );
+    await openModal();
+    await fireEvent.changeText(screen.getByLabelText('Password'), 'wrong');
+    // Deliberately not awaited: `fireEvent` hands back the handler's own
+    // promise, and this one is the request we're keeping open — awaiting it
+    // would hang the test rather than leave the modal mid-write.
+    fireEvent.press(screen.getByText('Delete forever'));
+    await waitFor(() =>
+      expect(made(/\/api\/account\/delete\/$/, 'POST')).toBe(true)
+    );
+
+    // Android hardware back, the backdrop, and Cancel — the three routes out.
+    // `requestClose` is fired at the backdrop and bubbles to the `Modal`'s
+    // `onRequestClose`, which is what the OS calls on a hardware-back press.
+    await fireEvent(screen.getByTestId('delete-account-backdrop'), 'requestClose');
+    await fireEvent.press(screen.getByTestId('delete-account-backdrop'));
+    await fireEvent.press(screen.getByText('Cancel'));
+    expect(screen.getByText('Delete your account?')).toBeTruthy();
+
+    // So the rejection has somewhere to land.
+    await act(async () => {
+      settle(jsonResponse({ detail: 'Incorrect password.' }, 403));
+    });
+    expect(await screen.findByText('Incorrect password.')).toBeTruthy();
+    expect(mockSignOut).not.toHaveBeenCalled();
+  });
+
+  // The gate exists so a *rejection* has somewhere to land, so it has to let go
+  // the moment the delete itself lands — before `signOut`, which makes its own
+  // round trips and is the part that can hang. Holding it across that would
+  // just move the trap rather than remove it.
+  it('releases the gate once the delete lands, before signOut finishes', async () => {
+    mockFetch.mockResolvedValue(jsonResponse(null, 204));
+    let finishSignOut: (value?: unknown) => void = () => {};
+    mockSignOut.mockReturnValue(
+      new Promise((resolve) => {
+        finishSignOut = resolve;
+      })
+    );
+    await openModal();
+
+    await fireEvent.changeText(screen.getByLabelText('Password'), 'my-pw');
+    // The press isn't awaited — `fireEvent` hands back the handler's own
+    // promise and `signOut` is deliberately left hanging. `act` still flushes
+    // the state updates the resolved delete makes on the way past.
+    await act(async () => {
+      fireEvent.press(screen.getByText('Delete forever'));
+    });
+    await waitFor(() => expect(mockSignOut).toHaveBeenCalled());
+
+    // Still mid-teardown, and the modal now lets go.
+    await fireEvent(screen.getByTestId('delete-account-backdrop'), 'requestClose');
+    await waitFor(() =>
+      expect(screen.queryByText('Delete your account?')).toBeNull()
+    );
+    finishSignOut();
+  });
 });
 
 describe('FeedPreferencesSection', () => {

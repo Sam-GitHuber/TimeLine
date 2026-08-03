@@ -58,16 +58,27 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // The delete landed and we're on our way out. Keeps the button spent — the
+  // dismissal gate has already let go by then, and a second press would fire a
+  // delete at a session that no longer exists.
+  const [done, setDone] = useState(false);
 
   async function handleDelete() {
-    if (deleting || !password) return;
+    if (deleting || done || !password) return;
     setError(null);
     setDeleting(true);
     try {
       await api.deleteAccount(password);
+      // The write landed, so there's no rejection left for this modal to show
+      // and the gate has done its job — let go of it *before* `signOut`, which
+      // is the one part of this that can hang (it makes its own
+      // `unregisterPush`/`logout` round trips). Holding it across those would
+      // seal someone into a "Deleting…" box with no way out, which is the trap
+      // this issue exists to avoid rather than move somewhere else.
+      setDeleting(false);
+      setDone(true);
       // The account (and session) is gone. signOut wipes the device tokens and
-      // the auth gate routes to /login for a clean logged-out boot. Don't reset
-      // `deleting` on success — the screen is being torn down.
+      // the auth gate routes to /login for a clean logged-out boot.
       await signOut();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Couldn’t delete your account.');
@@ -80,7 +91,9 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
       transparent
       animationType="fade"
       visible
-      onRequestClose={onCancel}
+      onRequestClose={() => {
+        if (!deleting) onCancel();
+      }}
       accessibilityViewIsModal
     >
       {/* Required since #172 mounted `KeyboardProvider`: that strips the
@@ -90,7 +103,17 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
           `components/KeyboardAvoider.tsx`. The avoider pads the bottom and the
           backdrop then centres the card in what's left. */}
       <KeyboardAvoider style={styles.avoider}>
-        <Pressable style={styles.backdrop} onPress={onCancel}>
+        {/* Every way out — backdrop, Cancel, and the Android hardware back
+            above — is held shut while the delete is in flight (issue #254).
+            The rejection ("wrong password", most often) renders inside this
+            modal, so dismissing it mid-request tears down the only thing that
+            could say why nothing happened, and leaves you unsure whether your
+            account still exists. Matches the web's `ConfirmDeleteDialog`. */}
+        <Pressable
+          testID="delete-account-backdrop"
+          style={styles.backdrop}
+          onPress={deleting ? undefined : onCancel}
+        >
           <Pressable style={styles.card} onPress={() => {}}>
             <Text style={styles.cardTitle}>Delete your account?</Text>
             <Text style={styles.cardBody}>
@@ -120,22 +143,27 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
             <View style={styles.actions}>
               <Pressable
                 onPress={onCancel}
+                disabled={deleting}
                 accessibilityRole="button"
-                style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.btn,
+                  styles.ghost,
+                  (pressed || deleting) && styles.pressed,
+                ]}
               >
                 <Text style={styles.ghostLabel}>Cancel</Text>
               </Pressable>
               <Pressable
                 onPress={handleDelete}
-                disabled={deleting || !password}
+                disabled={deleting || done || !password}
                 accessibilityRole="button"
                 style={({ pressed }) => [
                   styles.btn,
                   styles.danger,
-                  (pressed || deleting || !password) && styles.pressed,
+                  (pressed || deleting || done || !password) && styles.pressed,
                 ]}
               >
-                {deleting ? (
+                {deleting || done ? (
                   <ActivityIndicator color="#ffffff" size="small" />
                 ) : (
                   <Text style={styles.dangerLabel}>Delete forever</Text>

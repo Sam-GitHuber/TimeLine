@@ -75,6 +75,70 @@ describe("Delete account", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/incorrect/i);
     expect(window.location.assign).not.toHaveBeenCalled();
   });
+
+  // Issue #254. The rejection is rendered *inside* this dialog, so every route
+  // out of it has to stay shut until the request settles — otherwise the
+  // component that would have shown "wrong password" is already gone, and
+  // you're left not knowing whether your account still exists.
+  it("can't be dismissed while the delete is in flight", async () => {
+    const user = userEvent.setup();
+    let reject;
+    api.deleteAccount.mockReturnValue(
+      new Promise((_, r) => {
+        reject = r;
+      })
+    );
+
+    renderWithAuth(<DeleteAccountSection />);
+    await user.click(
+      screen.getByRole("button", { name: /delete my account/i })
+    );
+    await user.type(screen.getByLabelText("Password"), "wrong");
+    await user.click(screen.getByRole("button", { name: /delete forever/i }));
+    await screen.findByRole("button", { name: /deleting/i });
+
+    // All three ways out, while the POST is still open.
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("dialog").parentElement);
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // So the rejection lands somewhere a person can read it.
+    reject(apiError("Password is incorrect.", 400));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/incorrect/i);
+  });
+
+  // The gate exists so a *rejection* has somewhere to land, so it has to let go
+  // the moment the delete itself lands — before the best-effort `logout()`,
+  // which is the part that can hang. Holding it across that would just move the
+  // trap rather than remove it.
+  it("releases the gate once the delete lands, before the logout", async () => {
+    const user = userEvent.setup();
+    api.deleteAccount.mockResolvedValue(null);
+    let finishLogout;
+    api.logout.mockReturnValue(
+      new Promise((resolve) => {
+        finishLogout = resolve;
+      })
+    );
+
+    renderWithAuth(<DeleteAccountSection />);
+    await user.click(
+      screen.getByRole("button", { name: /delete my account/i })
+    );
+    await user.type(screen.getByLabelText("Password"), "my-password");
+    await user.click(screen.getByRole("button", { name: /delete forever/i }));
+    await waitFor(() => expect(api.logout).toHaveBeenCalled());
+
+    // Still mid-teardown, and the dialog now lets go.
+    expect(window.location.assign).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // …and the spent button can't fire a second delete at a dead session.
+    expect(api.deleteAccount).toHaveBeenCalledTimes(1);
+    finishLogout({});
+  });
 });
 
 describe("Report content", () => {
@@ -101,6 +165,50 @@ describe("Report content", () => {
       })
     );
     expect(await screen.findByText(/thanks for letting us know/i)).toBeInTheDocument();
+  });
+
+  // Issue #254, and the one that matters most: this is the safety path. A
+  // report dismissed mid-request unmounts the only renderer of "that didn't
+  // send", and the silence is indistinguishable from never having pressed Send.
+  it("can't be dismissed while the report is in flight", async () => {
+    const user = userEvent.setup();
+    let reject;
+    api.reportContent.mockReturnValue(
+      new Promise((_, r) => {
+        reject = r;
+      })
+    );
+    const onClose = vi.fn();
+
+    renderWithAuth(<ReportModal postId={7} onClose={onClose} />);
+    await user.click(screen.getByRole("button", { name: /send report/i }));
+    await screen.findByRole("button", { name: /sending/i });
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("dialog").parentElement);
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(onClose).not.toHaveBeenCalled();
+
+    reject(apiError("Couldn’t send the report.", 500));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/report/i);
+  });
+
+  // The other half of that gate: `submitting` is what holds the dialog shut, so
+  // it has to be released once the report lands — or the "Thanks for letting us
+  // know" screen would be stuck behind its Done button.
+  it("is dismissable again once the report has landed", async () => {
+    const user = userEvent.setup();
+    // Explicit: `clearAllMocks` keeps implementations, so the pending promise
+    // the test above installs would otherwise carry over.
+    api.reportContent.mockResolvedValue({ id: 1 });
+    const onClose = vi.fn();
+
+    renderWithAuth(<ReportModal postId={7} onClose={onClose} />);
+    await user.click(screen.getByRole("button", { name: /send report/i }));
+    await screen.findByText(/thanks for letting us know/i);
+
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalled();
   });
 
   it("names the kind of thing being reported", () => {
