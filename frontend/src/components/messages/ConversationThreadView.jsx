@@ -1405,10 +1405,18 @@ export default function ConversationThreadView() {
                           // who-reacted list: a reaction is content everyone sees,
                           // so being severed stops it (403) exactly as it stops a
                           // message. The list stays readable, and inert.
+                          // `mutateAsync`, so a refusal reaches the bubble that
+                          // asked for it and gets said there (#251). `mutate`
+                          // swallows it, and the mutation's own `isError` is no
+                          // use to either call site: one mutation serves every
+                          // bubble in the thread *and* every bubble in an open
+                          // strand, so a flag on it can't say which tap failed
+                          // — and the strand's are on screen while the
+                          // transcript around this line is `hidden`.
                           onReact={
                             canSend && !selecting
                               ? (emoji) =>
-                                  reactMutation.mutate({
+                                  reactMutation.mutateAsync({
                                     messageId: row.message.id,
                                     emoji,
                                   })
@@ -1647,22 +1655,19 @@ export default function ConversationThreadView() {
                   nearer the thing that went wrong, and the only place that works
                   when two messages are in flight and one of them fell over. A
                   failed edit still belongs here: it has no bubble of its own. */}
-              {/* Reacting is a one-click gesture with no optimistic pill, so a
-                  failure has to say so rather than leave the click looking as
-                  though it worked. The server owns the rules that can reject one
-                  (the per-target cap, emoji validation, a closed thread), so its
-                  message is what's shown. */}
+              {/* A failed *reaction* isn't reported here either, and that was a
+                  bug for as long as it was (#251): the composer sits in the
+                  transcript column, which is given `hidden` whenever a strand is
+                  open — and a strand is one of the two places you can react
+                  from. Anything rendered here while one is open paints into a
+                  `display: none` subtree. It says so on the bubble now, which
+                  both ways in can see. */}
               {/* A photo that couldn't be prepared never reached the outbox, so
                   it has no bubble to fail on — the composer is the only place
                   left to say so. */}
               {photoError && (
                 <p role="alert" className="mt-1 text-sm text-red-600">
                   {photoError}
-                </p>
-              )}
-              {reactMutation.isError && (
-                <p role="alert" className="mt-1 text-sm text-red-600">
-                  {serverMessage(reactMutation.error, "Couldn’t react.")}
                 </p>
               )}
               {editMutation.isError && (
@@ -1713,7 +1718,7 @@ export default function ConversationThreadView() {
               onReact={
                 canSend
                   ? (messageId, emoji) =>
-                      reactMutation.mutate({ messageId, emoji })
+                      reactMutation.mutateAsync({ messageId, emoji })
                   : undefined
               }
               onSend={(value, replyToId, mentionIds) =>

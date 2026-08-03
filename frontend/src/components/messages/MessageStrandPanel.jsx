@@ -91,6 +91,12 @@ export default function MessageStrandPanel({
   /** Server ids that arrived by your own sending — they skip the animation. */
   justSent,
   getActions,
+  /**
+   * `(messageId, emoji) => Promise` — toggle an emoji on a message in here.
+   * **Its rejection is load-bearing**: the bubble is what reports a refused
+   * reaction (#251), and it can only do that if the promise it gets back
+   * actually rejects. Handed straight through below.
+   */
   onReact,
   onSend,
   onRetry,
@@ -356,7 +362,10 @@ export default function MessageStrandPanel({
                   outbox entry, so a quick second one doesn't wait on the first.
                   And no error line under here — a reply that fails says so on
                   the bubble it failed as, which is the only place that can tell
-                  you *which* of two replies fell over. */}
+                  you *which* of two replies fell over. A refused **reaction**
+                  says so on its bubble for the same reason (#251); it used to
+                  have nowhere at all in here, because the only renderer was in
+                  the transcript's composer, hidden behind this panel. */}
               <button
                 type="submit"
                 disabled={!text.trim()}

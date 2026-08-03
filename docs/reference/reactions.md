@@ -188,6 +188,15 @@ Recorded here so a future session doesn't discover it and assume it was missed.
   the message about 👍, which is no more evidence than an unrelated resync is.
   Each message therefore names its own emoji, since two bare red lines under one
   row say nothing about which tap they belong to.
+- **The holding of those failures lives in `frontend/src/reactionFailures.js`**,
+  shared by `ReactionBar` and `MessageBubble` (issue #251 needed the identical
+  answer for messages). `useReactionFailures(summary)` owns the map, the
+  clear-condition and the per-direction fallbacks; a caller passes the summary
+  **as the server last stated it** and calls `attempt(emoji, run)` in place of
+  firing the toggle itself. Two copies of that clear-condition would drift, and
+  drift there is silent — getting it wrong means a rejection that never appears,
+  which is the whole bug. `attempt` never rejects, so a fire-and-forget caller
+  (the quick row, "tap to remove") can't leave an unhandled rejection behind.
 
 **In the messages drawer (Phase 9b M9c)** the same components serve a different
 grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️ 😂 😮 😢
@@ -198,6 +207,24 @@ bubble's lower edge and 🔒 **a pill never toggles — it opens "who reacted"**
 which is where your own row offers *"tap to remove"*. Neither is optimistic —
 the feed's chips aren't either (above); what differs here is that a pill isn't
 a control at all, for the reason under *Message reactions*.
+
+🔒 **A refused message reaction is reported on the bubble, never on the
+composer** (issue #251). The mutation lives in `ConversationThreadView`, but two
+screens call it: the transcript, and an open **reply strand**. The thread view
+renders the transcript column with Tailwind `hidden` — *not* unmounted, so a
+draft, an in-progress edit, the latched unread divider and the poll all survive a
+trip into a strand — which means anything the composer renders while a strand is
+open paints into a `display: none` subtree. That was where the error line was, so
+a reaction refused inside a strand said nothing at all; with no optimistic pill to
+take away, the tap was byte-for-byte identical to one that worked, and tapping
+again hits a server that may have taken the first one, where the second tap
+removes it. `MessageBubble` therefore owns the failure, the same rule the file
+already followed for a failed send: nearest the thing that went wrong, and the
+only place both ways in can see. Two consequences for anyone touching this:
+`onReact` **must return a promise that rejects** (`mutateAsync`, not `mutate`),
+and a mutation-level `isError` is no use here — one mutation serves every bubble
+in the thread and every bubble in the strand, so a flag on it can't say which tap
+failed.
 
 Two mechanical differences worth knowing before touching either:
 

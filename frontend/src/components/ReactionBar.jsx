@@ -2,7 +2,7 @@ import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../api.js";
-import { serverMessage } from "../errors.js";
+import { useReactionFailures } from "../reactionFailures.js";
 import QuickReactionPopover from "./QuickReactionPopover.jsx";
 import ReactorsPopover from "./ReactorsPopover.jsx";
 
@@ -14,21 +14,6 @@ const EmojiPickerPopover = lazy(() => import("./EmojiPickerPopover.jsx"));
 // A stable empty-array reference for the "no reactions" case, so the identity
 // check below doesn't see a fresh `[]` every render (which would loop forever).
 const NO_REACTIONS = [];
-
-// What a rejection sounds like when the server didn't write anything readable
-// itself. Named per direction rather than generically because a chip does two
-// opposite things depending on whether that emoji is already yours, and "it
-// didn't work" leaves you unable to tell which of them didn't happen.
-const FAILURES = {
-  add: "Couldn’t add that reaction — try again.",
-  remove: "Couldn’t remove that reaction — try again.",
-};
-
-// Whether the viewer has reacted with `emoji`, according to a server summary.
-// An emoji absent from the summary is one nobody has used, so: no.
-function hasReacted(summary, emoji) {
-  return summary.some((r) => r.emoji === emoji && r.reacted);
-}
 
 // Rough popover dimensions, used only to keep it on-screen (clamp + flip).
 const PICKER_W = 348;
@@ -95,16 +80,6 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
   // four one-tap reactions, "full" → the whole emoji picker.
   const [menu, setMenu] = useState(null);
   const [whoOpen, setWhoOpen] = useState(false);
-  // Rejected toggles, keyed by emoji, each tagged with whether that emoji was
-  // yours when you tapped — see the clear-condition below.
-  //
-  // **A map rather than the single slot its siblings use.** ConnectButton,
-  // BlockButton and RsvpBar are each one control doing one thing, so one slot
-  // holds every failure they can have. This bar is a *row* of independent
-  // toggles, and one slot there means the second failure overwrites the first:
-  // two taps that both failed, one message, and the other tap silent again —
-  // precisely the bug this exists to fix, reappearing for whichever chip lost.
-  const [failures, setFailures] = useState({});
   const addBtnRef = useRef(null);
   const whoBtnRef = useRef(null);
 
@@ -119,74 +94,21 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
     setItems(incoming);
   }
 
-  // Retire a message once the server's own answer moves to the state that tap
-  // was reaching for — the toggle landed and only its response was lost, so
-  // "couldn't add that reaction" would now be sitting beside a chip that says
-  // you did. Nothing else clears it, and each is judged only on *its own*
-  // emoji: a summary that changed for some other reason (someone else reacted,
-  // a different emoji of yours toggled) is not confirmation of your attempt,
-  // and clearing on any resync is the swallow issue #231 describes. The
-  // comparison is against `mine`, recorded at the attempt rather than at the
-  // rejection, so a refetch landing in the same render batch as the rejection
-  // can't eat the message before it's painted.
-  //
-  // Testing "moved off what it was" rather than "arrived at what we wanted" is
-  // the same condition here, since a chip is yours or it isn't — unlike
-  // ConnectButton's four states, where the two halves are genuinely different
-  // questions and both have to be asked.
-  //
-  // `items` is the right thing to read: it is only ever assigned a summary the
-  // server sent, whether from the re-sync above or from a later toggle's own
-  // response. Nothing here is optimistic.
-  const landed = Object.keys(failures).filter(
-    (emoji) => hasReacted(items, emoji) !== failures[emoji].mine,
-  );
-  if (landed.length > 0) {
-    const rest = { ...failures };
-    for (const emoji of landed) delete rest[emoji];
-    setFailures(rest);
-  }
+  // Rejected toggles, keyed by emoji — shared with the message bubble, which
+  // has the same row-of-independent-toggles shape and needed the same answer
+  // (issues #242 then #251). `items` is the right thing to hand it: it is only
+  // ever assigned a summary the server sent, whether from the re-sync above or
+  // from a later toggle's own response. Nothing here is optimistic.
+  const { failures, attempt } = useReactionFailures(items);
 
   const toggle = useMutation({
     mutationFn: (emoji) => api.toggleReaction({ ...target, emoji }),
     onSuccess: (data) => setItems(data.reactions ?? []),
   });
 
-  // Awaited rather than fired-and-forgotten so the failure can be tagged with
-  // what was true when you tapped. Reacting is a small, cheap gesture, so a
-  // rejection has to say so rather than leave the tap looking like it worked:
-  // the chips only ever repaint from `onSuccess`, the popover closes either
-  // way, and a silent failure reads as a missed button — so you tap again, at a
-  // server that may have taken the first one, where the second tap *removes* it.
-  async function react(emoji) {
+  function react(emoji) {
     setMenu(null);
-    const mine = hasReacted(items, emoji);
-    // Only this emoji's message goes. A fresh attempt on ❤️ says nothing about
-    // whether your 👍 landed, so dropping that one here would put the silence
-    // straight back — the same reasoning as the clear-condition above, applied
-    // to the manual clear rather than the automatic one.
-    setFailures((prev) => {
-      if (!(emoji in prev)) return prev;
-      const rest = { ...prev };
-      delete rest[emoji];
-      return rest;
-    });
-    try {
-      await toggle.mutateAsync(emoji);
-    } catch (err) {
-      // The server's own words are the point here: the rules that reject a
-      // reaction — the per-target distinct-emoji cap, emoji validation — are
-      // written for a person. `serverMessage` is what keeps the browser's
-      // "Failed to fetch" and a body-less 500's "Request failed (500)" out,
-      // both of which a bare `err.message` would show (issue #240).
-      setFailures((prev) => ({
-        ...prev,
-        [emoji]: {
-          mine,
-          text: serverMessage(err, mine ? FAILURES.remove : FAILURES.add),
-        },
-      }));
-    }
+    return attempt(emoji, () => toggle.mutateAsync(emoji));
   }
 
   // The emoji the viewer has already used, so the quick popover can show them as

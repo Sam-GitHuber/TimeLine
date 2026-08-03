@@ -6,6 +6,7 @@ import MessageMenu from "./MessageMenu.jsx";
 import MessageText from "./MessageText.jsx";
 import ReactorsPopover from "../ReactorsPopover.jsx";
 import { isEmojiOnly, plainMessageText } from "../../messageText.js";
+import { useReactionFailures } from "../../reactionFailures.js";
 import { formatClockTime } from "../../utils.js";
 
 // One message row — yours align right (filled accent), theirs left. A deleted
@@ -84,6 +85,10 @@ export default function MessageBubble({
    * to, which drops both the menu's quick row and "tap to remove" in the
    * who-reacted list — the list stays readable and inert, the same line the
    * server draws.
+   *
+   * **Returns a promise that rejects on refusal** — the caller owns the write,
+   * the bubble owns saying so (see `react` below). A caller that resolves
+   * regardless leaves the failure unreported, silently.
    */
   onReact,
   /** Which row in the who-reacted list is yours, so it can offer to undo. */
@@ -108,6 +113,31 @@ export default function MessageBubble({
   // clicked doesn't need revisiting the day it isn't.
   const [photoIndex, setPhotoIndex] = useState(null);
   const pillsRef = useRef(null);
+
+  /**
+   * Reacting, and holding on to a rejection (issue #251).
+   *
+   * **The bubble reports it, not the caller** — the same rule the file already
+   * follows for a failed *send*, and for the same reason twice over. It's
+   * nearest the thing that went wrong; and it's the only place that works from
+   * both ways in. The transcript and a reply strand each render these bubbles
+   * and each call the *one* mutation in `ConversationThreadView`, whose error
+   * line used to live in the composer block — a block the thread view gives
+   * Tailwind `hidden` while a strand is open, so a reaction refused inside a
+   * strand painted its message into a `display: none` subtree and said nothing
+   * at all. With no optimistic pill to take away (M2's fifth decision), that
+   * left the tap byte-for-byte identical to one that worked, so you tap again,
+   * at a server that may have taken the first one, where the second tap is a
+   * *removal*.
+   *
+   * `message.reactions` is the summary to judge against: it only ever holds
+   * what the server sent, patched in from a toggle's own response or a poll.
+   */
+  const { failures: reactionFailures, attempt } = useReactionFailures(reactions);
+  // Never rejects (`attempt` swallows it into state), which matters: both call
+  // sites below fire and forget, and a rejecting handler there would be an
+  // unhandled rejection rather than an error message.
+  const react = onReact ? (emoji) => attempt(emoji, () => onReact(emoji)) : undefined;
 
   /**
    * The timestamp is shown on the run's **last** bubble only. Five messages sent
@@ -213,7 +243,7 @@ export default function MessageBubble({
               <MessageMenu
                 getActions={() => getActions(message)}
                 onFill={mine && !large}
-                onReact={onReact}
+                onReact={react}
                 reactedEmojis={
                   new Set(
                     reactions.filter((r) => r.reacted).map((r) => r.emoji)
@@ -386,6 +416,29 @@ export default function MessageBubble({
           ))}
         </div>
       )}
+
+      {/* A refused reaction, under the pills and on the bubble's own side.
+          Outside the pills block rather than inside it: adding your *first*
+          emoji to a message is exactly the case where there are no pills to sit
+          under, and it's the one that fails on the per-target cap least and on
+          being offline most.
+
+          Each names its own emoji — with two of these up, identical red lines
+          would say nothing about which tap failed. Deliberately not
+          `aria-hidden`: which emoji it's about is the part a screen reader most
+          needs, and an emoji is announced by name. */}
+      {Object.entries(reactionFailures).map(([emoji, failure]) => (
+        <p
+          key={emoji}
+          role="alert"
+          className={`mt-0.5 text-xs leading-snug text-red-600 ${
+            mine ? "pr-1 text-right" : "pl-1 text-left"
+          }`}
+        >
+          {emoji} {failure.text}
+        </p>
+      ))}
+
       {/* The way into a strand from its root (M9d), and the *only* click that
           opens it from here — the bubble's own click stays free, the gesture
           budget M2 settled. Drawn as a branch off the bubble, the same living
@@ -444,7 +497,7 @@ export default function MessageBubble({
           <ReactorsPopover
             messageId={message.id}
             meId={meId}
-            onRemoveReaction={onReact}
+            onRemoveReaction={react}
             onClose={() => setWhoOpen(false)}
             ignoreRef={pillsRef}
           />

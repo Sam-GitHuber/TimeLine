@@ -1346,9 +1346,52 @@ describe("Messages drawer — reactions, send state and ticks (Phase 9b M9c)", (
 
     // There's no optimistic pill to take away, so silence would leave the click
     // looking as though it had worked.
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /only use 4 different emoji/i
-    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/only use 4 different emoji/i);
+    // And it says so *on the bubble it failed on*, not down at the composer
+    // (#251). The composer belongs to the transcript column, which is hidden
+    // whole while a reply strand is open — so a message rendered there is
+    // unreachable from one of the two places you can react from.
+    expect(alert.closest("li")).toBe(screen.getByText("big news").closest("li"));
+  });
+
+  it("keeps one message per emoji, and retires one the server later confirms", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 3, text: "big news" })]));
+    api.toggleReaction.mockRejectedValue(apiError("Nope.", 400));
+
+    renderAt("/messages/7");
+    await screen.findByText("big news");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "React with 👍" }));
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "React with ❤️" }));
+
+    // Two failed taps, two messages, each naming its own emoji. One slot for the
+    // whole bubble would have let ❤️ retire 👍's message and leave that tap
+    // silent again — the bug, back for whichever emoji lost.
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+    expect(screen.getAllByRole("alert")[0]).toHaveTextContent("👍");
+    expect(screen.getAllByRole("alert")[1]).toHaveTextContent("❤️");
+
+    // Now 👍 turns out to have landed all along — only its response was lost —
+    // and the server says so in the summary it answers the *next* toggle with.
+    // That message goes, because its own emoji moved; ❤️'s stays, because a
+    // summary changing for some other reason is no evidence about your ❤️ tap
+    // (the swallow #231 describes).
+    api.toggleReaction.mockResolvedValue({
+      reactions: [
+        { emoji: "👍", count: 1, reacted: true },
+        { emoji: "😂", count: 1, reacted: true },
+      ],
+    });
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "React with 😂" }));
+
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(1));
+    expect(screen.getByRole("alert")).toHaveTextContent("❤️");
   });
 
   it("opens who-reacted from a pill, and takes your own reaction off there", async () => {
@@ -2015,6 +2058,42 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
         name: /👍, 1, including you/,
       })
     ).toBeInTheDocument();
+  });
+
+  it("says so inside the strand when a reaction taken there is refused", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?" });
+    api.getMessages.mockResolvedValue(page([root]));
+    api.getThread.mockResolvedValue(page([root]));
+    api.toggleReaction.mockRejectedValue(
+      apiError("You can only use 4 different emoji here.", 400)
+    );
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    const bubble = within(strand()).getByText("dinner?").closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    await user.click(screen.getByRole("button", { name: "React with 👍" }));
+
+    // 🔒 Scoped to the strand, and that scoping is the whole test (#251). The
+    // rejection *was* rendered before this fix — into the transcript's composer,
+    // which sits in a column the thread view gives Tailwind `hidden` the moment
+    // a strand opens. jsdom loads no CSS, so an unscoped `findByRole("alert")`
+    // passed against code that painted the message into a `display: none`
+    // subtree, where nobody could read it.
+    expect(await within(strand()).findByRole("alert")).toHaveTextContent(
+      /only use 4 different emoji/i
+    );
+    // Reacting is deliberately non-optimistic (M2's fifth decision), so with
+    // nothing drawn on the tap and nothing taken away, this line is the only
+    // thing separating a refusal from a success. And exactly one of them: the
+    // transcript's copy of the same message is a separate bubble that wasn't
+    // tapped, and it has nothing to say.
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
   it("clears a message from the strand when you delete it there", async () => {

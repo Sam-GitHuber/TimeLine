@@ -1467,6 +1467,26 @@ strand lands you at the newest message rather than where you were reading. That'
 the right way round: the newest message is where a conversation resumes, and
 jump-to-latest is there for the other case.
 
+⚠️ **Nothing may report a failure from inside that column while a strand can be
+open.** `display: none` costs the transcript its scroll position, and it costs
+anything rendered in there its *audience* — including the composer, which is
+where several of this file's error lines live. A reaction refused inside a strand
+painted its message into that hidden subtree and so said nothing at all, for as
+long as strands existed (issue #251); with no optimistic pill to take away, the
+tap was indistinguishable from one that worked. The rule the fix settles on: an
+action offered in **both** the transcript and the strand reports on the **bubble**
+it was taken on, which is the only place both can see — the same rule a failed
+send already followed. Consequences to know before adding another: the handler
+the bubble is given must return a **rejecting promise** (`mutateAsync`, not
+`mutate`), and a mutation-level `isError` can't serve, since one mutation covers
+every bubble on both screens and a flag on it can't say which one failed. See
+[reactions.md](reactions.md#in-the-messages-drawer-phase-9b-m9c). Two of this
+file's other mutations — `editMutation` and `deleteManyMutation` — still render
+into the composer and are safe only because `getStrandActions` passes
+`allowEdit: false` and select mode isn't reachable from a strand. That's a
+property of the action list, not of the rendering; widen the list and they become
+the same bug.
+
 **The two halves in the transcript.** A reply renders a **collapsed quote** inside
 its bubble (name, two lines, `line-clamp`ed so a long quote can't push the reply
 off), and a root renders **"3 replies"** on a branch line under it — the same
