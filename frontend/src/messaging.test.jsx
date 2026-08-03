@@ -2158,6 +2158,113 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // the page, outside the panel entirely.
     expect(screen.getByPlaceholderText(/write a message/i)).toHaveFocus();
   });
+
+  // Issue #253. The transcript column is `hidden` — a real `display: none` —
+  // for as long as a strand is open, so nothing rendered inside it can be the
+  // only place a write reports its refusal. #251 fixed that for reactions by
+  // moving the message onto the bubble; these two have no bubble to move to, so
+  // they report from a bar outside the column instead.
+  //
+  // Both tests assert the same two things, because either alone passes on a
+  // broken build: that the column really is hidden (or the test proves nothing),
+  // and that the message is not inside it. `toBeVisible` can't stand in — jsdom
+  // loads no stylesheet, so Tailwind's `hidden` is just a class name here.
+  /** The transcript column, if a strand has been given `display: none` over it. */
+  function hiddenColumn() {
+    return screen.getByRole("log", { name: "Conversation" }).closest(".hidden");
+  }
+
+  it("says a bulk delete failed even though a strand opened over the transcript", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, sender: mineSender, text: "dinner?", reply_count: 2 });
+    const doomed = msg({ id: 6, sender: mineSender, text: "delete this" });
+    api.getMessages.mockResolvedValue(page([doomed, root]));
+    api.getThread.mockResolvedValue(page([root]));
+    // Held open, so the DELETE is genuinely still out while the strand opens —
+    // which is the whole window. In the real thing it's a loop of them, one at a
+    // time, so the window is as long as the selection.
+    let refuse;
+    api.deleteMessage.mockReturnValue(
+      new Promise((_, reject) => {
+        refuse = reject;
+      })
+    );
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderAt("/messages/7");
+    await openMenu(user, "delete this");
+    await user.click(screen.getByRole("button", { name: "Select" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(api.deleteMessage).toHaveBeenCalledWith(7, 6));
+
+    // `confirmDeleteSelected` ends select mode on the line after `mutate()`, so
+    // there is no race to win here: the transcript is fully interactive again,
+    // reply counts and all, while the deletes are still going out.
+    await user.click(await screen.findByRole("button", { name: /2 replies/ }));
+    expect(strand()).toBeInTheDocument();
+    expect(hiddenColumn()).not.toBeNull();
+
+    await act(async () => {
+      refuse(apiError("Nope.", 500));
+      await Promise.resolve();
+    });
+
+    // The line that says the action was *partial* — some of what you deleted is
+    // still there. Lose it and the only way to find out is to notice; and
+    // backing out to the conversation list instead of closing the strand
+    // unmounts this view (keyed on the conversation id), taking it for good.
+    const alert = await screen.findByText("Some messages are still there. Try again.");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert.closest(".hidden")).toBeNull();
+    confirm.mockRestore();
+  });
+
+  it("says an edit failed even though a strand opened over the transcript", async () => {
+    const user = userEvent.setup();
+    const original = msg({
+      id: 5,
+      sender: mineSender,
+      text: "helo",
+      reply_count: 2,
+    });
+    api.getMessages.mockResolvedValue(page([original]));
+    api.getThread.mockResolvedValue(page([original]));
+    let refuse;
+    api.editMessage.mockReturnValue(
+      new Promise((_, reject) => {
+        refuse = reject;
+      })
+    );
+
+    renderAt("/messages/7");
+    await openMenu(user, "helo");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const box = screen.getByPlaceholderText(/edit your message/i);
+    await user.clear(box);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(api.editMessage).toHaveBeenCalledWith(7, 5, "hello")
+    );
+
+    // Edit mode doesn't stand the reply count down — only select mode does — so
+    // a strand can open on top of an edit that hasn't answered yet.
+    await user.click(screen.getByRole("button", { name: /2 replies/ }));
+    expect(hiddenColumn()).not.toBeNull();
+
+    await act(async () => {
+      refuse(apiError("You can no longer edit this message.", 403));
+      await Promise.resolve();
+    });
+
+    // The server's own words, since it has some (`serverMessage`) — the edit
+    // window is the rule people run into and "Couldn't save the edit" wouldn't
+    // say which rule. The bubble still reads "helo" with no Edited marker, so
+    // silence here is indistinguishable from having cancelled.
+    const alert = await screen.findByText(/no longer edit this message/i);
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert.closest(".hidden")).toBeNull();
+  });
 });
 
 // Phase 9b M9e — photos, the conversation list's search and row actions, and
