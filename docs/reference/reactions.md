@@ -159,7 +159,35 @@ Recorded here so a future session doesn't discover it and assume it was missed.
   top). See the design note in the git history if this regresses.
 - Aggregated `emoji × count` chips on every post, comment, and reply; clicking your
   own chip toggles it off; a count reveals the visible "who reacted" list.
-  TanStack Query with an optimistic toggle.
+- **The chips are never optimistic.** `ReactionBar` holds the summary in state and
+  only ever assigns it something the *server* sent — the re-synced prop, or a
+  toggle's own response — so what you see is always an answer, never a guess.
+  Worth knowing before adding one: the clear-condition below depends on it.
+- **A rejected toggle is reported inline** (issue #242), by both clients. It had
+  no error path at all on the web until then: with the chips repainted only from
+  `onSuccess`, a rejection changed nothing on screen, and `react()` closes the
+  popover *before* sending, so the popover shutting was no evidence either. A
+  failed tap was indistinguishable from a successful one on one of the app's
+  highest-traffic gestures — and the natural response, tapping again, hits a
+  server that may have taken the first one, where the second tap *removes* it.
+  It follows the two rules from
+  [connections.md](connections.md#reporting-a-refused-write): the server's own
+  words via `serverMessage` where it wrote any (the per-target distinct-emoji cap
+  and emoji validation both reject with sentences meant for a person), our own
+  otherwise — named per direction, "couldn't add" vs "couldn't remove", since a
+  chip does two opposite things depending on whether it's already yours. The
+  message carries the emoji and whether that emoji was yours **at the tap**, and
+  is retired only when the server's summary shows that reacted-state has flipped
+  — the toggle landed and only its response was lost. Any other resync leaves it
+  standing (issue #231). Here that's one comparison rather than ConnectButton's
+  two, because a chip is yours or it isn't.
+  **Failures are held per emoji, not one to a bar** — the one place this pattern
+  departs from the single-control siblings it comes from. A bar is a row of
+  independent toggles, so a single slot would let the second failure overwrite
+  the first and leave a failed tap silent again; and tapping ❤️ must not retire
+  the message about 👍, which is no more evidence than an unrelated resync is.
+  Each message therefore names its own emoji, since two bare red lines under one
+  row say nothing about which tap they belong to.
 
 **In the messages drawer (Phase 9b M9c)** the same components serve a different
 grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️ 😂 😮 😢
@@ -167,8 +195,9 @@ grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️
 the message's `⋯` menu rather than on a button of its own; the `＋`
 expands that same panel into the full picker in place. Pills hang off the
 bubble's lower edge and 🔒 **a pill never toggles — it opens "who reacted"**,
-which is where your own row offers *"tap to remove"*. There is **no optimistic
-toggle** here, unlike the feed's chips: see *Message reactions* above.
+which is where your own row offers *"tap to remove"*. Neither is optimistic —
+the feed's chips aren't either (above); what differs here is that a pill isn't
+a control at all, for the reason under *Message reactions*.
 
 Two mechanical differences worth knowing before touching either:
 

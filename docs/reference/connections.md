@@ -111,6 +111,9 @@ surfaces in the same family (#237–#240):
   rejection can't eat the message before it's painted. This is the discipline
   [events.md](events.md) records for the RSVP, applied to a four-state button;
   the phone doesn't need it, since an `Alert` is dismissed rather than kept.
+  On a two-state control the two halves collapse into one comparison — see the
+  reaction chips in [reactions.md](reactions.md#frontend) (issue #242), where
+  the "answer" is simply whether that emoji is yours.
 
 The disconnect and block paths additionally hold their confirmation modal open
 until the write lands, so the failure has somewhere to go — see

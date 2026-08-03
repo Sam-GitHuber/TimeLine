@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { renderWithAuth } from "./test-utils.jsx";
+import {
+  renderWithAuth,
+  apiError,
+  offlineError,
+  unauthoredError,
+} from "./test-utils.jsx";
 import ReactionBar from "./components/ReactionBar.jsx";
 import PostCard from "./components/PostCard.jsx";
 import { api } from "./api.js";
@@ -184,6 +189,242 @@ describe("ReactionBar", () => {
     // Quick popover is portalled to <body>, like the full picker.
     expect(container).not.toContainElement(heart);
     expect(heart.closest("[data-reaction-popover]")).not.toBeNull();
+  });
+});
+
+/**
+ * What a *rejected* toggle does (issue #242).
+ *
+ * Until this, the bar had no error path at all: the chips are only ever
+ * repainted from `onSuccess`, so a rejection changed nothing on screen, and the
+ * popover closes before the request is even sent — so the popover closing was
+ * no evidence either. A failed tap was indistinguishable from a successful one,
+ * on one of the highest-traffic gestures in the app, and the natural response
+ * was to tap again at a server that may have taken the first one — where the
+ * second tap is a *removal*.
+ *
+ * The mobile twin already reported it. These pin the web half, and the two
+ * rules #236/#240 settled on: the server's own words where it wrote any and
+ * ours otherwise, and a message retired only by the server moving to the answer
+ * that tap was reaching for.
+ */
+describe("ReactionBar — a rejected toggle", () => {
+  const THUMB = /👍/;
+
+  it("says so in the server's own words, and leaves the chip where it was", async () => {
+    // The per-target distinct-emoji cap is a rule the server owns, and its
+    // sentence says far more than any fallback of ours could.
+    api.toggleReaction.mockRejectedValue(
+      apiError("You've used too many different emoji on this one.", 400),
+    );
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 3, reacted: false }]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You've used too many different emoji on this one.",
+    );
+    // Nothing moved: still 3, still not yours. That silence was the bug.
+    expect(screen.getByRole("button", { name: THUMB })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("uses our own words, named for the direction, when the server wrote none", async () => {
+    // Offline — the likeliest way any write fails, and the case a bare
+    // `err.message` would answer with the browser's "Failed to fetch".
+    api.toggleReaction.mockRejectedValue(offlineError());
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 3, reacted: false }]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn’t add that reaction — try again.",
+    );
+  });
+
+  it("says 'remove' when the tap was taking your own reaction back", async () => {
+    // A body-less 500: it carries a message *and* a status, so anything cruder
+    // than the `fromServer` flag would print "Request failed (500)" here.
+    api.toggleReaction.mockRejectedValue(unauthoredError(500));
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 3, reacted: true }]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn’t remove that reaction — try again.",
+    );
+  });
+
+  it("reports a rejection from the quick popover, which closes either way", async () => {
+    api.toggleReaction.mockRejectedValue(offlineError());
+    renderWithAuth(<ReactionBar commentId={12} reactions={[]} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /add a reaction/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /React 👍/ }));
+
+    // The popover shuts on the tap, before the request is sent — so it says
+    // nothing about whether the reaction landed. The message has to.
+    expect(screen.queryByRole("button", { name: /React 👍/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn’t add that reaction — try again.",
+    );
+  });
+
+  it("keeps the message when a resync changes anything other than your answer", async () => {
+    api.toggleReaction.mockRejectedValue(offlineError());
+    const { setProps } = renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 3, reacted: false }]}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+    await screen.findByRole("alert");
+
+    // A feed poll lands: someone else reacted, and a second emoji appeared.
+    // Neither is confirmation of *your* tap, so clearing here would be the
+    // swallow issue #231 describes.
+    setProps(
+      <ReactionBar
+        postId={7}
+        reactions={[
+          { emoji: "👍", count: 4, reacted: false },
+          { emoji: "🎉", count: 1, reacted: true },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Couldn’t add that reaction — try again.",
+    );
+  });
+
+  it("retires the message once the server shows the toggle landed after all", async () => {
+    api.toggleReaction.mockRejectedValue(offlineError());
+    const { setProps } = renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 3, reacted: false }]}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+    await screen.findByRole("alert");
+
+    // The POST did land; only its response was lost. Left standing, "couldn't
+    // add that reaction" would now sit beside a chip saying you did.
+    setProps(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 4, reacted: true }]}
+      />,
+    );
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: THUMB })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("keeps one chip's message when a different chip is tapped", async () => {
+    // A fresh attempt on ❤️ is no evidence about whether 👍 landed. Clearing
+    // every message on any tap would put 👍's silence straight back — the
+    // manual half of the same rule the resync test above pins.
+    api.toggleReaction.mockRejectedValueOnce(offlineError());
+    api.toggleReaction.mockResolvedValueOnce({
+      reactions: [
+        { emoji: "👍", count: 3, reacted: false },
+        { emoji: "❤️", count: 2, reacted: true },
+      ],
+    });
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[
+          { emoji: "👍", count: 3, reacted: false },
+          { emoji: "❤️", count: 1, reacted: false },
+        ]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("button", { name: /❤️/ }));
+
+    // ❤️ went through; 👍 still hasn't, and still says so.
+    expect(await screen.findByText("2")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Couldn’t add that reaction — try again.",
+    );
+  });
+
+  it("reports both taps when two different chips fail", async () => {
+    // One message slot would leave the loser of this race silent — the very
+    // bug being fixed, reappearing for whichever chip settled first.
+    api.toggleReaction.mockRejectedValue(offlineError());
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[
+          { emoji: "👍", count: 3, reacted: false },
+          { emoji: "❤️", count: 1, reacted: true },
+        ]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("button", { name: /❤️/ }));
+
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+    // Each names its own emoji and its own direction: 👍 was being added, ❤️
+    // taken back. Two identical lines would say nothing about either.
+    const [thumb, heart] = screen.getAllByRole("alert");
+    expect(thumb).toHaveTextContent("👍 Couldn’t add that reaction — try again.");
+    expect(heart).toHaveTextContent(
+      "❤️ Couldn’t remove that reaction — try again.",
+    );
+  });
+
+  it("clears the previous message when you tap again", async () => {
+    api.toggleReaction.mockRejectedValueOnce(offlineError());
+    api.toggleReaction.mockResolvedValueOnce({
+      reactions: [{ emoji: "👍", count: 4, reacted: true }],
+    });
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 3, reacted: false }]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("4")).toBeInTheDocument();
   });
 });
 
