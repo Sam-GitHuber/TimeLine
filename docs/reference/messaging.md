@@ -1482,10 +1482,15 @@ the bubble is given must return a **rejecting promise** (`mutateAsync`, not
 every bubble on both screens and a flag on it can't say which one failed. See
 [reactions.md](reactions.md#in-the-messages-drawer-phase-9b-m9c). Two of this
 file's other mutations — `editMutation` and `deleteManyMutation` — still render
-into the composer and are safe only because `getStrandActions` passes
-`allowEdit: false` and select mode isn't reachable from a strand. That's a
-property of the action list, not of the rendering; widen the list and they become
-the same bug.
+into the composer. Neither can be *triggered* from a strand, because
+`getStrandActions` passes `allowEdit: false` and omits `onSelect`; but that gates
+the trigger, and the `hidden` is on the renderer. A strand opened while one of
+them is still in flight hides its message just the same, and `deleteManyMutation`
+leaves select mode the instant you confirm while its DELETEs run one at a time —
+so that isn't even a race. Filed as **#253**; fix it by moving those lines out of
+the column rather than by reasoning about who can reach what. The invariant is
+about the *rendering*: nothing in that column may be the only renderer of a write
+that can outlive the transcript being visible.
 
 **The two halves in the transcript.** A reply renders a **collapsed quote** inside
 its bubble (name, two lines, `line-clamp`ed so a long quote can't push the reply
