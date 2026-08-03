@@ -5,7 +5,7 @@ import DrawerPopover from "./DrawerPopover.jsx";
 import MessageMenu from "./MessageMenu.jsx";
 import MessageText from "./MessageText.jsx";
 import ReactorsPopover from "../ReactorsPopover.jsx";
-import { isEmojiOnly, plainMessageText } from "../../messageText.js";
+import { isEmojiOnly } from "../../messageText.js";
 import { useReactionFailures } from "../../reactionFailures.js";
 import { formatClockTime } from "../../utils.js";
 
@@ -28,7 +28,9 @@ import { formatClockTime } from "../../utils.js";
 // a send is in flight, a tick when it lands, and Retry/Discard when it doesn't.
 // M9d added the two halves of a reply thread: a collapsed quote inside a reply's
 // bubble, and a "3 replies" branch under a root. M9f added highlighted
-// @mentions and the tick-box a bubble grows in select mode.
+// @mentions and the tick-box a bubble grows in select mode. M9g replaced the
+// quote with the **strand edge** — one bar down a reply's outer side, and a
+// click anywhere on the bubble opens the strand it belongs to.
 export default function MessageBubble({
   message,
   mine,
@@ -58,19 +60,17 @@ export default function MessageBubble({
   /** Whether this bubble is currently ticked. */
   selected = false,
   /**
-   * The message this one replies to, if the caller could resolve it (M9d).
-   *
-   * 🔒 **Resolved, never handed over.** `message.reply_to` is a bare `{ id }`,
-   * so this comes from the transcript's own loaded messages or from a fetch
-   * through the clipped endpoint (`quotes.js`) — the two places the server has
-   * already decided this viewer may see. `undefined` is a real answer and gets
-   * the honest "Original message unavailable", with **no name above it**.
+   * Drawn inside the strand panel rather than out in the transcript (M9g).
+   * **Everything in a strand belongs to that strand**, so a mark saying so on
+   * every bubble would say nothing: in here they're plain bubbles. Defaults
+   * false, so the transcript and a bubble drawn on its own agree.
    */
-  quoted,
+  insideStrand = false,
   /**
-   * Open this message's strand. Wired to *both* ways in — a reply's quote and a
-   * root's reply count — and omitted where there is no strand to open, which is
-   * what keeps the quote inert rather than a button that does nothing.
+   * Open this message's strand. Wired to all the ways in — the bubble itself
+   * once it wears a strand edge, and a root's reply count — and omitted where
+   * there is no strand to open, which is what keeps a bubble inert rather than
+   * clickable-but-doing-nothing.
    */
   onOpenThread,
   /**
@@ -157,11 +157,46 @@ export default function MessageBubble({
    * One to three emoji and nothing else: drop the bubble and draw it large, the
    * treatment every mainstream messenger gives it. Not for a tombstone (no text
    * of its own) and not for a photo message, which needs a bubble to sit in.
+   *
+   * **And not for a reply** (M9g), which is the phone's rule adopted here: a
+   * reply's marker is a bar down the bubble's edge, so it needs a bubble to have
+   * an edge. Before the bar, this branch drew an emoji-only reply large with its
+   * quote stacked above it — the one place the two clients disagreed about what
+   * an emoji-only reply looks like.
    */
   const photos = message.attachments ?? [];
   const large =
-    !message.is_deleted && photos.length === 0 && isEmojiOnly(message.text);
+    !message.reply_to &&
+    !message.is_deleted &&
+    photos.length === 0 &&
+    isEmojiOnly(message.text);
   const clock = formatClockTime(message.created_at);
+  /**
+   * The strand edge (M9g) — a reply out in the transcript wears one bar on its
+   * outer side, and clicking the bubble opens the strand it belongs to. Inside a
+   * strand it wears its quote instead and the bubble is inert: you're already
+   * where the bar would take you.
+   */
+  const edged = Boolean(message.reply_to) && !insideStrand;
+  const opensThread = edged && Boolean(onOpenThread) && !onToggleSelect;
+
+  /**
+   * A click anywhere on the bubble opens the strand — except when it's the end
+   * of a text selection, which on a page you read with a mouse is the one
+   * gesture that would otherwise be stolen. The phone has no equivalent problem
+   * (selecting text there is a long-press, which is the action menu) and so no
+   * equivalent guard.
+   */
+  function handleBubbleClick(event) {
+    if (!opensThread) return;
+    // Anything inside the bubble with a job of its own keeps it: the ⋯ menu, a
+    // link in the text, a photo, and the edge's own button below — which is why
+    // that one doesn't need to stop propagation to avoid firing twice.
+    if (event.target.closest("button, a")) return;
+    const selection = window.getSelection?.();
+    if (selection && !selection.isCollapsed) return;
+    onOpenThread();
+  }
   /**
    * 🔒 Clipped per viewer by the server (`_with_reply_counts`), not a plain
    * `Count`. A count is small but it's still existence — "3 replies" on a
@@ -215,21 +250,52 @@ export default function MessageBubble({
           // only those that currently have a menu, so a bubble doesn't change
           // width underneath you the moment a send settles.
           <div
+            onClick={opensThread ? handleBubbleClick : undefined}
             className={`msg-menu-host ${status === "failed" ? "opacity-60" : ""} ${
               large
-                ? // A column, so a quote above an emoji-only message can be full
-                  // width while the emoji itself still sits on the side its
-                  // sender's bubbles do. Without this the quote sets the box's
-                  // width and the emoji floats at the far left of it, reading as
-                  // detached from the message it belongs to.
+                ? // A column, so an emoji-only message still sits on the side its
+                  // sender's bubbles do rather than floating at the far left of a
+                  // full-width box, reading as detached from the run it's in.
                   `flex max-w-[78%] flex-col ${mine ? "items-end" : "items-start"}`
                 : `msg-bubble-body max-w-[78%] rounded-2xl py-2 ${
                     mine
                       ? "bg-accent text-white"
                       : "bg-raised text-ink ring-1 ring-line"
                   }`
-            }`}
+            } ${
+              // The strand edge (M9g). Theirs takes the accent on the left;
+              // yours takes white on the accent fill on the right, inside a
+              // 1px `accent-deep` ring — white against the warm ground has no
+              // outer edge of its own, and the ring is what it ends against.
+              // `ring` rather than a border on both counts: it draws outside the
+              // box, so the words don't move when a message becomes a reply.
+              edged
+                ? mine
+                  ? "border-r-[3px] border-r-white/85 ring-1 ring-accent-deep"
+                  : "border-l-[3px] border-l-accent"
+                : ""
+            } ${opensThread ? "cursor-pointer" : ""}`}
           >
+            {/* The keyboard and screen-reader route to the same thing the click
+                does. It sits *on* the bar rather than being an extra control
+                somewhere: a strip of the bubble's own edge, invisible until
+                focused, which is what stops "open the thread" from being a
+                mouse-only affordance.
+
+                🔒 It says "part of a thread" and no more, for the same reason
+                the bar draws no name: the root may be one this viewer was
+                clipped out of, and a label naming it would hand over exactly
+                what the payload withholds. */}
+            {opensThread && (
+              <button
+                type="button"
+                onClick={onOpenThread}
+                aria-label="Part of a thread — open thread"
+                className={`absolute inset-y-0 w-3 rounded-2xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                  mine ? "right-0" : "left-0"
+                }`}
+              />
+            )}
             {/* Inside the bubble, in its top-right corner. It used to sit
                 *beside* the bubble, which pushed the whole bubble in off the
                 panel edge — and left the reaction pills, which hang off the
@@ -249,18 +315,6 @@ export default function MessageBubble({
                     reactions.filter((r) => r.reacted).map((r) => r.emoji)
                   )
                 }
-              />
-            )}
-            {/* The collapsed quote (M9d) — inside the bubble, above the words,
-                so the reply reads as carrying what it answers rather than
-                sitting under a separate label. */}
-            {message.reply_to && (
-              <QuotedMessage
-                quoted={quoted}
-                // Same test the tick uses: an emoji-only message has no accent
-                // fill behind it, so white-on-white would be an invisible quote.
-                onFill={mine && !large}
-                onOpenThread={onOpenThread}
               />
             )}
             {/* Photos (Phase 9b M7 on the phone, properly here in M9e — this
@@ -641,80 +695,6 @@ function MessagePhoto({ attachment, onOpen }) {
       className="mb-1 block transition hover:opacity-90"
     >
       {image}
-    </button>
-  );
-}
-
-/**
- * The collapsed quote above a reply (Phase 9b M3 on the phone, M9d here) — two
- * lines of the message being answered, and the name of whoever wrote it.
- *
- * 🔒 **What it can't say is as designed as what it can.** When `quoted` is
- * absent the viewer was clipped out of that message, and the quote says
- * "Original message unavailable" with **no name** — because the author is
- * history too. Someone can join a group, post and leave again entirely inside
- * your interval gap, and `participants` lists only *current* members, so a name
- * here would be the one payload handing you a person you were never in a chat
- * with. See `messaging.md` → *The visibility rule*.
- *
- * It's also a **way into the strand**, not just a label, and that's needed
- * rather than convenient: when the root is one you were clipped out of, its
- * replies stand alone in the transcript with no root to carry a count, so
- * without this the strand would be unreachable for exactly the person whose view
- * of it is already partial.
- */
-function QuotedMessage({ quoted, onFill, onOpenThread }) {
-  // Plain text, so the markup is dropped rather than drawn (M9b's parser): a
-  // quote is a *reference* to a message, not a second rendering of it.
-  const body = quoted?.is_deleted
-    ? "Message deleted"
-    : quoted
-      ? plainMessageText(quoted.text)
-      : "Original message unavailable";
-
-  const content = (
-    <>
-      {quoted && (
-        <span
-          className={`block truncate text-[0.7rem] font-semibold ${
-            onFill ? "text-white/85" : "text-accent-deep"
-          }`}
-        >
-          {quoted.sender.display_name}
-        </span>
-      )}
-      {/* Two lines and no more — `line-clamp` rather than a JS truncation, so a
-          long quote can't push the reply itself off the bubble. */}
-      <span
-        className={`block line-clamp-2 text-xs ${
-          onFill ? "text-white/75" : "text-ink-soft"
-        } ${quoted ? "" : "italic"}`}
-      >
-        {body}
-      </span>
-    </>
-  );
-
-  const frame = `mb-1 block w-full border-l-2 pl-2 text-left ${
-    onFill ? "border-white/50" : "border-line-strong"
-  }`;
-
-  // Inert when there's nothing to open — which is only ever a strand you're
-  // already inside. A quote that looked clickable and wasn't would be worse
-  // than one that plainly isn't.
-  if (!onOpenThread) return <span className={frame}>{content}</span>;
-  return (
-    <button
-      type="button"
-      onClick={onOpenThread}
-      aria-label={
-        quoted
-          ? `In reply to ${quoted.sender.display_name} — open thread`
-          : "In reply to a message you can’t see — open thread"
-      }
-      className={`${frame} transition hover:opacity-80`}
-    >
-      {content}
     </button>
   );
 }

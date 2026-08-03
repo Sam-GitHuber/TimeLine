@@ -28,7 +28,6 @@ import {
 import { api, ApiError, setSessionExpiredHandler } from './api';
 import { clearDrafts } from './drafts';
 import { clearOutbox } from './outbox';
-import { clearQuotes } from './quotes';
 import { forgetLocalPushToken, registerForPush, unregisterPush } from './push';
 import { clearTokens, getAccessToken } from './tokens';
 import type { User } from './types';
@@ -146,7 +145,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (lastUserPk.current !== null && lastUserPk.current !== me.pk) {
       clearOutbox();
       clearDrafts();
-      clearQuotes();
     }
     lastUserPk.current = me.pk;
     setUser(me);
@@ -165,14 +163,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // upsert-on-token rule exists to prevent, and this is its other half.
     await unregisterPush();
     await api.logout();
-    // 🔒 Unsent messages (M4), half-written drafts and resolved reply quotes
-    // (M5) all live in module-level stores, so they'd otherwise survive into the
-    // next person's session on a shared phone. Two of the three are this
-    // person's own words and the third is other people's — none of it is the
-    // next person's, so it all goes out with them.
+    // 🔒 Unsent messages (M4) and half-written drafts live in module-level
+    // stores, so they'd otherwise survive into the next person's session on a
+    // shared phone. They're this person's own words, and none of it is the next
+    // person's, so it goes out with them. (A third store held *other people's*
+    // words — messages fetched to fill a reply's quote — until M9g removed
+    // quotes from the client entirely.)
     clearOutbox();
     clearDrafts();
-    clearQuotes();
     // The stores are empty now, so the next sign-in has nothing to guard.
     lastUserPk.current = null;
     setUser(null);

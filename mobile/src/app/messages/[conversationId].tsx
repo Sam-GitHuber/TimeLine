@@ -113,7 +113,6 @@ import {
   dismissConversationNotifications,
   setOnScreenConversation,
 } from '@/push';
-import { useQuotedMessages } from '@/quotes';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
 import {
@@ -511,19 +510,6 @@ export default function ThreadScreen() {
     [pages]
   );
   const messageCount = loaded.length;
-
-  /**
-   * 🔒 The quoted message behind a reply's collapsed quote (M5).
-   *
-   * A reply carries a bare `{ id }` — never the text, never the author — so both
-   * have to be resolved from messages that came through the interval-clipped
-   * endpoint. That used to mean "whatever this screen has loaded", which was
-   * complete only because it loaded *everything*. With lazy paging a miss would
-   * also mean "not paged in yet", and "Original message unavailable" would start
-   * lying about messages the viewer is perfectly entitled to. So the misses are
-   * fetched, through the same clipped endpoint — never a wider payload.
-   */
-  const resolveQuote = useQuotedMessages(id, loaded);
 
   /** You, as a message sender — what an outbox entry is dressed in. */
   const meAsAuthor: Author = useMemo(
@@ -1555,11 +1541,6 @@ export default function ThreadScreen() {
                     // tombstone stays attributed.
                     showSender={isGroup && !mine && item.startsRun}
                     endsRun={item.endsRun}
-                    quoted={
-                      message.reply_to
-                        ? resolveQuote(message.reply_to.id)
-                        : undefined
-                    }
                     status={statusFor(message)}
                     mentionNames={mentionNames}
                     // Select mode is the one time a tap on a bubble does
@@ -1945,11 +1926,6 @@ export default function ThreadScreen() {
           anchor={menuTarget.anchor}
           actions={menuTarget.actions}
           mentionNames={mentionNames}
-          quoted={
-            menuTarget.message.reply_to
-              ? resolveQuote(menuTarget.message.reply_to.id)
-              : undefined
-          }
           onReact={
             canSend
               ? (emoji) =>

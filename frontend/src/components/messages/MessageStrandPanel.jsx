@@ -16,8 +16,8 @@ export function threadQueryKey(conversationId, rootId) {
  * that sends straight back into it (Phase 9b M3 on the phone, M9d here).
  *
  * **Every route to a reply comes through here**, whether you clicked "3 replies"
- * on a root, clicked a reply's quote, or hit Reply on a message with no replies
- * at all — the last of those opens a strand one bubble long, on purpose. You
+ * on a root, clicked a reply (its strand edge), or hit Reply on a message with
+ * no replies at all — the last of those opens a strand one bubble long, on purpose. You
  * reply *inside* the conversation you're joining, with the thing you're
  * answering on screen while you write it. The alternative (aim the transcript's
  * composer at a message and show a quote bar above it) was built on the phone
@@ -56,12 +56,13 @@ export function threadQueryKey(conversationId, rootId) {
  */
 export default function MessageStrandPanel({
   conversationId,
-  /** The strand's head — what the transcript's branch and quotes link to. */
+  /** The strand's head — what the transcript's branch and replies link to. */
   rootId,
   /**
    * The message a reply will answer. The root when you got here by browsing;
    * **Reply** passes the message you actually clicked, so a reply to a reply
-   * quotes the person you meant rather than whoever started the strand.
+   * names the person you meant above the composer rather than whoever started
+   * the strand.
    */
   replyToId,
   meId,
@@ -144,12 +145,11 @@ export default function MessageStrandPanel({
   // Unsent replies go last: one the server hasn't accepted is by definition
   // newer than every reply that has.
   const messages = [...loaded, ...outgoing];
-  /**
-   * Quotes resolve against the strand's own messages and nothing else — every
-   * reply in here answers the root or another reply in here, by construction
-   * (`thread_root` is derived one level deep). A miss therefore means the
-   * genuine thing: the viewer was clipped out of that message.
-   */
+  // The root, and whichever message the composer is aimed at. Both come from
+  // the strand's own messages and nothing else: every reply in here answers the
+  // root or another reply in here, by construction (`thread_root` is derived one
+  // level deep). A miss therefore means the genuine thing — the viewer was
+  // clipped out of that message.
   const byId = new Map(loaded.map((m) => [m.id, m]));
   const root = byId.get(rootId);
   const target = replyToId ?? rootId;
@@ -273,9 +273,9 @@ export default function MessageStrandPanel({
                     // chronological context, so "who said this" is worth the
                     // repetition.
                     showSender={isGroup && message.sender.id !== meId}
-                    quoted={
-                      message.reply_to ? byId.get(message.reply_to.id) : undefined
-                    }
+                    // The one place a reply still shows what it answers (M9g) —
+                    // out in the transcript it wears the strand edge instead.
+                    insideStrand
                     mentionNames={mentionNames}
                     // No `onOpenThread`: you're already in the strand, and there
                     // is nowhere further to go. The quote renders inert.

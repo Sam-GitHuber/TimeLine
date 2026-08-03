@@ -12,7 +12,6 @@ import { api } from "./api.js";
 import { MessagingProvider } from "./messaging.jsx";
 import { clearDrafts } from "./drafts.js";
 import { clearOutbox } from "./outbox.js";
-import { clearQuotes } from "./quotes.js";
 import { prepareChatPhoto } from "./chatPhotos.js";
 import NewChatPicker from "./components/NewChatPicker.jsx";
 
@@ -221,7 +220,6 @@ beforeEach(() => {
   // 🔒 So do resolved quotes (Phase 9b M9d) — and this one holds *other
   // people's* message text, so it's cleared here for exactly the reason
   // sign-out clears it.
-  clearQuotes();
   api.getFeed.mockResolvedValue(page([]));
   api.getConnectionRequests.mockResolvedValue(page([]));
   api.getUnreadMessageCount.mockResolvedValue({ count: 0 });
@@ -1857,9 +1855,10 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     expect(within(strand()).queryByText(/Replying to/)).toBeNull();
   });
 
-  it("resolves a quote through the clipped endpoint, never off the reply", async () => {
+  it("marks a reply with a strand edge, and quotes nothing to do it", async () => {
     api.getMessages.mockResolvedValue(
       page([
+        msg({ id: 5, text: "dinner?", reply_count: 1 }),
         msg({
           id: 6,
           text: "where though",
@@ -1868,63 +1867,89 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
         }),
       ])
     );
-    // The quoted message hasn't paged in — so it's fetched by id. 🔒 This is the
-    // whole privacy design: the reply's payload carries a bare `{ id }`, and the
-    // body comes back through the same interval-clipped queryset the transcript
-    // reads.
-    api.getMessagesByIds.mockResolvedValue(
-      page([msg({ id: 5, text: "dinner?" })])
-    );
 
     renderAt("/messages/7");
-    expect(await screen.findByText("where though")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(api.getMessagesByIds).toHaveBeenCalledWith(7, [5])
-    );
-    // Both halves of the resolved quote: the words, and the author — which the
-    // reply's own payload never carried.
-    const quote = await screen.findByRole("button", {
-      name: "In reply to Priya — open thread",
-    });
-    expect(within(quote).getByText("dinner?")).toBeInTheDocument();
-    expect(within(quote).getByText("Priya")).toBeInTheDocument();
-  });
-
-  it("asks about an unresolvable quote once, then says so with no author name", async () => {
-    api.getMessages.mockResolvedValue(
-      page([
-        msg({
-          id: 6,
-          sender: { id: 3, display_name: "Sanjay", avatar_thumb: null },
-          text: "where though",
-          reply_to: { id: 5 },
-          thread_root_id: 5,
-        }),
-      ])
-    );
-    // Clipped out of this viewer's history: the id simply isn't in the response,
-    // indistinguishable from one that never existed.
-    api.getMessagesByIds.mockResolvedValue(page([]));
-
-    renderAt("/messages/7");
+    const reply = (await screen.findByText("where though")).closest("li");
+    // The mark, and the whole of what it says (M9g). Not whose thread and not
+    // which — a bar can't say that, and the point of the bar is that it doesn't
+    // try: the words it answers are one click away in the strand.
     expect(
-      await screen.findByText("Original message unavailable")
+      within(reply).getByRole("button", { name: "Part of a thread — open thread" })
     ).toBeInTheDocument();
-    // 🔒 No name above it. A client that couldn't resolve the message isn't
-    // entitled to its author either — someone can join a group, post and leave
-    // entirely inside your gap, and this would be the one payload handing you
-    // their name. Sanjay wrote the *reply*, so his name is on that bubble; the
-    // quote carries nobody's.
-    const quote = screen.getByText("Original message unavailable").parentElement;
-    expect(within(quote).queryByText("Priya")).toBeNull();
-
-    // Asked once and never again: an unresolvable id is a fact about this
-    // viewer, not a transient failure, so re-asking every poll would be a
-    // request that can only ever return nothing.
-    expect(api.getMessagesByIds).toHaveBeenCalledTimes(1);
+    // The root is right there in the transcript and the reply no longer repeats
+    // it: "dinner?" appears once, on the message that said it.
+    expect(screen.getAllByText("dinner?")).toHaveLength(1);
+    // 🔒 And nothing was fetched to draw it. The transcript used to resolve
+    // every quote by id through the clipped endpoint; a bar is drawn from
+    // `reply_to`'s bare `{ id }` alone, so the one request that could ever have
+    // leaked a clipped body is no longer made at all.
+    expect(api.getMessagesByIds).not.toHaveBeenCalled();
   });
 
-  it("opens a headless strand from a reply's quote, and says the head is missing", async () => {
+  it("opens the strand when you click a reply itself", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?", reply_count: 1 });
+    const reply = msg({
+      id: 6,
+      text: "where though",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([root, reply]));
+    api.getThread.mockResolvedValue(page([root, reply]));
+
+    renderAt("/messages/7");
+    await user.click(await screen.findByText("where though"));
+
+    // The strand it belongs to, not the message clicked: the server owns the
+    // flattening and `thread_root_id` is a read of it.
+    expect(api.getThread).toHaveBeenCalledWith(7, 5);
+    expect(within(strand()).getByText("where though")).toBeInTheDocument();
+  });
+
+  it("draws plain bubbles inside the strand — no quotes, no edges", async () => {
+    const user = userEvent.setup();
+    const root = msg({ id: 5, text: "dinner?", reply_count: 2 });
+    const answered = msg({
+      id: 6,
+      sender: { id: 3, display_name: "Sanjay", avatar_thumb: null },
+      text: "where though",
+      reply_to: { id: 5 },
+      thread_root_id: 5,
+    });
+    // A reply to a message the *strand* doesn't carry — the clipped case, and
+    // the one where what the quote won't say matters.
+    const orphanReply = msg({
+      id: 7,
+      text: "the usual place",
+      reply_to: { id: 4 },
+      thread_root_id: 5,
+    });
+    api.getMessages.mockResolvedValue(page([root, answered, orphanReply]));
+    api.getThread.mockResolvedValue(page([root, answered, orphanReply]));
+
+    renderAt("/messages/7");
+    await user.click(await screen.findByText("where though"));
+
+    // Everything in here belongs to this one strand, so a mark saying so on
+    // each bubble would say nothing, and a quote would repeat words already on
+    // screen a few rows up. The root's words appear once — on the root.
+    await within(strand()).findByText("where though");
+    expect(within(strand()).getAllByText("dinner?")).toHaveLength(1);
+    expect(
+      within(strand()).queryByRole("button", {
+        name: "Part of a thread — open thread",
+      })
+    ).toBeNull();
+    // And nothing announces a message the viewer can't see: the reply to a
+    // clipped message is just a bubble.
+    expect(
+      within(strand()).queryByText("Original message unavailable")
+    ).toBeNull();
+    expect(within(strand()).getByText("the usual place")).toBeInTheDocument();
+  });
+
+  it("opens a headless strand from a reply, and says the head is missing", async () => {
     const user = userEvent.setup();
     const orphan = msg({
       id: 6,
@@ -1933,20 +1958,15 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
       thread_root_id: 5,
     });
     api.getMessages.mockResolvedValue(page([orphan]));
-    api.getMessagesByIds.mockResolvedValue(page([]));
     // The strand comes back with the replies this viewer may see and no root.
     api.getThread.mockResolvedValue(page([orphan]));
 
     renderAt("/messages/7");
-    // The quote is the only way in here, and that's the point rather than a
-    // convenience: with the root clipped out there's no bubble to carry a reply
-    // count, so without this the strand would be unreachable for exactly the
-    // person whose view of it is already partial.
-    await user.click(
-      await screen.findByRole("button", {
-        name: /In reply to a message you can’t see/,
-      })
-    );
+    // The reply itself is the only way in here, and that's the point rather
+    // than a convenience: with the root clipped out there's no bubble to carry
+    // a reply count, so without this the strand would be unreachable for
+    // exactly the person whose view of it is already partial.
+    await user.click(await screen.findByText("where though"));
 
     expect(api.getThread).toHaveBeenCalledWith(7, 5);
     // Different wording from a quote's "Original message unavailable", which on

@@ -356,9 +356,13 @@ export function MessageThreadView({
                     // chronological context, so "who said this" is worth the
                     // repetition.
                     showSender={isGroup && item.sender.id !== meId}
-                    quoted={
-                      item.reply_to ? byId.get(item.reply_to.id) : undefined
-                    }
+                    // Plain bubbles in here (M9g): no strand edge, no quote.
+                    // Everything in this list belongs to the one thread, so a
+                    // mark saying so on each bubble would say nothing, and a
+                    // quote would repeat words that are already on screen a few
+                    // rows up. What you're answering is named above the
+                    // composer instead, and only when it isn't the root.
+                    insideStrand
                     status={status}
                     mentionNames={mentionNames}
                     onRetry={unsent ? () => onRetry?.(item) : undefined}
