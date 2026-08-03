@@ -113,7 +113,6 @@ import {
   dismissConversationNotifications,
   setOnScreenConversation,
 } from '@/push';
-import { useQuotedMessages } from '@/quotes';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
 import {
@@ -511,19 +510,6 @@ export default function ThreadScreen() {
     [pages]
   );
   const messageCount = loaded.length;
-
-  /**
-   * 🔒 The quoted message behind a reply's collapsed quote (M5).
-   *
-   * A reply carries a bare `{ id }` — never the text, never the author — so both
-   * have to be resolved from messages that came through the interval-clipped
-   * endpoint. That used to mean "whatever this screen has loaded", which was
-   * complete only because it loaded *everything*. With lazy paging a miss would
-   * also mean "not paged in yet", and "Original message unavailable" would start
-   * lying about messages the viewer is perfectly entitled to. So the misses are
-   * fetched, through the same clipped endpoint — never a wider payload.
-   */
-  const resolveQuote = useQuotedMessages(id, loaded);
 
   /** You, as a message sender — what an outbox entry is dressed in. */
   const meAsAuthor: Author = useMemo(
@@ -1555,11 +1541,6 @@ export default function ThreadScreen() {
                     // tombstone stays attributed.
                     showSender={isGroup && !mine && item.startsRun}
                     endsRun={item.endsRun}
-                    quoted={
-                      message.reply_to
-                        ? resolveQuote(message.reply_to.id)
-                        : undefined
-                    }
                     status={statusFor(message)}
                     mentionNames={mentionNames}
                     // Select mode is the one time a tap on a bubble does
@@ -1587,10 +1568,28 @@ export default function ThreadScreen() {
                     // own strand, a reply opens the one it belongs to. The server
                     // owns the flattening, so this is a read of it, never a second
                     // copy of the rule.
-                    onOpenThread={() => {
-                      const rootId = message.thread_root_id ?? message.id;
-                      setThread({ rootId, replyToId: rootId, composing: false });
-                    }}
+                    //
+                    // **Withheld while selecting**, which is what makes "select
+                    // mode wins the tap" true rather than nearly true. A bubble
+                    // decides it opens a strand from `onOpenThread` being present
+                    // and `onPress` being absent — and `onPress` is absent on an
+                    // *unsent* message even mid-selection, since it has no server
+                    // id to tick. Without this the one bubble in a selection you
+                    // can't tick would be the one that opens a Modal over it.
+                    // Drops the "N replies" branch too, exactly as the web drops
+                    // its strand links while selecting.
+                    onOpenThread={
+                      selecting
+                        ? undefined
+                        : () => {
+                            const rootId = message.thread_root_id ?? message.id;
+                            setThread({
+                              rootId,
+                              replyToId: rootId,
+                              composing: false,
+                            });
+                          }
+                    }
                     // No menu on an unsent message: every action it offers —
                     // edit, delete, react, report — needs a server id this one
                     // hasn't got. Retry and Discard are on the bubble instead.
@@ -1945,11 +1944,6 @@ export default function ThreadScreen() {
           anchor={menuTarget.anchor}
           actions={menuTarget.actions}
           mentionNames={mentionNames}
-          quoted={
-            menuTarget.message.reply_to
-              ? resolveQuote(menuTarget.message.reply_to.id)
-              : undefined
-          }
           onReact={
             canSend
               ? (emoji) =>

@@ -33,7 +33,6 @@ import { useMentions } from "../../mentions.js";
 import { insertMessage, patchReactions } from "../../messageCache.js";
 import { useMessaging } from "../../messaging.jsx";
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from "../../outbox.js";
-import { useQuotedMessages } from "../../quotes.js";
 import { readStateFor, receiptsVisible } from "../../readReceipts.js";
 import { firstUnreadId, toThreadRows } from "../../threadRows.js";
 
@@ -270,19 +269,6 @@ export default function ConversationThreadView() {
     [pages]
   );
   const messageCount = loaded.length;
-
-  /**
-   * The body and author of each quoted message (M9d) — from what's loaded, or
-   * fetched by id through the same clipped endpoint.
-   *
-   * 🔒 The fetch is the point, not an optimisation. `reply_to` is a bare
-   * `{ id }`, so resolving against loaded messages alone was only ever complete
-   * while the transcript eagerly loaded every page — and M9b made paging lazy.
-   * Without `quotes.js`, "Original message unavailable" would start appearing on
-   * messages the viewer is perfectly entitled to and had merely not scrolled
-   * back to, which devalues it in the case where it's true.
-   */
-  const resolveQuote = useQuotedMessages(conversationId, loaded);
 
   /**
    * Messages you've sent that the server hasn't accepted yet (M9c) — held
@@ -1375,19 +1361,11 @@ export default function ConversationThreadView() {
                           mentionNames={mentionNames}
                           status={statusFor(row.message)}
                           meId={me?.pk}
-                          // 🔒 Resolved through `quotes.js`, never read off the
-                          // reply's own payload — which carries a bare `{ id }`
-                          // precisely so the body can't be handed to someone the
-                          // server clipped it from.
-                          quoted={
-                            row.message.reply_to
-                              ? resolveQuote(row.message.reply_to.id)
-                              : undefined
-                          }
                           // Both ways into the strand run through this one
-                          // handler — the quote on a reply, and the reply count
-                          // on a root. A quote aims the strand's composer at the
-                          // root, since from a quote you came to read.
+                          // handler — the bubble itself once it wears a strand
+                          // edge (M9g), and the reply count on a root. A reply
+                          // aims the strand's composer at the root, since you
+                          // came to read rather than to answer that one message.
                           onOpenThread={
                             selecting
                               ? undefined

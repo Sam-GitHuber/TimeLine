@@ -39,7 +39,6 @@ import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
 import { clearDrafts } from '@/drafts';
 import { clearOutbox } from '@/outbox';
-import { clearQuotes } from '@/quotes';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
@@ -482,7 +481,6 @@ beforeEach(() => {
   // it's emptied here. Drafts (M5) are the same shape for the same reason.
   clearOutbox();
   clearDrafts();
-  clearQuotes();
   // Delivered push notifications (#178). Empty tray by default, so only the
   // test that cares about dismissal has to say what's in it.
   mockNotifications.getPresentedNotificationsAsync.mockReset();
@@ -1919,11 +1917,11 @@ it('offers no Reply in a thread you can’t send to', async () => {
   expect(screen.getByLabelText('Copy')).toBeTruthy();
 });
 
-it('renders a reply’s quote from the message it already holds', async () => {
+it('marks a reply as part of a thread instead of quoting it', async () => {
   serve({
     conversation: detail({}),
     messages: [
-      message({ id: 8, sender: ADA, text: 'dinner at 7?' }),
+      message({ id: 8, sender: ADA, text: 'dinner at 7?', reply_count: 1 }),
       message({
         id: 9,
         sender: MINE,
@@ -1937,15 +1935,26 @@ it('renders a reply’s quote from the message it already holds', async () => {
   await renderScreen();
   await screen.findByText('yes');
 
-  // The quoted body is resolved locally — the reply's payload carries only
-  // a bare `{ id }`, which is what stops a quote leaking clipped history.
-  expect(screen.getAllByText('dinner at 7?').length).toBeGreaterThan(1);
+  // The root said it once and the reply doesn't say it again (M9g). The strand
+  // edge is drawn on the bubble, so what a screen reader gets is the hint —
+  // the audible half of the same mark.
+  expect(screen.getAllByText('dinner at 7?')).toHaveLength(1);
+  expect(screen.getByLabelText('Your message: yes').props.accessibilityHint).toBe(
+    'Part of a thread. Opens it. Press and hold for message actions'
+  );
+  // A plain message keeps its inert tap, and says so.
+  expect(
+    screen.getByLabelText('Message from Ada Lovelace: dinner at 7?').props
+      .accessibilityHint
+  ).toBe('Press and hold for message actions');
 });
 
-it('says so honestly when a quoted message isn’t available', async () => {
-  // 🔒 The gap case, from the client's side: the server sends the reply but not
-  // the message it answers, because the viewer was out of the chat when it was
-  // sent. There is nothing to render, and pretending otherwise is the bug.
+it('draws a reply without asking the server what it answers', async () => {
+  // 🔒 The transcript used to resolve every quote by id through the clipped
+  // endpoint (`?ids=`, M5). A bar is drawn from the bare `{ id }` the reply
+  // already carries, so the one request that could ever have surfaced a clipped
+  // body is no longer made — the leak is now structurally impossible here
+  // rather than merely gated. `quotes.ts` still guards the strand's own quotes.
   serve({
     conversation: detail({}),
     messages: [
@@ -1957,12 +1966,72 @@ it('says so honestly when a quoted message isn’t available', async () => {
         thread_root_id: 8,
       }),
     ],
+    quotable: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
   });
 
   await renderScreen();
   await screen.findByText('still on for that');
 
-  expect(screen.getByText('Original message unavailable')).toBeTruthy();
+  // Given plenty of time to have asked, if it were going to.
+  await waitFor(() => expect(transcriptCalls().length).toBeGreaterThan(1), {
+    timeout: 15000,
+  });
+  expect(
+    mockFetch.mock.calls.some(([url]) => String(url).includes('?ids='))
+  ).toBe(false);
+  // And nothing about a message it can't see is on screen, honest or otherwise.
+  expect(screen.queryByText('Original message unavailable')).toBeNull();
+});
+
+it('draws plain bubbles inside the strand — no quotes, no edges', async () => {
+  // Everything in a strand belongs to that strand, so a mark saying so on each
+  // bubble would say nothing, and a quote would repeat words that are already
+  // on screen a few rows up. What you're answering is named above the composer
+  // instead, and only when it isn't the root.
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 2,
+  });
+  const answered = message({
+    id: 9,
+    sender: GRACE,
+    text: 'or 8 if easier',
+    reply_to: { id: 8 },
+    thread_root_id: 8,
+  });
+  // Answers a message that isn't in the strand and never will be.
+  const orphan = message({
+    id: 10,
+    sender: GRACE,
+    text: 'still on for that',
+    reply_to: { id: 7 },
+    thread_root_id: 8,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root, answered, orphan],
+    thread: [root, answered, orphan],
+  });
+
+  await renderScreen();
+  await fireEvent.press(
+    await screen.findByLabelText('Message from Grace Hopper: or 8 if easier')
+  );
+
+  // Exactly one "dinner at 7?" on screen — the root's own bubble in the
+  // transcript behind the blur. The strand opens at its newest reply, so its
+  // head is scrolled above the fold, and **no reply repeats it**: before M9g
+  // every visible reply in here carried it again as a quote.
+  await screen.findByText('Thread');
+  await waitFor(() =>
+    expect(screen.getAllByText('dinner at 7?')).toHaveLength(1)
+  );
+  // Nothing announces a message the viewer can't see, either: the reply to a
+  // clipped message is just a bubble.
+  expect(screen.queryByText('Original message unavailable')).toBeNull();
+  expect(screen.getByText('still on for that')).toBeTruthy();
 });
 
 it('opens the focused thread from a root’s reply count', async () => {
@@ -2192,9 +2261,9 @@ it('opens a headless thread when the root is one you can’t see', async () => {
     text: 'still on for that',
     reply_to: { id: 8 },
     thread_root_id: 8,
-    // Zero, because a reply is not a root — which is exactly why the *quote* has
-    // to be the way in here. With the root clipped away there's no bubble left
-    // in the transcript to carry a reply count.
+    // Zero, because a reply is not a root — which is exactly why the reply
+    // itself has to be the way in here. With the root clipped away there's no
+    // bubble left in the transcript to carry a reply count.
     reply_count: 0,
   });
   serve({
@@ -2205,14 +2274,12 @@ it('opens a headless thread when the root is one you can’t see', async () => {
   });
 
   await renderScreen();
-  // 🔒 Unnamed, and that's the fix: the quote reference is a bare id, so an
-  // unresolved quote can't name its author either. Otherwise a group member who
+  // 🔒 The reply itself is the way in, and it names nothing on the way: the
+  // bar says "part of a thread" and stops there. Otherwise a group member who
   // joined, posted and left inside your gap would reach you here — through the
-  // one payload that used to carry a name for a message you can't see.
+  // one affordance that used to carry a name for a message you can't see.
   await fireEvent.press(
-    await screen.findByLabelText(
-      'In reply to a message you can’t see — open thread'
-    )
+    await screen.findByLabelText('Message from Ada Lovelace: still on for that')
   );
   // The reply now appears twice — once in the transcript behind the blur, once
   // in the strand — which is also how we know the thread's fetch has landed.
@@ -2277,10 +2344,13 @@ it('follows the strand past its first page to the newest reply', async () => {
   // …and stops there. Two pages hold 25 messages, so a request for a third
   // would mean the eager pull had lost its stopping condition.
   expect(threadPages().some((url) => url.includes('page=3'))).toBe(false);
-  // Page one is on screen throughout — this pages the strand, it doesn't
-  // replace one window with another. (The root twice: once in the transcript
-  // behind the blur, once at the head of the strand.)
-  expect(screen.getAllByText('dinner at 7?').length).toBeGreaterThan(1);
+  // Page one is still on screen — this pages the strand, it doesn't replace one
+  // window with another.
+  //
+  // Asserted on the oldest reply rather than on the root's text: until M9g every
+  // reply quoted the root, so counting "dinner at 7?" counted quote blocks, not
+  // the strand's own head. With the quotes gone the root's words appear once,
+  // which proves nothing about paging.
   expect(screen.getByText('reply 1')).toBeTruthy();
 });
 
@@ -2493,94 +2563,6 @@ it('pages older messages in when you reach the top', async () => {
     expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
   );
   expect(await screen.findByText('Message 5')).toBeTruthy();
-});
-
-it('fetches a quoted message that hasn’t paged in yet', async () => {
-  // 🔒 The M3 debt this milestone had to settle. A reply carries a bare `{id}`,
-  // so the quote's words come from messages the client holds — which was
-  // complete only while the screen loaded *every* page. With lazy paging a miss
-  // also means "not paged in yet", so the honest "Original message unavailable"
-  // would become a lie some of the time. The fix is a fetch through the same
-  // interval-clipped endpoint, never a wider payload.
-  const old = message({ id: 1, sender: ADA, text: 'the original plan' });
-  const reply = message({
-    id: 2,
-    sender: GRACE,
-    text: 'still on for that',
-    reply_to: { id: 1 },
-    thread_root_id: 1,
-  });
-  serve({
-    conversation: detail({}),
-    // Only the reply is in the transcript — the message it quotes is older than
-    // the loaded page.
-    messages: [reply],
-    quotable: [old],
-  });
-
-  await renderScreen();
-
-  expect(await screen.findByText('the original plan')).toBeTruthy();
-  expect(
-    mockFetch.mock.calls.some(([url]) =>
-      String(url).includes('/api/conversations/5/messages/?ids=1')
-    )
-  ).toBe(true);
-});
-
-it('still says a quote is unavailable when it genuinely is', async () => {
-  // The other half of the test above, and the reason it matters: the fetch must
-  // not turn "you were clipped out of this" into a spinner that never resolves.
-  // An id the viewer isn't entitled to comes back absent, exactly as the server
-  // answers it, and the honest message stands.
-  serve({
-    conversation: detail({}),
-    messages: [
-      message({
-        id: 2,
-        sender: GRACE,
-        text: 'still on for that',
-        reply_to: { id: 1 },
-        thread_root_id: 1,
-      }),
-    ],
-    quotable: [],
-  });
-
-  await renderScreen();
-
-  expect(await screen.findByText('Original message unavailable')).toBeTruthy();
-});
-
-it('asks about an unresolvable quote once, not on every poll', async () => {
-  // A clipped id is a *fact* about this viewer, not a transient failure. Without
-  // remembering that it was asked, the 4-second poll would re-request it forever
-  // — a request every four seconds that can only ever return nothing.
-  serve({
-    conversation: detail({}),
-    messages: [
-      message({
-        id: 2,
-        sender: GRACE,
-        text: 'still on for that',
-        reply_to: { id: 1 },
-        thread_root_id: 1,
-      }),
-    ],
-    quotable: [],
-  });
-
-  await renderScreen();
-  await screen.findByText('Original message unavailable');
-  const asked = () =>
-    mockFetch.mock.calls.filter(([url]) => String(url).includes('?ids=')).length;
-  const first = asked();
-
-  // Let a couple of poll cycles go by.
-  await waitFor(() => expect(transcriptCalls().length).toBeGreaterThan(1), {
-    timeout: 15000,
-  });
-  expect(asked()).toBe(first);
 });
 
 it('separates the days and shows a clock time, not "5m ago"', async () => {
@@ -3279,6 +3261,84 @@ it('highlights a mention by resolving its id against the participants', async ()
  * everything ticked — and that it isn't offered for someone else's messages,
  * where a bulk action could only ever half-work.
  */
+it('ticks a reply rather than opening its strand while selecting', async () => {
+  // Select mode has to win the tap on *every* bubble, and a reply is the one
+  // that would otherwise have somewhere else to go — its strand edge makes the
+  // whole bubble a way into the thread.
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'one', reply_count: 1 }),
+      message({
+        id: 8,
+        sender: MINE,
+        text: 'two',
+        reply_to: { id: 7 },
+        thread_root_id: 7,
+      }),
+    ],
+  });
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await screen.findByText('1 selected');
+
+  await fireEvent.press(screen.getByLabelText('Your message: two'));
+
+  await screen.findByText('2 selected');
+  // Not "Thread": the strand never opened, and nothing was asked for.
+  expect(screen.queryByText('Thread')).toBeNull();
+  expect(
+    mockFetch.mock.calls.some(([url]) => String(url).includes('thread_root='))
+  ).toBe(false);
+  // The branch into the strand stands down with the tap, the way the long-press
+  // menu does — two modes racing for one gesture is what the mode prevents.
+  expect(screen.queryByLabelText('1 reply — open thread')).toBeNull();
+});
+
+it('ticks an unsent reply too, rather than opening its strand', async () => {
+  // The case the first version of this got wrong. A bubble decides it opens a
+  // strand from "no tap handler, but a strand handler" — and an unsent message
+  // has no tap handler even mid-selection, because it has no server id to tick
+  // by. It would have been the one bubble in a selection that opened a Modal.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: ADA, text: 'dinner at 7?' })],
+    thread: [message({ id: 7, sender: ADA, text: 'dinner at 7?' })],
+  });
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (url.includes('/messages/') && init?.method === 'POST') {
+      return jsonResponse({ detail: 'Nope.' }, 500);
+    }
+    return base(url, init);
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Reply'));
+  await fireEvent.changeText(
+    screen.getByLabelText('Reply to thread'),
+    'yes please'
+  );
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+  await screen.findByText('Not sent');
+  // Two of these are on screen (the scrim and the header button); either closes.
+  await fireEvent.press(screen.getAllByLabelText('Close thread')[0]);
+
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await screen.findByText('1 selected');
+
+  // The unsent reply is still on screen, still untickable — and tapping it must
+  // do *nothing at all* rather than reopening the strand over the selection.
+  await fireEvent.press(screen.getByLabelText('Your message: yes please'));
+
+  expect(screen.getByText('1 selected')).toBeTruthy();
+  expect(screen.queryByText('Thread')).toBeNull();
+});
+
 it('selects several messages and deletes them in one action', async () => {
   serve({
     conversation: detail({}),

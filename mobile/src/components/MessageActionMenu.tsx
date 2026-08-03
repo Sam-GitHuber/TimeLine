@@ -94,7 +94,6 @@ export function MessageActionMenu({
   mine,
   anchor,
   actions,
-  quoted,
   mentionNames,
   onReact,
   onMoreEmoji,
@@ -106,17 +105,13 @@ export function MessageActionMenu({
   anchor: BubbleAnchor;
   actions: MessageAction[];
   /**
-   * The message this one replies to, if the caller resolved it — passed straight
-   * through to the previewed bubble so the highlighted copy carries its quote
-   * like the real one does. Without it the preview would be visibly shorter than
-   * the bubble it's covering.
-   */
-  quoted?: Message;
-  /**
-   * Names for this message's mention ids (Phase 9b M8), passed through for the
-   * same reason `quoted` is: the preview re-renders the *real* bubble, so a
-   * highlighted `@Ada` that lost its highlight under the menu would give the
-   * game away that it's a copy.
+   * Names for this message's mention ids (Phase 9b M8). The preview re-renders
+   * the *real* bubble, so a highlighted `@Ada` that lost its highlight under the
+   * menu would give the game away that it's a copy.
+   *
+   * A reply used to need `quoted` here for the same reason. The strand edge
+   * (M9g) needs nothing passed: the bar is drawn from `message.reply_to`, which
+   * the preview already has, so the copy matches by construction.
    */
   mentionNames?: Map<number, string>;
   /**
@@ -208,12 +203,7 @@ export function MessageActionMenu({
         style={[styles.preview, { top: anchor.y, left: anchor.x, width: anchor.width }]}
         onLayout={(e) => setPreviewHeight(e.nativeEvent.layout.height)}
       >
-        <BubbleBody
-          message={message}
-          mine={mine}
-          quoted={quoted}
-          mentionNames={mentionNames}
-        />
+        <BubbleBody message={message} mine={mine} mentionNames={mentionNames} />
       </View>
 
       <Animated.View

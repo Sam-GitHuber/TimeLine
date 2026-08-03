@@ -38,18 +38,29 @@
  * thrown away on their behalf. What "read" means lives in `src/readReceipts.ts`,
  * not here; this component only draws what it's handed.
  *
- * **Replies** (Phase 9b M3) add two things. A reply carries a collapsed quote
- * *inside* the bubble (`QuotedMessage`, and so inside `BubbleBody`, so the menu's
- * preview shows it), and a message with replies grows a "3 replies" branch
- * beneath it that opens the focused thread view.
+ * **Replies** (Phase 9b M3) add two things. A message with replies grows a
+ * "3 replies" branch beneath it that opens the focused thread view, and a reply
+ * is marked as belonging to a thread — **the strand edge** (M9g): one bar down
+ * the bubble's outer side, accent on theirs, white-on-the-fill inside a 1px
+ * ring on yours. **Tapping a bubble that wears one opens its strand.**
+ *
+ * The bar replaced a collapsed quote of the message being answered, drawn inside
+ * every reply's bubble. The quote said more, and that was the problem: it
+ * repeated the same two lines down every reply in a strand, cost two lines of
+ * height on each, and still couldn't tell two side-conversations apart — it
+ * names a message, never a conversation. **Inside a strand a reply is a plain
+ * bubble** (`insideStrand`): everything in there belongs to the one thread, so a
+ * mark saying so on each bubble would say nothing. `messaging.md` → *The strand
+ * edge* has the full argument and what the bar deliberately doesn't say.
  *
  * **Run grouping and chat typography** (Phase 9b M5). A bubble knows whether it
  * ends a run (`endsRun`, decided by the caller, which is the only place that can
- * see the neighbours) and that drives three things at once: the timestamp, the
- * squared-off tail corner, and the tighter spacing that makes a burst read as
- * one block. The time itself is now a **clock** ("14:32") rather than "5m ago" —
- * the day separator above carries the date, so what a bubble has to answer is
- * when in the day. URLs and email addresses are **tappable**, and a message that
+ * see the neighbours) and that drives two things: the timestamp, and the tighter
+ * spacing that makes a burst read as one block. It drove a third — a squared-off
+ * tail corner on the run's last bubble — until M9g, which gave every bubble the
+ * same corner so the strand edge reads the same on all of them. The time itself
+ * is now a **clock** ("14:32") rather than "5m ago" — the day separator above
+ * carries the date, so what a bubble has to answer is when in the day. URLs and email addresses are **tappable**, and a message that
  * is nothing but one to three emoji drops its bubble and is drawn large.
  *
  * **Inline formatting** (Phase 9b M8). `*bold*`, `_italic_`, `~strikethrough~`
@@ -64,20 +75,28 @@
  * and open full-screen on tap. A message may be a photo with no caption at all —
  * which is why the text is now rendered conditionally rather than always.
  *
- * **Select mode** (Phase 9b M8) is the one state where a bubble's own tap does
- * something: it ticks the message, and the row takes an accent wash. That's a
- * suspension of the rule below rather than an exception to it — while selecting,
- * a tap means exactly one thing everywhere on screen, so there's nothing to
- * mistake it for.
+ * **Select mode** (Phase 9b M8): a tap ticks the message and the row takes an
+ * accent wash. It **wins over the strand edge's own tap** — while selecting, a
+ * tap means exactly one thing everywhere on screen, so there's nothing to
+ * mistake it for. The caller enforces that by withholding `onOpenThread` for as
+ * long as a selection is on, which matters because an *unsent* message gets no
+ * `onPress` even mid-selection (it has no server id to tick), and would
+ * otherwise be the one bubble in a selection that opened a Modal instead.
  *
  * **One gesture per target**, the rule M2 settled: **long-press** = the action
- * menu (Reply included), **tap the branch** = open the thread. The bubble's own
- * tap does nothing outside select mode, and should stay that way — a target this size doing
- * different things by press duration is where a mis-timed press does the wrong
- * thing. A tappable *link* inside the text is one exception and **a photo is the
- * other**; neither really breaks the rule, because both are smaller targets with
- * their own obvious affordance, and long-pressing over either still opens the
- * menu.
+ * menu (Reply included), **tap** = open the thread, on the bubbles that show a
+ * strand edge and only those. A plain message's own tap still does nothing.
+ *
+ * M9g revised the second half of that rule, which used to be "tap the branch"
+ * with the bubble itself inert. What made it safe to widen is that the tap is
+ * *earned by a visible mark*: a bubble is tappable exactly when it wears a bar,
+ * it does one thing wherever it appears, and that thing only opens a view —
+ * nothing is sent, changed or deleted by a mis-timed press, and closing the
+ * strand puts you back where you were. The narrower version had the same
+ * property on a smaller target (the quote block used to be the tap), so this is the
+ * same gesture on a target big enough to hit. A tappable *link* inside the text
+ * and **a photo** remain exceptions of the same kind, and long-pressing over any
+ * of them still opens the menu.
  *
  * **There is deliberately no swipe-to-reply.** M3 shipped one and it was taken
  * out after a day of real use: a rightward drag starting on a bubble is also the
@@ -108,7 +127,7 @@ import { SendStateIcon } from './icons';
 import type { BubbleAnchor } from './MessageActionMenu';
 import { measureInWindow } from '@/measure';
 import type { Mark } from '@/messageText';
-import { isEmojiOnly, parseMessageText, plainMessageText } from '@/messageText';
+import { isEmojiOnly, parseMessageText } from '@/messageText';
 import type { SendState } from '@/readReceipts';
 import { colors, fonts, fontSize, radius, spacing } from '@/theme';
 import type { Message, MessageAttachment, Reaction } from '@/types';
@@ -122,21 +141,39 @@ import { formatMessageTime } from '@/utils';
  * `maxWidth`: the wrapper owns that, so a copy rendered into a fixed-width slot
  * fills it exactly.
  */
+/**
+ * Does this bubble wear the strand edge (M9g)? **The bar and the tap that opens
+ * the strand both read this**, so a bubble is tappable exactly when it's marked.
+ *
+ * An emoji-only message is drawn without a bubble, so there'd be no edge to draw
+ * on — but `large` already excludes replies for that reason, which is why this
+ * doesn't need to ask.
+ */
+function wearsStrandEdge(message: Message, insideStrand: boolean) {
+  return !!message.reply_to && !insideStrand;
+}
+
 export function BubbleBody({
   message,
   mine,
-  quoted,
   status,
   endsRun = true,
+  insideStrand = false,
   mentionNames,
-  onQuotePress,
   onPhotoPress,
   onPhotoLongPress,
 }: {
   message: Message;
   mine: boolean;
-  /** The message this one replies to, if the caller could resolve it. */
-  quoted?: Message;
+  /**
+   * Drawn inside the focused strand rather than out in the transcript (M9g).
+   * **Everything in a strand is part of that strand**, so a mark saying so on
+   * every bubble would say nothing — in here they're plain bubbles, and the
+   * only thing that names what you're answering is the composer's own label.
+   * Defaults to false, so the transcript, the action menu's preview and any
+   * bubble drawn on its own all agree.
+   */
+  insideStrand?: boolean;
   /**
    * Display names for the ids in `message.mentions` (Phase 9b M8), so an
    * `@Ada` in the text can be highlighted. Supplied by the screen, which is
@@ -152,16 +189,11 @@ export function BubbleBody({
    */
   status?: SendState;
   /**
-   * Last bubble of a run (Phase 9b M5) — it carries the timestamp and the
-   * squared-off tail corner. Defaults to true so a bubble drawn on its own (the
-   * action menu's preview, the focused thread view) looks complete.
+   * Last bubble of a run (Phase 9b M5) — it carries the timestamp. Defaults to
+   * true so a bubble drawn on its own (the action menu's preview, the focused
+   * thread view) looks complete.
    */
   endsRun?: boolean;
-  /**
-   * Open the thread this reply belongs to. Omitted by the action menu's preview
-   * — a preview is a picture of the bubble, not a working copy of it.
-   */
-  onQuotePress?: () => void;
   /**
    * Open a photo full-screen (Phase 9b M7). Omitted by the action menu's
    * preview, and by an in-flight bubble — there's nothing full-size to open
@@ -194,8 +226,8 @@ export function BubbleBody({
    * treatment every mainstream messenger gives it. A few lines of code and one
    * of the most-noticed details in a chat.
    *
-   * Not for a reply, which has a quote block that needs a bubble to sit in, and
-   * not for a tombstone, which has no text of its own.
+   * Not for a reply, whose strand edge needs a bubble to sit on, and not for a
+   * tombstone, which has no text of its own.
    */
   const photos = message.attachments ?? [];
   const large =
@@ -204,25 +236,22 @@ export function BubbleBody({
     photos.length === 0 &&
     isEmojiOnly(message.text);
 
+  /**
+   * The strand edge (M9g) — a reply in the transcript wears one bar on its outer
+   * side and nothing else. Inside a strand it wears nothing: see `insideStrand`.
+   */
+  const edged = wearsStrandEdge(message, insideStrand);
+
   return (
     <View
       style={[
         large ? styles.bare : styles.bubble,
         !large && (mine ? styles.mine : styles.theirs),
-        // The tail: the run's last bubble squares off its near-bottom corner, so
-        // a block of messages reads as one shape with a point at the end rather
-        // than a stack of identical lozenges.
-        !large && endsRun && (mine ? styles.tailMine : styles.tailTheirs),
+        edged && (mine ? styles.strandMine : styles.strandTheirs),
       ]}
     >
-      {/* Inside the bubble, above the text — the standard treatment, and it
-          means the action menu's preview (which re-renders this component)
-          shows the quote too, so you can see exactly what you're acting on. */}
-      {message.reply_to ? (
-        <QuotedMessage quoted={quoted} mine={mine} onPress={onQuotePress} />
-      ) : null}
-      {/* Above the caption, below the quote — the order a photo message reads
-          in: what you're replying to, the picture, then what you said about it. */}
+      {/* Above the caption — the order a photo message reads in: the picture,
+          then what you said about it. */}
       {photos.length > 0 ? (
         <View style={styles.photos}>
           {photos.map((photo) => (
@@ -578,93 +607,13 @@ function ReactionPills({
   );
 }
 
-/**
- * The collapsed quote above a reply (Phase 9b M3) — who was answered, and a line
- * of what they said.
- *
- * **Both come from the resolved message, never from the reply.** A reply's
- * payload carries a bare `{ id }`; the body *and the author* come from a message
- * the client already holds, or from the focused thread's own fetch, both of
- * which go through the server's interval clipping. That's what stops a quote
- * becoming a window into history the viewer was clipped out of — including the
- * narrow version where the words stay hidden but the name doesn't, which matters
- * in a group where someone can join, post and leave inside your gap.
- *
- * So an unresolved quote shows no name at all, and that's the honest rendering:
- * "Original message unavailable" is a *true* statement about a message the
- * viewer isn't entitled to, not a loading state, and there is nothing further to
- * say about it.
- */
-function QuotedMessage({
-  quoted,
-  mine,
-  onPress,
-}: {
-  /** The message being answered, if the caller could resolve it. */
-  quoted?: Message;
-  mine: boolean;
-  /**
-   * Open the thread. **The quote is the way in for a reply**, the way the reply
-   * count is for a root — and it's needed, not just convenient: when the root is
-   * one the viewer was clipped out of, its replies stand alone in the transcript
-   * with no root to carry a count, so without this the strand would be
-   * unreachable for exactly the person whose view of it is already partial.
-   */
-  onPress?: () => void;
-}) {
-  // Two lines of plain text, so the markup is dropped rather than drawn (M8):
-  // a quote is a *reference* to a message, not a second rendering of it.
-  const body = quoted?.is_deleted
-    ? 'Message deleted'
-    : quoted
-      ? plainMessageText(quoted.text)
-      : 'Original message unavailable';
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={!onPress}
-      accessibilityRole={onPress ? 'button' : undefined}
-      accessibilityLabel={
-        onPress
-          ? quoted
-            ? `In reply to ${quoted.sender.display_name} — open thread`
-            : 'In reply to a message you can’t see — open thread'
-          : undefined
-      }
-      style={[styles.quote, mine ? styles.quoteMine : styles.quoteTheirs]}
-    >
-      {quoted ? (
-        <Text
-          style={[
-            styles.quoteName,
-            mine ? styles.quoteNameMine : styles.quoteNameTheirs,
-          ]}
-          numberOfLines={1}
-        >
-          {quoted.sender.display_name}
-        </Text>
-      ) : null}
-      <Text
-        style={[
-          styles.quoteText,
-          mine ? styles.quoteTextMine : styles.quoteTextTheirs,
-          !quoted && styles.quoteMissing,
-        ]}
-        numberOfLines={2}
-      >
-        {body}
-      </Text>
-    </Pressable>
-  );
-}
-
 export function MessageBubble({
   message,
   mine,
   showSender,
   endsRun = true,
-  quoted,
   status,
+  insideStrand = false,
   mentionNames,
   selected,
   onPress,
@@ -680,24 +629,24 @@ export function MessageBubble({
   showSender: boolean;
   /**
    * Last bubble of a run from this sender (Phase 9b M5). Decided by the caller,
-   * which is the only place that can see the neighbours — it drives the tail
-   * corner, the timestamp, and the tighter spacing that makes a burst read as
-   * one block. Defaults true so a bubble drawn alone looks finished.
+   * which is the only place that can see the neighbours — it drives the
+   * timestamp and the tighter spacing that makes a burst read as one block.
+   * Defaults true so a bubble drawn alone looks finished.
    */
   endsRun?: boolean;
-  /** The message this one replies to, if the caller could resolve it. */
-  quoted?: Message;
   /** Its send state (Phase 9b M4) — your own messages only; see `BubbleBody`. */
   status?: SendState;
+  /** Drawn inside the strand rather than the transcript; see `BubbleBody`. */
+  insideStrand?: boolean;
   /** Names for this message's mention ids (Phase 9b M8); see `BubbleBody`. */
   mentionNames?: Map<number, string>;
   /** Ticked in select mode (Phase 9b M8) — the row takes an accent wash. */
   selected?: boolean;
   /**
-   * What a plain tap does. **Only ever passed in select mode**: outside it the
-   * bubble's tap deliberately does nothing, for the reason in this file's
-   * header. In select mode a tap means one thing everywhere on the screen,
-   * which is why the rule can be suspended without becoming ambiguous.
+   * What a plain tap does. **Only ever passed in select mode**, and it wins
+   * over the strand edge's own tap below: while selecting, a tap means one
+   * thing everywhere on the screen, which is why the rule can be suspended
+   * without becoming ambiguous.
    */
   onPress?: () => void;
   /**
@@ -734,6 +683,27 @@ export function MessageBubble({
     measureInWindow(bubbleRef.current, onLongPress);
   }
 
+  /**
+   * **Tapping a reply opens its strand** (M9g) — the tap the strand edge earns.
+   *
+   * This is the rule in the file header being revised rather than broken. The
+   * bar is a visible affordance on the bubble, the tap does exactly one thing
+   * wherever the bar appears, and what it does is open a view — nothing is sent,
+   * changed or deleted, and closing the strand puts you back. That's the test a
+   * gesture on a target this size has to pass, and "tap the quote", which this
+   * replaces, passed it the same way on a smaller target.
+   *
+   * Only a *reply*. A root keeps its "3 replies" branch, so a bubble is tappable
+   * **exactly when it wears a bar** — which is why this asks the same predicate
+   * the bar does rather than restating it. Two spellings of "is this a reply in
+   * the transcript" in two components is one prop away from a bubble that opens
+   * a strand while showing nothing that says it would, and the invariant above
+   * is the whole justification for widening the gesture. And `onPress` — select
+   * mode — still wins.
+   */
+  const opensThread =
+    !onPress && !!onOpenThread && wearsStrandEdge(message, insideStrand);
+
   return (
     // Tighter inside a run than between them (Phase 9b M5): the gap is what
     // tells you where one person's burst ends and the next begins, so it has to
@@ -766,10 +736,12 @@ export function MessageBubble({
         ) : (
           <Pressable
             ref={bubbleRef}
-            onPress={onPress}
+            onPress={onPress ?? (opensThread ? onOpenThread : undefined)}
             onLongPress={onLongPress ? handleLongPress : undefined}
             delayLongPress={350}
-            accessibilityRole="text"
+            // A bubble that opens something is a button and has to say so, or
+            // the one affordance the bar promises is invisible to VoiceOver.
+            accessibilityRole={opensThread ? 'button' : 'text'}
             accessibilityState={onPress ? { selected: !!selected } : undefined}
             // The label lets the menu be opened by assistive tech and driven in
             // tests, since a long-press isn't otherwise discoverable.
@@ -780,17 +752,27 @@ export function MessageBubble({
                 ? `Your message: ${describeMessage(message)}`
                 : `Message from ${message.sender.display_name}: ${describeMessage(message)}`
             }
-            accessibilityHint="Press and hold for message actions"
+            // What the bar says, said out loud — the hint rather than the label,
+            // so the message itself is still what's announced first and a bubble
+            // stays findable by its words alone.
+            //
+            // 🔒 "part of a thread" and no more: the reply carries a bare id and
+            // the root may be one this viewer was clipped out of, so naming it
+            // here would hand over exactly what the payload withholds.
+            accessibilityHint={
+              opensThread
+                ? 'Part of a thread. Opens it. Press and hold for message actions'
+                : 'Press and hold for message actions'
+            }
             style={[styles.bubbleWrap, status === 'failed' && styles.unsent]}
           >
             <BubbleBody
               message={message}
               mine={mine}
-              quoted={quoted}
               status={status}
               endsRun={endsRun}
+              insideStrand={insideStrand}
               mentionNames={mentionNames}
-              onQuotePress={onOpenThread}
               onPhotoPress={onPhotoPress}
               // The same handler the wrapper uses, so the menu anchors to the
               // whole bubble either way — a menu that jumped to the photo's rect
@@ -840,10 +822,12 @@ export function MessageBubble({
         />
       ) : null}
 
-      {/* The way into the focused thread, and the *only* tap that opens it —
-          the bubble's own tap stays free. Drawn as a branch off the bubble, the
-          same living line the feed's comment threads use, so a thread reads as
-          growing out of the message rather than as a button stuck under it. */}
+      {/* The way into the focused thread from its **root** — a root wears no
+          strand edge, so this is the only tap that opens one from here. (A reply
+          is the other way in: since M9g the bubble's own tap does it.) Drawn as
+          a branch off the bubble, the same living line the feed's comment
+          threads use, so a thread reads as growing out of the message rather
+          than as a button stuck under it. */}
       {replyCount > 0 && onOpenThread ? (
         <View style={mine ? styles.alignEnd : styles.alignStart}>
           <Pressable
@@ -902,9 +886,56 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
   },
-  // The tail — the run's last bubble only, on the side it's aligned to.
-  tailMine: { borderBottomRightRadius: radius.sm },
-  tailTheirs: { borderBottomLeftRadius: radius.sm },
+  // ---- The strand edge (M9g) ----------------------------------------------
+  // One bar on a reply's outer side, saying only that the message belongs to a
+  // thread — not which one, and not whose. See `messaging.md` → *The strand
+  // edge* for why that's the whole of it.
+  //
+  // **A border, not a bar drawn over the bubble.** The first cut absolutely
+  // positioned a 3px strip and clipped it with `overflow: 'hidden'`; it read as
+  // a blunt rectangle stuck on the side, because a clipped strip keeps its
+  // square ends right up to where the corner cuts them off. A border follows the
+  // radius and tapers into the curve, which is the whole difference between a
+  // mark that belongs to the bubble and one sitting on top of it.
+  //
+  // The 3px comes back off the padding so the words sit exactly where they do in
+  // a message that isn't a reply — a bubble mustn't reflow on becoming one.
+  // Both sides are built the same way: **the bubble's own hairline moves outside
+  // as an `outline`, and the bar becomes the border inside it.** Theirs would
+  // otherwise have the accent bar *replacing* the hairline on that one side,
+  // which reads as the bubble's edge changing colour rather than as a mark
+  // sitting inside it. This is also what the web has always drawn, where the
+  // hairline is a Tailwind `ring` (a box-shadow, outside the border box).
+  strandTheirs: {
+    borderWidth: 0,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.accent,
+    paddingLeft: spacing.md - 5,
+    outlineWidth: 1,
+    outlineColor: colors.line,
+    outlineStyle: 'solid',
+  },
+  // White at full strength competes with the text on the fill; at 85% it reads
+  // as a mark rather than a second highlight.
+  strandMine: {
+    borderRightWidth: 3,
+    borderRightColor: 'rgba(255,255,255,0.85)',
+    paddingRight: spacing.md - 5,
+    // The ring the white bar ends against — white on the warm ground has no
+    // outer edge of its own. `outline` (RN 0.76+) rather than a border because
+    // it draws *outside* the box: a border would eat 1px of the fill on all four
+    // sides and read as an outlined bubble instead of an edge to the bar.
+    outlineWidth: 1,
+    outlineColor: colors.accentDeep,
+    outlineStyle: 'solid',
+  },
+  // No tail. M5 squared the near-bottom corner of a run's last bubble; M9g took
+  // it out, because **every bubble having the same corner is what makes the
+  // strand edge legible** — a bar running into a 6pt corner ends bluntly on some
+  // bubbles and curves away on others, and the eye reads that difference as
+  // meaning something when it doesn't. The run is still marked, by the spacing
+  // and by the timestamp on its last bubble. It also settles a disagreement with
+  // the web, which never drew a tail.
   // An emoji-only message has no bubble at all: the glyph is the message, and a
   // container around it would be a frame around a gesture.
   bare: { paddingVertical: spacing.xs },
@@ -990,26 +1021,6 @@ const styles = StyleSheet.create({
   },
   pillMine: { backgroundColor: colors.accentTint, borderColor: colors.accent },
   pillPressed: { opacity: 0.6 },
-  // The quote sits inset at the top of the bubble behind a vertical rule — the
-  // living line again, this time marking "these words are someone else's".
-  quote: {
-    marginBottom: spacing.xs + 2,
-    paddingLeft: spacing.sm,
-    borderLeftWidth: 2,
-  },
-  // Tinted against whichever bubble it's in, so it stays legible on the accent
-  // fill as well as on the raised surface.
-  quoteMine: {
-    borderLeftColor: 'rgba(255,255,255,0.6)',
-  },
-  quoteTheirs: { borderLeftColor: colors.accent },
-  quoteName: { fontSize: fontSize.sm - 1, fontWeight: '700' },
-  quoteText: { fontSize: fontSize.sm, lineHeight: 18 },
-  quoteMissing: { fontStyle: 'italic' },
-  quoteNameMine: { color: 'rgba(255,255,255,0.9)' },
-  quoteTextMine: { color: 'rgba(255,255,255,0.75)' },
-  quoteNameTheirs: { color: colors.accentDeep },
-  quoteTextTheirs: { color: colors.inkSoft },
   // The branch into a reply thread: a short stub of line, then the count.
   threadLink: {
     flexDirection: 'row',

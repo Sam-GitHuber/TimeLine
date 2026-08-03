@@ -191,9 +191,10 @@ the details**. What's specific to messaging:
 ## Reply threads
 
 Added in Phase 9b M3. Replying to a message puts your reply in the transcript
-where it belongs chronologically, with a collapsed quote above it — and tapping
-into it brings **the whole strand forward** over a blurred transcript, scrollable,
-with its own composer.
+where it belongs chronologically, marked as part of a thread — and tapping it
+brings **the whole strand forward** over a blurred transcript, scrollable, with
+its own composer. What that mark is changed in M9g: see
+[The strand edge](#the-strand-edge).
 
 **Why a focused thread and not just a quote.** The cheaper pattern (each reply
 shows the one message it answers, and nothing else) was the original plan and was
@@ -224,11 +225,13 @@ Concretely, two halves:
   [`visible_messages_for`](#history-is-interval-clipped): a member who was
   `pending` across a gap would read clipped-out history through someone else's
   quote of it.
-- **The body *and the author* are fetched, not sent along.** The client renders
-  the quote from a message it already holds, from the thread endpoint below, or
-  by asking for it by id ([`?ids=`](#api), added in M5) — all three
-  interval-clipped, which is the only property that matters. When it can't be
-  resolved, "Original message unavailable" is a *true* statement about a message
+- **The body *and the author* are fetched, not sent along.** No client asks any
+  more — [M9g](#the-strand-edge) stopped drawing quotes, so a reply's id is now
+  only ever used to say *that* it belongs to a thread. While quotes existed the
+  client rendered them from a message it already held, from the thread endpoint
+  below, or by asking for it by id ([`?ids=`](#api), added in M5) — all three
+  interval-clipped, which is the only property that ever mattered. When it
+  couldn't be resolved, "Original message unavailable" was a *true* statement about a message
   the viewer isn't entitled to, and it appears with **no name above it**.
 
 **Why the author counts as history.** M3 first shipped `reply_to` as
@@ -281,15 +284,15 @@ So there are three ways in, and they differ only in what the composer aims at:
 | --- | --- | --- |
 | **Reply** in the long-press menu | the message you tapped | up |
 | **"N replies"** on a root | the root | down |
-| **A reply's quote** | the strand's root | down |
+| **Tapping a reply** (its strand edge) | the strand's root | down |
 
 Replying to a reply targets *that* reply, not the root. The server flattens it
-into the same strand either way, so this costs nothing and keeps the quote naming
-who you actually answered. The strand names the target above its composer only
-when it isn't the root — otherwise the label would restate the message already
-sitting at the top of the screen.
+into the same strand either way, so this costs nothing and keeps the strand's
+composer label naming who you actually answered. The strand names the target
+above its composer only when it isn't the root — otherwise the label would
+restate the message already sitting at the top of the screen.
 
-**The quote being a way in isn't just convenience.** When the root is one the
+**A reply being a way in isn't just convenience.** When the root is one the
 viewer was clipped out of, its replies stand alone in the transcript with no root
 to carry a count, so without it the strand would be unreachable for exactly the
 person whose view of it is already partial. It opens headless, saying so.
@@ -297,6 +300,103 @@ person whose view of it is already partial. It opens headless, saying so.
 Because the strand has its own composer, replying no longer competes with
 editing: a half-written message, or an edit in progress, is untouched by a trip
 into a thread and still there when you close it.
+
+### The strand edge
+
+Added in M9g, on both clients at once. **A reply in the transcript wears one bar
+down the outer side of its bubble, and tapping the bubble opens its strand.** The
+bar is the accent on their side; on yours it's white on the accent fill, inside a
+1px `accent-deep` ring — white against the warm ground has no outer edge of its
+own, and the ring is what it ends against. A root wears nothing: it already
+carries *"N replies"* underneath, which says more than a bar could.
+
+**What the bar says is deliberately the whole of it: *this message is part of a
+thread*.** Not which thread, and not whose. Two side-conversations running at
+once wear the same mark, and you tell them apart by opening one. Colour-keying
+the bar per `thread_root_id` was drawn up and rejected — it works, and it would
+have made the app's one-accent rule into a palette where hue carries meaning that
+colour alone can't carry accessibly.
+
+This replaced a **collapsed quote** inside every reply's bubble (M3 on the phone,
+M9d on the web): the name of whoever was answered and two `line-clamp`ed lines of
+what they said. The quote said more, and that was the problem.
+
+- **It repeated itself.** Three replies to one message meant the same two lines
+  three times, most often directly under the message they quoted.
+- **It cost two lines on every reply**, which is what made a busy group's
+  transcript read as mostly chrome.
+- **It still couldn't separate two live strands**, because a quote names a
+  *message*, never a conversation — the same limitation that made the
+  quote-only design wrong in the first place (see
+  [Reply threads](#reply-threads), *Why a focused thread and not just a quote*).
+- **And it announced privacy clips in the middle of the chat.** A reply whose
+  root you were clipped out of read *"Original message unavailable"* on every one
+  of its bubbles. With the bar it simply looks like a reply, which is all a
+  viewer was ever entitled to know.
+
+🔒 **Dropping it also removed the only request that could ever have surfaced a
+clipped body.** The transcript used to resolve every quote by id through the
+[`?ids=`](#api) endpoint. It was correctly gated — that's what the endpoint's
+clipping is for — but a bar is drawn from the bare `{ id }` a reply already
+carries, so the transcript now fetches nothing at all to mark a reply.
+
+**Inside a strand there is no mark and no quote — just bubbles.** A first cut
+kept the collapsed quote in there, on the reasoning that a flat list can't
+otherwise show which of its messages was answered. In use that was wrong twice
+over: everything in a strand belongs to the one thread, so a mark saying so on
+each bubble says nothing, and the message being quoted is almost always a few
+rows up the same short list. What you're answering is named **above the
+composer** instead, and only when it isn't the root. `insideStrand` on the bubble
+picks between the two treatments and defaults to the transcript's, so anything
+drawing a bubble on its own (the phone's action-menu preview) agrees with the
+transcript by construction.
+
+**So the client draws no quotes at all now, and `quotes.ts` / `quotes.js` are
+gone** — along with the sign-out hook that cleared them. That store was the one
+place a client held *other people's* message text outside the query cache, so
+removing it is a small privacy win as well as a deletion: there is now nothing to
+clear. 🔒 The **server** side of [`?ids=`](#api) stays, with its tests: it's a
+legitimate endpoint, and the clipping it enforces is what makes the id-only wire
+format safe in the first place.
+
+**Tapping the bubble is a revision of "one gesture per target"**, the rule M2
+settled, and worth recording as such. The bubble's own tap used to do nothing
+outside select mode; now it opens the strand, but *only* on a bubble wearing a
+bar. What makes that safe is that the tap is earned by a visible mark, does one
+thing wherever it appears, and only opens a view — nothing is sent, changed or
+deleted by a mis-timed press, and closing the strand puts you back. The narrower
+version had the same property on a much smaller target, since tapping the quote
+was already the way in. Select mode still wins the tap, and long-press still
+opens the action menu.
+
+Two client-specific notes, both about the web:
+
+- **A click that ends a text selection doesn't open anything**, and neither does
+  one that lands on the ⋯ menu, a link or a photo. On a page you read with a
+  mouse, selecting text is the gesture the bubble would otherwise steal; the
+  phone has no equivalent problem, because selecting text there is a long-press,
+  which is the action menu.
+- ⚠️ **The open is deferred ~250ms, and that delay is load-bearing.** Selecting a
+  word is a *double*-click, and its first click is indistinguishable from a
+  single one at the moment it arrives — same target, still-collapsed selection.
+  Opening straight away would hide the transcript before the word was ever
+  selected. The timer re-reads the selection when it fires, so a double-click
+  has made one by then and the open is abandoned; no `dblclick` handler and no
+  click-counting is involved. The cost is a quarter-second before a panel that
+  goes to the network anyway.
+- ⚠️ **A click inside the ⋯ menu doesn't reach the bubble**, which needs saying
+  because it looks like it couldn't. The menu is portalled to `<body>`, but
+  React events travel the *React* tree, so a click on the panel's padding or the
+  gaps around its emoji row arrived at the bubble that rendered it — opening the
+  strand under the open menu and hiding the transcript from beneath it.
+  `DrawerPopover` marks its panel `data-popover` and the handler bails on it.
+- **The bar is also a `<button>`** spanning the bubble's edge, invisible until
+  focused. A `div` with an `onClick` is a mouse-only affordance, and this is a
+  route into a conversation — it can't be one. Its label says "Part of a thread —
+  open thread" and names nobody, for the same reason the bar draws no name.
+
+One consequence, stated plainly because it's the trade: the quote answered
+*"replying to what?"* without leaving the transcript, and that is now a tap.
 
 A reply is otherwise an ordinary message: it bumps `updated_at`, counts toward
 unread, and [pushes](#push-notifications) like any other. Nothing about replying
@@ -699,7 +799,7 @@ Two decisions inside the parser are worth knowing before changing it:
   app corrupting what they wrote.
 
 Places that show a message as *one line of plain text* — a conversation row's
-preview, a collapsed quote — drop the markup rather than drawing it
+preview, a push body — drop the markup rather than drawing it
 (`plainMessageText`). A preview can't carry emphasis, and showing raw asterisks
 there while the bubble renders them is the seam that reads as half-finished.
 
@@ -958,9 +1058,11 @@ Direct and group chats share the endpoints:
     **paginates like the transcript**, so a client must follow `next` — a strand
     longer than one page is otherwise silently cut off at its *oldest* messages,
     hiding the newest replies and the one the reader just sent.
-  - `?ids=<a,b,c>` narrows it to **specific messages** (Phase 9b M5) — how a
-    reply's collapsed quote gets its words and its author, now that the app's
-    transcript pages lazily. Same trick, same reason: an id the viewer is clipped
+  - `?ids=<a,b,c>` narrows it to **specific messages** (Phase 9b M5) — added so a
+    reply's collapsed quote could get its words and its author once the app's
+    transcript began paging lazily. No client calls it since
+    [M9g](#the-strand-edge) dropped quotes; it stays because the rule it encodes
+    is the server's, not a client's. Same trick, same reason: an id the viewer is clipped
     out of is simply **absent** from the response, indistinguishable from one
     that never existed, with no second code path to get wrong. Capped at
     `MESSAGE_IDS_MAX` (50); an empty list returns nothing rather than everything.
@@ -1219,9 +1321,9 @@ utility can't be written as one — both live in `index.css`, and half of either
 pair silently does nothing on its own. Details in
 [M9b](#the-web-transcript-phase-9b-m9b) below.
 
-🔒 **Three module-level stores hold message text outside React** — `drafts.js`,
-`quotes.js` and `outbox.js` — which is what lets a draft, a resolved quote and a
-failed send survive the drawer switching views. They are **cleared on sign-out**
+🔒 **Two module-level stores hold message text outside React** — `drafts.js` and
+`outbox.js` — which is what lets a draft and a failed send survive the drawer
+switching views. They are **cleared on sign-out**
 in `auth.jsx` for exactly that reason: on a shared computer the next person to
 open the drawer isn't the one who typed it.
 
@@ -1449,9 +1551,10 @@ page.
 ### Reply threads on the web (Phase 9b M9d)
 
 M9d brought [reply threads](#reply-threads) across. The behaviour is the app's —
-one flat strand per root, quotes resolved rather than handed over, and
-[every route landing in the strand](#every-route-to-a-reply-goes-through-the-strand)
-— and `quotes.js` is a port of the app's module, comments included.
+one flat strand per root and
+[every route landing in the strand](#every-route-to-a-reply-goes-through-the-strand).
+It also ported the app's `quotes.js`, comments included; both copies were deleted
+in [M9g](#the-strand-edge) along with the quote itself.
 
 **The strand takes the panel, at every width.** M9d was planned the other way
 (widen the drawer to 740px on a big window so the strand could sit *beside* the
@@ -1524,24 +1627,23 @@ is only a class name there.) This is the same class as
 [#254/#255](connections.md#reporting-a-refused-write), one dismissal-route
 spelling over.
 
-**The two halves in the transcript.** A reply renders a **collapsed quote** inside
-its bubble (name, two lines, `line-clamp`ed so a long quote can't push the reply
-off), and a root renders **"3 replies"** on a branch line under it — the same
-living line the feed's comment threads use, so a strand reads as growing out of
-the message rather than as a button stuck under it. Clicking either opens the
-strand; the bubble's own click stays free.
+**The two halves in the transcript.** A reply wears the
+[strand edge](#the-strand-edge) and opens its strand when clicked; a root renders
+**"3 replies"** on a branch line under it — the same living line the feed's
+comment threads use, so a strand reads as growing out of the message rather than
+as a button stuck under it.
 
-🔒 **The quote is resolved, never read off the reply.** `reply_to` is a bare
-`{ id }`, so `quotes.js` looks in the transcript's loaded messages and otherwise
-fetches by id through [`?ids=`](#api) — the same interval-clipped queryset, so an
-id you were clipped out of comes back **absent** and the quote says "Original
-message unavailable" **with no name above it**. That fetch stopped being optional
-when M9b made paging lazy: without it the message would appear on anything you
-merely hadn't scrolled back to, which devalues it in the case where it's true.
-Each id is asked about **once** — an unresolvable id is a fact about this viewer,
-not a transient failure, so re-asking every poll would be a request that can only
-ever return nothing. 🔒 The store is cleared on sign-out, like the outbox and the
-drafts, and for a stronger reason than either: it holds *other people's* words.
+M9d shipped a **collapsed quote** inside every reply's bubble instead, resolved
+through `quotes.js` rather than read off the reply. M9g replaced it with the bar
+and dropped the quote from the strand panel too, so the web transcript — like the
+phone's — now asks for nothing at all in order to mark a reply, and `quotes.js`
+has been deleted.
+
+Two things the web does that the phone doesn't need to: a click that ends a
+**text selection** doesn't open the strand (nor does one on the ⋯ menu, a link or
+a photo), and the bar doubles as a focusable **`<button>`** spanning the bubble's
+edge — a `div` with an `onClick` would make a route into a conversation
+mouse-only.
 
 **The strand carries the ⋯ menu, unlike the app's**, which leaves it out only
 because its strand is a `Modal` and so is the menu — an iOS constraint the web
@@ -1735,9 +1837,9 @@ only when [every ticked message is one you could delete alone](#multi-select-pha
 — **Delete**. The differences:
 
 - ⚠️ **A capture-phase click handler wraps the row, and the `preventDefault` is
-  load-bearing.** A bubble contains links, a photo, a quote and a reply count,
-  every one of which would otherwise fire on the click that was meant to tick the
-  box — opening a lightbox or navigating away mid-selection. Intercepting once in
+  load-bearing.** A bubble contains links, a photo, a reply count and — since
+  M9g — a click of its own when it wears a strand edge, every one of which would
+  otherwise fire on the click that was meant to tick the box — opening a lightbox or navigating away mid-selection. Intercepting once in
   the capture phase settles all of them, rather than threading a "we're selecting"
   flag through every child that has a click of its own.
 - **There's a real checkbox**, because the row is not a button and can't become
@@ -1955,10 +2057,11 @@ outbox's business, and that view doesn't own the outbox.
 ### Reply threads on the phone (Phase 9b M3)
 
 **Two affordances, one gesture each** — the rule M2 settled, applied to the same
-bubble: **long-press** for the action menu (Reply lives in it), **tap the branch**
-(or a reply's quote) to open the thread. The bubble's own tap stays free, and
-should: a target that small doing different things by press duration is where a
-mis-timed press does the wrong thing.
+bubble: **long-press** for the action menu (Reply lives in it), **tap** to open
+the thread. M3 gave the tap to the branch line and a reply's quote only, leaving
+the bubble itself inert; M9g widened it to the whole bubble on replies, which now
+wear the [strand edge](#the-strand-edge) — see there for why that's a revision of
+the rule rather than a break with it. A plain message's tap still does nothing.
 
 **There is no swipe-to-reply, and that's a decision, not an omission.** M3 first
 shipped a rightward swipe on the bubble and it was pulled after a day of real
@@ -2075,9 +2178,15 @@ poll refetches every loaded page, so any gap at a boundary heals itself.
 day and what a bubble has to answer is when in it — the conversation *list* keeps
 relative time, where the question really is how recent something is; and **run
 grouping**, where consecutive messages from one person sit tighter together and
-only the run's last bubble carries the timestamp and the tail corner. A run
-breaks at a divider as well as at a change of sender: one straddling "Yesterday"
-would read as a single sitting.
+only the run's last bubble carries the timestamp. A run breaks at a divider as
+well as at a change of sender: one straddling "Yesterday" would read as a single
+sitting.
+
+The run's last bubble also **squared off its near-bottom corner** until M9g,
+which dropped it: with a [strand edge](#the-strand-edge) running down the side, a
+bar that ends bluntly on some bubbles and curves away on others reads as though
+the difference means something. Every bubble now has the same corner, which is
+also what the web always did.
 
 Two things are **exempt from run grouping's timestamp suppression**, and both are
 load-bearing rather than tidy-ups. An **"Edited" marker** is a disclosure — the
@@ -2130,7 +2239,10 @@ Deliberately *not* while editing: in edit mode the composer holds someone's sent
 of yours, so persisting them would mean coming back to a message you never wrote.
 
 **Quotes are fetched when they haven't paged in.** This is the debt M3 left, and
-it had to be settled here. The transcript resolved a quote's body and author from
+it had to be settled here. *(M9g deleted `quotes.ts`: the client draws no quotes
+anywhere any more — see [The strand edge](#the-strand-edge). Kept below because it
+is the reasoning behind the `?ids=` endpoint, which is still the server's rule for
+handing a message over by id.)* The transcript resolved a quote's body and author from
 messages it already held, which was complete *only* because it loaded every page.
 With lazy paging a miss also means "not paged in yet", so "Original message
 unavailable" — which is supposed to mean *you were clipped out of this* — would
@@ -2139,8 +2251,8 @@ the case where it's true. `quotes.ts` fetches the misses through
 [`?ids=`](#api), the same interval-clipped endpoint, and **never** a wider
 payload. Each id is asked about **once**: an unresolvable id is a fact about this
 viewer, not a transient failure, so re-asking every poll would be a request that
-can only ever return nothing. 🔒 What it holds is other people's message text, so
-it's cleared on sign-out too.
+can only ever return nothing. 🔒 What it held was other people's message text, so
+it was cleared on sign-out too — and since M9g there is no store to clear.
 
 **New-message push** (issue #118) is the one place the app gets something the web
 can't have. A tapped message push deep-links to the thread via `routeForNotification`
@@ -2161,11 +2273,16 @@ Four decisions:
 - **The pressed message comes with you into the mode.** A burst is exactly where
   you already know you want the next few, so entering with nothing ticked would
   waste the tap you just made.
-- **A tap on a bubble ticks it** — the one state where a bubble's own tap does
-  anything. That's a *suspension* of the [one-gesture-per-target
+- **A tap on a bubble ticks it**, and it ticks *every* bubble — including a
+  reply, whose tap would otherwise open its [strand](#the-strand-edge). That's a
+  *suspension* of the [one-gesture-per-target
   rule](#the-long-press-action-menu-phase-9b-m1) rather than an exception to it:
   while selecting, a tap means one thing everywhere on screen. The long-press
-  menu stands down for the same reason, so two modes can't race.
+  menu stands down for the same reason, so two modes can't race. ⚠️ Both clients
+  enforce it by **withholding the strand handler while selecting**, not by
+  ordering the two: a bubble decides it opens a strand from that handler being
+  present and its tap handler being absent, and an *unsent* message has no tap
+  handler even mid-selection, since it has no server id to tick.
 - **Delete is offered only when every ticked message is one you could delete on
   its own.** A bulk action that silently did *part* of what it says — yours,
   quietly skipping theirs — is worse than one that isn't there. Absent reads as
