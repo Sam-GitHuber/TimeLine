@@ -181,6 +181,30 @@ export function pressAlertButton(title: string, buttonText: string): void {
 }
 
 /**
+ * Answer the "camera or library?" prompt every photo picker opens first.
+ *
+ * `askPhotoSource` is an `Alert`, so "the user tapped Take Photo" is "the second
+ * button's `onPress` fired" — there's no rendered sheet to press under Node. The
+ * answer has to be armed *before* the press that opens it, because the prompt
+ * goes up and is answered inside that same press.
+ *
+ * Unmatched alerts are left alone rather than auto-pressed: the camera path can
+ * raise a *second* alert ("Camera access needed") with none of these buttons,
+ * and a test asserting on that one needs it to still be a plain recorded call.
+ */
+export function answerPhotoSource(
+  choice: 'Take Photo' | 'Choose from Library'
+): void {
+  alertSpy.mockImplementation(((
+    _title: string,
+    _message: string | undefined,
+    buttons: AlertButton[] | undefined
+  ) => {
+    buttons?.find((button) => button.text === choice)?.onPress?.();
+  }) as unknown as typeof Alert.alert);
+}
+
+/**
  * Read a `<Switch>`'s on/off state, whichever platform rendered it.
  *
  * iOS renders an `RCTSwitch` carrying `value`; Android renders an

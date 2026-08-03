@@ -7,19 +7,25 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react-native';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { Alert } from 'react-native';
 
 import { api } from '@/api';
 import { ComposeBox } from '@/components/ComposeBox';
 import type { User } from '@/types';
+import { alertSpy, answerPhotoSource } from './helpers';
 
 jest.mock('expo-image-picker', () => ({
   launchImageLibraryAsync: jest.fn(),
+  launchCameraAsync: jest.fn(),
+  requestCameraPermissionsAsync: jest.fn(),
 }));
 
 const mockFetch = jest.fn();
 const pick = ImagePicker.launchImageLibraryAsync as jest.Mock;
+const takePhoto = ImagePicker.launchCameraAsync as jest.Mock;
+const askCamera = ImagePicker.requestCameraPermissionsAsync as jest.Mock;
 
 const user: User = {
   pk: 1,
@@ -75,6 +81,9 @@ let createPost: jest.SpiedFunction<typeof api.createPost>;
 beforeEach(() => {
   mockFetch.mockReset();
   pick.mockReset();
+  takePhoto.mockReset();
+  askCamera.mockReset().mockResolvedValue({ granted: true });
+  alertSpy.mockReset().mockImplementation(() => {});
   globalThis.fetch = mockFetch as unknown as typeof fetch;
   createPost = jest.spyOn(api, 'createPost');
 });
@@ -150,6 +159,10 @@ it('keeps what you typed when posting fails', async () => {
 });
 
 describe('photos', () => {
+  // Every path here goes through the "camera or library?" prompt first, so the
+  // answer is armed by default and the camera tests below re-arm it.
+  beforeEach(() => answerPhotoSource('Choose from Library'));
+
   it('attaches a picked photo and lets you post with no text', async () => {
     pick.mockResolvedValue({
       canceled: false,
@@ -205,6 +218,60 @@ describe('photos', () => {
 
     // The button keeps its "Add photos" label; what must NOT appear is a count.
     expect(screen.queryByText(/^\d+ photos?$/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Post' })).toBeDisabled();
+  });
+
+  it('lets you take a photo instead of picking one', async () => {
+    // "Add photos" used to open the camera roll and nothing else, which meant
+    // posting the thing in front of you was a trip out to the camera app and
+    // back. Both paths end in the same attached photo.
+    answerPhotoSource('Take Photo');
+    takePhoto.mockResolvedValue({
+      canceled: false,
+      assets: [{ uri: 'file:///tmp/shot.jpg', fileName: null, mimeType: null }],
+    });
+    await renderCompose();
+
+    await fireEvent.press(screen.getByLabelText('Add photos'));
+
+    expect(await screen.findByText('1 photo')).toBeTruthy();
+    expect(pick).not.toHaveBeenCalled();
+  });
+
+  it('says so and picks nothing when camera access is refused', async () => {
+    // 🔒 The camera is the one path here that needs permission — the modern
+    // library picker runs out of process. Silently doing nothing after someone
+    // taps "Take Photo" reads as a broken button, so this asserts the telling.
+    answerPhotoSource('Take Photo');
+    askCamera.mockResolvedValue({ granted: false });
+    await renderCompose();
+
+    await fireEvent.press(screen.getByLabelText('Add photos'));
+
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Camera access needed',
+        expect.stringContaining('Settings')
+      )
+    );
+    expect(takePhoto).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^\d+ photos?$/)).toBeNull();
+  });
+
+  it('adds nothing when the source prompt is cancelled', async () => {
+    alertSpy.mockImplementation(((
+      _title: string,
+      _message: string | undefined,
+      buttons: { text?: string; onPress?: () => void }[] | undefined
+    ) => {
+      buttons?.find((button) => button.text === 'Cancel')?.onPress?.();
+    }) as unknown as typeof Alert.alert);
+    await renderCompose();
+
+    await fireEvent.press(screen.getByLabelText('Add photos'));
+
+    expect(pick).not.toHaveBeenCalled();
+    expect(takePhoto).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Post' })).toBeDisabled();
   });
 

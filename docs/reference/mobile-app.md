@@ -239,9 +239,38 @@ permission on a privacy-first app is a bad look — one the Play listing would
 show. Setting it `false` doesn't merely omit the permission, it emits an explicit
 `tools:node="remove"` so the merge strips anything a dependency adds; verified in
 Phase 10, so don't "fix" that entry when you see it in the introspected manifest.
-**The camera permission is real and stays** — chat photos can be taken with the
-camera (Phase 9b M7, `launchCameraAsync`), so this is a live capability, not
-plugin default cruft.
+**The camera permission is real and stays** — every photo picker in the app can
+take a shot (`launchCameraAsync`), so this is a live capability, not plugin
+default cruft. Its usage string names posts, chats *and* profiles, because Apple
+shows that sentence to the person in the prompt and it's the only explanation
+they get.
+
+### Taking a photo: camera or library
+
+Every place that adds a photo — a post, a chat message, a profile or group
+avatar — asks **"Take Photo / Choose from Library"** first, through the shared
+`src/photoSource.ts`. Only chat had the camera when photos first shipped
+(Phase 9b M7); the rest opened the camera roll and nothing else, which on a phone
+is the wrong default — "add a photo" to what you're writing about *right now*
+very often means the thing in front of you, and a trip out to the camera app and
+back is the friction that makes an app feel like a website in a wrapper.
+
+It's one module rather than a copied block per screen so the wording, the button
+order and the permission handling can't drift apart. Two things in it are worth
+knowing before touching it:
+
+- **`askPhotoSource` wraps `Alert` in a promise, and includes `onDismiss`.**
+  Android's Back dismisses an alert without firing any button, so without that
+  the caller would await a promise that never settles and the button would be
+  dead for the rest of the screen's life. `photoSource.test.ts` pins it.
+- **Only the camera path asks permission.** The modern library picker runs out of
+  process and hands back only what was chosen, so prompting for library access
+  would be a prompt for nothing. A refused camera resolves `null` after telling
+  the person why — silently doing nothing reads as a broken button.
+
+Multi-select is a library-only option (`allowsMultipleSelection`,
+`selectionLimit`): the camera returns one shot. The post composer is the only
+caller that asks for several at once.
 
 **Don't use `new URL()`.** React Native ships a partial `URL` implementation
 (hence `react-native-url-polyfill`). Paging follows the paginator's `next` URL,

@@ -12,7 +12,6 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import * as ImagePicker from 'expo-image-picker';
 import { useState } from 'react';
 import {
   ActivityIndicator,
@@ -27,6 +26,7 @@ import {
 } from 'react-native';
 
 import { api, type PhotoUpload } from '@/api';
+import { askPhotoSource, launchPhotoPicker } from '@/photoSource';
 import { Avatar } from './Avatar';
 import { NowNode } from './NowNode';
 import { SPINE_COLUMN, Spine } from './timeline';
@@ -140,16 +140,27 @@ export function ComposeBox({
     },
   });
 
+  /**
+   * Add photos: take one, or pick from the library.
+   *
+   * The camera is offered first — on a phone, "add a photo" to what you're
+   * writing about right now often means the thing in front of you. Only the
+   * library can return several at once, which is why this is a choice rather
+   * than a camera button beside a library button.
+   */
   async function pickPhotos() {
-    // No explicit permission request: the modern iOS picker runs out of process
-    // and returns only what the user picked, so it needs no library access.
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
+    const source = await askPhotoSource('Add a photo');
+    if (!source) return;
+
+    // No explicit permission request for the library: the modern iOS picker
+    // runs out of process and returns only what the user picked, so it needs no
+    // library access. The camera path handles its own permission.
+    const result = await launchPhotoPicker(source, {
       allowsMultipleSelection: true,
       selectionLimit: MAX_PHOTOS - photos.length,
       quality: 0.9,
     });
-    if (result.canceled) return;
+    if (!result || result.canceled) return;
 
     setPhotos((current) =>
       [

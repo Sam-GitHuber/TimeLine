@@ -76,7 +76,6 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import * as ImagePicker from 'expo-image-picker';
 import EmojiPicker from 'rn-emoji-keyboard';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -109,6 +108,7 @@ import { getDraft, setDraft } from '@/drafts';
 import { useMentions } from '@/mentions';
 import type { Outgoing, OutgoingPhoto } from '@/outbox';
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
+import { askPhotoSource, launchPhotoPicker } from '@/photoSource';
 import {
   dismissConversationNotifications,
   setOnScreenConversation,
@@ -1175,44 +1175,19 @@ export default function ThreadScreen() {
    * **The camera is offered first, not just the library.** Sending a picture of
    * what's in front of you is at least half of what a photo in a chat is for,
    * and bouncing someone out to the camera app and back is the kind of friction
-   * that makes an app feel like a website with a wrapper.
-   *
-   * A plain `Alert` rather than a native action sheet: three choices, one of
-   * them Cancel, and it's the pattern this screen already uses for destructive
-   * confirms — an extra dependency for a rounder sheet isn't worth it.
+   * that makes an app feel like a website with a wrapper. The prompt itself
+   * lives in `photoSource.ts` so every screen that takes a photo asks the same
+   * way — see there for why it's an `Alert` and not an action sheet.
    */
-  function attachPhoto() {
-    Alert.alert('Send a photo', undefined, [
-      { text: 'Take Photo', onPress: () => pickPhoto('camera') },
-      { text: 'Choose from Library', onPress: () => pickPhoto('library') },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
-  }
+  async function attachPhoto() {
+    const source = await askPhotoSource('Send a photo');
+    if (!source) return;
 
-  async function pickPhoto(source: 'camera' | 'library') {
-    let picked;
-    if (source === 'camera') {
-      // The camera *does* need permission — unlike the modern library picker,
-      // which runs out of process and hands back only what was chosen.
-      const permission = await ImagePicker.requestCameraPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert(
-          'Camera access needed',
-          'Allow camera access in Settings to take a photo here.'
-        );
-        return;
-      }
-      picked = await ImagePicker.launchCameraAsync({ quality: 1 });
-    } else {
-      // `quality: 1` on both: this is the *pick*, and every photo is resized and
-      // re-encoded a moment later by `prepareChatPhoto`. Compressing twice would
-      // only throw away detail before the step that decides how much to keep.
-      picked = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        quality: 1,
-      });
-    }
-    if (picked.canceled) return;
+    // `quality: 1`: this is the *pick*, and every photo is resized and
+    // re-encoded a moment later by `prepareChatPhoto`. Compressing twice would
+    // only throw away detail before the step that decides how much to keep.
+    const picked = await launchPhotoPicker(source, { quality: 1 });
+    if (!picked || picked.canceled) return;
     const asset = picked.assets[0];
     if (!asset) return;
 

@@ -50,7 +50,7 @@
         "expo-image-picker",
         {
           "photosPermission": "TimeLine needs access to your photos so you can add them to a post or send them in a chat.",
-          "cameraPermission": "TimeLine needs access to your camera so you can take a photo to send in a chat.",
+          "cameraPermission": "TimeLine needs access to your camera so you can take a photo for a post, a chat or your profile.",
           "microphonePermission": false
         }
       ],

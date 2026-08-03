@@ -8,12 +8,12 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { api, type PhotoUpload } from '@/api';
+import { askPhotoSource, launchPhotoPicker } from '@/photoSource';
 import { AvatarCropModal } from './AvatarCropModal';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -69,11 +69,11 @@ export function GroupForm({
   });
 
   async function pickAvatar() {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 1,
-    });
-    if (result.canceled) return;
+    const source = await askPhotoSource('Group photo');
+    if (!source) return;
+    // Full image, not the OS square crop — our round cropper reframes it.
+    const result = await launchPhotoPicker(source, { quality: 1 });
+    if (!result || result.canceled) return;
     const asset = result.assets[0];
     setPendingCrop({ uri: asset.uri, width: asset.width, height: asset.height });
   }
