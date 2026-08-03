@@ -411,6 +411,15 @@ avatar, its posts' photos and its chats' attachments. `_post_image_files`,
 place — **any new delete path has to use them**, because an orphaned file stays
 retrievable by URL, so "delete the post I regret" otherwise doesn't.
 
+**The confirm dialog can't be dismissed while the POST is open** (issue #254) —
+on either client, by Escape, the backdrop, Cancel or the Android hardware back.
+It renders the rejection inside itself, and a "wrong password" 400 is the
+overwhelmingly likely one, so dismissing it mid-request left you with no idea
+whether the account you'd just asked to erase still existed. Same gate
+`ConfirmDeleteDialog.jsx` puts on a half-done delete; the rule and its two
+gotchas are written up in
+[connections.md](connections.md#reporting-a-refused-write).
+
 All in one transaction. Chosen over anonymise-and-keep because it's the cleaner
 erasure story for a privacy-first app; the accepted trade-off is that replies
 *others* wrote under a deleted user's comment cascade away too. **Backups caveat**

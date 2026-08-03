@@ -80,7 +80,9 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
       transparent
       animationType="fade"
       visible
-      onRequestClose={onCancel}
+      onRequestClose={() => {
+        if (!deleting) onCancel();
+      }}
       accessibilityViewIsModal
     >
       {/* Required since #172 mounted `KeyboardProvider`: that strips the
@@ -90,7 +92,17 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
           `components/KeyboardAvoider.tsx`. The avoider pads the bottom and the
           backdrop then centres the card in what's left. */}
       <KeyboardAvoider style={styles.avoider}>
-        <Pressable style={styles.backdrop} onPress={onCancel}>
+        {/* Every way out — backdrop, Cancel, and the Android hardware back
+            above — is held shut while the delete is in flight (issue #254).
+            The rejection ("wrong password", most often) renders inside this
+            modal, so dismissing it mid-request tears down the only thing that
+            could say why nothing happened, and leaves you unsure whether your
+            account still exists. Matches the web's `ConfirmDeleteDialog`. */}
+        <Pressable
+          testID="delete-account-backdrop"
+          style={styles.backdrop}
+          onPress={deleting ? undefined : onCancel}
+        >
           <Pressable style={styles.card} onPress={() => {}}>
             <Text style={styles.cardTitle}>Delete your account?</Text>
             <Text style={styles.cardBody}>
@@ -120,8 +132,13 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
             <View style={styles.actions}>
               <Pressable
                 onPress={onCancel}
+                disabled={deleting}
                 accessibilityRole="button"
-                style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.btn,
+                  styles.ghost,
+                  (pressed || deleting) && styles.pressed,
+                ]}
               >
                 <Text style={styles.ghostLabel}>Cancel</Text>
               </Pressable>

@@ -63,6 +63,9 @@ export function ReportModal({
         messageId,
         reason: reason.trim(),
       });
+      // Clear `submitting` alongside `done`: the dismissal gates below read it,
+      // and the success screen must stay dismissable by back and the backdrop.
+      setSubmitting(false);
       setDone(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Couldn’t send the report.');
@@ -75,7 +78,9 @@ export function ReportModal({
       transparent
       animationType="fade"
       visible
-      onRequestClose={onClose}
+      onRequestClose={() => {
+        if (!submitting) onClose();
+      }}
       accessibilityViewIsModal
     >
       {/* Required since #172 mounted `KeyboardProvider`: that strips the
@@ -84,8 +89,20 @@ export function ReportModal({
           with no scroll to reach them. See `components/KeyboardAvoider.tsx`. */}
       <KeyboardAvoider style={styles.avoider}>
         {/* Backdrop cancels; the card swallows its own presses (a sibling
-            Pressable), matching DisconnectWarningModal. */}
-        <Pressable style={styles.backdrop} onPress={onClose}>
+            Pressable), matching DisconnectWarningModal.
+
+            Every way out — backdrop, Cancel, and the Android hardware back
+            above — is held shut while the report is in flight (issue #254).
+            The rejection renders inside this modal, so dismissing it mid-request
+            tears down the only thing that could have said the report never
+            sent, and silence here is indistinguishable from never having
+            pressed Send. This is the safety path; it doesn't get to be
+            ambiguous. Matches the web's `ConfirmDeleteDialog`. */}
+        <Pressable
+          testID="report-backdrop"
+          style={styles.backdrop}
+          onPress={submitting ? undefined : onClose}
+        >
           <Pressable style={styles.card} onPress={() => {}}>
             {done ? (
               <>
@@ -142,8 +159,13 @@ export function ReportModal({
                 <View style={styles.actions}>
                   <Pressable
                     onPress={onClose}
+                    disabled={submitting}
                     accessibilityRole="button"
-                    style={({ pressed }) => [styles.btn, styles.ghost, pressed && styles.pressed]}
+                    style={({ pressed }) => [
+                      styles.btn,
+                      styles.ghost,
+                      (pressed || submitting) && styles.pressed,
+                    ]}
                   >
                     <Text style={styles.ghostLabel}>Cancel</Text>
                   </Pressable>

@@ -43,13 +43,19 @@ function ConfirmDeleteModal({ onCancel }) {
 
   // Esc cancels; lock background scroll and move focus in — same dialog pattern
   // as DisconnectWarningModal.
+  //
+  // Not while the delete is in flight, though (issue #254): the rejection —
+  // "wrong password", most often — is rendered inside this dialog, so a
+  // dismissal mid-request unmounts the only thing that could say why nothing
+  // happened, and leaves you unsure whether your account still exists. Same
+  // gate `ConfirmDeleteDialog` puts on a half-done delete.
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") onCancel();
+      if (event.key === "Escape" && !deleting) onCancel();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  }, [onCancel, deleting]);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -87,7 +93,7 @@ function ConfirmDeleteModal({ onCancel }) {
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4 backdrop-blur-sm"
-      onClick={onCancel}
+      onClick={deleting ? undefined : onCancel}
     >
       <form
         ref={dialogRef}
@@ -131,6 +137,7 @@ function ConfirmDeleteModal({ onCancel }) {
           <button
             type="button"
             onClick={onCancel}
+            disabled={deleting}
             className="btn btn-ghost btn-sm"
           >
             Cancel

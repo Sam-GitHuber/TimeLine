@@ -258,6 +258,44 @@ describe('DeleteAccountSection', () => {
     expect(await screen.findByText('Incorrect password.')).toBeTruthy();
     expect(mockSignOut).not.toHaveBeenCalled();
   });
+
+  // Issue #254. The rejection — "wrong password", most often — renders inside
+  // this modal, so dismissing it mid-request tears down the only thing that
+  // could say why nothing happened, and leaves you unsure whether the account
+  // you just asked to erase still exists. On Android it's one hardware-back
+  // press away, which is why `onRequestClose` is in here too.
+  it('holds every way out shut while the delete is in flight', async () => {
+    let settle: (value: unknown) => void = () => {};
+    mockFetch.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      })
+    );
+    await openModal();
+    await fireEvent.changeText(screen.getByLabelText('Password'), 'wrong');
+    // Deliberately not awaited: `fireEvent` hands back the handler's own
+    // promise, and this one is the request we're keeping open — awaiting it
+    // would hang the test rather than leave the modal mid-write.
+    fireEvent.press(screen.getByText('Delete forever'));
+    await waitFor(() =>
+      expect(made(/\/api\/account\/delete\/$/, 'POST')).toBe(true)
+    );
+
+    // Android hardware back, the backdrop, and Cancel — the three routes out.
+    // `requestClose` is fired at the backdrop and bubbles to the `Modal`'s
+    // `onRequestClose`, which is what the OS calls on a hardware-back press.
+    await fireEvent(screen.getByTestId('delete-account-backdrop'), 'requestClose');
+    await fireEvent.press(screen.getByTestId('delete-account-backdrop'));
+    await fireEvent.press(screen.getByText('Cancel'));
+    expect(screen.getByText('Delete your account?')).toBeTruthy();
+
+    // So the rejection has somewhere to land.
+    await act(async () => {
+      settle(jsonResponse({ detail: 'Incorrect password.' }, 403));
+    });
+    expect(await screen.findByText('Incorrect password.')).toBeTruthy();
+    expect(mockSignOut).not.toHaveBeenCalled();
+  });
 });
 
 describe('FeedPreferencesSection', () => {

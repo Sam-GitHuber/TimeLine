@@ -250,6 +250,57 @@ describe('ReportModal on a message (Phase 9b M0)', () => {
     screen.getByText('Report this post');
     expect(screen.queryByText(/A copy of this message is sent/)).toBeNull();
   });
+
+  // Issue #254. The rejection renders *inside* this modal, so dismissing it
+  // mid-request tears down the only thing that could say the report never sent
+  // — and on the safety path, that silence is indistinguishable from never
+  // having pressed Send. On Android it's one hardware-back press away, which is
+  // why `onRequestClose` is in here alongside the backdrop and Cancel.
+  it('holds every way out shut while the report is in flight', async () => {
+    let settle: (value: unknown) => void = () => {};
+    mockFetch.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      })
+    );
+    const onClose = jest.fn();
+    await renderWithClient(<ReportModal postId={7} onClose={onClose} />);
+
+    // Deliberately not awaited: `fireEvent` hands back the handler's own
+    // promise, and this one is the request we're keeping open — awaiting it
+    // would hang the test rather than leave the modal mid-write.
+    fireEvent.press(screen.getByText('Send report'));
+    await waitFor(() => expect(made(/\/api\/reports\/$/, 'POST')).toBe(true));
+
+    // Android hardware back, the backdrop, and Cancel — the three routes out.
+    // `requestClose` is fired at the backdrop and bubbles to the `Modal`'s
+    // `onRequestClose`, which is what the OS calls on a hardware-back press.
+    await fireEvent(screen.getByTestId('report-backdrop'), 'requestClose');
+    await fireEvent.press(screen.getByTestId('report-backdrop'));
+    await fireEvent.press(screen.getByText('Cancel'));
+    expect(onClose).not.toHaveBeenCalled();
+
+    // So the rejection has somewhere to land.
+    await act(async () => {
+      settle(jsonResponse({ detail: 'Report failed.' }, 500));
+    });
+    expect(await screen.findByText('Report failed.')).toBeTruthy();
+  });
+
+  // The other half of that gate: `submitting` is what holds the modal shut, so
+  // it has to be released once the report lands, or the "Thanks for letting us
+  // know" screen would be stuck behind its Done button.
+  it('is dismissable again once the report has landed', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ id: 6 }, 201));
+    const onClose = jest.fn();
+    await renderWithClient(<ReportModal postId={7} onClose={onClose} />);
+
+    await fireEvent.press(screen.getByText('Send report'));
+    await screen.findByText('Thanks for letting us know');
+
+    await fireEvent(screen.getByTestId('report-backdrop'), 'requestClose');
+    expect(onClose).toHaveBeenCalled();
+  });
 });
 
 describe('BlockButton', () => {

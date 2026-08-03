@@ -124,6 +124,32 @@ mutation rather than reject it, and a dialog that refuses Cancel while busy woul
 then never let go. The deferral note in `mobile/src/app/_layout.tsx` names every
 component that depends on it — add to that list, don't just add the dependency.
 
+**Issue #254 made that hold the rule for every dialog that renders its own
+rejection**, which is the *unmount* spelling of the same bug: the message is
+written into a component that has already been torn down, so nothing renders
+anywhere. The four that didn't follow it were `ReportModal` and
+`DeleteAccountSection` on both clients, all of which left Escape, the backdrop,
+Cancel and (on the phone) `onRequestClose` — the Android hardware back — wired
+straight through while the request was open. `ConfirmDeleteDialog.jsx` had
+already settled the pattern next door; these just hadn't adopted it. The
+invariant is worth stating as a class rather than four instances: **a dialog that
+is the only renderer of its own error may not be dismissable while that write is
+in flight.** Reporting is the one that matters most — it's the safety path, its
+success screen is a whole "Thanks for letting us know" panel, so a silent failure
+is indistinguishable from never having pressed Send.
+
+Two things a change here has to keep:
+
+- **Release the flag on success.** The web and mobile `ReportModal`s both stay
+  mounted after a successful send to show that thanks screen, so `submitting`
+  clears alongside `done` — otherwise the gate holds the success screen shut too,
+  behind its Done button. Pinned in `frontend/src/legal-safety.test.jsx` and
+  `mobile/src/__tests__/safety.test.tsx`.
+- These four run their request with plain `async`/`await` and `useState`, **not a
+  React Query mutation**, so the `onlineManager` tripwire above doesn't reach
+  them: an offline `fetch` rejects rather than pausing, and the gate lets go. Move
+  one onto a mutation and it joins that list.
+
 ## Comments (threaded, connection-pruned)
 
 Posts have a **threaded comment tree** — `Comment` model: `post`, `author`,
