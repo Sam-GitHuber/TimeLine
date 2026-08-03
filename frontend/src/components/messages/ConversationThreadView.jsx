@@ -1732,17 +1732,22 @@ export default function ConversationThreadView() {
           line after `mutate()` while its DELETEs go out one at a time.
 
           So the fix is where they render, not who can reach what: out here they
-          are a sibling of the column rather than a child of it, and there is no
-          longer a state of this view in which they paint into a hidden subtree.
-          The invariant, stated as the class it is: **nothing in that column may
-          be the only renderer of a write that can outlive the transcript being
-          visible.** A `role="alert"` in a `display: none` subtree isn't
-          announced either, so this was silent to a screen reader too.
+          sit outside the column entirely — a sibling of the row that holds both
+          it and the strand — and there is no longer a state of this view in
+          which they paint into a hidden subtree. The invariant, stated as the
+          class it is: **nothing in that column may be the only renderer of a
+          write that can outlive the transcript being visible.** A `role="alert"`
+          in a `display: none` subtree isn't announced either, so this was silent
+          to a screen reader too.
 
           Kept out of the column, not merely conditioned on `!strand` — the
-          message is worth *more* over an open strand, not less, because backing
-          out of one to the conversation list unmounts this view (keyed on
-          `conversationId` in `MessagesDrawer`) and takes the message with it. */}
+          message is worth *more* over an open strand, not less, because leaving
+          the thread for the conversation list unmounts this view (`MessagesDrawer`
+          renders it only while `view === "thread"`) and takes the message with
+          it. That unmount is its own open bug, #258: the drawer's Back, ✕ and
+          Escape are a level above this component and can't see a write in
+          flight, so they can still tear the bar down with everything else. This
+          change stops the *hiding*; it doesn't stop the *unmounting*. */}
       {(photoError || editMutation.isError || deleteManyMutation.isError) && (
         <div className="space-y-1 px-3 pb-3 text-sm text-red-600">
           {/* A photo that couldn't be prepared never reached the outbox, so it

@@ -1493,14 +1493,23 @@ was no race to win at all, since `confirmDeleteSelected` ends select mode on the
 line *after* `mutate()` while its DELETEs go out one at a time, leaving the
 transcript fully interactive for the length of the selection. A failed edit,
 likewise, is reachable from an open strand because edit mode doesn't stand the
-reply counts down. All three now render in a small bar that is a **sibling** of
-the transcript column rather than a child of it, so it survives whichever of the
-two is on screen; and it's kept out of the column rather than merely conditioned
-on `!strand`, because the message is worth *more* over an open strand — backing
-out of one to the conversation list unmounts the whole view (keyed on
-`conversationId` in `MessagesDrawer`) and takes the message with it. A
-`role="alert"` in a `display: none` subtree isn't announced either, so this was
-silent to a screen reader as well as invisible.
+reply counts down. All three now render in a small bar **outside the column
+entirely** — a sibling of the row that holds both it and the strand panel — so it
+survives whichever of the two is on screen; and it's kept out of the column
+rather than merely conditioned on `!strand`, because the message is worth *more*
+over an open strand. A `role="alert"` in a `display: none` subtree isn't
+announced either, so this was silent to a screen reader as well as invisible.
+
+⚠️ **This closes the hiding half, not the unmounting half.** Leaving the thread
+for the conversation list unmounts the whole view — `MessagesDrawer` renders it
+only while `view === "thread"` (the `key={conversationId}` beside it is what
+forces a remount when you switch *between* chats, a different thing) — and that
+takes the bar with it, mid-write and all. The drawer's Back, ✕ and Escape sit a
+level above this component and can't see a write in flight, so they can still
+tear it down: that's **#258**, still open, and its fix is a `useMessaging`
+in-flight flag the chrome reads. `editMutation` has a second hole of its own in
+**#257** (`stopEditing` calls `reset()` unconditionally, discarding a rejection
+that hasn't arrived). Both are the same family one dismissal-route spelling over.
 
 **So the invariant is about the rendering, not about who can reach what:**
 nothing in that column may be the only renderer of a write that can outlive the
