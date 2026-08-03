@@ -345,6 +345,66 @@ describe("ReactionBar — a rejected toggle", () => {
     );
   });
 
+  it("keeps one chip's message when a different chip is tapped", async () => {
+    // A fresh attempt on ❤️ is no evidence about whether 👍 landed. Clearing
+    // every message on any tap would put 👍's silence straight back — the
+    // manual half of the same rule the resync test above pins.
+    api.toggleReaction.mockRejectedValueOnce(offlineError());
+    api.toggleReaction.mockResolvedValueOnce({
+      reactions: [
+        { emoji: "👍", count: 3, reacted: false },
+        { emoji: "❤️", count: 2, reacted: true },
+      ],
+    });
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[
+          { emoji: "👍", count: 3, reacted: false },
+          { emoji: "❤️", count: 1, reacted: false },
+        ]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("button", { name: /❤️/ }));
+
+    // ❤️ went through; 👍 still hasn't, and still says so.
+    expect(await screen.findByText("2")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Couldn’t add that reaction — try again.",
+    );
+  });
+
+  it("reports both taps when two different chips fail", async () => {
+    // One message slot would leave the loser of this race silent — the very
+    // bug being fixed, reappearing for whichever chip settled first.
+    api.toggleReaction.mockRejectedValue(offlineError());
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[
+          { emoji: "👍", count: 3, reacted: false },
+          { emoji: "❤️", count: 1, reacted: true },
+        ]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: THUMB }));
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("button", { name: /❤️/ }));
+
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+    // Each names its own emoji and its own direction: 👍 was being added, ❤️
+    // taken back. Two identical lines would say nothing about either.
+    const [thumb, heart] = screen.getAllByRole("alert");
+    expect(thumb).toHaveTextContent("👍 Couldn’t add that reaction — try again.");
+    expect(heart).toHaveTextContent(
+      "❤️ Couldn’t remove that reaction — try again.",
+    );
+  });
+
   it("clears the previous message when you tap again", async () => {
     api.toggleReaction.mockRejectedValueOnce(offlineError());
     api.toggleReaction.mockResolvedValueOnce({

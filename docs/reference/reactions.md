@@ -181,6 +181,13 @@ Recorded here so a future session doesn't discover it and assume it was missed.
   — the toggle landed and only its response was lost. Any other resync leaves it
   standing (issue #231). Here that's one comparison rather than ConnectButton's
   two, because a chip is yours or it isn't.
+  **Failures are held per emoji, not one to a bar** — the one place this pattern
+  departs from the single-control siblings it comes from. A bar is a row of
+  independent toggles, so a single slot would let the second failure overwrite
+  the first and leave a failed tap silent again; and tapping ❤️ must not retire
+  the message about 👍, which is no more evidence than an unrelated resync is.
+  Each message therefore names its own emoji, since two bare red lines under one
+  row say nothing about which tap they belong to.
 
 **In the messages drawer (Phase 9b M9c)** the same components serve a different
 grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️ 😂 😮 😢
@@ -188,8 +195,9 @@ grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️
 the message's `⋯` menu rather than on a button of its own; the `＋`
 expands that same panel into the full picker in place. Pills hang off the
 bubble's lower edge and 🔒 **a pill never toggles — it opens "who reacted"**,
-which is where your own row offers *"tap to remove"*. There is **no optimistic
-toggle** here, unlike the feed's chips: see *Message reactions* above.
+which is where your own row offers *"tap to remove"*. Neither is optimistic —
+the feed's chips aren't either (above); what differs here is that a pill isn't
+a control at all, for the reason under *Message reactions*.
 
 Two mechanical differences worth knowing before touching either:
 

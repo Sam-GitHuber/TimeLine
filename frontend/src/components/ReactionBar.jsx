@@ -95,9 +95,16 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
   // four one-tap reactions, "full" → the whole emoji picker.
   const [menu, setMenu] = useState(null);
   const [whoOpen, setWhoOpen] = useState(false);
-  // A rejected toggle, tagged with the emoji it was for and whether that emoji
-  // was yours when you tapped — see the clear-condition below.
-  const [failure, setFailure] = useState(null);
+  // Rejected toggles, keyed by emoji, each tagged with whether that emoji was
+  // yours when you tapped — see the clear-condition below.
+  //
+  // **A map rather than the single slot its siblings use.** ConnectButton,
+  // BlockButton and RsvpBar are each one control doing one thing, so one slot
+  // holds every failure they can have. This bar is a *row* of independent
+  // toggles, and one slot there means the second failure overwrites the first:
+  // two taps that both failed, one message, and the other tap silent again —
+  // precisely the bug this exists to fix, reappearing for whichever chip lost.
+  const [failures, setFailures] = useState({});
   const addBtnRef = useRef(null);
   const whoBtnRef = useRef(null);
 
@@ -112,15 +119,16 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
     setItems(incoming);
   }
 
-  // Retire the message once the server's own answer moves to the state that tap
+  // Retire a message once the server's own answer moves to the state that tap
   // was reaching for — the toggle landed and only its response was lost, so
   // "couldn't add that reaction" would now be sitting beside a chip that says
-  // you did. Nothing else clears it: a summary that changed for some other
-  // reason (someone else reacted, a different emoji of yours toggled) is not
-  // confirmation of your attempt, and clearing on any resync is the swallow
-  // issue #231 describes. The comparison is against `mine`, recorded at the
-  // attempt rather than at the rejection, so a refetch landing in the same
-  // render batch as the rejection can't eat the message before it's painted.
+  // you did. Nothing else clears it, and each is judged only on *its own*
+  // emoji: a summary that changed for some other reason (someone else reacted,
+  // a different emoji of yours toggled) is not confirmation of your attempt,
+  // and clearing on any resync is the swallow issue #231 describes. The
+  // comparison is against `mine`, recorded at the attempt rather than at the
+  // rejection, so a refetch landing in the same render batch as the rejection
+  // can't eat the message before it's painted.
   //
   // Testing "moved off what it was" rather than "arrived at what we wanted" is
   // the same condition here, since a chip is yours or it isn't — unlike
@@ -130,8 +138,13 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
   // `items` is the right thing to read: it is only ever assigned a summary the
   // server sent, whether from the re-sync above or from a later toggle's own
   // response. Nothing here is optimistic.
-  if (failure && hasReacted(items, failure.emoji) !== failure.mine) {
-    setFailure(null);
+  const landed = Object.keys(failures).filter(
+    (emoji) => hasReacted(items, emoji) !== failures[emoji].mine,
+  );
+  if (landed.length > 0) {
+    const rest = { ...failures };
+    for (const emoji of landed) delete rest[emoji];
+    setFailures(rest);
   }
 
   const toggle = useMutation({
@@ -148,7 +161,16 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
   async function react(emoji) {
     setMenu(null);
     const mine = hasReacted(items, emoji);
-    setFailure(null);
+    // Only this emoji's message goes. A fresh attempt on ❤️ says nothing about
+    // whether your 👍 landed, so dropping that one here would put the silence
+    // straight back — the same reasoning as the clear-condition above, applied
+    // to the manual clear rather than the automatic one.
+    setFailures((prev) => {
+      if (!(emoji in prev)) return prev;
+      const rest = { ...prev };
+      delete rest[emoji];
+      return rest;
+    });
     try {
       await toggle.mutateAsync(emoji);
     } catch (err) {
@@ -157,11 +179,13 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
       // written for a person. `serverMessage` is what keeps the browser's
       // "Failed to fetch" and a body-less 500's "Request failed (500)" out,
       // both of which a bare `err.message` would show (issue #240).
-      setFailure({
-        emoji,
-        mine,
-        text: serverMessage(err, mine ? FAILURES.remove : FAILURES.add),
-      });
+      setFailures((prev) => ({
+        ...prev,
+        [emoji]: {
+          mine,
+          text: serverMessage(err, mine ? FAILURES.remove : FAILURES.add),
+        },
+      }));
     }
   }
 
@@ -273,12 +297,20 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
       {/* Reported where the tap happened, under the row rather than beside it:
           this row wraps, and a message sharing a line with the chips would be
           pushed off the end of a busy one. `w-full` takes its own line in the
-          same flex container. */}
-      {failure && (
-        <p role="alert" className="w-full text-xs leading-snug text-red-600">
-          {failure.text}
+          same flex container.
+          Each names its own emoji — with two of these up, identical red lines
+          would say nothing about which tap failed. Deliberately not
+          `aria-hidden`: which emoji it's about is the part a screen reader
+          most needs, and an emoji is announced by name. */}
+      {Object.entries(failures).map(([emoji, failure]) => (
+        <p
+          key={emoji}
+          role="alert"
+          className="w-full text-xs leading-snug text-red-600"
+        >
+          {emoji} {failure.text}
         </p>
-      )}
+      ))}
     </div>
   );
 }
