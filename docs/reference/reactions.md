@@ -159,7 +159,28 @@ Recorded here so a future session doesn't discover it and assume it was missed.
   top). See the design note in the git history if this regresses.
 - Aggregated `emoji × count` chips on every post, comment, and reply; clicking your
   own chip toggles it off; a count reveals the visible "who reacted" list.
-  TanStack Query with an optimistic toggle.
+- **The chips are never optimistic.** `ReactionBar` holds the summary in state and
+  only ever assigns it something the *server* sent — the re-synced prop, or a
+  toggle's own response — so what you see is always an answer, never a guess.
+  Worth knowing before adding one: the clear-condition below depends on it.
+- **A rejected toggle is reported inline** (issue #242), by both clients. It had
+  no error path at all on the web until then: with the chips repainted only from
+  `onSuccess`, a rejection changed nothing on screen, and `react()` closes the
+  popover *before* sending, so the popover shutting was no evidence either. A
+  failed tap was indistinguishable from a successful one on one of the app's
+  highest-traffic gestures — and the natural response, tapping again, hits a
+  server that may have taken the first one, where the second tap *removes* it.
+  It follows the two rules from
+  [connections.md](connections.md#reporting-a-refused-write): the server's own
+  words via `serverMessage` where it wrote any (the per-target distinct-emoji cap
+  and emoji validation both reject with sentences meant for a person), our own
+  otherwise — named per direction, "couldn't add" vs "couldn't remove", since a
+  chip does two opposite things depending on whether it's already yours. The
+  message carries the emoji and whether that emoji was yours **at the tap**, and
+  is retired only when the server's summary shows that reacted-state has flipped
+  — the toggle landed and only its response was lost. Any other resync leaves it
+  standing (issue #231). Here that's one comparison rather than ConnectButton's
+  two, because a chip is yours or it isn't.
 
 **In the messages drawer (Phase 9b M9c)** the same components serve a different
 grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️ 😂 😮 😢

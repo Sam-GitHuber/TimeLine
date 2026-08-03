@@ -22,6 +22,13 @@ export const fakeUser = {
 // surfaces its error state immediately instead of after backoff. Pass
 // `auth: { user: null }` to simulate a logged-out visitor, or override any of
 // the context callbacks.
+//
+// Alongside RTL's own `rerender`, the result carries **`setProps`**: the same
+// thing, but keeping this render's providers and QueryClient in place. Bare
+// `rerender` replaces the root, dropping the wrappers. It's for the case where
+// what's being tested is a component reacting to the server's answer changing
+// *underneath it while it stays mounted* — driving that through the app would
+// navigate, which remounts the component and takes the state under test with it.
 export function renderWithAuth(ui, { route = "/", auth = {} } = {}) {
   const value = {
     user: fakeUser,
@@ -35,13 +42,15 @@ export function renderWithAuth(ui, { route = "/", auth = {} } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const wrap = (node) => (
     <QueryClientProvider client={queryClient}>
       <AuthContext.Provider value={value}>
-        <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
+        <MemoryRouter initialEntries={[route]}>{node}</MemoryRouter>
       </AuthContext.Provider>
     </QueryClientProvider>
   );
+  const utils = render(wrap(ui));
+  return { ...utils, setProps: (node) => utils.rerender(wrap(node)) };
 }
 
 // ---------------------------------------------------------------------------
