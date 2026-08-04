@@ -59,6 +59,19 @@ export function BlockButton({
     // as a disconnect does and refreshes the same set. Its own list used to omit
     // `['connections']`, leaving someone you'd just blocked listed as a
     // connection (#278), and every calendar and event key (#285).
+    //
+    // **Unblocking deliberately fires the same call, and it is a superset of
+    // what that direction needs.** `BlockView.delete` only deletes the `Block`
+    // row — it restores no connection, so `connected_user_ids` doesn't move and
+    // the feed/calendar/event keys are a wasted refetch rather than a wrong one.
+    // What unblocking does move is most of the rest: `is_blocked` on the profile
+    // and the people lists, and the messaging surfaces, since
+    // `_conversation_visible` hides a blocked pair's direct thread and lifting
+    // the block brings it back. Splitting the two directions to save one refetch
+    // on a rare, deliberate action would put the *block* path — the one where
+    // being subtly wrong means believing someone is cut off who isn't (#236) —
+    // at the mercy of a boolean prop. Not worth it; both directions are pinned
+    // in `connectionCache.test.tsx`.
     onSuccess: () => invalidateConnectionChange(queryClient, userId),
   });
 

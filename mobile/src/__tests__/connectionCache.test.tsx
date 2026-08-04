@@ -220,6 +220,32 @@ it('refreshes the same set when you block someone', async () => {
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ['connections'] });
 });
 
+/**
+ * Unblocking takes the same call, and the comment on `BlockButton` says why it's
+ * a superset rather than a fork. `BlockView.delete` restores no connection, so
+ * the content keys are a wasted refetch — but the profile, the people lists and
+ * the messaging surfaces all move (a blocked pair's direct thread is hidden by
+ * `_conversation_visible` and comes back), and the block direction is not worth
+ * putting behind a boolean to save them. Pinned so it stays a decision.
+ */
+it('refreshes the same set when you unblock someone', async () => {
+  const { surfaces } = await renderOverSurfaces(
+    <BlockButton userId={42} displayName="Ada Lovelace" isBlocked />
+  );
+
+  // No confirmation on this direction — unblocking undoes no damage.
+  await fireEvent.press(screen.getByLabelText('Unblock'));
+
+  await waitFor(() =>
+    expect(
+      mockFetch.mock.calls.some(
+        ([url, init]) => String(url).endsWith('/users/42/block/') && init.method === 'DELETE'
+      )
+    ).toBe(true)
+  );
+  await waitFor(() => expect(loadCounts(surfaces)).toEqual(allAt(2)));
+});
+
 /** The locked panel's Connect is the same write, so it refreshes the same set. */
 it('refreshes the same set when you connect from the locked chat panel', async () => {
   const { surfaces } = await renderOverSurfaces(

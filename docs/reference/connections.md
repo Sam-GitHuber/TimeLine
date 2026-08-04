@@ -185,6 +185,15 @@ never remounts, and `staleTime: 0` buys nothing without something marking it
 stale. Block the person who organised a dated event and it sat on your Calendar
 tab for the rest of the session, answering a tap with *Event not available*.
 
+The messaging keys are the one place it departs from the group-membership
+helper, which leaves `['conversations']` / `['unreadMessages']` out as polled
+and self-healing. The difference is what's on screen when the write is made: a
+group leave only removes access and you make it from the Groups tab, where
+connecting *grants* access and the locked `PendingChatPanel` is a screen you're
+staring at waiting for it to open. A poll cycle of *"Connect with Dana to join
+this chat"* after you already have is the bug, not a slow heal. The polled-key
+rule still holds everywhere it isn't beaten by something the user is watching.
+
 Two decisions worth keeping:
 
 - **It doesn't fork on which transition it was**, unlike the group-membership

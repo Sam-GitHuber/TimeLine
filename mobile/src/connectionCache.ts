@@ -70,11 +70,26 @@
  *   `PendingChatPanel` already refreshed the open thread and the list; doing it
  *   from a profile instead left the same chat locked (#278).
  *
+ * **These three are the one place this helper departs from `groupCache.ts`**,
+ * which leaves `['conversations']` / `['unreadMessages']` out precisely because
+ * they're polled and heal within a cycle. The difference is what's on screen at
+ * the moment of the write. A group leave only ever *removes* your access, and
+ * you're on the Groups tab when you make it; connecting *grants* access, and the
+ * `PendingChatPanel` is a locked screen you are staring at, waiting for it to
+ * open — a poll cycle of "Connect with Dana to join this chat" after you already
+ * have is the bug, not a slow heal. `['unreadMessages']` rides with
+ * `['conversations']` rather than on its own merit: it's derived from that list,
+ * and the two disagreeing for a cycle (a badge counting a chat the list has
+ * already dropped, or not counting one it just gained) is the visible artefact.
+ * The polled-key rule still holds everywhere it isn't beaten by something the
+ * user is looking at.
+ *
  * **Deliberately not in here:** `['notificationsUnread']` / `['notifications']`,
  * which approving does move (it addresses the request's notification and posts
  * an accepted one) and rejecting moves too (deleting the `Connection` cascades
- * its notification away). Both are **polled** by the activity bell, so they heal
- * within a cycle — the same call `groupCache.ts` makes, for the same reason.
+ * its notification away). Both are **polled** by the activity bell, and neither
+ * is the screen the write was made from, so they heal within a cycle — the call
+ * `groupCache.ts` makes, for the reason it makes it.
  */
 
 import type { QueryClient } from '@tanstack/react-query';
