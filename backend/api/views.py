@@ -859,9 +859,16 @@ def _comment_chain_visible(comment, visible_author_ids):
 def can_view_comment(user, comment, connected_ids=None):
     """Whether ``user`` can see ``comment``. Mirrors the pruned comment tree
     (``PostCommentsView``): the comment's post must be visible, and the comment
-    must survive the same subtree prune the tree builder applies — so its
-    author, *and the author of every comment above it*, must be active and be
-    the viewer or one of their connections.
+    must survive the tree builder's **connection** prune — so its author, *and
+    the author of every comment above it*, must be active and be the viewer or
+    one of their connections.
+
+    The tree builder's *other* prune — a tombstone with no visible replies left
+    to hold up — is deliberately **not** applied here. Every caller handles
+    deleted content explicitly and with better words than a bare 404
+    ("there's nothing to report", "that comment was deleted"), and the rule
+    costs a walk down the subtree that only the reply path has a reason to pay
+    for; ``PostCommentsView.post`` applies it there.
     """
     if connected_ids is None:
         connected_ids = connected_user_ids(user)
@@ -1883,8 +1890,31 @@ class PostCommentsView(APIView):
             # would resurrect a slot its author had finished with. (It would also
             # keep the tombstone alive indefinitely — the tree only renders one
             # while replies still hang off it.)
+            #
+            # But say so *only* if this viewer's tree still renders it. The tree
+            # builder's second prune drops a tombstone once it holds nothing up,
+            # and that state is reachable — a soft delete leaves the tombstone,
+            # then its last reply is hard-deleted out from under it. Answering
+            # "that was deleted" there would confirm a comment once stood at an
+            # id the viewer's own thread no longer shows, which is the same
+            # oracle PARENT_UNAVAILABLE exists to close, so it takes the same
+            # answer. ``can_view_comment`` deliberately doesn't fold this in:
+            # reactions and reports want the explicit deleted-content message,
+            # and it costs a walk that only this path needs.
+            visible_author_ids = connected_ids | {request.user.id}
+            still_rendered = build_visible_comment_tree(
+                list(
+                    post.comments.select_related("author").filter(
+                        author__is_active=True
+                    )
+                ),
+                visible_author_ids,
+                root_id=parent.id,
+            )
+            if not still_rendered:
+                raise ValidationError({"parent": [PARENT_UNAVAILABLE]})
             raise ValidationError(
-                {"parent": "That comment was deleted, so you can't reply to it."}
+                {"parent": ["That comment was deleted, so you can't reply to it."]}
             )
         comment = serializer.save(author=request.user, post=post)
         # Notify the person being replied to (Phase 8). A top-level comment

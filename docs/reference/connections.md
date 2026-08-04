@@ -231,7 +231,7 @@ Two things that fix depends on, both easy to get subtly wrong:
   naive author-filtered `COUNT`. Because it's the shared helper, comment
   **reactions** and **reports** were closed by the same change; they were open in
   precisely the same way.
-- **All three rejections have to be one rejection.** Unknown id, wrong post and
+- **All the rejections have to be one rejection.** Unknown id, wrong post and
   invisible parent previously answered differently — DRF's *"object does not
   exist"* against our *"only reply to a comment on this post"* — which made the
   endpoint a comment-id existence oracle, and a distinct "you can't see that"
@@ -240,8 +240,23 @@ Two things that fix depends on, both easy to get subtly wrong:
   shape**: the view raises it inside a list, because `{"parent": "…"}` against
   `{"parent": ["…"]}` separates the cases just as well as the wording would.
 
+  **The tombstone is the fourth case, and it's conditional.** A deleted parent
+  answers *"That comment was deleted, so you can't reply to it"* — which is the
+  right, more useful sentence while your thread still shows the tombstone, and
+  an oracle once it doesn't. The tree builder's *second* prune drops a tombstone
+  the moment it stops holding anything up, and that state is reachable: a soft
+  delete leaves the tombstone, then its last reply is hard-deleted out from
+  under it. So the reply path checks whether this viewer's tree still renders it
+  (`build_visible_comment_tree` rooted at the parent) and falls back to
+  `PARENT_UNAVAILABLE` when it doesn't. That rule is **not** folded into
+  `can_view_comment`: reactions and reports want their own explicit
+  deleted-content messages, and it costs a subtree walk only this path needs.
+
 Pinned in `ReplyVisibilityTests` (`backend/api/tests.py`), including the
-connected-author-under-a-hidden-parent case that a per-comment check passes.
+connected-author-under-a-hidden-parent case that a per-comment check passes, the
+tombstone before and after it empties, and the report path — whose only previous
+visibility test used a stranger's *own* comment, which the old check caught
+anyway.
 
 ### Frontend
 

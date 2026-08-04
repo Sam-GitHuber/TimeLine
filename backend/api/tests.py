@@ -883,6 +883,57 @@ class ReplyVisibilityTests(APITestCase):
         self.assertEqual(bodies[1], bodies[0])
         self.assertEqual(bodies[2], bodies[0])
 
+    def test_an_emptied_tombstone_answers_like_any_invisible_parent(self):
+        # A soft delete leaves a tombstone; hard-deleting its last reply out
+        # from under it leaves one holding nothing up, which the tree builder
+        # drops. Saying "that was deleted" then confirms a comment stood at an
+        # id my own thread no longer shows me.
+        top = Comment.objects.create(
+            post=self.post, author=self.friend, text="friend top"
+        )
+        reply = Comment.objects.create(
+            post=self.post, author=self.pal, parent=top, text="pal reply"
+        )
+        top.text = ""
+        top.deleted_at = timezone.now()
+        top.save(update_fields=["text", "deleted_at"])
+        # While the reply holds it up, the tombstone renders and says so.
+        self.assertIn(top.id, self._visible_ids())
+        resp = self._reply_to(top.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotEqual([str(m) for m in resp.data["parent"]], [PARENT_UNAVAILABLE])
+
+        reply.delete()
+
+        # Now it holds nothing up, so it's gone from the tree — and the reply
+        # path has to agree, in wording *and* shape.
+        self.assertNotIn(top.id, self._visible_ids())
+        resp = self._reply_to(top.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual([str(m) for m in resp.data["parent"]], [PARENT_UNAVAILABLE])
+
+    def test_cannot_report_a_comment_hidden_by_its_parent(self):
+        # The doc claims the shared helper closed reports along with replies;
+        # this pins it. The existing report test only covers a stranger's own
+        # comment, which the per-comment check already caught.
+        stranger_top = Comment.objects.create(
+            post=self.post, author=self.stranger, text="stranger top"
+        )
+        friend_reply = Comment.objects.create(
+            post=self.post,
+            author=self.friend,
+            parent=stranger_top,
+            text="friend reply under stranger",
+        )
+
+        resp = self.client.post(
+            REPORTS_URL,
+            {"comment": friend_reply.pk, "reason": "spam"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Report.objects.exists())
+
     def test_cannot_react_to_a_comment_hidden_by_its_parent(self):
         # can_view_comment gates comment reactions and reports too, so the same
         # subtree rule now closes those alongside the reply path.
