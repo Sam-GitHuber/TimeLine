@@ -120,6 +120,7 @@ describe("ReactionBar", () => {
       postId: 7,
       commentId: null,
       messageId: null,
+      eventId: null,
     });
   });
 

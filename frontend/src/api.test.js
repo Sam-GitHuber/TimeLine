@@ -146,8 +146,8 @@ describe("api CSRF + fetch wiring", () => {
     document.cookie = "csrftoken=tok-c";
     const fetchMock = stubFetch({ body: "{}" });
 
-    await api.addComment(5, { text: "top-level" });
-    await api.addComment(5, { text: "a reply", parent: 42 });
+    await api.addComment({ postId: 5 }, { text: "top-level" });
+    await api.addComment({ postId: 5 }, { text: "a reply", parent: 42 });
 
     const [topUrl, topOpts] = fetchMock.mock.calls[0];
     expect(topUrl).toContain("/api/posts/5/comments/");
@@ -156,6 +156,27 @@ describe("api CSRF + fetch wiring", () => {
 
     const [, replyOpts] = fetchMock.mock.calls[1];
     expect(JSON.parse(replyOpts.body)).toEqual({ text: "a reply", parent: 42 });
+  });
+
+  it("routes a comment thread to the post or the event that owns it", async () => {
+    document.cookie = "csrftoken=tok-c";
+    const fetchMock = stubFetch({ body: "[]" });
+
+    await api.getComments({ postId: 5 });
+    await api.getComments({ eventId: 5 });
+    await api.addComment({ eventId: 9 }, { text: "on the event" });
+
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/posts/5/comments/");
+    // The same id, a different thread — the two spaces are separate.
+    expect(fetchMock.mock.calls[1][0]).toContain("/api/events/5/comments/");
+    expect(fetchMock.mock.calls[2][0]).toContain("/api/events/9/comments/");
+  });
+
+  it("refuses to build a comment URL with no target", async () => {
+    // Both ids arrive as optional props, so "neither was passed" is reachable;
+    // left alone it builds `/api/posts/undefined/comments/`, which 404s and
+    // surfaces as a mystery "couldn't load comments".
+    expect(() => api.getComments({})).toThrow(/postId or an eventId/);
   });
 
   it("getPage strips the origin from a DRF `next` URL", async () => {

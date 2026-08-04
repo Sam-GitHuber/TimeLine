@@ -55,7 +55,7 @@ function someoneElse(overrides = {}) {
 
 async function renderThread(comments) {
   api.getComments.mockResolvedValue(comments);
-  const result = renderWithAuth(<CommentThread postId={7} />);
+  const result = renderWithAuth(<CommentThread target={{ postId: 7 }} />);
   // The top-level composer only paints once the tree has loaded.
   await screen.findByPlaceholderText(/Write a comment/);
   return result;

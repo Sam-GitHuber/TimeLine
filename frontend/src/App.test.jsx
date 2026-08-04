@@ -577,7 +577,7 @@ describe("Comments", () => {
     await user.click(screen.getByRole("button", { name: "Comments" }));
 
     expect(await screen.findByText("Lovely shot")).toBeInTheDocument();
-    expect(api.getComments).toHaveBeenCalledWith(1);
+    expect(api.getComments).toHaveBeenCalledWith({ postId: 1 });
   });
 
   it("collapses replies by default and reveals them on demand", async () => {
@@ -627,7 +627,7 @@ describe("Comments", () => {
     await user.click(screen.getByRole("button", { name: "Comment" }));
 
     await waitFor(() =>
-      expect(api.addComment).toHaveBeenCalledWith(1, {
+      expect(api.addComment).toHaveBeenCalledWith({ postId: 1 }, {
         text: "Where is this?",
         parent: null,
       })

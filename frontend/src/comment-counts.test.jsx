@@ -122,7 +122,7 @@ describe("posting a comment refreshes the count", () => {
 
   async function postAComment() {
     api.getComments.mockResolvedValue([]);
-    const rendered = renderWithAuth(<CommentThread postId={42} />);
+    const rendered = renderWithAuth(<CommentThread target={{ postId: 42 }} />);
     const { queryClient } = rendered;
     // Seed the surfaces a real session would have loaded before opening a
     // thread: the home feed, a profile timeline, a group timeline, the

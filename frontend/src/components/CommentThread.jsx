@@ -9,7 +9,7 @@ import { ReportModal } from "./ReportModal.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { serverMessage } from "../errors.js";
-import { invalidatePostComments } from "../postCache.js";
+import { commentsQueryKey, invalidateComments } from "../postCache.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
 // The set of comment ids that are *ancestors* of `targetId` — the nodes whose
@@ -59,13 +59,21 @@ const DEEP_FROM = 4;
 // no hidden content here to leak (issue #12). The frontend just renders what it
 // gets, nesting `replies` under each comment.
 //
-// `highlightCommentId` (from the /p/:id permalink's ?comment=) deep-links to one
-// comment: its ancestors are auto-expanded, it's scrolled into view, and it
-// pulses briefly so the eye lands on it — the point of a "someone replied" link.
-export default function CommentThread({ postId, highlightCommentId = null }) {
+// `target` is `{ postId }` or `{ eventId }` — the thing the thread hangs off.
+// A comment tree is the same feature on both, and the server applies the same
+// prune to both; only which gate lets you reach it differs, and that is entirely
+// the server's business. So this component takes the target as data and never
+// branches on it: everything below (reply boxes, edit, delete, reactions, the
+// deep-link) works unchanged because a comment id is a comment id.
+//
+// `highlightCommentId` (from the /p/:id permalink's, or the event page's,
+// ?comment=) deep-links to one comment: its ancestors are auto-expanded, it's
+// scrolled into view, and it pulses briefly so the eye lands on it — the point
+// of a "someone replied" link.
+export default function CommentThread({ target, highlightCommentId = null }) {
   const { data: comments, isLoading, isError, error } = useQuery({
-    queryKey: ["comments", postId],
-    queryFn: () => api.getComments(postId),
+    queryKey: commentsQueryKey(target),
+    queryFn: () => api.getComments(target),
   });
 
   // Which comment to visually highlight; cleared after a moment so the pulse
@@ -115,7 +123,7 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
                 <CommentNode
                   key={comment.id}
                   comment={comment}
-                  postId={postId}
+                  target={target}
                   expandIds={expandIds}
                   highlightId={highlightId}
                   // The line these hang off is the *post's* spine; the thread's
@@ -129,7 +137,7 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
 
           {/* Top-level composer (a comment on the post itself). */}
           <div className="tl-thread-foot mt-2">
-            <CommentComposer postId={postId} placeholder="Write a comment…" />
+            <CommentComposer target={target} placeholder="Write a comment…" />
           </div>
         </>
       )}
@@ -159,7 +167,7 @@ export default function CommentThread({ postId, highlightCommentId = null }) {
 // that opens the replies it exists to hold up.
 function CommentNode({
   comment,
-  postId,
+  target,
   expandIds = null,
   highlightId = null,
   depth = 0,
@@ -185,7 +193,7 @@ function CommentNode({
       // or became a tombstone. The post's `comment_count` moved too, and that
       // rides the post payload — so the lists showing it need invalidating just
       // as deleting a post does. Both live in one helper (#215).
-      invalidatePostComments(queryClient, postId);
+      invalidateComments(queryClient, target);
       // **Close the dialog explicitly**, unlike `PostMenu`, which can leave it
       // to the card unmounting. A comment that had replies survives its own
       // delete as a tombstone, so this node stays mounted through the refetch —
@@ -280,7 +288,7 @@ function CommentNode({
             ) : editing ? (
               <CommentEditor
                 commentId={comment.id}
-                postId={postId}
+                target={target}
                 initialText={comment.text}
                 onDone={() => setEditing(false)}
               />
@@ -396,7 +404,7 @@ function CommentNode({
             {showReply && !isDeleted && (
               <div className="mt-2">
                 <CommentComposer
-                  postId={postId}
+                  target={target}
                   parentId={comment.id}
                   autoFocus
                   placeholder={`Reply to ${comment.author.display_name}…`}
@@ -451,7 +459,7 @@ function CommentNode({
             <CommentNode
               key={reply.id}
               comment={reply}
-              postId={postId}
+              target={target}
               expandIds={expandIds}
               highlightId={highlightId}
               depth={depth + 1}
@@ -468,7 +476,7 @@ function CommentNode({
 // pattern a post uses on the web, one level down. The thread is a plain list, so
 // there's no virtualisation to unmount a half-typed edit and no reason to reach
 // for the modal the phone needs.
-function CommentEditor({ commentId, postId, initialText, onDone }) {
+function CommentEditor({ commentId, target, initialText, onDone }) {
   const [text, setText] = useState(initialText);
   const queryClient = useQueryClient();
 
@@ -477,7 +485,7 @@ function CommentEditor({ commentId, postId, initialText, onDone }) {
     onSuccess: () => {
       // Only the thread changes: an edit can't move a comment count, so the
       // post lists are left alone (unlike delete).
-      queryClient.invalidateQueries({ queryKey: ["comments", postId] });
+      queryClient.invalidateQueries({ queryKey: commentsQueryKey(target) });
       onDone();
     },
   });
@@ -533,7 +541,7 @@ function CommentEditor({ commentId, postId, initialText, onDone }) {
 // comment tree so the new node appears in place — and the post lists with it,
 // since the card's "Comments · N" moved too.
 function CommentComposer({
-  postId,
+  target,
   parentId = null,
   autoFocus = false,
   placeholder = "Write a comment…",
@@ -544,12 +552,12 @@ function CommentComposer({
 
   const mutation = useMutation({
     mutationFn: (value) =>
-      api.addComment(postId, { text: value, parent: parentId }),
+      api.addComment(target, { text: value, parent: parentId }),
     onSuccess: () => {
       setText("");
       // The tree *and* the post's comment_count wherever it's shown — a new
       // comment moves both, the same way a delete does.
-      invalidatePostComments(queryClient, postId);
+      invalidateComments(queryClient, target);
       onDone?.();
     },
   });

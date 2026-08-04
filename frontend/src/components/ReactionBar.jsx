@@ -72,9 +72,19 @@ function PopoverPortal({ anchorRef, width = PICKER_W, height = PICKER_H, childre
 // (add, or remove if you'd used that emoji); the toggle endpoint returns the
 // fresh summary, so a click updates in place without refetching the whole feed —
 // the next poll reconciles anything that changed underneath us.
-export default function ReactionBar({ postId = null, commentId = null, reactions }) {
+export default function ReactionBar({
+  postId = null,
+  commentId = null,
+  eventId = null,
+  reactions,
+  trailing = null,
+}) {
   const incoming = reactions ?? NO_REACTIONS;
-  const target = postId ? { postId } : { commentId };
+  // An event reacts exactly like a post: `api.toggleReaction` and
+  // `api.getReactors` route on whichever id is set, and the server prunes an
+  // event's reactions to the viewer's connections the same way it prunes a
+  // post's. Nothing below this line knows or cares which it got.
+  const target = postId ? { postId } : commentId ? { commentId } : { eventId };
   const [items, setItems] = useState(incoming);
   // Which popover is open off the add button: null → closed, "quick" → the
   // four one-tap reactions, "full" → the whole emoji picker.
@@ -233,6 +243,12 @@ export default function ReactionBar({ postId = null, commentId = null, reactions
           {emoji} {failure.text}
         </p>
       ))}
+
+      {/* Anything the caller wants on the row's end — the event page hangs its
+          comment count here, the same way `PostCard` does on mobile, so the
+          count sits with the chips instead of starting a row of its own on an
+          event with no reactions yet. */}
+      {trailing}
     </div>
   );
 }

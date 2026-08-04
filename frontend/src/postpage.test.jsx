@@ -70,7 +70,7 @@ describe("PostPage permalink", () => {
     renderPost("/p/5");
     expect(await screen.findByText("the post body")).toBeInTheDocument();
     // Comments open by default on the permalink (postId is the post's numeric id).
-    await waitFor(() => expect(api.getComments).toHaveBeenCalledWith(5));
+    await waitFor(() => expect(api.getComments).toHaveBeenCalledWith({ postId: 5 }));
     expect(await screen.findByText("top comment")).toBeInTheDocument();
   });
 

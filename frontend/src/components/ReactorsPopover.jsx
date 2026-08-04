@@ -20,12 +20,13 @@ export function reactorsQueryKey({
   postId = null,
   commentId = null,
   messageId = null,
+  eventId = null,
 } = {}) {
-  return ["reactors", postId, commentId, messageId];
+  return ["reactors", postId, commentId, messageId, eventId];
 }
 
 // "Who reacted", grouped by emoji. Pass exactly one of postId / commentId /
-// messageId.
+// messageId / eventId.
 //
 // **Post and comment reactors are pruned per viewer, server-side**: that list
 // only ever contains people you're connected with (plus yourself), so a reactor
@@ -47,6 +48,7 @@ export default function ReactorsPopover({
   postId = null,
   commentId = null,
   messageId = null,
+  eventId = null,
   onClose,
   ignoreRef,
   /**
@@ -66,7 +68,7 @@ export default function ReactorsPopover({
   onRemoveReaction,
 }) {
   const wrapRef = useRef(null);
-  const target = { postId, commentId, messageId };
+  const target = { postId, commentId, messageId, eventId };
 
   const { data, isLoading, isError } = useQuery({
     queryKey: reactorsQueryKey(target),

@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
 import Avatar from "../components/Avatar.jsx";
+import CommentThread from "../components/CommentThread.jsx";
+import ReactionBar from "../components/ReactionBar.jsx";
 import DimensionChips from "../components/events/DimensionChips.jsx";
 import DimensionEditor from "../components/events/DimensionEditor.jsx";
 import PollTally from "../components/events/PollTally.jsx";
@@ -27,6 +29,12 @@ export default function EventPage() {
   const eventId = Number(eid);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // `?comment=<id>` — the anchor an "someone replied on your event"
+  // notification carries, so the thread opens at the comment that was written
+  // rather than at the top of it.
+  const [searchParams] = useSearchParams();
+  const commentParam = searchParams.get("comment");
+  const highlightCommentId = commentParam ? Number(commentParam) : null;
 
   // Which chip's editor is open: { dimension, mode: "set" | "poll" } or null.
   const [editing, setEditing] = useState(null);
@@ -298,6 +306,38 @@ export default function EventPage() {
           />
         </section>
       )}
+
+      {/* Reactions and the conversation, the same pair a post carries — an
+          event is authored content, and "are we still on for Saturday?" used to
+          have nowhere to go but the group timeline, detached from the plan it
+          was about. Below the RSVP because deciding whether you're going is the
+          page's job; talking about it is what happens next.
+
+          The reaction chips are pruned to your connections, unlike the RSVP and
+          poll counts above them, which are complete — see events.md. */}
+      <section className="mt-6 border-t border-line pt-5">
+        <ReactionBar
+          eventId={event.id}
+          reactions={event.reactions}
+          trailing={
+            event.comment_count > 0 ? (
+              <span className="text-sm text-ink-faint">
+                {event.comment_count}{" "}
+                {event.comment_count === 1 ? "comment" : "comments"}
+              </span>
+            ) : null
+          }
+        />
+        <div className="mt-4">
+          <CommentThread
+            // Remount when the deep-link target changes so the highlight
+            // re-arms — the same key trick `PostCard` uses.
+            key={highlightCommentId ?? "thread"}
+            target={{ eventId: event.id, groupId }}
+            highlightCommentId={highlightCommentId}
+          />
+        </div>
+      </section>
 
       {event.can_moderate && (
         <section className="mt-8 flex flex-wrap gap-2 border-t border-line pt-5">
