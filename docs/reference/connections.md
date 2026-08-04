@@ -204,6 +204,45 @@ from a not-connected author — *and its entire subtree* — is invisible to you
   event's organiser — with the deliberate **inversion** that a poll/RSVP *count*
   includes people you can't see, while their *names* stay gated).
 
+### The boundary gates writing too (#211)
+
+For a long time the prune was read-only: `POST /posts/<id>/comments/` checked that
+`parent` was on the same post and wasn't a tombstone, and nothing else. So a reply
+could be aimed at a comment your own tree had pruned away — you addressed someone
+invisible to you, and *they* got a reply from a stranger in a conversation they'd
+never invited one into. Nothing leaked (you still couldn't read the parent), but
+it was the one place the graph gated reading and not writing. **`parent` is now
+held to exactly the prune the GET applies.**
+
+Two things that fix depends on, both easy to get subtly wrong:
+
+- **`can_view_comment` had to become ancestor-aware first.** It claimed to mirror
+  the pruned tree but only checked the comment's *own* author, and the tree's
+  prune is a **subtree** prune — a connected friend's reply sitting under a
+  stranger is hidden along with the branch. So the helper said "visible" about
+  comments the tree would never show, and the obvious one-line fix
+  (`can_view_comment(user, parent)`) would have left the hole half-open.
+  `_comment_chain_visible` now walks from the comment up to a root, requiring
+  every author on the way to be active and visible; deactivation is checked at
+  each level too, since the tree builder drops banned authors *before* walking
+  and orphans everything under them. It loads the post's comments in one query
+  and climbs in Python — the same trade, for the same reason, as the tree builder
+  itself, and `comment_counts_for_posts` already documented this exact trap for a
+  naive author-filtered `COUNT`. Because it's the shared helper, comment
+  **reactions** and **reports** were closed by the same change; they were open in
+  precisely the same way.
+- **All three rejections have to be one rejection.** Unknown id, wrong post and
+  invisible parent previously answered differently — DRF's *"object does not
+  exist"* against our *"only reply to a comment on this post"* — which made the
+  endpoint a comment-id existence oracle, and a distinct "you can't see that"
+  would have confirmed the existence of the very comment being hidden. They all
+  return `PARENT_UNAVAILABLE` (`serializers.py`) now, and **as the same JSON
+  shape**: the view raises it inside a list, because `{"parent": "…"}` against
+  `{"parent": ["…"]}` separates the cases just as well as the wording would.
+
+Pinned in `ReplyVisibilityTests` (`backend/api/tests.py`), including the
+connected-author-under-a-hidden-parent case that a per-comment check passes.
+
 ### Frontend
 
 Collapsible comment thread (accordion) with an inline reply composer on each post.

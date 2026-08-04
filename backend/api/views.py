@@ -79,6 +79,7 @@ from .models import (
 from .serializers import (
     CONVERSATION_TITLE_MAX_LENGTH,
     EVERYONE,
+    PARENT_UNAVAILABLE,
     AuthorSerializer,
     CommentCreateSerializer,
     CommentEditSerializer,
@@ -808,17 +809,63 @@ def can_view_post(user, post, connected_ids=None):
     )
 
 
+def _comment_chain_visible(comment, visible_author_ids):
+    """Whether ``comment`` survives the tree walk — itself **and every ancestor**.
+
+    The prune in ``build_visible_comment_tree`` is a *subtree* prune: a hidden
+    comment takes everything below it, so a reply by someone you're connected
+    with is still invisible when its parent is a stranger's. Checking only
+    ``comment.author`` therefore over-approximates, which is the same trap
+    ``comment_counts_for_posts`` documents for a naive author-filtered COUNT.
+    The walk here is the yes/no form of that same rule.
+
+    One query loads the post's comments and the chain is walked in Python, so
+    cost is independent of nesting depth (the tree builder makes the same
+    trade for the same reason). ``author__is_active`` is checked at every level
+    because the tree builder drops deactivated authors *before* walking, which
+    orphans their replies — an orphan is never reached from a root, so it is
+    hidden as surely as a pruned one.
+    """
+    if not comment.author.is_active or comment.author_id not in visible_author_ids:
+        return False
+    if comment.parent_id is None:
+        return True
+    rows = {
+        row["id"]: row
+        for row in Comment.objects.filter(post_id=comment.post_id).values(
+            "id", "parent_id", "author_id", "author__is_active"
+        )
+    }
+    parent_id = comment.parent_id
+    seen = set()
+    while parent_id is not None:
+        if parent_id in seen:
+            # Not reachable through the API (a parent must exist before its
+            # reply), but a cycle in the data would otherwise spin forever, and
+            # a cycle has no root to be reached from either.
+            return False
+        seen.add(parent_id)
+        row = rows.get(parent_id)
+        if row is None:
+            # An ancestor on another post, or gone: the chain doesn't reach a
+            # root of this thread, so the tree never renders this comment.
+            return False
+        if not row["author__is_active"] or row["author_id"] not in visible_author_ids:
+            return False
+        parent_id = row["parent_id"]
+    return True
+
+
 def can_view_comment(user, comment, connected_ids=None):
     """Whether ``user`` can see ``comment``. Mirrors the pruned comment tree
-    (``PostCommentsView``): the comment's post must be visible, the comment's
-    author must be active, and — matching the connection-pruned tree — the author
-    must be the viewer or one of their connections.
+    (``PostCommentsView``): the comment's post must be visible, and the comment
+    must survive the same subtree prune the tree builder applies — so its
+    author, *and the author of every comment above it*, must be active and be
+    the viewer or one of their connections.
     """
     if connected_ids is None:
         connected_ids = connected_user_ids(user)
-    if not comment.author.is_active:
-        return False
-    if comment.author_id != user.id and comment.author_id not in connected_ids:
+    if not _comment_chain_visible(comment, set(connected_ids) | {user.id}):
         return False
     return can_view_post(user, comment.post, connected_ids=connected_ids)
 
@@ -1728,7 +1775,11 @@ class PostCommentsView(APIView):
       stays hidden.
 
     POST adds a comment, or a reply when ``parent`` is given; the author is taken
-    from the session, never the body.
+    from the session, never the body. **``parent`` is held to the same prune the
+    GET applies** (issue #211) — you may only reply to a comment your own tree
+    would have shown you — so the connection boundary gates writing as well as
+    reading. Unknown id, wrong post and invisible parent all answer with the one
+    ``PARENT_UNAVAILABLE`` sentence; see it for why they must be identical.
     """
 
     def _get_post_or_404(self, request, pk):
@@ -1805,14 +1856,28 @@ class PostCommentsView(APIView):
         return Response(data)
 
     def post(self, request, pk):
-        post, _connected_ids = self._get_post_or_404(request, pk)
+        post, connected_ids = self._get_post_or_404(request, pk)
         serializer = CommentCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         parent = serializer.validated_data.get("parent")
-        if parent is not None and parent.post_id != post.id:
-            raise ValidationError(
-                {"parent": "You can only reply to a comment on this post."}
-            )
+        if parent is not None and (
+            parent.post_id != post.id
+            or not can_view_comment(request.user, parent, connected_ids)
+        ):
+            # The connection graph gates writing here as well as reading (issue
+            # #211). Without the visibility half you could reply into a branch
+            # pruned out of your own tree — addressing someone invisible to you,
+            # who then gets a reply from a stranger in a conversation you were
+            # never part of. Nothing leaks (you still can't read the parent), but
+            # it's the one place the boundary was one-directional.
+            #
+            # One message for both halves, matching the serializer's
+            # ``does_not_exist``: see PARENT_UNAVAILABLE for why the three cases
+            # must be indistinguishable. The list is load-bearing — a bare
+            # string here would render as ``{"parent": "..."}`` against the
+            # field error's ``{"parent": ["..."]}``, and the *shape* would tell
+            # the three cases apart just as well as the wording would.
+            raise ValidationError({"parent": [PARENT_UNAVAILABLE]})
         if parent is not None and parent.is_deleted:
             # A tombstone has nothing to answer, and a reply arriving under one
             # would resurrect a slot its author had finished with. (It would also
