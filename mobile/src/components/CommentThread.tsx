@@ -39,7 +39,7 @@ import { KebabIcon } from './icons';
 import { ReactionBar } from './ReactionBar';
 import { ReportModal } from './ReportModal';
 import { SPINE_CENTRE } from './timeline';
-import { markPostCommentsSeen } from '@/postCache';
+import { invalidatePostComments, markPostCommentsSeen } from '@/postCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Comment } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
@@ -370,15 +370,7 @@ function CommentNode({
       // Refetch rather than splice: only the server knows whether the row went
       // or turned into a tombstone. The post's `comment_count` moved too, and
       // that rides the post payload wherever it's shown.
-      for (const key of [
-        ['comments', postId],
-        ['feed'],
-        ['userPosts'],
-        ['groupPosts'],
-        ['post', String(postId)],
-      ]) {
-        queryClient.invalidateQueries({ queryKey: key });
-      }
+      invalidatePostComments(queryClient, postId);
     },
     onError: (err) => {
       Alert.alert(
@@ -856,7 +848,9 @@ function CommentEditor({
  * The write box for a comment (`parentId` null) or a reply.
  *
  * On success it invalidates the tree so the new node appears in place, rather
- * than trying to splice it in at the right depth on the client.
+ * than trying to splice it in at the right depth on the client — and, through
+ * the same helper the delete path uses, the post lists carrying the now-stale
+ * `comment_count` (#273).
  */
 function CommentComposer({
   postId,
@@ -879,10 +873,9 @@ function CommentComposer({
       api.addComment(postId, { text: value, parent: parentId }),
     onSuccess: () => {
       setText('');
-      queryClient.invalidateQueries({ queryKey: ['comments', postId] });
-      // The post's comment_count is now stale wherever it's shown.
-      queryClient.invalidateQueries({ queryKey: ['feed'] });
-      queryClient.invalidateQueries({ queryKey: ['post', String(postId)] });
+      // The tree, plus the post's `comment_count` on every surface showing it —
+      // the same set the delete path invalidates, from the same helper.
+      invalidatePostComments(queryClient, postId);
       onDone?.();
     },
   });
