@@ -139,12 +139,17 @@ export function ComposeBox({
       // The keys are bare prefixes, which is what makes them reach the suffixed
       // keys the screens actually use: `['feed', includeGroups]` and
       // `['userPosts', id]`. (`invalidateQueries` prefix-matches — the opposite
-      // of `postCache`'s `setQueriesData`, which needs the exact key; see
-      // feed-and-posts.md.) `['userPosts']` therefore also marks a cached
-      // *other* person's profile stale, which costs nothing: the compose box
+      // of `setQueryData`, which needs the exact key, and is why `postCache`
+      // reaches these same lists through a `setQueriesData` predicate instead;
+      // see feed-and-posts.md.)
+      //
+      // The one place this is broader than web, which scopes the personal case
+      // to `['userPosts', user.pk]`: a bare `['userPosts']` also marks a cached
+      // *other* person's profile stale. That costs nothing — the compose box
       // only exists on the home feed and a group page, so no profile query can
       // be observed here, and an unobserved one refetches on its next mount
-      // regardless at `staleTime` 0.
+      // regardless at `staleTime` 0 — and it can't miss your own profile the
+      // way `['userPosts', undefined]` would if `user` were ever null.
       //
       // Deliberately *not* a helper in `postCache.ts` alongside
       // `invalidatePostComments`, which is the obvious place to look. That one
