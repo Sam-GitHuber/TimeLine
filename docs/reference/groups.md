@@ -124,8 +124,10 @@ group's chats; deleting cascades them away) and `['notificationsUnread']`
 (accept/decline addresses the invite's notification). Every one of those is
 polled — by the Messages tab, the tab bar and the activity bell respectively — so
 they heal within a cycle on their own. The feed and the calendar are the two that
-never do. The **web** clients still refresh only `['groups']`; there it's a flash
-rather than a stuck state, because react-router unmounts the route (#280).
+never do. Two places still miss the rule: the **web** clients refresh only
+`["groups"]` (#281 — a flash rather than a stuck state there, since react-router
+unmounts the route), and the app's **members roster** doesn't apply it when an
+admin removes *themselves*, which is the same write as leaving (#282).
 
 ## API
 

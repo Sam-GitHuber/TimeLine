@@ -31,8 +31,9 @@
  * first-segment matching from the writer's side).
  *
  * **Deliberately not in here:** `['conversations']` / `['unreadMessages']` —
- * leaving a group deactivates you in its chats and deleting one cascades them
- * away (`GroupMemberRemoveView`) — and `['notificationsUnread']`, which
+ * leaving a group deactivates you in its chats (`GroupMemberDetailView.delete`)
+ * and deleting one takes them with it through the FK cascade
+ * (`GroupDetailView.delete`) — and `['notificationsUnread']`, which
  * accepting or declining an invite moves by addressing its notification. Those
  * are all real, but every one of those keys is **polled**: the Messages tab
  * polls the conversation list, the tab bar polls the unread-message count, and
