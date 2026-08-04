@@ -226,8 +226,10 @@ describe('invalidatePostComments', () => {
   });
 
   it('leaves another post’s permalink alone', () => {
-    // The permalink is the one exact-keyed entry, so it's the one that can
-    // over-reach onto a post nobody touched.
+    // Two of the five keys carry the post id — the permalink and the tree
+    // below. They're the ones that must *not* reach another post, in contrast
+    // to the three bare list keys, whose whole job is to reach every id-suffixed
+    // entry. Getting one of these written as a bare key would be silent.
     const client = makeClient();
     client.setQueryData(['post', '42'], post(42, 0));
     client.setQueryData(['post', '43'], post(43, 0));

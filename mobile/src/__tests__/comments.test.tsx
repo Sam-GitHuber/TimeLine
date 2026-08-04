@@ -49,24 +49,18 @@ function comment(overrides: Partial<Comment> & { id: number }): Comment {
   };
 }
 
-async function renderThread(
-  props: Partial<Parameters<typeof CommentThread>[0]> = {}
-) {
+function renderThread(props: Partial<Parameters<typeof CommentThread>[0]> = {}) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
       mutations: { gcTime: 0 },
     },
   });
-  // `render` is a Promise here, so it's awaited rather than spread — and the
-  // client is handed back so a test can seed the surfaces a real session would
-  // have loaded, then inspect what a write did to them.
-  const rendered = await render(
+  return render(
     <QueryClientProvider client={queryClient}>
       <CommentThread postId={7} {...props} />
     </QueryClientProvider>
   );
-  return { queryClient, ...rendered };
 }
 
 /**
