@@ -16,6 +16,7 @@ import EventScreen from '@/app/events/[eventId]';
 import CalendarScreen from '@/app/(tabs)/calendar';
 import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
+import { EventTimelineEntry } from '@/components/events/EventTimelineEntry';
 import { MonthGrid } from '@/components/events/MonthGrid';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, Poll, User } from '@/types';
@@ -936,6 +937,78 @@ describe('group page events', () => {
     await fireEvent.press(screen.getByRole('button', { name: 'Calendar' }));
 
     expect(await screen.findByText(/Quiz night/)).toBeTruthy();
+  });
+});
+
+// --- EventTimelineEntry: where the voice of time lives ----------------------
+//
+// The entry threads the same spine a `PostCard` does, and `PostCard` puts the
+// clock time **inline** at the head of the entry rather than in a rail, so the
+// spine can hug the screen edge (see `timeline.tsx`). The first port of this
+// component kept the web's rail — a stacked mono time inside the 36pt
+// `SPINE_COLUMN`, which has the 2pt spine drawn down the middle of it — so the
+// time was painted across the line and wrapped inside a box narrower than it
+// needed. These pin the inline shape: one text node per value, no stacking.
+
+describe('EventTimelineEntry', () => {
+  const past = makeEvent({
+    id: 40,
+    title: 'Spring picnic',
+    status: 'scheduled',
+    is_past: true,
+    event_date: '2026-04-05',
+    starts_at: '2026-04-05T12:30:00Z',
+    start_time: '12:30:00',
+    location_name: 'Riverside Park',
+    dimensions: {
+      date: { state: 'set', poll: null },
+      time: { state: 'set', poll: null },
+      location: { state: 'set', poll: null },
+    },
+  });
+
+  it('leads a past recap with the clock time inline, beside the organiser', async () => {
+    await renderWith(<EventTimelineEntry event={past} variant="past" />);
+
+    // Two nodes carry the time now: the band at the head of the entry, and the
+    // Time chip below. **That count is the assertion** — the rail put a literal
+    // newline between "12:30" and "pm" to fit the 36pt column, so it rendered
+    // "12:30 pm" and never matched this composed string at all.
+    expect(screen.getAllByText('12:30pm')).toHaveLength(2);
+    expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+    expect(screen.getByText('Spring picnic')).toBeTruthy();
+    // The date is not repeated in the body: the day divider above the recap
+    // carries it, and the Date chip states what it settled on.
+    expect(screen.queryByText(/Sun 5 Apr · 12:30pm/)).toBeNull();
+  });
+
+  it('says "all day" in the band when a past event has no time', async () => {
+    await renderWith(
+      <EventTimelineEntry
+        event={{
+          ...past,
+          start_time: null,
+          starts_at: null,
+          dimensions: { ...past.dimensions, time: { state: 'unset', poll: null } },
+        }}
+        variant="past"
+      />
+    );
+
+    expect(screen.getByText('all day')).toBeTruthy();
+  });
+
+  it('leads a future entry with the whole date, since no divider carries it', async () => {
+    await renderWith(
+      <EventTimelineEntry
+        event={{ ...past, is_past: false, start_time: '19:00:00' }}
+        variant="future"
+      />
+    );
+
+    // One composed string. The rail stacked the day over the month ("5" / "Apr")
+    // and dropped the time entirely.
+    expect(screen.getByText('Sun 5 Apr · 7pm')).toBeTruthy();
   });
 });
 

@@ -352,6 +352,24 @@ client just renders what arrives. Date/time render through a mobile copy of the
 `formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
 `frontend/src/utils.js`.
 
+**An event's "when" is inline on the phone, on a rail on the web** — and that
+divergence is the point, not a porting gap. The web gives every timeline entry a
+rail column to the *left* of the spine and puts the date/time in it; on a phone
+the spine hugs the screen edge (`SPINE_COLUMN` = 36pt, the 2pt line drawn down
+the middle of it), because `PostCard` moved the clock time inline beside the
+author's name to win back ~48pt of a 390pt screen — see the note at the top of
+`mobile/src/components/timeline.tsx`. `EventTimelineEntry` was ported before
+that and kept the rail, so a past event's time was drawn *across* the spine and
+wrapped inside a column narrower than it needed. It now mirrors `PostCard`
+exactly: the bead alone in the spine column, and an alignment band of exactly
+the bead's height carrying the when, then the organiser. A **past** recap leads
+with the clock time only (the day divider above it carries the date, which is
+also why the body no longer repeats the full `formatEventWhen`); a **future**
+entry leads with the whole date in accent, because there are no day dividers
+above the now boundary to carry it. The Date · Time · Where chips stay on both,
+as on the web, and are now the only place the date and the venue are written.
+Pinned in `mobile/src/__tests__/events.test.tsx` ("EventTimelineEntry").
+
 The **optimistic tick and its two debts** (the "Frontend notes" bullet above) hold
 here too, as of #227: `PollTally` awaits the vote and rolls its tick back with a
 message if it's rejected — which is why `EventScreen` hands voting down as
