@@ -42,6 +42,7 @@ import { SPINE_CENTRE } from './timeline';
 import {
   commentsQueryKey,
   invalidateComments,
+  markEventCommentsSeen,
   markPostCommentsSeen,
 } from '@/postCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -273,12 +274,16 @@ export function CommentThread({
    * action rather than on the post render (frontend/src/components/PostCard.jsx).
    */
   useEffect(() => {
-    // Only a *post* carries its "N new" badge in a cached feed list; an event's
-    // count comes back on the event payload, which the screen refetches.
-    if (comments && target.postId != null) {
+    if (!comments) return;
+    // Both kinds carry a `· N new` badge on a card elsewhere, and both are
+    // mirrored rather than refetched — see the two helpers for why an event's
+    // is not simply the post one with a different id.
+    if (target.postId != null) {
       markPostCommentsSeen(queryClient, Number(target.postId));
+    } else if (target.eventId != null) {
+      markEventCommentsSeen(queryClient, Number(target.eventId));
     }
-  }, [comments, target.postId, queryClient]);
+  }, [comments, target.postId, target.eventId, queryClient]);
 
   // Memoised because it walks the whole tree: without this, every keystroke in
   // the composer below re-walks it and hands every node a fresh Set.

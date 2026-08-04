@@ -1003,8 +1003,12 @@ describe('event comments and reactions', () => {
     await renderWith(<EventScreen />);
     await screen.findByText('Summer camping weekend');
 
+    // `findBy`, not `getBy`: the event query and the comments query resolve
+    // independently, so the composer isn't guaranteed to be mounted just
+    // because the title is. As a `getBy` this failed only under load (a second
+    // suite in the same worker) — it passed alone and failed in CI.
     await fireEvent.changeText(
-      screen.getByPlaceholderText('Write a comment…'),
+      await screen.findByPlaceholderText('Write a comment…'),
       'bringing a cake'
     );
     await fireEvent.press(screen.getByRole('button', { name: 'Post comment' }));

@@ -21,7 +21,7 @@
 import type { InfiniteData, QueryClient } from '@tanstack/react-query';
 
 import type { CommentTarget } from './api';
-import type { Paginated, Post } from './types';
+import type { Event as EventRow, Paginated, Post } from './types';
 
 /**
  * The post-list queries, whose data is the paginated infinite-list shape
@@ -35,6 +35,21 @@ import type { Paginated, Post } from './types';
  * — which is exactly how the badge came to sit there stale (#195).
  */
 const POST_LIST_KEYS = new Set(['feed', 'userPosts', 'groupPosts']);
+
+/**
+ * The event lists that render a `· N new` badge, matched on the first key
+ * segment for the same reason as `POST_LIST_KEYS` above — each carries a suffix
+ * this file doesn't know (`['groupEvents', id, 'upcoming' | 'past']`,
+ * `['groupCalendar', id]`).
+ *
+ * Unlike the post lists these are plain arrays, not paginated pages: the
+ * events endpoints are capped `APIView`s with no `next` to follow.
+ */
+const EVENT_LIST_KEYS = new Set([
+  'groupEvents',
+  'groupCalendar',
+  'personalCalendar',
+]);
 
 function seen(post: Post, postId: number): Post {
   return post.id === postId && post.new_comment_count > 0
@@ -99,6 +114,55 @@ export function invalidatePostComments(
   postId: number
 ): void {
   invalidateComments(queryClient, { postId });
+}
+
+/**
+ * The event twin of `markPostCommentsSeen`: mirror the server's "seen" reset
+ * into every cached copy of one event, so its `· N new` badge clears.
+ *
+ * **A read-only visit needs this, and nothing else provides it.** Opening an
+ * event's thread stamps `PostCommentRead` server-side, but the badge is
+ * rendered by the *group screen's* `EventCard` off `['groupEvents', id, …]` —
+ * a key only a comment *write* invalidates. The group screen stays mounted
+ * behind the pushed event screen, so it never refetches on the way back, and
+ * `focusManager` is wired only to `AppState`: read three new comments, go back,
+ * and the card would go on saying "· 3 new" until the app was backgrounded and
+ * foregrounded again.
+ *
+ * A cache write rather than an invalidate, for the same reason the post version
+ * is one: the server has already given its answer, so re-asking for it is a
+ * round trip to learn something we know. The web needs no equivalent — its
+ * `GroupPage` remounts and refetches on client-side navigation.
+ */
+export function markEventCommentsSeen(
+  queryClient: QueryClient,
+  eventId: number
+): void {
+  const seenEvent = (event: EventRow): EventRow =>
+    event.id === eventId && event.new_comment_count > 0
+      ? { ...event, new_comment_count: 0 }
+      : event;
+
+  queryClient.setQueriesData<EventRow[]>(
+    {
+      predicate: (query) =>
+        EVENT_LIST_KEYS.has(query.queryKey[0] as string),
+    },
+    (rows) => {
+      if (!Array.isArray(rows)) return rows;
+      // Only rebuild a list that actually holds this event with a live count,
+      // so unrelated entries keep their identity and don't re-render.
+      if (!rows.some((e) => e.id === eventId && e.new_comment_count > 0)) {
+        return rows;
+      }
+      return rows.map(seenEvent);
+    }
+  );
+
+  // The event screen's own copy: keyed by number, matching `EventScreen`.
+  queryClient.setQueryData<EventRow>(['event', eventId], (event) =>
+    event ? seenEvent(event) : event
+  );
 }
 
 /**

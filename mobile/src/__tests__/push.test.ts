@@ -231,6 +231,16 @@ describe('routeForNotification', () => {
     expect(routeForNotification('/g/42/events/7')).toBe('/events/7');
   });
 
+  it('keeps a comment deep-link on an event, as it does on a post', () => {
+    // Since events grew a comment thread, `comment_reply` and a comment
+    // `reaction` on one deep-link to `…/events/<eid>?comment=<cid>`. Dropping
+    // the query here doesn't fail loudly — it lands you at the top of the
+    // thread and makes `EventScreen`'s `highlightCommentId` dead code.
+    expect(routeForNotification('/g/1/events/9?comment=42')).toBe(
+      '/events/9?comment=42'
+    );
+  });
+
   it('opens the thread for a new-message push (#118)', () => {
     // The one push with no activity-centre row behind it — messaging keeps its
     // own unread badge — so the route is all the tap has to go on.

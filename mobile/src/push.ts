@@ -453,8 +453,19 @@ export function routeForNotification(url: string | null | undefined): Href {
   // event (which carries its group) and its Back returns there. This closes all
   // five event push kinds (created / poll_opened / scheduled / updated /
   // cancelled), which all deep-link to the same target (E3b).
+  //
+  // **The query has to come with it**, exactly as the post branch above carries
+  // it: since events grew a comment thread, `comment_reply` and a comment
+  // `reaction` on an event deep-link to `…/events/<eid>?comment=<cid>`, and
+  // `EventScreen` reads that param to open the thread at the comment somebody
+  // actually wrote. Dropping it here doesn't fail loudly — it lands you at the
+  // top of the thread and makes the screen's `highlightCommentId` dead code.
   const event = path.match(/^\/g\/\d+\/events\/(\d+)$/);
-  if (event) return `/events/${event[1]}` as Href;
+  if (event) {
+    return (
+      query ? `/events/${event[1]}?${query}` : `/events/${event[1]}`
+    ) as Href;
+  }
 
   // A new message (backend sends `/messages/<conversationId>`) opens the thread.
   // Unlike every other case here there's no activity-centre row behind it —
@@ -565,12 +576,19 @@ export function dismissPostNotifications(postId: number): Promise<void> {
 /**
  * The event screen's version of `dismissPostNotifications`. The wire shape is
  * the web's nested one (`/g/<gid>/events/<eid>`); only the event id matters —
- * an event's five push kinds all point at the same target.
+ * an event's push kinds all point at the same target.
+ *
+ * **The query is stripped first**, for the reason the post version already
+ * gives: since events grew a comment thread, a `comment_reply` or comment
+ * `reaction` on one arrives as `…/events/<eid>?comment=<cid>`. That's still the
+ * same event, but the anchored regex can't match it — so opening the event
+ * would mark the notification seen server-side while the OS notification sat in
+ * the tray, which is precisely the split this function exists to prevent.
  */
 export function dismissEventNotifications(eventId: number): Promise<void> {
   return dismissDelivered((data) => {
     if (typeof data.url !== 'string') return false;
-    const match = data.url.match(/^\/g\/\d+\/events\/(\d+)$/);
+    const match = data.url.split('?')[0].match(/^\/g\/\d+\/events\/(\d+)$/);
     return match !== null && Number(match[1]) === eventId;
   });
 }
