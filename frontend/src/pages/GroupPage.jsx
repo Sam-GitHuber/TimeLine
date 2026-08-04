@@ -16,6 +16,7 @@ import { eventLocalStart } from "../utils.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { serverMessage } from "../errors.js";
+import { invalidateGroupMembership } from "../groupCache.js";
 import { useMessaging } from "../messaging.jsx";
 
 // A single group: a pinned header + its timeline. Members only — the backend
@@ -69,19 +70,20 @@ export default function GroupPage() {
     queryFn: () => api.getGroupMembers(groupId),
   });
 
+  // Both writes end your membership, so they refresh the home feed and the
+  // personal calendar as well as the groups list — see `groupCache.js` for why
+  // leaving the feed alone leaves it offering posts the server will refuse.
+  const backToGroups = () => {
+    invalidateGroupMembership(queryClient);
+    navigate("/groups");
+  };
   const leave = useMutation({
     mutationFn: () => api.removeGroupMember(groupId, me.pk),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["groups"] });
-      navigate("/groups");
-    },
+    onSuccess: backToGroups,
   });
   const remove = useMutation({
     mutationFn: () => api.deleteGroup(groupId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["groups"] });
-      navigate("/groups");
-    },
+    onSuccess: backToGroups,
   });
 
   // Two stacked sticky bars (nav + this group header) mean the now-node has to
