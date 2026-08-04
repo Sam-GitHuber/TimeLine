@@ -96,18 +96,16 @@ export function ComposeBox({
   user,
   onPosted,
   groupId,
-  invalidateKey = ['feed'],
 }: {
   user: User | null;
   /** Called after a post lands, so the feed can bring it into view. */
   onPosted?: () => void;
   /**
    * When set, the post goes to this group (E3a) instead of the personal feed —
-   * `createPost` sends the `group` id and `invalidateKey` should be the group's
-   * timeline query so the new post appears there, not on the home feed.
+   * `createPost` sends the `group` id, and the group's timeline is one of the
+   * lists refreshed on success (see `onSuccess`).
    */
   groupId?: number;
-  invalidateKey?: readonly unknown[];
 }) {
   const [text, setText] = useState('');
   const [photos, setPhotos] = useState<PhotoUpload[]>([]);
@@ -122,10 +120,52 @@ export function ComposeBox({
       // Put the keyboard away: the thought is finished, and leaving it up means
       // the list resizes under the user a moment later, which reads as a jolt.
       Keyboard.dismiss();
-      // Refetch the timeline so the new post appears at the top. Invalidating
-      // rather than optimistically inserting keeps the client from having to
-      // guess the server's shape (ids, timestamps, counts) for a brand-new post.
-      queryClient.invalidateQueries({ queryKey: invalidateKey });
+      // Refetch the timelines the new post belongs on, so it appears at the top
+      // of each. Invalidating rather than optimistically inserting keeps the
+      // client from having to guess the server's shape (ids, timestamps,
+      // counts) for a brand-new post.
+      //
+      // Which lists those are is a rule, not a caller's choice — this used to
+      // take an `invalidateKey` prop and each screen passed the one list it was
+      // itself showing, so a group post never refreshed the home feed (#275).
+      // The rule matches web's (`frontend/src/components/ComposeBox.jsx`):
+      //
+      // The home feed always refreshes — a group post can surface there via the
+      // "include groups" toggle. Then refresh the specific list it landed in:
+      // the group's timeline, or (for a personal post) your own profile. A
+      // group post is *not* on your profile — `visible_posts` filters
+      // `group__isnull=True` there, so the two really are either/or.
+      //
+      // The keys are bare prefixes, which is what makes them reach the suffixed
+      // keys the screens actually use: `['feed', includeGroups]` and
+      // `['userPosts', id]`. (`invalidateQueries` prefix-matches — the opposite
+      // of `setQueryData`, which needs the exact key, and is why `postCache`
+      // reaches these same lists through a `setQueriesData` predicate instead;
+      // see feed-and-posts.md.)
+      //
+      // The one place this is broader than web, which scopes the personal case
+      // to `['userPosts', user.pk]`: a bare `['userPosts']` also marks a cached
+      // *other* person's profile stale. That costs nothing — the compose box
+      // only exists on the home feed and a group page, so no profile query can
+      // be observed here, and an unobserved one refetches on its next mount
+      // regardless at `staleTime` 0 — and it can't miss your own profile the
+      // way `['userPosts', undefined]` would if `user` were ever null.
+      //
+      // Deliberately *not* a helper in `postCache.ts` alongside
+      // `invalidatePostComments`, which is the obvious place to look. That one
+      // earns its keep by deriving its keys from the `POST_LIST_KEYS` set it
+      // shares with `markPostCommentsSeen`, so the two can't drift — it hits
+      // *every* post list, unconditionally. This is the other shape: a new post
+      // lands on exactly two of them, and which two depends on `groupId`. There
+      // is nothing to derive, so extracting it would move these two lines
+      // without buying the guarantee, and would split the rule away from web's
+      // copy of it. If a fourth post-list surface is ever added, both this and
+      // `POST_LIST_KEYS` need it — that's the cost, and it's why the rule is
+      // written out rather than computed.
+      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      queryClient.invalidateQueries({
+        queryKey: groupId ? ['groupPosts', groupId] : ['userPosts'],
+      });
       // Inserting a post above whatever you were looking at shifts everything
       // down. Scrolling to the top turns that from an unexplained lurch into a
       // deliberate move that shows you the thing you just wrote.

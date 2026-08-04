@@ -9,6 +9,7 @@ import { ReportModal } from "./ReportModal.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { serverMessage } from "../errors.js";
+import { invalidatePostComments } from "../postCache.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
 // The set of comment ids that are *ancestors* of `targetId` — the nodes whose
@@ -183,12 +184,8 @@ function CommentNode({
       // The thread refetches because only the server knows whether the row went
       // or became a tombstone. The post's `comment_count` moved too, and that
       // rides the post payload — so the lists showing it need invalidating just
-      // as deleting a post does.
-      queryClient.invalidateQueries({ queryKey: ["comments", postId] });
-      queryClient.invalidateQueries({ queryKey: ["feed"] });
-      queryClient.invalidateQueries({ queryKey: ["userPosts"] });
-      queryClient.invalidateQueries({ queryKey: ["groupPosts"] });
-      queryClient.invalidateQueries({ queryKey: ["post", String(postId)] });
+      // as deleting a post does. Both live in one helper (#215).
+      invalidatePostComments(queryClient, postId);
       // **Close the dialog explicitly**, unlike `PostMenu`, which can leave it
       // to the card unmounting. A comment that had replies survives its own
       // delete as a tombstone, so this node stays mounted through the refetch —
@@ -533,7 +530,8 @@ function CommentEditor({ commentId, postId, initialText, onDone }) {
 
 // The write box for a comment or a reply. `parentId` null = top-level comment;
 // otherwise it's a reply to that comment. On success it invalidates the post's
-// comment tree so the new node appears in place.
+// comment tree so the new node appears in place — and the post lists with it,
+// since the card's "Comments · N" moved too.
 function CommentComposer({
   postId,
   parentId = null,
@@ -549,7 +547,9 @@ function CommentComposer({
       api.addComment(postId, { text: value, parent: parentId }),
     onSuccess: () => {
       setText("");
-      queryClient.invalidateQueries({ queryKey: ["comments", postId] });
+      // The tree *and* the post's comment_count wherever it's shown — a new
+      // comment moves both, the same way a delete does.
+      invalidatePostComments(queryClient, postId);
       onDone?.();
     },
   });

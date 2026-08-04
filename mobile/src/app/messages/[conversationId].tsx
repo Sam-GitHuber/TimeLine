@@ -15,6 +15,9 @@
  *   - sends, and offers the **long-press action menu** on any bubble — Copy /
  *     Edit / Delete on your own, Copy / Report on someone else's (Phase 9b M1),
  *     with a quick-reaction row across the top (Phase 9b M2);
+ *   - **swipe a bubble right to reply**, which is why this screen alone has no
+ *     interactive back gesture — see `components/SwipeToReply` and the note on
+ *     the route in `app/_layout.tsx`;
  *   - **@mentions** in a group (Phase 9b M8): typing `@` offers the thread's
  *     active members, and the ids of whoever you picked ride along with the
  *     send — which is what lets a mention reach a muted thread;
@@ -285,10 +288,12 @@ function messageActions({
     // case — this one and the next two — is three taps rather than four.
     { label: 'Select', onPress: () => onSelect(message) },
   ];
-  // The only way to reply (M3). A swipe-to-reply shipped alongside this and was
-  // removed — it raced the navigator's back gesture and usually lost, closing
-  // the conversation instead of starting a reply; see `MessageBubble`. Left out
-  // where the server would refuse the send anyway, like the reaction row.
+  // Reply (M3). No longer the *only* route: a rightward swipe on the bubble
+  // does the same thing, now that the screen's back gesture is out of its way
+  // (see `SwipeToReply`). The menu keeps it because a gesture with no visible
+  // control is undiscoverable and unreachable by VoiceOver — the swipe is the
+  // shortcut, this is the affordance. Left out where the server would refuse
+  // the send anyway, like the reaction row.
   if (canSend) {
     actions.push({ label: 'Reply', onPress: () => onReply(message) });
   }
@@ -1589,6 +1594,19 @@ export default function ThreadScreen() {
                               composing: false,
                             });
                           }
+                    }
+                    // **Swipe right to reply** — the same destination as the
+                    // menu's Reply, on the gesture people arrive expecting.
+                    // Gated exactly where Reply is gated, plus two the menu
+                    // never has to think about: a tombstone has nothing to
+                    // answer, and while selecting, a drag across the list is
+                    // how you scroll a selection you're building. See
+                    // `SwipeToReply` for why the screen's back gesture had to
+                    // go first.
+                    onSwipeReply={
+                      canSend && !pending && !selecting && !message.is_deleted
+                        ? () => startReplying(message)
+                        : undefined
                     }
                     // No menu on an unsent message: every action it offers —
                     // edit, delete, react, report — needs a server id this one

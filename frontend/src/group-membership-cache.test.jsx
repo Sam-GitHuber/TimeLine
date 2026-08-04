@@ -1,0 +1,242 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useQuery } from "@tanstack/react-query";
+import { Routes, Route } from "react-router-dom";
+import GroupPage from "./pages/GroupPage.jsx";
+import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
+import { renderWithAuth } from "./test-utils.jsx";
+import { api } from "./api.js";
+
+// What each write to **your own** group membership *refreshes*, not just what it
+// calls (issue #281 — the web half of #277).
+//
+// Membership gates the home feed and the personal calendar as well as the groups
+// list (`groupCache.js`), so a leave that refreshes only `["groups"]` leaves the
+// feed listing posts the server will now refuse — click one and you get *Post
+// not available*, because `can_view_post` wants the membership you just gave up.
+//
+// The two gated surfaces are **mounted alongside** the page doing the write
+// rather than seeded into the cache, because a seeded but unobserved entry
+// refetches on its next mount whatever we do, and would pass against the broken
+// build. They sit outside the `<Routes>` so that navigating away — which every
+// one of these writes does — doesn't take the thing under test with it. Same
+// reasoning as the app's `groupActions.test.tsx`.
+
+vi.mock("./messaging.jsx", () => ({
+  useMessaging: vi.fn(() => ({ openNew: vi.fn() })),
+}));
+
+vi.mock("./api.js", () => ({
+  api: {
+    getPage: vi.fn(),
+    getGroup: vi.fn(),
+    getGroupPosts: vi.fn(),
+    getGroupMembers: vi.fn(),
+    getGroupEvents: vi.fn(),
+    getGroupCalendar: vi.fn(),
+    getGroupInvites: vi.fn(),
+    acceptGroupInvite: vi.fn(),
+    rejectGroupInvite: vi.fn(),
+    removeGroupMember: vi.fn(),
+    deleteGroup: vi.fn(),
+    getComments: vi.fn(),
+  },
+}));
+
+const emptyPage = { results: [], next: null };
+
+// The three surfaces a membership write has to refresh, each with a counting
+// fetcher so "loaded once" and "refetched" are distinguishable.
+let loads;
+
+function GatedSurfaces() {
+  // `{ includeGroups: true }` is the include-groups-in-feed preference turned
+  // on — the setting that puts a group's posts on the home feed in the first
+  // place. The key carries the same suffix FeedPage uses, so a fix that
+  // invalidated `["feed"]` as an *exact* key wouldn't pass here.
+  useQuery({ queryKey: ["feed", { includeGroups: true }], queryFn: loads.feed });
+  useQuery({ queryKey: ["personalCalendar"], queryFn: loads.calendar });
+  useQuery({ queryKey: ["groups"], queryFn: loads.groups });
+  return null;
+}
+
+/** How many times each surface has loaded, keyed by name for a readable diff. */
+function loadCounts() {
+  return Object.fromEntries(
+    Object.entries(loads).map(([name, fn]) => [name, fn.mock.calls.length])
+  );
+}
+
+async function renderOverGatedSurfaces(ui, route) {
+  const utils = renderWithAuth(
+    <>
+      <GatedSurfaces />
+      <Routes>
+        {ui}
+        <Route path="/groups" element={<p>Groups list</p>} />
+      </Routes>
+    </>,
+    { route }
+  );
+  // Their first load, so a later call is unambiguously a refetch.
+  await waitFor(() =>
+    expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 })
+  );
+  return utils;
+}
+
+const groupPageRoute = <Route path="/g/:id" element={<GroupPage />} />;
+const invitesRoute = (
+  <Route path="/group-invites" element={<GroupInvitesPage />} />
+);
+
+async function openGroupMenu() {
+  expect(await screen.findByText("Book Club")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Group actions" }));
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  loads = {
+    feed: vi.fn(async () => emptyPage),
+    calendar: vi.fn(async () => []),
+    groups: vi.fn(async () => emptyPage),
+  };
+  api.getGroup.mockResolvedValue({
+    id: 7,
+    name: "Book Club",
+    description: "",
+    avatar_thumb: null,
+    member_count: 2,
+    your_role: "admin",
+  });
+  api.getGroupPosts.mockResolvedValue(emptyPage);
+  api.getGroupMembers.mockResolvedValue([]);
+  api.getGroupEvents.mockResolvedValue([]);
+  api.getGroupCalendar.mockResolvedValue([]);
+  api.getComments.mockResolvedValue([]);
+  api.getGroupInvites.mockResolvedValue({
+    count: 1,
+    results: [
+      {
+        id: 12,
+        group: { id: 7, name: "Book Club", avatar_thumb: null },
+        invited_by: { id: 2, display_name: "Priya" },
+      },
+    ],
+    next: null,
+  });
+  api.removeGroupMember.mockResolvedValue({});
+  api.deleteGroup.mockResolvedValue({});
+  api.acceptGroupInvite.mockResolvedValue({});
+  api.rejectGroupInvite.mockResolvedValue({});
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("leaving or deleting a group", () => {
+  it("refreshes the feed and the calendar when you leave", async () => {
+    await renderOverGatedSurfaces(groupPageRoute, "/g/7");
+    await openGroupMenu();
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "Leave group" }));
+
+    // Leaving is the member-remove endpoint with your own id (groups.md).
+    await waitFor(() => expect(api.removeGroupMember).toHaveBeenCalledWith(7, 1));
+    // The feed is the regression: it filters group posts down to your active
+    // memberships, so every post from this group is now one the server refuses.
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ feed: 2, calendar: 2, groups: 2 })
+    );
+    expect(await screen.findByText("Groups list")).toBeInTheDocument();
+  });
+
+  it("refreshes the feed and the calendar when you delete", async () => {
+    await renderOverGatedSurfaces(groupPageRoute, "/g/7");
+    await openGroupMenu();
+
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: "Delete group" })
+    );
+
+    // Deleting takes the group's posts and events with it for everyone, so the
+    // two gated surfaces are just as wrong afterwards as they are after a leave.
+    await waitFor(() => expect(api.deleteGroup).toHaveBeenCalledWith(7));
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ feed: 2, calendar: 2, groups: 2 })
+    );
+  });
+
+  it("refreshes nothing when you cancel the confirmation", async () => {
+    window.confirm.mockReturnValue(false);
+    await renderOverGatedSurfaces(groupPageRoute, "/g/7");
+    await openGroupMenu();
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "Leave group" }));
+
+    expect(api.removeGroupMember).not.toHaveBeenCalled();
+    expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 });
+  });
+
+  it("refreshes nothing when the server refuses the leave", async () => {
+    // The last-admin guardrail is server-side, and the page surfaces its words
+    // rather than swallowing them; that message is also the tell that the
+    // failure has settled, so the counts are read after the mutation finished
+    // rather than before it started.
+    api.removeGroupMember.mockRejectedValue(
+      Object.assign(new Error("Promote another member to admin first."), {
+        name: "ApiError",
+        status: 400,
+        fromServer: true,
+      })
+    );
+    await renderOverGatedSurfaces(groupPageRoute, "/g/7");
+    await openGroupMenu();
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "Leave group" }));
+
+    expect(
+      await screen.findByText("Promote another member to admin first.")
+    ).toBeInTheDocument();
+    // Nothing changed on the server, so nothing is refreshed — and you stay put
+    // rather than being sent to a list of groups you're still in.
+    expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 });
+    expect(screen.queryByText("Groups list")).toBeNull();
+  });
+});
+
+describe("deciding on a group invitation", () => {
+  it("refreshes the feed and the calendar when you accept", async () => {
+    await renderOverGatedSurfaces(invitesRoute, "/group-invites");
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Accept" }));
+
+    // Accepting makes you an active member, so the group's posts and events are
+    // now yours to see — the inverse of the leave case, and just as wrong if
+    // the two gated surfaces keep the old answer.
+    await waitFor(() => expect(api.acceptGroupInvite).toHaveBeenCalledWith(12));
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ feed: 2, calendar: 2, groups: 2 })
+    );
+  });
+
+  it("leaves the feed and the calendar alone when you decline", async () => {
+    await renderOverGatedSurfaces(invitesRoute, "/group-invites");
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
+    expect(api.getGroupInvites).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Decline" }));
+
+    // Declining deletes the invite row and joins nothing, so it stays on the
+    // narrow set. The invite list refetching is the signal that the success
+    // handler has run — every invalidation in it happens in that same tick, so
+    // if the feed were in the set it would have refetched by now too.
+    await waitFor(() => expect(api.getGroupInvites).toHaveBeenCalledTimes(2));
+    expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 2 });
+  });
+});

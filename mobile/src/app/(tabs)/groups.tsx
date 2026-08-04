@@ -36,6 +36,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { ComposeIcon } from '@/components/icons';
+import { invalidateGroupMembership } from '@/groupCache';
 import { dedupeById, trimToFirstPage } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Group, GroupInvite, Paginated } from '@/types';
@@ -239,16 +240,19 @@ function InvitesList() {
   const { refreshing, onRefresh } = usePullToRefresh(queryKey, query.refetch);
 
   const decide = useMutation({
-    mutationFn: ({
-      act,
-      id,
-    }: {
-      act: (id: number) => Promise<void>;
-      id: number;
-    }) => act(id),
-    onSuccess: () => {
+    // The two decisions differ in what they *change*, not just which endpoint
+    // they call, so the choice is a flag the success handler can read rather
+    // than an opaque function passed in from the row.
+    mutationFn: ({ accept, id }: { accept: boolean; id: number }) =>
+      accept ? api.acceptGroupInvite(id) : api.rejectGroupInvite(id),
+    onSuccess: (_result, { accept }) => {
       queryClient.invalidateQueries({ queryKey: ['groupInvites'] });
-      queryClient.invalidateQueries({ queryKey: ['groups'] });
+      // Accepting makes you an active member, and membership gates the home
+      // feed and the personal calendar as well as this list (see
+      // `groupCache.ts`). Declining deletes the invite row and leaves every
+      // membership alone, so it stays on the narrow set it already had.
+      if (accept) invalidateGroupMembership(queryClient);
+      else queryClient.invalidateQueries({ queryKey: ['groups'] });
     },
   });
 
@@ -285,7 +289,7 @@ function InvitesList() {
             </View>
             <View style={styles.decideRow}>
               <Pressable
-                onPress={() => decide.mutate({ act: api.acceptGroupInvite, id: item.id })}
+                onPress={() => decide.mutate({ accept: true, id: item.id })}
                 disabled={pending}
                 accessibilityRole="button"
                 accessibilityLabel={`Accept ${item.group.name}`}
@@ -294,7 +298,7 @@ function InvitesList() {
                 <Text style={styles.acceptLabel}>Accept</Text>
               </Pressable>
               <Pressable
-                onPress={() => decide.mutate({ act: api.rejectGroupInvite, id: item.id })}
+                onPress={() => decide.mutate({ accept: false, id: item.id })}
                 disabled={pending}
                 accessibilityRole="button"
                 accessibilityLabel={`Decline ${item.group.name}`}

@@ -111,6 +111,31 @@ groups, profiles, and the message transcript's `loadOlder`.
 - **TanStack Query** drives the frontend; mutations invalidate `["feed"]` /
   `["users"]` / `["user", id]` so posting or connecting refreshes the affected
   views immediately.
+- **A new post refreshes two lists, and which two is a rule the compose box
+  owns** (`ComposeBox.jsx` / `ComposeBox.tsx`, both `onSuccess`). Always
+  `['feed']` — a group post surfaces on the home feed via the *include groups*
+  toggle — and then the one list it landed in: `['groupPosts', groupId]` for a
+  group post, `['userPosts']` for a personal one. Those two are genuinely
+  either/or, because `visible_posts` filters `group__isnull=True` for a profile,
+  so a group post is never on your own timeline.
+
+  Mobile used to take the key from the caller (an `invalidateKey` prop), and
+  each screen naturally passed the one list it was itself showing — so a group
+  post refreshed the group and nothing else (#275). The symptom is #273's
+  exactly: a tab navigator keeps the Home tab mounted, so its query has a live
+  observer, never remounts, and `staleTime: 0` doesn't rescue it; the post is
+  missing from the feed until a pull-to-refresh or an app foreground. **Deciding
+  the key at the call site is the bug** — the rule belongs where the write is.
+  A regression test for this must mount observers on the other surfaces, not
+  seed cache entries (same reasoning as the badge tests below).
+
+  **It stays in the compose box rather than moving to `postCache`**, which is
+  the natural place to look given `invalidatePostComments` lives there. That
+  helper earns its place by *deriving* its keys from the `POST_LIST_KEYS` set it
+  shares with `markPostCommentsSeen`, so the two can't drift — it hits every
+  post list, unconditionally. A new post is the other shape: exactly two lists,
+  and which two depends on whether it went to a group. There's nothing to
+  derive, so extracting it would move two lines without buying the guarantee.
 
 ### Permalink — a single post by id
 
@@ -349,6 +374,45 @@ counts exclude your own messages.
   count — so it clears on open **and** genuinely-new later comments re-badge once
   a refetch legitimately raises the count. (A per-card "already opened" flag
   would suppress those later comments until the card remounted.)
+- **That cache write matches on the first key segment, not the whole key** —
+  `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
+  clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post
+  list caches under a *suffixed* key the writer can't know: `['feed',
+  includeGroups]`, `['userPosts', id]`, `['groupPosts', id]`. An exact-key
+  `setQueryData(['feed'], …)` matches none of them and updates nothing without
+  erroring — mobile shipped that way and the badge simply never cleared (#195).
+  Tests for this must seed the suffixed keys; a bare `['feed']` fixture tests a
+  cache entry neither app ever writes.
+- **The *total* is a separate problem from the badge, and it's an invalidation,
+  not a cache write.** Opening a thread only moves `new_comment_count`, which the
+  client can compute itself; adding or deleting a comment moves `comment_count`,
+  and only the server knows the new value after pruning. So every mutation on the
+  tree must invalidate the post lists as well as `['comments', postId]` — the
+  count rides the *post* payload, not the tree. Both clients funnel both
+  mutations through one `invalidatePostComments(queryClient, postId)`
+  (`frontend/src/postCache.js`, `mobile/src/postCache.ts`), which derives its
+  list keys from the same `POST_LIST_KEYS` set `markPostCommentsSeen` uses, so a
+  new post-list surface can't reach one and not the other. The bug this closes
+  (#215 on web, #273 on mobile) was exactly the drift a shared list prevents:
+  delete carried the full set, add carried part of it, and a card sat reading
+  *Comments · 3* above four comments until something unrelated refetched.
+- **Note the two helpers match keys in opposite directions**, which is the
+  easiest thing here to get backwards. `markPostCommentsSeen` *writes*, so it
+  needs the exact suffixed key and reaches the lists through a predicate;
+  `invalidatePostComments` *invalidates*, which prefix-matches, so a bare
+  `['userPosts']` correctly reaches `['userPosts', 7]`.
+- **What the invalidation actually buys is the mounted screen.** With
+  `staleTime` at 0, a timeline that has been unmounted refetches on its next
+  mount anyway — but a native stack keeps the screen you came *from* mounted
+  while you read a post, so without the invalidation its query never refetches
+  and going back shows the old count. That's the reported symptom of #273, and
+  it's why the mobile regression test mounts observers rather than seeding cache
+  entries. (A seeded, unobserved entry passes against the broken build.) One
+  consequence worth knowing before debugging near this: the seen-marking write
+  fires a tick after the tree refetches and `setQueryData` clears
+  `isInvalidated`, so on an *unobserved* query the flag is cleared again shortly
+  after being set. Harmless at `staleTime` 0 — but don't write a test that waits
+  on that flag.
 
 ## Photos
 

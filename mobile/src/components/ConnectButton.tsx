@@ -18,9 +18,11 @@
  * share through that person; withdrawing a still-pending request never had a
  * live connection to break, so it mutates straight away — same rule as the web.
  *
- * On success it invalidates every view the change touches (the people lists, the
- * feed, this person's profile + posts, and the requests inbox) so nothing shows
- * a stale button or a post that just (dis)appeared.
+ * On success it invalidates every view the change touches, through the shared
+ * `invalidateConnectionChange` — a connection is the visibility boundary itself,
+ * so the set is much wider than the people lists this button sits among, and
+ * keeping it here rather than in a list copied per call site is what stops the
+ * four connection writes drifting apart again (#278 / #285).
  *
  * A rejection alerts (issue #236). Without it, a withdraw that 400s — they
  * accepted, or closed their account, while your screen was open — re-enabled a
@@ -35,6 +37,7 @@ import { Alert, Pressable, StyleSheet, Text } from 'react-native';
 
 import { api, serverMessage } from '@/api';
 import { DisconnectWarningModal } from '@/components/DisconnectWarningModal';
+import { invalidateConnectionChange } from '@/connectionCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { ProfileUser } from '@/types';
 
@@ -82,14 +85,7 @@ export function ConnectButton({
   const mutation = useMutation({
     mutationFn: () =>
       isConnectAction ? api.connect(userId) : api.disconnect(userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] });
-      queryClient.invalidateQueries({ queryKey: ['connections'] });
-      queryClient.invalidateQueries({ queryKey: ['feed'] });
-      queryClient.invalidateQueries({ queryKey: ['user', userId] });
-      queryClient.invalidateQueries({ queryKey: ['userPosts', userId] });
-      queryClient.invalidateQueries({ queryKey: ['connectionRequests'] });
-    },
+    onSuccess: () => invalidateConnectionChange(queryClient, userId),
   });
 
   // Awaited rather than fired-and-forgotten so the disconnect path can keep its
