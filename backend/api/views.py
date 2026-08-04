@@ -2642,10 +2642,17 @@ class ConversationLeaveView(APIView):
     ``left_at``, then re-runs ``promote_participants`` so anyone still
     pending gets re-checked against the (now smaller) active clique. 404 if
     the caller has no non-left participant row for this conversation —
-    a chat you're not in shouldn't even reveal it exists.
+    a chat you're not in shouldn't even reveal it exists — and 404 for a
+    thread ``_thread_for_viewer`` hides, since mutating participant state on a
+    thread a block has taken away is the same hole the read-marker and mute
+    routes had. In practice that gate only bites on a **direct** thread
+    (``_conversation_visible`` passes every group), and whether leaving a 1:1
+    should be possible *at all* is the separate open question in issue #210 —
+    this only makes sure it can't happen on a thread you can no longer reach.
     """
 
     def post(self, request, pk):
+        _convo, _my_status = _thread_for_viewer(pk, request.user)
         p = get_object_or_404(
             Participant, conversation_id=pk, user=request.user, left_at__isnull=True
         )
@@ -2688,7 +2695,8 @@ class ConversationDetailView(generics.RetrieveAPIView):
     Drives the thread page's header so it's correct even on a cold page
     load/refresh, not only when arriving from the list. Participant-scoped —
     404 if you're not a member at all, or (direct only) if the pair is blocked
-    either way.
+    either way **or the other account is deactivated**; both halves come from
+    ``_conversation_visible``, so this can't drift from what the list shows.
 
     It's also where **read receipts** live (Phase 9b M4): each participant's
     read marker rides on the ``participants`` list here and nowhere else, so the
@@ -2853,7 +2861,9 @@ class ConversationMessagesView(generics.ListAPIView):
     ``/conversations/<pk>/messages/``.
 
     You must be a participant, else 404 (we don't reveal a thread you're not
-    in). A blocked direct pair can't see the thread at all (404). A pending
+    in). A direct thread that ``_conversation_visible`` hides — a blocked pair,
+    or the other account deactivated — can't be seen at all (404), the same
+    rule the list applies. A pending
     group member sees the thread exists (via the detail view) but can't read
     or send here — 403 — until they're promoted to active. GET returns
     messages oldest-first, paginated, clipped to your access interval(s) for a
@@ -3990,12 +4000,22 @@ def can_view_message(user, message):
     """Whether ``user`` may see ``message`` — the report gate for a message
     target, and the exact same rule the thread itself uses.
 
-    Three conditions, all reused rather than re-derived (a second copy of the
-    messaging safety gate would drift from the first):
+    Three conditions:
 
     1. They're a member of the conversation at all (``_viewer_participant_status``).
     2. For a direct thread, the pair isn't blocked either way — a blocked thread
-       404s everywhere else, so it must here too.
+       404s everywhere else, so it must here too. **This is deliberately the
+       block half of ``_conversation_visible`` and not the whole of it**: that
+       helper also hides a direct thread whose other account is *deactivated*,
+       and applying it here would take the report path away exactly when the
+       other party has been banned. Reporting is the safety valve, and the
+       reasoning below about demotion applies just as much to the other person
+       vanishing — being unable to reach the thread shouldn't disarm you.
+       The consequence is that a message in a deactivated pair's thread stays
+       reactable/reportable by id while the thread itself 404s; nothing is
+       readable that wasn't already, and neither action reaches a banned
+       account. Don't "fix" this into ``_conversation_visible`` without
+       deciding that question first.
     3. The message falls inside one of their access intervals
        (``_messages_for_viewer``). This is what stops a member who was ``pending``
        across a gap from reporting — and thereby reading back, via the admin — a

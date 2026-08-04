@@ -3627,11 +3627,11 @@ class BlockedThreadWriteTests(MessagingBase):
     """🔒 A block takes the thread away from **both** sides — for writes as well
     as reads.
 
-    The read routes had this from Phase 5; the read-marker and mute routes
-    resolved the thread with the membership-only helper and so kept answering
-    on a thread the block had already hidden. Blocking is the safety feature,
-    so it can't be the one gate a write path skips: these assert every
-    per-thread route agrees, from the blocked party's side (the side that
+    The read routes had this from Phase 5; the read-marker, mute and leave
+    routes resolved the thread with a membership-only lookup and so kept
+    answering on a thread the block had already hidden. Blocking is the safety
+    feature, so it can't be the one gate a write path skips: these assert the
+    per-thread routes agree, from the blocked party's side (the side that
     matters — they're the one the block is protecting against).
     """
 
@@ -3690,6 +3690,19 @@ class BlockedThreadWriteTests(MessagingBase):
         self.assertFalse(
             Participant.objects.filter(
                 conversation=self.convo, user=self.me, muted_at__isnull=False
+            ).exists()
+        )
+
+    def test_leaving_a_blocked_thread_cannot_mutate_participant_state(self):
+        # Leave resolved a raw Participant row, which a block never touches on
+        # a direct thread — so it closed the access interval and tombstoned the
+        # row on a thread 404'd everywhere else. Whether leaving a 1:1 should
+        # exist at all is #210; this is only that it can't happen here.
+        resp = self.client.post(f"/api/conversations/{self.convo.pk}/leave/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(
+            Participant.objects.filter(
+                conversation=self.convo, user=self.me, left_at__isnull=False
             ).exists()
         )
 

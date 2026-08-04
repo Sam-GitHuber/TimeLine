@@ -1034,8 +1034,10 @@ carries the rule:
   is the same predicate the conversation list filters on.
 
 `POST`/`DELETE /conversations/<pk>/read/` and `POST`/`DELETE
-/conversations/<pk>/mute/` took the first. So after a block, the thread vanished
-from the blocked party's list and 404'd on the detail and `/messages/` — while:
+/conversations/<pk>/mute/` took the first, and `/leave/` took neither — it
+resolved a raw `Participant` row, which a block never touches on a direct
+thread. So after a block, the thread vanished from the blocked party's list and
+404'd on the detail and `/messages/` — while:
 
 - `DELETE .../read/` still returned `200 {"unread_count": N}`, computed from
   `_messages_for_viewer` on the hidden thread. The 200-vs-400 split ("There's
@@ -1047,8 +1049,14 @@ from the blocked party's list and 404'd on the detail and `/messages/` — while
   party could move a tick that surfaces to the blocker the moment the block is
   lifted.
 - `/mute/` still mutated `Participant.muted_at` on it.
+- `/leave/` still closed the access interval and tombstoned the `Participant`
+  row on it. (Whether leaving a 1:1 should be possible **at all** is the
+  separate open question in [#210](https://github.com/Sam-GitHuber/TimeLine/issues/210);
+  the gate only stops it happening on a thread you can no longer reach. Note
+  the gate is a no-op for group chats, so it settles nothing about #210 either
+  way.)
 
-**All per-thread routes now resolve through `_thread_for_viewer`**, and the rule
+**Every per-thread route now resolves through `_thread_for_viewer`**, and the rule
 itself lives only in `_conversation_visible` — `_thread_for_viewer` calls it
 instead of re-deriving the block half, and `ConversationDetailView.get_object`
 no longer keeps a third copy inline. Three spellings of one sentence is how this
