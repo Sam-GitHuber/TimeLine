@@ -17,13 +17,17 @@ import { Alert } from 'react-native';
 
 import { api } from '@/api';
 import { useAuth } from '@/auth';
+import { invalidateGroupMembership } from '@/groupCache';
 
 export function useGroupActions(groupId: number) {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
 
   const backToGroups = () => {
-    queryClient.invalidateQueries({ queryKey: ['groups'] });
+    // Both writes end your membership, so they refresh the home feed and the
+    // personal calendar as well as the groups list — see `groupCache.ts` for
+    // why leaving the feed alone leaves it offering posts the server refuses.
+    invalidateGroupMembership(queryClient);
     router.replace('/groups');
   };
 
