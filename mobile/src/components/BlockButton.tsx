@@ -36,6 +36,7 @@ import { useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text } from 'react-native';
 
 import { api } from '@/api';
+import { invalidateConnectionChange } from '@/connectionCache';
 import { DisconnectWarningModal } from './DisconnectWarningModal';
 import { colors, fontSize, spacing } from '@/theme';
 
@@ -53,20 +54,12 @@ export function BlockButton({
 
   const mutation = useMutation({
     mutationFn: () => (isBlocked ? api.unblockUser(userId) : api.blockUser(userId)),
-    onSuccess: () => {
-      // A block/unblock changes connection state, feeds, and messaging surfaces —
-      // invalidate them all, exactly as the web BlockButton does.
-      for (const key of [
-        ['user', userId],
-        ['users'],
-        ['feed'],
-        ['conversations'],
-        ['unreadMessages'],
-        ['connectionRequests'],
-      ]) {
-        queryClient.invalidateQueries({ queryKey: key });
-      }
-    },
+    // A block deletes the `Connection` row outright ("Blocking severs any
+    // connection" — `BlockView.post`), so it moves the visibility boundary just
+    // as a disconnect does and refreshes the same set. Its own list used to omit
+    // `['connections']`, leaving someone you'd just blocked listed as a
+    // connection (#278), and every calendar and event key (#285).
+    onSuccess: () => invalidateConnectionChange(queryClient, userId),
   });
 
   // Like `PollTally`'s rollback, this leans on a deferral recorded in
