@@ -68,12 +68,62 @@ export function markPostCommentsSeen(queryClient, postId) {
 // POST_LIST_KEYS means a new one can't be added to `markPostCommentsSeen`
 // without the invalidation following it.
 export function invalidatePostComments(queryClient, postId) {
-  const keys = [
-    ["comments", postId],
-    ...[...POST_LIST_KEYS].map((key) => [key]),
-    // Keyed by string: that's what useParams hands the permalink query.
-    ["post", String(postId)],
-  ];
+  invalidateComments(queryClient, { postId });
+}
+
+// The query key for one comment thread. A thread hangs off a post **or** an
+// event, and the two id spaces are separate — post 7 and event 7 both exist —
+// so the kind is part of the key. Without it the two would share a cache entry
+// and whichever loaded second would paint the other's comments.
+//
+// `connectionCache` invalidates the `["comments"]` prefix, which still matches
+// both, deliberately: a connection change re-prunes every tree.
+export function commentsQueryKey({ postId = null, eventId = null }) {
+  if (postId != null) return ["comments", "post", postId];
+  if (eventId != null) return ["comments", "event", eventId];
+  throw new Error("commentsQueryKey needs a postId or an eventId");
+}
+
+// Refetch everything a *change* to a comment tree touches: the tree itself, and
+// the target's `comment_count` wherever a card renders it.
+//
+// The count rides the target's payload rather than the comment tree, so adding
+// or deleting a comment moves data in two different queries. Invalidate only
+// the tree and the open thread shows four comments under a button still reading
+// "Comments · 3" — as does every other surface holding it, until something
+// unrelated refetches.
+//
+// **An event lives on four surfaces, and this names all four** — the same rule
+// `EventPage`'s `invalidate()` follows, and for the reason #279 established: a
+// key nothing points at from the write side is exactly how a surface gets
+// missed. `groupId` is optional only because a caller that doesn't have it
+// still wants the other three refreshed; pass it wherever it's known.
+export function invalidateComments(
+  queryClient,
+  { postId = null, eventId = null, groupId = null }
+) {
+  const target = postId != null ? { postId } : { eventId };
+  const keys = [commentsQueryKey(target)];
+  if (postId != null) {
+    keys.push(
+      ...[...POST_LIST_KEYS].map((key) => [key]),
+      // Keyed by string: that's what useParams hands the permalink query.
+      ["post", String(postId)]
+    );
+  } else {
+    // **Numbers, not strings** — `EventPage` builds its keys from
+    // `Number(useParams().eid)`, where the permalink post query keeps the raw
+    // string. The two conventions are a trap: a key that doesn't match
+    // invalidates nothing at all and fails completely silently, so these are
+    // coerced here rather than trusting every caller to have the right type.
+    keys.push(["event", Number(eventId)], ["personalCalendar"]);
+    if (groupId != null) {
+      keys.push(
+        ["groupEvents", Number(groupId)],
+        ["groupCalendar", Number(groupId)]
+      );
+    }
+  }
   for (const queryKey of keys) {
     queryClient.invalidateQueries({ queryKey });
   }

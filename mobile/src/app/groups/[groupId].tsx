@@ -208,14 +208,18 @@ export default function GroupScreen() {
         <Text style={styles.upcomingHeading}>
           ↑ {upcomingCount} upcoming
         </Text>
+        {/* `showActions` — the reaction row and comment count, as a post on
+            the timeline below carries. This region *is* the phone's version of
+            the web's upcoming timeline entries, so it gets a timeline entry's
+            affordances; the calendar tab's cards don't (see `EventCard`). */}
         {scheduledFuture.map((e) => (
-          <EventCard key={e.id} event={e} />
+          <EventCard key={e.id} event={e} showActions />
         ))}
         {staging.length > 0 ? (
           <>
             <Text style={styles.stagingHeading}>Being planned</Text>
             {staging.map((e) => (
-              <EventCard key={e.id} event={e} />
+              <EventCard key={e.id} event={e} showActions />
             ))}
           </>
         ) : null}

@@ -34,6 +34,11 @@ vi.mock("./api.js", () => ({
     deleteEvent: vi.fn().mockResolvedValue({}),
     createEvent: vi.fn(),
     getPersonalCalendar: vi.fn(),
+    // Comments and reactions on the event itself.
+    getComments: vi.fn().mockResolvedValue([]),
+    addComment: vi.fn().mockResolvedValue({}),
+    toggleReaction: vi.fn().mockResolvedValue({ reactions: [] }),
+    getReactors: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -70,6 +75,9 @@ function makeEvent(overrides = {}) {
     },
     can_manage: true,
     can_moderate: true,
+    reactions: [],
+    comment_count: 0,
+    new_comment_count: 0,
     polls: [
       {
         id: 11,
@@ -624,6 +632,76 @@ describe("EventPage", () => {
   });
 });
 
+// An event is authored content, so it carries the same pair a post does. The
+// visibility rules are the server's (and tested there); what matters here is
+// that the thread and the chips are wired to the *event*, not to a post.
+describe("EventPage — comments and reactions", () => {
+  it("loads the thread for the event, not for a post of the same id", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    // The two id spaces are separate: event 7 and post 7 both exist, so a
+    // thread keyed or routed on the bare number would fetch the wrong one.
+    await waitFor(() =>
+      expect(api.getComments).toHaveBeenCalledWith({ eventId: 7, groupId: 3 })
+    );
+  });
+
+  it("posts a comment onto the event", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.type(
+      await screen.findByPlaceholderText("Write a comment…"),
+      "are we still on?"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Comment" }));
+
+    await waitFor(() =>
+      expect(api.addComment).toHaveBeenCalledWith(
+        { eventId: 7, groupId: 3 },
+        { text: "are we still on?", parent: null }
+      )
+    );
+  });
+
+  it("toggles a reaction on the event", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.toggleReaction.mockResolvedValue({
+      reactions: [{ emoji: "🎉", count: 1, reacted: true }],
+    });
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add a reaction" }));
+    await userEvent.click(await screen.findByRole("button", { name: /🎉/ }));
+
+    await waitFor(() =>
+      expect(api.toggleReaction).toHaveBeenCalledWith(
+        expect.objectContaining({ eventId: 7, emoji: "🎉" })
+      )
+    );
+  });
+
+  it("renders the reaction chips the server sent", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({ reactions: [{ emoji: "🎉", count: 3, reacted: false }] })
+    );
+    renderEventPage();
+
+    expect(await screen.findByText("3")).toBeInTheDocument();
+  });
+
+  it("shows the comment count beside the chips", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ comment_count: 4 }));
+    renderEventPage();
+
+    expect(await screen.findByText("4 comments")).toBeInTheDocument();
+  });
+});
+
 describe("date & time entry", () => {
   it("hops from hour to minute after two digits", async () => {
     const onSet = vi.fn();
@@ -805,6 +883,38 @@ describe("event timeline entries", () => {
     );
     expect(screen.getByRole("link", { name: /Camping/ })).toBeInTheDocument();
     expect(screen.getByText(/2 going/)).toBeInTheDocument();
+  });
+
+  it("carries the reaction row and comment count, as a post on this spine does", () => {
+    const ev = makeEvent({
+      id: 11,
+      title: "Camping",
+      status: "scheduled",
+      event_date: "2026-08-20",
+      starts_at: "2026-08-20T00:00:00Z",
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "unset" },
+        location: { state: "unset" },
+      },
+      polls: [],
+      rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+      reactions: [{ emoji: "🎉", count: 2, reacted: false }],
+      comment_count: 3,
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline futureEvents={[ev]} />} />
+      </Routes>
+    );
+
+    expect(screen.getByText("2")).toBeInTheDocument();
+    // The count links through to the event page rather than expanding the
+    // thread in place, unlike a post's — an event's conversation lives beside
+    // its polls, its RSVP and its chips.
+    expect(
+      screen.getByRole("link", { name: /3 comments/ })
+    ).toHaveAttribute("href", "/g/3/events/11");
   });
 });
 

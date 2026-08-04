@@ -185,7 +185,7 @@ export default function PostScreen() {
               onLayout={handleThreadLayout}
             >
               <CommentThread
-                postId={id}
+                target={{ postId: id }}
                 highlightCommentId={highlightCommentId}
                 onHighlightLayout={scrollToThreadOffset}
               />

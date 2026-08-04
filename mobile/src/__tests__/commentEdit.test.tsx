@@ -110,7 +110,7 @@ async function renderThread(tree: Comment[]) {
   await act(async () => {
     render(
       <QueryClientProvider client={queryClient}>
-        <CommentThread postId={7} />
+        <CommentThread target={{ postId: 7 }} />
       </QueryClientProvider>
     );
   });
@@ -174,7 +174,7 @@ describe('saving an edit', () => {
     await waitFor(() => expect(made(COMMENT_5, 'PATCH')).toBe(true));
     expect(requestBody(COMMENT_5, 'PATCH')).toEqual({ text: 'Comment 5, fixed' });
     // The thread refetches so the new text and its marker appear in place.
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['comments', 7] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['comments', 'post', 7] });
     await waitFor(() =>
       expect(screen.queryByLabelText('Edit comment text')).toBeNull()
     );
@@ -262,7 +262,7 @@ describe('deleting', () => {
 
     await waitFor(() => expect(made(COMMENT_5, 'DELETE')).toBe(true));
     // The comment count moved, so the lists carrying it are refetched too.
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['comments', 7] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['comments', 'post', 7] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['feed'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['post', '7'] });
   });

@@ -58,7 +58,7 @@ function renderThread(props: Partial<Parameters<typeof CommentThread>[0]> = {}) 
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <CommentThread postId={7} {...props} />
+      <CommentThread target={{ postId: 7 }} {...props} />
     </QueryClientProvider>
   );
 }
@@ -134,7 +134,7 @@ async function renderThreadOverTimelines() {
       {Object.entries(screens).map(([name, s]) => (
         <TimelineScreen key={name} queryKey={s.key} queryFn={s.fn} />
       ))}
-      <CommentThread postId={7} />
+      <CommentThread target={{ postId: 7 }} />
     </QueryClientProvider>
   );
   // Their first load, so a later call is unambiguously a refetch.

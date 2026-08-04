@@ -31,7 +31,7 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 
-import { api } from '@/api';
+import { api, type CommentTarget } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from './ActionMenu';
 import { Avatar } from './Avatar';
@@ -39,7 +39,12 @@ import { KebabIcon } from './icons';
 import { ReactionBar } from './ReactionBar';
 import { ReportModal } from './ReportModal';
 import { SPINE_CENTRE } from './timeline';
-import { invalidatePostComments, markPostCommentsSeen } from '@/postCache';
+import {
+  commentsQueryKey,
+  invalidateComments,
+  markEventCommentsSeen,
+  markPostCommentsSeen,
+} from '@/postCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Comment } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
@@ -229,11 +234,17 @@ export function ancestorIdsOf(comments: Comment[], targetId: number): Set<number
 }
 
 export function CommentThread({
-  postId,
+  target,
   highlightCommentId = null,
   onHighlightLayout,
 }: {
-  postId: number;
+  /**
+   * The thing this thread hangs off — `{ postId }` or `{ eventId, groupId }`.
+   * A comment tree is the same feature on both and the server applies the same
+   * prune to both, so nothing below branches on it: a comment id is a comment
+   * id, and reply/edit/delete/react all work unchanged.
+   */
+  target: CommentTarget;
   /** From a notification deep link — auto-expanded, highlighted, scrolled to. */
   highlightCommentId?: number | null;
   /** Reports where the highlighted comment landed, so the screen can scroll. */
@@ -246,8 +257,8 @@ export function CommentThread({
     isLoading,
     error,
   } = useQuery({
-    queryKey: ['comments', postId],
-    queryFn: () => api.getComments(postId),
+    queryKey: commentsQueryKey(target),
+    queryFn: () => api.getComments(target),
   });
 
   /**
@@ -263,8 +274,16 @@ export function CommentThread({
    * action rather than on the post render (frontend/src/components/PostCard.jsx).
    */
   useEffect(() => {
-    if (comments) markPostCommentsSeen(queryClient, postId);
-  }, [comments, postId, queryClient]);
+    if (!comments) return;
+    // Both kinds carry a `· N new` badge on a card elsewhere, and both are
+    // mirrored rather than refetched — see the two helpers for why an event's
+    // is not simply the post one with a different id.
+    if (target.postId != null) {
+      markPostCommentsSeen(queryClient, Number(target.postId));
+    } else if (target.eventId != null) {
+      markEventCommentsSeen(queryClient, Number(target.eventId));
+    }
+  }, [comments, target.postId, target.eventId, queryClient]);
 
   // Memoised because it walks the whole tree: without this, every keystroke in
   // the composer below re-walks it and hands every node a fresh Set.
@@ -295,7 +314,7 @@ export function CommentThread({
           <CommentNode
             key={comment.id}
             comment={comment}
-            postId={postId}
+            target={target}
             expandIds={expandIds}
             highlightId={highlightCommentId}
             onHighlightLayout={onHighlightLayout}
@@ -310,7 +329,7 @@ export function CommentThread({
       )}
 
       <View style={styles.threadComposer}>
-        <CommentComposer postId={postId} placeholder="Write a comment…" />
+        <CommentComposer target={target} placeholder="Write a comment…" />
       </View>
     </View>
   );
@@ -319,7 +338,7 @@ export function CommentThread({
 /** One comment: a bead on the spine, its reactions, and its branched replies. */
 function CommentNode({
   comment,
-  postId,
+  target,
   expandIds,
   highlightId,
   onHighlightLayout,
@@ -328,7 +347,7 @@ function CommentNode({
   isLast,
 }: {
   comment: Comment;
-  postId: number;
+  target: CommentTarget;
   expandIds: Set<number> | null;
   highlightId: number | null;
   onHighlightLayout?: (y: number) => void;
@@ -370,7 +389,7 @@ function CommentNode({
       // Refetch rather than splice: only the server knows whether the row went
       // or turned into a tombstone. The post's `comment_count` moved too, and
       // that rides the post payload wherever it's shown.
-      invalidatePostComments(queryClient, postId);
+      invalidateComments(queryClient, target);
     },
     onError: (err) => {
       Alert.alert(
@@ -661,7 +680,7 @@ function CommentNode({
             ) : editing ? (
               <CommentEditor
                 commentId={comment.id}
-                postId={postId}
+                target={target}
                 initialText={comment.text}
                 onDone={() => setEditing(false)}
               />
@@ -680,7 +699,7 @@ function CommentNode({
 
             {showReply && !isDeleted ? (
               <CommentComposer
-                postId={postId}
+                target={target}
                 parentId={comment.id}
                 autoFocus
                 placeholder={`Reply to ${comment.author.display_name}…`}
@@ -723,7 +742,7 @@ function CommentNode({
             <CommentNode
               key={reply.id}
               comment={reply}
-              postId={postId}
+              target={target}
               expandIds={expandIds}
               highlightId={highlightId}
               // `report`, not the raw callback: a reply's offset is relative to
@@ -756,12 +775,12 @@ function CommentNode({
  */
 function CommentEditor({
   commentId,
-  postId,
+  target,
   initialText,
   onDone,
 }: {
   commentId: number;
-  postId: number;
+  target: CommentTarget;
   initialText: string;
   onDone: () => void;
 }) {
@@ -773,7 +792,7 @@ function CommentEditor({
     onSuccess: () => {
       // Only the thread changes — an edit can't move a comment count, so the
       // post lists are left alone (unlike delete).
-      queryClient.invalidateQueries({ queryKey: ['comments', postId] });
+      queryClient.invalidateQueries({ queryKey: commentsQueryKey(target) });
       onDone();
     },
   });
@@ -853,13 +872,13 @@ function CommentEditor({
  * `comment_count` (#273).
  */
 function CommentComposer({
-  postId,
+  target,
   parentId = null,
   autoFocus = false,
   placeholder,
   onDone,
 }: {
-  postId: number;
+  target: CommentTarget;
   parentId?: number | null;
   autoFocus?: boolean;
   placeholder: string;
@@ -870,12 +889,12 @@ function CommentComposer({
 
   const { mutate, isPending, error } = useMutation({
     mutationFn: (value: string) =>
-      api.addComment(postId, { text: value, parent: parentId }),
+      api.addComment(target, { text: value, parent: parentId }),
     onSuccess: () => {
       setText('');
       // The tree, plus the post's `comment_count` on every surface showing it —
       // the same set the delete path invalidates, from the same helper.
-      invalidatePostComments(queryClient, postId);
+      invalidateComments(queryClient, target);
       onDone?.();
     },
   });

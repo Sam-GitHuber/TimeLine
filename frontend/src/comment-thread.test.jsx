@@ -52,7 +52,7 @@ function chainOf(depth) {
 }
 
 function renderThread(props = {}) {
-  return renderWithAuth(<CommentThread postId={7} {...props} />);
+  return renderWithAuth(<CommentThread target={{ postId: 7 }} {...props} />);
 }
 
 beforeEach(() => {
@@ -201,7 +201,7 @@ describe("the tree", () => {
     await userEvent.click(submit);
 
     await waitFor(() =>
-      expect(api.addComment).toHaveBeenCalledWith(7, {
+      expect(api.addComment).toHaveBeenCalledWith({ postId: 7 }, {
         text: "mine",
         parent: 1,
       })

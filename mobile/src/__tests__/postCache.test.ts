@@ -11,7 +11,11 @@
 
 import { QueryClient } from '@tanstack/react-query';
 
-import { invalidatePostComments, markPostCommentsSeen } from '@/postCache';
+import {
+  invalidatePostComments,
+  markEventCommentsSeen,
+  markPostCommentsSeen,
+} from '@/postCache';
 import type { Paginated, Post } from '@/types';
 
 /**
@@ -131,12 +135,12 @@ describe('markPostCommentsSeen', () => {
     // a comment thread, a group's own record — must be passed over untouched.
     const client = makeClient();
     const comments = [{ id: 9, post: 42 }];
-    client.setQueryData(['comments', 42], comments);
+    client.setQueryData(['comments', 'post', 42], comments);
     client.setQueryData(['post', '43'], post(43, 5));
 
     markPostCommentsSeen(client, 42);
 
-    expect(client.getQueryData(['comments', 42])).toBe(comments);
+    expect(client.getQueryData(['comments', 'post', 42])).toBe(comments);
     expect((client.getQueryData(['post', '43']) as Post).new_comment_count).toBe(5);
   });
 
@@ -166,7 +170,7 @@ describe('markPostCommentsSeen', () => {
  */
 describe('invalidatePostComments', () => {
   function seedEverySurface(client: QueryClient) {
-    client.setQueryData(['comments', 42], [{ id: 9, post: 42 }]);
+    client.setQueryData(['comments', 'post', 42], [{ id: 9, post: 42 }]);
     client.setQueryData(['feed', false], list([page([post(42, 0)])]));
     client.setQueryData(['userPosts', '7'], list([page([post(42, 0)])]));
     client.setQueryData(['groupPosts', '3'], list([page([post(42, 0)])]));
@@ -189,7 +193,7 @@ describe('invalidatePostComments', () => {
     // there read "Comments · 3" over a thread of four until something else
     // refetched.
     for (const key of [
-      ['comments', 42],
+      ['comments', 'post', 42],
       ['feed'],
       ['userPosts'],
       ['groupPosts'],
@@ -241,7 +245,7 @@ describe('invalidatePostComments', () => {
 
   it('leaves another post’s comment tree alone', () => {
     const client = makeClient();
-    client.setQueryData(['comments', 42], [{ id: 9 }]);
+    client.setQueryData(['comments', 'post', 42], [{ id: 9 }]);
     client.setQueryData(['comments', 43], [{ id: 10 }]);
 
     invalidatePostComments(client, 42);
@@ -252,5 +256,71 @@ describe('invalidatePostComments', () => {
   it('does nothing, and throws nothing, on an empty cache', () => {
     const client = makeClient();
     expect(() => invalidatePostComments(client, 42)).not.toThrow();
+  });
+});
+
+// The event twin. The badge lives on the group screen's `EventCard`, off
+// `['groupEvents', id, …]` — a key only a comment *write* invalidates — and
+// that screen stays mounted behind the pushed event screen, so a read-only
+// visit has nothing else to clear it.
+describe('markEventCommentsSeen', () => {
+  const event = (id: number, newCount: number) =>
+    ({ id, comment_count: 5, new_comment_count: newCount }) as never;
+
+  it('clears the badge on every list that renders the event', () => {
+    const client = makeClient();
+    client.setQueryData(['groupEvents', 7, 'upcoming'], [event(9, 3)]);
+    client.setQueryData(['groupEvents', 7, 'past'], [event(9, 3)]);
+    client.setQueryData(['groupCalendar', 7], [event(9, 3)]);
+    client.setQueryData(['personalCalendar'], [event(9, 3)]);
+    client.setQueryData(['event', 9], event(9, 3));
+
+    markEventCommentsSeen(client, 9);
+
+    for (const key of [
+      ['groupEvents', 7, 'upcoming'],
+      ['groupEvents', 7, 'past'],
+      ['groupCalendar', 7],
+      ['personalCalendar'],
+    ]) {
+      expect(
+        (client.getQueryData(key) as { new_comment_count: number }[])[0]
+          .new_comment_count
+      ).toBe(0);
+    }
+    expect(
+      (client.getQueryData(['event', 9]) as { new_comment_count: number })
+        .new_comment_count
+    ).toBe(0);
+  });
+
+  it('leaves another event in the same list alone', () => {
+    const client = makeClient();
+    client.setQueryData(['groupEvents', 7, 'upcoming'], [event(9, 3), event(10, 2)]);
+
+    markEventCommentsSeen(client, 9);
+
+    const rows = client.getQueryData([
+      'groupEvents',
+      7,
+      'upcoming',
+    ]) as { id: number; new_comment_count: number }[];
+    expect(rows.find((e) => e.id === 10)!.new_comment_count).toBe(2);
+  });
+
+  it('keeps a list identity stable when nothing needed clearing', () => {
+    // So an unrelated cache entry doesn't re-render every screen holding it.
+    const client = makeClient();
+    const rows = [event(10, 0)];
+    client.setQueryData(['groupEvents', 7, 'upcoming'], rows);
+
+    markEventCommentsSeen(client, 9);
+
+    expect(client.getQueryData(['groupEvents', 7, 'upcoming'])).toBe(rows);
+  });
+
+  it('does nothing, and throws nothing, on an empty cache', () => {
+    const client = makeClient();
+    expect(() => markEventCommentsSeen(client, 9)).not.toThrow();
   });
 });

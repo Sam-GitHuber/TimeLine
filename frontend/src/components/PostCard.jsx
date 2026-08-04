@@ -228,7 +228,7 @@ export default function PostCard({
           <CommentThread
             // Remount when the deep-link target changes so the highlight re-arms.
             key={highlightCommentId ?? "thread"}
-            postId={post.id}
+            target={{ postId: post.id }}
             highlightCommentId={highlightCommentId}
           />
         )}

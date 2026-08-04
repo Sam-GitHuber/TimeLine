@@ -116,6 +116,22 @@ describe('dismissing a viewed post’s / event’s notifications', () => {
     expect(dismissed()).toEqual(['a']);
   });
 
+  it('clears an event’s comment deep-link too, query and all', async () => {
+    // A `comment_reply` or comment `reaction` on an event arrives as
+    // `…/events/<eid>?comment=<cid>`. Still the same event — but an anchored
+    // regex can't match it, so opening the event would mark the notification
+    // seen server-side while the OS notification sat in the tray, which is the
+    // exact split this function exists to prevent.
+    tray(
+      presented('a', { url: '/g/1/events/9?comment=42', notificationId: 7 }),
+      presented('b', { url: '/g/1/events/10?comment=43', notificationId: 8 })
+    );
+
+    await dismissEventNotifications(9);
+
+    expect(dismissed()).toEqual(['a']);
+  });
+
   it('survives a tray entry whose url is not a string', async () => {
     tray(
       presented('a', { url: null, notificationId: 7 }),

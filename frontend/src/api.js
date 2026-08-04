@@ -180,13 +180,30 @@ function firstErrorMessage(data) {
  * `reactionPath` in `mobile/src/api.ts`.
  */
 function reactionPath(
-  { postId = null, commentId = null, messageId = null },
+  { postId = null, commentId = null, messageId = null, eventId = null },
   action
 ) {
   if (postId != null) return `/api/posts/${postId}/${action}/`;
   if (commentId != null) return `/api/comments/${commentId}/${action}/`;
   if (messageId != null) return `/api/messages/${messageId}/${action}/`;
-  throw new Error("reactionPath needs a postId, commentId or messageId");
+  if (eventId != null) return `/api/events/${eventId}/${action}/`;
+  throw new Error(
+    "reactionPath needs a postId, commentId, messageId or eventId"
+  );
+}
+
+/**
+ * The comment-thread URL for whichever target was named — a post or an event.
+ *
+ * Same reasoning as `reactionPath`: two targets, and the components holding
+ * these ids carry them as optional props, so "neither was passed" is reachable
+ * and builds `/api/posts/undefined/comments/` if left alone. Mirrors the app's
+ * `commentsPath` in `mobile/src/api.ts`.
+ */
+function commentsPath({ postId = null, eventId = null }) {
+  if (postId != null) return `/api/posts/${postId}/comments/`;
+  if (eventId != null) return `/api/events/${eventId}/comments/`;
+  throw new Error("commentsPath needs a postId or an eventId");
 }
 
 export const api = {
@@ -385,12 +402,14 @@ export const api = {
   // photos, comments, reactions and notifications. Returns 204.
   deletePost: (id) => request(`/api/posts/${id}/`, { method: "DELETE" }),
 
-  // The visible comment tree for a post (already pruned server-side to people
-  // you're connected with), and adding a comment/reply.
-  getComments: (postId) => request(`/api/posts/${postId}/comments/`),
+  // The visible comment tree for a post **or an event** (already pruned
+  // server-side to people you're connected with), and adding a comment/reply.
+  // Both take a target — `{ postId }` or `{ eventId }` — because a thread is
+  // the same feature either way; only the gate the server applies differs.
+  getComments: (target) => request(commentsPath(target)),
 
-  addComment: (postId, { text, parent = null }) =>
-    request(`/api/posts/${postId}/comments/`, {
+  addComment: (target, { text, parent = null }) =>
+    request(commentsPath(target), {
       method: "POST",
       body: parent ? { text, parent } : { text },
     }),

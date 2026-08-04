@@ -71,11 +71,13 @@ function AddReactionIcon({ color = colors.inkFaint }: { color?: string }) {
 export function ReactionBar({
   postId,
   commentId,
+  eventId,
   reactions,
   trailing,
 }: {
   postId?: number;
   commentId?: number;
+  eventId?: number;
   reactions: Reaction[] | undefined;
   /**
    * The target's own actions, to sit with this row: a post's "N comments" link
@@ -94,7 +96,16 @@ export function ReactionBar({
   trailing?: ReactNode;
 }) {
   const incoming = reactions ?? NO_REACTIONS;
-  const target = postId != null ? { postId } : { commentId };
+  // An event reacts exactly like a post: `api.toggleReaction` routes on
+  // whichever id is set, and the server prunes an event's reactions to the
+  // viewer's connections the same way it prunes a post's. Nothing below here
+  // knows which it got.
+  const target =
+    postId != null
+      ? { postId }
+      : commentId != null
+        ? { commentId }
+        : { eventId };
 
   const [items, setItems] = useState<Reaction[]>(incoming);
   const [whoOpen, setWhoOpen] = useState(false);

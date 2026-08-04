@@ -1188,7 +1188,7 @@ class NotificationSerializer(serializers.ModelSerializer):
         if obj.kind == K.COMMENT_REPLY:
             return f"{name} replied to your comment"
         if obj.kind == K.REACTION:
-            what = "post" if obj.post_id else "comment"
+            what = "post" if obj.post_id else "event" if obj.event_id else "comment"
             return f"{name} reacted to your {what}"
         if obj.kind == K.CONNECTION_REQUEST:
             return f"{name} asked to connect"
@@ -1210,6 +1210,8 @@ class NotificationSerializer(serializers.ModelSerializer):
             return f"{name} updated {title}"
         if obj.kind == K.EVENT_CANCELLED:
             return f"{name} cancelled {title}"
+        if obj.kind == K.EVENT_COMMENT:
+            return f"{name} commented on {title}"
         return f"{name} did something"
 
     def get_target(self, obj):
@@ -1227,6 +1229,23 @@ class NotificationSerializer(serializers.ModelSerializer):
             return {"type": "event", "id": obj.event_id}
         return None
 
+    @staticmethod
+    def _comment_url(comment):
+        """The page a comment lives on, anchored at the comment itself.
+
+        A comment hangs off a post *or* an event, so this reads the target
+        rather than assuming ``post_id`` — which for an event comment is
+        ``None`` and used to render the string ``/p/None``: a link that looks
+        real, 404s on arrival, and only appears for people who commented on an
+        event, which is nobody until this release.
+        """
+        if comment.event_id:
+            event = comment.event
+            return (
+                f"/g/{event.group_id}/events/{event.id}?comment={comment.id}"
+            )
+        return f"/p/{comment.post_id}?comment={comment.id}"
+
     def get_url(self, obj):
         K = Notification.Kind
         # Post permalink (/p/<id>), with ?comment=<id> when the notification is
@@ -1234,10 +1253,10 @@ class NotificationSerializer(serializers.ModelSerializer):
         if obj.kind == K.POST_REPLY and obj.post_id:
             return f"/p/{obj.post_id}"
         if obj.kind == K.COMMENT_REPLY and obj.comment_id:
-            return f"/p/{obj.comment.post_id}?comment={obj.comment_id}"
+            return self._comment_url(obj.comment)
         if obj.kind == K.REACTION:
             if obj.comment_id:
-                return f"/p/{obj.comment.post_id}?comment={obj.comment_id}"
+                return self._comment_url(obj.comment)
             if obj.post_id:
                 return f"/p/{obj.post_id}"
         if obj.kind == K.CONNECTION_REQUEST:
@@ -1423,14 +1442,26 @@ def build_rsvp_summary(event, *, visible_ids, me_id, request, named=True):
 
 
 def serialize_event(event, *, viewer, visible_ids, request,
-                    is_group_admin=False, detail=True):
+                    is_group_admin=False, detail=True, comment_counts=None):
     """The full event payload — scalar fields, dimension states, RSVP summary,
     and (in ``detail``) the polls.
 
     Built as a dict rather than a ``ModelSerializer`` because the gated
     aggregates (poll/RSVP names) don't map onto plain fields. Push-ready: a client
     (web now, a phone later) has everything to render the card and deep-link. The
-    view must prefetch ``polls__options__votes__voter`` and ``rsvps__user``.
+    view must prefetch ``polls__options__votes__voter``, ``rsvps__user`` and
+    ``reactions``.
+
+    ``comment_counts`` is the ``{"total", "new"}`` entry from
+    ``comment_counts_for_events`` for *this* event, or ``None``. It's passed in
+    rather than computed here because the counts need one query for a whole page
+    of events, not one per event — the same bargain ``CommentCountMixin`` strikes
+    for posts. **Absent means zero, and that is a real decision**: a list
+    endpoint that hasn't paid for the counts says ``0``, which is
+    indistinguishable from an event nobody has commented on. So every list that
+    renders an event has to pass them; the alternative (omitting the keys
+    entirely) would make both clients branch on their presence to avoid
+    rendering "0 comments" on a payload that simply didn't ask.
     """
     me_id = viewer.id
     can_manage = event.organiser_id == me_id
@@ -1465,6 +1496,14 @@ def serialize_event(event, *, viewer, visible_ids, request,
         "can_moderate": can_manage or is_group_admin,
         "created_at": event.created_at,
         "updated_at": event.updated_at,
+        # Reactions prune to the viewer's connections, exactly as a post's do —
+        # unlike the poll/RSVP aggregates above, which are complete counts. See
+        # ``EventReactionView`` for why the same page carries both rules.
+        "reactions": summarise_reactions(
+            event.reactions.all(), visible_ids, me_id
+        ),
+        "comment_count": (comment_counts or {}).get("total", 0),
+        "new_comment_count": (comment_counts or {}).get("new", 0),
         # Polls are included even in list/summary payloads — the dimension chips
         # need each poll's option tallies (a "polling" chip shows the live count)
         # and the custom-poll chips. Voter names ride along already connection-

@@ -809,6 +809,22 @@ def can_view_post(user, post, connected_ids=None):
     )
 
 
+def comment_thread_filter(comment):
+    """The ORM filter selecting **the thread ``comment`` belongs to** — every
+    comment on the same post, or on the same event.
+
+    A one-liner with a real job: ``post_id IS NULL`` is true of *every* event
+    comment in the database, so any query that reaches for ``post_id`` without
+    checking which target is set silently widens from "this thread" to "every
+    event thread there has ever been". That's a correctness bug in the tree
+    walk and a leak in anything that then reads authors out of the result, so
+    the choice is made once, here, rather than at each call site.
+    """
+    return {"event_id": comment.event_id} if comment.event_id else {
+        "post_id": comment.post_id
+    }
+
+
 def _comment_chain_visible(comment, visible_author_ids):
     """Whether ``comment`` survives the tree walk — itself **and every ancestor**.
 
@@ -832,7 +848,12 @@ def _comment_chain_visible(comment, visible_author_ids):
         return True
     rows = {
         row["id"]: row
-        for row in Comment.objects.filter(post_id=comment.post_id).values(
+        # Scoped to the comment's own thread, whichever kind it is. Reading
+        # ``post_id`` unconditionally here would load the *whole* set of
+        # post-less comments for an event comment (every event comment in the
+        # database shares ``post_id IS NULL``), and the walk below would then
+        # find ancestors that belong to other events.
+        for row in Comment.objects.filter(**comment_thread_filter(comment)).values(
             "id", "parent_id", "author_id", "author__is_active"
         )
     }
@@ -858,10 +879,21 @@ def _comment_chain_visible(comment, visible_author_ids):
 
 def can_view_comment(user, comment, connected_ids=None):
     """Whether ``user`` can see ``comment``. Mirrors the pruned comment tree
-    (``PostCommentsView``): the comment's post must be visible, and the comment
-    must survive the tree builder's **connection** prune — so its author, *and
-    the author of every comment above it*, must be active and be the viewer or
-    one of their connections.
+    (``PostCommentsView`` / ``EventCommentsView``): the comment's **target** must
+    be visible, and the comment must survive the tree builder's **connection**
+    prune — so its author, *and the author of every comment above it*, must be
+    active and be the viewer or one of their connections.
+
+    The target gate is the only thing that differs between the two kinds: a post
+    comment goes through ``can_view_post``, an event comment through
+    ``can_view_event`` (group membership **and** a connection to the organiser).
+    The connection prune above it is identical, and deliberately so — a comment
+    on an event is authored content in a group, exactly like a comment on a
+    group post, so the same rule about whose words reach you applies. Note the
+    two gates compose rather than overlap: you can be able to see the event
+    (connected to its organiser) and still not see a given comment on it
+    (not connected to its author), which is precisely the group timeline's
+    behaviour one level down.
 
     The tree builder's *other* prune — a tombstone with no visible replies left
     to hold up — is deliberately **not** applied here. Every caller handles
@@ -874,6 +906,8 @@ def can_view_comment(user, comment, connected_ids=None):
         connected_ids = connected_user_ids(user)
     if not _comment_chain_visible(comment, set(connected_ids) | {user.id}):
         return False
+    if comment.event_id:
+        return can_view_event(user, comment.event, connected_ids=connected_ids)
     return can_view_post(user, comment.post, connected_ids=connected_ids)
 
 
@@ -1013,6 +1047,26 @@ def build_visible_comment_tree(comments, visible_author_ids, root_id=None):
 
 def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
     """``{post_id: {"total": int, "new": int}}`` for a page of posts (issue #63).
+    See ``_comment_counts``, which does the work for both kinds of thread.
+    """
+    return _comment_counts(posts, viewer, "post", visible_author_ids)
+
+
+def comment_counts_for_events(events, viewer, visible_author_ids=None):
+    """``{event_id: {"total": int, "new": int}}`` for a list of events.
+
+    The event twin of ``comment_counts_for_posts``, and the *same* function
+    underneath — the counting rules (subtree pruning, tombstones counting toward
+    the total but never toward "new", your own comments never new) are
+    properties of a comment tree, not of what it hangs off. A second copy would
+    be a second place for the "new" definition to drift, and drift there is
+    invisible: a wrong badge looks exactly like a right one.
+    """
+    return _comment_counts(events, viewer, "event", visible_author_ids)
+
+
+def _comment_counts(targets, viewer, field, visible_author_ids=None):
+    """``{target_id: {"total": int, "new": int}}`` for a page of posts or events.
 
     ``total`` is how many comments ``viewer`` would see if they expanded the
     thread; ``new`` is how many of those they haven't seen yet. Both honour the
@@ -1024,12 +1078,12 @@ def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
     over-count a connected author's reply that sits under a hidden parent.)
 
     Cost is bounded and independent of page size: **one** query loads every
-    comment on the page's posts, one loads this viewer's last-seen markers, and
-    the trees are built in Python — no per-post query. Fine at family scale
+    comment on the page's targets, one loads this viewer's last-seen markers, and
+    the trees are built in Python — no per-target query. Fine at family scale
     (mirrors why the tree prune itself runs in Python, see the comment view).
 
     "New" = a visible comment authored by *someone else* with ``created_at`` after
-    the viewer's ``PostCommentRead.last_seen_at`` for that post; a missing marker
+    the viewer's ``PostCommentRead.last_seen_at`` for that target; a missing marker
     (thread never opened) makes every such comment new. Your own comments never
     count as new — you've self-evidently seen them — matching how ``ConversationRead``
     excludes your own messages from an unread count.
@@ -1038,31 +1092,40 @@ def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
     ``visible_reactor_ids``); pass it in when the caller already has it — the
     post-serving views do, via ``ReactionContextMixin`` — to skip recomputing the
     connections query.
+
+    ``field`` is ``"post"`` or ``"event"`` and is a **required** argument, not a
+    default. Every filter below keys off it, and defaulting it to ``"post"``
+    would make an event caller that forgot it return counts for the wrong
+    thread rather than fail — the counts would simply be wrong, everywhere, and
+    look fine.
     """
-    post_ids = [p.id for p in posts]
-    if not post_ids:
+    target_ids = [t.id for t in targets]
+    if not target_ids:
         return {}
 
     if visible_author_ids is None:
         visible_author_ids = connected_user_ids(viewer) | {viewer.id}
 
+    id_field = f"{field}_id"
     # One query for all comments on the page. Drop deactivated authors up front,
     # exactly as PostCommentsView does, so a banned author's comment takes its
     # subtree with it here too. Only the fields the tree walk needs.
-    comments_by_post = defaultdict(list)
+    comments_by_target = defaultdict(list)
     for comment in (
-        Comment.objects.filter(post_id__in=post_ids, author__is_active=True)
+        Comment.objects.filter(
+            **{f"{id_field}__in": target_ids}, author__is_active=True
+        )
         # ``deleted_at`` is in the field list because the tree builder reads it
         # (issue #128) — deferring it would make every tombstone cost a query.
-        .only("id", "post_id", "parent_id", "author_id", "created_at", "deleted_at")
+        .only("id", id_field, "parent_id", "author_id", "created_at", "deleted_at")
     ):
-        comments_by_post[comment.post_id].append(comment)
+        comments_by_target[getattr(comment, id_field)].append(comment)
 
     # One query for this viewer's last-seen markers across the page.
     last_seen = dict(
         PostCommentRead.objects.filter(
-            user=viewer, post_id__in=post_ids
-        ).values_list("post_id", "last_seen_at")
+            user=viewer, **{f"{id_field}__in": target_ids}
+        ).values_list(id_field, "last_seen_at")
     )
 
     def walk(nodes, seen_at):
@@ -1085,12 +1148,12 @@ def comment_counts_for_posts(posts, viewer, visible_author_ids=None):
         return total, new
 
     counts = {}
-    for post_id in post_ids:
+    for target_id in target_ids:
         tree = build_visible_comment_tree(
-            comments_by_post.get(post_id, []), visible_author_ids
+            comments_by_target.get(target_id, []), visible_author_ids
         )
-        total, new = walk(tree, last_seen.get(post_id))
-        counts[post_id] = {"total": total, "new": new}
+        total, new = walk(tree, last_seen.get(target_id))
+        counts[target_id] = {"total": total, "new": new}
     return counts
 
 
@@ -1764,14 +1827,20 @@ class ConnectionRequestActionView(APIView):
         return Response({"detail": "Rejected."}, status=status.HTTP_200_OK)
 
 
-class PostCommentsView(APIView):
-    """The comment tree for a post (GET) and adding a comment/reply (POST) at
-    ``/posts/<pk>/comments/``.
+class BaseCommentsView(APIView):
+    """The comment tree for one thing (GET) and adding a comment/reply (POST).
 
-    One rule for both personal and group posts: you can reach a post's comments
-    only if you can **see** the post, and the tree is then pruned to your
-    connections — a not-connected author's comment and its whole subtree are
-    omitted server-side, so hidden content never reaches the client. Concretely:
+    Subclassed twice — for a **post** (``/posts/<pk>/comments/``) and for a
+    group **event** (``/events/<pk>/comments/``). Everything about a thread is
+    identical between the two: the connection prune, the tombstone rules, the
+    reply-target check, the last-seen marker, the notification-seen sweep. Only
+    three things differ, and each is a hook below: which gate decides you can
+    reach the thread at all, which field the comment hangs off, and who gets
+    told when a top-level comment arrives.
+
+    **The prune is the same rule in both cases** — a not-connected author's
+    comment and its whole subtree are omitted server-side, so hidden content
+    never reaches the client. What differs is only the gate on the *target*:
 
     - **Personal post** (no group): visible if you're its author or connected
       with them — else 404.
@@ -1780,76 +1849,74 @@ class PostCommentsView(APIView):
       group you only see comments from members you're connected with, matching
       the connection-gated timeline; a co-member you don't know (or have blocked)
       stays hidden.
+    - **Event**: active membership of its group **and** a connection to its
+      organiser (``can_view_event``) — else 404, exactly as the event detail
+      answers. The comment prune then runs on top, so you can be able to see the
+      event and still not see a given comment on it.
 
     POST adds a comment, or a reply when ``parent`` is given; the author is taken
     from the session, never the body. **``parent`` is held to the same prune the
     GET applies** (issue #211) — you may only reply to a comment your own tree
     would have shown you — so the connection boundary gates writing as well as
-    reading. Unknown id, wrong post and invisible parent all answer with the one
-    ``PARENT_UNAVAILABLE`` sentence; see it for why they must be identical.
+    reading. Unknown id, wrong target and invisible parent all answer with the
+    one ``PARENT_UNAVAILABLE`` sentence; see it for why they must be identical.
     """
 
-    def _get_post_or_404(self, request, pk):
-        """Return ``(post, connected_ids)`` the requester may see + comment on,
-        or 404.
+    #: ``"post"`` or ``"event"`` — the ``Comment`` / ``PostCommentRead`` field
+    #: this thread hangs off. Every filter and every write below keys off it.
+    target_field = None
 
-        The single visibility gate for both regimes: fetch via ``visible_posts``
-        (author-or-connected, author active) scoped to the post's timeline, after
-        a membership check for group posts. ``connected_ids`` is returned so GET
-        can prune the tree without a second query.
-        """
-        post = get_object_or_404(Post.objects.select_related("author"), pk=pk)
-        connected_ids = connected_user_ids(request.user)
-        # Group posts gate on active membership first (404 for a non-member, so
-        # the group's existence isn't leaked); visibility below then also prunes
-        # to authors you're connected with.
-        if post.group_id and not is_group_member(request.user, post.group_id):
-            raise NotFound()
-        visible = visible_posts(
-            request.user,
-            connected_ids=connected_ids,
-            group=post.group_id or None,
-        )
-        if not visible.filter(pk=pk).exists():
-            raise NotFound()
-        return post, connected_ids
+    def _get_target_or_404(self, request, pk):
+        """Return ``(target, connected_ids)`` the requester may see + comment on,
+        or 404. ``connected_ids`` comes back so GET can prune the tree without a
+        second query."""
+        raise NotImplementedError
+
+    def _see_notifications(self, request, target):
+        """Mark unread notifications about this target as seen — opening the
+        thread is reading them."""
+        raise NotImplementedError
+
+    def _notify_top_level(self, request, target, comment):
+        """Tell whoever owns ``target`` that someone commented on it."""
+        raise NotImplementedError
 
     def get(self, request, pk):
-        post, connected_ids = self._get_post_or_404(request, pk)
+        target, connected_ids = self._get_target_or_404(request, pk)
         # Opening the thread is the "seen" event (issue #63): stamp the viewer's
-        # last-seen marker to now, which clears the post's "N new" count on their
-        # next feed load. Consistent with how opening a conversation clears its
+        # last-seen marker to now, which clears the target's "N new" count on
+        # their next load. Consistent with how opening a conversation clears its
         # unread badge — seen is thread-level, not per-comment. Cheap upsert; the
         # GET already fires only on a deliberate open, so no extra round-trip.
         now = timezone.now()
+        target_kwargs = {self.target_field: target}
         try:
             PostCommentRead.objects.update_or_create(
-                post=post,
+                **target_kwargs,
                 user=request.user,
                 defaults={"last_seen_at": now},
             )
         except IntegrityError:
             # Two near-simultaneous opens (double-click / duplicate tab) can both
-            # miss the row and race to INSERT; the loser hits the unique (post,
+            # miss the row and race to INSERT; the loser hits the unique (target,
             # user) constraint. Fall back to a plain UPDATE of the row the winner
             # just created — the timestamps are within milliseconds either way.
-            PostCommentRead.objects.filter(post=post, user=request.user).update(
-                last_seen_at=now
-            )
-        # The same seen event, applied to the activity centre — see
-        # notifications.see_post_notifications.
-        notifications.see_post_notifications(request.user, post)
+            PostCommentRead.objects.filter(
+                **target_kwargs, user=request.user
+            ).update(last_seen_at=now)
+        # The same seen event, applied to the activity centre.
+        self._see_notifications(request, target)
         # Drop comments by deactivated (banned) authors before building the
         # tree, so a banned member's comments vanish just like their posts do —
         # and their replies go with them (an orphaned reply is never reached).
         comments = list(
-            post.comments.select_related("author")
+            target.comments.select_related("author")
             .prefetch_related("reactions")
             .filter(author__is_active=True)
         )
         # Prune to the viewer's connections (plus themselves) — the same rule for
-        # personal and group posts. Reactions on those comments prune to the very
-        # same set, so it's passed straight into the serializer context.
+        # personal posts, group posts and events. Reactions on those comments
+        # prune to the very same set, so it's passed straight into the context.
         visible_author_ids = connected_ids | {request.user.id}
         tree = build_visible_comment_tree(comments, visible_author_ids)
         data = CommentSerializer(
@@ -1863,12 +1930,17 @@ class PostCommentsView(APIView):
         return Response(data)
 
     def post(self, request, pk):
-        post, connected_ids = self._get_post_or_404(request, pk)
+        target, connected_ids = self._get_target_or_404(request, pk)
         serializer = CommentCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         parent = serializer.validated_data.get("parent")
         if parent is not None and (
-            parent.post_id != post.id
+            # A reply must be on *this* thread. Read through the parent's own
+            # target field, so a post comment can't be named as the parent of an
+            # event comment or the reverse — the two id spaces are shared, and
+            # comparing only ``post_id`` would let an event's ``pk`` match a
+            # different post's comment by coincidence of numbering.
+            getattr(parent, f"{self.target_field}_id") != target.id
             or not can_view_comment(request.user, parent, connected_ids)
         ):
             # The connection graph gates writing here as well as reading (issue
@@ -1904,7 +1976,7 @@ class PostCommentsView(APIView):
             visible_author_ids = connected_ids | {request.user.id}
             still_rendered = build_visible_comment_tree(
                 list(
-                    post.comments.select_related("author").filter(
+                    target.comments.select_related("author").filter(
                         author__is_active=True
                     )
                 ),
@@ -1916,18 +1988,17 @@ class PostCommentsView(APIView):
             raise ValidationError(
                 {"parent": ["That comment was deleted, so you can't reply to it."]}
             )
-        comment = serializer.save(author=request.user, post=post)
+        comment = serializer.save(
+            author=request.user, **{self.target_field: target}
+        )
         # Notify the person being replied to (Phase 8). A top-level comment
-        # notifies the post's author (post_reply); a reply notifies the parent
-        # comment's author (comment_reply). create_notification handles the
-        # self/mute/visibility rules and no-ops when they apply.
+        # notifies whoever owns the target (post_reply / event_comment); a reply
+        # notifies the parent comment's author (comment_reply) whatever the
+        # thread hangs off — the recipient and the target are the same question
+        # there either way. create_notification handles the self/mute/visibility
+        # rules and no-ops when they apply.
         if parent is None:
-            notifications.create_notification(
-                recipient=post.author,
-                actor=request.user,
-                kind=Notification.Kind.POST_REPLY,
-                post=post,
-            )
+            self._notify_top_level(request, target, comment)
         else:
             notifications.create_notification(
                 recipient=parent.author,
@@ -1936,6 +2007,83 @@ class PostCommentsView(APIView):
                 comment=comment,
             )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class PostCommentsView(BaseCommentsView):
+    """A post's comment tree at ``/posts/<pk>/comments/``. See
+    ``BaseCommentsView`` for everything but the gate."""
+
+    target_field = "post"
+
+    def _get_target_or_404(self, request, pk):
+        """The single visibility gate for both regimes: fetch via
+        ``visible_posts`` (author-or-connected, author active) scoped to the
+        post's timeline, after a membership check for group posts."""
+        post = get_object_or_404(Post.objects.select_related("author"), pk=pk)
+        connected_ids = connected_user_ids(request.user)
+        # Group posts gate on active membership first (404 for a non-member, so
+        # the group's existence isn't leaked); visibility below then also prunes
+        # to authors you're connected with.
+        if post.group_id and not is_group_member(request.user, post.group_id):
+            raise NotFound()
+        visible = visible_posts(
+            request.user,
+            connected_ids=connected_ids,
+            group=post.group_id or None,
+        )
+        if not visible.filter(pk=pk).exists():
+            raise NotFound()
+        return post, connected_ids
+
+    def _see_notifications(self, request, target):
+        notifications.see_post_notifications(request.user, target)
+
+    def _notify_top_level(self, request, target, comment):
+        notifications.create_notification(
+            recipient=target.author,
+            actor=request.user,
+            kind=Notification.Kind.POST_REPLY,
+            post=target,
+        )
+
+
+class EventCommentsView(BaseCommentsView):
+    """A group event's comment tree at ``/events/<pk>/comments/``.
+
+    The gate is ``can_view_event`` — the *same* one the event detail, RSVP and
+    poll routes use, never a fourth copy — so an event you can't see 404s here
+    identically to how it 404s there, and the comments can't become an oracle
+    for an event that doesn't exist for you.
+
+    A **cancelled** event keeps its thread, readable and writable. The tombstone
+    is deliberately kept so RSVP'd members can see what happened, and "sorry,
+    can't do the new date" is exactly the conversation a cancellation starts —
+    closing the thread at the moment it becomes most useful would be the wrong
+    reading of what the tombstone is for. A **past** event likewise: a recap is
+    a fine place to say thanks.
+    """
+
+    target_field = "event"
+
+    def _get_target_or_404(self, request, pk):
+        event = get_object_or_404(
+            Event.objects.select_related("organiser", "group"), pk=pk
+        )
+        connected_ids = connected_user_ids(request.user)
+        if not can_view_event(request.user, event, connected_ids=connected_ids):
+            raise NotFound()
+        return event, connected_ids
+
+    def _see_notifications(self, request, target):
+        notifications.see_event_notifications(request.user, target)
+
+    def _notify_top_level(self, request, target, comment):
+        notifications.create_notification(
+            recipient=target.organiser,
+            actor=request.user,
+            kind=Notification.Kind.EVENT_COMMENT,
+            event=target,
+        )
 
 
 class CommentDetailView(APIView):
@@ -1978,7 +2126,13 @@ class CommentDetailView(APIView):
 
     def _owned_comment(self, request, pk):
         comment = get_object_or_404(
-            Comment.objects.select_related("author", "post", "post__author"), pk=pk
+            Comment.objects.select_related(
+                "author", "post", "post__author",
+                # The event branch of ``can_view_comment`` reads the organiser
+                # (the gate) and the group (the membership check).
+                "event", "event__organiser", "event__group",
+            ),
+            pk=pk,
         )
         if comment.author_id == request.user.id:
             return comment
@@ -1992,12 +2146,13 @@ class CommentDetailView(APIView):
         The nested ``replies`` have to be the *pruned* ones — a response built
         without them would tell the client this comment has no replies, and a
         client that trusted it would drop the subtree from its cache. So the
-        edit response runs the same tree walk ``PostCommentsView`` does, rooted
-        at this comment.
+        edit response runs the same tree walk ``BaseCommentsView`` does, rooted
+        at this comment — on whichever thread it belongs to, hence
+        ``comment.target`` rather than ``comment.post``.
         """
         visible_author_ids = connected_user_ids(request.user) | {request.user.id}
         comments = list(
-            comment.post.comments.select_related("author")
+            comment.target.comments.select_related("author")
             .prefetch_related("reactions")
             .filter(author__is_active=True)
         )
@@ -2155,10 +2310,19 @@ def _toggle_reaction(request, target_kwargs, visible_ids, allow_add=True):
         # double-surface every one of them), and buzzing someone's phone for a 👍
         # is how people end up turning notifications off. A message reaction is
         # seen the next time you look at the thread, which is enough.
+        # Whose content it is depends on the target: a post/comment has an
+        # ``author``, an event has an ``organiser``. Spelled out rather than
+        # reached for with a shared attribute name, because the two models
+        # genuinely call it different things and a `getattr` chain here would
+        # silently notify nobody the day a third shape appears.
         reacted_target = target_kwargs.get("post") or target_kwargs.get("comment")
-        if reacted_target is not None:
+        event = target_kwargs.get("event")
+        owner = reacted_target.author if reacted_target is not None else (
+            event.organiser if event is not None else None
+        )
+        if owner is not None:
             notifications.create_notification(
-                recipient=reacted_target.author,
+                recipient=owner,
                 actor=request.user,
                 kind=Notification.Kind.REACTION,
                 **target_kwargs,
@@ -2172,11 +2336,12 @@ def _toggle_reaction(request, target_kwargs, visible_ids, allow_add=True):
 
 
 def _reaction_target(target_kwargs):
-    """The single target out of ``{"post"|"comment"|"message": obj}``."""
+    """The single target out of ``{"post"|"comment"|"message"|"event": obj}``."""
     return (
         target_kwargs.get("post")
         or target_kwargs.get("comment")
         or target_kwargs.get("message")
+        or target_kwargs.get("event")
     )
 
 
@@ -2273,6 +2438,47 @@ class CommentReactionView(APIView):
         return _reactors_grouped(
             request,
             self._get_comment_or_404(request, pk),
+            visible_reactor_ids(request.user),
+        )
+
+
+class EventReactionView(APIView):
+    """Toggle your emoji reaction on a group event (POST
+    ``/events/<pk>/react/``) or list who reacted (GET
+    ``/events/<pk>/reactions/``). Gated by ``can_view_event`` — the same wall the
+    event detail, its comments, its polls and its RSVP enforce.
+
+    **Pruned per viewer, like a post's — deliberately not like the event's own
+    polls.** An event page carries two different rules and both are right. A
+    poll tally and an RSVP count are *complete*, counting people the viewer
+    can't see, because they're shared coordination numbers: "only 2 free on
+    Saturday" when really 5 are would mislead a group decision. A reaction is
+    the opposite — a personal signal, the same thing it is on a post — so it
+    counts only the viewer plus the people they may see, and a not-connected
+    reactor is never surfaced second-hand. See reactions.md and events.md; this
+    is the inversion those two docs describe, resolved in favour of the rule
+    that governs the thing being counted rather than the page it sits on.
+    """
+
+    def _get_event_or_404(self, request, pk):
+        event = get_object_or_404(
+            Event.objects.select_related("organiser", "group"), pk=pk
+        )
+        if not can_view_event(request.user, event):
+            raise NotFound()
+        return event
+
+    def post(self, request, pk):
+        return _toggle_reaction(
+            request,
+            {"event": self._get_event_or_404(request, pk)},
+            visible_reactor_ids(request.user),
+        )
+
+    def get(self, request, pk):
+        return _reactors_grouped(
+            request,
+            self._get_event_or_404(request, pk),
             visible_reactor_ids(request.user),
         )
 
@@ -3866,6 +4072,11 @@ def _notifications_for(user):
         .select_related(
             "actor", "post", "post__author", "comment", "comment__post", "group",
             "event",
+            # A comment now hangs off a post *or* an event, and the deep-link
+            # builder reads the event's group to spell `/g/<gid>/events/<eid>`.
+            # Without both of these a page of event-comment notifications is two
+            # extra queries per row.
+            "comment__event", "comment__event__group",
         )
         .order_by("-created_at", "-id")
     )
@@ -4315,9 +4526,9 @@ def _event_or_404(user, pk):
 
 def _event_detail_qs():
     """Everything ``serialize_event(detail=True)`` reads, prefetched — no N+1 over
-    an event's polls, options, votes, or RSVPs."""
+    an event's polls, options, votes, RSVPs **or reactions**."""
     return Event.objects.select_related("organiser", "group").prefetch_related(
-        "polls__options__votes__voter", "rsvps__user"
+        "polls__options__votes__voter", "rsvps__user", "reactions"
     )
 
 
@@ -4329,6 +4540,12 @@ def _event_response(event_id, request, status_code=status.HTTP_200_OK):
     data = serialize_event(
         event, viewer=request.user, visible_ids=visible_ids, request=request,
         is_group_admin=is_admin,
+        # One event, so the "page" is a list of one — the counts still go
+        # through the shared walk rather than a shortcut, because the shortcut
+        # is where the subtree prune gets forgotten.
+        comment_counts=comment_counts_for_events(
+            [event], request.user, visible_author_ids=visible_ids
+        ).get(event.id),
     )
     return Response(data, status=status_code)
 
@@ -4466,7 +4683,7 @@ class GroupEventsView(APIView):
         today = timezone.localdate()
         base = visible_events(
             request.user, gid, connected_ids=connected
-        ).prefetch_related("polls__options__votes__voter", "rsvps__user")
+        ).prefetch_related("polls__options__votes__voter", "rsvps__user", "reactions")
         # Narrow to a DB superset of the window and **cap** it, so the response
         # can't grow with a group's whole event history. is_past is a per-event
         # property (tz-aware, all-day vs timed), so the exact prune then happens
@@ -4492,10 +4709,15 @@ class GroupEventsView(APIView):
             )
         visible_ids = set(connected) | {request.user.id}
         is_admin = is_group_admin(request.user, gid)
+        # One query for the whole page's counts, not one per event.
+        counts = comment_counts_for_events(
+            events, request.user, visible_author_ids=visible_ids
+        )
         data = [
             serialize_event(
                 e, viewer=request.user, visible_ids=visible_ids,
                 request=request, is_group_admin=is_admin, detail=False,
+                comment_counts=counts.get(e.id),
             )
             for e in events
         ]
@@ -5006,17 +5228,22 @@ class GroupCalendarView(APIView):
         qs = (
             visible_events(request.user, gid, connected_ids=connected)
             .filter(event_date__isnull=False)
-            .prefetch_related("polls__options__votes__voter", "rsvps__user")
+            .prefetch_related("polls__options__votes__voter", "rsvps__user", "reactions")
         )
         qs = _apply_calendar_window(qs, request)
         visible_ids = set(connected) | {request.user.id}
         is_admin = is_group_admin(request.user, gid)
+        events = list(qs.order_by("event_date", "start_time", "id"))
+        counts = comment_counts_for_events(
+            events, request.user, visible_author_ids=visible_ids
+        )
         data = [
             serialize_event(
                 e, viewer=request.user, visible_ids=visible_ids,
                 request=request, is_group_admin=is_admin, detail=False,
+                comment_counts=counts.get(e.id),
             )
-            for e in qs.order_by("event_date", "start_time", "id")
+            for e in events
         ]
         return Response(data)
 
@@ -5041,15 +5268,20 @@ class PersonalCalendarView(APIView):
                 event_date__isnull=False,
             )
             .select_related("organiser", "group")
-            .prefetch_related("polls__options__votes__voter", "rsvps__user")
+            .prefetch_related("polls__options__votes__voter", "rsvps__user", "reactions")
         )
         qs = _apply_calendar_window(qs, request)
+        events = list(qs.order_by("event_date", "start_time", "id"))
+        counts = comment_counts_for_events(
+            events, request.user, visible_author_ids=visible_organisers
+        )
         data = [
             serialize_event(
                 e, viewer=request.user, visible_ids=visible_organisers,
                 request=request, detail=False,
+                comment_counts=counts.get(e.id),
             )
-            for e in qs.order_by("event_date", "start_time", "id")
+            for e in events
         ]
         return Response(data)
 

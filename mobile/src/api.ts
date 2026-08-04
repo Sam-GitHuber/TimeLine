@@ -487,6 +487,20 @@ export type ReactionTarget = {
   postId?: number;
   commentId?: number;
   messageId?: number;
+  eventId?: number;
+};
+
+/**
+ * Which thread a comment belongs to — a post's or an event's.
+ *
+ * Both ids are optional for the same reason `ReactionTarget`'s are: the screens
+ * holding them carry them that way, so "neither was passed" is reachable.
+ */
+export type CommentTarget = {
+  postId?: number | string;
+  eventId?: number | string;
+  /** Carried along so a write can refresh the group's views of the event. */
+  groupId?: number | string;
 };
 
 /**
@@ -498,13 +512,28 @@ export type ReactionTarget = {
  * as a mystery "Couldn't react" — so it fails loudly here instead.
  */
 function reactionPath(
-  { postId, commentId, messageId }: ReactionTarget,
+  { postId, commentId, messageId, eventId }: ReactionTarget,
   action: 'react' | 'reactions'
 ): string {
   if (postId != null) return `/api/posts/${postId}/${action}/`;
   if (commentId != null) return `/api/comments/${commentId}/${action}/`;
   if (messageId != null) return `/api/messages/${messageId}/${action}/`;
-  throw new Error('reactionPath needs a postId, commentId or messageId');
+  if (eventId != null) return `/api/events/${eventId}/${action}/`;
+  throw new Error(
+    'reactionPath needs a postId, commentId, messageId or eventId'
+  );
+}
+
+/**
+ * The comment-thread URL for whichever target was named. Same reasoning as
+ * `reactionPath`, and the same loud failure: left alone a target-less call
+ * builds `/api/posts/undefined/comments/`, which 404s and reads as a mystery
+ * "couldn't load comments". Mirrors `commentsPath` in `frontend/src/api.js`.
+ */
+function commentsPath({ postId, eventId }: CommentTarget): string {
+  if (postId != null) return `/api/posts/${postId}/comments/`;
+  if (eventId != null) return `/api/events/${eventId}/comments/`;
+  throw new Error('commentsPath needs a postId or an eventId');
 }
 
 export const api = {
@@ -1497,8 +1526,8 @@ export const api = {
    * Not paginated: `PostCommentsView` is a plain `APIView` returning the whole
    * nested tree, so there's no `next` to follow here.
    */
-  getComments: (postId: number | string) =>
-    request<Comment[]>(`/api/posts/${postId}/comments/`),
+  getComments: (target: CommentTarget) =>
+    request<Comment[]>(commentsPath(target)),
 
   /**
    * Add a comment, or a reply when `parent` is given.
@@ -1506,10 +1535,10 @@ export const api = {
    * The author comes from the token, never the body — same rule as posting.
    */
   addComment: (
-    postId: number | string,
+    target: CommentTarget,
     { text, parent = null }: { text: string; parent?: number | null }
   ) =>
-    request<Comment>(`/api/posts/${postId}/comments/`, {
+    request<Comment>(commentsPath(target), {
       method: 'POST',
       body: { text, parent },
     }),

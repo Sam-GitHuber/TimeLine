@@ -76,6 +76,60 @@ posts** as a quiet recap card (`Timeline` merges past events with posts by time)
 conventional **month grid** rides alongside for practical planning, and the
 personal **`/calendar`** unions upcoming events across all your groups.
 
+### 5. An event is authored content, so it carries comments and reactions
+
+Not a fifth pillar so much as the consequence of the first: if an event goes
+through the same gate as a post because it *is* authored content, then it gets
+the same pair of things a post gets. "Are we still on for Saturday?" previously
+had nowhere to go but the group timeline, detached from the plan it was about.
+
+Both widen an existing model rather than adding a parallel one, which is the
+shape this codebase already chose for [reactions](reactions.md) when messages
+arrived: `Comment` takes an `event` FK (with `post` now nullable behind a
+`comment_targets_exactly_one` check constraint), and `Reaction`'s three-way
+constraint becomes four-way. That keeps **one** tree builder, one connection
+prune, one edit/delete route, one reply rule and one emoji validator — an
+`EventComment` would have been five places for those to drift apart.
+
+**The gate is the only thing that differs.** `can_view_comment` routes an event
+comment through `can_view_event` instead of `can_view_post`; everything above it
+is identical. The two gates **compose rather than overlap**: you can be able to
+see an event (connected to its organiser) and still not see a given comment on
+it (not connected to its author) — precisely the group timeline's behaviour, one
+level down.
+
+**Reactions on an event are pruned per viewer, like a post's** — deliberately
+*unlike* the poll and RSVP tallies sitting a few pixels above them. Both rules
+now live on one page on purpose, and the split is decision 2's, read the right
+way round: a poll tally and an RSVP count are shared coordination numbers, so
+they count everyone; a reaction is a personal signal, so it counts only you and
+the people you may see. The rule follows the thing being counted, not the page
+it sits on. Pinned side by side in `EventReactionTests`.
+
+**Both surfaces carry the row: the event page, and the group feed.** On the feed
+an event entry reads as part of the one line, so it gets the one line's
+affordances — react in place, and follow the count through. **The thread itself
+does not expand there**, unlike a post's, which unfolds inline: a post *is* the
+content, whereas an event's conversation sits beside its polls, its RSVP and its
+chips, and unfolding all of that into a timeline row would bury the posts below
+it. So the count is a link. On the phone the group page's **upcoming** region is
+`EventCard`s rather than timeline entries (the web uses `EventTimelineEntry` for
+both), so that card takes a `showActions` prop — **on there, off in the calendar
+agenda and the month grid's day lists**, which are indexes you tap through
+rather than act in.
+
+Two traps in the widening, both now closed by construction and worth knowing
+before touching this code:
+
+- **`post_id IS NULL` is true of *every* event comment.** Any query reaching for
+  it without checking which target is set silently widens from "this thread" to
+  "every event thread there has ever been" — a correctness bug in the tree walk
+  and a leak in anything reading authors out of the result. Hence
+  `comment_thread_filter`, which makes the choice once.
+- **The notification deep-link read `comment.post_id` unconditionally**, which
+  for an event comment renders `/p/None?comment=…`: a link that looks real and
+  404s on arrival.
+
 ## Concepts & lifecycle
 
 An **event** is a bundle of decisions. Each **dimension** (date / time / location /
@@ -158,6 +212,22 @@ events for the month grid); `GET /api/calendar/?from=&to=` (personal union acros
 every group you're an active member of — a pure time-merge, the same discipline as
 the `include_groups` feed toggle).
 
+**Comments & reactions** — `GET/POST /api/events/<id>/comments/` (the pruned
+tree / add a comment or reply); `POST /api/events/<id>/react/` and
+`GET /api/events/<id>/reactions/`. Editing, deleting and reacting to an
+individual comment all go through the **existing** `/api/comments/<id>/` routes,
+which never needed to know what the comment hangs off. `serialize_event` carries
+`reactions`, `comment_count` and `new_comment_count`; **every list that renders
+an event pays for its counts** (one query per page, via
+`comment_counts_for_events`), because a payload that skipped them says `0` — and
+`0` is indistinguishable from an event nobody has commented on.
+
+A **cancelled** event keeps its thread, readable and writable. The tombstone is
+kept so RSVP'd members can see what happened, and "sorry, can't do the new date"
+is exactly the conversation a cancellation starts; closing the thread at the
+moment it becomes most useful would be the wrong reading of what the tombstone
+is for. A past event likewise — a recap is a fine place to say thanks.
+
 The scheduling fields (`event_date` / `start_time` / `location_name`) are written
 **only** through `finalise`, never the event PATCH — so decision 3 and the status
 recompute stay in one place. The event PATCH covers title, description, location
@@ -196,6 +266,19 @@ transport only.
 | `event_scheduled` | a **date** is first finalised | members connected to the organiser |
 | `event_updated` | a scheduled event's date/time/location changes | going/maybe RSVPs (de-duped while unread, like reactions) |
 | `event_cancelled` | event cancelled (or organiser departs) | going/maybe RSVPs |
+| `event_comment` | someone comments on an event | its **organiser** |
+
+`event_comment` is the event twin of `post_reply`. A *reply* to an event comment
+reuses `comment_reply`, because the recipient and the target are the same
+question there whatever the thread hangs off; only "someone commented on the
+thing you made" needs to know it was an event, since it targets the `event` FK.
+Its Android channel is **`replies`, not `events`** — the channel groups by what
+the notification *is* to the person getting it, and this is somebody answering
+you, where the five `events` kinds are the organiser broadcasting. Filing it
+with them would mean quietening a busy group's plans also quietened people
+talking to you. `see_event_notifications` matches `comment__event` as well as
+`event`, so reading a reply on an event stops the badge counting it — the
+`comment__post` half `see_post_notifications` has always had.
 
 ## Organiser departure
 

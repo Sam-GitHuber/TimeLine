@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import Avatar from "../Avatar.jsx";
 import DimensionChips from "./DimensionChips.jsx";
+import ReactionBar from "../ReactionBar.jsx";
 import {
   parseEventDate,
   formatEventWhen,
@@ -81,6 +82,37 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
                 {going} going{maybe > 0 ? ` · ${maybe} maybe` : ""}
               </p>
             )}
+
+        {/* The same reaction row a post on this spine carries. An event entry
+            reads as part of the one line, so it gets the one line's affordances
+            — react here, and follow the count through to the thread.
+
+            **The thread itself stays on the event page**, unlike a post's,
+            which expands inline. A post is the whole content; an event's
+            conversation sits beside its polls, its RSVP and its chips, and
+            unfolding all of that into a timeline row would bury the posts
+            below it. The count is the link. */}
+        <ReactionBar
+          eventId={event.id}
+          reactions={event.reactions}
+          trailing={
+            <Link
+              to={`/g/${event.group.id}/events/${event.id}`}
+              className="rounded-lg text-sm text-ink-faint transition hover:text-accent-deep"
+            >
+              {event.comment_count > 0
+                ? `${event.comment_count} ${
+                    event.comment_count === 1 ? "comment" : "comments"
+                  }`
+                : "Comment"}
+              {event.new_comment_count > 0 && (
+                <span className="ml-1.5 font-semibold tabular-nums text-accent-deep">
+                  · {event.new_comment_count} new
+                </span>
+              )}
+            </Link>
+          }
+        />
       </div>
     </article>
   );

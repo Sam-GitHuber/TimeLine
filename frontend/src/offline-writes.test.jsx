@@ -106,7 +106,7 @@ describe("a write that fails with no server reachable", () => {
     const user = userEvent.setup();
     api.getComments.mockResolvedValue([]);
     api.createComment.mockRejectedValue(offlineError());
-    renderWithAuth(<CommentThread postId={4} />);
+    renderWithAuth(<CommentThread target={{ postId: 4 }} />);
 
     await user.type(
       await screen.findByPlaceholderText(/write a comment/i),

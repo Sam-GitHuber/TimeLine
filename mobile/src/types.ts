@@ -539,6 +539,14 @@ export type Event = {
   created_at: string;
   updated_at: string;
   polls: Poll[];
+  /**
+   * Reactions on the event itself — **pruned to your connections**, unlike the
+   * poll and RSVP counts above, which are complete. A tally is a shared
+   * coordination number; a reaction is a personal signal. See events.md.
+   */
+  reactions: Reaction[];
+  comment_count: number;
+  new_comment_count: number;
 };
 
 /**

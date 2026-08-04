@@ -39,6 +39,7 @@ import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '../Avatar';
+import { ReactionBar } from '../ReactionBar';
 import { SPINE_COLUMN, Spine } from '../timeline';
 import { DimensionChips } from './DimensionChips';
 import {
@@ -83,62 +84,94 @@ export function EventTimelineEntry({
         </Pressable>
       </View>
 
-      <Pressable style={styles.card} onPress={open} accessibilityRole="button">
-        {/* The alignment band: the when leads, then the organiser — the same
-            first line as a post, so the two read as one kind of entry. Both are
-            given an explicit line box of exactly the bead's height, so their
-            centres land on the bead's without any nudging. */}
-        <View style={styles.band}>
-          <When event={event} past={past} />
-          <Text
-            style={styles.organiser}
-            numberOfLines={1}
-            onPress={openOrganiser}
-            accessibilityRole="button"
-          >
-            {event.organiser.display_name}
+      <View style={styles.card}>
+        <Pressable onPress={open} accessibilityRole="button" style={styles.cardBody}>
+          {/* The alignment band: the when leads, then the organiser — the same
+              first line as a post, so the two read as one kind of entry. Both are
+              given an explicit line box of exactly the bead's height, so their
+              centres land on the bead's without any nudging. */}
+          <View style={styles.band}>
+            <When event={event} past={past} />
+            <Text
+              style={styles.organiser}
+              numberOfLines={1}
+              onPress={openOrganiser}
+              accessibilityRole="button"
+            >
+              {event.organiser.display_name}
+            </Text>
+            {/* No "Happened" tag on a past entry. Its position says it — it sits
+                below the now-node under a day divider that dates it, among posts
+                that are equally in the past and carry no such label. "Cancelled"
+                stays, because that one *isn't* legible from position: a called-off
+                event is a tombstone, not a memory, and nothing else says so. */}
+            {cancelled ? <Text style={styles.tagOff}>Cancelled</Text> : null}
+          </View>
+
+          <Text style={[styles.title, past && styles.titlePast]} numberOfLines={2}>
+            {event.title}
           </Text>
-          {/* No "Happened" tag on a past entry. Its position says it — it sits
-              below the now-node under a day divider that dates it, among posts
-              that are equally in the past and carry no such label. "Cancelled"
-              stays, because that one *isn't* legible from position: a called-off
-              event is a tombstone, not a memory, and nothing else says so. */}
-          {cancelled ? <Text style={styles.tagOff}>Cancelled</Text> : null}
-        </View>
 
-        <Text style={[styles.title, past && styles.titlePast]} numberOfLines={2}>
-          {event.title}
-        </Text>
+          {!past && event.description ? (
+            <Text style={styles.description} numberOfLines={2}>
+              {event.description}
+            </Text>
+          ) : null}
 
-        {!past && event.description ? (
-          <Text style={styles.description} numberOfLines={2}>
-            {event.description}
-          </Text>
-        ) : null}
+          {/* The Date · Time · Where pills stay on a past event too — the recap
+              shows what it settled on, just as the future entry shows what's set,
+              and they are now the only place the venue is written (the band above
+              carries the clock time alone, and the organiser and the when used to
+              be repeated in a meta line under the title).
 
-        {/* The Date · Time · Where pills stay on a past event too — the recap
-            shows what it settled on, just as the future entry shows what's set,
-            and they are now the only place the venue is written (the band above
-            carries the clock time alone, and the organiser and the when used to
-            be repeated in a meta line under the title).
+              So a past recap does state its date twice: once on the day divider
+              above it, once in the Date chip. That's deliberate — the chips are
+              the record of what the event settled on, and a recap missing the one
+              decision it's most defined by reads as though it never got a date.
+              The divider is a property of the *timeline*, not of the event. */}
+          <View style={styles.chips}>
+            <DimensionChips event={event} />
+          </View>
 
-            So a past recap does state its date twice: once on the day divider
-            above it, once in the Date chip. That's deliberate — the chips are
-            the record of what the event settled on, and a recap missing the one
-            decision it's most defined by reads as though it never got a date.
-            The divider is a property of the *timeline*, not of the event. */}
-        <View style={styles.chips}>
-          <DimensionChips event={event} />
-        </View>
+          {past
+            ? going > 0 && <Text style={styles.turnout}>{going} went</Text>
+            : (going > 0 || maybe > 0) && (
+                <Text style={styles.turnout}>
+                  {going} going{maybe > 0 ? ` · ${maybe} maybe` : ''}
+                </Text>
+              )}
+        </Pressable>
 
-        {past
-          ? going > 0 && <Text style={styles.turnout}>{going} went</Text>
-          : (going > 0 || maybe > 0) && (
-              <Text style={styles.turnout}>
-                {going} going{maybe > 0 ? ` · ${maybe} maybe` : ''}
+        {/* The same reaction row a post on this spine carries. Outside the
+            Pressable above for the reason `PostCard` keeps its own outside: a tap
+            meant for a chip must never be swallowed by the card behind it.
+
+            **The thread itself stays on the event screen**, unlike a post's,
+            which opens its own screen anyway. An event's conversation sits beside
+            its polls, its RSVP and its chips, so the count links there rather
+            than unfolding all of that into a timeline row. */}
+        <ReactionBar
+          eventId={event.id}
+          reactions={event.reactions}
+          trailing={
+            <Pressable onPress={open} accessibilityRole="button" hitSlop={6}>
+              <Text style={styles.comments}>
+                {event.comment_count > 0
+                  ? `${event.comment_count} ${
+                      event.comment_count === 1 ? 'comment' : 'comments'
+                    }`
+                  : 'Comment'}
+                {event.new_comment_count > 0 ? (
+                  <Text style={styles.newComments}>
+                    {' '}
+                    · {event.new_comment_count} new
+                  </Text>
+                ) : null}
               </Text>
-            )}
-      </Pressable>
+            </Pressable>
+          }
+        />
+      </View>
     </View>
   );
 }
@@ -188,9 +221,14 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingTop: BEAD_BORDER,
     paddingBottom: spacing.lg,
+    // A little air off the spine column, not a full indent — the point of
+    // moving the line to the edge was to give this column the width back.
     paddingLeft: spacing.sm,
-    gap: spacing.xs,
   },
+  // The tappable content. Split from `card` so the reaction row can sit outside
+  // it: a tap meant for a chip must never be swallowed by the card behind it,
+  // the same split `PostCard` makes for its chips and photos.
+  cardBody: { gap: spacing.xs },
   band: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   when: {
     fontSize: fontSize.sm,
@@ -225,6 +263,8 @@ const styles = StyleSheet.create({
   description: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20 },
   chips: { marginTop: 2 },
   turnout: { fontSize: 11, color: colors.inkFaint },
+  comments: { fontSize: fontSize.sm, color: colors.inkFaint },
+  newComments: { color: colors.accent, fontWeight: '600' },
   tagOff: {
     fontSize: 11,
     fontWeight: '700',

@@ -163,11 +163,28 @@ class Connection(models.Model):
 
 
 class Comment(models.Model):
-    """A comment on a post, or a reply to another comment — a node in a tree.
+    """A comment on a post **or a group event**, or a reply to another comment —
+    a node in a tree.
 
-    ``parent`` is null for a top-level comment on the post, or points at the
+    The target is exactly one of a ``Post`` or an ``Event``, guarded by a check
+    constraint. That's the same shape ``Reaction`` uses, and it was chosen for
+    the same reason: the targets are concrete and few, so two nullable FKs plus
+    a constraint beats ``GenericForeignKey``/contenttypes machinery, and it
+    keeps **one** tree builder, one prune, one edit/delete route and one reply
+    rule rather than a parallel ``EventComment`` that would drift from all five.
+    ``post`` is nullable *only* because of this — every comment still has
+    exactly one target.
+
+    An **event** comment is the ordinary "are we still on for Saturday?" that
+    used to have nowhere to go but the group timeline, detached from the plan it
+    was about. Its tree behaves identically to a post's; only the gate differs
+    (``can_view_event`` instead of ``can_view_post`` — see ``can_view_comment``).
+
+    ``parent`` is null for a top-level comment on the target, or points at the
     comment being replied to. The tree can nest to any depth; the reply chain is
     walked in Python when building the (visibility-pruned) tree the API returns.
+    A reply always shares its parent's target — enforced in the view, which
+    refuses a ``parent`` from a different post/event.
 
     Deleting a comment cascades to its replies (``on_delete=CASCADE`` on
     ``parent``): removing a node removes the branch under it, which matches how
@@ -184,6 +201,17 @@ class Comment(models.Model):
         Post,
         on_delete=models.CASCADE,
         related_name="comments",
+        null=True,
+        blank=True,
+    )
+    # The event this comment is on, when it isn't on a post. CASCADE like
+    # ``post``: delete the thing and its conversation goes with it.
+    event = models.ForeignKey(
+        "Event",
+        on_delete=models.CASCADE,
+        related_name="comments",
+        null=True,
+        blank=True,
     )
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -229,6 +257,35 @@ class Comment(models.Model):
         # written (unlike the feed). The ``id`` tiebreaker keeps siblings that
         # share a timestamp in a stable, deterministic order.
         ordering = ["created_at", "id"]
+        constraints = [
+            # A comment hangs off exactly one thing — a post or an event. Never
+            # both (which target would its replies belong to?), and never
+            # neither (a comment on nothing is unreachable and unprunable, since
+            # every gate starts from the target).
+            models.CheckConstraint(
+                name="comment_targets_exactly_one",
+                condition=(
+                    models.Q(post__isnull=False, event__isnull=True)
+                    | models.Q(post__isnull=True, event__isnull=False)
+                ),
+            ),
+        ]
+        indexes = [
+            # The event thread's one query, mirroring the implicit index the
+            # ``post`` FK already gives the post thread.
+            models.Index(fields=["event", "created_at"]),
+        ]
+
+    @property
+    def target(self):
+        """The ``Post`` or ``Event`` this comment is on.
+
+        The constraint guarantees exactly one, so callers that only need "the
+        thing this hangs off" (the notification deep-link, the reply-target
+        check) can ask once instead of branching on two FKs and getting it
+        subtly wrong in one of the places.
+        """
+        return self.post if self.post_id else self.event
 
     @property
     def is_deleted(self):
@@ -246,13 +303,21 @@ class Comment(models.Model):
 
 
 class PostCommentRead(models.Model):
-    """How recently a user last opened a post's comment thread (issue #63).
+    """How recently a user last opened a post's **or event's** comment thread
+    (issue #63).
 
-    One row per (post, user): ``last_seen_at`` is stamped whenever the user
+    One row per (target, user): ``last_seen_at`` is stamped whenever the user
     opens the thread (the ``GET`` on the comments endpoint). It's the marker the
     feed uses to show a "N new" count next to *Comments* — a visible comment is
     "new" to you if its ``created_at`` is after this timestamp (a missing row
     means you've never opened the thread, so every comment is new).
+
+    Widened for event threads the same way ``Comment`` itself was: a nullable
+    ``event`` beside a now-nullable ``post``, exactly one set. **The name is
+    now half-wrong and is kept anyway** — renaming the model is a table rename
+    plus a `related_name` change across the read paths, and the cost of that
+    lands on a live database holding real beta data for no behavioural gain. If
+    it's ever renamed, do it on its own, not folded into a feature.
 
     Deliberately the same shape as ``ConversationRead`` (which tracks how far a
     participant has read a message thread): a single last-seen timestamp per
@@ -266,6 +331,15 @@ class PostCommentRead(models.Model):
         Post,
         on_delete=models.CASCADE,
         related_name="comment_reads",
+        null=True,
+        blank=True,
+    )
+    event = models.ForeignKey(
+        "Event",
+        on_delete=models.CASCADE,
+        related_name="comment_reads",
+        null=True,
+        blank=True,
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -276,14 +350,33 @@ class PostCommentRead(models.Model):
 
     class Meta:
         constraints = [
+            # Both are **conditional** on their FK being set. The original was a
+            # plain unique (post, user); left that way once ``post`` went
+            # nullable, every event row would have NULL there — and Postgres
+            # treats NULLs as distinct, so it would stop enforcing anything for
+            # events while silently still looking like it did.
             models.UniqueConstraint(
                 fields=["post", "user"],
+                condition=models.Q(post__isnull=False),
                 name="unique_post_comment_read",
+            ),
+            models.UniqueConstraint(
+                fields=["event", "user"],
+                condition=models.Q(event__isnull=False),
+                name="unique_event_comment_read",
+            ),
+            models.CheckConstraint(
+                name="comment_read_targets_exactly_one",
+                condition=(
+                    models.Q(post__isnull=False, event__isnull=True)
+                    | models.Q(post__isnull=True, event__isnull=False)
+                ),
             ),
         ]
 
     def __str__(self):
-        return f"{self.user} saw {self.post} comments @ {self.last_seen_at}"
+        target = self.post if self.post_id else self.event
+        return f"{self.user} saw {target} comments @ {self.last_seen_at}"
 
 
 class Conversation(models.Model):
@@ -1086,26 +1179,44 @@ class Reaction(models.Model):
         null=True,
         blank=True,
     )
+    # The fourth target: a group event. Same widening as ``message`` before it,
+    # for the same reason — one toggle path, one validator, one aggregation.
+    event = models.ForeignKey(
+        "Event",
+        on_delete=models.CASCADE,
+        related_name="reactions",
+        null=True,
+        blank=True,
+    )
     emoji = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
-            # A reaction targets exactly one thing — post, comment or message.
-            # Spelled as "one is set and the other two aren't" three times over
-            # rather than something clever: it's the shape Postgres can check
-            # per-row, and it's obvious what a fourth target would need.
+            # A reaction targets exactly one thing — post, comment, message or
+            # event. Spelled as "one is set and the other three aren't" four
+            # times over rather than something clever: it's the shape Postgres
+            # can check per-row, and the previous version of this comment said
+            # it was obvious what a fourth target would need, which turned out
+            # to be true when the event became one.
             models.CheckConstraint(
                 name="reaction_targets_exactly_one",
                 condition=(
                     models.Q(
-                        post__isnull=False, comment__isnull=True, message__isnull=True
+                        post__isnull=False, comment__isnull=True,
+                        message__isnull=True, event__isnull=True,
                     )
                     | models.Q(
-                        post__isnull=True, comment__isnull=False, message__isnull=True
+                        post__isnull=True, comment__isnull=False,
+                        message__isnull=True, event__isnull=True,
                     )
                     | models.Q(
-                        post__isnull=True, comment__isnull=True, message__isnull=False
+                        post__isnull=True, comment__isnull=True,
+                        message__isnull=False, event__isnull=True,
+                    )
+                    | models.Q(
+                        post__isnull=True, comment__isnull=True,
+                        message__isnull=True, event__isnull=False,
                     )
                 ),
             ),
@@ -1127,6 +1238,11 @@ class Reaction(models.Model):
                 condition=models.Q(message__isnull=False),
                 name="unique_user_message_emoji",
             ),
+            models.UniqueConstraint(
+                fields=["user", "event", "emoji"],
+                condition=models.Q(event__isnull=False),
+                name="unique_user_event_emoji",
+            ),
         ]
 
     def __str__(self):
@@ -1134,8 +1250,10 @@ class Reaction(models.Model):
             target = f"post {self.post_id}"
         elif self.comment_id:
             target = f"comment {self.comment_id}"
-        else:
+        elif self.message_id:
             target = f"message {self.message_id}"
+        else:
+            target = f"event {self.event_id}"
         return f"{self.user} · {self.emoji} · {target}"
 
 
@@ -1183,6 +1301,13 @@ class Notification(models.Model):
         EVENT_SCHEDULED = "event_scheduled", "Event date set"
         EVENT_UPDATED = "event_updated", "Event changed"
         EVENT_CANCELLED = "event_cancelled", "Event cancelled"
+        # A top-level comment on an event, notifying its organiser — the event
+        # twin of ``POST_REPLY``. A *reply* to an event comment reuses
+        # ``COMMENT_REPLY``, because the recipient and the target are the same
+        # question there whatever the comment hangs off; only "someone commented
+        # on the thing you made" needs to know it was an event, since it targets
+        # the ``event`` FK and deep-links to the event page.
+        EVENT_COMMENT = "event_comment", "Comment on your event"
         # Phase 9b M8. **No Notification row is ever created with this kind**,
         # and that isn't an omission. Messaging is deliberately outside the
         # activity centre — it has its own unread badge — so a mention has no
@@ -1215,6 +1340,7 @@ class Notification(models.Model):
             Kind.EVENT_SCHEDULED,
             Kind.EVENT_UPDATED,
             Kind.EVENT_CANCELLED,
+            Kind.EVENT_COMMENT,
             # Mutable, and default-on like the rest: naming someone is how you
             # get their attention, so it should reach them by default — but
             # punching through a quiet they deliberately asked for has to be

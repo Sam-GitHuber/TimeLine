@@ -74,7 +74,7 @@ describe("invalidatePostComments", () => {
     invalidatePostComments(qc, 42);
 
     expect(seen).toEqual([
-      ["comments", 42],
+      ["comments", "post", 42],
       ["feed"],
       ["userPosts"],
       ["groupPosts"],
