@@ -1326,6 +1326,19 @@ info → new-message:
   which also added the [info panel](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e)
   behind Details. A `pending` viewer sees a **locked panel**: "Connect with C & D
   to join", inline connection-request buttons, and a **Decline / Leave** button.
+- **Leaving refreshes `['conversations']` and `['unreadMessages']`, from all
+  three places it's offered** — the locked panel's Decline, the thread menu's
+  Leave, and the info panel's. `ConversationLeaveView` tombstones your
+  participant row and `user_conversations` filters on `left_at__isnull=True`, so
+  the chat is off your list server-side the instant the write lands; every one of
+  the three then puts you *on* that list. Only the info panel's copy refreshed it
+  (#286). The other two handed you a cache still showing the chat you'd just
+  left, still styled Pending, and clicking it 404s — `getConversation` won't
+  admit a chat you're not in exists. Bounded, since the list polls every 12s
+  (`CONVERSATION_LIST_POLL_MS`), but the dead click it leaves behind lasts those
+  12 seconds. All three of the app's copies always did this; the web is the drift.
+  The connect buttons *inside* the locked panel refresh the wider connection set
+  instead — see [connections.md](connections.md).
 - **Sender attribution (group threads only).** An incoming message in a *group*
   carries its sender's avatar + name on one line above the bubble; a **run** of
   consecutive messages from the same person shares a single label, so a burst

@@ -739,6 +739,57 @@ describe("Messages drawer — group thread", () => {
     ).toBeInTheDocument();
   });
 
+  // Leaving a chat is the same call from three places on the web — the locked
+  // panel's Decline, the thread header's Leave, and the Details panel's — and
+  // all three land you on the conversation list. `ConversationLeaveView`
+  // tombstones your participant row and `user_conversations` filters on
+  // `left_at__isnull=True`, so the chat is off that list server-side
+  // immediately; a copy that refreshes nothing hands you a cache still showing
+  // it, still styled Pending, and clicking it 404s. Only the Details panel got
+  // this right (issue #286).
+  //
+  // Both polls are effectively off in these tests, so a second call to either
+  // fetcher can only be an invalidation.
+  describe.each([
+    [
+      "the locked panel's Decline",
+      { my_status: "pending", can_send: false, must_connect_with: [] },
+      /decline|leave/i,
+      false,
+    ],
+    ["the header menu's Leave", {}, /leave/i, true],
+  ])("declining or leaving via %s", (_name, detail, buttonName, viaMenu) => {
+    it("refreshes the conversation list and the unread badge", async () => {
+      const user = userEvent.setup();
+      api.getConversation.mockResolvedValue(groupConvoDetail(detail));
+      api.getMessages.mockResolvedValue(page([]));
+      api.getConversations.mockResolvedValue(page([]));
+      api.leaveConversation.mockResolvedValue({});
+
+      renderAt("/messages/11");
+      // The header title renders for both the locked panel and the open thread,
+      // where the Leave button only exists once its menu is open.
+      await screen.findByText("Book Club");
+      const listLoads = api.getConversations.mock.calls.length;
+      const badgeLoads = api.getUnreadMessageCount.mock.calls.length;
+
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      if (viaMenu) await openHeaderMenu(user);
+      await user.click(screen.getByRole("button", { name: buttonName }));
+      confirm.mockRestore();
+
+      await waitFor(() => expect(api.leaveConversation).toHaveBeenCalledWith(11));
+      await waitFor(() =>
+        expect(api.getConversations.mock.calls.length).toBeGreaterThan(listLoads)
+      );
+      await waitFor(() =>
+        expect(api.getUnreadMessageCount.mock.calls.length).toBeGreaterThan(
+          badgeLoads
+        )
+      );
+    });
+  });
+
   it("shows the title, participant avatars, and composer for an active group chat", async () => {
     const user = userEvent.setup();
     api.getConversation.mockResolvedValue(groupConvoDetail());

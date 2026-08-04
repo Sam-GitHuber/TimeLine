@@ -6,6 +6,7 @@ import ConnectButton from "../components/ConnectButton.jsx";
 import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
+import { invalidateConnectionChange } from "../connectionCache.js";
 import { serverMessage } from "../errors.js";
 
 // The people hub. Three segments share one page:
@@ -289,6 +290,15 @@ function DiscoverList() {
 // mutual (you both start seeing each other's posts); Reject discards it. Uses a
 // child of the ["connectionRequests"] key the nav badge and segment count hold,
 // so invalidating ["connectionRequests"] refreshes all three.
+//
+// Approving therefore refreshes everything a connection gates
+// (`connectionCache.js`) — the feed, the calendars, the group events — where
+// rejecting keeps the narrow set: the inbox, its badge, and the requester's own
+// row. The decision travels as a boolean rather than as the opaque `act`
+// function the rows used to hand in, because the success handler has to be able
+// to tell the two apart; `requesterId` rides along because the refresh is about
+// that person's profile and posts, not the request row's own id. (Same shape
+// both invite inboxes settled on — groups.md.)
 function RequestsList() {
   const queryClient = useQueryClient();
   const query = useInfiniteList(
@@ -298,13 +308,27 @@ function RequestsList() {
   const { items: requests, isLoading, isError, error } = query;
 
   const decide = useMutation({
-    // `act` is api.approveRequest or api.rejectRequest.
-    mutationFn: ({ act, id }) => act(id),
-    onSuccess: () => {
+    mutationFn: ({ approve, id }) =>
+      approve ? api.approveRequest(id) : api.rejectRequest(id),
+    onSuccess: (_data, { approve, requesterId }) => {
+      if (approve) {
+        // Approving makes the connection real, which moves the whole visibility
+        // boundary — not just this list. Same set as every other connection
+        // write; see `connectionCache.js`.
+        invalidateConnectionChange(queryClient, requesterId);
+        return;
+      }
+      // Rejecting deletes a still-pending row and connects nobody, so the gated
+      // surfaces are correct as they stand — the narrow set is all it needs,
+      // exactly as declining a group invite keeps its own (groups.md). This is
+      // the one place the narrow case is safe to assume, because the *server*
+      // guarantees it: `ConnectionRequestActionView` 404s unless the row is
+      // still pending, so a reject that gets here can't have ended a connection.
+      // What changes is the inbox, its badge, and their button — back to
+      // "Connect" — on whichever people list is behind this one.
       queryClient.invalidateQueries({ queryKey: ["connectionRequests"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
-      queryClient.invalidateQueries({ queryKey: ["connections"] });
-      queryClient.invalidateQueries({ queryKey: ["feed"] });
+      queryClient.invalidateQueries({ queryKey: ["user", requesterId] });
     },
   });
 
@@ -334,7 +358,11 @@ function RequestsList() {
               <button
                 type="button"
                 onClick={() =>
-                  decide.mutate({ act: api.approveRequest, id: req.id })
+                  decide.mutate({
+                    approve: true,
+                    id: req.id,
+                    requesterId: req.requester.id,
+                  })
                 }
                 disabled={decide.isPending}
                 className="btn btn-primary btn-sm"
@@ -344,7 +372,11 @@ function RequestsList() {
               <button
                 type="button"
                 onClick={() =>
-                  decide.mutate({ act: api.rejectRequest, id: req.id })
+                  decide.mutate({
+                    approve: false,
+                    id: req.id,
+                    requesterId: req.requester.id,
+                  })
                 }
                 disabled={decide.isPending}
                 className="btn btn-ghost btn-sm"

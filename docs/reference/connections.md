@@ -166,7 +166,8 @@ Two things a change here has to keep:
 trees, the personal calendar and both event lists all check, so a write that
 adds or removes an accepted connection changes what a dozen screens are allowed
 to show — not just the button that made it. **The four writes that move it
-therefore share one helper**, `mobile/src/connectionCache.ts`'s
+therefore share one helper on each client** — `mobile/src/connectionCache.ts`
+and `frontend/src/connectionCache.js`, both exporting
 `invalidateConnectionChange`: the Connect button, the Block button (blocking
 deletes the `Connection` row outright), the locked `PendingChatPanel`, and
 approving from the requests inbox. It holds the relationship keys, the
@@ -176,14 +177,24 @@ approving from the requests inbox. It holds the relationship keys, the
 group chats that promote and sever with the connection.
 
 Before that each site kept its own list, written from the point of view of the
-screen it sits on, and the four had drifted apart (#278) with the whole
-calendar/event family missing from every one of them (#285) — the same shape as
-#215 / #273 / #275 / #277, which is why the rule now lives in one file per client
-rather than being copied per call site. On the phone the drift isn't a flash: the
-tabs stay mounted for the session, so a query there keeps a live observer and
-never remounts, and `staleTime: 0` buys nothing without something marking it
-stale. Block the person who organised a dated event and it sat on your Calendar
-tab for the rest of the session, answering a tap with *Event not available*.
+screen it sits on, and the four had drifted apart (#278 on mobile, #288 on the
+web) with the whole calendar/event family missing from every one of them (#285) —
+the same shape as #215 / #273 / #275 / #277, which is why the rule now lives in
+one file per client rather than being copied per call site. On the phone the
+drift isn't a flash: the tabs stay mounted for the session, so a query there
+keeps a live observer and never remounts, and `staleTime: 0` buys nothing
+without something marking it stale. Block the person who organised a dated event
+and it sat on your Calendar tab for the rest of the session, answering a tap with
+*Event not available*.
+
+On the web react-router unmounts a route and nothing sets a `staleTime`, so most
+of it was a flash while the refetch was already on its way. **Two web cases
+weren't**, because the write and the surface it invalidates are on the same
+mounted page: approving on `/u/:id` flipped the button to "Connected" over a
+timeline that stayed empty until you reloaded (`ProfilePage` mounts `['user',
+id]` and `['userPosts', id]`, and only the first was refreshed), and blocking
+there left that person's posts rendered — and your Connections list still listing
+them — under a button now reading "Unblock".
 
 The messaging keys are the one place it departs from the group-membership
 helper, which leaves `['conversations']` / `['unreadMessages']` out as polled
@@ -211,9 +222,11 @@ Two decisions worth keeping:
   mutation take the decision as a boolean rather than as an opaque `act`
   function — the same shape both invite inboxes settled on.
 
-**Mobile only so far.** The web's four sites (`ConnectButton.jsx`,
-`BlockButton.jsx`, `PeoplePage.jsx`, `PendingChatPanel.jsx`) still hold their own
-lists — #288 is the port, and this paragraph goes when it lands.
+Pinned on both clients: `frontend/src/connection-cache.test.jsx` and
+`mobile/src/__tests__/connectionCache.test.tsx`. Both mount the gated surfaces
+*alongside* the component doing the write rather than seeding them into the
+cache — a seeded but unobserved entry refetches on its next mount whatever the
+helper does, so it would pass against the broken build.
 
 ## Comments (threaded, connection-pruned)
 

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
+import { invalidateConnectionChange } from "../connectionCache.js";
 import DisconnectWarningModal from "./DisconnectWarningModal.jsx";
 
 // What each state's failure sounds like when the server didn't say anything
@@ -32,8 +33,8 @@ const RESULTS = {
 //   connected → "Connected" → click to disconnect
 // Both "Connect" and "Approve" call api.connect: for an incoming request the
 // backend accepts the existing request instead of making a second one.
-// On success it invalidates the people list, feed, that user's profile, and the
-// connection-requests inbox so every view reflects the change.
+// On success it refreshes everything a connection gates — the whole set, not the
+// slice this button happens to sit next to; see `connectionCache.js`.
 //
 // Disconnecting from an accepted connection can sever group chats you only
 // share through them (you're dropped to pending there until reconnected with
@@ -57,14 +58,12 @@ export default function ConnectButton({ userId, displayName, connectionStatus })
   const mutation = useMutation({
     mutationFn: () =>
       isConnectAction ? api.connect(userId) : api.disconnect(userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["users"] });
-      queryClient.invalidateQueries({ queryKey: ["connections"] });
-      queryClient.invalidateQueries({ queryKey: ["feed"] });
-      queryClient.invalidateQueries({ queryKey: ["user", userId] });
-      queryClient.invalidateQueries({ queryKey: ["connectionRequests"] });
-      queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    },
+    // Approving on a profile is the case that made the old hand-written list a
+    // bug rather than a flash: the person's timeline is mounted directly beneath
+    // this button (`ProfilePage`), so refreshing `["user", id]` and not
+    // `["userPosts", id]` flipped the button to "Connected" over a timeline that
+    // stayed empty until you reloaded the page (#288).
+    onSuccess: () => invalidateConnectionChange(queryClient, userId),
   });
 
   // Retire the message once the server's own answer moves to the one the
