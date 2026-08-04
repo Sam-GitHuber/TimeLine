@@ -105,21 +105,28 @@ posts down to the groups you're an **active** member of (that's what the
 include-groups toggle merges in), and `PersonalCalendarView` gates on the
 identical set — so a membership write changes what the **home feed** and the
 **personal calendar** are allowed to show. Every write that ends or starts your
-membership — leave, delete, accepting an invite, and an admin removing their
-**own** row from the members roster — therefore invalidates `['groups']`,
-`['feed']` *and* `['personalCalendar']` together. On mobile the rule lives in one
-helper (`mobile/src/groupCache.ts`) rather than being copied into each of the
-four; copied lists are what drifted in #215 / #273 / #275.
+membership — leave, delete, accepting an invite, and (on mobile) an admin
+removing their **own** row from the members roster — therefore invalidates
+`['groups']`, `['feed']` *and* `['personalCalendar']` together. Each client keeps
+the rule in one helper — `mobile/src/groupCache.ts`, `frontend/src/groupCache.js`
+— rather than copying it into each write; copied lists are what drifted in
+#215 / #273 / #275. The web roster isn't a fourth site: its admin controls render
+only on *other* people's rows (`isAdmin && !isSelf`), so leaving from there isn't
+possible and the ⋯ menu is the only way out of a group.
 
-Refreshing only the acting screen's list was #277, and on the app that isn't a
-flash: the tabs stay mounted for the session, so the feed query keeps a live
-observer and never remounts, and a `staleTime` of 0 buys nothing without
-something marking it stale. A leave left the feed listing posts the server would
-then refuse — tap one and you get *Post not available*, because `can_view_post`
-wants the membership you just gave up. Declining an invite is deliberately *not*
-in this set: it deletes the invite row and joins nothing.
+Refreshing only the acting screen's list was #277 on mobile and #281 on the web,
+and on the app it isn't a flash: the tabs stay mounted for the session, so the
+feed query keeps a live observer and never remounts, and a `staleTime` of 0 buys
+nothing without something marking it stale. A leave left the feed listing posts
+the server would then refuse — tap one and you get *Post not available*, because
+`can_view_post` wants the membership you just gave up. On the web the same wrong
+render is a flash rather than a stuck state, since react-router unmounts the
+route and nothing sets a `staleTime`, so the refetch is already on its way.
+Declining an invite is deliberately *not* in this set: it deletes the invite row
+and joins nothing — which is why both invite inboxes pass the decision to the
+success handler as a boolean it can fork on, rather than as an opaque function.
 
-The roster is the one of the four where the rule has to be applied
+The mobile roster is the one site where the rule has to be applied
 **conditionally**, and #282 is what that costs. Its single mutation covers
 promote, demote and remove, so it forks on the action rather than on the screen:
 only `remove` *with your own id* ends a membership of yours — removing someone
@@ -136,11 +143,9 @@ The keys that a membership write *also* moves but that aren't invalidated here
 are `['conversations']` / `['unreadMessages']` (leaving deactivates you in the
 group's chats; deleting cascades them away) and `['notificationsUnread']`
 (accept/decline addresses the invite's notification). Every one of those is
-polled — by the Messages tab, the tab bar and the activity bell respectively — so
-they heal within a cycle on their own. The feed and the calendar are the two that
-never do. One place still misses the rule: the **web** clients refresh only
-`["groups"]` (#281 — a flash rather than a stuck state there, since react-router
-unmounts the route).
+polled — by the Messages tab / drawer, the tab bar / nav count and the activity
+bell respectively — so they heal within a cycle on their own. The feed and the
+calendar are the two that never do.
 
 ## API
 
