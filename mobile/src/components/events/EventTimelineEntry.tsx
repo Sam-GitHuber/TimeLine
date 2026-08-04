@@ -26,9 +26,13 @@
  * the same move, or the two entry kinds disagree about where the voice of time
  * lives on a phone.
  *
- * So the geometry below mirrors `PostCard` exactly — bead alone in the spine
- * column, an alignment band of exactly `BEAD` height carrying the time and the
- * organiser — and the line never breaks between a post and an event.
+ * So the geometry below follows `PostCard` — bead alone in the spine column, an
+ * alignment band of exactly `BEAD` height carrying the time and the organiser —
+ * and the line never breaks between a post and an event. **Matching it in
+ * spirit isn't enough: the two times have to be the same width**, since they
+ * share a column and the names that follow them start where they end. Which is
+ * why the band takes no `fonts.mono` (see `styles.when`) and why
+ * `formatEventTimeParts` pads its minutes the way `formatClockTime` does.
  */
 
 import { router } from 'expo-router';
@@ -42,7 +46,7 @@ import {
   formatEventTime,
   formatEventTimeParts,
 } from '@/eventFormat';
-import { colors, fontSize, fonts, radius, spacing } from '@/theme';
+import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Event } from '@/types';
 
 const BEAD = 24; // matches Avatar size="xs" and PostCard
@@ -189,10 +193,19 @@ const styles = StyleSheet.create({
   },
   band: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   when: {
-    fontFamily: fonts.mono,
     fontSize: fontSize.sm,
     color: colors.inkSoft,
-    // Tabular figures so times down a column don't shuffle as the digits
+    // **No `fonts.mono` here, deliberately** — `PostCard`'s clock time doesn't
+    // use it either, and these two sit in the same column of the same spine. A
+    // mono event time beside a system-font post time is a different width, so
+    // the organiser's name and the author's name below it would start at
+    // different x — the exact column alignment this whole change exists to
+    // establish. (`docs/design-system.md` does call mono the voice of time, and
+    // the *web* honours that on both; mobile's `PostCard` is the one that
+    // doesn't. Making them both mono is a feed-wide change and its own issue —
+    // what matters here is that the two agree.)
+    //
+    // Tabular figures so times down the column don't shuffle as the digits
     // change — the same reason `PostCard` asks for them.
     fontVariant: ['tabular-nums'],
     // The explicit bead-height line box that puts this on the bead's centre.

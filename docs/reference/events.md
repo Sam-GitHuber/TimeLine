@@ -360,9 +360,20 @@ the middle of it), because `PostCard` moved the clock time inline beside the
 author's name to win back ~48pt of a 390pt screen — see the note at the top of
 `mobile/src/components/timeline.tsx`. `EventTimelineEntry` was ported before
 that and kept the rail, so a past event's time was drawn *across* the spine and
-wrapped inside a column narrower than it needed. It now mirrors `PostCard`
-exactly: the bead alone in the spine column, and an alignment band of exactly
-the bead's height carrying the when, then the organiser. A **past** recap leads
+wrapped inside a column narrower than it needed. It now follows `PostCard`: the
+bead alone in the spine column, and an alignment band of exactly the bead's
+height carrying the when, then the organiser. **The two times have to come out
+the same width**, not merely sit in the same place — they share a column, and
+the organiser's name and the author's name start where their times end. Two
+things fall out of that: the band takes **no `fonts.mono`** (mobile's
+`PostCard` doesn't use it, so a mono event time beside a system-font post time
+would break the column — the *web* honours the design system's mono-for-time
+rule on both, and mobile's `PostCard` is the outlier; making them both mono is
+a feed-wide change and its own issue), and **`formatEventTimeParts` pads its
+minutes** — "7:00", never "7" — because `formatClockTime` above and below it
+always does, and the unpadded form is ~24pt narrower. That padding landed in
+*both* copies of the helper, mobile and web; the web's rail has the same column
+and the same neighbours. A **past** recap leads
 with the clock time only (the day divider above it carries the date, which is
 also why the body no longer repeats the full `formatEventWhen`); a **future**
 entry leads with the whole date in accent, because there are no day dividers

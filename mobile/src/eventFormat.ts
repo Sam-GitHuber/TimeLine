@@ -36,12 +36,12 @@ export function parseEventDate(dateStr: string | null | undefined): Date | null 
  * This is what the group timeline groups and sorts a past event by
  * (`toGroupRows`), deliberately in preference to the serialized `starts_at`
  * instant. An event's day is a calendar date in the event's *own* timezone, and
- * the recap renders that wall-clock date/time verbatim (`formatEventWhen`, and
- * the rail's `formatEventTimeParts`) — never converted to the viewer's zone.
- * Deriving the day divider from `starts_at` instead reads it in the *viewer's*
- * zone, so an all-day event (midnight in the event's zone) falls under the
- * previous day's divider anywhere west of that zone, contradicting the recap
- * right beneath it.
+ * the recap renders that wall-clock time verbatim (`formatEventTimeParts`, at
+ * the head of the entry beside the organiser) — never converted to the viewer's
+ * zone. Deriving the day divider from `starts_at` instead reads it in the
+ * *viewer's* zone, so an all-day event (midnight in the event's zone) falls
+ * under the previous day's divider anywhere west of that zone, contradicting
+ * the recap right beneath it.
  *
  * Using it as the *sort* key too keeps the divider algorithm's invariant: every
  * row's day key is the local calendar day of the value it was sorted by, which
@@ -90,10 +90,19 @@ export function formatEventTime(timeStr: string | null | undefined): string {
 }
 
 /**
- * The wall-clock time split so the meridiem can sit on its own line on the
- * timeline rail (like `formatClockTime`, but from an event's `HH:MM` wall clock
- * in its own timezone rather than an instant — so a past event's rail matches
- * the time in its body). Returns null when there's no time (an all-day event).
+ * The wall-clock time split so the meridiem can be styled apart from the digits
+ * (like `formatClockTime`, but from an event's `HH:MM` wall clock in its own
+ * timezone rather than an instant — so a past event's leading time matches the
+ * time in its body). Returns null when there's no time (an all-day event).
+ *
+ * **The minutes are always padded, even on the hour** — "7:00", never "7".
+ * This is the one `formatEvent*` helper that renders into a *column* of times:
+ * on the phone at the head of a past recap, on the web on the timeline rail,
+ * and in both cases directly above and below post times from `formatClockTime`,
+ * which always pads. An unpadded "7pm" against a post's "7:00pm" is ~24pt
+ * narrower, which shifts the name that follows it out of the column. Prose
+ * elsewhere still says "7pm" — that's `formatEventTime`, which is a different
+ * function for a different job.
  */
 export function formatEventTimeParts(
   timeStr: string | null | undefined
@@ -104,14 +113,18 @@ export function formatEventTimeParts(
   const meridiem = h < 12 ? 'am' : 'pm';
   const hour = h % 12 || 12;
   return {
-    time: min ? `${hour}:${String(min).padStart(2, '0')}` : `${hour}`,
+    time: `${hour}:${String(Number.isNaN(min) ? 0 : min).padStart(2, '0')}`,
     meridiem,
   };
 }
 
 /**
- * The one-line "when" recap: "Sat 19 Jul · 7:00pm" (the time is omitted for a
- * date-only, all-day event). Used on the card summary and the past recap.
+ * The one-line "when" recap: "Sat 19 Jul · 7pm" (the time is omitted for a
+ * date-only, all-day event). Used on the boxed, *off*-the-line `EventCard` —
+ * its summary and its past-recap branch — and on the event detail screen. Not
+ * on the timeline spine: an entry there leads with `formatEventTimeParts` (past)
+ * or its own date · time (future), because the day divider above a past recap
+ * already carries the date. See `EventTimelineEntry`.
  */
 export function formatEventWhen(
   event: Pick<Event, 'event_date' | 'start_time'>,

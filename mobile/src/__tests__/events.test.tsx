@@ -1010,9 +1010,6 @@ describe('EventTimelineEntry', () => {
     // `eventFormat.test.ts`'s job. Same trap as the runner's timezone.
     const when = `${formatEventDate('2026-04-05')} · ${formatEventTime('19:00:00')}`;
     expect(screen.getByText(when)).toBeTruthy();
-    // The rail stacked the day over the month and dropped the time entirely, so
-    // it could never have produced a single node reading both.
-    expect(when).toContain('·');
   });
 });
 

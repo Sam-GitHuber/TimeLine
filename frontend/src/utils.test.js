@@ -4,6 +4,7 @@ import {
   dayKey,
   eventLocalStart,
   formatEventDate,
+  formatEventTimeParts,
   formatRelativeTime,
 } from "./utils.js";
 
@@ -41,6 +42,25 @@ describe("formatRelativeTime", () => {
 // from -12 to +14, so the test can't pass by accident on a lucky runner.
 const FAR_EAST_MIDNIGHT = "2026-04-05T00:00:00+13:00";
 const FAR_WEST_MIDNIGHT = "2026-04-05T00:00:00-11:00";
+
+describe("formatEventTimeParts", () => {
+  it("splits the time from its meridiem, or is null when all-day", () => {
+    expect(formatEventTimeParts("14:10")).toEqual({ time: "2:10", meridiem: "pm" });
+    expect(formatEventTimeParts(null)).toBeNull();
+  });
+
+  // Unlike `formatEventTime`, which says "7pm" in prose. This one renders onto
+  // the timeline **rail**, directly above and below post times from
+  // `formatClockTime`, which always pads — so an unpadded "7" sits visibly out
+  // of the column from a "7:00" one row up. Kept in sync with the mobile copy
+  // in `mobile/src/eventFormat.ts`.
+  it("pads the minutes on the hour, so the rail column stays aligned", () => {
+    expect(formatEventTimeParts("19:00")).toEqual({ time: "7:00", meridiem: "pm" });
+    expect(formatEventTimeParts("00:00")).toEqual({ time: "12:00", meridiem: "am" });
+    // Seconds are along for the ride on an "HH:MM:SS" value from the API.
+    expect(formatEventTimeParts("09:00:00")).toEqual({ time: "9:00", meridiem: "am" });
+  });
+});
 
 describe("eventLocalStart", () => {
   it("puts an all-day event at local midnight on its own date", () => {
