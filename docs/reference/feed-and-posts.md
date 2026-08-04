@@ -111,6 +111,23 @@ groups, profiles, and the message transcript's `loadOlder`.
 - **TanStack Query** drives the frontend; mutations invalidate `["feed"]` /
   `["users"]` / `["user", id]` so posting or connecting refreshes the affected
   views immediately.
+- **A new post refreshes two lists, and which two is a rule the compose box
+  owns** (`ComposeBox.jsx` / `ComposeBox.tsx`, both `onSuccess`). Always
+  `['feed']` — a group post surfaces on the home feed via the *include groups*
+  toggle — and then the one list it landed in: `['groupPosts', groupId]` for a
+  group post, `['userPosts']` for a personal one. Those two are genuinely
+  either/or, because `visible_posts` filters `group__isnull=True` for a profile,
+  so a group post is never on your own timeline.
+
+  Mobile used to take the key from the caller (an `invalidateKey` prop), and
+  each screen naturally passed the one list it was itself showing — so a group
+  post refreshed the group and nothing else (#275). The symptom is #273's
+  exactly: a tab navigator keeps the Home tab mounted, so its query has a live
+  observer, never remounts, and `staleTime: 0` doesn't rescue it; the post is
+  missing from the feed until a pull-to-refresh or an app foreground. **Deciding
+  the key at the call site is the bug** — the rule belongs where the write is.
+  A regression test for this must mount observers on the other surfaces, not
+  seed cache entries (same reasoning as the badge tests below).
 
 ### Permalink — a single post by id
 
