@@ -209,9 +209,11 @@ describe("the Block button", () => {
     // Unblocking undoes none of the block's damage, so it needs no warning.
     await userEvent.click(screen.getByRole("button", { name: "Unblock" }));
 
-    // It restores nothing on its own either — but it lifts the bar on their
-    // posts and profile being fetchable again, and the pages showing "you've
-    // blocked this person" are the ones this refreshes.
+    // Pinned in both directions on purpose. Unblocking restores no connection,
+    // so the content keys are a wasted refetch rather than a wrong one — but
+    // it does move `is_blocked` on the profile and the people lists, and it
+    // brings the direct thread back (`_conversation_visible`). The reasoning for
+    // not splitting the two directions is on the mutation in `BlockButton.jsx`.
     await waitFor(() => expect(api.unblockUser).toHaveBeenCalledWith(ADA));
     await waitFor(() => expect(loadCounts()).toEqual(allAt(2)));
   });

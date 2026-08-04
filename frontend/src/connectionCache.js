@@ -35,8 +35,10 @@
 // pending request is in fact ending a live connection. Forking on a stale prop
 // would under-invalidate in exactly that race, which is the bug this file exists
 // to stop. The cost of the flat rule is a refetch of the mounted screens after a
-// request that changed nothing they show — cheap, and `["feed"]` was already
-// being invalidated unconditionally by all four sites.
+// request that changed nothing they show — cheap, and no new habit: three of the
+// four sites already invalidated `["feed"]` unconditionally. (The fourth, the
+// locked `PendingChatPanel`, invalidated only its own two messaging keys — which
+// is #288's other half, not an argument for narrowness.)
 //
 // Rejecting an incoming request *is* forked (`pages/PeoplePage.jsx`), because
 // there the server guarantees the narrow case rather than the client guessing it:
