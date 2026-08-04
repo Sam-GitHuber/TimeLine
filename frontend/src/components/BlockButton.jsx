@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
+import { invalidateConnectionChange } from "../connectionCache.js";
 import DisconnectWarningModal from "./DisconnectWarningModal.jsx";
 
 // Block / unblock control on a person's profile. Blocking is the strong,
@@ -35,19 +36,14 @@ export default function BlockButton({ userId, displayName, isBlocked }) {
   const mutation = useMutation({
     mutationFn: () =>
       isBlocked ? api.unblockUser(userId) : api.blockUser(userId),
-    onSuccess: () => {
-      // A block/unblock changes connection state, feeds, and messaging surfaces.
-      for (const key of [
-        ["user", userId],
-        ["users"],
-        ["feed"],
-        ["conversations"],
-        ["unreadMessages"],
-        ["connectionRequests"],
-      ]) {
-        queryClient.invalidateQueries({ queryKey: key });
-      }
-    },
+    // A block deletes the `Connection` row outright (`BlockView.post`), so it
+    // moves the same boundary every other connection write moves — and refreshes
+    // the same set (`connectionCache.js`). The old list here was a different
+    // six keys from the Connect button's six, and neither held
+    // `["connections"]`: block someone from their profile and your Connections
+    // list went on listing the person you'd just cut off, with their posts still
+    // rendered under a button now reading "Unblock" (#288).
+    onSuccess: () => invalidateConnectionChange(queryClient, userId),
   });
 
   // Retire the message once the server's own answer moves to the one the

@@ -37,10 +37,19 @@ export default function EventPage() {
     retry: false,
   });
 
+  // What an event write refreshes: the event itself, both of the group's views
+  // of it (Upcoming/Past and the month grid) — and the personal `/calendar`,
+  // which merges this group's events in with every other group's
+  // (`PersonalCalendarView`, events.md). That last key was read by `CalendarPage`
+  // and invalidated by *nothing* in `frontend/src`, so setting a date,
+  // cancelling or deleting left it stale — a whole surface the write side had
+  // never heard of, which is exactly how a key gets missed (#279). Mobile has
+  // invalidated all four on every event write since it was built.
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["event", eventId] });
     queryClient.invalidateQueries({ queryKey: ["groupEvents", groupId] });
     queryClient.invalidateQueries({ queryKey: ["groupCalendar", groupId] });
+    queryClient.invalidateQueries({ queryKey: ["personalCalendar"] });
   };
   const closeAndRefresh = () => {
     setEditing(null);
@@ -95,7 +104,13 @@ export default function EventPage() {
   const remove = useMutation({
     mutationFn: () => api.deleteEvent(eventId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["groupEvents", groupId] });
+      // The one write that didn't follow the rule its ten siblings share: it
+      // named `["groupEvents"]` alone, so the group's Month grid went on
+      // painting the deleted event from a stale `["groupCalendar"]` — on the
+      // very page this navigate lands you back on (#279). A delete removes the
+      // event from every surface a cancel changes, so it invalidates the same
+      // set.
+      invalidate();
       navigate(`/g/${groupId}`);
     },
   });
