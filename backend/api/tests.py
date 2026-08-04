@@ -3623,6 +3623,121 @@ class BlockTests(MessagingBase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class BlockedThreadWriteTests(MessagingBase):
+    """🔒 A block takes the thread away from **both** sides — for writes as well
+    as reads.
+
+    The read routes had this from Phase 5; the read-marker and mute routes
+    resolved the thread with the membership-only helper and so kept answering
+    on a thread the block had already hidden. Blocking is the safety feature,
+    so it can't be the one gate a write path skips: these assert every
+    per-thread route agrees, from the blocked party's side (the side that
+    matters — they're the one the block is protecting against).
+    """
+
+    def setUp(self):
+        super().setUp()
+        # friend and I have a real thread with a message from them, then they
+        # block me. Everything below runs as *me*, the blocked party.
+        resp = self.open_with(self.friend)
+        self.convo = Conversation.objects.get(pk=resp.data["id"])
+        Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="hi"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.post(block_url(self.me))
+        self.client.force_authenticate(self.me)
+
+    def mute_url(self):
+        return f"/api/conversations/{self.convo.pk}/mute/"
+
+    def test_the_reads_hide_it(self):
+        # The Phase 5 behaviour these writes have to match.
+        self.assertEqual(self.client.get(CONVERSATIONS_URL).data["count"], 0)
+        self.assertEqual(
+            self.client.get(f"/api/conversations/{self.convo.pk}/").status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.get(messages_url(self.convo)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_marking_read_cannot_move_a_receipt_on_a_blocked_thread(self):
+        # POST /read/ writes ConversationRead, which *is* the read receipt the
+        # other side sees — so this let a blocked party move a tick that
+        # surfaces to the blocker the moment the block is lifted.
+        resp = self.client.post(read_url(self.convo))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(
+            ConversationRead.objects.filter(
+                conversation=self.convo, user=self.me
+            ).exists()
+        )
+
+    def test_marking_unread_cannot_probe_a_blocked_thread(self):
+        # The 200-with-a-count vs 400 split was a yes/no oracle for "does the
+        # person who blocked me still have an undeleted message waiting for
+        # me" — answered off a thread that 404s everywhere else.
+        resp = self.client.delete(read_url(self.convo))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertNotIn("unread_count", resp.data)
+
+    def test_muting_a_blocked_thread_is_gone_too(self):
+        for method in (self.client.post, self.client.delete):
+            resp = method(self.mute_url())
+            self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(
+            Participant.objects.filter(
+                conversation=self.convo, user=self.me, muted_at__isnull=False
+            ).exists()
+        )
+
+    def test_a_deactivated_other_party_hides_the_thread_the_same_way(self):
+        # The list has always dropped a direct thread whose other party went
+        # inactive; the per-thread routes didn't, so the transcript stayed
+        # readable to anyone holding the id. One rule, one place, now.
+        self.client.force_authenticate(self.friend)
+        self.client.delete(block_url(self.me))  # lift the block…
+        User.objects.filter(pk=self.friend.pk).update(is_active=False)
+        self.client.force_authenticate(self.me)
+
+        self.assertEqual(self.client.get(CONVERSATIONS_URL).data["count"], 0)
+        self.assertEqual(
+            self.client.get(messages_url(self.convo)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.post(read_url(self.convo)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_a_group_chat_is_untouched_by_any_of_this(self):
+        # The rule is direct-only: a group chat has no "other party", and a
+        # block between two of its members must not take the whole chat away
+        # from everyone. Guards against over-tightening the shared helper.
+        third = make_user("third@example.com")
+        for pair in ((self.me, third), (self.friend, third)):
+            make_connection(*pair, status=ACCEPTED)
+        convo = Conversation.objects.create(kind=Conversation.Kind.GROUP)
+        for user in (self.me, self.friend, third):
+            Participant.objects.create(
+                conversation=convo, user=user, status=Participant.Status.ACTIVE
+            )
+        Message.objects.create(conversation=convo, sender=third, text="hello all")
+
+        self.assertEqual(
+            self.client.get(messages_url(convo)).status_code, status.HTTP_200_OK
+        )
+        self.assertEqual(
+            self.client.post(read_url(convo)).status_code, status.HTTP_200_OK
+        )
+        self.assertEqual(
+            self.client.post(f"/api/conversations/{convo.pk}/mute/").status_code,
+            status.HTTP_200_OK,
+        )
+
+
 class MessagingAuthRequiredTests(APITestCase):
     def test_conversations_require_login(self):
         self.assertEqual(
