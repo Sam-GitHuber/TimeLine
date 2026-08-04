@@ -20,6 +20,7 @@
 
 import type { InfiniteData, QueryClient } from '@tanstack/react-query';
 
+import type { CommentTarget } from './api';
 import type { Paginated, Post } from './types';
 
 /**
@@ -97,12 +98,61 @@ export function invalidatePostComments(
   queryClient: QueryClient,
   postId: number
 ): void {
+  invalidateComments(queryClient, { postId });
+}
+
+/**
+ * The query key for one comment thread.
+ *
+ * A thread hangs off a post **or** an event, and the two id spaces are separate
+ * — post 7 and event 7 both exist — so the kind is part of the key. Without it
+ * the two would share a cache entry and whichever loaded second would paint the
+ * other's comments. Mirrors `commentsQueryKey` in `frontend/src/postCache.js`.
+ *
+ * `connectionCache` invalidates the `['comments']` prefix, which still matches
+ * both, deliberately: a connection change re-prunes every tree.
+ */
+export function commentsQueryKey({ postId, eventId }: CommentTarget): unknown[] {
+  if (postId != null) return ['comments', 'post', Number(postId)];
+  if (eventId != null) return ['comments', 'event', Number(eventId)];
+  throw new Error('commentsQueryKey needs a postId or an eventId');
+}
+
+/**
+ * Refetch everything a *change* to a comment tree touches: the tree itself, and
+ * the target's `comment_count` wherever a card renders it.
+ *
+ * **An event lives on four surfaces and this names all four** — the rule
+ * `EventScreen`'s own invalidate already follows, now applied to comment
+ * writes. `groupId` is optional only because a caller without it still wants
+ * the other keys refreshed; pass it wherever it's known.
+ *
+ * Every event key is coerced to a **number**, because that's what
+ * `EventScreen` builds its keys from while the post permalink keeps the raw
+ * string. A key of the wrong type matches nothing and fails silently.
+ */
+export function invalidateComments(
+  queryClient: QueryClient,
+  { postId, eventId, groupId }: CommentTarget
+): void {
   const keys: unknown[][] = [
-    ['comments', postId],
-    ...[...POST_LIST_KEYS].map((key) => [key]),
-    // Keyed by string: that's what the route param hands the permalink query.
-    ['post', String(postId)],
+    commentsQueryKey(postId != null ? { postId } : { eventId }),
   ];
+  if (postId != null) {
+    keys.push(
+      ...[...POST_LIST_KEYS].map((key) => [key]),
+      // Keyed by string: that's what the route param hands the permalink query.
+      ['post', String(postId)]
+    );
+  } else {
+    keys.push(['event', Number(eventId)], ['personalCalendar']);
+    if (groupId != null) {
+      keys.push(
+        ['groupEvents', Number(groupId)],
+        ['groupCalendar', Number(groupId)]
+      );
+    }
+  }
   for (const queryKey of keys) {
     queryClient.invalidateQueries({ queryKey });
   }

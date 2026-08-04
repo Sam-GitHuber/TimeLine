@@ -131,12 +131,12 @@ describe('markPostCommentsSeen', () => {
     // a comment thread, a group's own record — must be passed over untouched.
     const client = makeClient();
     const comments = [{ id: 9, post: 42 }];
-    client.setQueryData(['comments', 42], comments);
+    client.setQueryData(['comments', 'post', 42], comments);
     client.setQueryData(['post', '43'], post(43, 5));
 
     markPostCommentsSeen(client, 42);
 
-    expect(client.getQueryData(['comments', 42])).toBe(comments);
+    expect(client.getQueryData(['comments', 'post', 42])).toBe(comments);
     expect((client.getQueryData(['post', '43']) as Post).new_comment_count).toBe(5);
   });
 
@@ -166,7 +166,7 @@ describe('markPostCommentsSeen', () => {
  */
 describe('invalidatePostComments', () => {
   function seedEverySurface(client: QueryClient) {
-    client.setQueryData(['comments', 42], [{ id: 9, post: 42 }]);
+    client.setQueryData(['comments', 'post', 42], [{ id: 9, post: 42 }]);
     client.setQueryData(['feed', false], list([page([post(42, 0)])]));
     client.setQueryData(['userPosts', '7'], list([page([post(42, 0)])]));
     client.setQueryData(['groupPosts', '3'], list([page([post(42, 0)])]));
@@ -189,7 +189,7 @@ describe('invalidatePostComments', () => {
     // there read "Comments · 3" over a thread of four until something else
     // refetched.
     for (const key of [
-      ['comments', 42],
+      ['comments', 'post', 42],
       ['feed'],
       ['userPosts'],
       ['groupPosts'],
@@ -241,7 +241,7 @@ describe('invalidatePostComments', () => {
 
   it('leaves another post’s comment tree alone', () => {
     const client = makeClient();
-    client.setQueryData(['comments', 42], [{ id: 9 }]);
+    client.setQueryData(['comments', 'post', 42], [{ id: 9 }]);
     client.setQueryData(['comments', 43], [{ id: 10 }]);
 
     invalidatePostComments(client, 42);

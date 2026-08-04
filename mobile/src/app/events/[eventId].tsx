@@ -36,6 +36,8 @@ import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEditor';
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
+import { CommentThread } from '@/components/CommentThread';
+import { ReactionBar } from '@/components/ReactionBar';
 import { formatEventWhen } from '@/eventFormat';
 import { dismissEventNotifications } from '@/push';
 import { useAndroidBack } from '@/useAndroidBack';
@@ -67,8 +69,13 @@ function nothingDecided(event: { event_date: string | null; start_time: string |
 }
 
 export default function EventScreen() {
-  const { eventId } = useLocalSearchParams<{ eventId: string }>();
+  const { eventId, comment } = useLocalSearchParams<{
+    eventId: string;
+    /** From a "replied on your event" push — the comment to open at. */
+    comment?: string;
+  }>();
   const id = Number(eventId);
+  const highlightCommentId = comment ? Number(comment) : null;
   const queryClient = useQueryClient();
 
   // Which chip's editor is open (organiser's Set/Change/Poll), or null.
@@ -327,6 +334,31 @@ export default function EventScreen() {
             </View>
           ) : null}
 
+          {/* Reactions and the conversation — the same pair a post carries, in
+              the same order. Below the RSVP because deciding whether you're
+              going is the screen's job; talking about it is what happens next.
+
+              The chips prune to your connections, unlike the RSVP and poll
+              counts above them, which are complete — see events.md. */}
+          <View style={styles.section}>
+            <ReactionBar
+              eventId={event.id}
+              reactions={event.reactions}
+              trailing={
+                event.comment_count > 0 ? (
+                  <Text style={styles.commentCount}>
+                    {event.comment_count}{' '}
+                    {event.comment_count === 1 ? 'comment' : 'comments'}
+                  </Text>
+                ) : null
+              }
+            />
+            <CommentThread
+              target={{ eventId: event.id, groupId: event.group.id }}
+              highlightCommentId={highlightCommentId}
+            />
+          </View>
+
           {/* Cancel/delete — the organiser or a group admin (`can_moderate`).
               Cancel soft-cancels (a tombstone that notifies RSVPs); delete is a
               hard, everyone removal. */}
@@ -403,6 +435,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   sectionTitle: { fontSize: fontSize.base, fontWeight: '700', color: colors.ink },
+  commentCount: { fontSize: fontSize.sm, color: colors.inkFaint },
   hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20, marginBottom: spacing.xs },
   askMore: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   askMoreLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.accentDeep },

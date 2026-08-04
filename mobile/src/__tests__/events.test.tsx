@@ -229,6 +229,9 @@ function makeEvent(overrides: Partial<Event> = {}): Event {
     },
     can_manage: false,
     can_moderate: false,
+    reactions: [],
+    comment_count: 0,
+    new_comment_count: 0,
     created_at: '2026-07-18T10:00:00Z',
     updated_at: '2026-07-18T10:00:00Z',
     polls: [DATE_POLL],
@@ -938,6 +941,103 @@ describe('group page events', () => {
     await fireEvent.press(screen.getByRole('button', { name: 'Calendar' }));
 
     expect(await screen.findByText(/Quiz night/)).toBeTruthy();
+  });
+});
+
+// --- Comments and reactions on the event ------------------------------------
+//
+// An event is authored content, so it carries the same pair a post does. The
+// visibility rules are the server's (and tested there); what matters here is
+// that the thread and the chips are wired to the *event*.
+//
+// Note the URL matching below puts `/comments/` **before** the bare
+// `/api/events/9/`, which would otherwise swallow it — `includes` is a prefix
+// test, and serving the event payload to the comments query is a silent
+// no-comments state rather than an error.
+
+describe('event comments and reactions', () => {
+  function serveEvent(event: Event, comments: unknown[] = []) {
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/comments/')) {
+        return jsonResponse(opts?.method === 'POST' ? { id: 1 } : comments);
+      }
+      if (url.includes('/api/events/9/react/')) {
+        return jsonResponse({
+          reactions: [{ emoji: '🎉', count: 1, reacted: true }],
+        });
+      }
+      if (url.includes('/api/events/9/')) return jsonResponse(event);
+      return jsonResponse(null, 404);
+    });
+  }
+
+  it('loads the thread from the event, not from a post of the same id', async () => {
+    serveEvent(makeEvent(), [
+      {
+        id: 3,
+        author: { id: 2, display_name: 'Ada Lovelace', avatar_thumb: null },
+        parent: null,
+        text: 'are we still on?',
+        created_at: '2026-08-01T10:00:00Z',
+        edited_at: null,
+        deleted_at: null,
+        replies: [],
+        reactions: [],
+      },
+    ]);
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+
+    expect(await screen.findByText('are we still on?')).toBeTruthy();
+    // Event 9 and post 9 both exist, so a thread routed on the bare number
+    // would fetch the wrong one.
+    const urls = mockFetch.mock.calls.map((c) => c[0] as string);
+    expect(urls.some((u) => u.includes('/api/events/9/comments/'))).toBe(true);
+    expect(urls.some((u) => u.includes('/api/posts/9/comments/'))).toBe(false);
+  });
+
+  it('posts a comment onto the event', async () => {
+    serveEvent(makeEvent());
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+
+    await fireEvent.changeText(
+      screen.getByPlaceholderText('Write a comment…'),
+      'bringing a cake'
+    );
+    await fireEvent.press(screen.getByRole('button', { name: 'Post comment' }));
+
+    await waitFor(() => {
+      const post = mockFetch.mock.calls.find(
+        (c) =>
+          (c[0] as string).includes('/api/events/9/comments/') &&
+          (c[1] as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(post).toBeTruthy();
+      expect(JSON.parse((post![1] as RequestInit).body as string)).toEqual({
+        text: 'bringing a cake',
+        parent: null,
+      });
+    });
+  });
+
+  it('renders the reaction chips the server sent', async () => {
+    serveEvent(
+      makeEvent({ reactions: [{ emoji: '🎉', count: 3, reacted: false }] })
+    );
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+
+    expect(await screen.findByText('3')).toBeTruthy();
+  });
+
+  it('shows the comment count beside the chips', async () => {
+    serveEvent(makeEvent({ comment_count: 4 }));
+    await renderWith(<EventScreen />);
+
+    expect(await screen.findByText('4 comments')).toBeTruthy();
   });
 });
 

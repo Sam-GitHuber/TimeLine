@@ -49,8 +49,15 @@ export function reactorsQueryKey({
   postId,
   commentId,
   messageId,
+  eventId,
 }: ReactionTarget) {
-  return ['reactors', postId ?? null, commentId ?? null, messageId ?? null];
+  return [
+    'reactors',
+    postId ?? null,
+    commentId ?? null,
+    messageId ?? null,
+    eventId ?? null,
+  ];
 }
 
 export function ReactorsSheet({
@@ -59,6 +66,7 @@ export function ReactorsSheet({
   postId,
   commentId,
   messageId,
+  eventId,
   meId,
   onRemoveReaction,
 }: {
@@ -67,6 +75,7 @@ export function ReactorsSheet({
   postId?: number;
   commentId?: number;
   messageId?: number;
+  eventId?: number;
   /**
    * Which row is yours, so it can offer to remove your reaction. A prop rather
    * than a `useAuth()` call on purpose: this sheet is otherwise a pure renderer
@@ -87,10 +96,12 @@ export function ReactorsSheet({
       ? { postId }
       : commentId != null
         ? { commentId }
-        : { messageId };
+        : messageId != null
+          ? { messageId }
+          : { eventId };
 
   const { data, isLoading, error } = useQuery({
-    queryKey: reactorsQueryKey({ postId, commentId, messageId }),
+    queryKey: reactorsQueryKey({ postId, commentId, messageId, eventId }),
     queryFn: () => api.getReactors(target),
     // Only fetch once the sheet is actually open — this is a per-target request
     // and the feed can hold dozens of targets at a time.

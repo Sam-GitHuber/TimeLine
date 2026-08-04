@@ -191,7 +191,7 @@ describe('comment Report', () => {
 
   it('flags someone else’s comment', async () => {
     serveComments([comment({ id: 8 })]);
-    await renderWithClient(<CommentThread postId={7} />);
+    await renderWithClient(<CommentThread target={{ postId: 7 }} />);
 
     await screen.findByText('Comment 8');
     await fireEvent.press(screen.getByLabelText('Comment options'));
@@ -209,7 +209,7 @@ describe('comment Report', () => {
     // Authored by the viewer (pk 1) → self-report is pointless, so the same ⋯
     // carries the owner's pair instead.
     serveComments([comment({ id: 9, author: { id: 1, display_name: 'Me Myself', avatar_thumb: null } })]);
-    await renderWithClient(<CommentThread postId={7} />);
+    await renderWithClient(<CommentThread target={{ postId: 7 }} />);
 
     await screen.findByText('Comment 9');
     await fireEvent.press(screen.getByLabelText('Comment options'));
