@@ -29,6 +29,7 @@ import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from '@/components/ActionMenu';
 import { Avatar } from '@/components/Avatar';
+import { LEAVE_GROUP_CONFIRM } from '@/components/useGroupActions';
 import { invalidateGroupMembership } from '@/groupCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { GroupMember } from '@/types';
@@ -100,16 +101,16 @@ export default function GroupMembersScreen() {
     // Confirm *before* the mutation, so tapping Cancel is a true no-op rather
     // than resolving into the mutation's success path (which would fire the
     // invalidations below for a removal that never happened). Removing your own
-    // row *is* leaving, so it says so — same wording as the ⋯ menu's Leave, which
-    // makes the same call.
+    // row *is* leaving, so it says so — literally the ⋯ menu's wording, shared
+    // from `useGroupActions` rather than retyped, since the two must not drift.
     const remove = () =>
       Alert.alert(
-        isSelf ? 'Leave group?' : 'Remove member?',
-        isSelf ? 'You’ll stop seeing its timeline.' : `Remove ${name} from this group?`,
+        isSelf ? LEAVE_GROUP_CONFIRM.title : 'Remove member?',
+        isSelf ? LEAVE_GROUP_CONFIRM.message : `Remove ${name} from this group?`,
         [
           { text: 'Cancel', style: 'cancel' },
           {
-            text: isSelf ? 'Leave' : 'Remove',
+            text: isSelf ? LEAVE_GROUP_CONFIRM.confirm : 'Remove',
             style: 'destructive',
             onPress: () => mutation.mutate({ kind: 'remove', userId: member.user.id }),
           },
