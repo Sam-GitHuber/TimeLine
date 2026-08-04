@@ -358,6 +358,19 @@ counts exclude your own messages.
   erroring — mobile shipped that way and the badge simply never cleared (#195).
   Tests for this must seed the suffixed keys; a bare `['feed']` fixture tests a
   cache entry neither app ever writes.
+- **The *total* is a separate problem from the badge, and it's an invalidation,
+  not a cache write.** Opening a thread only moves `new_comment_count`, which the
+  client can compute itself; adding or deleting a comment moves `comment_count`,
+  and only the server knows the new value after pruning. So every mutation on the
+  tree must invalidate the post lists as well as `['comments', postId]` — the
+  count rides the *post* payload, not the tree. Web funnels both mutations
+  through one `invalidatePostComments(queryClient, postId)`
+  (`frontend/src/postCache.js`), which derives its list keys from the same
+  `POST_LIST_KEYS` set `markPostCommentsSeen` uses, so a new post-list surface
+  can't reach one and not the other. The bug this closes (#215) was exactly the
+  drift a shared list prevents: delete carried the full set, add carried one key
+  of it, and a card sat reading *Comments · 3* above four comments until
+  something unrelated refetched.
 
 ## Photos
 
