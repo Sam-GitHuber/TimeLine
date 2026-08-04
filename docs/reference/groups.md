@@ -98,6 +98,35 @@ group is gated by **[connection](connections.md)**, not membership:
   already have a relationship with. Removing members stays **admin-only**. You
   can't invite or be invited by someone you've blocked (either direction).
 
+### Membership is a gate on two *other* screens, so its writes refresh them
+
+Joining or leaving doesn't only change the groups list. `feed_posts` filters group
+posts down to the groups you're an **active** member of (that's what the
+include-groups toggle merges in), and `PersonalCalendarView` gates on the
+identical set — so a membership write changes what the **home feed** and the
+**personal calendar** are allowed to show. All three writes — leave, delete, and
+accepting an invite — therefore invalidate `['groups']`, `['feed']` *and*
+`['personalCalendar']` together. On mobile the rule lives in one helper
+(`mobile/src/groupCache.ts`) rather than being copied into each of the three;
+copied lists are what drifted in #215 / #273 / #275.
+
+Refreshing only the acting screen's list was #277, and on the app that isn't a
+flash: the tabs stay mounted for the session, so the feed query keeps a live
+observer and never remounts, and a `staleTime` of 0 buys nothing without
+something marking it stale. A leave left the feed listing posts the server would
+then refuse — tap one and you get *Post not available*, because `can_view_post`
+wants the membership you just gave up. Declining an invite is deliberately *not*
+in this set: it deletes the invite row and joins nothing.
+
+The keys that a membership write *also* moves but that aren't invalidated here
+are `['conversations']` / `['unreadMessages']` (leaving deactivates you in the
+group's chats; deleting cascades them away) and `['notificationsUnread']`
+(accept/decline addresses the invite's notification). Every one of those is
+polled — by the Messages tab, the tab bar and the activity bell respectively — so
+they heal within a cycle on their own. The feed and the calendar are the two that
+never do. The **web** clients still refresh only `['groups']`; there it's a flash
+rather than a stuck state, because react-router unmounts the route (#280).
+
 ## API
 
 - `POST /api/groups/` — create (creator written as `active` `admin`).

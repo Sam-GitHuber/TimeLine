@@ -6,7 +6,7 @@
  * endpoint and refreshes the shared count so the tab badge can't go stale.
  */
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 
 import GroupsScreen from '@/app/(tabs)/groups';
@@ -136,6 +136,117 @@ it('declines an invite via the reject endpoint', async () => {
       )
     ).toBe(true)
   );
+});
+
+describe('refreshing what a membership change gates', () => {
+  /**
+   * A tab elsewhere in the app, observing its query the way the real screen
+   * does — mounted rather than seeded, because a tab navigator keeps every
+   * visited tab mounted, so its query has a live observer and never remounts on
+   * a tab switch. A seeded but unobserved entry refetches on its next mount
+   * whatever we do, and would pass against the broken build (`compose.test.tsx`
+   * has the same harness for the same reason).
+   */
+  function MountedTab({
+    queryKey,
+    queryFn,
+  }: {
+    queryKey: unknown[];
+    queryFn: () => Promise<unknown>;
+  }) {
+    useQuery({ queryKey, queryFn });
+    return null;
+  }
+
+  async function renderScreenOverTabs() {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    const tabs = {
+      // `true` is the include-groups-in-feed preference turned on — the setting
+      // that puts a group's posts on the home feed at all. The suffix is the one
+      // the real screen uses, so invalidating the bare key as an *exact* key
+      // wouldn't pass here.
+      feed: { key: ['feed', true], fn: jest.fn(async () => emptyList()) },
+      calendar: { key: ['personalCalendar'], fn: jest.fn(async () => []) },
+    };
+    await render(
+      <QueryClientProvider client={queryClient}>
+        {Object.entries(tabs).map(([name, tab]) => (
+          <MountedTab key={name} queryKey={tab.key} queryFn={tab.fn} />
+        ))}
+        <GroupsScreen />
+      </QueryClientProvider>
+    );
+    // Their first load, so a later call is unambiguously a refetch.
+    await waitFor(() => expect(loadCounts(tabs)).toEqual({ feed: 1, calendar: 1 }));
+    return tabs;
+  }
+
+  type Tabs = Awaited<ReturnType<typeof renderScreenOverTabs>>;
+
+  function emptyList() {
+    return {
+      pages: [{ count: 0, next: null, previous: null, results: [] }],
+      pageParams: [undefined],
+    };
+  }
+
+  function loadCounts(tabs: Tabs) {
+    return Object.fromEntries(
+      Object.entries(tabs).map(([name, tab]) => [name, tab.fn.mock.calls.length])
+    );
+  }
+
+  function decided(inviteId: number, action: 'accept' | 'reject') {
+    return mockFetch.mock.calls.some(
+      ([url, init]) =>
+        String(url).includes(`/api/group-invites/${inviteId}/${action}/`) &&
+        init?.method === 'POST'
+    );
+  }
+
+  it('refreshes the feed and the calendar when you accept an invite', async () => {
+    serve();
+    const tabs = await renderScreenOverTabs();
+
+    fireEvent.press(await screen.findByText('Invites'));
+    fireEvent.press(await screen.findByLabelText('Accept Book Club'));
+
+    await waitFor(() => expect(decided(99, 'accept')).toBe(true));
+    // Joining is the inverse of leaving (#277): the group's posts belong on the
+    // home feed from now on and its events on the calendar, and the Groups tab
+    // you accepted from is not the tab that has to show them.
+    await waitFor(() => expect(loadCounts(tabs)).toEqual({ feed: 2, calendar: 2 }));
+  });
+
+  it('leaves them alone when you decline one', async () => {
+    serve();
+    const tabs = await renderScreenOverTabs();
+
+    fireEvent.press(await screen.findByText('Invites'));
+    const invitesLoads = invitesRequests();
+    fireEvent.press(await screen.findByLabelText('Decline Book Club'));
+
+    // Declining deletes the invite row and joins nothing, so neither gated
+    // surface changed — refreshing them would be a needless round-trip on a
+    // phone. The invites list reloading is the tell that the write has landed
+    // and its invalidations have run, so the counts below aren't read early.
+    await waitFor(() => expect(decided(99, 'reject')).toBe(true));
+    await waitFor(() => expect(invitesRequests()).toBeGreaterThan(invitesLoads));
+    expect(loadCounts(tabs)).toEqual({ feed: 1, calendar: 1 });
+  });
+
+  /** How many times the invites list has been fetched (its POSTs excluded). */
+  function invitesRequests() {
+    return mockFetch.mock.calls.filter(
+      ([url, init]) =>
+        String(url).includes('/api/group-invites/') && init?.method !== 'POST'
+    ).length;
+  }
 });
 
 it('offers a New group CTA when you have no groups', async () => {
