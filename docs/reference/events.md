@@ -367,8 +367,20 @@ with the clock time only (the day divider above it carries the date, which is
 also why the body no longer repeats the full `formatEventWhen`); a **future**
 entry leads with the whole date in accent, because there are no day dividers
 above the now boundary to carry it. The Date · Time · Where chips stay on both,
-as on the web, and are now the only place the date and the venue are written.
-Pinned in `mobile/src/__tests__/events.test.tsx` ("EventTimelineEntry").
+as on the web, and are now the only place the venue is written. A past recap
+therefore states its date twice — the divider above it, and the Date chip — and
+that's the settled answer, not an oversight: the chips are the record of what
+the event decided, and a recap missing the one decision it's most defined by
+reads as though it never got a date, while the divider is a property of the
+*timeline* rather than of the event. What did go is the **"Happened" tag**: its
+position says it, sitting below the now-node among posts equally in the past
+that carry no such label. "Cancelled" stays, because that one isn't legible
+from position — a called-off event is a tombstone, not a memory. Pinned in
+`mobile/src/__tests__/events.test.tsx` ("EventTimelineEntry"), whose date
+assertion is **derived from `formatEventDate`, never spelled out**: it goes
+through `toLocaleDateString`, so a hardcoded "Sun 5 Apr" passes on a British
+machine and fails on CI's, which renders "Sun, Apr 5" (reproduce with
+`LC_ALL=en_US.UTF-8 npx jest`). Same trap as the runner's timezone.
 
 The **optimistic tick and its two debts** (the "Frontend notes" bullet above) hold
 here too, as of #227: `PollTally` awaits the vote and rolls its tick back with a

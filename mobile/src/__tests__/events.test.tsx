@@ -18,6 +18,7 @@ import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
 import { EventTimelineEntry } from '@/components/events/EventTimelineEntry';
 import { MonthGrid } from '@/components/events/MonthGrid';
+import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, Poll, User } from '@/types';
 
@@ -970,16 +971,15 @@ describe('EventTimelineEntry', () => {
   it('leads a past recap with the clock time inline, beside the organiser', async () => {
     await renderWith(<EventTimelineEntry event={past} variant="past" />);
 
-    // Two nodes carry the time now: the band at the head of the entry, and the
-    // Time chip below. **That count is the assertion** — the rail put a literal
-    // newline between "12:30" and "pm" to fit the 36pt column, so it rendered
-    // "12:30 pm" and never matched this composed string at all.
+    // Two nodes carry the time: the band at the head of the entry, and the Time
+    // chip below (the chips stay on a past recap, as on the web). **The
+    // spelling is the assertion** — the rail put a literal newline between
+    // "12:30" and "pm" to fit the 36pt column, which normalises to "12:30 pm"
+    // and matches neither query below.
     expect(screen.getAllByText('12:30pm')).toHaveLength(2);
+    expect(screen.queryByText('12:30 pm')).toBeNull();
     expect(screen.getByText('Ada Lovelace')).toBeTruthy();
     expect(screen.getByText('Spring picnic')).toBeTruthy();
-    // The date is not repeated in the body: the day divider above the recap
-    // carries it, and the Date chip states what it settled on.
-    expect(screen.queryByText(/Sun 5 Apr · 12:30pm/)).toBeNull();
   });
 
   it('says "all day" in the band when a past event has no time', async () => {
@@ -999,16 +999,20 @@ describe('EventTimelineEntry', () => {
   });
 
   it('leads a future entry with the whole date, since no divider carries it', async () => {
-    await renderWith(
-      <EventTimelineEntry
-        event={{ ...past, is_past: false, start_time: '19:00:00' }}
-        variant="future"
-      />
-    );
+    const future = { ...past, is_past: false, start_time: '19:00:00' };
+    await renderWith(<EventTimelineEntry event={future} variant="future" />);
 
-    // One composed string. The rail stacked the day over the month ("5" / "Apr")
-    // and dropped the time entirely.
-    expect(screen.getByText('Sun 5 Apr · 7pm')).toBeTruthy();
+    // **Derived, not spelled.** `formatEventDate` goes through
+    // `toLocaleDateString`, so the expected text is "Sun 5 Apr" on a British
+    // runner and "Sun, Apr 5" on CI's — hardcoding either makes the suite pass
+    // in one place and fail in the other, which is what it did. The claim here
+    // is the *composition* (one node, date · time); how a date is spelled is
+    // `eventFormat.test.ts`'s job. Same trap as the runner's timezone.
+    const when = `${formatEventDate('2026-04-05')} · ${formatEventTime('19:00:00')}`;
+    expect(screen.getByText(when)).toBeTruthy();
+    // The rail stacked the day over the month and dropped the time entirely, so
+    // it could never have produced a single node reading both.
+    expect(when).toContain('·');
   });
 });
 

@@ -94,7 +94,11 @@ export function EventTimelineEntry({
           >
             {event.organiser.display_name}
           </Text>
-          {past && !cancelled ? <Text style={styles.tagMuted}>Happened</Text> : null}
+          {/* No "Happened" tag on a past entry. Its position says it — it sits
+              below the now-node under a day divider that dates it, among posts
+              that are equally in the past and carry no such label. "Cancelled"
+              stays, because that one *isn't* legible from position: a called-off
+              event is a tombstone, not a memory, and nothing else says so. */}
           {cancelled ? <Text style={styles.tagOff}>Cancelled</Text> : null}
         </View>
 
@@ -110,9 +114,15 @@ export function EventTimelineEntry({
 
         {/* The Date · Time · Where pills stay on a past event too — the recap
             shows what it settled on, just as the future entry shows what's set,
-            and they are now the only place the date and the venue are written
-            (the band above carries the clock time alone, and the organiser and
-            the when used to be repeated in a meta line under the title). */}
+            and they are now the only place the venue is written (the band above
+            carries the clock time alone, and the organiser and the when used to
+            be repeated in a meta line under the title).
+
+            So a past recap does state its date twice: once on the day divider
+            above it, once in the Date chip. That's deliberate — the chips are
+            the record of what the event settled on, and a recap missing the one
+            decision it's most defined by reads as though it never got a date.
+            The divider is a property of the *timeline*, not of the event. */}
         <View style={styles.chips}>
           <DimensionChips event={event} />
         </View>
@@ -202,13 +212,6 @@ const styles = StyleSheet.create({
   description: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20 },
   chips: { marginTop: 2 },
   turnout: { fontSize: 11, color: colors.inkFaint },
-  tagMuted: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.inkFaint,
-    textTransform: 'uppercase',
-    lineHeight: BEAD,
-  },
   tagOff: {
     fontSize: 11,
     fontWeight: '700',
