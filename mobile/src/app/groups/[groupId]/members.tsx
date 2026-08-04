@@ -7,6 +7,17 @@
  * server-side (a 400 if the sole admin tries to demote/remove the last admin);
  * its message is surfaced rather than pre-guarded here, so the rule lives in one
  * place. Any member can open the invite picker.
+ *
+ * An admin can tap **their own** row, and removing it is `removeGroupMember` with
+ * your own id — byte for byte the call the ⋯ menu's *Leave* makes, and the server
+ * treats it as leaving (`GroupMemberDetailView.delete` allows `is_self` for any
+ * member). So that one branch is a leave, and is treated as one: it says so on
+ * the menu and the confirm, refreshes what leaving refreshes (`groupCache.ts` —
+ * membership gates the home feed and the personal calendar, #282), and navigates
+ * back to the Groups tab rather than leaving you on the roster of a group you're
+ * no longer in. Removing *someone else* changes no membership of yours, so it
+ * stays on the narrow set. The choice is a **flag in the mutation variables**
+ * rather than an opaque function, so the success handler can tell the two apart.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -18,8 +29,19 @@ import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from '@/components/ActionMenu';
 import { Avatar } from '@/components/Avatar';
+import { LEAVE_GROUP_CONFIRM } from '@/components/useGroupActions';
+import { invalidateGroupMembership } from '@/groupCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { GroupMember } from '@/types';
+
+/**
+ * What the roster's one mutation was asked to do. A discriminated variable
+ * rather than a callback, because `onSuccess` has to know whether the write
+ * ended *your own* membership — and a `() => Promise<void>` can't say.
+ */
+type RosterAction =
+  | { kind: 'role'; userId: number; role: 'admin' | 'member' }
+  | { kind: 'remove'; userId: number };
 
 export default function GroupMembersScreen() {
   const { groupId } = useLocalSearchParams<{ groupId: string }>();
@@ -36,8 +58,22 @@ export default function GroupMembersScreen() {
   });
 
   const mutation = useMutation({
-    mutationFn: (fn: () => Promise<void>) => fn(),
-    onSuccess: () => {
+    mutationFn: (action: RosterAction) =>
+      action.kind === 'role'
+        ? api.setGroupMemberRole(id, action.userId, action.role)
+        : api.removeGroupMember(id, action.userId),
+    onSuccess: (_result, action) => {
+      if (action.kind === 'remove' && action.userId === me?.pk) {
+        // You just left. Membership gates the home feed and the personal
+        // calendar, and on the app that lie is permanent — the tabs stay mounted,
+        // so nothing marks the feed stale and it keeps offering posts the server
+        // will now refuse (#277, #282; see `groupCache.ts`). The group and the
+        // roster are deliberately *not* invalidated: both would 404 for a
+        // non-member, and this screen is about to unmount anyway.
+        invalidateGroupMembership(queryClient);
+        router.replace('/groups');
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: ['groupMembers', id] });
       // Your own role or the member count can change (demoting yourself, removing
       // someone), so refresh the group and the list too.
@@ -56,29 +92,40 @@ export default function GroupMembersScreen() {
   function manage(member: GroupMember) {
     if (!isAdmin) return;
     const name = member.user.display_name;
+    const isSelf = member.user.id === me?.pk;
     const roleLabel = member.role === 'admin' ? 'Make member' : 'Make admin';
     const nextRole = member.role === 'admin' ? 'member' : 'admin';
 
     const promote = () =>
-      mutation.mutate(() => api.setGroupMemberRole(id, member.user.id, nextRole));
+      mutation.mutate({ kind: 'role', userId: member.user.id, role: nextRole });
     // Confirm *before* the mutation, so tapping Cancel is a true no-op rather
     // than resolving into the mutation's success path (which would fire the
-    // invalidations below for a removal that never happened).
+    // invalidations below for a removal that never happened). Removing your own
+    // row *is* leaving, so it says so — literally the ⋯ menu's wording, shared
+    // from `useGroupActions` rather than retyped, since the two must not drift.
     const remove = () =>
-      Alert.alert('Remove member?', `Remove ${name} from this group?`, [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: () => mutation.mutate(() => api.removeGroupMember(id, member.user.id)),
-        },
-      ]);
+      Alert.alert(
+        isSelf ? LEAVE_GROUP_CONFIRM.title : 'Remove member?',
+        isSelf ? LEAVE_GROUP_CONFIRM.message : `Remove ${name} from this group?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: isSelf ? LEAVE_GROUP_CONFIRM.confirm : 'Remove',
+            style: 'destructive',
+            onPress: () => mutation.mutate({ kind: 'remove', userId: member.user.id }),
+          },
+        ]
+      );
 
     openMenu({
       title: name,
       items: [
         { label: roleLabel, onPress: promote },
-        { label: 'Remove from group', destructive: true, onPress: remove },
+        {
+          label: isSelf ? 'Leave group' : 'Remove from group',
+          destructive: true,
+          onPress: remove,
+        },
       ],
     });
   }

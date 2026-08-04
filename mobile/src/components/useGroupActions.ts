@@ -19,6 +19,21 @@ import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { invalidateGroupMembership } from '@/groupCache';
 
+/**
+ * What a **leave** asks before it happens, wherever it's triggered from.
+ *
+ * Shared because there are two triggers for one action: this hook's ⋯ menu entry,
+ * and the members roster's *Leave group* on your own row (#282), which is the
+ * same `removeGroupMember` call. Two copies of the wording would drift, and the
+ * roster's comment and `groups.md` both claim they're identical — a claim nothing
+ * would have enforced.
+ */
+export const LEAVE_GROUP_CONFIRM = {
+  title: 'Leave group?',
+  message: 'You’ll stop seeing its timeline.',
+  confirm: 'Leave',
+} as const;
+
 export function useGroupActions(groupId: number) {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
@@ -54,9 +69,13 @@ export function useGroupActions(groupId: number) {
   });
 
   const leave = () =>
-    Alert.alert('Leave group?', 'You’ll stop seeing its timeline.', [
+    Alert.alert(LEAVE_GROUP_CONFIRM.title, LEAVE_GROUP_CONFIRM.message, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Leave', style: 'destructive', onPress: () => leaveMutation.mutate() },
+      {
+        text: LEAVE_GROUP_CONFIRM.confirm,
+        style: 'destructive',
+        onPress: () => leaveMutation.mutate(),
+      },
     ]);
 
   const remove = () =>
