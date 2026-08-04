@@ -71,3 +71,39 @@ export function markPostCommentsSeen(
     post ? seen(post, postId) : post
   );
 }
+
+/**
+ * Refetch everything a *change* to a post's comment tree touches: the tree
+ * itself, and the post's `comment_count` wherever a card renders it.
+ *
+ * The total rides the post payload rather than the comment tree, so adding or
+ * deleting a comment moves data in two different queries. Invalidate only the
+ * tree and the open thread shows four comments under a button still reading
+ * "Comments · 3" — as does every other surface holding that post (home feed,
+ * profile timeline, group timeline, permalink) until something unrelated
+ * refetches.
+ *
+ * It's one helper rather than a list of keys copied into each mutation because
+ * that copying is the actual failure mode: delete had the full set and add had
+ * three keys of it (#273, the mobile half of #215). Deriving the list surfaces
+ * from POST_LIST_KEYS means a new one can't be added to `markPostCommentsSeen`
+ * without the invalidation following it.
+ *
+ * Prefix-matching is what makes the bare keys work: `['userPosts']` reaches the
+ * real `['userPosts', id]` entry. That's the opposite of `setQueryData` above,
+ * which needs the exact key — the asymmetry is the whole reason #195 happened.
+ */
+export function invalidatePostComments(
+  queryClient: QueryClient,
+  postId: number
+): void {
+  const keys: unknown[][] = [
+    ['comments', postId],
+    ...[...POST_LIST_KEYS].map((key) => [key]),
+    // Keyed by string: that's what the route param hands the permalink query.
+    ['post', String(postId)],
+  ];
+  for (const queryKey of keys) {
+    queryClient.invalidateQueries({ queryKey });
+  }
+}

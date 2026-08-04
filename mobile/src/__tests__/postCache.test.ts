@@ -11,7 +11,7 @@
 
 import { QueryClient } from '@tanstack/react-query';
 
-import { markPostCommentsSeen } from '@/postCache';
+import { invalidatePostComments, markPostCommentsSeen } from '@/postCache';
 import type { Paginated, Post } from '@/types';
 
 /**
@@ -152,5 +152,103 @@ describe('markPostCommentsSeen', () => {
   it('does nothing, and throws nothing, on an empty cache', () => {
     const client = makeClient();
     expect(() => markPostCommentsSeen(client, 42)).not.toThrow();
+  });
+});
+
+/**
+ * The other half: the *total*, which only the server knows after pruning, so it
+ * has to be refetched rather than computed (#273).
+ *
+ * Seed the suffixed keys here for the same reason as above — but note the check
+ * is the reverse one. `invalidateQueries` prefix-matches, so a bare
+ * `['userPosts']` is *meant* to reach `['userPosts', '7']`; these tests exist to
+ * prove every surface is on the list at all, which is the bit that drifted.
+ */
+describe('invalidatePostComments', () => {
+  function seedEverySurface(client: QueryClient) {
+    client.setQueryData(['comments', 42], [{ id: 9, post: 42 }]);
+    client.setQueryData(['feed', false], list([page([post(42, 0)])]));
+    client.setQueryData(['userPosts', '7'], list([page([post(42, 0)])]));
+    client.setQueryData(['groupPosts', '3'], list([page([post(42, 0)])]));
+    client.setQueryData(['post', '42'], post(42, 0));
+  }
+
+  function invalidated(client: QueryClient, key: unknown[]): boolean {
+    const matches = client.getQueryCache().findAll({ queryKey: key });
+    expect(matches.length).toBeGreaterThan(0);
+    return matches.every((q) => q.state.isInvalidated);
+  }
+
+  it('marks the tree and every surface carrying the count', () => {
+    const client = makeClient();
+    seedEverySurface(client);
+
+    invalidatePostComments(client, 42);
+
+    // The profile and group timelines are the two that were missing: a card
+    // there read "Comments · 3" over a thread of four until something else
+    // refetched.
+    for (const key of [
+      ['comments', 42],
+      ['feed'],
+      ['userPosts'],
+      ['groupPosts'],
+      ['post', '42'],
+    ]) {
+      expect(invalidated(client, key)).toBe(true);
+    }
+  });
+
+  it('covers every post list markPostCommentsSeen writes to', () => {
+    // The two helpers have to agree: a surface added to one and not the other
+    // is exactly the drift the shared key set exists to prevent. So rather than
+    // restate the list, seed only post lists, let the *write* tell us which
+    // ones it reaches, and require the invalidation to have reached all of them.
+    const client = makeClient();
+    client.setQueryData(['feed', true], list([page([post(42, 3)])]));
+    client.setQueryData(['feed', false], list([page([post(42, 3)])]));
+    client.setQueryData(['userPosts', '7'], list([page([post(42, 3)])]));
+    client.setQueryData(['groupPosts', '3'], list([page([post(42, 3)])]));
+
+    markPostCommentsSeen(client, 42);
+    const written = client
+      .getQueryCache()
+      .getAll()
+      .filter((q) => counts(client, q.queryKey as unknown[]).includes(0))
+      .map((q) => q.queryKey as unknown[]);
+    expect(written).toHaveLength(4);
+
+    invalidatePostComments(client, 42);
+
+    for (const key of written) {
+      expect(invalidated(client, key)).toBe(true);
+    }
+  });
+
+  it('leaves another post’s permalink alone', () => {
+    // The permalink is the one exact-keyed entry, so it's the one that can
+    // over-reach onto a post nobody touched.
+    const client = makeClient();
+    client.setQueryData(['post', '42'], post(42, 0));
+    client.setQueryData(['post', '43'], post(43, 0));
+
+    invalidatePostComments(client, 42);
+
+    expect(client.getQueryState(['post', '43'])?.isInvalidated).toBe(false);
+  });
+
+  it('leaves another post’s comment tree alone', () => {
+    const client = makeClient();
+    client.setQueryData(['comments', 42], [{ id: 9 }]);
+    client.setQueryData(['comments', 43], [{ id: 10 }]);
+
+    invalidatePostComments(client, 42);
+
+    expect(client.getQueryState(['comments', 43])?.isInvalidated).toBe(false);
+  });
+
+  it('does nothing, and throws nothing, on an empty cache', () => {
+    const client = makeClient();
+    expect(() => invalidatePostComments(client, 42)).not.toThrow();
   });
 });

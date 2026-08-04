@@ -363,14 +363,31 @@ counts exclude your own messages.
   client can compute itself; adding or deleting a comment moves `comment_count`,
   and only the server knows the new value after pruning. So every mutation on the
   tree must invalidate the post lists as well as `['comments', postId]` — the
-  count rides the *post* payload, not the tree. Web funnels both mutations
-  through one `invalidatePostComments(queryClient, postId)`
-  (`frontend/src/postCache.js`), which derives its list keys from the same
-  `POST_LIST_KEYS` set `markPostCommentsSeen` uses, so a new post-list surface
-  can't reach one and not the other. The bug this closes (#215) was exactly the
-  drift a shared list prevents: delete carried the full set, add carried one key
-  of it, and a card sat reading *Comments · 3* above four comments until
-  something unrelated refetched.
+  count rides the *post* payload, not the tree. Both clients funnel both
+  mutations through one `invalidatePostComments(queryClient, postId)`
+  (`frontend/src/postCache.js`, `mobile/src/postCache.ts`), which derives its
+  list keys from the same `POST_LIST_KEYS` set `markPostCommentsSeen` uses, so a
+  new post-list surface can't reach one and not the other. The bug this closes
+  (#215 on web, #273 on mobile) was exactly the drift a shared list prevents:
+  delete carried the full set, add carried part of it, and a card sat reading
+  *Comments · 3* above four comments until something unrelated refetched.
+- **Note the two helpers match keys in opposite directions**, which is the
+  easiest thing here to get backwards. `markPostCommentsSeen` *writes*, so it
+  needs the exact suffixed key and reaches the lists through a predicate;
+  `invalidatePostComments` *invalidates*, which prefix-matches, so a bare
+  `['userPosts']` correctly reaches `['userPosts', 7]`.
+- **What the invalidation actually buys is the mounted screen.** With
+  `staleTime` at 0, a timeline that has been unmounted refetches on its next
+  mount anyway — but a native stack keeps the screen you came *from* mounted
+  while you read a post, so without the invalidation its query never refetches
+  and going back shows the old count. That's the reported symptom of #273, and
+  it's why the mobile regression test mounts observers rather than seeding cache
+  entries. (A seeded, unobserved entry passes against the broken build.) One
+  consequence worth knowing before debugging near this: the seen-marking write
+  fires a tick after the tree refetches and `setQueryData` clears
+  `isInvalidated`, so on an *unobserved* query the flag is cleared again shortly
+  after being set. Harmless at `staleTime` 0 — but don't write a test that waits
+  on that flag.
 
 ## Photos
 
