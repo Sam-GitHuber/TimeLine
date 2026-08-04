@@ -46,3 +46,17 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+    # We float every action on its major tag (@v4, @v7) so patches and minors
+    # arrive automatically, without a PR each time. Dependabot doesn't infer
+    # that from the tag, so it keeps proposing an exact pin instead
+    # (github/codeql-action@v4 -> @v4.37.4, PR #267) — which would make codeql
+    # the only pinned action in the repo and turn every codeql patch release
+    # into a PR, the noise the grouping above exists to avoid. An exact
+    # *version tag* is no safer than the major tag either; only a commit SHA
+    # would be, and that's churn we don't want. Majors still come through, and
+    # so do security advisories, which ignore rules never suppress.
+    ignore:
+      - dependency-name: "github/codeql-action"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
