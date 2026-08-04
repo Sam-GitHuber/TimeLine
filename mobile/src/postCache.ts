@@ -22,6 +22,19 @@ import type { InfiniteData, QueryClient } from '@tanstack/react-query';
 
 import type { Paginated, Post } from './types';
 
+/**
+ * The post-list queries, whose data is the paginated infinite-list shape
+ * `{ pages: [{ results: [post, …] }, …] }`.
+ *
+ * Matched on the **first** key segment only, never on the whole key. Every one
+ * of these keys carries a suffix the writer here doesn't know — the home feed is
+ * `['feed', includeGroups]` (the include-groups-in-feed preference), a profile
+ * is `['userPosts', id]`, a group timeline `['groupPosts', id]`. An exact-key
+ * `setQueryData(['feed'], …)` matches none of them and updates nothing, silently
+ * — which is exactly how the badge came to sit there stale (#195).
+ */
+const POST_LIST_KEYS = new Set(['feed', 'userPosts', 'groupPosts']);
+
 function seen(post: Post, postId: number): Post {
   return post.id === postId && post.new_comment_count > 0
     ? { ...post, new_comment_count: 0 }
@@ -32,15 +45,15 @@ export function markPostCommentsSeen(
   queryClient: QueryClient,
   postId: number
 ): void {
-  // The paginated feed. Only rebuild a page (and the list) when it actually
-  // holds this post with a non-zero count, so unrelated cache entries keep their
+  // Paginated lists: only rebuild a page (and the list) when it actually holds
+  // this post with a non-zero count, so unrelated cache entries keep their
   // identity and don't trigger needless re-renders down the tree.
-  queryClient.setQueryData<InfiniteData<Paginated<Post>, string>>(
-    ['feed'],
+  queryClient.setQueriesData<InfiniteData<Paginated<Post>, string>>(
+    { predicate: (query) => POST_LIST_KEYS.has(query.queryKey[0] as string) },
     (data) => {
       if (!data?.pages) return data;
       const hit = data.pages.some((page) =>
-        page.results.some((p) => p.id === postId && p.new_comment_count > 0)
+        page?.results?.some((p) => p.id === postId && p.new_comment_count > 0)
       );
       if (!hit) return data;
       return {
