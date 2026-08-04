@@ -1098,6 +1098,25 @@ describe('EventTimelineEntry', () => {
     expect(screen.getByText('all day')).toBeTruthy();
   });
 
+  it('carries the reaction row and comment count, as a post on this spine does', async () => {
+    await renderWith(
+      <EventTimelineEntry
+        event={{ ...past, reactions: [{ emoji: '🎉', count: 2, reacted: false }], comment_count: 3 }}
+        variant="past"
+      />
+    );
+
+    expect(screen.getByText('2')).toBeTruthy();
+    // The count links through to the event screen rather than unfolding the
+    // thread in place — an event's conversation lives beside its polls and RSVP.
+    expect(screen.getByText('3 comments')).toBeTruthy();
+  });
+
+  it('invites a first comment when there are none', async () => {
+    await renderWith(<EventTimelineEntry event={past} variant="past" />);
+    expect(screen.getByText('Comment')).toBeTruthy();
+  });
+
   it('leads a future entry with the whole date, since no divider carries it', async () => {
     const future = { ...past, is_past: false, start_time: '19:00:00' };
     await renderWith(<EventTimelineEntry event={future} variant="future" />);

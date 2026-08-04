@@ -19,6 +19,7 @@ import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '../Avatar';
+import { ReactionBar } from '../ReactionBar';
 import { formatEventWhen } from '@/eventFormat';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 import type { Event } from '@/types';
@@ -26,9 +27,22 @@ import type { Event } from '@/types';
 export function EventCard({
   event,
   showGroup = false,
+  showActions = false,
 }: {
   event: Event;
   showGroup?: boolean;
+  /**
+   * Show the reaction row and comment count, as a post on the group timeline
+   * has. **On for the group page's upcoming region, off everywhere else.**
+   *
+   * The group page is the one place this card stands in for a timeline entry —
+   * the web renders its upcoming events as `EventTimelineEntry`s, which carry
+   * the row, so without this the phone's most-visible events would be the only
+   * ones you couldn't react to. The other callers are the calendar agenda and a
+   * month grid's day list, which are *indexes*: dense, scannable, and somewhere
+   * you tap through rather than act in place.
+   */
+  showActions?: boolean;
 }) {
   const cancelled = event.status === 'cancelled';
   const past = event.is_past;
@@ -37,29 +51,59 @@ export function EventCard({
 
   const open = () => router.push(`/events/${event.id}`);
 
+  // The reaction row and the comment count, when this card is standing in for a
+  // timeline entry. Rendered *outside* the card's own Pressable by the callers
+  // below, so a tap meant for a chip can't be swallowed by the card behind it —
+  // the same split `PostCard` and `EventTimelineEntry` make.
+  const actions = showActions ? (
+    <View style={styles.actions}>
+      <ReactionBar
+        eventId={event.id}
+        reactions={event.reactions}
+        trailing={
+          <Pressable onPress={open} accessibilityRole="button" hitSlop={6}>
+            <Text style={styles.comments}>
+              {event.comment_count > 0
+                ? `${event.comment_count} ${
+                    event.comment_count === 1 ? 'comment' : 'comments'
+                  }`
+                : 'Comment'}
+              {event.new_comment_count > 0 ? (
+                <Text style={styles.newComments}>
+                  {' '}
+                  · {event.new_comment_count} new
+                </Text>
+              ) : null}
+            </Text>
+          </Pressable>
+        }
+      />
+    </View>
+  ) : null;
+
   if (past && !cancelled) {
     return (
-      <Pressable style={[styles.card, styles.recap]} onPress={open} accessibilityRole="button">
-        <View style={styles.recapHead}>
-          <Text style={styles.tag}>Event · happened</Text>
-          {showGroup ? <Text style={styles.groupLabel}>{event.group.name}</Text> : null}
-        </View>
-        <Text style={styles.recapTitle}>{event.title}</Text>
-        <Text style={styles.recapWhen}>
-          {formatEventWhen(event)}
-          {event.location_name ? ` · ${event.location_name}` : ''}
-        </Text>
-        <Text style={styles.meta}>{going > 0 ? `${going} went` : 'no turnout recorded'}</Text>
-      </Pressable>
+      <View style={[styles.card, styles.recap]}>
+        <Pressable onPress={open} accessibilityRole="button" style={styles.recapBody}>
+          <View style={styles.recapHead}>
+            <Text style={styles.tag}>Event · happened</Text>
+            {showGroup ? <Text style={styles.groupLabel}>{event.group.name}</Text> : null}
+          </View>
+          <Text style={styles.recapTitle}>{event.title}</Text>
+          <Text style={styles.recapWhen}>
+            {formatEventWhen(event)}
+            {event.location_name ? ` · ${event.location_name}` : ''}
+          </Text>
+          <Text style={styles.meta}>{going > 0 ? `${going} went` : 'no turnout recorded'}</Text>
+        </Pressable>
+        {actions}
+      </View>
     );
   }
 
   return (
-    <Pressable
-      style={[styles.card, cancelled && styles.cancelled]}
-      onPress={open}
-      accessibilityRole="button"
-    >
+    <View style={[styles.card, cancelled && styles.cancelled]}>
+      <Pressable onPress={open} accessibilityRole="button" style={styles.body}>
       <View style={styles.headRow}>
         <Avatar user={event.organiser} size="sm" />
         <View style={styles.headBody}>
@@ -88,7 +132,9 @@ export function EventCard({
           {going} going{maybe > 0 ? ` · ${maybe} maybe` : ''}
         </Text>
       )}
-    </Pressable>
+      </Pressable>
+      {actions}
+    </View>
   );
 }
 
@@ -101,6 +147,13 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     gap: spacing.sm,
   },
+  // The tappable content, split from the card so the reaction row can sit
+  // outside it (see `actions`).
+  body: { gap: spacing.sm },
+  recapBody: { gap: spacing.xs },
+  actions: { marginTop: spacing.xs },
+  comments: { fontSize: fontSize.sm, color: colors.inkFaint },
+  newComments: { color: colors.accent, fontWeight: '600' },
   cancelled: { opacity: 0.6 },
   headRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' },
   headBody: { flex: 1, gap: 2 },

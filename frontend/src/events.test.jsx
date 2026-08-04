@@ -884,6 +884,38 @@ describe("event timeline entries", () => {
     expect(screen.getByRole("link", { name: /Camping/ })).toBeInTheDocument();
     expect(screen.getByText(/2 going/)).toBeInTheDocument();
   });
+
+  it("carries the reaction row and comment count, as a post on this spine does", () => {
+    const ev = makeEvent({
+      id: 11,
+      title: "Camping",
+      status: "scheduled",
+      event_date: "2026-08-20",
+      starts_at: "2026-08-20T00:00:00Z",
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "unset" },
+        location: { state: "unset" },
+      },
+      polls: [],
+      rsvp: { counts: { going: 0, maybe: 0, declined: 0, guests: 0 } },
+      reactions: [{ emoji: "🎉", count: 2, reacted: false }],
+      comment_count: 3,
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline futureEvents={[ev]} />} />
+      </Routes>
+    );
+
+    expect(screen.getByText("2")).toBeInTheDocument();
+    // The count links through to the event page rather than expanding the
+    // thread in place, unlike a post's — an event's conversation lives beside
+    // its polls, its RSVP and its chips.
+    expect(
+      screen.getByRole("link", { name: /3 comments/ })
+    ).toHaveAttribute("href", "/g/3/events/11");
+  });
 });
 
 describe("MonthGrid", () => {
