@@ -57,6 +57,14 @@ _CONNECTION_GATED_KINDS = frozenset(
         Notification.Kind.EVENT_SCHEDULED,
         Notification.Kind.EVENT_UPDATED,
         Notification.Kind.EVENT_CANCELLED,
+        # Someone commented on your event. Gated like every other content kind:
+        # the commenter has to be someone you may see. It can't actually fire
+        # otherwise — an event's audience *is* the organiser's connections, so a
+        # commenter is connected to the organiser by construction — but the gate
+        # is the cheap half of a belt-and-braces pair, and leaving a content kind
+        # out of this set is exactly the kind of omission nobody notices until
+        # the audience rule changes underneath it.
+        Notification.Kind.EVENT_COMMENT,
     }
 )
 
@@ -87,6 +95,13 @@ _CONNECTION_GATED_KINDS = frozenset(
 _KIND_CHANNELS = {
     Notification.Kind.POST_REPLY: "replies",
     Notification.Kind.COMMENT_REPLY: "replies",
+    # **"replies", not "events".** The channel groups by what the notification
+    # *is* to the person receiving it, and this one is "somebody answered
+    # something you made" — the same thing a reply to your post is. The five
+    # `events` kinds are the organiser broadcasting to everyone else (a poll
+    # opened, a date set); filing a comment on your own event beside them would
+    # mean quietening those also quietened people talking to you.
+    Notification.Kind.EVENT_COMMENT: "replies",
     Notification.Kind.REACTION: "reactions",
     Notification.Kind.CONNECTION_REQUEST: "social",
     Notification.Kind.CONNECTION_ACCEPTED: "social",
@@ -391,12 +406,22 @@ def see_post_notifications(recipient, post):
 
 
 def see_event_notifications(recipient, event):
-    """Mark ``recipient``'s unread notifications about ``event`` as seen when
-    they open the event itself — the same viewing-is-seeing rule as
-    ``see_post_notifications``, for the five event kinds."""
+    """Mark ``recipient``'s unread notifications about ``event`` — the event
+    itself **or any comment on it** — as seen when they open it. The same
+    viewing-is-seeing rule as ``see_post_notifications``, and now matched the
+    same way: on the target FKs rather than on kinds, because anything pointing
+    at this event is news you have by definition now seen.
+
+    The ``comment__event`` half arrived with event comments. Without it, opening
+    an event and reading the reply to your comment on it left the badge counting
+    that reply — the exact complaint ``see_post_notifications`` exists to answer,
+    reintroduced one target along. Two kinds reach here through a comment: an
+    ``event_comment`` on your event and a ``comment_reply`` beneath you, plus a
+    ``reaction`` on a comment of yours.
+    """
     Notification.objects.filter(
+        Q(event=event) | Q(comment__event=event),
         recipient=recipient,
-        event=event,
         seen_at__isnull=True,
     ).update(seen_at=timezone.now())
 

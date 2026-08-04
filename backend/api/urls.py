@@ -249,6 +249,26 @@ urlpatterns = [
         views.EventCancelView.as_view(),
         name="event-cancel",
     ),
+    # An event's comment thread and its reactions — the same route shapes as a
+    # post's, because they are the same features on a different target. Editing,
+    # deleting and reacting to an individual comment all go through the existing
+    # ``comments/<pk>/`` routes above, which never needed to know what the
+    # comment hangs off.
+    path(
+        "events/<int:pk>/comments/",
+        views.EventCommentsView.as_view(),
+        name="event-comments",
+    ),
+    path(
+        "events/<int:pk>/react/",
+        views.EventReactionView.as_view(),
+        name="event-react",
+    ),
+    path(
+        "events/<int:pk>/reactions/",
+        views.EventReactionView.as_view(),
+        name="event-reactions",
+    ),
     path(
         "events/<int:pk>/rsvp/",
         views.EventRSVPView.as_view(),

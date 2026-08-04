@@ -8769,6 +8769,369 @@ class EventSeenOnViewTests(EventsBase):
         self.assertIsNone(anas.seen_at)  # another recipient's row
 
 
+# --- Comments and reactions on an event ------------------------------------
+
+
+def event_comments_url(e):
+    return f"/api/events/{e.pk}/comments/"
+
+
+def react_event_url(e):
+    return f"/api/events/{e.pk}/react/"
+
+
+def event_reactions_url(e):
+    return f"/api/events/{e.pk}/reactions/"
+
+
+class EventCommentTests(EventsBase):
+    """An event's comment thread — the same feature as a post's, on a target
+    reached through a different gate.
+
+    ``EventsBase`` is exactly the fixture this needs: ``me`` and ``ana`` are
+    both connected to the organiser (so both can see the event) and **not** to
+    each other, which is the case where the two gates come apart.
+    """
+
+    def test_connected_member_can_read_and_write_the_thread(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_comments_url(event), {"text": "Bringing a cake"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201)
+        thread = self.client.get(event_comments_url(event))
+        self.assertEqual(thread.status_code, 200)
+        self.assertEqual([c["text"] for c in thread.json()], ["Bringing a cake"])
+        # It really did land on the event, not on some post.
+        comment = Comment.objects.get(pk=resp.json()["id"])
+        self.assertEqual(comment.event_id, event.id)
+        self.assertIsNone(comment.post_id)
+
+    def test_member_not_connected_to_organiser_404s_the_thread(self):
+        # The event doesn't exist for the outsider, so neither does its
+        # conversation — and a 404 rather than a 403, so the thread can't
+        # confirm an event they're not allowed to know about.
+        event = self.make_event()
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.client.get(event_comments_url(event)).status_code, 404)
+        self.assertEqual(
+            self.client.post(
+                event_comments_url(event), {"text": "hi"}, format="json"
+            ).status_code,
+            404,
+        )
+
+    def test_nonmember_404s_the_thread(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.nonmember)
+        self.assertEqual(self.client.get(event_comments_url(event)).status_code, 404)
+
+    def test_thread_prunes_to_the_viewers_connections(self):
+        """The two gates compose. ``me`` and ``ana`` can both see the event
+        (both connected to the organiser) but not each other — so each sees the
+        organiser's comment and their own, never the other's."""
+        event = self.make_event()
+        Comment.objects.create(event=event, author=self.org, text="from the organiser")
+        Comment.objects.create(event=event, author=self.ana, text="from ana")
+        Comment.objects.create(event=event, author=self.me, text="from me")
+
+        self.client.force_authenticate(self.me)
+        texts = [c["text"] for c in self.client.get(event_comments_url(event)).json()]
+        self.assertEqual(sorted(texts), ["from me", "from the organiser"])
+
+    def test_a_hidden_comment_takes_its_replies_with_it(self):
+        """Subtree pruning, the same rule as a post's thread: a reply from
+        someone you *can* see is still hidden under a parent you can't."""
+        event = self.make_event()
+        anas = Comment.objects.create(event=event, author=self.ana, text="ana asks")
+        Comment.objects.create(
+            event=event, author=self.org, parent=anas, text="organiser answers"
+        )
+
+        self.client.force_authenticate(self.me)
+        self.assertEqual(self.client.get(event_comments_url(event)).json(), [])
+
+    def test_reply_must_be_on_the_same_event(self):
+        """A parent from another thread is refused, and refused with the same
+        sentence an unknown id gets — the ids share one space, so comparing the
+        wrong field would let another event's comment through by coincidence of
+        numbering."""
+        event = self.make_event()
+        other = self.make_event(title="Other")
+        elsewhere = Comment.objects.create(
+            event=other, author=self.org, text="different event"
+        )
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_comments_url(event),
+            {"text": "reply", "parent": elsewhere.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["parent"], [PARENT_UNAVAILABLE])
+
+    def test_reply_from_a_post_thread_is_refused(self):
+        """The other direction of the same confusion: a *post's* comment named
+        as the parent of an event comment."""
+        # me is already connected to org (EventsBase), so this post and its
+        # comment are genuinely visible — the refusal below is about the
+        # *thread*, not about visibility.
+        post = Post.objects.create(author=self.org, text="a post")
+        on_post = Comment.objects.create(post=post, author=self.org, text="on a post")
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_comments_url(event),
+            {"text": "reply", "parent": on_post.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["parent"], [PARENT_UNAVAILABLE])
+
+    def test_a_cancelled_event_keeps_its_thread(self):
+        """The tombstone is kept so RSVP'd members can see what happened, and
+        "sorry, can't do the new date" is exactly the conversation a
+        cancellation starts. Closing the thread at the moment it becomes most
+        useful would be the wrong reading of what the tombstone is for."""
+        event = self.make_event(status="cancelled")
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_comments_url(event), {"text": "shame!"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201)
+
+    def test_deleting_the_event_takes_the_thread_with_it(self):
+        event = self.make_event()
+        Comment.objects.create(event=event, author=self.me, text="doomed")
+        event.delete()
+        self.assertFalse(Comment.objects.filter(text="doomed").exists())
+
+    def test_event_comment_can_be_edited_and_deleted_by_its_author(self):
+        """Through the existing ``/comments/<pk>/`` route, which never needed to
+        know what the comment hangs off."""
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        cid = self.client.post(
+            event_comments_url(event), {"text": "typo"}, format="json"
+        ).json()["id"]
+
+        edit = self.client.patch(
+            f"/api/comments/{cid}/", {"text": "fixed"}, format="json"
+        )
+        self.assertEqual(edit.status_code, 200)
+        self.assertEqual(edit.json()["text"], "fixed")
+        self.assertIsNotNone(edit.json()["edited_at"])
+
+        self.assertEqual(
+            self.client.delete(f"/api/comments/{cid}/").status_code, 204
+        )
+        self.assertFalse(Comment.objects.filter(pk=cid).exists())
+
+    def test_someone_who_cannot_see_the_event_cannot_touch_its_comments(self):
+        """``can_view_comment`` routes an event comment through
+        ``can_view_event``, so the outsider gets the same 404 on the comment
+        that they get on the event."""
+        event = self.make_event()
+        comment = Comment.objects.create(
+            event=event, author=self.org, text="members only"
+        )
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(
+            self.client.post(
+                react_comment_url(comment), {"emoji": "👍"}, format="json"
+            ).status_code,
+            404,
+        )
+
+    def test_counts_ride_on_the_event_payload(self):
+        event = self.make_event()
+        Comment.objects.create(event=event, author=self.org, text="one")
+        Comment.objects.create(event=event, author=self.ana, text="hidden from me")
+
+        self.client.force_authenticate(self.me)
+        detail = self.client.get(event_url(event)).json()
+        # Counts honour the same prune the thread does — ana's is not counted.
+        self.assertEqual(detail["comment_count"], 1)
+        self.assertEqual(detail["new_comment_count"], 1)
+
+        # Opening the thread clears "new" without changing the total.
+        self.client.get(event_comments_url(event))
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(detail["comment_count"], 1)
+        self.assertEqual(detail["new_comment_count"], 0)
+
+    def test_list_and_calendar_payloads_carry_the_counts(self):
+        """Every surface that renders an event pays for its counts. A list that
+        skipped them would report 0, which is indistinguishable from an event
+        nobody has commented on."""
+        event = self.make_event(event_date=self.future(), status="scheduled")
+        Comment.objects.create(event=event, author=self.org, text="one")
+
+        self.client.force_authenticate(self.me)
+        for url in (
+            f"{group_events_url(self.group)}?window=upcoming",
+            group_calendar_url(self.group),
+            PERSONAL_CALENDAR_URL,
+        ):
+            with self.subTest(url=url):
+                row = next(
+                    e for e in self.client.get(url).json() if e["id"] == event.id
+                )
+                self.assertEqual(row["comment_count"], 1)
+
+
+class EventReactionTests(EventsBase):
+    """Reactions on an event itself.
+
+    **Pruned per viewer, like a post's** — deliberately unlike the poll and RSVP
+    tallies on the same page, which are complete. A tally is a shared
+    coordination number; a reaction is a personal signal.
+    """
+
+    def test_toggle_adds_then_removes(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            react_event_url(event), {"emoji": "🎉"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(summary_for(resp.json()["reactions"], "🎉")["count"], 1)
+        self.assertTrue(summary_for(resp.json()["reactions"], "🎉")["reacted"])
+
+        again = self.client.post(
+            react_event_url(event), {"emoji": "🎉"}, format="json"
+        )
+        self.assertIsNone(summary_for(again.json()["reactions"], "🎉"))
+
+    def test_count_is_pruned_to_who_the_viewer_may_see(self):
+        """The inversion of the poll rule, and the point of this test: ana can
+        see the event and react to it, but ``me`` isn't connected to ana, so
+        ana's reaction neither counts nor names her."""
+        event = self.make_event()
+        Reaction.objects.create(user=self.ana, event=event, emoji="🎉")
+        Reaction.objects.create(user=self.org, event=event, emoji="🎉")
+
+        self.client.force_authenticate(self.me)
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(summary_for(detail["reactions"], "🎉")["count"], 1)
+
+        listed = self.client.get(event_reactions_url(event)).json()
+        names = [u["display_name"] for r in listed for u in r["users"]]
+        self.assertEqual(names, [self.org.display_name])
+
+    def test_rsvp_counts_stay_complete_on_the_same_event(self):
+        """Both rules on one page, which is the decision worth pinning: the
+        reaction above is pruned, the RSVP below is not."""
+        event = self.make_event()
+        EventRSVP.objects.create(event=event, user=self.ana, response="going")
+        Reaction.objects.create(user=self.ana, event=event, emoji="🎉")
+
+        self.client.force_authenticate(self.me)
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(detail["rsvp"]["counts"]["going"], 1)  # complete
+        self.assertIsNone(summary_for(detail["reactions"], "🎉"))  # pruned
+
+    def test_invisible_event_404s_both_routes(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(
+            self.client.post(
+                react_event_url(event), {"emoji": "🎉"}, format="json"
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(event_reactions_url(event)).status_code, 404
+        )
+
+
+class EventCommentNotificationTests(EventsBase):
+    """Who gets told, and where the link goes."""
+
+    def test_top_level_comment_notifies_the_organiser(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        self.client.post(
+            event_comments_url(event), {"text": "can I bring a friend?"},
+            format="json",
+        )
+        note = Notification.objects.get(
+            recipient=self.org, kind=Notification.Kind.EVENT_COMMENT
+        )
+        self.assertEqual(note.event_id, event.id)
+        self.assertEqual(note.actor_id, self.me.id)
+
+    def test_organisers_own_comment_notifies_nobody(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.org)
+        self.client.post(event_comments_url(event), {"text": "hi all"}, format="json")
+        self.assertFalse(
+            Notification.objects.filter(
+                kind=Notification.Kind.EVENT_COMMENT
+            ).exists()
+        )
+
+    def test_reply_notifies_the_parents_author_and_deep_links_to_the_event(self):
+        event = self.make_event()
+        mine = Comment.objects.create(event=event, author=self.me, text="question")
+        self.client.force_authenticate(self.org)
+        self.client.post(
+            event_comments_url(event),
+            {"text": "yes of course", "parent": mine.pk},
+            format="json",
+        )
+        note = Notification.objects.get(
+            recipient=self.me, kind=Notification.Kind.COMMENT_REPLY
+        )
+        self.client.force_authenticate(self.me)
+        row = next(
+            n for n in self.client.get("/api/notifications/").json()["results"]
+            if n["id"] == note.id
+        )
+        # Not `/p/None?comment=…`, which is what reading `post_id` unguarded
+        # produces for an event comment: a link that looks real and 404s.
+        self.assertEqual(
+            row["url"],
+            f"/g/{self.group.id}/events/{event.id}?comment={note.comment_id}",
+        )
+
+    def test_opening_the_event_sees_its_comment_notifications(self):
+        """Reading the reply is why the badge should stop counting it — the
+        ``comment__event`` half of ``see_event_notifications``."""
+        event = self.make_event()
+        mine = Comment.objects.create(event=event, author=self.me, text="q")
+        reply = Comment.objects.create(
+            event=event, author=self.org, parent=mine, text="a"
+        )
+        note = Notification.objects.create(
+            recipient=self.me, actor=self.org,
+            kind=Notification.Kind.COMMENT_REPLY, comment=reply,
+        )
+        self.client.force_authenticate(self.me)
+        self.client.get(event_url(event))
+        note.refresh_from_db()
+        self.assertIsNotNone(note.seen_at)
+
+    def test_reacting_to_an_event_notifies_its_organiser(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        self.client.post(react_event_url(event), {"emoji": "🎉"}, format="json")
+        note = Notification.objects.get(
+            recipient=self.org, kind=Notification.Kind.REACTION
+        )
+        self.assertEqual(note.event_id, event.id)
+        self.client.force_authenticate(self.org)
+        row = next(
+            n for n in self.client.get("/api/notifications/").json()["results"]
+            if n["id"] == note.id
+        )
+        self.assertIn("reacted to your event", row["text"])
+        self.assertEqual(
+            row["url"], f"/g/{self.group.id}/events/{event.id}"
+        )
+
+
 class MarkConversationUnreadTests(APITestCase):
     """Marking a thread unread again (Phase 9b M6) — ``DELETE
     /conversations/<id>/read/``.
