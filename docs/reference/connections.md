@@ -213,7 +213,7 @@ Two decisions worth keeping:
 
 **Mobile only so far.** The web's four sites (`ConnectButton.jsx`,
 `BlockButton.jsx`, `PeoplePage.jsx`, `PendingChatPanel.jsx`) still hold their own
-lists; #278 and #285 stay open for that half.
+lists — #288 is the port, and this paragraph goes when it lands.
 
 ## Comments (threaded, connection-pruned)
 
