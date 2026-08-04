@@ -349,6 +349,15 @@ counts exclude your own messages.
   count — so it clears on open **and** genuinely-new later comments re-badge once
   a refetch legitimately raises the count. (A per-card "already opened" flag
   would suppress those later comments until the card remounted.)
+- **That cache write matches on the first key segment, not the whole key** —
+  `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
+  clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post
+  list caches under a *suffixed* key the writer can't know: `['feed',
+  includeGroups]`, `['userPosts', id]`, `['groupPosts', id]`. An exact-key
+  `setQueryData(['feed'], …)` matches none of them and updates nothing without
+  erroring — mobile shipped that way and the badge simply never cleared (#195).
+  Tests for this must seed the suffixed keys; a bare `['feed']` fixture tests a
+  cache entry neither app ever writes.
 
 ## Photos
 
