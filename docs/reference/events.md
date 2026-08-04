@@ -352,6 +352,47 @@ client just renders what arrives. Date/time render through a mobile copy of the
 `formatEvent*` helpers (`mobile/src/eventFormat.ts`), kept in sync with
 `frontend/src/utils.js`.
 
+**An event's "when" is inline on the phone, on a rail on the web** — and that
+divergence is the point, not a porting gap. The web gives every timeline entry a
+rail column to the *left* of the spine and puts the date/time in it; on a phone
+the spine hugs the screen edge (`SPINE_COLUMN` = 36pt, the 2pt line drawn down
+the middle of it), because `PostCard` moved the clock time inline beside the
+author's name to win back ~48pt of a 390pt screen — see the note at the top of
+`mobile/src/components/timeline.tsx`. `EventTimelineEntry` was ported before
+that and kept the rail, so a past event's time was drawn *across* the spine and
+wrapped inside a column narrower than it needed. It now follows `PostCard`: the
+bead alone in the spine column, and an alignment band of exactly the bead's
+height carrying the when, then the organiser. **The two times have to come out
+the same width**, not merely sit in the same place — they share a column, and
+the organiser's name and the author's name start where their times end. Two
+things fall out of that: the band takes **no `fonts.mono`** (mobile's
+`PostCard` doesn't use it, so a mono event time beside a system-font post time
+would break the column — the *web* honours the design system's mono-for-time
+rule on both, and mobile's `PostCard` is the outlier; making them both mono is
+a feed-wide change and its own issue), and **`formatEventTimeParts` pads its
+minutes** — "7:00", never "7" — because `formatClockTime` above and below it
+always does, and the unpadded form is ~24pt narrower. That padding landed in
+*both* copies of the helper, mobile and web; the web's rail has the same column
+and the same neighbours. A **past** recap leads
+with the clock time only (the day divider above it carries the date, which is
+also why the body no longer repeats the full `formatEventWhen`); a **future**
+entry leads with the whole date in accent, because there are no day dividers
+above the now boundary to carry it. The Date · Time · Where chips stay on both,
+as on the web, and are now the only place the venue is written. A past recap
+therefore states its date twice — the divider above it, and the Date chip — and
+that's the settled answer, not an oversight: the chips are the record of what
+the event decided, and a recap missing the one decision it's most defined by
+reads as though it never got a date, while the divider is a property of the
+*timeline* rather than of the event. What did go is the **"Happened" tag**: its
+position says it, sitting below the now-node among posts equally in the past
+that carry no such label. "Cancelled" stays, because that one isn't legible
+from position — a called-off event is a tombstone, not a memory. Pinned in
+`mobile/src/__tests__/events.test.tsx` ("EventTimelineEntry"), whose date
+assertion is **derived from `formatEventDate`, never spelled out**: it goes
+through `toLocaleDateString`, so a hardcoded "Sun 5 Apr" passes on a British
+machine and fails on CI's, which renders "Sun, Apr 5" (reproduce with
+`LC_ALL=en_US.UTF-8 npx jest`). Same trap as the runner's timezone.
+
 The **optimistic tick and its two debts** (the "Frontend notes" bullet above) hold
 here too, as of #227: `PollTally` awaits the vote and rolls its tick back with a
 message if it's rejected — which is why `EventScreen` hands voting down as

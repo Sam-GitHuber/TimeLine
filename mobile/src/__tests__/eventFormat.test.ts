@@ -69,6 +69,17 @@ describe('formatEventTimeParts', () => {
     expect(formatEventTimeParts('14:10')).toEqual({ time: '2:10', meridiem: 'pm' });
     expect(formatEventTimeParts(null)).toBeNull();
   });
+
+  // Unlike `formatEventTime`, which says "7pm" in prose. This one renders into
+  // a *column* — beside a past recap on the spine, and on the web's rail —
+  // directly above and below post times from `formatClockTime`, which always
+  // pads. "7" against a "7:00" one row up is visibly out of the column.
+  it('pads the minutes on the hour, so the column stays aligned', () => {
+    expect(formatEventTimeParts('19:00')).toEqual({ time: '7:00', meridiem: 'pm' });
+    expect(formatEventTimeParts('00:00')).toEqual({ time: '12:00', meridiem: 'am' });
+    // Seconds are along for the ride on an `HH:MM:SS` value from the API.
+    expect(formatEventTimeParts('09:00:00')).toEqual({ time: '9:00', meridiem: 'am' });
+  });
 });
 
 describe('formatEventWhen', () => {

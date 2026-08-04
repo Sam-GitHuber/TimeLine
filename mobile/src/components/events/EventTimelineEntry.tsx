@@ -6,17 +6,33 @@
  *
  * `variant` decides the voice:
  *   - `"past"` (below the now boundary, among the posts) — a quiet **recap**: the
- *     rail shows the event's clock time like a post (the day divider already
- *     carries the date), and the body is a one-line mono recap + turnout. This is
- *     what E3b weaves into the group timeline.
- *   - `"future"` (above the now boundary) — the date leads in accent and the body
- *     carries the live chips. Available for parity; E3b's group page renders the
- *     upcoming region as `EventCard`s in the header instead (see the mobile note
- *     in events.md / the phase plan), so `"past"` is the variant in use.
+ *     event's clock time leads the entry like a post's does (the day divider
+ *     already carries the date), and the body is the title, where it was, and the
+ *     turnout. This is what E3b weaves into the group timeline.
+ *   - `"future"` (above the now boundary) — the whole date leads in accent,
+ *     because there are no day dividers up there to carry it, and the body keeps
+ *     the live chips. Available for parity; E3b's group page renders the upcoming
+ *     region as `EventCard`s in the header instead (see the mobile note in
+ *     events.md / the phase plan), so `"past"` is the variant in use.
  *
- * Ported from `frontend/src/components/events/EventTimelineEntry.jsx`; the spine
- * geometry (bead column, halo, inline time) mirrors `PostCard` exactly so the
- * line never breaks between a post and an event.
+ * **The time is inline, not on a rail — deliberately, and unlike the web.** The
+ * web puts an event's date/time in its own column to the *left* of the spine,
+ * which is where this file's first port put it too: a stacked mono `Rail` inside
+ * `SPINE_COLUMN`. That column is 36pt wide and has the 2pt spine drawn down the
+ * middle of it, so the time was painted straight over the line and wrapped
+ * inside a box narrower than it needed. `PostCard` had already faced this and
+ * moved the clock time inline beside the author's name so the spine could hug
+ * the screen edge (see `timeline.tsx`) — an event on the same line has to make
+ * the same move, or the two entry kinds disagree about where the voice of time
+ * lives on a phone.
+ *
+ * So the geometry below follows `PostCard` — bead alone in the spine column, an
+ * alignment band of exactly `BEAD` height carrying the time and the organiser —
+ * and the line never breaks between a post and an event. **Matching it in
+ * spirit isn't enough: the two times have to be the same width**, since they
+ * share a column and the names that follow them start where they end. Which is
+ * why the band takes no `fonts.mono` (see `styles.when`) and why
+ * `formatEventTimeParts` pads its minutes the way `formatClockTime` does.
  */
 
 import { router } from 'expo-router';
@@ -26,11 +42,11 @@ import { Avatar } from '../Avatar';
 import { SPINE_COLUMN, Spine } from '../timeline';
 import { DimensionChips } from './DimensionChips';
 import {
+  formatEventDate,
+  formatEventTime,
   formatEventTimeParts,
-  formatEventWhen,
-  parseEventDate,
 } from '@/eventFormat';
-import { colors, fontSize, fonts, radius, spacing } from '@/theme';
+import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Event } from '@/types';
 
 const BEAD = 24; // matches Avatar size="xs" and PostCard
@@ -56,7 +72,6 @@ export function EventTimelineEntry({
       <Spine />
 
       <View style={styles.spineColumn}>
-        <Rail event={event} past={past} />
         <Pressable
           onPress={openOrganiser}
           accessibilityRole="button"
@@ -69,19 +84,30 @@ export function EventTimelineEntry({
       </View>
 
       <Pressable style={styles.card} onPress={open} accessibilityRole="button">
-        <View style={styles.titleRow}>
-          {past && !cancelled ? <Text style={styles.tagMuted}>Happened</Text> : null}
-          <Text style={[styles.title, past && styles.titlePast]} numberOfLines={2}>
-            {event.title}
+        {/* The alignment band: the when leads, then the organiser — the same
+            first line as a post, so the two read as one kind of entry. Both are
+            given an explicit line box of exactly the bead's height, so their
+            centres land on the bead's without any nudging. */}
+        <View style={styles.band}>
+          <When event={event} past={past} />
+          <Text
+            style={styles.organiser}
+            numberOfLines={1}
+            onPress={openOrganiser}
+            accessibilityRole="button"
+          >
+            {event.organiser.display_name}
           </Text>
+          {/* No "Happened" tag on a past entry. Its position says it — it sits
+              below the now-node under a day divider that dates it, among posts
+              that are equally in the past and carry no such label. "Cancelled"
+              stays, because that one *isn't* legible from position: a called-off
+              event is a tombstone, not a memory, and nothing else says so. */}
           {cancelled ? <Text style={styles.tagOff}>Cancelled</Text> : null}
         </View>
 
-        <Text style={styles.meta}>
-          {event.organiser.display_name}
-          {' · '}
-          <Text style={styles.metaMono}>{formatEventWhen(event)}</Text>
-          {event.location_name ? ` · ${event.location_name}` : ''}
+        <Text style={[styles.title, past && styles.titlePast]} numberOfLines={2}>
+          {event.title}
         </Text>
 
         {!past && event.description ? (
@@ -90,6 +116,17 @@ export function EventTimelineEntry({
           </Text>
         ) : null}
 
+        {/* The Date · Time · Where pills stay on a past event too — the recap
+            shows what it settled on, just as the future entry shows what's set,
+            and they are now the only place the venue is written (the band above
+            carries the clock time alone, and the organiser and the when used to
+            be repeated in a meta line under the title).
+
+            So a past recap does state its date twice: once on the day divider
+            above it, once in the Date chip. That's deliberate — the chips are
+            the record of what the event settled on, and a recap missing the one
+            decision it's most defined by reads as though it never got a date.
+            The divider is a property of the *timeline*, not of the event. */}
         <View style={styles.chips}>
           <DimensionChips event={event} />
         </View>
@@ -106,33 +143,33 @@ export function EventTimelineEntry({
   );
 }
 
-// The rail's voice-of-time: a past event shows its clock time like a post (the
-// day divider carries the date); a future event shows its date in accent (there
-// are no day dividers above the now boundary).
-function Rail({ event, past }: { event: Event; past: boolean }) {
+/**
+ * The event's "when", leading the band where a post's clock time does.
+ *
+ * A **past** event shows only its clock time, like a post: the day divider it
+ * sits under already carries the date, and repeating it in the body is how the
+ * two came to disagree in the first place. A **future** event carries the whole
+ * date in accent, because there are no day dividers above the now boundary to
+ * carry it for it.
+ *
+ * All of it is the event's own wall clock (`formatEvent*`), never `starts_at`
+ * read in the viewer's zone — see `eventFormat.ts`.
+ */
+function When({ event, past }: { event: Event; past: boolean }) {
   if (past) {
     const parts = formatEventTimeParts(event.start_time);
-    if (parts) {
-      return (
-        <Text style={styles.railPast} numberOfLines={2}>
-          {parts.time}
-          {'\n'}
-          {parts.meridiem}
-        </Text>
-      );
-    }
     return (
-      <Text style={styles.railPast} numberOfLines={2}>
-        all{'\n'}day
+      <Text style={styles.when} numberOfLines={1}>
+        {parts ? parts.time : 'all day'}
+        {parts ? <Text style={styles.meridiem}>{parts.meridiem}</Text> : null}
       </Text>
     );
   }
-  const d = parseEventDate(event.event_date);
+  const date = formatEventDate(event.event_date);
+  const time = formatEventTime(event.start_time);
   return (
-    <Text style={styles.railFuture} numberOfLines={2}>
-      {d ? d.getDate() : ''}
-      {'\n'}
-      {d ? d.toLocaleDateString(undefined, { month: 'short' }) : ''}
+    <Text style={[styles.when, styles.whenFuture]} numberOfLines={1}>
+      {date ? (time ? `${date} · ${time}` : date) : 'Being planned'}
     </Text>
   );
 }
@@ -141,42 +178,53 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', paddingRight: spacing.md },
   off: { opacity: 0.6 },
   spineColumn: { width: SPINE_COLUMN, alignItems: 'center' },
-  railPast: {
-    fontFamily: fonts.mono,
-    fontSize: 10,
-    color: colors.inkFaint,
-    textAlign: 'center',
-    marginBottom: 2,
-  },
-  railFuture: {
-    fontFamily: fonts.mono,
-    fontSize: 10,
-    color: colors.accentDeep,
-    textAlign: 'center',
-    marginBottom: 2,
-    fontWeight: '600',
-  },
   bead: {
+    // A surface-coloured halo separates the bead from the line behind it.
     borderWidth: BEAD_BORDER,
     borderColor: colors.surface,
     borderRadius: radius.pill,
   },
-  card: { flex: 1, paddingTop: BEAD_BORDER, paddingBottom: spacing.lg, paddingLeft: spacing.sm, gap: spacing.xs },
-  titleRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.xs },
-  title: { fontSize: fontSize.base, fontWeight: '700', color: colors.ink, flexShrink: 1, lineHeight: BEAD },
+  card: {
+    flex: 1,
+    paddingTop: BEAD_BORDER,
+    paddingBottom: spacing.lg,
+    paddingLeft: spacing.sm,
+    gap: spacing.xs,
+  },
+  band: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  when: {
+    fontSize: fontSize.sm,
+    color: colors.inkSoft,
+    // **No `fonts.mono` here, deliberately** — `PostCard`'s clock time doesn't
+    // use it either, and these two sit in the same column of the same spine. A
+    // mono event time beside a system-font post time is a different width, so
+    // the organiser's name and the author's name below it would start at
+    // different x — the exact column alignment this whole change exists to
+    // establish. (`docs/design-system.md` does call mono the voice of time, and
+    // the *web* honours that on both; mobile's `PostCard` is the one that
+    // doesn't. Making them both mono is a feed-wide change and its own issue —
+    // what matters here is that the two agree.)
+    //
+    // Tabular figures so times down the column don't shuffle as the digits
+    // change — the same reason `PostCard` asks for them.
+    fontVariant: ['tabular-nums'],
+    // The explicit bead-height line box that puts this on the bead's centre.
+    lineHeight: BEAD,
+  },
+  whenFuture: { color: colors.accentDeep, fontWeight: '600' },
+  meridiem: { fontSize: 11, color: colors.inkFaint },
+  organiser: {
+    fontSize: fontSize.base,
+    fontWeight: '600',
+    color: colors.ink,
+    lineHeight: BEAD,
+    flexShrink: 1,
+  },
+  title: { fontSize: fontSize.base, fontWeight: '700', color: colors.ink },
   titlePast: { color: colors.inkSoft, fontWeight: '600' },
-  meta: { fontSize: fontSize.sm, color: colors.inkFaint },
-  metaMono: { fontFamily: fonts.mono },
   description: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20 },
   chips: { marginTop: 2 },
   turnout: { fontSize: 11, color: colors.inkFaint },
-  tagMuted: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.inkFaint,
-    textTransform: 'uppercase',
-    lineHeight: BEAD,
-  },
   tagOff: {
     fontSize: 11,
     fontWeight: '700',

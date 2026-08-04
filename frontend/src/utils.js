@@ -161,13 +161,20 @@ export function formatEventTime(timeStr) {
 // timeline rail (like `formatClockTime`, but from an event's "HH:MM" *wall clock*
 // rather than an instant — so a past event's rail matches the time in its body,
 // both in the event's own timezone). Returns null when there's no time.
+//
+// The minutes are always padded, even on the hour ("7:00", never "7"). This is
+// the one `formatEvent*` helper that renders into a *column* of times — the
+// rail, directly above and below post times from `formatClockTime`, which
+// always pads — and an unpadded "7" is visibly narrower than a "7:00" one row
+// up. Prose elsewhere still says "7pm"; that's `formatEventTime`, a different
+// function for a different job. Kept in sync with `mobile/src/eventFormat.ts`.
 export function formatEventTimeParts(timeStr) {
   if (!timeStr) return null;
   const [h, min] = timeStr.split(":").map(Number);
   if (Number.isNaN(h)) return null;
   const meridiem = h < 12 ? "am" : "pm";
   const hour = h % 12 || 12;
-  return { time: min ? `${hour}:${String(min).padStart(2, "0")}` : `${hour}`, meridiem };
+  return { time: `${hour}:${String(Number.isNaN(min) ? 0 : min).padStart(2, "0")}`, meridiem };
 }
 
 // The one-line "when" recap: "Sat 19 Jul · 7:00pm" (time part omitted when a
