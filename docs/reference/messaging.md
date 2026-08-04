@@ -1917,12 +1917,13 @@ convention so it needs no teaching: **swipe right** for the read/unread toggle,
 - **Leave** confirms first, and on an invitation you haven't accepted it is
   **Decline**: the same endpoint, and a very different sentence.
 
-**Why a swipe is safe here when [M3's swipe-to-reply wasn't](#reply-threads-on-the-phone-phase-9b-m3).**
+**Why a swipe was safe here while [M3's swipe-to-reply wasn't](#swipe-to-reply-and-the-back-gesture-it-cost).**
 That one raced the navigator's interactive back gesture and usually lost. The
 conversation list is a **tab root** — there's nothing to go back to and no
-competing responder — so the same gesture is unambiguous here. Worth saying,
-because "we removed a swipe once" otherwise reads as "swipes don't work in this
-app".
+competing responder — so the same gesture was unambiguous here from the start.
+The bubble's swipe has since come back too, by taking the back gesture off the
+thread screen; the rule both follow is that a swipe is safe exactly when nothing
+else is claiming the drag.
 
 The row is built on `react-native-gesture-handler`'s **deprecated** `Swipeable`
 rather than its current `ReanimatedSwipeable`, behind our own `SwipeableRow`
@@ -2056,24 +2057,64 @@ outbox's business, and that view doesn't own the outbox.
 
 ### Reply threads on the phone (Phase 9b M3)
 
-**Two affordances, one gesture each** — the rule M2 settled, applied to the same
-bubble: **long-press** for the action menu (Reply lives in it), **tap** to open
-the thread. M3 gave the tap to the branch line and a reply's quote only, leaving
-the bubble itself inert; M9g widened it to the whole bubble on replies, which now
-wear the [strand edge](#the-strand-edge) — see there for why that's a revision of
-the rule rather than a break with it. A plain message's tap still does nothing.
+**One meaning per gesture** — the rule M2 settled, applied to the same bubble:
+**long-press** for the action menu (Reply lives in it), **tap** to open the
+thread, **swipe right** to reply. M3 gave the tap to the branch line and a
+reply's quote only, leaving the bubble itself inert; M9g widened it to the whole
+bubble on replies, which now wear the [strand edge](#the-strand-edge) — see there
+for why that's a revision of the rule rather than a break with it. A plain
+message's tap still does nothing. What the rule forbids is one gesture meaning
+different things on different bubbles, which is why a third gesture could be
+added to the same target without disturbing it.
 
-**There is no swipe-to-reply, and that's a decision, not an omission.** M3 first
-shipped a rightward swipe on the bubble and it was pulled after a day of real
-use. A rightward drag starting near the left of a screen is also the navigator's
-interactive back gesture, so the two raced for the same touch and the navigator
-usually won: you'd swipe a bubble and land back on the conversation list with no
-reply started. No threshold tunes that away, because both gestures are
-legitimately claiming the drag — the loser is whichever responder happens to win
-the touch on the day. Long-press → Reply is one unambiguous route that never
-fights the navigator. Bringing the swipe back would mean disabling the screen's
-own back gesture while a bubble owns the touch, which is more machinery than the
-affordance is worth.
+#### Swipe to reply, and the back gesture it cost
+
+**Pull a message rightward and let go past the line to reply to it**
+(`components/SwipeToReply`). The bubble follows your thumb, damped, to a hard
+stop; past ~56pt a light haptic says the reply is armed and the arrow behind the
+message is at full strength; let go short of that and it springs home having done
+nothing. Nothing happens *during* a drag, which is what makes an accidental pull
+free to abandon. It lands exactly where the menu's Reply lands — the strand, with
+the composer aimed at the message you pulled.
+
+**This is a reversal, and the reversal is the interesting part.** M3 shipped this
+swipe and pulled it after a day of real use: a rightward drag near the left of
+the screen is also the navigator's interactive back gesture, the two raced for
+the same touch, and the navigator usually won — you'd swipe a bubble and land on
+the conversation list with no reply started. No threshold tunes that away,
+because both gestures legitimately claim the drag; the loser is whichever
+responder wins the touch on the day. The note left behind said a swipe could only
+come back if the screen's own back gesture went first, and judged that more
+machinery than the affordance was worth.
+
+It was the affordance that turned out to be worth more. **The thread screen now
+sets `gestureEnabled: false`** (on the `messages/[conversationId]` route in
+`app/_layout.tsx`), so exactly one responder claims the drag and the race is gone
+rather than tuned. What that costs is the iOS swipe-back *on this one screen*:
+back is the header's "← Back", which was always there. Android is unaffected —
+`gestureEnabled` doesn't govern the OS's own back gesture, so the system swipe
+still works there. (The one rough edge left is Android's: a drag begun inside the
+system gesture inset, within ~20dp of the screen edge, still goes to the OS, so
+an incoming bubble's leftmost sliver isn't a reliable place to start a pull.
+Starting anywhere else on the bubble is fine.)
+
+**A swipe is a shortcut, never the only route.** Reply stays in the long-press
+menu, because a gesture with no visible control is undiscoverable and unreachable
+by VoiceOver. The gesture is withheld where Reply is: a read-only thread, a
+message still in the outbox, a tombstone, and while a selection is on. Opting
+out **disables** the handler rather than removing it — an earlier cut returned
+the bubble's children bare, which put them at a different depth in the tree, so
+turning select mode on remounted every message on screen along with its photos
+and its measured rect. Vertical scrolling always wins (`failOffsetY`), and only
+a *rightward* drag activates the pan (a scalar `activeOffsetX`, not a symmetric
+pair — the array form would claim leftward drags too and then swallow them), so
+flicking through a thread never peels a bubble sideways or stalls it.
+
+It's built on the deprecated `PanGestureHandler` and React Native's own
+`Animated` rather than `Gesture.Pan()` + Reanimated, for the reason
+[`SwipeableRow`](#swipe-a-row-for-its-actions-phase-9b-m6) documents: Reanimated's
+worklet runtime can't load under Jest, and the modern API leans on it, so the
+current API would mean mocking away the very thing under test.
 
 The transcript's composer keeps its **two** modes (write, edit) — replying
 happens in the strand's own composer, so the two never compete. An earlier cut

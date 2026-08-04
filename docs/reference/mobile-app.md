@@ -616,6 +616,17 @@ helpers; `androidBack.test.tsx` pins the hook's own contract. The two layers are
 both needed — the unit test says the hook works, the screen tests say the screens
 still call it, and the second is what a refactor silently drops.
 
+**iOS's swipe-back is a gesture like any other, and one screen doesn't get it.**
+The conversation thread sets `gestureEnabled: false` on its route in
+`app/_layout.tsx`, because a rightward drag on a message bubble means *reply*
+there and two responders claiming one drag is a race, not a preference — see
+[messaging.md](messaging.md#swipe-to-reply-and-the-back-gesture-it-cost) for the
+full story, including the day the trade was made the other way round. Everywhere
+else keeps the gesture. Two things to know before adding a swipe to any other
+screen: `gestureEnabled` is iOS-only (Android's back gesture belongs to the OS
+and ignores it), and a route-level option belongs in the layout rather than in
+the screen, so it holds from the first frame.
+
 ### The date/time picker
 
 `@react-native-community/datetimepicker` is **two different components behind one

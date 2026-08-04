@@ -17,8 +17,9 @@
  * a blurred transcript with its own composer, a reply renders a quote resolved
  * from messages the client already holds (never anything the server attached to
  * it — not the text and not the author), and a root's "N replies" opens the same
- * strand. Reply is a menu item and nothing else: the swipe that shipped with M3
- * fought the navigator's back gesture and was removed.
+ * strand. Reply has two ways in: the menu item, and a rightward **swipe** on the
+ * bubble — the one that shipped with M3, was pulled for fighting the navigator's
+ * back gesture, and came back once that gesture was turned off.
  *
  * What's worth pinning: sending fires the send endpoint and clears the input;
  * group threads attribute a *run* of messages to its sender only once (the first
@@ -33,6 +34,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
 import * as ImagePicker from 'expo-image-picker';
 import { Alert, FlatList, Linking, Platform, StyleSheet } from 'react-native';
+import { State } from 'react-native-gesture-handler';
 
 import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
@@ -439,6 +441,13 @@ function warmClient() {
   });
 }
 
+/**
+ * Draw the screen again from the top, with a *fresh* element so React can't bail
+ * out of the render. Set by `renderScreen`; only the swipe tests need it, and
+ * why they need it is written up with them.
+ */
+let redrawScreen: (() => Promise<void>) | null = null;
+
 async function renderScreen(client?: QueryClient) {
   await saveTokens({ access: 'a', refresh: 'r' });
   const queryClient =
@@ -449,13 +458,18 @@ async function renderScreen(client?: QueryClient) {
         mutations: { gcTime: 0 },
       },
     });
-  return render(
+  const tree = () => (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <ThreadScreen />
       </AuthProvider>
     </QueryClientProvider>
   );
+  const result = await render(tree());
+  redrawScreen = async () => {
+    await result.rerender(tree());
+  };
+  return result;
 }
 
 /**
@@ -481,6 +495,9 @@ beforeEach(() => {
   // it's emptied here. Drafts (M5) are the same shape for the same reason.
   clearOutbox();
   clearDrafts();
+  // Dropped with the tree it closes over, so a swipe test that forgot to
+  // render fails on the missing screen rather than redrawing a dead one.
+  redrawScreen = null;
   // Delivered push notifications (#178). Empty tray by default, so only the
   // test that cares about dismissal has to say what's in it.
   mockNotifications.getPresentedNotificationsAsync.mockReset();
@@ -1550,6 +1567,149 @@ it('Reply opens the strand, even on a message with no replies yet', async () => 
   await fireEvent.press(screen.getByLabelText('Send reply'));
 
   await waitFor(() => expect(sendCalls()).toEqual([['yes, see you', 8]]));
+});
+
+/* ---- Swipe to reply -------------------------------------------------------
+ *
+ * The gesture M3 shipped, pulled, and has now brought back with the clash
+ * settled the other way round: the thread screen gives up its own back gesture
+ * (`app/_layout.tsx`) so a rightward drag on a bubble belongs to the reply and
+ * nothing else. What these pin is the arming threshold — a drag that stops short
+ * must do *nothing*, the property that makes an accidental pull free to abandon
+ * — and the gate on which messages offer the gesture at all.
+ *
+ * Firing one needs no drag simulator. `react-native-gesture-handler` puts the
+ * raw `onGestureHandlerEvent` / `onGestureHandlerStateChange` props on the view
+ * under the handler, so a test can post the events the native side would, and
+ * `SwipeToReply` puts a per-message `testID` on that view so a suite can aim at
+ * one bubble — a drag has no accessible name to query by.
+ */
+
+/**
+ * Drag a message right by `distance` points past the point the pan took over,
+ * and let go.
+ *
+ * The `ACTIVE` event first is the real sequence, not ceremony: a pan reports
+ * `translationX` from *touch-down*, so it has already travelled the activation
+ * slop by the time the gesture is a swipe at all, and `SwipeToReply` subtracts
+ * where it was when it activated. Sending the transition is what exercises
+ * that; `START` is arbitrary precisely because the component reads it off the
+ * event rather than assuming a constant.
+ *
+ * **The redraw first is a Jest artefact, not a user step.** The handler stamps
+ * its `handlerTag` onto the view at *render* time but is only assigned one when
+ * it *mounts*, and it drops every event whose tag doesn't match — so on a tree
+ * that has rendered exactly once, the view advertises `-1` and swallows
+ * everything sent to it. Any later render publishes the real tag. On a device
+ * this can't bite (a screen that has never re-rendered has also never been
+ * touched); here it would quietly turn every assertion below into a test of
+ * nothing, which is why the pair of pulls in one test matters — a short pull
+ * and a long one through the same helper can't both be swallowed and still
+ * disagree.
+ */
+const START = 30;
+
+async function swipeMessage(messageId: number, distance: number) {
+  await redrawScreen?.();
+  const row = screen.getByTestId(`swipe-to-reply-${messageId}`);
+  const { handlerTag } = row.props;
+  await fireEvent(row, 'gestureHandlerStateChange', {
+    nativeEvent: {
+      handlerTag,
+      oldState: State.BEGAN,
+      state: State.ACTIVE,
+      translationX: START,
+    },
+  });
+  await fireEvent(row, 'gestureHandlerEvent', {
+    nativeEvent: {
+      handlerTag,
+      state: State.ACTIVE,
+      translationX: START + distance,
+    },
+  });
+  await fireEvent(row, 'gestureHandlerStateChange', {
+    nativeEvent: {
+      handlerTag,
+      oldState: State.ACTIVE,
+      state: State.END,
+      translationX: START + distance,
+    },
+  });
+}
+
+it('swiping a message right opens its strand, ready to reply', async () => {
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({ conversation: detail({}), messages: [only], thread: [only] });
+
+  await renderScreen();
+  await screen.findByLabelText('Message from Ada Lovelace: dinner at 7?');
+
+  // Half a pull first: far enough to move the bubble and show the arrow, not
+  // far enough to arm. Nothing happens *during* a drag, which is the whole
+  // reason a gesture this easy to start by accident is safe to have.
+  //
+  // 40 is picked against `START`: under the trigger on its own, over it if the
+  // travel *before* activation were counted too — so this fails as well if the
+  // bubble ever goes back to measuring from touch-down.
+  await swipeMessage(8, 40);
+  expect(screen.queryByLabelText('Reply to thread')).toBeNull();
+
+  await swipeMessage(8, 90);
+
+  // Past the line it lands where the menu's Reply lands — keyboard up, aimed at
+  // message 8. One destination, two ways in.
+  const input = await screen.findByLabelText('Reply to thread');
+  expect(input.props.autoFocus).toBe(true);
+
+  await fireEvent.changeText(input, 'yes, see you');
+  await fireEvent.press(screen.getByLabelText('Send reply'));
+
+  await waitFor(() => expect(sendCalls()).toEqual([['yes, see you', 8]]));
+});
+
+it('refuses the swipe on a message there is no replying to', async () => {
+  // A read-only thread would refuse the send and a tombstone has nothing to
+  // answer, so neither gets a gesture that could only end in an error or an
+  // empty strand — the same gate Reply has in the menu. The handler stays in
+  // the tree but is switched off, which is what stops select mode remounting
+  // every bubble on screen; `enabled` is the half a device obeys, and the
+  // swipe below is the half a test can prove.
+  serve({
+    conversation: detail({ can_send: false }),
+    messages: [
+      message({ id: 8, sender: ADA, text: 'dinner at 7?' }),
+      message({ id: 9, sender: ADA, text: '', is_deleted: true }),
+    ],
+  });
+
+  await renderScreen();
+  await screen.findByLabelText('Message from Ada Lovelace: dinner at 7?');
+
+  expect(screen.getByTestId('swipe-to-reply-8').props.enabled).toBe(false);
+  expect(screen.getByTestId('swipe-to-reply-9').props.enabled).toBe(false);
+
+  await swipeMessage(8, 90);
+  expect(screen.queryByLabelText('Reply to thread')).toBeNull();
+});
+
+it('drops the swipe while a selection is on', async () => {
+  // A drag across the list while selecting is how you get to the next message
+  // you want, and a swipe that yanked you into a strand would take the ticks
+  // you had gathered with it. Select mode suspends the gesture, exactly as it
+  // suspends the strand-edge tap.
+  const only = message({ id: 8, sender: ADA, text: 'dinner at 7?' });
+  serve({ conversation: detail({}), messages: [only], thread: [only] });
+
+  await renderScreen();
+  expect((await screen.findByTestId('swipe-to-reply-8')).props.enabled).toBe(true);
+
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  await fireEvent.press(screen.getByLabelText('Select'));
+
+  expect(screen.getByTestId('swipe-to-reply-8').props.enabled).toBe(false);
+  await swipeMessage(8, 90);
+  expect(screen.queryByLabelText('Reply to thread')).toBeNull();
 });
 
 /**

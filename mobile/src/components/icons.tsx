@@ -122,6 +122,37 @@ export function KebabIcon({ color, size = 20 }: IconProps) {
 }
 
 /**
+ * A curved arrow doubling back — reply.
+ *
+ * Drawn for the swipe-to-reply hint that surfaces behind a message bubble as you
+ * pull it (see `SwipeToReply`), so it's a *left*-pointing arrow even though the
+ * gesture drags rightward: it says what will happen, not which way your thumb
+ * went. Same stroke weight and round caps as the tab icons, because it's the
+ * same line.
+ */
+export function ReplyIcon({ color, size = 22 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      {/* The head, then the shaft curving down and away — one continuous
+          gesture, which is what stops it reading as an ordinary back arrow. */}
+      <Path
+        d="M10 7 5 12l5 5"
+        stroke={color}
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Path
+        d="M5 12h8a6 6 0 0 1 6 6v1"
+        stroke={color}
+        strokeWidth={1.75}
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
+/**
  * The send-state glyph beside your own message's timestamp (Phase 9b M4):
  * a clock while it's in flight, one tick once the server has it, two once
  * everyone it was for has read it.
