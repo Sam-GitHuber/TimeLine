@@ -39,6 +39,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { ConnectButton } from '@/components/ConnectButton';
+import { invalidateConnectionChange } from '@/connectionCache';
 import { dedupeById, trimToFirstPage } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { ConnectionRequest, Paginated, PersonSummary } from '@/types';
@@ -362,10 +363,21 @@ function DiscoverList() {
 }
 
 /**
+ * The decision a row's two buttons make, carried as data rather than as the
+ * `act` function the row used to hand in: the success handler has to be able to
+ * tell approve from reject, since only one of them changes what the rest of the
+ * app may show. `requesterId` rides along because the refresh is about that
+ * person's profile and posts, not the request row's own id. (Same shape both
+ * invite inboxes settled on for accept vs decline — groups.md.)
+ */
+type Decision = { approve: boolean; id: number; requesterId: number };
+
+/**
  * Your inbox of incoming requests. Approve makes the connection mutual (you both
- * start seeing each other's posts); Reject discards it. Both invalidate the
- * shared ['connectionRequests'] key (badge + this list), plus the people lists
- * and the feed, which a new connection changes.
+ * start seeing each other's posts); Reject discards it. Approving therefore
+ * refreshes everything a connection gates (`connectionCache.ts`) — the feed, the
+ * calendars, the group events — where rejecting keeps the narrow set: the inbox,
+ * its badge, and the requester's own row.
  */
 function RequestsList() {
   const queryClient = useQueryClient();
@@ -385,13 +397,27 @@ function RequestsList() {
   );
 
   const decide = useMutation({
-    mutationFn: ({ act, id }: { act: (id: number) => Promise<void>; id: number }) =>
-      act(id),
-    onSuccess: () => {
+    mutationFn: ({ approve, id }: Decision) =>
+      approve ? api.approveRequest(id) : api.rejectRequest(id),
+    onSuccess: (_data, { approve, requesterId }) => {
+      if (approve) {
+        // Approving makes the connection real, which moves the whole visibility
+        // boundary — not just this list. Same set as every other connection
+        // write; see `connectionCache.ts`.
+        invalidateConnectionChange(queryClient, requesterId);
+        return;
+      }
+      // Rejecting deletes a still-pending row and connects nobody, so the gated
+      // surfaces are correct as they stand — the narrow set is all it needs,
+      // exactly as declining a group invite keeps its own (groups.md). This is
+      // the one place the narrow case is safe to assume, because the *server*
+      // guarantees it: `ConnectionRequestActionView` 404s unless the row is
+      // still pending, so a reject that gets here can't have ended a
+      // connection. What changes is the inbox, its badge, and their button —
+      // back to "Connect" — on whichever people list is behind this one.
       queryClient.invalidateQueries({ queryKey: ['connectionRequests'] });
       queryClient.invalidateQueries({ queryKey: ['users'] });
-      queryClient.invalidateQueries({ queryKey: ['connections'] });
-      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      queryClient.invalidateQueries({ queryKey: ['user', requesterId] });
     },
   });
 
@@ -425,7 +451,11 @@ function RequestsList() {
               <View style={styles.decideRow}>
                 <Pressable
                   onPress={() =>
-                    decide.mutate({ act: api.approveRequest, id: item.id })
+                    decide.mutate({
+                      approve: true,
+                      id: item.id,
+                      requesterId: item.requester.id,
+                    })
                   }
                   disabled={pending}
                   accessibilityRole="button"
@@ -439,7 +469,11 @@ function RequestsList() {
                 </Pressable>
                 <Pressable
                   onPress={() =>
-                    decide.mutate({ act: api.rejectRequest, id: item.id })
+                    decide.mutate({
+                      approve: false,
+                      id: item.id,
+                      requesterId: item.requester.id,
+                    })
                   }
                   disabled={pending}
                   accessibilityRole="button"

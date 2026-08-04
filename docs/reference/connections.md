@@ -160,6 +160,61 @@ Two things a change here has to keep:
   them: an offline `fetch` rejects rather than pausing, and the gate lets go. Move
   one onto a mutation and it joins that list.
 
+### A connection *is* the boundary, so its writes refresh everything it gates
+
+`connected_user_ids` is the one set the feed, profiles, group timelines, comment
+trees, the personal calendar and both event lists all check, so a write that
+adds or removes an accepted connection changes what a dozen screens are allowed
+to show — not just the button that made it. **The four writes that move it
+therefore share one helper**, `mobile/src/connectionCache.ts`'s
+`invalidateConnectionChange`: the Connect button, the Block button (blocking
+deletes the `Connection` row outright), the locked `PendingChatPanel`, and
+approving from the requests inbox. It holds the relationship keys, the
+`visible_posts`-gated content keys (`['feed']`, `['userPosts', id]`,
+`['groupPosts']`, `['post']`, `['comments']`), the calendar/event family
+(`['personalCalendar']`, `['groupEvents']`, `['groupCalendar']`) and the shared
+group chats that promote and sever with the connection.
+
+Before that each site kept its own list, written from the point of view of the
+screen it sits on, and the four had drifted apart (#278) with the whole
+calendar/event family missing from every one of them (#285) — the same shape as
+#215 / #273 / #275 / #277, which is why the rule now lives in one file per client
+rather than being copied per call site. On the phone the drift isn't a flash: the
+tabs stay mounted for the session, so a query there keeps a live observer and
+never remounts, and `staleTime: 0` buys nothing without something marking it
+stale. Block the person who organised a dated event and it sat on your Calendar
+tab for the rest of the session, answering a tap with *Event not available*.
+
+The messaging keys are the one place it departs from the group-membership
+helper, which leaves `['conversations']` / `['unreadMessages']` out as polled
+and self-healing. The difference is what's on screen when the write is made: a
+group leave only removes access and you make it from the Groups tab, where
+connecting *grants* access and the locked `PendingChatPanel` is a screen you're
+staring at waiting for it to open. A poll cycle of *"Connect with Dana to join
+this chat"* after you already have is the bug, not a slow heal. The polled-key
+rule still holds everywhere it isn't beaten by something the user is watching.
+
+Two decisions worth keeping:
+
+- **It doesn't fork on which transition it was**, unlike the group-membership
+  helper ([groups.md](groups.md)). Only approving and disconnecting move the
+  *accepted* set — sending or withdrawing a request leaves a `pending` row — but
+  `connection_status` is a snapshot from a cached row that can change underneath
+  an open screen: they accept while you're looking, and the DELETE you think is
+  withdrawing a request ends a live connection. Forking on a stale prop would
+  under-invalidate in exactly that race.
+- **Rejecting an incoming request is the exception**, and keeps the narrow set
+  (the inbox, its badge, that person's row). Not because the client reasons its
+  way there, but because the *server* guarantees it:
+  `ConnectionRequestActionView` 404s unless the row is still pending, so a reject
+  that succeeds cannot have ended a connection. That's what made the inbox's
+  mutation take the decision as a boolean rather than as an opaque `act`
+  function — the same shape both invite inboxes settled on.
+
+**Mobile only so far.** The web's four sites (`ConnectButton.jsx`,
+`BlockButton.jsx`, `PeoplePage.jsx`, `PendingChatPanel.jsx`) still hold their own
+lists — #288 is the port, and this paragraph goes when it lands.
+
 ## Comments (threaded, connection-pruned)
 
 Posts have a **threaded comment tree** — `Comment` model: `post`, `author`,
