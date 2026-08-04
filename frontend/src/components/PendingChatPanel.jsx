@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
+import { invalidateConnectionChange } from "../connectionCache.js";
 import { useMessaging } from "../messaging.jsx";
 
 // The locked view for a group chat you've been added to but aren't an active
@@ -15,17 +16,27 @@ export default function PendingChatPanel({ mustConnectWith, conversationId }) {
 
   const connectMutation = useMutation({
     mutationFn: (userId) => api.connect(userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["conversation", conversationId],
-      });
-      queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    },
+    // The same `api.connect` the ConnectButton makes, so it refreshes the same
+    // set (`connectionCache.js`) — which includes this conversation and the
+    // list, the two keys this panel used to name on its own. Connecting here can
+    // promote you into the chat *and* widen what the feed, the calendars and the
+    // group timelines may show; only the promotion was ever refreshed (#288).
+    onSuccess: (_data, userId) => invalidateConnectionChange(queryClient, userId),
   });
 
   const leaveMutation = useMutation({
     mutationFn: () => api.leaveConversation(conversationId),
-    onSuccess: () => openList(),
+    onSuccess: () => {
+      // Declining tombstones your participant row, and `user_conversations`
+      // filters on `left_at__isnull=True`, so the chat is off your list
+      // server-side immediately. Refresh it before `openList()` puts you on that
+      // list, or you land on a cache still showing the chat you just declined —
+      // still styled Pending, and a dead click: `getConversation` 404s, because
+      // a chat you're not in shouldn't admit it exists (#286).
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      queryClient.invalidateQueries({ queryKey: ["unreadMessages"] });
+      openList();
+    },
   });
 
   const people = mustConnectWith ?? [];

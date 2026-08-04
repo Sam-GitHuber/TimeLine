@@ -160,6 +160,74 @@ Two things a change here has to keep:
   them: an offline `fetch` rejects rather than pausing, and the gate lets go. Move
   one onto a mutation and it joins that list.
 
+### A connection *is* the boundary, so its writes refresh everything it gates
+
+`connected_user_ids` is the one set the feed, profiles, group timelines, comment
+trees, the personal calendar and both event lists all check, so a write that
+adds or removes an accepted connection changes what a dozen screens are allowed
+to show — not just the button that made it. **The four writes that move it
+therefore share one helper on each client** — `mobile/src/connectionCache.ts`
+and `frontend/src/connectionCache.js`, both exporting
+`invalidateConnectionChange`: the Connect button, the Block button (blocking
+deletes the `Connection` row outright), the locked `PendingChatPanel`, and
+approving from the requests inbox. It holds the relationship keys, the
+`visible_posts`-gated content keys (`['feed']`, `['userPosts', id]`,
+`['groupPosts']`, `['post']`, `['comments']`), the calendar/event family
+(`['personalCalendar']`, `['groupEvents']`, `['groupCalendar']`) and the shared
+group chats that promote and sever with the connection.
+
+Before that each site kept its own list, written from the point of view of the
+screen it sits on, and the four had drifted apart (#278 on mobile, #288 on the
+web) with the whole calendar/event family missing from every one of them (#285) —
+the same shape as #215 / #273 / #275 / #277, which is why the rule now lives in
+one file per client rather than being copied per call site. On the phone the
+drift isn't a flash: the tabs stay mounted for the session, so a query there
+keeps a live observer and never remounts, and `staleTime: 0` buys nothing
+without something marking it stale. Block the person who organised a dated event
+and it sat on your Calendar tab for the rest of the session, answering a tap with
+*Event not available*.
+
+On the web react-router unmounts a route and nothing sets a `staleTime`, so most
+of it was a flash while the refetch was already on its way. **Two web cases
+weren't**, because the write and the surface it invalidates are on the same
+mounted page: approving on `/u/:id` flipped the button to "Connected" over a
+timeline that stayed empty until you reloaded (`ProfilePage` mounts `['user',
+id]` and `['userPosts', id]`, and only the first was refreshed), and blocking
+there left that person's posts rendered — and your Connections list still listing
+them — under a button now reading "Unblock".
+
+The messaging keys are the one place it departs from the group-membership
+helper, which leaves `['conversations']` / `['unreadMessages']` out as polled
+and self-healing. The difference is what's on screen when the write is made: a
+group leave only removes access and you make it from the Groups tab, where
+connecting *grants* access and the locked `PendingChatPanel` is a screen you're
+staring at waiting for it to open. A poll cycle of *"Connect with Dana to join
+this chat"* after you already have is the bug, not a slow heal. The polled-key
+rule still holds everywhere it isn't beaten by something the user is watching.
+
+Two decisions worth keeping:
+
+- **It doesn't fork on which transition it was**, unlike the group-membership
+  helper ([groups.md](groups.md)). Only approving and disconnecting move the
+  *accepted* set — sending or withdrawing a request leaves a `pending` row — but
+  `connection_status` is a snapshot from a cached row that can change underneath
+  an open screen: they accept while you're looking, and the DELETE you think is
+  withdrawing a request ends a live connection. Forking on a stale prop would
+  under-invalidate in exactly that race.
+- **Rejecting an incoming request is the exception**, and keeps the narrow set
+  (the inbox, its badge, that person's row). Not because the client reasons its
+  way there, but because the *server* guarantees it:
+  `ConnectionRequestActionView` 404s unless the row is still pending, so a reject
+  that succeeds cannot have ended a connection. That's what made the inbox's
+  mutation take the decision as a boolean rather than as an opaque `act`
+  function — the same shape both invite inboxes settled on.
+
+Pinned on both clients: `frontend/src/connection-cache.test.jsx` and
+`mobile/src/__tests__/connectionCache.test.tsx`. Both mount the gated surfaces
+*alongside* the component doing the write rather than seeding them into the
+cache — a seeded but unobserved entry refetches on its next mount whatever the
+helper does, so it would pass against the broken build.
+
 ## Comments (threaded, connection-pruned)
 
 Posts have a **threaded comment tree** — `Comment` model: `post`, `author`,
@@ -203,6 +271,60 @@ from a not-connected author — *and its entire subtree* — is invisible to you
   [group events](events.md) (`visible_events` applies this exact gate keyed on the
   event's organiser — with the deliberate **inversion** that a poll/RSVP *count*
   includes people you can't see, while their *names* stay gated).
+
+### The boundary gates writing too (#211)
+
+For a long time the prune was read-only: `POST /posts/<id>/comments/` checked that
+`parent` was on the same post and wasn't a tombstone, and nothing else. So a reply
+could be aimed at a comment your own tree had pruned away — you addressed someone
+invisible to you, and *they* got a reply from a stranger in a conversation they'd
+never invited one into. Nothing leaked (you still couldn't read the parent), but
+it was the one place the graph gated reading and not writing. **`parent` is now
+held to exactly the prune the GET applies.**
+
+Two things that fix depends on, both easy to get subtly wrong:
+
+- **`can_view_comment` had to become ancestor-aware first.** It claimed to mirror
+  the pruned tree but only checked the comment's *own* author, and the tree's
+  prune is a **subtree** prune — a connected friend's reply sitting under a
+  stranger is hidden along with the branch. So the helper said "visible" about
+  comments the tree would never show, and the obvious one-line fix
+  (`can_view_comment(user, parent)`) would have left the hole half-open.
+  `_comment_chain_visible` now walks from the comment up to a root, requiring
+  every author on the way to be active and visible; deactivation is checked at
+  each level too, since the tree builder drops banned authors *before* walking
+  and orphans everything under them. It loads the post's comments in one query
+  and climbs in Python — the same trade, for the same reason, as the tree builder
+  itself, and `comment_counts_for_posts` already documented this exact trap for a
+  naive author-filtered `COUNT`. Because it's the shared helper, comment
+  **reactions** and **reports** were closed by the same change; they were open in
+  precisely the same way.
+- **All the rejections have to be one rejection.** Unknown id, wrong post and
+  invisible parent previously answered differently — DRF's *"object does not
+  exist"* against our *"only reply to a comment on this post"* — which made the
+  endpoint a comment-id existence oracle, and a distinct "you can't see that"
+  would have confirmed the existence of the very comment being hidden. They all
+  return `PARENT_UNAVAILABLE` (`serializers.py`) now, and **as the same JSON
+  shape**: the view raises it inside a list, because `{"parent": "…"}` against
+  `{"parent": ["…"]}` separates the cases just as well as the wording would.
+
+  **The tombstone is the fourth case, and it's conditional.** A deleted parent
+  answers *"That comment was deleted, so you can't reply to it"* — which is the
+  right, more useful sentence while your thread still shows the tombstone, and
+  an oracle once it doesn't. The tree builder's *second* prune drops a tombstone
+  the moment it stops holding anything up, and that state is reachable: a soft
+  delete leaves the tombstone, then its last reply is hard-deleted out from
+  under it. So the reply path checks whether this viewer's tree still renders it
+  (`build_visible_comment_tree` rooted at the parent) and falls back to
+  `PARENT_UNAVAILABLE` when it doesn't. That rule is **not** folded into
+  `can_view_comment`: reactions and reports want their own explicit
+  deleted-content messages, and it costs a subtree walk only this path needs.
+
+Pinned in `ReplyVisibilityTests` (`backend/api/tests.py`), including the
+connected-author-under-a-hidden-parent case that a per-comment check passes, the
+tombstone before and after it empties, and the report path — whose only previous
+visibility test used a stranger's *own* comment, which the old check caught
+anyway.
 
 ### Frontend
 

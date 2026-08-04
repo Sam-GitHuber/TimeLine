@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useQuery } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
 import DimensionEditor from "./components/events/DimensionEditor.jsx";
 import EventPage from "./pages/EventPage.jsx";
@@ -873,6 +874,115 @@ describe("PlanEventForm", () => {
         3,
         expect.objectContaining({ title: "Camping trip" })
       )
+    );
+  });
+});
+
+// What an event write *refreshes*, not just what it calls (issue #279).
+//
+// Ten of `EventPage`'s eleven writes shared one `invalidate()`; delete named
+// `["groupEvents"]` alone and navigated. And no web write anywhere named
+// `["personalCalendar"]`, though `CalendarPage` reads it — a whole surface the
+// write side had never heard of, which is exactly how a key gets missed.
+//
+// Both surfaces are **mounted alongside** the page doing the write rather than
+// seeded into the cache, because a seeded but unobserved entry refetches on its
+// next mount whatever we do, and would pass against the broken build. They sit
+// outside the `<Routes>` so that navigating away — which delete does — doesn't
+// take the thing under test with it. Same reasoning as
+// `group-membership-cache.test.jsx`.
+describe("what an event write refreshes", () => {
+  let loads;
+
+  function CalendarSurfaces() {
+    // Keyed exactly as `GroupPage` and `CalendarPage` key them, month grid
+    // included: the group's calendar is a sibling of the Upcoming list delete
+    // already refreshed, and it paints the same event on a grid.
+    useQuery({ queryKey: ["groupCalendar", 3], queryFn: loads.groupCalendar });
+    useQuery({ queryKey: ["personalCalendar"], queryFn: loads.personalCalendar });
+    return null;
+  }
+
+  function loadCounts() {
+    return {
+      groupCalendar: loads.groupCalendar.mock.calls.length,
+      personalCalendar: loads.personalCalendar.mock.calls.length,
+    };
+  }
+
+  async function renderOverCalendars() {
+    const utils = renderWithAuth(
+      <>
+        <CalendarSurfaces />
+        <Routes>
+          <Route path="/g/:id/events/:eid" element={<EventPage />} />
+          <Route path="/g/:id" element={<div>group page</div>} />
+        </Routes>
+      </>,
+      { route: "/g/3/events/7" }
+    );
+    // Their first load, so a later call is unambiguously a refetch.
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ groupCalendar: 1, personalCalendar: 1 })
+    );
+    return utils;
+  }
+
+  beforeEach(() => {
+    loads = {
+      groupCalendar: vi.fn(async () => []),
+      personalCalendar: vi.fn(async () => []),
+    };
+    api.getEvent.mockResolvedValue(makeEvent({ event_date: "2026-07-19" }));
+  });
+
+  it("refreshes both calendars when you delete", async () => {
+    await renderOverCalendars();
+    await screen.findByText("Picnic");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    confirm.mockRestore();
+
+    // The group's Month view is the one you land on: delete navigates back to
+    // `/g/3`, where the grid painted the deleted event from a stale
+    // `["groupCalendar", 3]` for the length of the refetch.
+    await waitFor(() => expect(api.deleteEvent).toHaveBeenCalledWith(7));
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ groupCalendar: 2, personalCalendar: 2 })
+    );
+    expect(await screen.findByText("group page")).toBeInTheDocument();
+  });
+
+  it("refreshes the personal calendar when you cancel", async () => {
+    await renderOverCalendars();
+    await screen.findByText("Picnic");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel event" }));
+    confirm.mockRestore();
+
+    // Cancel already refreshed the group's two views; `/calendar` merges this
+    // group's events in with every other group's, and was left stating an event
+    // is on that the server now reports cancelled.
+    await waitFor(() => expect(api.cancelEvent).toHaveBeenCalledWith(7));
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ groupCalendar: 2, personalCalendar: 2 })
+    );
+  });
+
+  it("refreshes the personal calendar when a date is finalised", async () => {
+    await renderOverCalendars();
+    await screen.findByText("Picnic");
+
+    // Setting the date is what *puts* an event on the calendars — both filter
+    // `event_date__isnull=False` — so it's the write that most obviously has to
+    // reach them, and the one that never did.
+    await userEvent.click(screen.getAllByRole("button", { name: "Pin" })[0]);
+
+    await waitFor(() => expect(api.finaliseEvent).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ groupCalendar: 2, personalCalendar: 2 })
     );
   });
 });

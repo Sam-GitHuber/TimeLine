@@ -1023,6 +1023,60 @@ mutateAsync`, so:
 Web renders the message inside the dialog (and beneath the button once the dialog
 is dismissed); mobile alerts over it. Same behaviour, each client's idiom.
 
+### 🔒 The block gates writes, not only reads
+
+"404s the thread" was true of the read routes and, until recently, not of two
+write ones. There are two thread resolvers in `views.py`, and only one of them
+carries the rule:
+
+- **`_viewer_conversation_or_404`** — membership only. *Are you a participant?*
+- **`_thread_for_viewer`** — membership **plus** `_conversation_visible`, which
+  is the same predicate the conversation list filters on.
+
+`POST`/`DELETE /conversations/<pk>/read/` and `POST`/`DELETE
+/conversations/<pk>/mute/` took the first, and `/leave/` took neither — it
+resolved a raw `Participant` row, which a block never touches on a direct
+thread. So after a block, the thread vanished from the blocked party's list and
+404'd on the detail and `/messages/` — while:
+
+- `DELETE .../read/` still returned `200 {"unread_count": N}`, computed from
+  `_messages_for_viewer` on the hidden thread. The 200-vs-400 split ("There's
+  nothing here to mark unread") is a yes/no oracle for *does the person who
+  blocked me still have an undeleted message waiting for me* — answerable
+  repeatedly, from a thread that officially doesn't exist.
+- `POST .../read/` still wrote `ConversationRead`, and that column **is** the
+  read receipt (`attach_read_receipts` serves the ticks from it), so a blocked
+  party could move a tick that surfaces to the blocker the moment the block is
+  lifted.
+- `/mute/` still mutated `Participant.muted_at` on it.
+- `/leave/` still closed the access interval and tombstoned the `Participant`
+  row on it. (Whether leaving a 1:1 should be possible **at all** is the
+  separate open question in [#210](https://github.com/Sam-GitHuber/TimeLine/issues/210);
+  the gate only stops it happening on a thread you can no longer reach. Note
+  the gate is a no-op for group chats, so it settles nothing about #210 either
+  way.)
+
+**Every per-thread route now resolves through `_thread_for_viewer`**, and the rule
+itself lives only in `_conversation_visible` — `_thread_for_viewer` calls it
+instead of re-deriving the block half, and `ConversationDetailView.get_object`
+no longer keeps a third copy inline. Three spellings of one sentence is how this
+drifted; a new per-thread route should reach for `_thread_for_viewer` unless it
+specifically wants membership without visibility.
+
+That unification also closes the **other** half of the same rule, which no
+per-thread route had ever applied: `_conversation_visible` hides a direct thread
+when the other account is **deactivated**, so the list dropped such a thread
+while `/messages/` would still serve the whole transcript to anyone holding the
+id. Sending was already barred (`can_message` checks `is_active`), so this half
+was disclosure rather than a write hole — but it was the same sentence, living
+in one place and not the other.
+
+The rule stays **direct-only**: a group chat has no "other party", and a block
+between two of its members must not take the chat away from everyone.
+Pinned in `BlockedThreadWriteTests` (`backend/api/tests.py`), which asserts the
+reads and the writes agree from the *blocked* party's side, and that a group
+chat is untouched.
+
 ## API
 
 Direct and group chats share the endpoints:
@@ -1272,6 +1326,19 @@ info → new-message:
   which also added the [info panel](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e)
   behind Details. A `pending` viewer sees a **locked panel**: "Connect with C & D
   to join", inline connection-request buttons, and a **Decline / Leave** button.
+- **Leaving refreshes `['conversations']` and `['unreadMessages']`, from all
+  three places it's offered** — the locked panel's Decline, the thread menu's
+  Leave, and the info panel's. `ConversationLeaveView` tombstones your
+  participant row and `user_conversations` filters on `left_at__isnull=True`, so
+  the chat is off your list server-side the instant the write lands; every one of
+  the three then puts you *on* that list. Only the info panel's copy refreshed it
+  (#286). The other two handed you a cache still showing the chat you'd just
+  left, still styled Pending, and clicking it 404s — `getConversation` won't
+  admit a chat you're not in exists. Bounded, since the list polls every 12s
+  (`CONVERSATION_LIST_POLL_MS`), but the dead click it leaves behind lasts those
+  12 seconds. All three of the app's copies always did this; the web is the drift.
+  The connect buttons *inside* the locked panel refresh the wider connection set
+  instead — see [connections.md](connections.md).
 - **Sender attribution (group threads only).** An incoming message in a *group*
   carries its sender's avatar + name on one line above the bubble; a **run** of
   consecutive messages from the same person shares a single label, so a burst
@@ -1917,12 +1984,13 @@ convention so it needs no teaching: **swipe right** for the read/unread toggle,
 - **Leave** confirms first, and on an invitation you haven't accepted it is
   **Decline**: the same endpoint, and a very different sentence.
 
-**Why a swipe is safe here when [M3's swipe-to-reply wasn't](#reply-threads-on-the-phone-phase-9b-m3).**
+**Why a swipe was safe here while [M3's swipe-to-reply wasn't](#swipe-to-reply-and-the-back-gesture-it-cost).**
 That one raced the navigator's interactive back gesture and usually lost. The
 conversation list is a **tab root** — there's nothing to go back to and no
-competing responder — so the same gesture is unambiguous here. Worth saying,
-because "we removed a swipe once" otherwise reads as "swipes don't work in this
-app".
+competing responder — so the same gesture was unambiguous here from the start.
+The bubble's swipe has since come back too, by taking the back gesture off the
+thread screen; the rule both follow is that a swipe is safe exactly when nothing
+else is claiming the drag.
 
 The row is built on `react-native-gesture-handler`'s **deprecated** `Swipeable`
 rather than its current `ReanimatedSwipeable`, behind our own `SwipeableRow`
@@ -2056,24 +2124,64 @@ outbox's business, and that view doesn't own the outbox.
 
 ### Reply threads on the phone (Phase 9b M3)
 
-**Two affordances, one gesture each** — the rule M2 settled, applied to the same
-bubble: **long-press** for the action menu (Reply lives in it), **tap** to open
-the thread. M3 gave the tap to the branch line and a reply's quote only, leaving
-the bubble itself inert; M9g widened it to the whole bubble on replies, which now
-wear the [strand edge](#the-strand-edge) — see there for why that's a revision of
-the rule rather than a break with it. A plain message's tap still does nothing.
+**One meaning per gesture** — the rule M2 settled, applied to the same bubble:
+**long-press** for the action menu (Reply lives in it), **tap** to open the
+thread, **swipe right** to reply. M3 gave the tap to the branch line and a
+reply's quote only, leaving the bubble itself inert; M9g widened it to the whole
+bubble on replies, which now wear the [strand edge](#the-strand-edge) — see there
+for why that's a revision of the rule rather than a break with it. A plain
+message's tap still does nothing. What the rule forbids is one gesture meaning
+different things on different bubbles, which is why a third gesture could be
+added to the same target without disturbing it.
 
-**There is no swipe-to-reply, and that's a decision, not an omission.** M3 first
-shipped a rightward swipe on the bubble and it was pulled after a day of real
-use. A rightward drag starting near the left of a screen is also the navigator's
-interactive back gesture, so the two raced for the same touch and the navigator
-usually won: you'd swipe a bubble and land back on the conversation list with no
-reply started. No threshold tunes that away, because both gestures are
-legitimately claiming the drag — the loser is whichever responder happens to win
-the touch on the day. Long-press → Reply is one unambiguous route that never
-fights the navigator. Bringing the swipe back would mean disabling the screen's
-own back gesture while a bubble owns the touch, which is more machinery than the
-affordance is worth.
+#### Swipe to reply, and the back gesture it cost
+
+**Pull a message rightward and let go past the line to reply to it**
+(`components/SwipeToReply`). The bubble follows your thumb, damped, to a hard
+stop; past ~56pt a light haptic says the reply is armed and the arrow behind the
+message is at full strength; let go short of that and it springs home having done
+nothing. Nothing happens *during* a drag, which is what makes an accidental pull
+free to abandon. It lands exactly where the menu's Reply lands — the strand, with
+the composer aimed at the message you pulled.
+
+**This is a reversal, and the reversal is the interesting part.** M3 shipped this
+swipe and pulled it after a day of real use: a rightward drag near the left of
+the screen is also the navigator's interactive back gesture, the two raced for
+the same touch, and the navigator usually won — you'd swipe a bubble and land on
+the conversation list with no reply started. No threshold tunes that away,
+because both gestures legitimately claim the drag; the loser is whichever
+responder wins the touch on the day. The note left behind said a swipe could only
+come back if the screen's own back gesture went first, and judged that more
+machinery than the affordance was worth.
+
+It was the affordance that turned out to be worth more. **The thread screen now
+sets `gestureEnabled: false`** (on the `messages/[conversationId]` route in
+`app/_layout.tsx`), so exactly one responder claims the drag and the race is gone
+rather than tuned. What that costs is the iOS swipe-back *on this one screen*:
+back is the header's "← Back", which was always there. Android is unaffected —
+`gestureEnabled` doesn't govern the OS's own back gesture, so the system swipe
+still works there. (The one rough edge left is Android's: a drag begun inside the
+system gesture inset, within ~20dp of the screen edge, still goes to the OS, so
+an incoming bubble's leftmost sliver isn't a reliable place to start a pull.
+Starting anywhere else on the bubble is fine.)
+
+**A swipe is a shortcut, never the only route.** Reply stays in the long-press
+menu, because a gesture with no visible control is undiscoverable and unreachable
+by VoiceOver. The gesture is withheld where Reply is: a read-only thread, a
+message still in the outbox, a tombstone, and while a selection is on. Opting
+out **disables** the handler rather than removing it — an earlier cut returned
+the bubble's children bare, which put them at a different depth in the tree, so
+turning select mode on remounted every message on screen along with its photos
+and its measured rect. Vertical scrolling always wins (`failOffsetY`), and only
+a *rightward* drag activates the pan (a scalar `activeOffsetX`, not a symmetric
+pair — the array form would claim leftward drags too and then swallow them), so
+flicking through a thread never peels a bubble sideways or stalls it.
+
+It's built on the deprecated `PanGestureHandler` and React Native's own
+`Animated` rather than `Gesture.Pan()` + Reanimated, for the reason
+[`SwipeableRow`](#swipe-a-row-for-its-actions-phase-9b-m6) documents: Reanimated's
+worklet runtime can't load under Jest, and the modern API leans on it, so the
+current API would mean mocking away the very thing under test.
 
 The transcript's composer keeps its **two** modes (write, edit) — replying
 happens in the strand's own composer, so the two never compete. An earlier cut

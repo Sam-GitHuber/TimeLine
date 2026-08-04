@@ -6,7 +6,7 @@
  * uploads nothing at all while still returning a cheerful 201.
  */
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
 
@@ -161,6 +161,129 @@ it('keeps what you typed when posting fails', async () => {
   await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
 
   expect(await screen.findByDisplayValue('Worth keeping')).toBeTruthy();
+});
+
+describe('refreshing the timelines a new post lands on', () => {
+  /**
+   * A timeline screen sitting elsewhere in the app while you compose.
+   *
+   * It renders nothing — all that matters is that it *observes* its query, the
+   * way the real screen does, because that's what decides whether an
+   * invalidation refetches now or is merely noted for later. (Copied from
+   * `comments.test.tsx`, for the same reason: a tab navigator keeps a visited
+   * tab mounted, so the home feed has a live observer and never remounts on a
+   * tab switch. A seeded, *unobserved* cache entry passes against the broken
+   * build — at `staleTime` 0 it refetches on its next mount whatever we do.)
+   */
+  function TimelineScreen({
+    queryKey,
+    queryFn,
+  }: {
+    queryKey: unknown[];
+    queryFn: () => Promise<unknown>;
+  }) {
+    useQuery({ queryKey, queryFn });
+    return null;
+  }
+
+  /**
+   * The composer, with every post-list surface mounted alongside it.
+   *
+   * The keys carry the suffixes the real screens use — `['feed', includeGroups]`
+   * from the home tab, `['userPosts', id]` from a profile — so a fix that
+   * invalidated the bare unsuffixed keys as *exact* keys wouldn't pass here.
+   */
+  async function renderComposeOverTimelines(props: { groupId?: number } = {}) {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    const screens = {
+      // `true` is the "include groups in feed" preference turned on — the
+      // setting that puts a group post on the home feed in the first place.
+      feed: { key: ['feed', true], fn: jest.fn(async () => postList()) },
+      userPosts: { key: ['userPosts', user.pk], fn: jest.fn(async () => postList()) },
+      groupPosts: { key: ['groupPosts', 5], fn: jest.fn(async () => postList()) },
+    };
+    await render(
+      <QueryClientProvider client={queryClient}>
+        {Object.entries(screens).map(([name, s]) => (
+          <TimelineScreen key={name} queryKey={s.key} queryFn={s.fn} />
+        ))}
+        <ComposeBox user={user} {...props} />
+      </QueryClientProvider>
+    );
+    // Their first load, so a later call is unambiguously a refetch.
+    await waitFor(() =>
+      expect(loadCounts(screens)).toEqual({ feed: 1, userPosts: 1, groupPosts: 1 })
+    );
+    return screens;
+  }
+
+  type Screens = Awaited<ReturnType<typeof renderComposeOverTimelines>>;
+
+  function postList() {
+    return {
+      pages: [{ count: 0, next: null, previous: null, results: [] }],
+      pageParams: [undefined],
+    };
+  }
+
+  /** How many times each surface has loaded, keyed by name for a readable diff. */
+  function loadCounts(screens: Screens) {
+    return Object.fromEntries(
+      Object.entries(screens).map(([name, s]) => [name, s.fn.mock.calls.length])
+    );
+  }
+
+  async function post(text: string) {
+    await fireEvent.changeText(screen.getByLabelText("What's happening?"), text);
+    await fireEvent.press(screen.getByRole('button', { name: 'Post' }));
+  }
+
+  it('refreshes the home feed and your profile after a personal post', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ id: 1 }, 201));
+    const screens = await renderComposeOverTimelines();
+
+    await post('From the home feed');
+
+    // Your profile timeline is the other list a personal post lands on, and it
+    // stays wrong when it isn't refreshed: open your profile from a screen
+    // already in the stack and the post you just wrote isn't there.
+    await waitFor(() =>
+      expect(loadCounts(screens)).toEqual({ feed: 2, userPosts: 2, groupPosts: 1 })
+    );
+  });
+
+  it('refreshes the home feed as well as the group after a group post', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ id: 1 }, 201));
+    const screens = await renderComposeOverTimelines({ groupId: 5 });
+
+    await post('Into the group');
+
+    // The feed is the regression (#275): a group post surfaces there via the
+    // "include groups" toggle, and the Home tab stays mounted while you're in
+    // a group, so nothing else refetches it until a pull or an app foreground.
+    // The profile must NOT refresh — the server files a group post under the
+    // group, and `visible_posts` keeps group posts off a profile timeline.
+    await waitFor(() =>
+      expect(loadCounts(screens)).toEqual({ feed: 2, userPosts: 1, groupPosts: 2 })
+    );
+  });
+
+  it('refreshes nothing when the post is refused', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Nope.' }, 400));
+    const screens = await renderComposeOverTimelines();
+
+    await post('Doomed');
+
+    // The Alert is the tell that the failure has settled, so the counts below
+    // are read after the mutation finished rather than before it started.
+    await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+    expect(loadCounts(screens)).toEqual({ feed: 1, userPosts: 1, groupPosts: 1 });
+  });
 });
 
 describe('photos', () => {

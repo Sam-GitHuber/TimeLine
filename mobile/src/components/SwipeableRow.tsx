@@ -27,10 +27,11 @@
  *
  * M3 built and removed a swipe-to-reply on a message bubble because a rightward
  * drag was also the navigator's interactive back gesture and the two raced for
- * the touch. That doesn't apply here: the conversation list is a **tab root**,
- * so there is nothing to go back to and no competing responder. Worth stating,
- * because "we removed a swipe once" is otherwise the sort of note that gets
- * read as "swipes don't work in this app".
+ * the touch. That never applied here: the conversation list is a **tab root**,
+ * so there is nothing to go back to and no competing responder. The swipe has
+ * since returned to the bubble as well (`SwipeToReply`), by taking the back
+ * gesture off the thread screen — so the shared rule across both is that a swipe
+ * is safe exactly when nothing else is claiming the drag.
  */
 
 import { useRef } from 'react';

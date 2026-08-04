@@ -83,9 +83,12 @@
  * `onPress` even mid-selection (it has no server id to tick), and would
  * otherwise be the one bubble in a selection that opened a Modal instead.
  *
- * **One gesture per target**, the rule M2 settled: **long-press** = the action
+ * **One meaning per gesture**, the rule M2 settled: **long-press** = the action
  * menu (Reply included), **tap** = open the thread, on the bubbles that show a
- * strand edge and only those. A plain message's own tap still does nothing.
+ * strand edge and only those, **swipe right** = reply. A plain message's own tap
+ * still does nothing. The rule is about ambiguity, not arithmetic — what it
+ * forbids is one gesture meaning different things on different bubbles, which is
+ * why a third gesture can be added without touching it.
  *
  * M9g revised the second half of that rule, which used to be "tap the branch"
  * with the bubble itself inert. What made it safe to widen is that the tap is
@@ -98,16 +101,18 @@
  * and **a photo** remain exceptions of the same kind, and long-pressing over any
  * of them still opens the menu.
  *
- * **There is deliberately no swipe-to-reply.** M3 shipped one and it was taken
- * out after a day of real use: a rightward drag starting on a bubble is also the
- * navigator's back gesture, so the swipe raced the screen it was swiping on and
- * usually lost — you'd land back on the conversation list with no reply started.
- * That's a clash a threshold can't tune away, because both gestures are
- * legitimately claiming the same drag; the loser is whichever responder happens
- * to win the touch. Long-press → Reply is one unambiguous route and it never
- * fights the navigator. If a swipe ever comes back it needs the screen's own
- * back gesture disabled while a bubble owns the touch, which is a bigger change
- * than the affordance is worth.
+ * **Swipe right to reply** (`onSwipeReply`, wrapped by `SwipeToReply`) is the
+ * third gesture, and it took two goes to get here. M3 shipped one and pulled it
+ * after a day: a rightward drag on a bubble was also the navigator's
+ * interactive back gesture, and the two raced for the touch — you'd swipe and
+ * land on the conversation list with no reply started. The note left here said
+ * the swipe could only return if the screen's back gesture went first, and
+ * judged that too big a change. **That call was later reversed**: the thread
+ * screen now disables its own back gesture (`app/_layout.tsx`), leaving one
+ * owner for the drag, and back is the header's "← Back". The rule the file
+ * header states is unbroken — this is a *third* gesture on the bubble, not a
+ * second meaning for tap or hold. See `SwipeToReply` for the arming threshold
+ * and why a scroll always wins.
  */
 
 import { useMemo, useRef } from 'react';
@@ -125,6 +130,7 @@ import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
 import { SendStateIcon } from './icons';
 import type { BubbleAnchor } from './MessageActionMenu';
+import { SwipeToReply } from './SwipeToReply';
 import { measureInWindow } from '@/measure';
 import type { Mark } from '@/messageText';
 import { isEmojiOnly, parseMessageText } from '@/messageText';
@@ -620,6 +626,7 @@ export function MessageBubble({
   onLongPress,
   onShowReactors,
   onOpenThread,
+  onSwipeReply,
   onPhotoPress,
   onRetry,
   onDiscard,
@@ -661,6 +668,15 @@ export function MessageBubble({
   onShowReactors?: () => void;
   /** Open the focused thread view — what the reply-count affordance does. */
   onOpenThread?: () => void;
+  /**
+   * Start a reply — what a rightward swipe on the message does. Omitted is how
+   * a message opts *out* of the gesture entirely (see `SwipeToReply`), which is
+   * the caller's call: a read-only thread, a tombstone with nothing to answer,
+   * a message still in the outbox, and select mode all withhold it. Same
+   * destination as the menu's Reply, which stays the route for anyone who can't
+   * make a drag.
+   */
+  onSwipeReply?: () => void;
   /** Open a photo full-screen (Phase 9b M7) — what tapping one does. */
   onPhotoPress?: (photo: MessageAttachment) => void;
   /** Send it again — offered under a `failed` bubble, with `onDiscard`. */
@@ -719,133 +735,140 @@ export function MessageBubble({
         selected && styles.rowSelected,
       ]}
     >
-      {showSender && (
-        <View style={styles.senderLine}>
-          <Avatar user={message.sender} size="xs" />
-          <Text style={styles.senderName} numberOfLines={1}>
-            {message.sender.display_name}
-          </Text>
-        </View>
-      )}
-
-      <View style={[styles.bubbleRow, mine ? styles.alignEnd : styles.alignStart]}>
-        {message.is_deleted ? (
-          <View style={styles.tombstone}>
-            <Text style={styles.tombstoneText}>Message deleted</Text>
-          </View>
-        ) : (
-          <Pressable
-            ref={bubbleRef}
-            onPress={onPress ?? (opensThread ? onOpenThread : undefined)}
-            onLongPress={onLongPress ? handleLongPress : undefined}
-            delayLongPress={350}
-            // A bubble that opens something is a button and has to say so, or
-            // the one affordance the bar promises is invisible to VoiceOver.
-            accessibilityRole={opensThread ? 'button' : 'text'}
-            accessibilityState={onPress ? { selected: !!selected } : undefined}
-            // The label lets the menu be opened by assistive tech and driven in
-            // tests, since a long-press isn't otherwise discoverable.
-            // A photo with no caption would otherwise announce itself as an
-            // empty message, which is how a screen reader reports "nothing here".
-            accessibilityLabel={
-              mine
-                ? `Your message: ${describeMessage(message)}`
-                : `Message from ${message.sender.display_name}: ${describeMessage(message)}`
-            }
-            // What the bar says, said out loud — the hint rather than the label,
-            // so the message itself is still what's announced first and a bubble
-            // stays findable by its words alone.
-            //
-            // 🔒 "part of a thread" and no more: the reply carries a bare id and
-            // the root may be one this viewer was clipped out of, so naming it
-            // here would hand over exactly what the payload withholds.
-            accessibilityHint={
-              opensThread
-                ? 'Part of a thread. Opens it. Press and hold for message actions'
-                : 'Press and hold for message actions'
-            }
-            style={[styles.bubbleWrap, status === 'failed' && styles.unsent]}
-          >
-            <BubbleBody
-              message={message}
-              mine={mine}
-              status={status}
-              endsRun={endsRun}
-              insideStrand={insideStrand}
-              mentionNames={mentionNames}
-              onPhotoPress={onPhotoPress}
-              // The same handler the wrapper uses, so the menu anchors to the
-              // whole bubble either way — a menu that jumped to the photo's rect
-              // when you happened to hold over the picture would read as a
-              // different menu.
-              onPhotoLongPress={onLongPress ? handleLongPress : undefined}
-            />
-          </Pressable>
-        )}
-      </View>
-
-      {/* A failed send stays exactly where you left it, dimmed, with the two
-          ways out beside the reason. **It is never dropped for you** — the text
-          is something a person typed, and silently losing it is the one
-          outcome this whole path exists to prevent. Discard is right there so
-          "get rid of it" is still one tap, but it has to be your tap. */}
-      {status === 'failed' ? (
-        <View style={[styles.failedRow, styles.alignEnd]}>
-          <Text style={styles.failedText}>Not sent</Text>
-          <Pressable
-            onPress={onRetry}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Try sending again"
-          >
-            <Text style={styles.failedAction}>Retry</Text>
-          </Pressable>
-          <Pressable
-            onPress={onDiscard}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Discard this message"
-          >
-            <Text style={styles.failedDiscard}>Discard</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      {/* Rendered on a tombstone too. A reaction someone left is a thing that
-          happened, and silently dropping it when the message is deleted would
-          make it look as though they never did. */}
-      {reactions.length > 0 ? (
-        <ReactionPills
-          reactions={reactions}
-          mine={mine}
-          onShowReactors={onShowReactors}
-        />
-      ) : null}
-
-      {/* The way into the focused thread from its **root** — a root wears no
-          strand edge, so this is the only tap that opens one from here. (A reply
-          is the other way in: since M9g the bubble's own tap does it.) Drawn as
-          a branch off the bubble, the same living line the feed's comment
-          threads use, so a thread reads as growing out of the message rather
-          than as a button stuck under it. */}
-      {replyCount > 0 && onOpenThread ? (
-        <View style={mine ? styles.alignEnd : styles.alignStart}>
-          <Pressable
-            onPress={onOpenThread}
-            hitSlop={6}
-            accessibilityRole="button"
-            accessibilityLabel={`${replyCount} ${
-              replyCount === 1 ? 'reply' : 'replies'
-            } — open thread`}
-            style={({ pressed }) => [styles.threadLink, pressed && styles.pressed]}
-          >
-            <View style={styles.branch} />
-            <Text style={styles.threadLinkText}>
-              {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+      {/* The whole message moves as one under a swipe — bubble, sender line,
+          pills and the strand branch — because they are one message. Sliding
+          the bubble out from under its own reactions would read as two things
+          that had come apart. Withheld (`onSwipeReply` absent) is how a
+          message declines the gesture; see the prop. */}
+      <SwipeToReply onReply={onSwipeReply} testID={`swipe-to-reply-${message.id}`}>
+        {showSender && (
+          <View style={styles.senderLine}>
+            <Avatar user={message.sender} size="xs" />
+            <Text style={styles.senderName} numberOfLines={1}>
+              {message.sender.display_name}
             </Text>
-          </Pressable>
+          </View>
+        )}
+
+        <View style={[styles.bubbleRow, mine ? styles.alignEnd : styles.alignStart]}>
+          {message.is_deleted ? (
+            <View style={styles.tombstone}>
+              <Text style={styles.tombstoneText}>Message deleted</Text>
+            </View>
+          ) : (
+            <Pressable
+              ref={bubbleRef}
+              onPress={onPress ?? (opensThread ? onOpenThread : undefined)}
+              onLongPress={onLongPress ? handleLongPress : undefined}
+              delayLongPress={350}
+              // A bubble that opens something is a button and has to say so, or
+              // the one affordance the bar promises is invisible to VoiceOver.
+              accessibilityRole={opensThread ? 'button' : 'text'}
+              accessibilityState={onPress ? { selected: !!selected } : undefined}
+              // The label lets the menu be opened by assistive tech and driven in
+              // tests, since a long-press isn't otherwise discoverable.
+              // A photo with no caption would otherwise announce itself as an
+              // empty message, which is how a screen reader reports "nothing here".
+              accessibilityLabel={
+                mine
+                  ? `Your message: ${describeMessage(message)}`
+                  : `Message from ${message.sender.display_name}: ${describeMessage(message)}`
+              }
+              // What the bar says, said out loud — the hint rather than the label,
+              // so the message itself is still what's announced first and a bubble
+              // stays findable by its words alone.
+              //
+              // 🔒 "part of a thread" and no more: the reply carries a bare id and
+              // the root may be one this viewer was clipped out of, so naming it
+              // here would hand over exactly what the payload withholds.
+              accessibilityHint={
+                opensThread
+                  ? 'Part of a thread. Opens it. Press and hold for message actions'
+                  : 'Press and hold for message actions'
+              }
+              style={[styles.bubbleWrap, status === 'failed' && styles.unsent]}
+            >
+              <BubbleBody
+                message={message}
+                mine={mine}
+                status={status}
+                endsRun={endsRun}
+                insideStrand={insideStrand}
+                mentionNames={mentionNames}
+                onPhotoPress={onPhotoPress}
+                // The same handler the wrapper uses, so the menu anchors to the
+                // whole bubble either way — a menu that jumped to the photo's rect
+                // when you happened to hold over the picture would read as a
+                // different menu.
+                onPhotoLongPress={onLongPress ? handleLongPress : undefined}
+              />
+            </Pressable>
+          )}
         </View>
-      ) : null}
+
+        {/* A failed send stays exactly where you left it, dimmed, with the two
+            ways out beside the reason. **It is never dropped for you** — the text
+            is something a person typed, and silently losing it is the one
+            outcome this whole path exists to prevent. Discard is right there so
+            "get rid of it" is still one tap, but it has to be your tap. */}
+        {status === 'failed' ? (
+          <View style={[styles.failedRow, styles.alignEnd]}>
+            <Text style={styles.failedText}>Not sent</Text>
+            <Pressable
+              onPress={onRetry}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Try sending again"
+            >
+              <Text style={styles.failedAction}>Retry</Text>
+            </Pressable>
+            <Pressable
+              onPress={onDiscard}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Discard this message"
+            >
+              <Text style={styles.failedDiscard}>Discard</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
+        {/* Rendered on a tombstone too. A reaction someone left is a thing that
+            happened, and silently dropping it when the message is deleted would
+            make it look as though they never did. */}
+        {reactions.length > 0 ? (
+          <ReactionPills
+            reactions={reactions}
+            mine={mine}
+            onShowReactors={onShowReactors}
+          />
+        ) : null}
+
+        {/* The way into the focused thread from its **root** — a root wears no
+            strand edge, so this is the only tap that opens one from here. (A reply
+            is the other way in: since M9g the bubble's own tap does it.) Drawn as
+            a branch off the bubble, the same living line the feed's comment
+            threads use, so a thread reads as growing out of the message rather
+            than as a button stuck under it. */}
+        {replyCount > 0 && onOpenThread ? (
+          <View style={mine ? styles.alignEnd : styles.alignStart}>
+            <Pressable
+              onPress={onOpenThread}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel={`${replyCount} ${
+                replyCount === 1 ? 'reply' : 'replies'
+              } — open thread`}
+              style={({ pressed }) => [styles.threadLink, pressed && styles.pressed]}
+            >
+              <View style={styles.branch} />
+              <Text style={styles.threadLinkText}>
+                {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </SwipeToReply>
     </View>
   );
 }

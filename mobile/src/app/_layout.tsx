@@ -134,7 +134,37 @@ function AuthGate() {
         headerShown: false,
         contentStyle: { backgroundColor: colors.surface },
       }}
-    />
+    >
+      {/**
+       * 🚫 **No swipe-back on a conversation** — the one screen in the app that
+       * gives the gesture up, and the trade is deliberate.
+       *
+       * A rightward drag on a message bubble means *reply* there (see
+       * `components/SwipeToReply`), and iOS's interactive pop gesture wants the
+       * same drag. M3 shipped both and the navigator kept winning: you'd swipe a
+       * bubble and land on the conversation list with no reply started. Two
+       * responders legitimately claiming one drag is not a thing a threshold can
+       * fix — one of them has to go, and on a messaging screen the reply is worth
+       * more than the second way out.
+       *
+       * Nobody is stranded: the header's "← Back" is right there and always was,
+       * and this is iOS-only anyway — `gestureEnabled` doesn't govern Android's
+       * system back gesture, which is the OS's and still works. Set here rather
+       * than from the screen so it holds from the first frame, before there's
+       * anything to swipe.
+       */}
+      {/* Declared first and otherwise doing nothing, which is the point:
+          expo-router puts explicitly declared screens ahead of the file-system
+          ones, so naming only the conversation below would quietly make a
+          *dynamic* route the stack's first — the fallback React Navigation
+          seeds initial state from, with no `conversationId` to seed it with.
+          The tab root is the app's real entry, and saying so costs a line. */}
+      <Stack.Screen name="(tabs)" />
+      <Stack.Screen
+        name="messages/[conversationId]"
+        options={{ gestureEnabled: false }}
+      />
+    </Stack>
   );
 }
 

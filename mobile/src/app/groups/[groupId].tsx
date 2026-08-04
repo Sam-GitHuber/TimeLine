@@ -279,11 +279,7 @@ export default function GroupScreen() {
               {identity}
               {toggle}
               {upcomingSection}
-              <ComposeBox
-                user={me}
-                groupId={id}
-                invalidateKey={['groupPosts', id]}
-              />
+              <ComposeBox user={me} groupId={id} />
             </>
           }
           onEndReached={() => {

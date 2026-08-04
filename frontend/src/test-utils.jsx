@@ -29,6 +29,9 @@ export const fakeUser = {
 // what's being tested is a component reacting to the server's answer changing
 // *underneath it while it stays mounted* — driving that through the app would
 // navigate, which remounts the component and takes the state under test with it.
+//
+// It also carries **`queryClient`**, for the tests whose subject is the cache
+// itself: seed a key before rendering, or assert what a mutation invalidated.
 export function renderWithAuth(ui, { route = "/", auth = {} } = {}) {
   const value = {
     user: fakeUser,
@@ -50,7 +53,11 @@ export function renderWithAuth(ui, { route = "/", auth = {} } = {}) {
     </QueryClientProvider>
   );
   const utils = render(wrap(ui));
-  return { ...utils, setProps: (node) => utils.rerender(wrap(node)) };
+  return {
+    ...utils,
+    queryClient,
+    setProps: (node) => utils.rerender(wrap(node)),
+  };
 }
 
 // ---------------------------------------------------------------------------

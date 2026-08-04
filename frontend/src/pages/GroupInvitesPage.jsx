@@ -4,6 +4,7 @@ import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
+import { invalidateGroupMembership } from "../groupCache.js";
 
 // Your inbox of group invitations: groups someone has invited you to join.
 // Accept adds you as a member; Decline discards the invite. Mirrors the
@@ -19,11 +20,19 @@ export default function GroupInvitesPage() {
   const { items: invites, isLoading, isError, error } = query;
 
   const decide = useMutation({
-    // `act` is api.acceptGroupInvite or api.rejectGroupInvite.
-    mutationFn: ({ act, id }) => act(id),
-    onSuccess: () => {
+    // The two decisions differ in what they *change*, not just which endpoint
+    // they call, so the choice is a flag the success handler can read rather
+    // than the opaque `act` function the row used to pass in.
+    mutationFn: ({ accept, id }) =>
+      accept ? api.acceptGroupInvite(id) : api.rejectGroupInvite(id),
+    onSuccess: (_result, { accept }) => {
       queryClient.invalidateQueries({ queryKey: ["groupInvites"] });
-      queryClient.invalidateQueries({ queryKey: ["groups"] });
+      // Accepting makes you an active member, and membership gates the home
+      // feed and the personal calendar as well as this list (see
+      // `groupCache.js`). Declining deletes the invite row and leaves every
+      // membership alone, so it stays on the narrow set it already had.
+      if (accept) invalidateGroupMembership(queryClient);
+      else queryClient.invalidateQueries({ queryKey: ["groups"] });
     },
   });
 
@@ -73,9 +82,7 @@ export default function GroupInvitesPage() {
           </div>
           <button
             type="button"
-            onClick={() =>
-              decide.mutate({ act: api.acceptGroupInvite, id: invite.id })
-            }
+            onClick={() => decide.mutate({ accept: true, id: invite.id })}
             disabled={decide.isPending}
             className="btn btn-primary btn-sm"
           >
@@ -83,9 +90,7 @@ export default function GroupInvitesPage() {
           </button>
           <button
             type="button"
-            onClick={() =>
-              decide.mutate({ act: api.rejectGroupInvite, id: invite.id })
-            }
+            onClick={() => decide.mutate({ accept: false, id: invite.id })}
             disabled={decide.isPending}
             className="btn btn-ghost btn-sm"
           >

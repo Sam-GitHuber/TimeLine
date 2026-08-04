@@ -209,6 +209,23 @@ The gate needs a *present* organiser. Two paths:
 
 ## Frontend notes / deliberate deviations from the phase sketch
 
+- **Every event write refreshes the same four keys**, via `EventPage`'s one
+  `invalidate()`: `['event', id]`, `['groupEvents', gid]`, `['groupCalendar',
+  gid]` and `['personalCalendar']`. An event lives on four surfaces, and a write
+  that names fewer leaves the others stating the old answer. Two drifts made that
+  the rule rather than a convention (#279, both web-only — mobile has invalidated
+  all four on every event write since it was built): **delete** named
+  `['groupEvents']` alone and navigated, so the group's Month grid painted the
+  deleted event from a stale `['groupCalendar']` on the very page it lands you
+  on; and `['personalCalendar']` was read by `CalendarPage` and invalidated by
+  **nothing** anywhere in `frontend/src`, so setting a date, cancelling or
+  deleting left `/calendar` stale. A key nothing points at from the write side is
+  exactly how a surface gets missed. Pinned in `frontend/src/events.test.jsx`
+  ("what an event write refreshes"). Creating an event is the one write that
+  correctly stops at `['groupEvents']`: `createEvent` takes no date, and both
+  calendars filter `event_date__isnull=False`, so a new event cannot be on
+  either. A connection change refreshes all three of the calendar/event keys too
+  — see [connections.md](connections.md).
 - **The chip row is the organiser's control surface** (the plan's "lights chips up
   in any order"), not just a status display. On `EventPage`, an unset built-in chip
   carries inline **Set · Poll** affordances (and a *set* chip carries **Change ·

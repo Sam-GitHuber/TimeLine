@@ -777,10 +777,21 @@ export default function ConversationThreadView() {
   });
 
   // Leave (or, while pending, decline) a chat — group-only in the header;
-  // PendingChatPanel has its own copy of this for the locked view.
+  // PendingChatPanel has its own copy of this for the locked view, and the
+  // Details panel a third. All three now refresh the same two keys, as all three
+  // of the app's copies always have: `ConversationLeaveView` tombstones your
+  // participant row and `user_conversations` filters on `left_at__isnull=True`,
+  // so the chat is off your list server-side the moment this succeeds. Refresh
+  // before `openList()` hands you that list, or you land on a cache still
+  // showing the chat you just left — and clicking it 404s, because a chat you're
+  // not in shouldn't admit it exists (#286).
   const leaveMutation = useMutation({
     mutationFn: () => api.leaveConversation(conversationId),
-    onSuccess: () => openList(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      queryClient.invalidateQueries({ queryKey: ["unreadMessages"] });
+      openList();
+    },
   });
 
   // Silence this thread's *push* notifications (issue #118). Offered on the web

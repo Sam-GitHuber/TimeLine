@@ -7,9 +7,10 @@
  * `PendingChatPanel.jsx`.
  *
  * Each Connect fires the same `api.connect` the ConnectButton does, then
- * invalidates this conversation and the list so a promotion (the backend lets
- * you in the instant you're connected to the whole active clique) repaints the
- * thread without a manual reload.
+ * refreshes what a connection change refreshes anywhere else
+ * (`connectionCache.ts`) — including this conversation and the list, so a
+ * promotion (the backend lets you in the instant you're connected to the whole
+ * active clique) repaints the thread without a manual reload.
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -17,6 +18,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { api } from '@/api';
 import { Avatar } from '@/components/Avatar';
+import { invalidateConnectionChange } from '@/connectionCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Author } from '@/types';
 
@@ -33,12 +35,12 @@ export function PendingChatPanel({
 
   const connectMutation = useMutation({
     mutationFn: (userId: number) => api.connect(userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ['conversation', conversationId],
-      });
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
-    },
+    // The same `api.connect` the ConnectButton makes, so it refreshes the same
+    // set (`connectionCache.ts`) — which includes this thread and the list, the
+    // two this panel used to name on its own. Connecting here can promote you
+    // into the chat *and* widen what the feed, the calendars and the group
+    // timelines may show; only the panel knew about the first half (#278).
+    onSuccess: (_data, userId) => invalidateConnectionChange(queryClient, userId),
   });
 
   const leaveMutation = useMutation({

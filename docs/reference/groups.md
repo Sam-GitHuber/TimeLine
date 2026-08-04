@@ -98,6 +98,55 @@ group is gated by **[connection](connections.md)**, not membership:
   already have a relationship with. Removing members stays **admin-only**. You
   can't invite or be invited by someone you've blocked (either direction).
 
+### Membership is a gate on two *other* screens, so its writes refresh them
+
+Joining or leaving doesn't only change the groups list. `feed_posts` filters group
+posts down to the groups you're an **active** member of (that's what the
+include-groups toggle merges in), and `PersonalCalendarView` gates on the
+identical set — so a membership write changes what the **home feed** and the
+**personal calendar** are allowed to show. Every write that ends or starts your
+membership — leave, delete, accepting an invite, and (on mobile) an admin
+removing their **own** row from the members roster — therefore invalidates
+`['groups']`, `['feed']` *and* `['personalCalendar']` together. Each client keeps
+the rule in one helper — `mobile/src/groupCache.ts`, `frontend/src/groupCache.js`
+— rather than copying it into each write; copied lists are what drifted in
+#215 / #273 / #275. The web roster isn't a fourth site: its admin controls render
+only on *other* people's rows (`isAdmin && !isSelf`), so leaving from there isn't
+possible and the ⋯ menu is the only way out of a group.
+
+Refreshing only the acting screen's list was #277 on mobile and #281 on the web,
+and on the app it isn't a flash: the tabs stay mounted for the session, so the
+feed query keeps a live observer and never remounts, and a `staleTime` of 0 buys
+nothing without something marking it stale. A leave left the feed listing posts
+the server would then refuse — tap one and you get *Post not available*, because
+`can_view_post` wants the membership you just gave up. On the web the same wrong
+render is a flash rather than a stuck state, since react-router unmounts the
+route and nothing sets a `staleTime`, so the refetch is already on its way.
+Declining an invite is deliberately *not* in this set: it deletes the invite row
+and joins nothing — which is why both invite inboxes pass the decision to the
+success handler as a boolean it can fork on, rather than as an opaque function.
+
+The mobile roster is the one site where the rule has to be applied
+**conditionally**, and #282 is what that costs. Its single mutation covers
+promote, demote and remove, so it forks on the action rather than on the screen:
+only `remove` *with your own id* ends a membership of yours — removing someone
+else, or giving up your own admin badge, leaves the two gated surfaces correct.
+That branch is a leave in every other respect too, since it is literally the call
+`useGroupActions.leave` makes (`GroupMemberDetailView.delete` allows `is_self`
+for any member): the menu says *Leave group*, the confirm carries Leave's wording,
+and it `router.replace`s back to the Groups tab rather than leaving you on the
+roster of a group you're no longer in — where `['group', id]` would 404 on its
+next fetch. It deliberately doesn't invalidate `['group', id]` /
+`['groupMembers', id]` on that branch for the same reason.
+
+The keys that a membership write *also* moves but that aren't invalidated here
+are `['conversations']` / `['unreadMessages']` (leaving deactivates you in the
+group's chats; deleting cascades them away) and `['notificationsUnread']`
+(accept/decline addresses the invite's notification). Every one of those is
+polled — by the Messages tab / drawer, the tab bar / nav count and the activity
+bell respectively — so they heal within a cycle on their own. The feed and the
+calendar are the two that never do.
+
 ## API
 
 - `POST /api/groups/` — create (creator written as `active` `admin`).
@@ -147,7 +196,9 @@ the People hub, with a group-invites badge on the tab (shared `['groupInvites']`
 query key). A group opens full-screen at `groups/[groupId]` (a root-stack sibling
 of the tabs): the connection-pruned group timeline through the shared
 `TimelineList`, capped by a **group-scoped `ComposeBox`** (`createPost` gains an
-optional `group` id; the box takes a `groupId` + `invalidateKey`). The group
+optional `group` id; the box takes a `groupId`, and decides for itself which
+timelines to refresh on success — see
+[feed-and-posts](feed-and-posts.md#posts)). The group
 actions live behind a **⋯ menu** (ActionSheetIOS): Invite, Members, Leave, and —
 for admins — Edit, Delete. Members is its own roster screen (admin controls via a
 per-row action sheet; the last-admin guardrail surfaces the server's 400); invite

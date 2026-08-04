@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
+import { invalidateConnectionChange } from "../connectionCache.js";
 import DisconnectWarningModal from "./DisconnectWarningModal.jsx";
 
 // Block / unblock control on a person's profile. Blocking is the strong,
@@ -35,19 +36,29 @@ export default function BlockButton({ userId, displayName, isBlocked }) {
   const mutation = useMutation({
     mutationFn: () =>
       isBlocked ? api.unblockUser(userId) : api.blockUser(userId),
-    onSuccess: () => {
-      // A block/unblock changes connection state, feeds, and messaging surfaces.
-      for (const key of [
-        ["user", userId],
-        ["users"],
-        ["feed"],
-        ["conversations"],
-        ["unreadMessages"],
-        ["connectionRequests"],
-      ]) {
-        queryClient.invalidateQueries({ queryKey: key });
-      }
-    },
+    // A block deletes the `Connection` row outright (`BlockView.post`), so it
+    // moves the same boundary a disconnect does and refreshes the same set
+    // (`connectionCache.js`). Its own list was six keys that overlapped the
+    // Connect button's six without matching them, and the one it omitted was
+    // `["connections"]`: block someone from their profile and your Connections
+    // list went on listing the person you'd just cut off, with their posts still
+    // rendered under a button now reading "Unblock" (#288). Neither list held a
+    // calendar or event key.
+    //
+    // **Unblocking deliberately fires the same call, and it is a superset of
+    // what that direction needs.** `BlockView.delete` only deletes the `Block`
+    // row — it restores no connection, so `connected_user_ids` doesn't move and
+    // the feed/calendar/event keys are a wasted refetch rather than a wrong one.
+    // What unblocking *does* move is most of the rest: `is_blocked` on the
+    // profile and the people lists, and the messaging surfaces, since
+    // `_conversation_visible` hides a blocked pair's direct thread and lifting
+    // the block brings it back. Splitting the two directions to save one refetch
+    // on a rare, deliberate action would put the *block* path — the one where
+    // being subtly wrong means believing someone is cut off who isn't (#236) —
+    // at the mercy of a boolean prop. Not worth it; both directions are pinned
+    // in `connection-cache.test.jsx`. Same call the app's `BlockButton.tsx`
+    // makes, for the same reasons.
+    onSuccess: () => invalidateConnectionChange(queryClient, userId),
   });
 
   // Retire the message once the server's own answer moves to the one the

@@ -7,7 +7,7 @@
  * without dropping or reordering anything.
  */
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 
@@ -60,6 +60,101 @@ function renderThread(props: Partial<Parameters<typeof CommentThread>[0]> = {}) 
     <QueryClientProvider client={queryClient}>
       <CommentThread postId={7} {...props} />
     </QueryClientProvider>
+  );
+}
+
+/**
+ * A timeline screen sitting in the stack underneath the post you're reading.
+ *
+ * It renders nothing — all that matters is that it *observes* its query, the
+ * way the real screen does, because that's what decides whether an invalidation
+ * refetches now or is merely noted for later.
+ */
+function TimelineScreen({
+  queryKey,
+  queryFn,
+}: {
+  queryKey: unknown[];
+  queryFn: () => Promise<unknown>;
+}) {
+  useQuery({ queryKey, queryFn });
+  return null;
+}
+
+function postList(newCommentCount: number) {
+  return {
+    pages: [
+      {
+        count: 1,
+        next: null,
+        previous: null,
+        results: [
+          { id: 7, comment_count: 3, new_comment_count: newCommentCount },
+        ],
+      },
+    ],
+    pageParams: [undefined],
+  };
+}
+
+/**
+ * The thread, with the surfaces that also show its post mounted alongside it.
+ *
+ * **Mounted, not seeded, and that's the point.** Expo Router's native stack
+ * keeps the screen you came *from* mounted while you read a post, so its query
+ * has a live observer and never remounts when you go back — which is exactly
+ * why a stale count sat there in the first place (#273). A seeded, unobserved
+ * cache entry doesn't reproduce that: with `staleTime` at 0 an unmounted screen
+ * refetches on its next mount whatever we do here, so it would pass against the
+ * broken build. Asserting on refetches also side-steps a race — the
+ * seen-marking effect writes to these same queries a tick after the thread
+ * refetches, and a `setQueryData` clears `isInvalidated`, so the flag is not a
+ * dependable thing to wait on.
+ */
+async function renderThreadOverTimelines() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  // Non-zero `new_comment_count`, so the seen-marking write really does fire on
+  // these queries and the test covers the two writes interleaving.
+  const screens = {
+    feed: { key: ['feed', false], fn: jest.fn(async () => postList(2)) },
+    userPosts: { key: ['userPosts', '1'], fn: jest.fn(async () => postList(2)) },
+    groupPosts: { key: ['groupPosts', '5'], fn: jest.fn(async () => postList(2)) },
+    permalink: {
+      key: ['post', '7'],
+      fn: jest.fn(async () => ({ id: 7, comment_count: 3, new_comment_count: 2 })),
+    },
+  };
+  await render(
+    <QueryClientProvider client={queryClient}>
+      {Object.entries(screens).map(([name, s]) => (
+        <TimelineScreen key={name} queryKey={s.key} queryFn={s.fn} />
+      ))}
+      <CommentThread postId={7} />
+    </QueryClientProvider>
+  );
+  // Their first load, so a later call is unambiguously a refetch.
+  await waitFor(() =>
+    expect(loadCounts(screens)).toEqual({
+      feed: 1,
+      userPosts: 1,
+      groupPosts: 1,
+      permalink: 1,
+    })
+  );
+  return { queryClient, screens };
+}
+
+type Screens = Awaited<ReturnType<typeof renderThreadOverTimelines>>['screens'];
+
+/** How many times each surface has loaded, keyed by name for a readable diff. */
+function loadCounts(screens: Screens) {
+  return Object.fromEntries(
+    Object.entries(screens).map(([name, s]) => [name, s.fn.mock.calls.length])
   );
 }
 
@@ -249,6 +344,64 @@ describe('writing', () => {
     await fireEvent.changeText(screen.getByLabelText('Write a comment…'), '   ');
 
     expect(screen.getByLabelText('Post comment')).toBeDisabled();
+  });
+
+  /**
+   * The count on the card, not the tree (#273 — the mobile half of #215).
+   *
+   * `comment_count` rides the *post* payload, so a mutation that refetches only
+   * `['comments', 7]` leaves every card holding that post reading the old total.
+   * The composer used to invalidate the feed and the permalink but not the two
+   * timeline surfaces, which is why the home feed was right and the group
+   * timeline you'd just posted from was wrong.
+   */
+  it('refreshes the count on every surface holding the post', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValue(jsonResponse(comment({ id: 9 }), 201));
+
+    const { screens } = await renderThreadOverTimelines();
+    await screen.findByText('No comments yet. Start the conversation.');
+
+    await fireEvent.changeText(
+      screen.getByLabelText('Write a comment…'),
+      'a fourth comment'
+    );
+    await fireEvent.press(screen.getByLabelText('Post comment'));
+
+    // The profile and group timelines are the two that were missed: the home
+    // feed refreshed, which is what made it read as a per-screen glitch.
+    // Asserted as one object so a failure's diff names the stale surface.
+    await waitFor(() =>
+      expect(loadCounts(screens)).toEqual({
+        feed: 2,
+        userPosts: 2,
+        groupPosts: 2,
+        permalink: 2,
+      })
+    );
+  });
+
+  it('leaves those surfaces alone when the comment is refused', async () => {
+    // Only a success moves the count. Refetching on the attempt would reload
+    // every timeline in the stack each time a comment fails to send.
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValue(jsonResponse({ detail: 'Nope.' }, 400));
+
+    const { screens } = await renderThreadOverTimelines();
+    await screen.findByText('No comments yet. Start the conversation.');
+
+    await fireEvent.changeText(screen.getByLabelText('Write a comment…'), 'Hi');
+    await fireEvent.press(screen.getByLabelText('Post comment'));
+
+    expect(await screen.findByText('Nope.')).toBeTruthy();
+    expect(loadCounts(screens)).toEqual({
+      feed: 1,
+      userPosts: 1,
+      groupPosts: 1,
+      permalink: 1,
+    });
   });
 
   it('surfaces the server’s message when a comment is rejected', async () => {

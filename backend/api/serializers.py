@@ -27,6 +27,15 @@ User = get_user_model()
 # while being far more than any real status update needs. Comments share it.
 POST_MAX_LENGTH = 5000
 
+# The **one** answer to every unusable ``parent`` on a reply (issue #211): an id
+# that doesn't exist, one belonging to a different post, and one the connection
+# prune hides from you all get this sentence and nothing else. Three separate
+# messages made the endpoint a comment-id oracle — "doesn't exist" versus "wrong
+# post" tells an outsider which ids are real, and a distinct "you can't see that"
+# would confirm the existence of the very comment we're hiding. The wording is
+# deliberately about what you may reply to rather than about what exists.
+PARENT_UNAVAILABLE = "You can only reply to a comment you can see on this post."
+
 
 class _Everyone:
     """A "no pruning" stand-in for a set of visible reactor ids.
@@ -325,11 +334,19 @@ class CommentCreateSerializer(serializers.ModelSerializer):
 
     ``author`` and ``post`` are set in the view (from the session and the URL),
     never the body. ``parent`` is optional — omit it for a top-level comment,
-    or give the id of the comment being replied to (the view checks it belongs
-    to the same post).
+    or give the id of the comment being replied to. The field is declared
+    explicitly only to override DRF's ``does_not_exist`` text: the view rejects
+    a wrong-post or invisible parent with ``PARENT_UNAVAILABLE``, and an unknown
+    id has to answer identically or the difference is the oracle (issue #211).
     """
 
     text = serializers.CharField(max_length=POST_MAX_LENGTH)
+    parent = serializers.PrimaryKeyRelatedField(
+        queryset=Comment.objects.all(),
+        required=False,
+        allow_null=True,
+        error_messages={"does_not_exist": PARENT_UNAVAILABLE},
+    )
 
     class Meta:
         model = Comment

@@ -35,6 +35,7 @@ from api.serializers import (
     MESSAGE_ATTACHMENTS_MAX,
     MESSAGE_MAX_LENGTH,
     MESSAGE_THUMBNAIL_MAX_BYTES,
+    PARENT_UNAVAILABLE,
     NotificationSerializer,
 )
 from api.views import (
@@ -757,6 +758,223 @@ def _flatten_ids(tree):
         ids.add(node["id"])
         ids |= _flatten_ids(node.get("replies", []))
     return ids
+
+
+class ReplyVisibilityTests(APITestCase):
+    """The **write** side of the connection boundary (issue #211).
+
+    Reading was pruned from the start; replying wasn't, so a ``parent`` id you
+    could never have seen was still accepted — putting your reply in front of
+    someone invisible to you, in a conversation you were never part of. A reply
+    is now allowed only where your own pruned tree would have shown you the
+    parent, which is a *subtree* rule: a connected friend's reply sitting under
+    a stranger is as unreachable as the stranger's own comment.
+    """
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        self.pal = make_user("pal@example.com")
+        self.stranger = make_user("stranger@example.com")
+        make_connection(self.me, self.friend, ACCEPTED)
+        make_connection(self.me, self.pal, ACCEPTED)
+
+        # My own post, so it stays visible to me however the thread's authors
+        # are later pruned or deactivated. Comments are created directly (as in
+        # CommentTests) so a stranger can be in the thread at all.
+        self.post = Post.objects.create(author=self.me, text="a post")
+        self.client.force_authenticate(self.me)
+
+    def _reply_to(self, parent_id, text="reply"):
+        return self.client.post(
+            comments_url(self.post),
+            {"text": text, "parent": parent_id},
+            format="json",
+        )
+
+    def _visible_ids(self):
+        resp = self.client.get(comments_url(self.post))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return _flatten_ids(resp.data)
+
+    def test_can_reply_to_a_comment_you_can_see(self):
+        top = Comment.objects.create(
+            post=self.post, author=self.friend, text="friend top"
+        )
+        nested = Comment.objects.create(
+            post=self.post, author=self.pal, parent=top, text="pal reply"
+        )
+
+        # Both depths work — the gate is "visible", not "top-level".
+        for parent in (top, nested):
+            resp = self._reply_to(parent.id)
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+            self.assertEqual(
+                Comment.objects.get(pk=resp.data["id"]).parent_id, parent.id
+            )
+
+    def test_cannot_reply_to_a_not_connected_authors_comment(self):
+        hidden = Comment.objects.create(
+            post=self.post, author=self.stranger, text="stranger top"
+        )
+        self.assertNotIn(hidden.id, self._visible_ids())
+
+        resp = self._reply_to(hidden.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Comment.objects.filter(parent=hidden).exists())
+
+    def test_cannot_reply_under_a_hidden_parent_even_to_a_connected_author(self):
+        # The case a per-comment author check misses: the reply's *own* author
+        # is someone I'm connected with, so only walking the chain above it
+        # shows that the whole branch is pruned out of my tree.
+        stranger_top = Comment.objects.create(
+            post=self.post, author=self.stranger, text="stranger top"
+        )
+        friend_reply = Comment.objects.create(
+            post=self.post,
+            author=self.friend,
+            parent=stranger_top,
+            text="friend reply under stranger",
+        )
+        self.assertNotIn(friend_reply.id, self._visible_ids())
+
+        resp = self._reply_to(friend_reply.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Comment.objects.filter(parent=friend_reply).exists())
+
+    def test_cannot_reply_under_a_deactivated_authors_comment(self):
+        # A ban pulls the author's comments *and* the branch beneath them, so
+        # the reply left dangling underneath is unreachable too.
+        top = Comment.objects.create(
+            post=self.post, author=self.friend, text="friend top"
+        )
+        pal_reply = Comment.objects.create(
+            post=self.post, author=self.pal, parent=top, text="pal reply"
+        )
+        self.friend.is_active = False
+        self.friend.save(update_fields=["is_active"])
+        self.assertNotIn(pal_reply.id, self._visible_ids())
+
+        resp = self._reply_to(pal_reply.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Comment.objects.filter(parent=pal_reply).exists())
+
+    def test_unknown_wrong_post_and_hidden_parents_are_indistinguishable(self):
+        # Three different rejections would let an outsider probe which comment
+        # ids exist, and confirm the existence of the very comment being hidden.
+        hidden = Comment.objects.create(
+            post=self.post, author=self.stranger, text="stranger top"
+        )
+        other_post = Post.objects.create(author=self.me, text="other")
+        elsewhere = Comment.objects.create(
+            post=other_post, author=self.me, text="elsewhere"
+        )
+        unknown = Comment.objects.order_by("-id").first().id + 1000
+
+        bodies = []
+        for parent_id in (hidden.id, elsewhere.id, unknown):
+            resp = self._reply_to(parent_id)
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+            # Compared unnormalised: the *shape* has to match as well as the
+            # wording, or a bare string against a list tells them apart anyway.
+            bodies.append([str(m) for m in resp.data["parent"]])
+
+        self.assertEqual(bodies[0], [PARENT_UNAVAILABLE])
+        self.assertEqual(bodies[1], bodies[0])
+        self.assertEqual(bodies[2], bodies[0])
+
+    def test_an_emptied_tombstone_answers_like_any_invisible_parent(self):
+        # A soft delete leaves a tombstone; hard-deleting its last reply out
+        # from under it leaves one holding nothing up, which the tree builder
+        # drops. Saying "that was deleted" then confirms a comment stood at an
+        # id my own thread no longer shows me.
+        top = Comment.objects.create(
+            post=self.post, author=self.friend, text="friend top"
+        )
+        reply = Comment.objects.create(
+            post=self.post, author=self.pal, parent=top, text="pal reply"
+        )
+        top.text = ""
+        top.deleted_at = timezone.now()
+        top.save(update_fields=["text", "deleted_at"])
+        # While the reply holds it up, the tombstone renders and says so.
+        self.assertIn(top.id, self._visible_ids())
+        resp = self._reply_to(top.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotEqual([str(m) for m in resp.data["parent"]], [PARENT_UNAVAILABLE])
+
+        reply.delete()
+
+        # Now it holds nothing up, so it's gone from the tree — and the reply
+        # path has to agree, in wording *and* shape.
+        self.assertNotIn(top.id, self._visible_ids())
+        resp = self._reply_to(top.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual([str(m) for m in resp.data["parent"]], [PARENT_UNAVAILABLE])
+
+    def test_cannot_report_a_comment_hidden_by_its_parent(self):
+        # The doc claims the shared helper closed reports along with replies;
+        # this pins it. The existing report test only covers a stranger's own
+        # comment, which the per-comment check already caught.
+        stranger_top = Comment.objects.create(
+            post=self.post, author=self.stranger, text="stranger top"
+        )
+        friend_reply = Comment.objects.create(
+            post=self.post,
+            author=self.friend,
+            parent=stranger_top,
+            text="friend reply under stranger",
+        )
+
+        resp = self.client.post(
+            REPORTS_URL,
+            {"comment": friend_reply.pk, "reason": "spam"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Report.objects.exists())
+
+    def test_cannot_react_to_a_comment_hidden_by_its_parent(self):
+        # can_view_comment gates comment reactions and reports too, so the same
+        # subtree rule now closes those alongside the reply path.
+        stranger_top = Comment.objects.create(
+            post=self.post, author=self.stranger, text="stranger top"
+        )
+        friend_reply = Comment.objects.create(
+            post=self.post,
+            author=self.friend,
+            parent=stranger_top,
+            text="friend reply under stranger",
+        )
+
+        resp = self.client.post(
+            react_comment_url(friend_reply), {"emoji": "👍"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Reaction.objects.exists())
+
+    def test_visibility_check_does_not_scale_with_nesting_depth(self):
+        # The chain walk loads the post's comments once and climbs in Python;
+        # a per-ancestor query would make a deep thread quietly expensive. Both
+        # parents share an author so the notification work is identical and the
+        # only variable left is the depth.
+        chain = []
+        parent = None
+        for i in range(12):
+            parent = Comment.objects.create(
+                post=self.post, author=self.friend, parent=parent, text=f"c{i}"
+            )
+            chain.append(parent)
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._reply_to(chain[1].id)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        shallow = len(ctx)
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._reply_to(chain[-1].id)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(ctx), shallow)
 
 
 class CommentCountTests(APITestCase):
@@ -3403,6 +3621,134 @@ class BlockTests(MessagingBase):
     def test_cannot_block_yourself(self):
         resp = self.client.post(block_url(self.me))
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class BlockedThreadWriteTests(MessagingBase):
+    """🔒 A block takes the thread away from **both** sides — for writes as well
+    as reads.
+
+    The read routes had this from Phase 5; the read-marker, mute and leave
+    routes resolved the thread with a membership-only lookup and so kept
+    answering on a thread the block had already hidden. Blocking is the safety
+    feature, so it can't be the one gate a write path skips: these assert the
+    per-thread routes agree, from the blocked party's side (the side that
+    matters — they're the one the block is protecting against).
+    """
+
+    def setUp(self):
+        super().setUp()
+        # friend and I have a real thread with a message from them, then they
+        # block me. Everything below runs as *me*, the blocked party.
+        resp = self.open_with(self.friend)
+        self.convo = Conversation.objects.get(pk=resp.data["id"])
+        Message.objects.create(
+            conversation=self.convo, sender=self.friend, text="hi"
+        )
+        self.client.force_authenticate(self.friend)
+        self.client.post(block_url(self.me))
+        self.client.force_authenticate(self.me)
+
+    def mute_url(self):
+        return f"/api/conversations/{self.convo.pk}/mute/"
+
+    def test_the_reads_hide_it(self):
+        # The Phase 5 behaviour these writes have to match.
+        self.assertEqual(self.client.get(CONVERSATIONS_URL).data["count"], 0)
+        self.assertEqual(
+            self.client.get(f"/api/conversations/{self.convo.pk}/").status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.get(messages_url(self.convo)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_marking_read_cannot_move_a_receipt_on_a_blocked_thread(self):
+        # POST /read/ writes ConversationRead, which *is* the read receipt the
+        # other side sees — so this let a blocked party move a tick that
+        # surfaces to the blocker the moment the block is lifted.
+        resp = self.client.post(read_url(self.convo))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(
+            ConversationRead.objects.filter(
+                conversation=self.convo, user=self.me
+            ).exists()
+        )
+
+    def test_marking_unread_cannot_probe_a_blocked_thread(self):
+        # The 200-with-a-count vs 400 split was a yes/no oracle for "does the
+        # person who blocked me still have an undeleted message waiting for
+        # me" — answered off a thread that 404s everywhere else.
+        resp = self.client.delete(read_url(self.convo))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertNotIn("unread_count", resp.data)
+
+    def test_muting_a_blocked_thread_is_gone_too(self):
+        for method in (self.client.post, self.client.delete):
+            resp = method(self.mute_url())
+            self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(
+            Participant.objects.filter(
+                conversation=self.convo, user=self.me, muted_at__isnull=False
+            ).exists()
+        )
+
+    def test_leaving_a_blocked_thread_cannot_mutate_participant_state(self):
+        # Leave resolved a raw Participant row, which a block never touches on
+        # a direct thread — so it closed the access interval and tombstoned the
+        # row on a thread 404'd everywhere else. Whether leaving a 1:1 should
+        # exist at all is #210; this is only that it can't happen here.
+        resp = self.client.post(f"/api/conversations/{self.convo.pk}/leave/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(
+            Participant.objects.filter(
+                conversation=self.convo, user=self.me, left_at__isnull=False
+            ).exists()
+        )
+
+    def test_a_deactivated_other_party_hides_the_thread_the_same_way(self):
+        # The list has always dropped a direct thread whose other party went
+        # inactive; the per-thread routes didn't, so the transcript stayed
+        # readable to anyone holding the id. One rule, one place, now.
+        self.client.force_authenticate(self.friend)
+        self.client.delete(block_url(self.me))  # lift the block…
+        User.objects.filter(pk=self.friend.pk).update(is_active=False)
+        self.client.force_authenticate(self.me)
+
+        self.assertEqual(self.client.get(CONVERSATIONS_URL).data["count"], 0)
+        self.assertEqual(
+            self.client.get(messages_url(self.convo)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.post(read_url(self.convo)).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_a_group_chat_is_untouched_by_any_of_this(self):
+        # The rule is direct-only: a group chat has no "other party", and a
+        # block between two of its members must not take the whole chat away
+        # from everyone. Guards against over-tightening the shared helper.
+        third = make_user("third@example.com")
+        for pair in ((self.me, third), (self.friend, third)):
+            make_connection(*pair, status=ACCEPTED)
+        convo = Conversation.objects.create(kind=Conversation.Kind.GROUP)
+        for user in (self.me, self.friend, third):
+            Participant.objects.create(
+                conversation=convo, user=user, status=Participant.Status.ACTIVE
+            )
+        Message.objects.create(conversation=convo, sender=third, text="hello all")
+
+        self.assertEqual(
+            self.client.get(messages_url(convo)).status_code, status.HTTP_200_OK
+        )
+        self.assertEqual(
+            self.client.post(read_url(convo)).status_code, status.HTTP_200_OK
+        )
+        self.assertEqual(
+            self.client.post(f"/api/conversations/{convo.pk}/mute/").status_code,
+            status.HTTP_200_OK,
+        )
 
 
 class MessagingAuthRequiredTests(APITestCase):
