@@ -129,6 +129,14 @@ groups, profiles, and the message transcript's `loadOlder`.
   A regression test for this must mount observers on the other surfaces, not
   seed cache entries (same reasoning as the badge tests below).
 
+  **It stays in the compose box rather than moving to `postCache`**, which is
+  the natural place to look given `invalidatePostComments` lives there. That
+  helper earns its place by *deriving* its keys from the `POST_LIST_KEYS` set it
+  shares with `markPostCommentsSeen`, so the two can't drift — it hits every
+  post list, unconditionally. A new post is the other shape: exactly two lists,
+  and which two depends on whether it went to a group. There's nothing to
+  derive, so extracting it would move two lines without buying the guarantee.
+
 ### Permalink — a single post by id
 
 - **`GET /api/posts/<id>/`** (`PostDetailView`) returns one post, gated by the

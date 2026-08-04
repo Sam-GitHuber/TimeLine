@@ -145,6 +145,18 @@ export function ComposeBox({
       // only exists on the home feed and a group page, so no profile query can
       // be observed here, and an unobserved one refetches on its next mount
       // regardless at `staleTime` 0.
+      //
+      // Deliberately *not* a helper in `postCache.ts` alongside
+      // `invalidatePostComments`, which is the obvious place to look. That one
+      // earns its keep by deriving its keys from the `POST_LIST_KEYS` set it
+      // shares with `markPostCommentsSeen`, so the two can't drift — it hits
+      // *every* post list, unconditionally. This is the other shape: a new post
+      // lands on exactly two of them, and which two depends on `groupId`. There
+      // is nothing to derive, so extracting it would move these two lines
+      // without buying the guarantee, and would split the rule away from web's
+      // copy of it. If a fourth post-list surface is ever added, both this and
+      // `POST_LIST_KEYS` need it — that's the cost, and it's why the rule is
+      // written out rather than computed.
       queryClient.invalidateQueries({ queryKey: ['feed'] });
       queryClient.invalidateQueries({
         queryKey: groupId ? ['groupPosts', groupId] : ['userPosts'],

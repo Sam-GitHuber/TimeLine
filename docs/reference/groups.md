@@ -147,7 +147,9 @@ the People hub, with a group-invites badge on the tab (shared `['groupInvites']`
 query key). A group opens full-screen at `groups/[groupId]` (a root-stack sibling
 of the tabs): the connection-pruned group timeline through the shared
 `TimelineList`, capped by a **group-scoped `ComposeBox`** (`createPost` gains an
-optional `group` id; the box takes a `groupId` + `invalidateKey`). The group
+optional `group` id; the box takes a `groupId`, and decides for itself which
+timelines to refresh on success — see
+[feed-and-posts](feed-and-posts.md#posts)). The group
 actions live behind a **⋯ menu** (ActionSheetIOS): Invite, Members, Leave, and —
 for admins — Edit, Delete. Members is its own roster screen (admin controls via a
 per-row action sheet; the last-admin guardrail surfaces the server's 400); invite
