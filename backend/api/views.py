@@ -2353,8 +2353,8 @@ def _blocked_with_ids(user):
     }
 
 
-def _conversation_visible(convo, user, blocked):
-    """Whether ``convo`` should appear in ``user``'s list.
+def _conversation_visible(convo, user, blocked=None):
+    """Whether ``user`` may reach ``convo`` at all — **the** rule, in one place.
 
     Group chats are always visible — the Participant rows already gate
     membership, and a pending member is meant to see a locked row (see
@@ -2363,12 +2363,26 @@ def _conversation_visible(convo, user, blocked):
     unchanged: a block cuts the pair off from each other so the thread
     disappears from both lists, consistent with the feed hiding a banned
     member.
+
+    It reads as a *list* rule and is really a **reachability** rule, which is
+    how it came to be applied in some places and not others: the list called
+    this, the per-message routes re-derived the block half in
+    ``_thread_for_viewer``, the detail view wrote a third copy inline, and the
+    read/mute routes checked neither. Three spellings of one sentence is two
+    too many, so everything that resolves a thread now asks here.
+
+    ``blocked`` is the caller's precomputed set of ids they're blocked with
+    (``_blocked_with_ids``): the list builds it once for a whole page, while a
+    single-thread caller passes ``None`` and pays one query for the pair. Same
+    shape as ``connected_ids`` on the post/comment side.
     """
     if convo.kind != Conversation.Kind.DIRECT:
         return True
     other = convo.other_participant(user)
     if other is None or not other.is_active:
         return False
+    if blocked is None:
+        return not is_blocked_between(user, other)
     return other.id not in blocked
 
 
@@ -2628,10 +2642,17 @@ class ConversationLeaveView(APIView):
     ``left_at``, then re-runs ``promote_participants`` so anyone still
     pending gets re-checked against the (now smaller) active clique. 404 if
     the caller has no non-left participant row for this conversation —
-    a chat you're not in shouldn't even reveal it exists.
+    a chat you're not in shouldn't even reveal it exists — and 404 for a
+    thread ``_thread_for_viewer`` hides, since mutating participant state on a
+    thread a block has taken away is the same hole the read-marker and mute
+    routes had. In practice that gate only bites on a **direct** thread
+    (``_conversation_visible`` passes every group), and whether leaving a 1:1
+    should be possible *at all* is the separate open question in issue #210 —
+    this only makes sure it can't happen on a thread you can no longer reach.
     """
 
     def post(self, request, pk):
+        _convo, _my_status = _thread_for_viewer(pk, request.user)
         p = get_object_or_404(
             Participant, conversation_id=pk, user=request.user, left_at__isnull=True
         )
@@ -2674,7 +2695,8 @@ class ConversationDetailView(generics.RetrieveAPIView):
     Drives the thread page's header so it's correct even on a cold page
     load/refresh, not only when arriving from the list. Participant-scoped —
     404 if you're not a member at all, or (direct only) if the pair is blocked
-    either way.
+    either way **or the other account is deactivated**; both halves come from
+    ``_conversation_visible``, so this can't drift from what the list shows.
 
     It's also where **read receipts** live (Phase 9b M4): each participant's
     read marker rides on the ``participants`` list here and nowhere else, so the
@@ -2732,14 +2754,13 @@ class ConversationDetailView(generics.RetrieveAPIView):
         if convo.my_status is None:
             raise NotFound()
         attach_read_receipts(convo, user)
+        if not _conversation_visible(convo, user):
+            raise NotFound()
         if convo.kind == Conversation.Kind.DIRECT:
-            other = convo.other_participant(user)
-            if is_blocked_between(user, other):
-                raise NotFound()
             # Whether new messages are still allowed (drives the composer).
             # History stays readable after a disconnect even when this is
             # False.
-            convo._can_message = can_message(user, other)
+            convo._can_message = can_message(user, convo.other_participant(user))
         else:
             # A pending group member can read the locked panel but not send.
             convo._can_message = convo.my_status == ACTIVE_P
@@ -2795,19 +2816,25 @@ def _message_id_param(raw, field):
 def _thread_for_viewer(pk, user):
     """Resolve a conversation the viewer may *reach*, as ``(convo, my_status)``.
 
-    404 for a thread they're not in, and 404 for a blocked direct pair — a block
-    hides the thread from both sides entirely. This is the gate every per-message
-    route starts from, so that probing a message id can never reveal anything
-    about a conversation you have no business seeing.
+    404 for a thread they're not in, and 404 for a direct thread
+    ``_conversation_visible`` hides — a block, or the other account going
+    inactive, takes the thread away from both sides entirely. This is the gate
+    every per-thread route starts from, so that probing a conversation or
+    message id can never reveal anything about a thread you have no business
+    seeing.
+
+    ``_viewer_conversation_or_404`` is deliberately **not** that gate: it
+    answers membership only, and reaching for it instead of this is what left
+    the read-marker and mute routes writable on a thread the block had already
+    taken away. Call this one unless you specifically want membership without
+    visibility.
     """
     convo = _viewer_conversation_or_404(pk, user)
     my_status = _viewer_participant_status(convo, user)
     if my_status is None:
         raise NotFound()
-    if convo.kind == Conversation.Kind.DIRECT:
-        other = convo.other_participant(user)
-        if is_blocked_between(user, other):
-            raise NotFound()
+    if not _conversation_visible(convo, user):
+        raise NotFound()
     return convo, my_status
 
 
@@ -2834,7 +2861,9 @@ class ConversationMessagesView(generics.ListAPIView):
     ``/conversations/<pk>/messages/``.
 
     You must be a participant, else 404 (we don't reveal a thread you're not
-    in). A blocked direct pair can't see the thread at all (404). A pending
+    in). A direct thread that ``_conversation_visible`` hides — a blocked pair,
+    or the other account deactivated — can't be seen at all (404), the same
+    rule the list applies. A pending
     group member sees the thread exists (via the detail view) but can't read
     or send here — 403 — until they're promoted to active. GET returns
     messages oldest-first, paginated, clipped to your access interval(s) for a
@@ -3039,16 +3068,26 @@ class ConversationReadView(APIView):
     clears your unread count; ``DELETE`` marks it **unread** again (Phase 9b
     M6).
 
-    Participant-only (404 otherwise) — resolved via
-    ``_viewer_conversation_or_404`` so this works for a group chat member (any
-    non-left status) too, not just a legacy direct pair; a pending member
-    marking read is harmless (they can't see any messages yet anyway, since
-    ``visible_messages_for`` clips to their intervals).
+    Participant-only (404 otherwise) — resolved via ``_thread_for_viewer`` so
+    this works for a group chat member (any non-left status) too, not just a
+    legacy direct pair; a pending member marking read is harmless (they can't
+    see any messages yet anyway, since ``visible_messages_for`` clips to their
+    intervals).
+
+    **It resolves through the same gate the reads do.** It used to take the
+    membership-only route, so after a block the thread 404'd on the list, the
+    detail and ``/messages/`` while these two still answered: ``DELETE``
+    returned a live unread count computed off the hidden thread — a yes/no
+    oracle for "does the person who blocked me still have an undeleted message
+    waiting for me" — and ``POST`` wrote a ``ConversationRead`` row, which *is*
+    the read receipt the other side sees, so a blocked party could still move a
+    tick that surfaces to them the moment the block is lifted. A block is the
+    safety feature; it can't be the one gate a write path skips.
     """
 
     def post(self, request, pk):
         user = request.user
-        convo = _viewer_conversation_or_404(pk, user)
+        convo, _my_status = _thread_for_viewer(pk, user)
         ConversationRead.objects.update_or_create(
             conversation=convo,
             user=user,
@@ -3100,7 +3139,7 @@ class ConversationReadView(APIView):
         case; saying so plainly beats a 200 that visibly does nothing.
         """
         user = request.user
-        convo = _viewer_conversation_or_404(pk, user)
+        convo, _my_status = _thread_for_viewer(pk, user)
         target = (
             _messages_for_viewer(convo, user)
             .filter(deleted_at__isnull=True)
@@ -3135,15 +3174,18 @@ class ConversationMuteView(APIView):
     the deliberate scope rather than hiding the thread.
 
     Member-only (404 otherwise, like every other conversation endpoint — a
-    thread you're not in doesn't reveal it exists). A ``pending`` member may mute
-    too: they'll be promoted eventually, and pre-emptively silencing a chat you
-    were dragged into is a reasonable thing to want. 404 for a legacy
-    Participant-less direct thread, which has no row to hold the flag; those
-    can't generate message pushes either, so they're already silent.
+    thread you're not in doesn't reveal it exists), and resolved through
+    ``_thread_for_viewer`` so a thread a block has taken away can't still be
+    muted; see ``ConversationReadView``, which skipped the same gate for the
+    same reason. A ``pending`` member may mute too: they'll be promoted
+    eventually, and pre-emptively silencing a chat you were dragged into is a
+    reasonable thing to want. 404 for a legacy Participant-less direct thread,
+    which has no row to hold the flag; those can't generate message pushes
+    either, so they're already silent.
     """
 
     def _participant(self, pk, user):
-        convo = _viewer_conversation_or_404(pk, user)
+        convo, _my_status = _thread_for_viewer(pk, user)
         participant = Participant.objects.filter(
             conversation=convo, user=user, left_at__isnull=True
         ).first()
@@ -3958,12 +4000,22 @@ def can_view_message(user, message):
     """Whether ``user`` may see ``message`` — the report gate for a message
     target, and the exact same rule the thread itself uses.
 
-    Three conditions, all reused rather than re-derived (a second copy of the
-    messaging safety gate would drift from the first):
+    Three conditions:
 
     1. They're a member of the conversation at all (``_viewer_participant_status``).
     2. For a direct thread, the pair isn't blocked either way — a blocked thread
-       404s everywhere else, so it must here too.
+       404s everywhere else, so it must here too. **This is deliberately the
+       block half of ``_conversation_visible`` and not the whole of it**: that
+       helper also hides a direct thread whose other account is *deactivated*,
+       and applying it here would take the report path away exactly when the
+       other party has been banned. Reporting is the safety valve, and the
+       reasoning below about demotion applies just as much to the other person
+       vanishing — being unable to reach the thread shouldn't disarm you.
+       The consequence is that a message in a deactivated pair's thread stays
+       reactable/reportable by id while the thread itself 404s; nothing is
+       readable that wasn't already, and neither action reaches a banned
+       account. Don't "fix" this into ``_conversation_visible`` without
+       deciding that question first.
     3. The message falls inside one of their access intervals
        (``_messages_for_viewer``). This is what stops a member who was ``pending``
        across a gap from reporting — and thereby reading back, via the admin — a

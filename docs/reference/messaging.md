@@ -1023,6 +1023,60 @@ mutateAsync`, so:
 Web renders the message inside the dialog (and beneath the button once the dialog
 is dismissed); mobile alerts over it. Same behaviour, each client's idiom.
 
+### 🔒 The block gates writes, not only reads
+
+"404s the thread" was true of the read routes and, until recently, not of two
+write ones. There are two thread resolvers in `views.py`, and only one of them
+carries the rule:
+
+- **`_viewer_conversation_or_404`** — membership only. *Are you a participant?*
+- **`_thread_for_viewer`** — membership **plus** `_conversation_visible`, which
+  is the same predicate the conversation list filters on.
+
+`POST`/`DELETE /conversations/<pk>/read/` and `POST`/`DELETE
+/conversations/<pk>/mute/` took the first, and `/leave/` took neither — it
+resolved a raw `Participant` row, which a block never touches on a direct
+thread. So after a block, the thread vanished from the blocked party's list and
+404'd on the detail and `/messages/` — while:
+
+- `DELETE .../read/` still returned `200 {"unread_count": N}`, computed from
+  `_messages_for_viewer` on the hidden thread. The 200-vs-400 split ("There's
+  nothing here to mark unread") is a yes/no oracle for *does the person who
+  blocked me still have an undeleted message waiting for me* — answerable
+  repeatedly, from a thread that officially doesn't exist.
+- `POST .../read/` still wrote `ConversationRead`, and that column **is** the
+  read receipt (`attach_read_receipts` serves the ticks from it), so a blocked
+  party could move a tick that surfaces to the blocker the moment the block is
+  lifted.
+- `/mute/` still mutated `Participant.muted_at` on it.
+- `/leave/` still closed the access interval and tombstoned the `Participant`
+  row on it. (Whether leaving a 1:1 should be possible **at all** is the
+  separate open question in [#210](https://github.com/Sam-GitHuber/TimeLine/issues/210);
+  the gate only stops it happening on a thread you can no longer reach. Note
+  the gate is a no-op for group chats, so it settles nothing about #210 either
+  way.)
+
+**Every per-thread route now resolves through `_thread_for_viewer`**, and the rule
+itself lives only in `_conversation_visible` — `_thread_for_viewer` calls it
+instead of re-deriving the block half, and `ConversationDetailView.get_object`
+no longer keeps a third copy inline. Three spellings of one sentence is how this
+drifted; a new per-thread route should reach for `_thread_for_viewer` unless it
+specifically wants membership without visibility.
+
+That unification also closes the **other** half of the same rule, which no
+per-thread route had ever applied: `_conversation_visible` hides a direct thread
+when the other account is **deactivated**, so the list dropped such a thread
+while `/messages/` would still serve the whole transcript to anyone holding the
+id. Sending was already barred (`can_message` checks `is_active`), so this half
+was disclosure rather than a write hole — but it was the same sentence, living
+in one place and not the other.
+
+The rule stays **direct-only**: a group chat has no "other party", and a block
+between two of its members must not take the chat away from everyone.
+Pinned in `BlockedThreadWriteTests` (`backend/api/tests.py`), which asserts the
+reads and the writes agree from the *blocked* party's side, and that a group
+chat is untouched.
+
 ## API
 
 Direct and group chats share the endpoints:
