@@ -240,22 +240,22 @@ export default function EventPage() {
               <p className="mb-2 text-sm font-semibold text-ink">
                 {EDITOR_TITLE[editing.dimension]?.[editing.mode]}
               </p>
+              {/* Handed down as `mutateAsync` so the editor can report its own
+                  rejection. This page used to render it — but only inside this
+                  `{editing && …}` block, and the tally's Set/Pin finalises with
+                  the editor *closed*, so on that path the paragraph wasn't
+                  mounted and the failure had nowhere to appear (#237). Each
+                  caller now says it beside the button that was pressed. */}
               <DimensionEditor
                 dimension={editing.dimension}
                 mode={editing.mode}
                 busy={busy}
-                onSet={(dimension, value) => finalise.mutate({ dimension, value })}
-                onPoll={(body) => createPoll.mutate(body)}
+                onSet={(dimension, value) =>
+                  finalise.mutateAsync({ dimension, value })
+                }
+                onPoll={(body) => createPoll.mutateAsync(body)}
                 onCancel={() => setEditing(null)}
               />
-              {(finalise.isError || createPoll.isError) && (
-                <p role="alert" className="mt-2 text-sm text-red-600">
-                  {serverMessage(
-                    finalise.error || createPoll.error,
-                    "That didn't work — try again."
-                  )}
-                </p>
-              )}
             </div>
           )}
 
@@ -283,11 +283,16 @@ export default function EventPage() {
                 onVote={(optionIds) =>
                   vote.mutateAsync({ pollId: poll.id, optionIds })
                 }
-                onFinalise={(dimension, opts) => finalise.mutate({ dimension, ...opts })}
+                // All `mutateAsync`, for the reason `onVote` and `onEdit` already
+                // were: the tally is where these were pressed, so it's where the
+                // rejection has to be said (#237).
+                onFinalise={(dimension, opts) =>
+                  finalise.mutateAsync({ dimension, ...opts })
+                }
                 onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, ...payload })}
-                onClose={() => closePoll.mutate(poll.id)}
-                onReopen={() => reopenPoll.mutate(poll.id)}
-                onDelete={() => deletePoll.mutate(poll.id)}
+                onClose={() => closePoll.mutateAsync(poll.id)}
+                onReopen={() => reopenPoll.mutateAsync(poll.id)}
+                onDelete={() => deletePoll.mutateAsync(poll.id)}
               />
             </div>
           ))}
@@ -365,6 +370,28 @@ export default function EventPage() {
           >
             Delete
           </button>
+          {/* Both writes only repaint anything from `onSuccess`, so a rejection
+              used to leave the page exactly as it was — and a cancel that
+              failed is pixel-identical to one that worked, right down to the
+              confirm that promised the RSVPs would be told (#237). Each states
+              its own failure: knowing *which* of the two didn't happen is most
+              of the value. */}
+          {cancel.isError && (
+            <p role="alert" className="w-full text-sm text-red-600">
+              {serverMessage(
+                cancel.error,
+                "Couldn't cancel the event — try again."
+              )}
+            </p>
+          )}
+          {remove.isError && (
+            <p role="alert" className="w-full text-sm text-red-600">
+              {serverMessage(
+                remove.error,
+                "Couldn't delete the event — try again."
+              )}
+            </p>
+          )}
         </section>
       )}
     </div>

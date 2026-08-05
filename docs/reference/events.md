@@ -415,6 +415,43 @@ The gate needs a *present* organiser. Two paths:
   network failure as an `ApiError` carrying `status: 0` — a status check stopped
   separating anything the moment offline had one. Mobile still sniffs an
   `ApiError` instance, and has the same unguarded `fetch` the web did (#243).
+- **Every organiser write on this page reports its own rejection, beside the
+  control that was pressed** (#237). The two bullets above gave the RSVP and the
+  vote a rejection path as each was reported; the organiser's other five —
+  `closePoll`, `reopenPoll`, `deletePoll`, `cancel` and `remove` — still had
+  `onSuccess: invalidate` and nothing else, on both clients. `onSuccess` is the
+  only place anything repaints, so a rejection left the page byte-identical to a
+  success. **Cancel is the one that matters**: you confirm a dialog that promises
+  the people who RSVP'd will be told, the request 403s, and the event never gets
+  its Cancelled tag, no `event_cancelled` notification goes out, and nothing says
+  so — you find out when they turn up. A refused **close** is the same shape with
+  a slower fuse: the poll stays painted open and votes keep arriving into one you
+  believe you froze. Where the message goes follows
+  [connections.md](connections.md#reporting-a-refused-write): the server's own
+  words when it wrote any, a **per-state** fallback of ours otherwise ("Couldn't
+  close the poll", not "something went wrong" — *which* of the organiser's six
+  actions didn't happen is most of the value). Mobile alerts, since an `Alert`
+  outlives whatever is on screen; the web renders inline.
+  - **Which component owns the message is the load-bearing part.** On the web
+    every renderer now sits in the component that owns the button, which is what
+    closed a hole the same issue found: `finalise`'s error paragraph lived inside
+    `EventPage`'s `{editing && …}` block, but `PollTally`'s per-option **Set/Pin**
+    finalises with the editor *closed*, so on that path the renderer wasn't
+    mounted and the rejection had nowhere to appear at all. So `PollTally` owns
+    the lifecycle actions and Set/Pin (the same `mutateAsync` handoff it already
+    had for `onVote`/`onEdit`, kept in a **separate** state from `voteError` —
+    that one is retired by a resync, and a refetch triggered by some *other*
+    write is no answer to "did my Remove poll go through?"), `DimensionEditor`
+    owns Set and Open poll, and only `cancel`/`remove` — whose buttons are on the
+    page — are rendered by the page. `DimensionEditor`'s Cancel is disabled while
+    its write is in flight for the other half of the same rule: it is now the
+    only renderer of that message, so it may not be dismissed before the message
+    arrives. Mobile needed none of this restructuring — an `Alert` isn't part of
+    the tree that raised it, which is the same property that makes it the phone's
+    answer to #261.
+  - The **free-value box** beside a poll keeps what you typed when the finalise
+    is refused, rather than clearing it as it does on success. A rejection that
+    also wipes the value means the retry is "type it again".
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).

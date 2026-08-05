@@ -29,7 +29,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError } from '@/api';
+import { api, ApiError, serverMessage } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
 import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
@@ -42,6 +42,15 @@ import { formatEventWhen } from '@/eventFormat';
 import { dismissEventNotifications } from '@/push';
 import { useAndroidBack } from '@/useAndroidBack';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
+
+/**
+ * The body of an organiser-write alert when the server wrote nothing readable —
+ * offline, or a 5xx with no DRF detail. The *title* carries which action failed
+ * ("Couldn't cancel the event"), which is the part that matters, so the body
+ * only has to say it's worth retrying. `serverMessage` prefers the server's own
+ * sentence over this whenever there is one.
+ */
+const WENT_WRONG = 'Something went wrong — try again in a moment.';
 
 type PollDimension = 'date' | 'time' | 'location' | 'custom';
 /** Which chip's editor is open, and whether it's setting a value or opening a poll. */
@@ -142,8 +151,7 @@ export default function EventScreen() {
       setEditing(null);
       invalidate();
     },
-    onError: (err) =>
-      Alert.alert('Couldn’t save', err instanceof Error ? err.message : 'Something went wrong.'),
+    onError: (err) => Alert.alert('Couldn’t save', serverMessage(err, WENT_WRONG)),
   });
   // Open a poll on a dimension (organiser). Closes the editor on success.
   const openPoll = useMutation({
@@ -152,8 +160,7 @@ export default function EventScreen() {
       setEditing(null);
       invalidate();
     },
-    onError: (err) =>
-      Alert.alert('Couldn’t open the poll', err instanceof Error ? err.message : 'Something went wrong.'),
+    onError: (err) => Alert.alert('Couldn’t open the poll', serverMessage(err, WENT_WRONG)),
   });
   // Poll lifecycle. Edit is `mutateAsync` so the edit form can await + surface a
   // 409 (voting has started) in place, matching the web.
@@ -162,9 +169,27 @@ export default function EventScreen() {
       api.editPoll(pollId, payload),
     onSuccess: invalidate,
   });
-  const closePoll = useMutation({ mutationFn: (pollId: number) => api.closePoll(pollId), onSuccess: invalidate });
-  const reopenPoll = useMutation({ mutationFn: (pollId: number) => api.reopenPoll(pollId), onSuccess: invalidate });
-  const deletePoll = useMutation({ mutationFn: (pollId: number) => api.deletePoll(pollId), onSuccess: invalidate });
+  // The rest of the lifecycle. `onSuccess` is the only place the invalidation
+  // runs, so before #237 a rejection repainted nothing at all: a close that 404'd
+  // (another admin had removed the poll) left it on screen still open, and votes
+  // went on arriving into a poll the organiser believed was frozen. The alert
+  // says which of the three didn't happen — the fallback is per action, not a
+  // house "something went wrong" (connections.md, "Reporting a refused write").
+  const closePoll = useMutation({
+    mutationFn: (pollId: number) => api.closePoll(pollId),
+    onSuccess: invalidate,
+    onError: (err) => Alert.alert('Couldn’t close the poll', serverMessage(err, WENT_WRONG)),
+  });
+  const reopenPoll = useMutation({
+    mutationFn: (pollId: number) => api.reopenPoll(pollId),
+    onSuccess: invalidate,
+    onError: (err) => Alert.alert('Couldn’t re-open the poll', serverMessage(err, WENT_WRONG)),
+  });
+  const deletePoll = useMutation({
+    mutationFn: (pollId: number) => api.deletePoll(pollId),
+    onSuccess: invalidate,
+    onError: (err) => Alert.alert('Couldn’t remove the poll', serverMessage(err, WENT_WRONG)),
+  });
   // `finalise` is in here too: the tally's per-option Set/Pin is a finalise, so it
   // must disable while one is in flight — otherwise a double-tap fires it twice.
   const pollBusy =
@@ -174,9 +199,14 @@ export default function EventScreen() {
     closePoll.isPending ||
     reopenPoll.isPending ||
     deletePoll.isPending;
+  // Cancel is the one that lies hardest: nothing on this screen moves until the
+  // write lands, so a cancel that failed looked exactly like one that worked —
+  // right down to the confirm that promised everyone who RSVP'd would be told.
+  // Nobody is notified and the organiser has no reason to doubt it (#237).
   const cancel = useMutation({
     mutationFn: () => api.cancelEvent(id),
     onSuccess: invalidate,
+    onError: (err) => Alert.alert('Couldn’t cancel the event', serverMessage(err, WENT_WRONG)),
   });
   const remove = useMutation({
     mutationFn: () => api.deleteEvent(id),
@@ -184,6 +214,10 @@ export default function EventScreen() {
       invalidate();
       goBack();
     },
+    // A failed delete never runs `goBack`, so you stay on the event you thought
+    // you'd deleted — indistinguishable from a slow request, and the natural
+    // response is to press it again.
+    onError: (err) => Alert.alert('Couldn’t delete the event', serverMessage(err, WENT_WRONG)),
   });
 
   function confirmCancel() {

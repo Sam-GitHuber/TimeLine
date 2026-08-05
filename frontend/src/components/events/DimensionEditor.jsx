@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import PollOptionFields from "./PollOptionFields.jsx";
 import { blankOption, optionValuePayload, OPTION_NOUN } from "./pollOptions.js";
+import { serverMessage } from "../../errors.js";
 
 // The one contextual editor that opens beneath the chip row when the organiser
 // clicks Set or Poll on a chip. It already knows *which* dimension — the chip
@@ -10,13 +11,51 @@ import { blankOption, optionValuePayload, OPTION_NOUN } from "./pollOptions.js";
 const SET_VERB = { date: "Set the date", time: "Set the time", location: "Set the place" };
 const PLACEHOLDER = { location: "e.g. The Oakhouse" };
 
+// `onSet` and `onPoll` return a promise (`EventPage` hands them down as
+// `mutateAsync`), and its rejection is reported here rather than by the page:
+// the editor is the only thing on screen that knows a Set or an Open poll was
+// pressed, and the page's paragraph only rendered while the editor was open —
+// which the tally's Set/Pin isn't (#237). Cancel is disabled while the write is
+// out for the other half of the same rule: this is the only renderer of that
+// message, so it may not be dismissed before the message arrives
+// (connections.md, "Reporting a refused write").
 export default function DimensionEditor({ dimension, mode, onSet, onPoll, onCancel, busy }) {
+  const [error, setError] = useState(null);
+
+  async function run(action, fallback) {
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      setError(serverMessage(err, fallback));
+    }
+  }
+
   return (
     <div className="ev-editor">
       {mode === "set" ? (
-        <SetField dimension={dimension} onSet={onSet} onCancel={onCancel} busy={busy} />
+        <SetField
+          dimension={dimension}
+          onSet={(d, value) =>
+            run(() => onSet(d, value), "That didn't work — try again.")
+          }
+          onCancel={onCancel}
+          busy={busy}
+        />
       ) : (
-        <PollBuilder dimension={dimension} onPoll={onPoll} onCancel={onCancel} busy={busy} />
+        <PollBuilder
+          dimension={dimension}
+          onPoll={(body) =>
+            run(() => onPoll(body), "Couldn't open the poll — try again.")
+          }
+          onCancel={onCancel}
+          busy={busy}
+        />
+      )}
+      {error && (
+        <p role="alert" className="mt-2 text-sm text-red-600">
+          {error}
+        </p>
       )}
     </div>
   );
@@ -60,7 +99,12 @@ function TextSetField({ dimension, onSet, onCancel, busy }) {
       <button type="submit" disabled={busy || !value.trim()} className="btn btn-primary btn-sm">
         {SET_VERB[dimension]}
       </button>
-      <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onCancel}
+        className="btn btn-ghost btn-sm"
+      >
         Cancel
       </button>
     </form>
@@ -147,7 +191,12 @@ function DateSetField({ onSet, onCancel, busy }) {
       <button type="submit" disabled={busy || !valid} className="btn btn-primary btn-sm">
         Set the date
       </button>
-      <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onCancel}
+        className="btn btn-ghost btn-sm"
+      >
         Cancel
       </button>
     </form>
@@ -222,7 +271,12 @@ function TimeSetField({ onSet, onCancel, busy }) {
       <button type="submit" disabled={busy || !valid} className="btn btn-primary btn-sm">
         Set the time
       </button>
-      <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onCancel}
+        className="btn btn-ghost btn-sm"
+      >
         Cancel
       </button>
     </form>
@@ -282,7 +336,12 @@ function PollBuilder({ dimension, onPoll, onCancel, busy }) {
         <button type="submit" disabled={!canOpen || busy} className="btn btn-primary btn-sm">
           Open poll
         </button>
-        <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onCancel}
+          className="btn btn-ghost btn-sm"
+        >
           Cancel
         </button>
       </div>

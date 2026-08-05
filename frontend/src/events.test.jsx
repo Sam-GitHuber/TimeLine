@@ -632,6 +632,155 @@ describe("EventPage", () => {
   });
 });
 
+// Issue #237. `onSuccess` is the only place these writes repaint anything, so a
+// rejection left the page byte-identical to a success — and on the organiser's
+// controls that's the difference between "everyone was told the picnic is off"
+// and nobody being told. Each of the five now reports where it was pressed,
+// following `connections.md#reporting-a-refused-write`: the server's own words
+// when it wrote any, our per-state fallback otherwise.
+describe("EventPage — a refused organiser write says so", () => {
+  it("states a refused cancel, in the server's own words", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.cancelEvent.mockRejectedValueOnce(
+      apiError("You can no longer manage this event.", 403)
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel event" }));
+    confirm.mockRestore();
+
+    await waitFor(() => expect(api.cancelEvent).toHaveBeenCalledWith(7));
+    expect(
+      await screen.findByText("You can no longer manage this event.")
+    ).toBeInTheDocument();
+    // Nothing else moved — no "Cancelled" tag — which is precisely why the
+    // message has to exist: there is no other tell.
+    expect(screen.queryByText("Cancelled")).not.toBeInTheDocument();
+  });
+
+  it("states a refused delete, and leaves you on the event", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    // Offline is the likeliest way any write fails, and since #240 it arrives
+    // carrying our own sentence rather than the server's — so this is the case
+    // the per-state fallback exists for.
+    api.deleteEvent.mockRejectedValueOnce(offlineError());
+    renderEventPage();
+    await screen.findByText("Picnic");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    confirm.mockRestore();
+
+    expect(
+      await screen.findByText("Couldn't delete the event — try again.")
+    ).toBeInTheDocument();
+    // `navigate` runs from `onSuccess` only, so you're still looking at the
+    // event you believe you deleted — indistinguishable from a slow request,
+    // and the natural next move is to press it again.
+    expect(screen.queryByText("group page")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["Close poll", "closePoll"],
+    ["Remove poll", "deletePoll"],
+  ])("states a refused %s on the poll it was pressed on", async (item, method) => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api[method].mockRejectedValueOnce(apiError("That poll no longer exists.", 404));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    const customPoll = screen
+      .getByRole("heading", { name: "What to bring?" })
+      .closest(".ev-tally");
+    await userEvent.click(
+      within(customPoll).getByRole("button", { name: "Poll options" })
+    );
+    await userEvent.click(screen.getByRole("menuitem", { name: item }));
+
+    await waitFor(() => expect(api[method]).toHaveBeenCalledWith(12));
+    // On that card — the ⋯ menu is part of it, and the date poll above is a
+    // different question the organiser didn't touch.
+    expect(await within(customPoll).findByRole("alert")).toHaveTextContent(
+      "That poll no longer exists."
+    );
+  });
+
+  // The path that had no renderer at all: the page's finalise paragraph lived
+  // inside `{editing && …}`, and Pin finalises with the editor closed.
+  it("states a refused Pin with no editor open", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.finaliseEvent.mockRejectedValueOnce(
+      apiError("Someone has already set that.", 409)
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+    // No editor is open — the chip row shows Set/Poll affordances, not a form.
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Pin" })[0]);
+
+    await waitFor(() => expect(api.finaliseEvent).toHaveBeenCalled());
+    expect(
+      await screen.findByText("Someone has already set that.")
+    ).toBeInTheDocument();
+  });
+
+  // The other half of the same rule: the editor is now the only renderer of its
+  // own rejection, so it may not be dismissed while that write is in flight.
+  it("holds the editor's Cancel while its Set is in flight, then states the failure", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    let rejectSet;
+    api.finaliseEvent.mockImplementationOnce(
+      () => new Promise((_, reject) => (rejectSet = reject))
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    // The first unset chip is Time; open its editor and set a value.
+    await userEvent.click(screen.getAllByRole("button", { name: "Set" })[0]);
+    await userEvent.type(await screen.findByLabelText("Hour"), "10");
+    await userEvent.type(screen.getByLabelText("Minute"), "00");
+    await userEvent.click(screen.getByRole("button", { name: "Set the time" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled()
+    );
+
+    rejectSet(apiError("That time has already passed.", 400));
+    expect(
+      await screen.findByText("That time has already passed.")
+    ).toBeInTheDocument();
+    // Still open, so the message is still there to read.
+    expect(screen.getByRole("button", { name: "Set the time" })).toBeInTheDocument();
+  });
+
+  // The free-value box beside a poll: a rejection that also wiped what you typed
+  // would make the retry mean typing it again.
+  it("keeps a typed free value when finalising it is refused", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.finaliseEvent.mockRejectedValueOnce(offlineError());
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    // The date poll's card carries the free-value form (custom polls don't).
+    const datePoll = screen
+      .getByRole("heading", { name: "Which date works?" })
+      .closest(".ev-tally");
+    const field = within(datePoll).getByLabelText("Set the date");
+    await userEvent.type(field, "2026-08-01");
+    await userEvent.click(
+      within(datePoll).getByRole("button", { name: "Set the date" })
+    );
+
+    expect(
+      await within(datePoll).findByText("Couldn't set the date — try again.")
+    ).toBeInTheDocument();
+    expect(field).toHaveValue("2026-08-01");
+  });
+});
+
 // An event is authored content, so it carries the same pair a post does. The
 // visibility rules are the server's (and tested there); what matters here is
 // that the thread and the chips are wired to the *event*, not to a post.
