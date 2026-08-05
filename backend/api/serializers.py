@@ -1212,6 +1212,11 @@ class NotificationSerializer(serializers.ModelSerializer):
             return f"{name} cancelled {title}"
         if obj.kind == K.EVENT_COMMENT:
             return f"{name} commented on {title}"
+        # No count, deliberately: this kind de-dupes while unread, so a second
+        # batch refreshes the same row and any number baked into the text would
+        # be the first batch's — stale on the line it's sitting on.
+        if obj.kind == K.EVENT_PHOTOS:
+            return f"{name} added photos to {title}"
         return f"{name} did something"
 
     def get_target(self, obj):
@@ -1441,8 +1446,46 @@ def build_rsvp_summary(event, *, visible_ids, me_id, request, named=True):
     return out
 
 
+def serialize_event_photo(photo, *, viewer, request, organiser_id,
+                          is_group_admin=False):
+    """One photo in an event's album.
+
+    Shaped like a ``PostImage`` in the post serializer (``id``/``image``/
+    ``thumbnail``/``width``/``height``) so both clients' existing photo grid and
+    lightbox render it with no branch, plus the two things a post's images don't
+    need: the **uploader** (an album has many authors, and the viewer is shown
+    whose photo they're looking at) and **``can_delete``**.
+
+    ``can_delete`` is computed here rather than left to the client to infer
+    because the rule has three limbs — you took it, you organised the event, or
+    you run the group — and only the first is derivable from the payload. It is
+    a hint for drawing the affordance; ``EventPhotoDetailView`` re-checks all
+    three and is the authority.
+
+    ``organiser_id`` is passed in rather than read off ``photo.event`` on
+    purpose: the preview path hands us photos fetched for a whole *page* of
+    events, where reaching through the FK would be one query per photo for a
+    value the caller already has in hand.
+    """
+    return {
+        "id": photo.id,
+        "image": absolute_media_url(photo.image, request),
+        "thumbnail": absolute_media_url(photo.thumbnail, request),
+        "width": photo.width,
+        "height": photo.height,
+        "uploader": _author_dict(photo.uploader, request),
+        "created_at": photo.created_at,
+        "can_delete": (
+            photo.uploader_id == viewer.id
+            or organiser_id == viewer.id
+            or is_group_admin
+        ),
+    }
+
+
 def serialize_event(event, *, viewer, visible_ids, request,
-                    is_group_admin=False, detail=True, comment_counts=None):
+                    is_group_admin=False, detail=True, comment_counts=None,
+                    photos=None):
     """The full event payload — scalar fields, dimension states, RSVP summary,
     and (in ``detail``) the polls.
 
@@ -1462,6 +1505,12 @@ def serialize_event(event, *, viewer, visible_ids, request,
     renders an event has to pass them; the alternative (omitting the keys
     entirely) would make both clients branch on their presence to avoid
     rendering "0 comments" on a payload that simply didn't ask.
+
+    ``photos`` is the ``{"photos", "count"}`` entry from ``event_photo_previews``
+    for this event, on exactly the same terms and for exactly the same reason —
+    it is a *per-page* query, absent means an empty album, and an empty album is
+    indistinguishable from one nobody has added to. Both are already pruned to
+    the viewer's connections by the helper, so nothing here re-filters them.
     """
     me_id = viewer.id
     can_manage = event.organiser_id == me_id
@@ -1504,6 +1553,18 @@ def serialize_event(event, *, viewer, visible_ids, request,
         ),
         "comment_count": (comment_counts or {}).get("total", 0),
         "new_comment_count": (comment_counts or {}).get("new", 0),
+        # The album's first few photos and its (pruned) size, so a card can
+        # render the grid without a request per event. ``photo_count`` is what
+        # the clients' "+N" overlay counts against — it can exceed what's in
+        # ``photos``, which is the whole reason it's a separate number.
+        "photos": [
+            serialize_event_photo(
+                p, viewer=viewer, request=request,
+                organiser_id=event.organiser_id, is_group_admin=is_group_admin,
+            )
+            for p in (photos or {}).get("photos", [])
+        ],
+        "photo_count": (photos or {}).get("count", 0),
         # Polls are included even in list/summary payloads — the dimension chips
         # need each poll's option tallies (a "polling" chip shows the live count)
         # and the custom-poll chips. Voter names ride along already connection-

@@ -248,8 +248,8 @@ the only explanation either gets.
 ### Taking a photo: camera or library
 
 Every place that adds a photo — a post, a chat message, a profile or group
-avatar — asks **"Take Photo / Choose from Library"** first, through the shared
-`src/photoSource.tsx`. Only chat had the camera when photos first shipped
+avatar, an [event's album](events.md) — asks **"Take Photo / Choose from
+Library"** first, through the shared `src/photoSource.tsx`. Only chat had the camera when photos first shipped
 (Phase 9b M7); the rest opened the camera roll and nothing else, which on a phone
 is the wrong default — "add a photo" to what you're writing about *right now*
 very often means the thing in front of you, and a trip out to the camera app and
@@ -295,9 +295,10 @@ Four things in it are worth knowing before touching it:
   nothing.
 
 Multi-select is a library-only option (`allowsMultipleSelection`,
-`selectionLimit`): the camera returns one shot. The post composer is the only
-caller that asks for several at once, and the only one that picks at less than
-full quality (0.9) — its photos go up as picked, while chat photos and avatars
+`selectionLimit`): the camera returns one shot. The post composer and the
+[event album](events.md) are the two callers that ask for several at once, and
+the two that pick at less than full quality (0.9) — their photos go up as
+picked, so that's the one compression they get, while chat photos and avatars
 are re-encoded on the phone afterwards and would only lose detail twice.
 
 In tests, the press that opens the sheet **must not be awaited** — `pickPhotos`

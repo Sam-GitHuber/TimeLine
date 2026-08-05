@@ -63,6 +63,16 @@
 //   comment tree is pruned to the same boundary, so blocking someone from the
 //   post you're reading (the avatar on `PostCard` is the way there) leaves the
 //   page underneath rendering a post and a thread the server would now refuse.
+// - **`["event"]` / `["eventPhotos"]`** — one event, and its album. The album
+//   prunes on the uploader (`uploader_id__in=visible_reactor_ids(user)`,
+//   events.md decision 6), exactly as a comment tree prunes on its author, so
+//   accepting or removing a connection changes which photos it may show *and*
+//   the count above them. `["event", id]` is here for the same reason one step
+//   removed: the event payload carries the album's preview tiles and
+//   `photo_count`, so the card and the page both state the old answer until
+//   something refetches. That half predates the album — the event's reactions
+//   and comment count were already gated — but nothing read the payload's
+//   photos then, so nobody noticed.
 // - **`["personalCalendar"]` / `["groupEvents"]` / `["groupCalendar"]`** — the
 //   half of #288 that came from #285. All three gate their organisers on
 //   `connected_user_ids` exactly as `feed_posts` does (`PersonalCalendarView`,
@@ -114,6 +124,8 @@ export function invalidateConnectionChange(queryClient, userId) {
     ["personalCalendar"],
     ["groupEvents"],
     ["groupCalendar"],
+    ["event"],
+    ["eventPhotos"],
     // Shared group chats promote/sever with the connection
     ["conversations"],
     ["conversation"],

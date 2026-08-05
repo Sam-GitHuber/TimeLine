@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Avatar from "./components/Avatar.jsx";
+import PhotoGrid from "./components/PhotoGrid.jsx";
 import PostCard from "./components/PostCard.jsx";
 import ComposeBox from "./components/ComposeBox.jsx";
 import ProfileEditForm from "./components/ProfileEditForm.jsx";
@@ -92,6 +93,29 @@ describe("PostCard photo gallery", () => {
       screen.getByRole("button", { name: "View photo 1 of 2" })
     ).toBeInTheDocument();
   });
+
+  it("still opens the viewer from a '+N' when the caller gives it nowhere to go", async () => {
+    // The event album's "+N" is a link to the event page, because the album is
+    // paginated and a card holds four of it. That's an opt-in
+    // (`overflowTo`/`overflowLabel`): a set with nowhere else to navigate to —
+    // a post's images — keeps the "+N" opening the viewer at that tile, which
+    // is right for a bounded set, and which `PostCard` gets by passing nothing.
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    const images = [1, 2, 3, 4].map((n) => ({
+      id: n,
+      image: `http://x/full${n}.jpg`,
+      thumbnail: `http://x/thumb${n}.jpg`,
+      width: 100,
+      height: 100,
+    }));
+    renderWithAuth(
+      <PhotoGrid images={images} max={4} total={9} onOpen={onOpen} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "View all 9 photos" }));
+    expect(onOpen).toHaveBeenCalledWith(3);
+  });
 });
 
 describe("Lightbox", () => {
@@ -132,6 +156,32 @@ describe("Lightbox", () => {
 
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps Escape to itself, so the drawer it opened from stays open", async () => {
+    // The viewer opens from inside the messages drawer, and the drawer closes
+    // on Escape too — both listening on `document`, so one press used to shut
+    // the photo *and* the panel behind it. The viewer takes the press in the
+    // capture phase and stops it there (`components/modalLayer.js`); this is a
+    // stand-in for the drawer's bubble-phase listener.
+    const user = userEvent.setup();
+    const behind = vi.fn();
+    document.addEventListener("keydown", behind);
+    try {
+      renderWithAuth(<PostCard post={galleryPost(2)} />);
+      // With nothing open the press reaches it as normal — the shared listener
+      // exists only while a layer does.
+      await user.keyboard("{Escape}");
+      expect(behind).toHaveBeenCalledTimes(1);
+
+      await user.click(screen.getByRole("button", { name: "View photo 1 of 2" }));
+      await user.keyboard("{Escape}");
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(behind).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("keydown", behind);
+    }
   });
 
   it("closes on a click of the backdrop", async () => {

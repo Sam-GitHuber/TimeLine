@@ -36,9 +36,12 @@
  */
 
 import { router } from 'expo-router';
+import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '../Avatar';
+import { PhotoGrid } from '../PhotoGrid';
+import { PhotoLightbox } from '../PhotoLightbox';
 import { ReactionBar } from '../ReactionBar';
 import { SPINE_COLUMN, Spine } from '../timeline';
 import { DimensionChips } from './DimensionChips';
@@ -64,6 +67,17 @@ export function EventTimelineEntry({
   const cancelled = event.status === 'cancelled';
   const going = event.rsvp?.counts?.going ?? 0;
   const maybe = event.rsvp?.counts?.maybe ?? 0;
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+
+  // **The grid here is a preview, and the viewer it opens holds exactly the
+  // preview.** The album is paginated and can hold up to 200 photos; this card
+  // was handed the first four on the event payload. An earlier version fetched
+  // the album when the viewer opened, which sounds better and wasn't: one
+  // un-paginated page is 20 photos, so a "+N" counted off `photo_count` opened a
+  // viewer that stopped at 20 and read "4 / 20" on an album of forty-seven. The
+  // whole album lives on the event screen, which is paginated properly, so
+  // that's where the "+N" goes.
+  const previews = event.photos ?? [];
 
   const open = () => router.push(`/events/${event.id}`);
   const openOrganiser = () => router.push(`/u/${event.organiser.id}`);
@@ -141,6 +155,41 @@ export function EventTimelineEntry({
                 </Text>
               )}
         </Pressable>
+
+        {/* The album's first few, in the same two-column grid a post's photos
+            use — an event entry reads as part of the one line, so its photos
+            look like the line's photos. Drawn on a past recap as much as on a
+            future entry: "before, during and after" is the point, and the recap
+            is where the after lands.
+
+            Outside the Pressable above, like the reaction row below it and for
+            the same reason: nesting makes "did I open the event or the photo?"
+            a matter of touch-responder luck. */}
+        <PhotoGrid
+          images={previews}
+          total={event.photo_count}
+          max={4}
+          label="event photo"
+          onOpen={setLightboxIndex}
+          // The "+N" tile opens the event, not the viewer. **Don't "fix" this
+          // back into a lightbox**: the album beyond these tiles isn't here to
+          // be shown, and a viewer that can't reach it would be back to
+          // counting photos it hasn't got. The photo under the overlay is still
+          // reachable — swipe to it from the tile beside it.
+          onOverflow={open}
+          overflowLabel={`See all ${event.photo_count} photos on the event`}
+        />
+
+        {lightboxIndex !== null && previews[lightboxIndex] ? (
+          <PhotoLightbox
+            images={previews}
+            initialIndex={lightboxIndex}
+            onClose={() => setLightboxIndex(null)}
+            captionFor={(photo) =>
+              'uploader' in photo ? photo.uploader.display_name : null
+            }
+          />
+        ) : null}
 
         {/* The same reaction row a post on this spine carries. Outside the
             Pressable above for the reason `PostCard` keeps its own outside: a tap

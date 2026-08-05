@@ -63,6 +63,10 @@ db.sqlite3-journal
 
 # User-uploaded media (post photos, avatars) — never commit real people's files.
 backend/media/
+# Scratch output from manual backend scripts (e.g. generated test JPEGs). Never
+# anything the app or the tests need — those live in fixtures or are made in a
+# tmpdir — so it's always safe to delete, and never something to commit.
+backend/_tmp_photos/
 
 # Flask stuff:
 instance/

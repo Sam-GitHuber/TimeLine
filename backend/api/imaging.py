@@ -69,6 +69,19 @@ SUPPORTED_FORMATS_HUMAN = "JPEG, PNG, WebP, GIF or HEIC"
 # a feed payload.
 MAX_IMAGES_PER_POST = 10
 
+# The same two bounds for an event's photo album (event photos), which differs
+# from a post in one way that matters here: a post is written once and closed,
+# whereas an album is added to by many people over the life of an event. So the
+# per-request cap bounds the *work* (the number of images one POST makes Pillow
+# decode, synchronously — same reasoning and same number as a post's), and a
+# second, separate cap bounds the *album*, which no per-request limit can.
+#
+# 200 is deliberately generous — a weekend away genuinely produces that many —
+# but it is not unbounded: photos land on a home PC's disk (see deploy.md) and
+# every one of them is also a row a page of events has to count.
+MAX_PHOTOS_PER_UPLOAD = 10
+MAX_PHOTOS_PER_EVENT = 200
+
 # Longest-edge caps. Originals are downscaled to keep storage sane; thumbnails
 # are what the feed/profile render so pages stay light.
 POST_IMAGE_MAX_EDGE = 2048
@@ -95,6 +108,18 @@ def post_image_upload_to(instance, filename):
 
 def post_thumb_upload_to(instance, filename):
     return _uuid_name("posts/thumbs", filename)
+
+
+# An event's album gets its own subdir rather than sharing "posts/". Nothing in
+# the app reads the path, but ops does: the media tree is what backup-restore.md
+# walks and what the Phase 11 bucket migration copies, and "which of these files
+# belong to events" should be answerable without joining the database.
+def event_photo_upload_to(instance, filename):
+    return _uuid_name("events", filename)
+
+
+def event_photo_thumb_upload_to(instance, filename):
+    return _uuid_name("events/thumbs", filename)
 
 
 def avatar_upload_to(instance, filename):

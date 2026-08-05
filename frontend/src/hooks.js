@@ -156,12 +156,20 @@ export function trimToFirstPage(data) {
 // you're looking for reads as "they aren't in your connections", which is a
 // wrong answer, not a missing one. All three call sites render it.
 //
+// `enabled` is for the one caller that wants the whole list only *sometimes*:
+// an event's album pages on scroll like any other long list, until you upload —
+// and since the album is oldest-first, what you just added is on the last page.
+// See `EventPhotos.jsx`. Passing it false leaves the query exactly as it is,
+// paging behind its Load more button.
+//
 // One place, so the next list that wants every page can't reintroduce the loop.
-export function useFetchAllPages(query) {
+export function useFetchAllPages(query, enabled = true) {
   const { hasNextPage, isFetchingNextPage, isError, fetchNextPage } = query;
   useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage && !isError) fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, isError, fetchNextPage]);
+    if (enabled && hasNextPage && !isFetchingNextPage && !isError) {
+      fetchNextPage();
+    }
+  }, [enabled, hasNextPage, isFetchingNextPage, isError, fetchNextPage]);
 }
 
 // The viewer's accepted connections, for the "pick someone you already know"

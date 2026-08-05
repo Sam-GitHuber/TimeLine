@@ -872,6 +872,28 @@ export const api = {
   // The event's RSVPs: complete counts + connection-gated named lists.
   getEventRsvps: (eventId) => request(`/api/events/${eventId}/rsvps/`),
 
+  // The event's photo album — paginated, and **pruned to the uploaders you can
+  // see** (the organiser plus your connections), like the event's comments and
+  // unlike its poll/RSVP tallies. So this is not the album's true size; see
+  // events.md. Page through it with `getPage`, as every other paged list does.
+  getEventPhotos: (eventId) => request(`/api/events/${eventId}/photos/`),
+
+  // Add photos to an event's album — any member who can see the event, before,
+  // during or after it. Always multipart; each file goes under `photos`.
+  addEventPhotos: (eventId, photos) => {
+    const form = new FormData();
+    for (const file of photos) form.append("photos", file);
+    return request(`/api/events/${eventId}/photos/`, {
+      method: "POST",
+      body: form,
+    });
+  },
+
+  // Remove one photo: the uploader, the organiser, or a group admin. The
+  // payload's `can_delete` says which of those you are; the server re-checks.
+  deleteEventPhoto: (photoId) =>
+    request(`/api/event-photos/${photoId}/`, { method: "DELETE" }),
+
   // Open a poll on a dimension (organiser). `options` is an array of
   // { label?, date_value?/time_value?/text_value? } depending on the dimension.
   createPoll: (eventId, { dimension, question, allowMultiple, closesAt, options }) =>

@@ -8,6 +8,7 @@ import CommentThread from "../components/CommentThread.jsx";
 import ReactionBar from "../components/ReactionBar.jsx";
 import DimensionChips from "../components/events/DimensionChips.jsx";
 import DimensionEditor from "../components/events/DimensionEditor.jsx";
+import EventPhotos from "../components/events/EventPhotos.jsx";
 import PollTally from "../components/events/PollTally.jsx";
 import RsvpBar from "../components/events/RsvpBar.jsx";
 import { formatEventWhen } from "../utils.js";
@@ -53,8 +54,16 @@ export default function EventPage() {
   // cancelling or deleting left it stale — a whole surface the write side had
   // never heard of, which is exactly how a key gets missed (#279). Mobile has
   // invalidated all four on every event write since it was built.
+  //
+  // The album is the fifth key, and it belongs in the same one call for the
+  // same reason: adding or removing a photo moves the grid on the event page
+  // *and* the previews + "+N" on every timeline entry and calendar card, which
+  // ride the event payload. A photo write that named only `['eventPhotos']`
+  // would leave the card beside it stating the old count — the shape of #279,
+  // one surface further out.
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["event", eventId] });
+    queryClient.invalidateQueries({ queryKey: ["eventPhotos", eventId] });
     queryClient.invalidateQueries({ queryKey: ["groupEvents", groupId] });
     queryClient.invalidateQueries({ queryKey: ["groupCalendar", groupId] });
     queryClient.invalidateQueries({ queryKey: ["personalCalendar"] });
@@ -322,6 +331,13 @@ export default function EventPage() {
           />
         </section>
       )}
+
+      {/* The album. Above the reactions and the thread because it's the thing
+          people come back to a past event for, and — unlike them — anyone who
+          can see the event may add to it, whoever organised it. Kept on a
+          cancelled event too: a day that turned into something else is still a
+          day people photographed. */}
+      <EventPhotos eventId={event.id} onChange={invalidate} />
 
       {/* Reactions and the conversation, the same pair a post carries — an
           event is authored content, and "are we still on for Saturday?" used to

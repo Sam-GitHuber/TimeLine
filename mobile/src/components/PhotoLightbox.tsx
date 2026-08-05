@@ -36,8 +36,16 @@ import {
 } from 'react-native-safe-area-context';
 
 import { AuthedImage } from './AuthedImage';
-import type { PostImage } from '@/types';
+import type { EventPhoto, PostImage } from '@/types';
 import { fontSize, radius, spacing } from '@/theme';
+
+/**
+ * What the viewer can show. A post's image and an event's album photo are the
+ * same shape as far as this screen is concerned — the album adds an uploader
+ * and a `can_delete`, which reach it through the two callbacks below rather
+ * than by this component learning what an event is.
+ */
+export type LightboxPhoto = PostImage | EventPhoto;
 
 /** Circular hit target for the close button — Apple's 44pt minimum. */
 const CLOSE_SIZE = 44;
@@ -47,10 +55,28 @@ export function PhotoLightbox({
   /** Which photo to open on — the one that was tapped. */
   initialIndex,
   onClose,
+  captionFor,
+  onDelete,
+  canDelete,
 }: {
-  images: PostImage[];
+  images: LightboxPhoto[];
   initialIndex: number;
   onClose: () => void;
+  /**
+   * A line under the photo — used by an event's album, where each photo has an
+   * author of its own (a post's images inherit the post's, already named above
+   * the grid). Given the *current* photo, so it follows the swipe.
+   */
+  captionFor?: (image: LightboxPhoto) => string | null;
+  /**
+   * Remove the photo on screen. Paired with `canDelete` rather than folded into
+   * it: an album is mixed (your photos beside other people's), so whether to
+   * *draw* the button is a question that has to be answerable without pressing
+   * it.
+   */
+  onDelete?: (image: LightboxPhoto) => void;
+  /** Whether this viewer may remove the photo on screen. */
+  canDelete?: (image: LightboxPhoto) => boolean;
 }) {
   return (
     <Modal
@@ -73,7 +99,14 @@ export function PhotoLightbox({
         the notch and the home indicator.
       */}
       <SafeAreaProvider>
-        <Pager images={images} initialIndex={initialIndex} onClose={onClose} />
+        <Pager
+          images={images}
+          initialIndex={initialIndex}
+          onClose={onClose}
+          captionFor={captionFor}
+          onDelete={onDelete}
+          canDelete={canDelete}
+        />
       </SafeAreaProvider>
     </Modal>
   );
@@ -87,16 +120,24 @@ function Pager({
   images,
   initialIndex,
   onClose,
+  captionFor,
+  onDelete,
+  canDelete,
 }: {
-  images: PostImage[];
+  images: LightboxPhoto[];
   initialIndex: number;
   onClose: () => void;
+  captionFor?: (image: LightboxPhoto) => string | null;
+  onDelete?: (image: LightboxPhoto) => void;
+  canDelete?: (image: LightboxPhoto) => boolean;
 }) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(initialIndex);
 
   const count = images.length;
+  const current = images[index];
+  const caption = current && captionFor ? captionFor(current) : null;
 
   // Which photo you've landed on, read off the scroll offset once the swipe has
   // settled. `onMomentumScrollEnd` rather than `onScroll` so the counter changes
@@ -143,27 +184,67 @@ function Pager({
       />
 
       {/* Chrome sits above the pager, so a swipe anywhere on the photo still
-          pages — only the button itself takes a touch. */}
+          pages — only the buttons themselves take a touch. */}
       <SafeAreaView style={styles.chrome} pointerEvents="box-none" edges={['top', 'bottom']}>
-        <Pressable
-          onPress={onClose}
-          style={({ pressed }) => [styles.close, pressed && styles.closePressed]}
-          accessibilityRole="button"
-          accessibilityLabel="Close photo viewer"
-          hitSlop={8}
-        >
-          <Text style={styles.closeText}>×</Text>
-        </Pressable>
+        <View style={styles.chromeRow}>
+          {current && onDelete && canDelete?.(current) ? (
+            <Pressable
+              onPress={() => onDelete(current)}
+              style={({ pressed }) => [
+                styles.chip,
+                styles.remove,
+                pressed && styles.deletePressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Remove this photo"
+              hitSlop={8}
+            >
+              <Text style={styles.deleteText}>Remove</Text>
+            </Pressable>
+          ) : null}
+          <Pressable
+            onPress={onClose}
+            style={({ pressed }) => [
+              styles.chip,
+              styles.close,
+              pressed && styles.closePressed,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Close photo viewer"
+            hitSlop={8}
+          >
+            <Text style={styles.closeText}>×</Text>
+          </Pressable>
+        </View>
       </SafeAreaView>
 
-      {count > 1 ? (
+      {/* Who took it, and where you are in the set — one pill, so a single
+          captioned photo still has somewhere to put its line and an album gets
+          both without stacking two floating chips. */}
+      {caption || count > 1 ? (
         <View
           style={[styles.counter, { bottom: insets.bottom + spacing.lg }]}
           pointerEvents="none"
         >
-          <Text style={styles.counterText}>
-            {index + 1} / {count}
-          </Text>
+          {/* Three Texts, not one. **Only the name may be truncated** — sharing
+              one `numberOfLines={1}` with the counter meant a long uploader
+              name ellipsized "4 / 20" clean off the end, so the album's own
+              photos were the ones that lost the count. `flexShrink` is what
+              makes the name the part that gives. */}
+          {caption ? (
+            <Text
+              style={[styles.counterText, styles.caption]}
+              numberOfLines={1}
+            >
+              {caption}
+            </Text>
+          ) : null}
+          {caption && count > 1 ? (
+            <Text style={styles.counterText}> · </Text>
+          ) : null}
+          {count > 1 ? (
+            <Text style={styles.counterText}>{`${index + 1} / ${count}`}</Text>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -185,8 +266,12 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     padding: spacing.sm,
   },
-  close: {
-    width: CLOSE_SIZE,
+  chromeRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  // What the two chrome buttons share. **Deliberately carries no width**, so
+  // the round one and the worded one can each say what they need: the × is a
+  // circle, and a `minWidth` + padding on *that* ovalised it to ~48pt across on
+  // every screen this viewer serves, not just the album.
+  chip: {
     height: CLOSE_SIZE,
     borderRadius: CLOSE_SIZE / 2,
     alignItems: 'center',
@@ -195,16 +280,33 @@ const styles = StyleSheet.create({
     // × disappears against anything pale.
     backgroundColor: 'rgba(255,255,255,0.15)',
   },
+  // Square, so the radius draws a circle — Apple's 44pt minimum, exactly.
+  close: { width: CLOSE_SIZE },
+  // A word, so it takes the width the word needs and keeps 44pt of height.
+  remove: { minWidth: CLOSE_SIZE, paddingHorizontal: spacing.md },
   closePressed: { backgroundColor: 'rgba(255,255,255,0.3)' },
   closeText: { color: '#fff', fontSize: 26, lineHeight: 30, fontWeight: '300' },
+  // Worded rather than an icon, and not tinted red until pressed: a destructive
+  // control sitting over someone's photos shouldn't shout, but it must be
+  // unmistakable about what it does before it's tapped.
+  deletePressed: { backgroundColor: 'rgba(220,38,38,0.75)' },
+  deleteText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '600' },
   counter: {
     position: 'absolute',
     alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    // So the pill can't run off both edges of the screen when the name is long
+    // — it shrinks the name instead (see `caption`).
+    maxWidth: '90%',
     backgroundColor: 'rgba(0,0,0,0.55)',
     borderRadius: radius.pill,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs,
   },
+  // The only part of the pill allowed to give: the counter is four characters
+  // and always worth more than the tail of a name.
+  caption: { flexShrink: 1 },
   counterText: {
     color: '#fff',
     fontSize: fontSize.sm,

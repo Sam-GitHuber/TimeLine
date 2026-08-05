@@ -140,6 +140,8 @@ function planningEvent(overrides: Partial<Event> = {}): Event {
     reactions: [],
     comment_count: 0,
     new_comment_count: 0,
+    photos: [],
+    photo_count: 0,
     created_at: '2026-07-18T10:00:00Z',
     updated_at: '2026-07-18T10:00:00Z',
     polls: [],

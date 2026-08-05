@@ -16,6 +16,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen } from '@testing-library/react-native';
 
+import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { PostCard } from '@/components/PostCard';
 import type { Post, PostImage } from '@/types';
 
@@ -118,5 +119,71 @@ describe('post photos', () => {
 
     expect(screen.getByLabelText('Close photo viewer')).toBeTruthy();
     expect(screen.queryByText('1 / 1')).toBeNull();
+  });
+
+  it('draws every one of a post’s photos, with no "+N" tile', async () => {
+    // 🔒 `PhotoGrid` is shared with an event's album, which caps its tiles and
+    // hands the overflow to the *album* rather than to the viewer. A post has
+    // no album to hand anything to: it's one bounded set, always sent whole, so
+    // it must keep drawing every tile and opening every one of them.
+    await renderPost([1, 2, 3, 4, 5].map(makeImage));
+
+    const tiles = photoTiles(5);
+    expect(tiles).toHaveLength(5);
+    expect(screen.queryByText(/^\+\d+$/)).toBeNull();
+
+    await fireEvent.press(tiles[4]);
+    expect(screen.getByText('5 / 5')).toBeTruthy();
+  });
+});
+
+// --- The viewer's chrome ----------------------------------------------------
+//
+// Shared by every screen that opens a photo — a post, a chat message, an event's
+// album — which is exactly why these two are worth pinning: a tweak made for one
+// of them lands on all three.
+
+function makeAlbumPhoto(id: number) {
+  return {
+    ...makeImage(id),
+    uploader: { id: 2, display_name: 'Ada Lovelace', avatar_thumb: null },
+    created_at: '2026-06-01T10:00:00Z',
+    can_delete: false,
+  };
+}
+
+describe('the photo viewer', () => {
+  it('keeps the close button a square 44pt target', async () => {
+    // Apple's minimum, and a circle only while it stays square: a `minWidth`
+    // plus horizontal padding (added for the album's worded Remove, which sits
+    // in the same row) ovalised the × on every screen this viewer serves.
+    await render(
+      <PhotoLightbox images={[makeImage(1)]} initialIndex={0} onClose={jest.fn()} />
+    );
+
+    expect(screen.getByLabelText('Close photo viewer')).toHaveStyle({
+      width: 44,
+      height: 44,
+    });
+  });
+
+  it('never lets a long name push the counter off the pill', async () => {
+    // 🔒 The caption and the counter shared one `numberOfLines={1}`, so a long
+    // uploader name ellipsized "1 / 3" away entirely — on an album, where the
+    // caption exists and the counter matters most.
+    await render(
+      <PhotoLightbox
+        images={[1, 2, 3].map(makeAlbumPhoto)}
+        initialIndex={0}
+        onClose={jest.fn()}
+        captionFor={() => 'Bartholomew Fitzwilliam-Featherstonehaugh III'}
+      />
+    );
+
+    // Two nodes, not one string: only the name may be truncated.
+    expect(
+      screen.getByText('Bartholomew Fitzwilliam-Featherstonehaugh III')
+    ).toBeTruthy();
+    expect(screen.getByText('1 / 3')).toBeTruthy();
   });
 });

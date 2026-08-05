@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
+import { useScrollLock } from "./modalLayer.js";
 
 // The "danger zone" on the profile-edit page: permanently delete your account
 // and everything you've posted (UK GDPR erasure — Phase 7). Because it's
@@ -61,13 +62,11 @@ function ConfirmDeleteModal({ onCancel }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onCancel, deleting]);
 
+  // Counted + shared, like every other layer that covers the page — see
+  // `modalLayer.js` for what a per-modal copy of this gets wrong.
+  useScrollLock();
   useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
   }, []);
 
   async function handleDelete(event) {

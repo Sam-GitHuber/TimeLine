@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useEscapeLayer, useScrollLock } from "./modalLayer.js";
 
-// A full-screen photo viewer for a post's images. Opens at a given index and
-// lets you flip through with the on-screen arrows or the ← / → keys; Esc, the
-// close button, or a click on the dark backdrop dismiss it. Rendered in a
-// portal on <body> so it sits above the app chrome regardless of where the
-// clicked thumbnail lives in the layout.
-export default function Lightbox({ images, index, onClose, onIndexChange }) {
+// A full-screen photo viewer for a post's images or an event's album. Opens at
+// a given index and lets you flip through with the on-screen arrows or the
+// ← / → keys; Esc, the close button, or a click on the dark backdrop dismiss
+// it. Rendered in a portal on <body> so it sits above the app chrome regardless
+// of where the clicked thumbnail lives in the layout.
+//
+// `caption` and `onDelete` exist for the album, where a photo has an author of
+// its own (a post's images inherit the post's) and can be taken back down by
+// the person who added it, the organiser or a group admin. A post passes
+// neither, so its viewer is unchanged.
+export default function Lightbox({
+  images,
+  index,
+  onClose,
+  onIndexChange,
+  caption = null,
+  onDelete = null,
+}) {
   const count = images.length;
   const current = images[index];
   const dialogRef = useRef(null);
@@ -20,37 +33,33 @@ export default function Lightbox({ images, index, onClose, onIndexChange }) {
     [index, count, onIndexChange]
   );
 
-  // Keyboard: arrows navigate, Escape closes.
-  //
-  // ⚠️ **In the capture phase, and Escape stops there.** The viewer opens from
-  // inside the messages drawer as well as from the feed (Phase 9b M9e), and the
-  // drawer closes on Escape too — both listening on `document`, so one press
-  // shut the photo *and* the panel behind it, dumping you back on the timeline
-  // for wanting to stop looking at a picture. Capturing runs before any
-  // bubble-phase listener on the same node, so `stopPropagation` here means the
-  // nearer thing wins — the same rule, and the same technique, as
-  // `DrawerPopover`. Only Escape is swallowed: the arrows aren't ambiguous.
+  // Escape closes — through the shared layer stack (`modalLayer.js`), which
+  // keeps the capture-phase swallow this viewer has always needed (it opens from
+  // inside the messages drawer, and the drawer closes on Escape too, so one
+  // press used to shut the photo *and* the panel behind it) while also making a
+  // dialog opened *on top of* the viewer win the press instead of losing it.
+  useEscapeLayer(onClose);
+
+  // The arrows stay this component's own, in the capture phase for the same
+  // reason and with no `stopPropagation`: nothing else in the app claims them.
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        onClose();
-      } else if (event.key === "ArrowLeft" && count > 1) goPrev();
+      if (event.key === "ArrowLeft" && count > 1) goPrev();
       else if (event.key === "ArrowRight" && count > 1) goNext();
     }
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [onClose, goPrev, goNext, count]);
+  }, [goPrev, goNext, count]);
 
-  // While the viewer is open: lock background scroll, move focus into the
-  // dialog (so keys work + screen readers land here), and restore focus on close.
+  // While the viewer is open: lock background scroll (counted, so a confirm
+  // dialog stacked over this one can't leave the page unscrollable — see
+  // `modalLayer.js`), move focus into the dialog (so keys work + screen readers
+  // land here), and restore focus on close.
+  useScrollLock();
   useEffect(() => {
     const previouslyFocused = document.activeElement;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
     return () => {
-      document.body.style.overflow = previousOverflow;
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
     };
   }, []);
@@ -70,14 +79,29 @@ export default function Lightbox({ images, index, onClose, onIndexChange }) {
       onClick={onClose}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm outline-none"
     >
-      <button
-        type="button"
-        onClick={onClose}
-        aria-label="Close"
-        className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
-      >
-        <Icon path="M6 6l12 12M18 6L6 18" />
-      </button>
+      <div className="absolute right-3 top-3 flex items-center gap-2">
+        {onDelete && (
+          <button
+            type="button"
+            onClick={(e) => {
+              stop(e);
+              onDelete();
+            }}
+            aria-label="Remove this photo"
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-red-600/80"
+          >
+            <Icon path="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+        >
+          <Icon path="M6 6l12 12M18 6L6 18" />
+        </button>
+      </div>
 
       {count > 1 && (
         <button
@@ -114,9 +138,22 @@ export default function Lightbox({ images, index, onClose, onIndexChange }) {
         </button>
       )}
 
-      {count > 1 && (
-        <div className="absolute bottom-4 rounded-full bg-black/50 px-3 py-1 font-mono text-xs tabular-nums text-white">
-          {index + 1} / {count}
+      {/* Who took it, and where you are in the set. One row so a single photo
+          with a caption still gets a place to put it, and an album gets both
+          without stacking two floating pills on top of each other. */}
+      {(caption || count > 1) && (
+        <div className="absolute bottom-4 flex max-w-[92vw] items-center gap-2 rounded-full bg-black/50 px-3 py-1 text-xs text-white">
+          {caption && <span className="truncate">{caption}</span>}
+          {caption && count > 1 && (
+            <span aria-hidden="true" className="text-white/40">
+              ·
+            </span>
+          )}
+          {count > 1 && (
+            <span className="font-mono tabular-nums">
+              {index + 1} / {count}
+            </span>
+          )}
         </div>
       )}
     </div>,

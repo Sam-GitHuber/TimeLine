@@ -80,6 +80,13 @@ function gatedSurfaces() {
     groupPosts: { key: ['groupPosts', 7], fn: jest.fn(async () => null) },
     comments: { key: ['comments', 9], fn: jest.fn(async () => []) },
     conversations: { key: ['conversations'], fn: jest.fn(async () => null) },
+    // The event and its album. The album prunes on the same visible-uploader
+    // set the comment tree does, and the event payload carries the preview
+    // photos + `photo_count` off that same prune — so a connection change moves
+    // both what they show and the number above them, and a cached copy states
+    // the old answer for the rest of the session.
+    event: { key: ['event', 9], fn: jest.fn(async () => null) },
+    album: { key: ['eventPhotos', 9], fn: jest.fn(async () => null) },
   };
 }
 // `['connections']` is deliberately not one of these: the People screen holds

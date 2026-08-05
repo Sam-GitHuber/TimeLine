@@ -64,6 +64,12 @@ function GatedSurfaces() {
   useQuery({ queryKey: ["personalCalendar"], queryFn: loads.calendar });
   useQuery({ queryKey: ["groupCalendar", 3], queryFn: loads.groupCalendar });
   useQuery({ queryKey: ["groupEvents", 3, "upcoming"], queryFn: loads.groupEvents });
+  // One event and its album. Both prune on the connection boundary: the album
+  // filters uploaders to `visible_reactor_ids`, and the event payload carries
+  // that album's preview tiles and `photo_count`, so a connection change moves
+  // what the page *and* every card of it may show.
+  useQuery({ queryKey: ["event", 7], queryFn: loads.event });
+  useQuery({ queryKey: ["eventPhotos", 7], queryFn: loads.eventPhotos });
   useQuery({ queryKey: ["connections"], queryFn: loads.connections });
   useQuery({ queryKey: ["conversations"], queryFn: loads.conversations });
   return null;
@@ -102,6 +108,8 @@ beforeEach(() => {
     calendar: vi.fn(async () => []),
     groupCalendar: vi.fn(async () => []),
     groupEvents: vi.fn(async () => []),
+    event: vi.fn(async () => ({ id: 7, photos: [], photo_count: 0 })),
+    eventPhotos: vi.fn(async () => emptyPage),
     connections: vi.fn(async () => emptyPage),
     conversations: vi.fn(async () => emptyPage),
   };

@@ -1,6 +1,9 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import Avatar from "../Avatar.jsx";
 import DimensionChips from "./DimensionChips.jsx";
+import Lightbox from "../Lightbox.jsx";
+import PhotoGrid from "../PhotoGrid.jsx";
 import ReactionBar from "../ReactionBar.jsx";
 import {
   parseEventDate,
@@ -26,6 +29,29 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
   const cancelled = event.status === "cancelled";
   const going = event.rsvp?.counts?.going || 0;
   const maybe = event.rsvp?.counts?.maybe || 0;
+  const [lightboxIndex, setLightboxIndex] = useState(null);
+  const eventPath = `/g/${event.group.id}/events/${event.id}`;
+
+  // **The tiles here are a preview, and the viewer they open holds exactly
+  // them.** The first few photos ride the event payload (already pruned to the
+  // uploaders this viewer may see); the album itself is paginated, lives on the
+  // event page, and can be two hundred photos long.
+  //
+  // This card used to fetch it on open, which couldn't work twice over: a plain
+  // `useQuery` gets DRF's *first page* and never any of the rest, so a "+7" tile
+  // labelled "view all 11 photos" opened a viewer that said "1 / 20" on an album
+  // of fifty, with the last thirty unreachable and the arrows wrapping round —
+  // and it cached that page-shaped answer under `['eventPhotos', id]`, the key
+  // the event page reads with `useInfiniteQuery`. Two shapes, one cache entry:
+  // opening a card and then walking to the event page inside the 5-minute
+  // `gcTime` handed the infinite observer a `{results, next, count}` with no
+  // `pages`, and the whole app went blank.
+  //
+  // So the card fetches nothing at all. Tapping a preview opens those previews;
+  // the "+N" is a link to the event page, where the real, paged album is (see
+  // `PhotoGrid`). Nothing but `EventPhotos` reads `['eventPhotos', id]` now, and
+  // it is the only shape stored there.
+  const previews = event.photos ?? [];
 
   return (
     <article
@@ -44,7 +70,7 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
         <div className="flex flex-wrap items-baseline gap-x-1.5">
           {past && !cancelled && <span className="ev-tag ev-tag--muted">Happened</span>}
           <Link
-            to={`/g/${event.group.id}/events/${event.id}`}
+            to={eventPath}
             className={`font-semibold transition hover:text-accent-deep ${
               past ? "text-ink-soft" : "text-ink"
             }`}
@@ -73,6 +99,21 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           <DimensionChips event={event} />
         </div>
 
+        {/* The album's first few, in the two-column grid a post's photos use —
+            an event entry reads as part of the one line, so its photos look
+            like the line's photos. Drawn on a past recap as much as on a future
+            entry: "before, during and after" is the whole point, and the recap
+            is where the after lands. */}
+        <PhotoGrid
+          images={previews}
+          total={event.photo_count}
+          max={4}
+          label="event photo"
+          overflowTo={eventPath}
+          overflowLabel={`See all ${event.photo_count} photos on the event`}
+          onOpen={setLightboxIndex}
+        />
+
         {past
           ? going > 0 && (
               <p className="mt-1 text-xs text-ink-faint">{going} went</p>
@@ -97,7 +138,7 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           reactions={event.reactions}
           trailing={
             <Link
-              to={`/g/${event.group.id}/events/${event.id}`}
+              to={eventPath}
               className="rounded-lg text-sm text-ink-faint transition hover:text-accent-deep"
             >
               {event.comment_count > 0
@@ -114,6 +155,16 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           }
         />
       </div>
+
+      {lightboxIndex !== null && previews[lightboxIndex] && (
+        <Lightbox
+          images={previews}
+          index={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+          onIndexChange={setLightboxIndex}
+          caption={previews[lightboxIndex].uploader?.display_name}
+        />
+      )}
     </article>
   );
 }

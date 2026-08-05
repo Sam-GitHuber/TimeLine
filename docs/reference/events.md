@@ -6,17 +6,20 @@ shown on a calendar and on the group's timeline. The distinctive part: an event
 **doesn't need a settled date to exist**. The organiser can open an **advisory
 poll** on any dimension (date, time, location, or a custom question), members vote,
 and the organiser makes the **final call** — the poll never auto-decides. Still no
-algorithm: the calendar is time-ordered, events surface by *when they are*. This is
-the current-state reference.
+algorithm: the calendar is time-ordered, events surface by *when they are*. An
+event also carries a **photo album** anyone who can see it may add to, before,
+during and after. This is the current-state reference.
 
-Code: `Event` / `Poll` / `PollOption` / `PollVote` / `EventRSVP` models +
-`Notification.event` FK; `visible_events` / `can_view_event` (the connection gate,
-keyed on the organiser) and the event/poll/RSVP/calendar views in `api/views.py`;
-the `serialize_event` / `serialize_poll` / `build_rsvp_summary` builders in
-`api/serializers.py`. Frontend: the `EventsSection` + `MonthGrid` on `/g/:id`, the
-`EventPage` detail (`/g/:id/events/:eid`, the notification deep-link target), the
-personal `CalendarPage` (`/calendar`), and the `DimensionChips` /
-`DimensionEditor` / `PollTally` / `RsvpBar` / `EventCard` components under
+Code: `Event` / `Poll` / `PollOption` / `PollVote` / `EventRSVP` / `EventPhoto`
+models + `Notification.event` FK; `visible_events` / `can_view_event` (the
+connection gate, keyed on the organiser) and the event/poll/RSVP/photo/calendar
+views in `api/views.py`; the `serialize_event` / `serialize_poll` /
+`build_rsvp_summary` / `serialize_event_photo` builders in `api/serializers.py`
+and the `event_photo_previews` helper in `api/views.py`. Frontend: the
+`EventsSection` + `MonthGrid` on `/g/:id`, the `EventPage` detail
+(`/g/:id/events/:eid`, the notification deep-link target), the personal
+`CalendarPage` (`/calendar`), and the `DimensionChips` / `DimensionEditor` /
+`PollTally` / `RsvpBar` / `EventCard` / `EventPhotos` components under
 `frontend/src/components/events/`.
 
 ## The four load-bearing decisions
@@ -130,6 +133,80 @@ before touching this code:
   for an event comment renders `/p/None?comment=…`: a link that looks real and
   404s on arrival.
 
+### 6. An event carries an album, and **anyone who can see it may add to it**
+
+The one write on an event that isn't the organiser's. Polls, finalising and
+cancelling are theirs by decision 3; the photos from a day out belong to whoever
+took them, and an album only one person may fill is a gallery rather than a
+shared memory. Before, during and after — a past event is precisely when the
+photos exist, so `EventPhoto` is allowed on a **past** and on a **cancelled**
+event exactly as the comment thread is.
+
+**Photos prune per viewer, on the uploader.** You see the organiser's and your
+connections' — the [comments](#5-an-event-is-authored-content-so-it-carries-comments-and-reactions)
+rule, deliberately *not* the complete-count rule the poll and RSVP tallies a few
+pixels above them follow. It's decision 2 read the right way round for a third
+time: a tally is a shared coordination number, so it counts everyone; a photo is
+authored content with an author of its own, so it goes through the one gate.
+The alternative would have made an album the first place in TimeLine that shows
+you content from someone you never connected to — a widening of the app's single
+visibility rule, on its most sensitive content type.
+
+**Accepted consequence:** two people at the same event see different albums, and
+neither sees the whole thing. So `photo_count` is *your* slice, not the album's
+size, and both clients' empty state says "No photos here yet" rather than
+claiming there are none. The **album cap** is the one number counted over
+everyone (see below) — it's a storage bound, not a visibility rule, and counting
+only the uploader's own slice would let the true total drift past it one
+connection-group at a time.
+
+**A photo is a `PostImage` with an uploader**, and that field is the whole
+difference between the two models: a post's images have no author of their own
+(they inherit the post's, and the post's gate covers them), while an album has
+many authors under one event. Everything else is shared — the same
+`process_image`, so EXIF/GPS stripping and the HEIC transcode are inherited
+rather than re-implemented, and the same grid + lightbox on both clients (see
+[feed-and-posts](feed-and-posts.md#photo-layout--the-full-screen-viewer)).
+
+**Removing one is the uploader's, the organiser's, or a group admin's** — an
+album anyone can add to needs someone who can take something out of it, and
+organiser-or-admin is the moderation pair that already cancels and deletes the
+event.
+
+Two things about that sentence are narrower than they look, and both are
+deliberate:
+
+- **The uploader's limb is checked *first*, before the visibility gate.** You can
+  lose sight of an event by leaving the group or disconnecting from its
+  organiser, and your photos would go with it — so ownership wins ahead of
+  `can_view_event`, exactly as `_owned_comment` does and for the same stated
+  reason: your photo stays yours to remove. Gating first is what makes a photo
+  unremovable by the one person with the clearest claim to it.
+- **The organiser's and the admin's limbs reach only what they can see.** The
+  prune above is per viewer, and it is *not* widened for admins — an album is
+  the last place to make an exception to the app's single visibility rule. So a
+  group admin who isn't connected to an uploader never sees that photo and has
+  no id to remove. Behind them sits the maintainer: `EventPhoto` is registered
+  in the Django admin, and deactivating an account still sweeps everything it
+  authored. A member-facing **report** flow is the honest fix for the gap
+  between those two and is tracked separately — this is not a moderation story
+  that's finished.
+
+**A photo you can't see is a 404, not a 403** — `can_view_comment`'s split, not
+`PostDetailView`'s. The container gate can't decide this one: `EventPhoto.id` is
+a global sequential key, so answering 403 for a photo the prune deliberately hid
+would let anyone walk the ids and count what people they never connected to have
+been posting. The gate that decides *whether you may see it* has to be the same
+gate that decides *whether you're told it exists*.
+
+🔒 **The album filters `uploader__is_active`, in both queries.** Deactivating an
+account is the maintainer's takedown lever and has to reach *everything* that
+account authored — `visible_posts`, `_comment_counts` and `visible_events` all
+carry the same filter, and `connected_user_ids` deliberately doesn't, so every
+consumer of that set has to apply it. Both the album query and
+`event_photo_previews` need it, and need to agree: otherwise the grid on a card
+and the album it opens report different counts.
+
 ## Concepts & lifecycle
 
 An **event** is a bundle of decisions. Each **dimension** (date / time / location /
@@ -180,6 +257,15 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
 - **`EventRSVP`** — `event` (CASCADE), `user` (CASCADE), `response` (going / maybe /
   declined), `guests` (a "+N" headcount), `note`, `UniqueConstraint(event, user)`
   (upsert).
+- **`EventPhoto`** — `event` (CASCADE), **`uploader`** (CASCADE — the field a
+  `PostImage` doesn't have; the prune keys on it), `image` / `thumbnail` (written
+  by `process_image`, own `events/` media subdir so ops can tell them apart from
+  post photos), `width` / `height`, `created_at`. Ordered oldest-first (an album
+  reads as the event unfolded, unlike the feed), index `(event, created_at)`.
+  Caps in `imaging.py`: **`MAX_PHOTOS_PER_UPLOAD` = 10** (bounds the work one
+  request makes Pillow do synchronously — same reasoning and number as a post's)
+  and **`MAX_PHOTOS_PER_EVENT` = 200** (bounds the *album*, which no per-request
+  limit can, since an album is added to over the life of an event).
 - **`Notification.event`** FK (the fifth concrete target) + five new kinds; the
   `CheckConstraint` widened to "at most one of five targets set". See
   [notifications](notifications.md).
@@ -211,6 +297,22 @@ field or pins a custom outcome, recomputes status, notifies.
 events for the month grid); `GET /api/calendar/?from=&to=` (personal union across
 every group you're an active member of — a pure time-merge, the same discipline as
 the `include_groups` feed toggle).
+
+**Photos** — `GET/POST /api/events/<id>/photos/` (the album, pruned to the
+uploaders you may see and **paginated** — unlike a post's ten, an album is added
+to over an event's life; add photos, any member who can see the event, multipart
+under `photos`); `DELETE /api/event-photos/<id>/` (uploader / organiser / group
+admin). Both verbs go through `can_view_event`, the same wall as everything
+else here. `serialize_event` carries **`photos`** (the first
+`EVENT_PHOTO_PREVIEW_COUNT` = 4, for the card grid) and **`photo_count`**, on
+the same terms as the comment counts: **every list that renders an event pays
+for them**, because a payload that skipped them says `[]`/`0` and that is
+indistinguishable from an empty album. `event_photo_previews` gets both in
+**two bounded queries** — a `RowNumber` window for the tiles plus one aggregate
+— never a `prefetch_related("photos")`, which would drag up to 200 rows per
+event back to render four tiles. The window's `order_by` must match the model's
+`Meta.ordering`, or a card's first four are a different four from the album's
+first page.
 
 **Comments & reactions** — `GET/POST /api/events/<id>/comments/` (the pruned
 tree / add a comment or reply); `POST /api/events/<id>/react/` and
@@ -267,6 +369,7 @@ transport only.
 | `event_updated` | a scheduled event's date/time/location changes | going/maybe RSVPs (de-duped while unread, like reactions) |
 | `event_cancelled` | event cancelled (or organiser departs) | going/maybe RSVPs |
 | `event_comment` | someone comments on an event | its **organiser** |
+| `event_photos` | someone adds photos to an event's album | **going/maybe RSVPs** (incl. the organiser), de-duped while unread |
 
 `event_comment` is the event twin of `post_reply`. A *reply* to an event comment
 reuses `comment_reply`, because the recipient and the target are the same
@@ -280,6 +383,23 @@ talking to you. `see_event_notifications` matches `comment__event` as well as
 `event`, so reading a reply on an event stops the badge counting it — the
 `comment__post` half `see_post_notifications` has always had.
 
+`event_photos` is the one event kind where the **connection gate does real
+work** rather than belt-and-braces. The five broadcasts ride it for free because
+their actor is the organiser and the audience *is* the organiser's connections;
+this one's actor is the **uploader**, and two people in an event's audience
+needn't be connected to each other — so a going/maybe RSVP who can't see the
+uploader's photos must not be told about them, or the deep-link lands on an
+album that doesn't contain them. Putting the kind in `_CONNECTION_GATED_KINDS`
+makes that filter the same one line every content kind already uses; no
+event-specific gating code. It's also in `_DEDUP_KINDS`, because people upload
+in batches (eight now, four more when they notice them) and that's one thing
+that happened — one row, and since `PushOutbox` is only written for genuinely
+new notifications, one buzz. Its Android channel is **`events`**, not `replies`:
+an announcement *about* the event, not somebody answering you. Its text carries
+no count, deliberately — a de-duping row would be stating the first batch's
+number. **Known edge:** an organiser who never RSVP'd isn't told, since the
+recipients are the RSVP list; the album is on their event page either way.
+
 ## Organiser departure
 
 The gate needs a *present* organiser. Two paths:
@@ -292,9 +412,15 @@ The gate needs a *present* organiser. Two paths:
 
 ## Frontend notes / deliberate deviations from the phase sketch
 
-- **Every event write refreshes the same four keys**, via `EventPage`'s one
-  `invalidate()`: `['event', id]`, `['groupEvents', gid]`, `['groupCalendar',
-  gid]` and `['personalCalendar']`. An event lives on four surfaces, and a write
+- **Every event write refreshes the same five keys**, via `EventPage`'s one
+  `invalidate()`: `['event', id]`, `['eventPhotos', id]`, `['groupEvents',
+  gid]`, `['groupCalendar', gid]` and `['personalCalendar']`. The album is the
+  fifth and belongs in the same one call for the same reason the others do:
+  adding or removing a photo moves the grid on the event page *and* the preview
+  tiles + "+N" on every timeline entry and calendar card, which ride the
+  **event** payload rather than the album's. A photo write naming only
+  `['eventPhotos']` would leave the card beside it stating the old count —
+  #279's shape, one surface further out. An event lives on four surfaces, and a write
   that names fewer leaves the others stating the old answer. Two drifts made that
   the rule rather than a convention (#279, both web-only — mobile has invalidated
   all four on every event write since it was built): **delete** named
@@ -462,6 +588,55 @@ The gate needs a *present* organiser. Two paths:
   - The **free-value box** beside a poll keeps what you typed when the finalise
     is refused, rather than clearing it as it does on success. A rejection that
     also wipes the value means the retry is "type it again".
+- **The album appears on three surfaces, and only two of them are the album.**
+  The **event page/screen** gets the full section (`EventPhotos.jsx` /
+  `EventPhotos.tsx`) — grid, **Add photos**, and a Remove in the viewer on any
+  photo whose payload says `can_delete`. A **timeline entry**
+  (`EventTimelineEntry`, both clients) gets the first **four** tiles in the
+  post grid, with a **"+N"** on the last when `photo_count` exceeds them: an
+  event entry reads as part of the one line, so its photos look like the line's
+  photos. Drawn on a past recap as much as on a future entry — "after" is where
+  most event photos land. **`EventCard` gets no grid**: it's the off-the-line
+  form used by the staging strip, month day-lists and the calendar agenda,
+  which are indexes you tap through rather than act in — the same reason it
+  takes `showActions={false}` there.
+- **The tiles are the payload, and a card fetches nothing.** The previews ride
+  `event.photos` / `event.photo_count`, so a page of ten events fires zero album
+  requests. Tapping a tile opens a viewer holding **only those previews** — the
+  "+N" tile is not a fifth photo but a **link to the event page**, where the
+  paginated album lives. That split is the fix for a card that used to promise
+  more than it could show: the overlay counts `photo_count` (up to 200) while a
+  viewer opened from a card could only ever hold one DRF page, so "+46" opened a
+  viewer reading "4 / 20" with the rest unreachable. Per-tile labels therefore
+  count against the previews ("View event photo 1 of 4"), matching the counter
+  in the viewer they open, and the "+N" says where it goes ("See all 50 photos
+  on the event"). **Accepted consequence:** the photo under the "+N" tile isn't
+  openable from the grid — it's an arrow away inside the viewer. That reads like
+  a bug and isn't; both clients carry a comment saying so.
+- 🔑 **`['eventPhotos', id]` has exactly one consumer** — the event page's
+  album, and it holds the infinite-query shape. Nothing else may cache a bare
+  DRF page under it. The card once did, with a plain `useQuery`, which put two
+  incompatible shapes in one TanStack entry: mount the card's viewer first and
+  the event page's `getNextPageParam` destructured `undefined` and threw, and
+  with no `ErrorBoundary` in `main.jsx` that white-screened the whole app.
+  "One cache entry, one invalidation" is now true because there is one reader,
+  not because two readers agreed.
+- **The grid and the viewer are shared with posts, not copied.** `PhotoGrid`
+  (`frontend/src/components/PhotoGrid.jsx`, `mobile/src/components/PhotoGrid.tsx`)
+  was lifted out of `PostCard` on both clients and takes `max`/`total` for the
+  "+N", plus `onOverflow`/`overflowLabel` for the event card's link-to-the-album
+  behaviour; `Lightbox`/`PhotoLightbox` gained a caption (who took it — a post's
+  images inherit the post's author, an album's don't) and an optional Remove.
+  A post passes none of the new props and is unchanged — and that's a constraint,
+  not an observation: a post's images are one bounded set with nowhere to
+  navigate to, so **the "+N" default must stay "open the viewer at that index"**.
+  Both clients pin it with a test that a post's grid is unchanged, because the
+  album's behaviour is the tempting thing to make the default.
+- **A refused photo write says so where the control is**, per
+  [connections.md](connections.md#reporting-a-refused-write): the web renders
+  inline beside Add photos and inside the confirm dialog for a remove; mobile
+  alerts, since an `Alert` outlives whatever is on screen. Removing confirms
+  first on both — a photo comes off for everyone who can see it.
 - **IBM Plex Mono** is used for every date/time (the sanctioned "voice of time");
   location is plain text + an optional pasted link, **never embedded map tiles**
   (which would leak every viewer's IP — see the privacy note in decision-land).
@@ -550,6 +725,15 @@ The **organiser's control surface** landed in **E3c**, across two PRs:
   poll). A `polling` chip stays read-only — its poll is managed from the
   `PollTally` card below it, not from the chip.
 
+The **album** (decision 6) landed on both clients in one PR, which is the rule
+#216/#227 bought: splitting them is what left the phone lying for a day. The
+phone half is arguably the primary one here — the camera is on it — so
+`EventPhotos.tsx` goes through `usePhotoPicker` (camera *and* library,
+multi-select, `quality: 0.9`, the composer's settings) and `AuthedImage`, and
+the tiles sit **outside** the entry's own `Pressable` on `EventTimelineEntry`,
+the rule `PostCard` already follows so "did I open the event or the photo?"
+isn't touch-responder luck. `EventCard` gets no grid, matching the web.
+
 ## Scope / non-goals (v1)
 
 No recurring events, no maps/geocoding, no timed push reminders (needs a background
@@ -558,3 +742,8 @@ upcoming view is the passive reminder for now), no external calendar sync (a
 read-only `.ics` export is a natural privacy-safe follow-up), no member-suggested
 poll options, no public/discoverable events. Events are a group-coordination
 feature, not a product pivot.
+
+On the **album** specifically: no per-photo captions, comments or reactions (the
+event's own thread is the place to say something about them), no reordering, no
+cover photo, and no "download all". Also no *editing* an event's fields on the
+phone — `updateEvent` is a dormant endpoint on the web too.

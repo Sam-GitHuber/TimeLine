@@ -9,14 +9,16 @@ from django.db.models import (
     Case,
     Count,
     Exists,
+    F,
     IntegerField,
     OuterRef,
     Q,
     Subquery,
     Value,
     When,
+    Window,
 )
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, RowNumber
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_time
@@ -28,6 +30,7 @@ from rest_framework.exceptions import (
     PermissionDenied,
     ValidationError,
 )
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
@@ -42,6 +45,8 @@ from .emoji import (
 )
 from .imaging import (
     MAX_IMAGES_PER_POST,
+    MAX_PHOTOS_PER_EVENT,
+    MAX_PHOTOS_PER_UPLOAD,
     POST_IMAGE_MAX_EDGE,
     POST_THUMB_EDGE,
     clear_avatar,
@@ -57,6 +62,7 @@ from .models import (
     ConversationRead,
     DevicePushToken,
     Event,
+    EventPhoto,
     EventRSVP,
     Group,
     GroupMembership,
@@ -106,6 +112,7 @@ from .serializers import (
     UserListSerializer,
     build_rsvp_summary,
     serialize_event,
+    serialize_event_photo,
     serialize_poll,
     summarise_reactions,
 )
@@ -958,6 +965,28 @@ def can_view_event(user, event, connected_ids=None):
     return event.organiser_id == user.id or event.organiser_id in connected_ids
 
 
+def can_view_event_photo(user, photo, connected_ids=None):
+    """Whether ``user`` may see ``photo`` — the yes/no form of the album query in
+    ``EventPhotosView.get`` / ``event_photo_previews``, so a route that acts on a
+    single photo can't drift from the list it was picked out of.
+
+    Two gates that **compose**, exactly as ``can_view_comment``'s do: the
+    **event** must be visible (membership plus a connection to its organiser),
+    *and* the photo must survive the album's own prune — its **uploader** must
+    still be active and be the viewer or one of their connections. You can be
+    able to see the event and still not see a given photo on it, which is the
+    group timeline's behaviour two levels down, and it's why "can I see the
+    event" is not a safe stand-in for "does this photo exist for me".
+    """
+    if connected_ids is None:
+        connected_ids = connected_user_ids(user)
+    if not photo.uploader.is_active:
+        return False
+    if photo.uploader_id != user.id and photo.uploader_id not in connected_ids:
+        return False
+    return can_view_event(user, photo.event, connected_ids=connected_ids)
+
+
 def connection_status_annotation(user):
     """Annotate a User queryset with ``connection_status`` — the requesting
     user's relationship to each row, driving the Connect button:
@@ -1063,6 +1092,94 @@ def comment_counts_for_events(events, viewer, visible_author_ids=None):
     invisible: a wrong badge looks exactly like a right one.
     """
     return _comment_counts(events, viewer, "event", visible_author_ids)
+
+
+# How many of an album's photos ride along on an event payload. Four fills the
+# two-column grid both clients render on a timeline entry exactly twice over,
+# and anything past it is reached through the lightbox (which fetches the album
+# properly) or the event page. Kept here rather than in ``imaging`` because it's
+# a payload-shape decision, not a limit on what may be uploaded.
+EVENT_PHOTO_PREVIEW_COUNT = 4
+
+
+def event_photo_previews(events, viewer, visible_uploader_ids=None):
+    """``{event_id: {"photos": [EventPhoto, ...], "count": int}}`` for a page of
+    events — the first few photos each one shows on a card, plus the album's
+    full size, both **pruned to this viewer**.
+
+    The prune is on ``uploader``, which is what makes an album per-viewer in the
+    first place (see ``EventPhoto``): you see the organiser's photos and your
+    connections', and a photo from someone you aren't connected to is neither
+    shown nor counted. So ``count`` here is **not** the album's true size — and
+    that's the point, unlike the poll/RSVP tallies on the same page, which are
+    complete. The rule follows the thing being counted: a tally is a shared
+    coordination number, a photo is authored content.
+
+    **Two bounded queries, never a prefetch.** ``prefetch_related("photos")``
+    would pull every row of every album on the page — up to
+    ``MAX_PHOTOS_PER_EVENT`` × the page size — to render four tiles each. The
+    window function asks the database for the first ``n`` per event instead, and
+    a second aggregate gets the totals. Cost is then a function of the page
+    size, not of how many photos the busiest album happens to hold, which is the
+    same bargain ``_comment_counts`` strikes one function up.
+    """
+    event_ids = [e.id for e in events]
+    if not event_ids:
+        return {}
+
+    if visible_uploader_ids is None:
+        visible_uploader_ids = connected_user_ids(viewer) | {viewer.id}
+
+    visible = EventPhoto.objects.filter(
+        event_id__in=event_ids,
+        uploader_id__in=visible_uploader_ids,
+        # 🔒 Deactivating an account is the maintainer's takedown lever, and it
+        # has to reach *everything* that account authored, not most of it — a
+        # banned member's posts (``visible_posts``), comments
+        # (``_comment_counts``) and events (``visible_events``) all drop out on
+        # exactly this filter, so their photos do too. ``connected_user_ids``
+        # doesn't check it, which is why every consumer of that set has to.
+        uploader__is_active=True,
+    )
+
+    # The first N of each album. ``order_by`` inside the window must match the
+    # model's ordering, or the "first four" here and the first page of
+    # ``EventPhotosView`` would be different four photos.
+    #
+    # There is deliberately **no** ``.order_by()`` call on the queryset itself.
+    # An empty one *clears* ``Meta.ordering``, which would leave the wrapping
+    # subquery below with no ``ORDER BY`` at all — the rows would then come back
+    # in whatever order the query plan felt like, and a preview tile's index
+    # would stop matching the album's, so tapping the third tile could open a
+    # different photo. Letting ``Meta.ordering`` stand is what keeps the two
+    # queries agreeing.
+    previews = defaultdict(list)
+    windowed = visible.annotate(
+        rank=Window(
+            expression=RowNumber(),
+            partition_by=[F("event_id")],
+            order_by=["created_at", "id"],
+        )
+    ).select_related("uploader")
+    # A window annotation can't be filtered in the same query (the database
+    # computes it after WHERE), so the rank test goes in a wrapping subquery —
+    # which is what ``filter`` on a QuerySet with a window expression compiles
+    # to on Django 4.2+.
+    for photo in windowed.filter(rank__lte=EVENT_PHOTO_PREVIEW_COUNT):
+        previews[photo.event_id].append(photo)
+
+    counts = {
+        row["event_id"]: row["n"]
+        for row in visible.values("event_id").annotate(n=Count("id"))
+    }
+
+    return {
+        event_id: {
+            "photos": previews.get(event_id, []),
+            "count": counts.get(event_id, 0),
+        }
+        for event_id in event_ids
+    }
 
 
 def _comment_counts(targets, viewer, field, visible_author_ids=None):
@@ -1210,16 +1327,20 @@ def _stored_files(rows, *field_names):
 def _group_files(group):
     """Every stored file that dies with ``group``.
 
-    Its avatar, its posts' photos and its chats' attachments — **including
-    those belonging to other people**. A group's posts and group-chat messages
-    outlive their author leaving the group (leaving drops only the membership
-    row), so "the departing member's own files" is not the same set and gathering
-    only that leaves other members' photos orphaned.
+    Its avatar, its posts' photos, its **events' album photos** and its chats'
+    attachments — **including those belonging to other people**. A group's
+    posts, event photos and group-chat messages outlive their author leaving the
+    group (leaving drops only the membership row), so "the departing member's
+    own files" is not the same set and gathering only that leaves other members'
+    photos orphaned.
     """
     return (
         [group.avatar, group.avatar_thumb]
         + _stored_files(
             PostImage.objects.filter(post__group=group), "image", "thumbnail"
+        )
+        + _stored_files(
+            EventPhoto.objects.filter(event__group=group), "image", "thumbnail"
         )
         + _stored_files(
             MessageAttachment.objects.filter(message__conversation__group=group),
@@ -4389,6 +4510,19 @@ def delete_account(user):
     files_to_delete += _stored_files(
         PostImage.objects.filter(post__author=user), "image", "thumbnail"
     )
+    # Event album photos, gathered through **two** cascades for the same reason
+    # the chat attachments below need two:
+    #   - `EventPhoto.uploader` — their own photos, in anyone's album.
+    #   - `Event.organiser` — deleting the user deletes the events they
+    #     organised, and that takes *other people's* photos on those events with
+    #     it. Orphaned just as surely, so they're gathered too.
+    # Their photos on someone else's surviving event are covered by the first
+    # clause; that event lives on, having lost one photo.
+    files_to_delete += _stored_files(
+        EventPhoto.objects.filter(Q(uploader=user) | Q(event__organiser=user)),
+        "image",
+        "thumbnail",
+    )
     # Chat photos need two sets gathered, because two different cascades reach
     # messages:
     #   - `Message.sender` — their own messages, in every chat.
@@ -4546,6 +4680,9 @@ def _event_response(event_id, request, status_code=status.HTTP_200_OK):
         comment_counts=comment_counts_for_events(
             [event], request.user, visible_author_ids=visible_ids
         ).get(event.id),
+        photos=event_photo_previews(
+            [event], request.user, visible_uploader_ids=visible_ids
+        ).get(event.id),
     )
     return Response(data, status=status_code)
 
@@ -4579,18 +4716,25 @@ def _event_audience(event):
     )
 
 
-def _event_rsvp_audience(event, responses):
-    """Members who RSVP'd with one of ``responses`` (going/maybe), other than the
-    organiser — the recipients of ``event_updated`` / ``event_cancelled``."""
-    return (
-        User.objects.filter(
-            event_rsvps__event=event,
-            event_rsvps__response__in=responses,
-            is_active=True,
-        )
-        .exclude(id=event.organiser_id)
-        .distinct()
+def _event_rsvp_audience(event, responses, include_organiser=False):
+    """Members who RSVP'd with one of ``responses`` (going/maybe) — the
+    recipients of ``event_updated`` / ``event_cancelled`` / ``event_photos``.
+
+    The organiser is excluded by default because they are the **actor** for the
+    first two, and the choke-point would drop them anyway (no
+    self-notifications). ``event_photos`` passes ``include_organiser=True``: its
+    actor is the *uploader*, so an organiser who RSVP'd going is a genuine
+    recipient — and the choke-point still drops the uploader themselves,
+    whoever they are.
+    """
+    qs = User.objects.filter(
+        event_rsvps__event=event,
+        event_rsvps__response__in=responses,
+        is_active=True,
     )
+    if not include_organiser:
+        qs = qs.exclude(id=event.organiser_id)
+    return qs.distinct()
 
 
 def _notify_event(event, kind, recipients):
@@ -4709,15 +4853,19 @@ class GroupEventsView(APIView):
             )
         visible_ids = set(connected) | {request.user.id}
         is_admin = is_group_admin(request.user, gid)
-        # One query for the whole page's counts, not one per event.
+        # One query for the whole page's counts, not one per event — and the
+        # same again for its photo previews.
         counts = comment_counts_for_events(
             events, request.user, visible_author_ids=visible_ids
+        )
+        photos = event_photo_previews(
+            events, request.user, visible_uploader_ids=visible_ids
         )
         data = [
             serialize_event(
                 e, viewer=request.user, visible_ids=visible_ids,
                 request=request, is_group_admin=is_admin, detail=False,
-                comment_counts=counts.get(e.id),
+                comment_counts=counts.get(e.id), photos=photos.get(e.id),
             )
             for e in events
         ]
@@ -4781,7 +4929,20 @@ class EventDetailView(APIView):
             raise PermissionDenied(
                 "Only the organiser or a group admin can delete this event."
             )
-        event.delete()  # cascades to polls, options, votes, RSVPs, notifications
+        # The cascade takes the album's *rows*; it never touches storage. Gather
+        # the files before the delete and sweep them on commit — everyone's, not
+        # just the organiser's, since the whole album dies with the event.
+        photo_files = _stored_files(
+            EventPhoto.objects.filter(event=event), "image", "thumbnail"
+        )
+        # The ``atomic`` is load-bearing, exactly as in ``PostDetailView.delete``
+        # and ``GroupDetailView.delete``: ``ATOMIC_REQUESTS`` is off, so without
+        # an open transaction Django runs an ``on_commit`` callback *inline*, and
+        # a sweep that isn't tied to a commit is just an immediate delete.
+        with transaction.atomic():
+            # Cascades to polls, options, votes, RSVPs, photos, notifications.
+            event.delete()
+            delete_files_on_commit(photo_files)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -4843,6 +5004,237 @@ class EventRSVPListView(APIView):
             me_id=request.user.id, request=request, named=True,
         )
         return Response(summary)
+
+
+class EventPhotosView(APIView):
+    """An event's photo album — ``GET/POST /events/<pk>/photos/``.
+
+    **Anyone who can see the event can add to it**, before, during or after.
+    That's the one deliberate asymmetry with the rest of this feature: polls,
+    finalising and cancelling are the organiser's, but the photos from a day out
+    belong to whoever took them, and an album only one person may fill is a
+    gallery, not a shared memory.
+
+    The gate on both verbs is ``can_view_event`` — the *same* wall the detail,
+    comments, polls, RSVP and reaction routes use, never a sixth copy. An event
+    you can't see 404s here identically to how it 404s there, so the album can't
+    become an oracle for an event that doesn't exist for you.
+
+    **GET is pruned per viewer, on the uploader.** You see the organiser's
+    photos and your connections', exactly as you see their comments and their
+    reactions — see ``EventPhoto`` for why an album follows the authored-content
+    rule rather than the complete-count rule the polls and RSVP above it use.
+    Paginated, because unlike a post's ten an album is added to over the life of
+    an event and can genuinely reach ``MAX_PHOTOS_PER_EVENT``.
+
+    **Allowed on a cancelled and on a past event**, deliberately, and for the
+    two halves of the same reason ``EventCommentsView`` stays open: a past event
+    is precisely when the photos exist, and a cancellation that turned into a
+    pub instead is still a day people photographed.
+    """
+
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def _event_or_404(self, request, pk):
+        """The event, plus the viewer's connection set — the same shape (and for
+        the same reason) as ``EventCommentsView._get_target_or_404``. Both verbs
+        need that set again a line later, and recomputing it means a second full
+        scan of ``Connection`` in one request."""
+        event = get_object_or_404(
+            Event.objects.select_related("organiser", "group"), pk=pk
+        )
+        connected_ids = connected_user_ids(request.user)
+        if not can_view_event(request.user, event, connected_ids=connected_ids):
+            raise NotFound()
+        return event, connected_ids
+
+    def get(self, request, pk):
+        event, connected_ids = self._event_or_404(request, pk)
+        visible_ids = connected_ids | {request.user.id}
+        is_admin = is_group_admin(request.user, event.group_id)
+        qs = (
+            EventPhoto.objects.filter(
+                event=event,
+                uploader_id__in=visible_ids,
+                # Same filter, same reason as ``event_photo_previews`` — a
+                # deactivated member's photos leave the album exactly as their
+                # posts leave the feed. The two must agree, or the grid on a
+                # card and the album it opens would disagree about the count.
+                uploader__is_active=True,
+            )
+            .select_related("uploader")
+        )
+        paginator = PageNumberPagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        data = [
+            serialize_event_photo(
+                p, viewer=request.user, request=request,
+                organiser_id=event.organiser_id, is_group_admin=is_admin,
+            )
+            for p in page
+        ]
+        return paginator.get_paginated_response(data)
+
+    def post(self, request, pk):
+        event, connected_ids = self._event_or_404(request, pk)
+        files = request.FILES.getlist("photos")
+        if not files:
+            raise ValidationError({"photos": "Choose at least one photo."})
+        if len(files) > MAX_PHOTOS_PER_UPLOAD:
+            raise ValidationError(
+                {"photos": f"You can add at most {MAX_PHOTOS_PER_UPLOAD} photos at a time."}
+            )
+        # The album cap counts **every** photo on the event, not just the ones
+        # this viewer can see. It's a storage bound, not a visibility rule, and
+        # counting only your own slice of a pruned album would let the true
+        # total drift past the cap one connection-group at a time.
+        existing = EventPhoto.objects.filter(event=event).count()
+        if existing + len(files) > MAX_PHOTOS_PER_EVENT:
+            raise ValidationError(
+                {
+                    "photos": (
+                        f"This event's album is full "
+                        f"({MAX_PHOTOS_PER_EVENT} photos). Remove some first."
+                    )
+                }
+            )
+
+        # Process every file before writing any row, as ``PostCreateView`` does:
+        # one bad photo in a batch of eight fails the whole request cleanly
+        # rather than half-uploading. The offending name is in the message —
+        # "which one do I drop?" is the only question the user has here.
+        processed = []
+        for f in files:
+            try:
+                processed.append(
+                    process_image(
+                        f,
+                        max_edge=POST_IMAGE_MAX_EDGE,
+                        thumb_edge=POST_THUMB_EDGE,
+                    )
+                )
+            except ValidationError as exc:
+                detail = exc.detail
+                msg = detail[0] if isinstance(detail, list) else detail
+                raise ValidationError({"photos": f"{f.name}: {msg}"}) from exc
+
+        created = []
+        with transaction.atomic():
+            for item in processed:
+                photo = EventPhoto(
+                    event=event,
+                    uploader=request.user,
+                    width=item["width"],
+                    height=item["height"],
+                )
+                photo.image.save(f"image{item['ext']}", item["image"], save=False)
+                photo.thumbnail.save(
+                    f"thumb{item['ext']}", item["thumbnail"], save=False
+                )
+                photo.save()
+                created.append(photo)
+
+        # Tell the people who said they'd be there. The actor is the uploader,
+        # not the organiser — so unlike the five organiser-broadcast kinds this
+        # one needs the connection gate to do real work, which it does inside
+        # the notification choke-point (see ``_CONNECTION_GATED_KINDS``): a
+        # recipient not connected to the uploader can't see these photos, so
+        # telling them about them would be a link to an empty page.
+        #
+        # **Bulk, not a loop over ``create_notification``.** Per-recipient this
+        # costs seven queries each — preference, connection, dedup, insert,
+        # insert, and the transaction around them — and it runs in the same
+        # request that has just synchronously decoded and re-encoded up to ten
+        # photos, on one gunicorn worker on a home PC. Thirty people going was
+        # 211 statements. ``create_notifications`` applies the identical rules
+        # set-wise instead, in a handful. ``connected_ids`` is threaded in
+        # because the uploader is the actor and we already have their set from
+        # the gate above — the same reason ``EventCommentsView`` threads it.
+        notifications.create_notifications(
+            _event_rsvp_audience(event, [GOING, MAYBE], include_organiser=True),
+            request.user,
+            Notification.Kind.EVENT_PHOTOS,
+            event=event,
+            connected_ids=connected_ids,
+        )
+
+        is_admin = is_group_admin(request.user, event.group_id)
+        return Response(
+            [
+                serialize_event_photo(
+                    p, viewer=request.user, request=request,
+                    organiser_id=event.organiser_id, is_group_admin=is_admin,
+                )
+                for p in created
+            ],
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class EventPhotoDetailView(APIView):
+    """Remove one photo from an event's album —
+    ``DELETE /event-photos/<pk>/``.
+
+    Three people may remove it: the **uploader** (your photo stays yours to
+    take down), the **organiser**, and a **group admin** — the same pair who can
+    cancel or delete the event itself. An album anyone can add to needs someone
+    who can take something out of it, and that's the moderation shape this
+    codebase already chose everywhere else. The organiser and the admin can only
+    reach what *they* can see: the album's per-viewer prune is not widened for
+    them (the maintainer's lever behind them is ``EventPhotoAdmin``, which sees
+    everything).
+
+    **The permission shape is ``CommentDetailView``'s** — the two checks in the
+    order that view spells out, and for the same two reasons:
+
+    - **The uploader may always remove their own photo**, checked *before* the
+      visibility gate. You can lose sight of a photo you added by leaving the
+      group or by disconnecting from the organiser, and your photo should still
+      be yours to take down; there is no other self-service route to it.
+    - **A photo you can't see is a 404, not a 403** — and that means the album's
+      prune, not just the event's gate. ``EventPhoto.id`` is a global sequential
+      key, so a 403 on a photo you're merely not connected to the uploader of
+      would answer "does row 4291 exist, and is it on an event I'm in?" for
+      content belonging to people you have never connected with: an existence
+      and counting oracle, walkable by id. ``can_view_event_photo`` composes both
+      halves of the album query, exactly as ``can_view_comment`` composes the
+      thread's, so a hidden photo is as absent here as it is in the list.
+    - A photo you **can** see but may not remove is a **403**.
+    """
+
+    def delete(self, request, pk):
+        photo = get_object_or_404(
+            EventPhoto.objects.select_related(
+                "event", "event__organiser", "event__group", "uploader"
+            ),
+            pk=pk,
+        )
+        event = photo.event
+        if photo.uploader_id != request.user.id:
+            connected_ids = connected_user_ids(request.user)
+            if not can_view_event_photo(
+                request.user, photo, connected_ids=connected_ids
+            ):
+                raise NotFound()
+            if not (
+                event.organiser_id == request.user.id
+                or is_group_admin(request.user, event.group_id)
+            ):
+                raise PermissionDenied(
+                    "Only the person who added a photo, the organiser or a "
+                    "group admin can remove it."
+                )
+        # Gather the files before the row goes, and sweep them **inside** the
+        # transaction that removes it. ``ATOMIC_REQUESTS`` is off, so with no
+        # transaction open Django runs an ``on_commit`` callback immediately —
+        # registering the sweep first would unlink the JPEGs *before* the delete
+        # and leave a live row pointing at nothing if the delete then failed.
+        # Same order, same reason as ``PostDetailView.delete``.
+        files = [photo.image, photo.thumbnail]
+        with transaction.atomic():
+            photo.delete()
+            delete_files_on_commit(files)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 def _build_option_kwargs(dimension, opt, order):
@@ -5237,11 +5629,14 @@ class GroupCalendarView(APIView):
         counts = comment_counts_for_events(
             events, request.user, visible_author_ids=visible_ids
         )
+        photos = event_photo_previews(
+            events, request.user, visible_uploader_ids=visible_ids
+        )
         data = [
             serialize_event(
                 e, viewer=request.user, visible_ids=visible_ids,
                 request=request, is_group_admin=is_admin, detail=False,
-                comment_counts=counts.get(e.id),
+                comment_counts=counts.get(e.id), photos=photos.get(e.id),
             )
             for e in events
         ]
@@ -5275,11 +5670,14 @@ class PersonalCalendarView(APIView):
         counts = comment_counts_for_events(
             events, request.user, visible_author_ids=visible_organisers
         )
+        photos = event_photo_previews(
+            events, request.user, visible_uploader_ids=visible_organisers
+        )
         data = [
             serialize_event(
                 e, viewer=request.user, visible_ids=visible_organisers,
                 request=request, detail=False,
-                comment_counts=counts.get(e.id),
+                comment_counts=counts.get(e.id), photos=photos.get(e.id),
             )
             for e in events
         ]
