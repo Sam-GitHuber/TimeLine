@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { serverMessage } from "../errors.js";
+import { useEscapeLayer, useScrollLock } from "./modalLayer.js";
 
 // A confirm step before a destructive action. Deleting something that carries
 // other people's replies, reactions or photos isn't a one-click action, so both
@@ -26,21 +27,17 @@ export default function ConfirmDeleteDialog({
 }) {
   const dialogRef = useRef(null);
 
-  useEffect(() => {
-    function onKey(event) {
-      if (event.key === "Escape" && !pending) onCancel();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel, pending]);
+  // Escape cancels, unless the delete is already in flight. Both go through the
+  // shared layer stack (`modalLayer.js`) because this dialog opens *over* the
+  // photo viewer in an event album: as a plain bubble-phase listener it lost the
+  // press to the viewer underneath, which closed instead, and as a hand-written
+  // scroll lock it put `overflow: hidden` back after the viewer had cleared it,
+  // leaving the whole app unscrollable.
+  useEscapeLayer(onCancel, !pending);
 
+  useScrollLock();
   useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
   }, []);
 
   const stop = (event) => event.stopPropagation();

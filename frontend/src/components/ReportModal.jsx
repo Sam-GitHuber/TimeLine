@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
+import { useScrollLock } from "./modalLayer.js";
 
 // The report dialog, opened from a ⋯ overflow menu's "Report" item — a post's
 // (issue #62), a comment's (#128) or a message bubble's.
@@ -35,13 +36,11 @@ export function ReportModal({ postId, commentId, messageId, onClose }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose, submitting]);
 
+  // Counted + shared, like every other layer that covers the page — see
+  // `modalLayer.js` for what a per-modal copy of this gets wrong.
+  useScrollLock();
   useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
   }, []);
 
   async function handleSubmit(event) {

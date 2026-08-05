@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Cropper from "react-easy-crop";
 import { getCroppedImg } from "../cropImage.js";
+import { useScrollLock } from "./modalLayer.js";
 
 // Reframe an avatar before it's uploaded (issue #18). Given the file the user
 // just chose, this shows an interactive crop stage — drag to reposition, and
@@ -64,14 +65,13 @@ export default function AvatarCropModal({ file, onCropped, onCancel }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onCancel]);
 
-  // Lock background scroll, move focus into the dialog, restore it on close.
+  // Lock background scroll (counted + shared — see `modalLayer.js`), move focus
+  // into the dialog, restore it on close.
+  useScrollLock();
   useEffect(() => {
     const previouslyFocused = document.activeElement;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
     return () => {
-      document.body.style.overflow = previousOverflow;
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
     };
   }, []);

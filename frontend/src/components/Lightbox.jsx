@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useEscapeLayer, useScrollLock } from "./modalLayer.js";
 
 // A full-screen photo viewer for a post's images or an event's album. Opens at
 // a given index and lets you flip through with the on-screen arrows or the
@@ -32,37 +33,33 @@ export default function Lightbox({
     [index, count, onIndexChange]
   );
 
-  // Keyboard: arrows navigate, Escape closes.
-  //
-  // ⚠️ **In the capture phase, and Escape stops there.** The viewer opens from
-  // inside the messages drawer as well as from the feed (Phase 9b M9e), and the
-  // drawer closes on Escape too — both listening on `document`, so one press
-  // shut the photo *and* the panel behind it, dumping you back on the timeline
-  // for wanting to stop looking at a picture. Capturing runs before any
-  // bubble-phase listener on the same node, so `stopPropagation` here means the
-  // nearer thing wins — the same rule, and the same technique, as
-  // `DrawerPopover`. Only Escape is swallowed: the arrows aren't ambiguous.
+  // Escape closes — through the shared layer stack (`modalLayer.js`), which
+  // keeps the capture-phase swallow this viewer has always needed (it opens from
+  // inside the messages drawer, and the drawer closes on Escape too, so one
+  // press used to shut the photo *and* the panel behind it) while also making a
+  // dialog opened *on top of* the viewer win the press instead of losing it.
+  useEscapeLayer(onClose);
+
+  // The arrows stay this component's own, in the capture phase for the same
+  // reason and with no `stopPropagation`: nothing else in the app claims them.
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        onClose();
-      } else if (event.key === "ArrowLeft" && count > 1) goPrev();
+      if (event.key === "ArrowLeft" && count > 1) goPrev();
       else if (event.key === "ArrowRight" && count > 1) goNext();
     }
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [onClose, goPrev, goNext, count]);
+  }, [goPrev, goNext, count]);
 
-  // While the viewer is open: lock background scroll, move focus into the
-  // dialog (so keys work + screen readers land here), and restore focus on close.
+  // While the viewer is open: lock background scroll (counted, so a confirm
+  // dialog stacked over this one can't leave the page unscrollable — see
+  // `modalLayer.js`), move focus into the dialog (so keys work + screen readers
+  // land here), and restore focus on close.
+  useScrollLock();
   useEffect(() => {
     const previouslyFocused = document.activeElement;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
     return () => {
-      document.body.style.overflow = previousOverflow;
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
     };
   }, []);

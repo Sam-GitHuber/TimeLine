@@ -1,12 +1,10 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
 import Avatar from "../Avatar.jsx";
 import DimensionChips from "./DimensionChips.jsx";
 import Lightbox from "../Lightbox.jsx";
 import PhotoGrid from "../PhotoGrid.jsx";
 import ReactionBar from "../ReactionBar.jsx";
-import { api } from "../../api.js";
 import {
   parseEventDate,
   formatEventWhen,
@@ -32,25 +30,28 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
   const going = event.rsvp?.counts?.going || 0;
   const maybe = event.rsvp?.counts?.maybe || 0;
   const [lightboxIndex, setLightboxIndex] = useState(null);
+  const eventPath = `/g/${event.group.id}/events/${event.id}`;
 
-  // The album's tiles ride the event payload (the first few, already pruned to
-  // the uploaders this viewer may see), but the *viewer* has to be able to
-  // scroll the whole thing — that's the point of opening it. So the full album
-  // is fetched only once the lightbox is opened: a page of ten events would
-  // otherwise fire ten album requests for photos nobody has clicked.
+  // **The tiles here are a preview, and the viewer they open holds exactly
+  // them.** The first few photos ride the event payload (already pruned to the
+  // uploaders this viewer may see); the album itself is paginated, lives on the
+  // event page, and can be two hundred photos long.
   //
-  // Same query key the event page's album uses, so a photo added there and a
-  // lightbox opened here can't disagree — one entry in the cache, one
-  // invalidation.
-  const albumQuery = useQuery({
-    queryKey: ["eventPhotos", event.id],
-    queryFn: () => api.getEventPhotos(event.id),
-    enabled: lightboxIndex !== null,
-  });
-  // Until it lands, the previews *are* the album — so opening a photo shows
-  // that photo immediately and the rest slot in behind it, rather than the
-  // viewer flashing empty while a request is out.
-  const album = albumQuery.data?.results ?? event.photos ?? [];
+  // This card used to fetch it on open, which couldn't work twice over: a plain
+  // `useQuery` gets DRF's *first page* and never any of the rest, so a "+7" tile
+  // labelled "view all 11 photos" opened a viewer that said "1 / 20" on an album
+  // of fifty, with the last thirty unreachable and the arrows wrapping round —
+  // and it cached that page-shaped answer under `['eventPhotos', id]`, the key
+  // the event page reads with `useInfiniteQuery`. Two shapes, one cache entry:
+  // opening a card and then walking to the event page inside the 5-minute
+  // `gcTime` handed the infinite observer a `{results, next, count}` with no
+  // `pages`, and the whole app went blank.
+  //
+  // So the card fetches nothing at all. Tapping a preview opens those previews;
+  // the "+N" is a link to the event page, where the real, paged album is (see
+  // `PhotoGrid`). Nothing but `EventPhotos` reads `['eventPhotos', id]` now, and
+  // it is the only shape stored there.
+  const previews = event.photos ?? [];
 
   return (
     <article
@@ -69,7 +70,7 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
         <div className="flex flex-wrap items-baseline gap-x-1.5">
           {past && !cancelled && <span className="ev-tag ev-tag--muted">Happened</span>}
           <Link
-            to={`/g/${event.group.id}/events/${event.id}`}
+            to={eventPath}
             className={`font-semibold transition hover:text-accent-deep ${
               past ? "text-ink-soft" : "text-ink"
             }`}
@@ -104,10 +105,12 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
             entry: "before, during and after" is the whole point, and the recap
             is where the after lands. */}
         <PhotoGrid
-          images={event.photos}
+          images={previews}
           total={event.photo_count}
           max={4}
           label="event photo"
+          overflowTo={eventPath}
+          overflowLabel={`See all ${event.photo_count} photos on the event`}
           onOpen={setLightboxIndex}
         />
 
@@ -135,7 +138,7 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           reactions={event.reactions}
           trailing={
             <Link
-              to={`/g/${event.group.id}/events/${event.id}`}
+              to={eventPath}
               className="rounded-lg text-sm text-ink-faint transition hover:text-accent-deep"
             >
               {event.comment_count > 0
@@ -153,13 +156,13 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
         />
       </div>
 
-      {lightboxIndex !== null && album[lightboxIndex] && (
+      {lightboxIndex !== null && previews[lightboxIndex] && (
         <Lightbox
-          images={album}
+          images={previews}
           index={lightboxIndex}
           onClose={() => setLightboxIndex(null)}
           onIndexChange={setLightboxIndex}
-          caption={album[lightboxIndex].uploader?.display_name}
+          caption={previews[lightboxIndex].uploader?.display_name}
         />
       )}
     </article>

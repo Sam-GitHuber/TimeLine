@@ -1227,9 +1227,10 @@ describe("PlanEventForm", () => {
 // take the thing under test with it. Same reasoning as
 // `group-membership-cache.test.jsx`.
 // The album. Who may see which photo is enforced (and tested exhaustively) on
-// the backend; here we check the two things the client owns — that a card shows
-// the previews and says how many more there are, and that opening one gets you
-// the *whole* album rather than the four tiles the payload carried.
+// the backend; here we check what the client owns — that a card shows the
+// previews and says how many more there are, that the "+N" goes to the page
+// that actually holds them, and that the album page itself is honest about
+// what it has (an upload you can see, an error that doesn't read as "empty").
 function makePhoto(id, uploader = you, overrides = {}) {
   return {
     id,
@@ -1273,11 +1274,10 @@ describe("event photos", () => {
     ).toBeInTheDocument();
   });
 
-  it("caps the tiles at four and puts the rest behind a +N", () => {
-    // The two numbers earning their keep: the payload carries four photos, the
-    // album holds eleven, and the card has to say so rather than imply the
-    // album is what it was sent.
-    const event = makeEvent({
+  // An entry with four preview tiles standing in front of an eleven-photo
+  // album — the shape every card-side assertion below is about.
+  function previewEvent(overrides = {}) {
+    return makeEvent({
       id: 9,
       title: "Reunion",
       status: "scheduled",
@@ -1287,58 +1287,93 @@ describe("event photos", () => {
       polls: [],
       photos: [1, 2, 3, 4].map((n) => makePhoto(n)),
       photo_count: 11,
+      ...overrides,
     });
+  }
+
+  it("caps the tiles at four and puts the rest behind a +N that leads to the event", () => {
+    // The two numbers earning their keep: the payload carries four photos, the
+    // album holds eleven, and the card has to say so rather than imply the
+    // album is what it was sent. The "+N" is a **link to the event page**, not
+    // a viewer button: the album is paginated and the card holds four of it.
     renderWithAuth(
       <Routes>
-        <Route path="/" element={<Timeline pastEvents={[event]} />} />
+        <Route path="/" element={<Timeline pastEvents={[previewEvent()]} />} />
       </Routes>
     );
     expect(document.querySelectorAll(".tl-entry--event img")).toHaveLength(4);
     expect(screen.getByText("+7")).toBeInTheDocument();
+    const more = screen.getByRole("link", {
+      name: "See all 11 photos on the event",
+    });
+    expect(more).toHaveAttribute("href", "/g/3/events/9");
+    // And the tiles that *do* open the viewer count against the previews, not
+    // the album: the viewer they open holds four, so "1 of 11" would be the
+    // card describing photos it hasn't got.
     expect(
-      screen.getByRole("button", { name: "View all 11 photos" })
+      screen.getByRole("button", { name: "View event photo 1 of 4" })
     ).toBeInTheDocument();
   });
 
-  it("opening a preview fetches the whole album, not just the tiles", async () => {
-    // The point of the lazy fetch: a page of ten events must not fire ten album
-    // requests, but the moment you open one you have to be able to scroll past
-    // the four photos that rode the payload.
-    const event = makeEvent({
-      id: 9,
-      title: "Reunion",
-      status: "scheduled",
-      is_past: true,
-      event_date: "2026-06-01",
-      starts_at: "2026-06-01T13:00:00Z",
-      polls: [],
-      photos: [makePhoto(1), makePhoto(2)],
-      photo_count: 6,
-    });
-    api.getEventPhotos.mockResolvedValue({
-      results: [1, 2, 3, 4, 5, 6].map((n) => makePhoto(n, ali)),
-      next: null,
-      count: 6,
-    });
+  it("opens a preview tile on the previews alone, fetching nothing", async () => {
+    // The card requests no album at all now. It used to fetch one on open with
+    // a plain `useQuery` — which gets page 1 and no more, so the viewer read
+    // "1 / 20" on an album of fifty — and cached that page-shaped answer under
+    // the key the event page reads as an infinite query. See the next test.
     renderWithAuth(
       <Routes>
-        <Route path="/" element={<Timeline pastEvents={[event]} />} />
+        <Route path="/" element={<Timeline pastEvents={[previewEvent()]} />} />
       </Routes>
     );
 
-    // Nothing is requested until a photo is actually clicked.
-    expect(api.getEventPhotos).not.toHaveBeenCalled();
     await userEvent.click(
-      screen.getByRole("button", { name: "View event photo 1 of 6" })
+      screen.getByRole("button", { name: "View event photo 1 of 4" })
     );
 
     const viewer = await screen.findByRole("dialog", { name: "Photo viewer" });
-    await waitFor(() => expect(api.getEventPhotos).toHaveBeenCalledWith(9));
-    // 1 / 6, not 1 / 2 — the whole album is now flippable.
-    await waitFor(() =>
-      expect(within(viewer).getByText("1 / 6")).toBeInTheDocument()
+    // 1 / 4 — the counter and the tile's label agree, and both are true.
+    expect(within(viewer).getByText("1 / 4")).toBeInTheDocument();
+    expect(api.getEventPhotos).not.toHaveBeenCalled();
+  });
+
+  it("survives a card's viewer and then the event page in one cache", async () => {
+    // The crash this replaced: two components read `['eventPhotos', id]` with
+    // incompatible shapes, so whichever mounted second got the other's answer —
+    // `InfiniteQueryObserver` destructured `{pages}` off a bare DRF page and
+    // threw on `pages.length`, unmounting the whole app (there's no error
+    // boundary) to a blank white page. Both surfaces, both orders, one
+    // QueryClient: only `EventPhotos` reads that key now.
+    api.getEvent.mockResolvedValue(previewEvent());
+    api.getEventPhotos.mockResolvedValue({
+      results: [1, 2, 3, 4, 5].map((n) => makePhoto(n, ali)),
+      next: null,
+      count: 5,
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={[previewEvent()]} />} />
+        <Route path="/g/:id/events/:eid" element={<EventPage />} />
+      </Routes>
     );
-    expect(within(viewer).getByText("Ali")).toBeInTheDocument();
+
+    // Open the card's viewer first — the write that used to poison the key.
+    await userEvent.click(
+      screen.getByRole("button", { name: "View event photo 1 of 4" })
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "Photo viewer" })
+    ).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+
+    // Then walk to the event page the "+N" points at, well inside `gcTime`.
+    await userEvent.click(
+      screen.getByRole("link", { name: "See all 11 photos on the event" })
+    );
+
+    expect(await screen.findByRole("heading", { name: /Photos/ })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "View photo 5 of 5" })
+    ).toBeInTheDocument();
   });
 
   it("lists the album on the event page and names who added each photo", async () => {
@@ -1445,6 +1480,175 @@ describe("event photos", () => {
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(api.deleteEventPhoto).toHaveBeenCalledWith(1));
+  });
+
+  // The confirm dialog opens *over* the open viewer — the album is the first
+  // place in the app where two layers stack, and both of them used to assume
+  // they were the only one. See `components/modalLayer.js`.
+  async function openTheConfirmOverTheViewer() {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.getEventPhotos.mockResolvedValue({
+      results: [makePhoto(1, you, { can_delete: true })],
+      next: null,
+      count: 1,
+    });
+    renderEventPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View photo 1 of 1" })
+    );
+    expect(document.body.style.overflow).toBe("hidden");
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Remove this photo" })
+    );
+    return await screen.findByRole("dialog", { name: "Remove photo" });
+  }
+
+  it("gives the page its scroll back when both layers close at once", async () => {
+    const dialog = await openTheConfirmOverTheViewer();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(api.deleteEventPhoto).toHaveBeenCalledWith(1));
+
+    // Both unmount in one commit, and React runs their cleanups in child order.
+    // With a saved-and-restored `overflow` in each, the viewer put back "" and
+    // the dialog then put back the "hidden" it had captured *from the viewer* —
+    // and nothing in the app could scroll again until a reload.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Remove photo" })).toBeNull()
+    );
+    await waitFor(() => expect(document.body.style.overflow).toBe(""));
+  });
+
+  it("closes the confirm dialog on Escape, not the viewer under it", async () => {
+    await openTheConfirmOverTheViewer();
+
+    await userEvent.keyboard("{Escape}");
+
+    // The viewer listens in the capture phase and stops propagation there (it
+    // has to: it opens inside the messages drawer, which closes on Escape too).
+    // The dialog listened in the bubble phase, which that flag skips — so the
+    // press went to the layer *underneath*, closing the photo and leaving the
+    // confirm hanging over nothing.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Remove photo" })).toBeNull()
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Photo viewer" })
+    ).toBeInTheDocument();
+    expect(api.deleteEventPhoto).not.toHaveBeenCalled();
+  });
+
+  it("shows the photos you just added to an album longer than one page", async () => {
+    // The album is ordered oldest-first, so an upload lands on its **last**
+    // page — and only the first was ever loaded. The count in the heading went
+    // 20 → 23, the grid stayed at 20, a "Load more" quietly appeared, and from
+    // where the user is standing the upload did nothing: so they press Add
+    // again, and spend the 200-photo cap twice.
+    api.getEvent.mockResolvedValue(makeEvent());
+    const firstPage = Array.from({ length: 20 }, (_, i) => makePhoto(i + 1));
+    api.getEventPhotos.mockResolvedValue({
+      results: firstPage,
+      next: null,
+      count: 20,
+    });
+    renderEventPage();
+    expect(
+      await screen.findByRole("button", { name: "View photo 20 of 20" })
+    ).toBeInTheDocument();
+
+    // From here the server holds 23, so page 1 no longer ends the album.
+    api.getEventPhotos.mockResolvedValue({
+      results: firstPage,
+      next: "/api/events/7/photos/?page=2",
+      count: 23,
+    });
+    api.getPage.mockResolvedValue({
+      results: [21, 22, 23].map((n) => makePhoto(n)),
+      next: null,
+      count: 23,
+    });
+
+    await userEvent.upload(
+      screen.getByLabelText("Add photos to this event"),
+      new File(["x"], "beach.jpg", { type: "image/jpeg" })
+    );
+
+    await waitFor(() => expect(api.addEventPhotos).toHaveBeenCalled());
+    expect(
+      await screen.findByRole("button", { name: "View photo 23 of 23" })
+    ).toBeInTheDocument();
+    expect(api.getPage).toHaveBeenCalledWith("/api/events/7/photos/?page=2");
+  });
+
+  it("uploads at most one batch of what you picked, and says what it left", async () => {
+    // Nothing stopped a "select all" in a phone's picker: thirty full-size
+    // photos went up through the parser to be rejected wholesale, saving none —
+    // and over a hundred files Django refuses the request before the view can
+    // even say why. Both post composers cap for exactly this reason.
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    await screen.findByRole("heading", { name: /Photos/ });
+
+    const picked = Array.from(
+      { length: 12 },
+      (_, i) => new File(["x"], `beach-${i}.jpg`, { type: "image/jpeg" })
+    );
+    await userEvent.upload(
+      screen.getByLabelText("Add photos to this event"),
+      picked
+    );
+
+    await waitFor(() =>
+      expect(api.addEventPhotos).toHaveBeenCalledWith(7, picked.slice(0, 10))
+    );
+    // And the two that didn't go are said out loud — a silent trim is the same
+    // "did that work?" the upload itself was fixed for.
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /2 of the ones you picked/
+    );
+  });
+
+  it("says it couldn't read the album rather than that it's empty", async () => {
+    // `isLoading` is `isPending && isFetching` in TanStack v5, so a failed
+    // query is "not loading" with no items — which fell through to the empty
+    // state, and rendered it *beside* the error line. The empty state is a
+    // claim about the server's answer; there wasn't one.
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.getEventPhotos.mockRejectedValue(offlineError());
+    renderEventPage();
+
+    expect(
+      await screen.findByText("Couldn’t load the photos.")
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("No photos here yet — add the first.")
+    ).toBeNull();
+  });
+
+  it("keeps the partial wording when a later page is the one that failed", async () => {
+    // The other half of the same rule: rows did arrive, so the album is
+    // under-stated rather than unread, and neither the empty state nor the
+    // "couldn't read it at all" line is true.
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.getEventPhotos.mockResolvedValue({
+      results: [makePhoto(1), makePhoto(2)],
+      next: "/api/events/7/photos/?page=2",
+      count: 5,
+    });
+    api.getPage.mockRejectedValue(offlineError());
+    renderEventPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Load more" })
+    );
+
+    expect(
+      await screen.findByText("Couldn’t load all the photos.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load the photos.")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "View photo 1 of 2" })
+    ).toBeInTheDocument();
   });
 });
 

@@ -965,6 +965,28 @@ def can_view_event(user, event, connected_ids=None):
     return event.organiser_id == user.id or event.organiser_id in connected_ids
 
 
+def can_view_event_photo(user, photo, connected_ids=None):
+    """Whether ``user`` may see ``photo`` — the yes/no form of the album query in
+    ``EventPhotosView.get`` / ``event_photo_previews``, so a route that acts on a
+    single photo can't drift from the list it was picked out of.
+
+    Two gates that **compose**, exactly as ``can_view_comment``'s do: the
+    **event** must be visible (membership plus a connection to its organiser),
+    *and* the photo must survive the album's own prune — its **uploader** must
+    still be active and be the viewer or one of their connections. You can be
+    able to see the event and still not see a given photo on it, which is the
+    group timeline's behaviour two levels down, and it's why "can I see the
+    event" is not a safe stand-in for "does this photo exist for me".
+    """
+    if connected_ids is None:
+        connected_ids = connected_user_ids(user)
+    if not photo.uploader.is_active:
+        return False
+    if photo.uploader_id != user.id and photo.uploader_id not in connected_ids:
+        return False
+    return can_view_event(user, photo.event, connected_ids=connected_ids)
+
+
 def connection_status_annotation(user):
     """Annotate a User queryset with ``connection_status`` — the requesting
     user's relationship to each row, driving the Connect button:
@@ -1123,18 +1145,22 @@ def event_photo_previews(events, viewer, visible_uploader_ids=None):
     # The first N of each album. ``order_by`` inside the window must match the
     # model's ordering, or the "first four" here and the first page of
     # ``EventPhotosView`` would be different four photos.
+    #
+    # There is deliberately **no** ``.order_by()`` call on the queryset itself.
+    # An empty one *clears* ``Meta.ordering``, which would leave the wrapping
+    # subquery below with no ``ORDER BY`` at all — the rows would then come back
+    # in whatever order the query plan felt like, and a preview tile's index
+    # would stop matching the album's, so tapping the third tile could open a
+    # different photo. Letting ``Meta.ordering`` stand is what keeps the two
+    # queries agreeing.
     previews = defaultdict(list)
-    windowed = (
-        visible.annotate(
-            rank=Window(
-                expression=RowNumber(),
-                partition_by=[F("event_id")],
-                order_by=["created_at", "id"],
-            )
+    windowed = visible.annotate(
+        rank=Window(
+            expression=RowNumber(),
+            partition_by=[F("event_id")],
+            order_by=["created_at", "id"],
         )
-        .select_related("uploader")
-        .order_by()
-    )
+    ).select_related("uploader")
     # A window annotation can't be filtered in the same query (the database
     # computes it after WHERE), so the rank test goes in a wrapping subquery —
     # which is what ``filter`` on a QuerySet with a window expression compiles
@@ -4909,8 +4935,14 @@ class EventDetailView(APIView):
         photo_files = _stored_files(
             EventPhoto.objects.filter(event=event), "image", "thumbnail"
         )
-        event.delete()  # cascades to polls, options, votes, RSVPs, photos, notifications
-        delete_files_on_commit(photo_files)
+        # The ``atomic`` is load-bearing, exactly as in ``PostDetailView.delete``
+        # and ``GroupDetailView.delete``: ``ATOMIC_REQUESTS`` is off, so without
+        # an open transaction Django runs an ``on_commit`` callback *inline*, and
+        # a sweep that isn't tied to a commit is just an immediate delete.
+        with transaction.atomic():
+            # Cascades to polls, options, votes, RSVPs, photos, notifications.
+            event.delete()
+            delete_files_on_commit(photo_files)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -5004,11 +5036,21 @@ class EventPhotosView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def _event_or_404(self, request, pk):
-        return _event_or_404(request.user, pk)
+        """The event, plus the viewer's connection set — the same shape (and for
+        the same reason) as ``EventCommentsView._get_target_or_404``. Both verbs
+        need that set again a line later, and recomputing it means a second full
+        scan of ``Connection`` in one request."""
+        event = get_object_or_404(
+            Event.objects.select_related("organiser", "group"), pk=pk
+        )
+        connected_ids = connected_user_ids(request.user)
+        if not can_view_event(request.user, event, connected_ids=connected_ids):
+            raise NotFound()
+        return event, connected_ids
 
     def get(self, request, pk):
-        event = self._event_or_404(request, pk)
-        visible_ids = visible_reactor_ids(request.user)
+        event, connected_ids = self._event_or_404(request, pk)
+        visible_ids = connected_ids | {request.user.id}
         is_admin = is_group_admin(request.user, event.group_id)
         qs = (
             EventPhoto.objects.filter(
@@ -5034,7 +5076,7 @@ class EventPhotosView(APIView):
         return paginator.get_paginated_response(data)
 
     def post(self, request, pk):
-        event = self._event_or_404(request, pk)
+        event, connected_ids = self._event_or_404(request, pk)
         files = request.FILES.getlist("photos")
         if not files:
             raise ValidationError({"photos": "Choose at least one photo."})
@@ -5095,18 +5137,26 @@ class EventPhotosView(APIView):
         # Tell the people who said they'd be there. The actor is the uploader,
         # not the organiser — so unlike the five organiser-broadcast kinds this
         # one needs the connection gate to do real work, which it does inside
-        # ``create_notification`` (see ``_CONNECTION_GATED_KINDS``): a recipient
-        # not connected to the uploader can't see these photos, so telling them
-        # about them would be a link to an empty page.
-        for recipient in _event_rsvp_audience(
-            event, [GOING, MAYBE], include_organiser=True
-        ):
-            notifications.create_notification(
-                recipient,
-                request.user,
-                Notification.Kind.EVENT_PHOTOS,
-                event=event,
-            )
+        # the notification choke-point (see ``_CONNECTION_GATED_KINDS``): a
+        # recipient not connected to the uploader can't see these photos, so
+        # telling them about them would be a link to an empty page.
+        #
+        # **Bulk, not a loop over ``create_notification``.** Per-recipient this
+        # costs seven queries each — preference, connection, dedup, insert,
+        # insert, and the transaction around them — and it runs in the same
+        # request that has just synchronously decoded and re-encoded up to ten
+        # photos, on one gunicorn worker on a home PC. Thirty people going was
+        # 211 statements. ``create_notifications`` applies the identical rules
+        # set-wise instead, in a handful. ``connected_ids`` is threaded in
+        # because the uploader is the actor and we already have their set from
+        # the gate above — the same reason ``EventCommentsView`` threads it.
+        notifications.create_notifications(
+            _event_rsvp_audience(event, [GOING, MAYBE], include_organiser=True),
+            request.user,
+            Notification.Kind.EVENT_PHOTOS,
+            event=event,
+            connected_ids=connected_ids,
+        )
 
         is_admin = is_group_admin(request.user, event.group_id)
         return Response(
@@ -5125,43 +5175,65 @@ class EventPhotoDetailView(APIView):
     """Remove one photo from an event's album —
     ``DELETE /event-photos/<pk>/``.
 
-    Permission shape is ``PostDetailView``'s, deliberately identical: a photo on
-    an event you can't see is a **404** (existence stays hidden), and one you
-    can see but may not remove is a **403**.
-
     Three people may remove it: the **uploader** (your photo stays yours to
     take down), the **organiser**, and a **group admin** — the same pair who can
     cancel or delete the event itself. An album anyone can add to needs someone
     who can take something out of it, and that's the moderation shape this
-    codebase already chose everywhere else.
+    codebase already chose everywhere else. The organiser and the admin can only
+    reach what *they* can see: the album's per-viewer prune is not widened for
+    them (the maintainer's lever behind them is ``EventPhotoAdmin``, which sees
+    everything).
 
-    A photo you can't *see* but did upload is not a case that exists: the album
-    prunes on the uploader, so your own photos are always visible to you.
+    **The permission shape is ``CommentDetailView``'s** — the two checks in the
+    order that view spells out, and for the same two reasons:
+
+    - **The uploader may always remove their own photo**, checked *before* the
+      visibility gate. You can lose sight of a photo you added by leaving the
+      group or by disconnecting from the organiser, and your photo should still
+      be yours to take down; there is no other self-service route to it.
+    - **A photo you can't see is a 404, not a 403** — and that means the album's
+      prune, not just the event's gate. ``EventPhoto.id`` is a global sequential
+      key, so a 403 on a photo you're merely not connected to the uploader of
+      would answer "does row 4291 exist, and is it on an event I'm in?" for
+      content belonging to people you have never connected with: an existence
+      and counting oracle, walkable by id. ``can_view_event_photo`` composes both
+      halves of the album query, exactly as ``can_view_comment`` composes the
+      thread's, so a hidden photo is as absent here as it is in the list.
+    - A photo you **can** see but may not remove is a **403**.
     """
 
     def delete(self, request, pk):
         photo = get_object_or_404(
             EventPhoto.objects.select_related(
-                "event", "event__organiser", "event__group"
+                "event", "event__organiser", "event__group", "uploader"
             ),
             pk=pk,
         )
         event = photo.event
-        if not can_view_event(request.user, event):
-            raise NotFound()
-        if not (
-            photo.uploader_id == request.user.id
-            or event.organiser_id == request.user.id
-            or is_group_admin(request.user, event.group_id)
-        ):
-            raise PermissionDenied(
-                "Only the person who added a photo, the organiser or a group "
-                "admin can remove it."
-            )
-        # Gather the files before the row goes; the sweep runs on commit so a
-        # rolled-back delete can't strand a live row without its image.
-        delete_files_on_commit([photo.image, photo.thumbnail])
-        photo.delete()
+        if photo.uploader_id != request.user.id:
+            connected_ids = connected_user_ids(request.user)
+            if not can_view_event_photo(
+                request.user, photo, connected_ids=connected_ids
+            ):
+                raise NotFound()
+            if not (
+                event.organiser_id == request.user.id
+                or is_group_admin(request.user, event.group_id)
+            ):
+                raise PermissionDenied(
+                    "Only the person who added a photo, the organiser or a "
+                    "group admin can remove it."
+                )
+        # Gather the files before the row goes, and sweep them **inside** the
+        # transaction that removes it. ``ATOMIC_REQUESTS`` is off, so with no
+        # transaction open Django runs an ``on_commit`` callback immediately —
+        # registering the sweep first would unlink the JPEGs *before* the delete
+        # and leave a live row pointing at nothing if the delete then failed.
+        # Same order, same reason as ``PostDetailView.delete``.
+        files = [photo.image, photo.thumbnail]
+        with transaction.atomic():
+            photo.delete()
+            delete_files_on_commit(files)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

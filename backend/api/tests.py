@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, connection, transaction
+from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.models import Q
 from django.db.utils import OperationalError
 from django.test import SimpleTestCase, override_settings
@@ -9148,6 +9148,16 @@ class EventPhotoBase(EventsBase):
     """Shared helper for the album tests — every one of them uploads files, so
     they all need the throwaway ``MEDIA_ROOT`` the post-photo tests use."""
 
+    @classmethod
+    def tearDownClass(cls):
+        # Our own sweep, not a borrowed one. ``PhotoPostTests`` wipes the same
+        # root, but only ever gets to on a *full* run where it happens to sort
+        # last; running one album class on its own would otherwise leave its
+        # JPEGs in the temp dir for good. Removing the root more than once in a
+        # run is harmless — file storage recreates the directories it needs.
+        shutil.rmtree(_PHOTO_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
     def add_photo(self, event, uploader, name="p.jpg"):
         """Add one photo through the **API**, not the ORM.
 
@@ -9408,7 +9418,8 @@ class EventPhotoUploadTests(EventPhotoBase):
 
 class EventPhotoDeleteTests(EventPhotoBase):
     """Three people may remove a photo, and everyone else gets the same
-    404/403 split ``PostDetailView`` uses."""
+    404/403 split ``CommentDetailView`` uses — owner first, then a 404 for
+    anything the album's prune hides from you."""
 
     def test_uploader_can_remove_their_own(self):
         event = self.make_event()
@@ -9420,6 +9431,9 @@ class EventPhotoDeleteTests(EventPhotoBase):
         self.assertFalse(EventPhoto.objects.filter(pk=photo.pk).exists())
 
     def test_organiser_can_remove_anyones(self):
+        """"Anyone's" within the album *they* see — which for the organiser is
+        the whole album, with no carve-out: the audience is their connections,
+        so every uploader is one of them by construction."""
         event = self.make_event()
         photo = self.add_photo(event, self.me)
         self.client.force_authenticate(self.org)
@@ -9427,25 +9441,87 @@ class EventPhotoDeleteTests(EventPhotoBase):
             self.client.delete(event_photo_url(photo)).status_code, 204
         )
 
-    def test_group_admin_can_remove_anyones(self):
+    def test_group_admin_can_remove_a_photo_they_can_see(self):
         event = self.make_event()
+        make_connection(self.admin, self.me)
         photo = self.add_photo(event, self.me)
         self.client.force_authenticate(self.admin)
         self.assertEqual(
             self.client.delete(event_photo_url(photo)).status_code, 204
         )
 
-    def test_another_member_gets_403(self):
-        """``ana`` can see the event and isn't connected to ``me``, but she can
-        see the *photo* exists here only because the test handed her its id —
-        the 403 is what stops a member tidying up someone else's album."""
+    def test_group_admin_cannot_reach_a_photo_the_prune_hides_from_them(self):
+        """Deliberate, and the one place the moderation pair stops short.
+
+        The album's per-viewer prune is **not** widened for group admins:
+        widening it would make an album the first place in TimeLine that shows
+        you content from someone you never connected with, on the app's most
+        sensitive content type. So a group admin moderates what they can see and
+        no more, and the lever behind them is ``EventPhotoAdmin`` (see
+        ``EventPhotoAdminTests``), not a query with an admin branch in it.
+
+        It's a 404 rather than a 403 for the same reason it is for anyone else:
+        the id is sequential and global.
+        """
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)  # admin is not connected to me
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 404
+        )
+        self.assertTrue(EventPhoto.objects.filter(pk=photo.pk).exists())
+
+    def test_a_photo_the_album_hides_from_you_is_a_404_not_a_403(self):
+        """🔒 The id is the leak. ``ana`` can see the event but not ``me``'s
+        photos, and ``EventPhoto.id`` is a global sequential key — so a 403 here
+        would answer "does row N exist, and is it on an event I'm in?" for
+        content uploaded by people she has never connected with, walkable id by
+        id. That's an existence-and-count oracle over the most sensitive content
+        type in the app, so a photo she can't see has to be as absent as one
+        that was never there.
+
+        A 403 is still the right answer for a photo she *can* see but may not
+        remove — that's the case below, and the two together are exactly the
+        split ``can_view_comment`` draws.
+        """
         event = self.make_event()
         photo = self.add_photo(event, self.me)
+        self.client.force_authenticate(self.ana)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 404
+        )
+        # Indistinguishable from an id that was never issued.
+        self.assertEqual(
+            self.client.delete(f"/api/event-photos/{photo.pk + 9999}/").status_code,
+            404,
+        )
+        self.assertTrue(EventPhoto.objects.filter(pk=photo.pk).exists())
+
+    def test_a_visible_photo_you_do_not_own_is_a_403(self):
+        """The other half of the split: ``ana`` and ``me`` can both see the
+        organiser's photos, and neither may tidy up his album."""
+        event = self.make_event()
+        photo = self.add_photo(event, self.org)
         self.client.force_authenticate(self.ana)
         self.assertEqual(
             self.client.delete(event_photo_url(photo)).status_code, 403
         )
         self.assertTrue(EventPhoto.objects.filter(pk=photo.pk).exists())
+
+    def test_a_deactivated_uploaders_photo_is_a_404_to_a_plain_member(self):
+        """Deactivation drops the photo out of ``ana``'s album, so it has to
+        drop out of the id space too — otherwise the takedown lever leaves an
+        oracle behind."""
+        make_connection(self.ana, self.me)
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        self.me.is_active = False
+        self.me.save(update_fields=["is_active"])
+
+        self.client.force_authenticate(self.ana)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 404
+        )
 
     def test_someone_who_cannot_see_the_event_gets_404(self):
         event = self.make_event()
@@ -9454,6 +9530,43 @@ class EventPhotoDeleteTests(EventPhotoBase):
         self.assertEqual(
             self.client.delete(event_photo_url(photo)).status_code, 404
         )
+
+    def test_uploader_can_still_remove_a_photo_after_leaving_the_group(self):
+        """Your photo stays yours to take down. Leaving the group closes the
+        event to you, and there is no other self-service route to the album —
+        so gating the owner on visibility would strand a photo you regret
+        somewhere you can no longer reach it. Same rule, same order, as
+        ``CommentDetailView``: the owner check runs *before* the gate.
+        """
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        GroupMembership.objects.filter(group=self.group, user=self.me).delete()
+
+        self.client.force_authenticate(self.me)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 204
+        )
+        self.assertFalse(EventPhoto.objects.filter(pk=photo.pk).exists())
+
+    def test_uploader_can_still_remove_a_photo_after_disconnecting_from_the_organiser(self):
+        """The other way you lose sight of your own photo: the event's gate is
+        keyed on the organiser, so disconnecting from them 404s the whole event
+        out from under you while your photo is still sitting in it."""
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        Connection.objects.filter(
+            Q(requester=self.org, requestee=self.me)
+            | Q(requester=self.me, requestee=self.org)
+        ).delete()
+
+        self.client.force_authenticate(self.me)
+        # The event really is gone for them…
+        self.assertEqual(self.client.get(event_url(event)).status_code, 404)
+        # …and the photo is still theirs to remove.
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 204
+        )
+        self.assertFalse(EventPhoto.objects.filter(pk=photo.pk).exists())
 
     def test_can_delete_flag_matches_the_three_limbs(self):
         event = self.make_event()
@@ -9485,6 +9598,37 @@ class EventPhotoDeleteTests(EventPhotoBase):
             self.client.delete(event_photo_url(photo))
         self.assertFalse(os.path.exists(image_path))
         self.assertFalse(os.path.exists(thumb_path))
+
+    def test_a_delete_that_fails_does_not_take_the_files_with_it(self):
+        """The sweep has to be registered **after** the row goes, inside the
+        transaction that removes it.
+
+        ``ATOMIC_REQUESTS`` is off, so in production there is no open
+        transaction here and Django runs an ``on_commit`` callback *inline*.
+        Registering the sweep first therefore unlinked both JPEGs immediately
+        and only then tried the delete — and a delete that failed left a live
+        row pointing at two files that no longer existed. ``test_delete_sweeps
+        _the_files`` above can't catch that: ``captureOnCommitCallbacks`` opens
+        an atomic block production doesn't have, which defers the callback and
+        makes the wrong order look like the right one. This one asserts on the
+        callback itself, so it sees the difference.
+        """
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        image_path, thumb_path = photo.image.path, photo.thumbnail.path
+
+        self.client.force_authenticate(self.me)
+        with mock.patch.object(
+            EventPhoto, "delete", side_effect=DatabaseError("delete failed")
+        ):
+            with self.captureOnCommitCallbacks(execute=True) as callbacks:
+                with self.assertRaises(DatabaseError):
+                    self.client.delete(event_photo_url(photo))
+
+        self.assertEqual(callbacks, [])
+        self.assertTrue(os.path.exists(image_path))
+        self.assertTrue(os.path.exists(thumb_path))
+        self.assertTrue(EventPhoto.objects.filter(pk=photo.pk).exists())
 
 
 class EventPhotoFileSweepTests(EventPhotoBase):
@@ -9596,6 +9740,62 @@ class EventPhotoPayloadTests(EventPhotoBase):
             ids[:EVENT_PHOTO_PREVIEW_COUNT],
         )
 
+    def test_previews_are_the_albums_own_first_page_in_the_same_order(self):
+        """Stronger than the test above, and the one that matters to a tap.
+
+        The card renders the previews as tiles and hands the lightbox the index
+        of the tile you touched; the lightbox then reads the *album* endpoint.
+        So the two queries don't merely have to be sorted — they have to be
+        sorted the **same way**, or tapping the third tile opens somebody else's
+        fourth photo. Compared endpoint-against-endpoint rather than against a
+        list this test built, because a locally-remembered order can agree with
+        both of them while they disagree with each other.
+        """
+        event = self.make_event()
+        for i in range(EVENT_PHOTO_PREVIEW_COUNT + 3):
+            self.add_photo(event, self.org, f"{i}.jpg")
+
+        self.client.force_authenticate(self.me)
+        previews = self.client.get(event_url(event)).json()["photos"]
+        album = self.client.get(event_photos_url(event)).json()["results"]
+        self.assertEqual(
+            [p["id"] for p in previews],
+            [p["id"] for p in album[:EVENT_PHOTO_PREVIEW_COUNT]],
+        )
+
+    def test_the_preview_query_orders_its_outer_select(self):
+        """The guarantee behind the two tests above, pinned where it can fail.
+
+        ``event_photo_previews`` annotates a window function and then filters on
+        it, which Django compiles into a wrapping ``qualify`` subquery — so the
+        ordering the tiles depend on has to sit on the **outer** select. Calling
+        ``.order_by()`` with no arguments clears ``Meta.ordering`` and leaves
+        that outer select with none, at which point the row order is whatever
+        the plan happens to hand back and a tile's index stops meaning anything.
+
+        This is asserted against the SQL rather than the response because
+        Postgres computes a window function over sorted input and today emits
+        the rows in that order anyway — so the endpoint comparisons above stay
+        green either way. They pin what the clients need; this pins the thing
+        that actually promises it.
+        """
+        event = self.make_event()
+        self.add_photo(event, self.org)
+
+        self.client.force_authenticate(self.me)
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.get(event_url(event))
+        windowed = [
+            q["sql"] for q in ctx.captured_queries if "ROW_NUMBER()" in q["sql"]
+        ]
+        self.assertEqual(len(windowed), 1, windowed)
+        sql = windowed[0]
+        # The last WHERE is the subquery-wrapper's ``rank <= N``; an ORDER BY
+        # after it is on the outer select. Without one the only ORDER BY left is
+        # the window's own, inside ``OVER (…)``, which orders nothing that comes
+        # back.
+        self.assertGreater(sql.rfind("ORDER BY"), sql.rfind("WHERE"), sql)
+
     def test_a_photo_carries_what_a_grid_and_a_lightbox_need(self):
         event = self.make_event()
         self.add_photo(event, self.me)
@@ -9633,6 +9833,65 @@ class EventPhotoPayloadTests(EventPhotoBase):
         with CaptureQueriesContext(connection) as ctx:
             self.client.get(group_events_url(self.group))
         self.assertEqual(len(ctx), baseline)
+
+
+class EventPhotoAdminTests(EventPhotoBase):
+    """🔒 The maintainer's takedown lever has to reach an event album.
+
+    The album prunes per viewer on the uploader and that prune is deliberately
+    **not** widened for a group's admins — so a photo can sit in an album with
+    no in-app route to removal at all, if its uploader is connected to nobody
+    with moderation powers. That's an acceptable shape only because the
+    maintainer's route reaches everything; before ``EventPhotoAdmin`` existed it
+    stopped short of here.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.staff = User.objects.create_superuser(
+            email="root@example.com", password=PASSWORD
+        )
+        self.client.force_login(self.staff)
+
+    def test_the_admin_sees_a_photo_no_member_can_moderate(self):
+        """``ana``'s photo, on ``org``'s event, in ``admin``'s group: the group
+        admin isn't connected to her, so it isn't in *their* album."""
+        event = self.make_event()
+        photo = self.add_photo(event, self.ana, "ana.jpg")
+        self.client.force_login(self.staff)
+
+        changelist = self.client.get("/admin/api/eventphoto/")
+        self.assertEqual(changelist.status_code, 200)
+        self.assertIn("ana@x.com", changelist.content.decode())
+        self.assertEqual(
+            self.client.get(f"/admin/api/eventphoto/{photo.pk}/change/").status_code,
+            200,
+        )
+
+    def test_the_admin_delete_takes_the_row_and_the_files(self):
+        """A takedown that leaves the JPEG on disk isn't a takedown, and a
+        database delete never touches storage."""
+        event = self.make_event()
+        photo = self.add_photo(event, self.ana, "ana.jpg")
+        image_path, thumb_path = photo.image.path, photo.thumbnail.path
+        self.client.force_login(self.staff)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/admin/api/eventphoto/{photo.pk}/delete/", {"post": "yes"}
+            )
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(EventPhoto.objects.filter(pk=photo.pk).exists())
+        self.assertFalse(os.path.exists(image_path))
+        self.assertFalse(os.path.exists(thumb_path))
+
+    def test_photos_cannot_be_added_through_the_admin(self):
+        """Uploads go through the validated API pipeline (EXIF/GPS stripped,
+        re-encoded) or not at all."""
+        self.client.force_login(self.staff)
+        self.assertEqual(
+            self.client.get("/admin/api/eventphoto/add/").status_code, 403
+        )
 
 
 class EventPhotoNotificationTests(EventPhotoBase):
@@ -9763,6 +10022,57 @@ class EventPhotoNotificationTests(EventPhotoBase):
             Notification.objects.filter(
                 recipient=self.me, kind=Notification.Kind.EVENT_PHOTOS
             ).exists()
+        )
+
+    def _going_crowd(self, event, size, connected_to):
+        """``size`` members who are going and connected to ``connected_to`` — an
+        audience every one of whom must be told."""
+        for i in range(size):
+            user = make_user(f"crowd{event.id}-{i}@x.com")
+            add_member(self.group, user)
+            make_connection(connected_to, user)
+            self._rsvp(event, user, "going")
+
+    def test_the_fan_out_does_not_grow_with_the_audience(self):
+        """The album's notify step is a **broadcast**, and it runs in the same
+        request that has just decoded and re-encoded the upload, on one worker.
+
+        Notifying one recipient at a time cost about seven statements each —
+        preference, connection ``EXISTS``, dedup, ``BEGIN``, two inserts,
+        ``COMMIT`` — so thirty people going meant over two hundred queries
+        behind a photo upload. Asserted as *no growth* rather than an absolute
+        number, for the same reason
+        ``test_previews_cost_the_same_however_big_the_album_gets`` is: the exact
+        count is incidental, the growth is the bug.
+        """
+        small = self.make_event(title="Small")
+        self._going_crowd(small, 2, self.me)
+        big = self.make_event(title="Big")
+        self._going_crowd(big, 12, self.me)
+
+        self.client.force_authenticate(self.me)
+        counts = []
+        for event in (small, big):
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self.client.post(
+                    event_photos_url(event),
+                    {"photos": [make_image_upload()]},
+                    format="multipart",
+                )
+            self.assertEqual(resp.status_code, 201, resp.content)
+            counts.append(len(ctx))
+        self.assertEqual(counts[1], counts[0])
+
+        # …and everyone still got told. A bounded query count that reaches
+        # nobody would pass the assertion above and break the feature.
+        self.assertEqual(
+            Notification.objects.filter(
+                kind=Notification.Kind.EVENT_PHOTOS, event=big
+            ).count(),
+            12,
+        )
+        self.assertEqual(
+            PushOutbox.objects.filter(notification__event=big).count(), 12
         )
 
 

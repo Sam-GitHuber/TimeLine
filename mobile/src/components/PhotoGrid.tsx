@@ -18,6 +18,16 @@
  * tile then takes a "+N" overlay. A post passes neither (it's capped at ten and
  * always sends them all), so it gets the old behaviour with no branch.
  *
+ * **A "+N" tile is not a photo you open — it is the way to the rest**, and
+ * `onOverflow` is where it goes. That rule exists because the alternative is a
+ * lie the two event surfaces both told: a grid whose "+N" counted the whole
+ * album but whose viewer only ever held the handful of photos the grid was
+ * given, so the counter read "4 / 20" on an album of forty-seven and the rest
+ * were unreachable. Now the overlay tile takes you where the rest actually are —
+ * the event screen from a timeline entry, the next page inside the album — and
+ * the tiles either side of it are labelled against the set the viewer will hold,
+ * so the labels and the viewer's counter can't disagree.
+ *
  * ⚠️ **Render this outside whatever `Pressable` wraps the card**, as `PostCard`
  * and `EventTimelineEntry` both do. Nesting it makes "did I open the post or
  * the photo?" a matter of touch-responder luck.
@@ -43,6 +53,8 @@ const PHOTO_GUTTER = spacing.sm;
 export function PhotoGrid({
   images,
   onOpen,
+  onOverflow,
+  overflowLabel,
   max,
   total,
   label = 'photo',
@@ -50,6 +62,16 @@ export function PhotoGrid({
 }: {
   images: LightboxPhoto[];
   onOpen: (index: number) => void;
+  /**
+   * Pressed instead of `onOpen` when the last tile carries the "+N" — "take me
+   * to the rest". Required in spirit wherever `total` can exceed what's drawn;
+   * without it the overlay tile falls back to opening the photo underneath it,
+   * which is the old behaviour and only safe for a caller that can't overflow
+   * (a post).
+   */
+  onOverflow?: () => void;
+  /** What the "+N" tile *does*, for a screen reader. Say where it goes. */
+  overflowLabel?: string;
   max?: number;
   total?: number;
   /** What one tile is called in the accessibility label ("photo", "event photo"). */
@@ -80,12 +102,23 @@ export function PhotoGrid({
           <Pressable
             key={image.id}
             style={single ? styles.cellSingle : styles.cellMultiple}
-            onPress={() => onOpen(index)}
+            onPress={
+              showOverlay && onOverflow ? onOverflow : () => onOpen(index)
+            }
             accessibilityRole="button"
             accessibilityLabel={
               showOverlay
-                ? `View all ${count} photos`
-                : `View ${label} ${index + 1} of ${count}${attribution ?? ''}`
+                ? // What it *does*, not what exists beyond it: this tile opens
+                  // the album, it doesn't put `count` photos in front of you.
+                  (overflowLabel ?? `View all ${count} photos`)
+                : // Counted against the tiles drawn, not the album — these open
+                  // a viewer holding exactly `shown`, and a label promising
+                  // "1 of 47" over a viewer that ends at 20 is the disagreement
+                  // this grid exists to stop. The album's true size is stated
+                  // by the "+N" and by the section heading above.
+                  `View ${label} ${index + 1} of ${shown.length}${
+                    attribution ?? ''
+                  }`
             }
           >
             <AuthedImage

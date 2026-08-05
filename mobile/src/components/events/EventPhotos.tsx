@@ -11,9 +11,17 @@
  * RSVP tallies above it. That's server-side, so this renders what arrives — but
  * it's why the count here can differ from what the person beside you sees, and
  * why the empty state doesn't claim the album is empty.
+ *
+ * **This is the whole album, and the only place it is.** A timeline entry's
+ * grid is a preview of four that sends you here for the rest; the paging below
+ * is what "the rest" means.
  */
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -23,6 +31,22 @@ import { api, serverMessage, type PhotoUpload } from '@/api';
 import { usePhotoPicker } from '@/photoSource';
 import { colors, fontSize, spacing } from '@/theme';
 import type { EventPhoto } from '@/types';
+
+/**
+ * How many photos one **pick** may hand over, matching the server's
+ * `MAX_PHOTOS_PER_UPLOAD`. Left off, `selectionLimit` is undefined, which
+ * expo-image-picker reads as "the system maximum" — i.e. no limit. Two things
+ * then go wrong, and the second is the one that bites: the server rejects the
+ * request only after buffering the whole body, and before it ever leaves the
+ * phone `api.ts` holds one `Uint8Array` per asset *simultaneously*, so a
+ * thirty-photo pick is thirty full-resolution images in memory at once. The
+ * composer caps for exactly this reason (`ComposeBox`'s `MAX_PHOTOS`).
+ *
+ * The album's own ceiling (`MAX_PHOTOS_PER_EVENT` = 200) is a different number
+ * and stays the server's to enforce — it's counted over the life of the event,
+ * which no single pick can know.
+ */
+const MAX_PHOTOS_PER_UPLOAD = 10;
 
 export function EventPhotos({
   eventId,
@@ -35,16 +59,29 @@ export function EventPhotos({
   const { pickPhotos, photoMenu } = usePhotoPicker();
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
-  // The first page only. The album is paginated server-side, and "load the
-  // rest" is a tap on the last tile rather than a scroll here — this section
-  // lives inside the event screen's scroll view, so a second scrollable would
-  // fight it.
-  const photosQuery = useQuery({
+  // **Paged, and "load the rest" is a tap on the last tile** — this section
+  // lives inside the event screen's scroll view, so a second scrollable (or an
+  // `onEndReached`) would fight it. One page is 20 and an album holds up to 200,
+  // so a single un-paged fetch drew twenty tiles beside a heading saying 47 and
+  // gave you no way at all to reach the other twenty-seven.
+  //
+  // Follows `next` with `getPage`, the same contract the feed and every other
+  // list on this client uses.
+  const photosQuery = useInfiniteQuery({
     queryKey: ['eventPhotos', eventId],
-    queryFn: () => api.getEventPhotos(eventId),
+    queryFn: ({ pageParam }) =>
+      pageParam
+        ? api.getPage<EventPhoto>(pageParam)
+        : api.getEventPhotos(eventId),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) => lastPage.next ?? undefined,
   });
-  const photos: EventPhoto[] = photosQuery.data?.results ?? [];
-  const total = photosQuery.data?.count ?? photos.length;
+  const photos: EventPhoto[] =
+    photosQuery.data?.pages.flatMap((page) => page.results ?? []) ?? [];
+  // `count` is the server's, off the first page: your slice of the album, which
+  // is not `photos.length` until the last page is in.
+  const total = photosQuery.data?.pages[0]?.count ?? photos.length;
+  const unloaded = Math.max(total - photos.length, 0);
 
   const add = useMutation({
     mutationFn: (uploads: PhotoUpload[]) => api.addEventPhotos(eventId, uploads),
@@ -76,11 +113,15 @@ export function EventPhotos({
     // uploaded as picked, so that's the one compression it gets.
     const assets = await pickPhotos('Add photos', {
       allowsMultipleSelection: true,
+      selectionLimit: MAX_PHOTOS_PER_UPLOAD,
       quality: 0.9,
     });
     if (!assets) return;
     add.mutate(
-      assets.map((asset, i) => ({
+      // Sliced as well as limited, the belt-and-braces `ComposeBox` uses:
+      // `selectionLimit` is a request to the OS picker, and the one that comes
+      // back is the array we're about to read into memory.
+      assets.slice(0, MAX_PHOTOS_PER_UPLOAD).map((asset, i) => ({
         uri: asset.uri,
         name: asset.fileName ?? `photo-${i}.jpg`,
         type: asset.mimeType ?? 'image/jpeg',
@@ -127,17 +168,41 @@ export function EventPhotos({
 
       {photosQuery.isLoading ? (
         <ActivityIndicator color={colors.accent} />
+      ) : photosQuery.isError && photos.length === 0 ? (
+        // **Only this line, and not the empty state beside it.** A request that
+        // failed is not an album with nothing in it, and saying both at once
+        // told you the album was empty *and* that we couldn't tell — the first
+        // of which the client has no way of knowing.
+        <Text style={styles.error}>Couldn’t load the photos.</Text>
       ) : photos.length === 0 ? (
         // Carefully not "there are no photos": you're seeing your slice of the
         // album, so someone you aren't connected to may well have added some.
+        // Reached only when the query *succeeded* and returned nothing.
         <Text style={styles.empty}>No photos here yet — add the first.</Text>
       ) : (
-        <PhotoGrid images={photos} onOpen={setLightboxIndex} />
+        <>
+          <PhotoGrid
+            images={photos}
+            // Only when there really is another page: a "+N" that loads nothing
+            // is a dead tile. Everything loaded ⇒ no overlay, and every photo
+            // opens.
+            total={photosQuery.hasNextPage ? total : undefined}
+            onOpen={setLightboxIndex}
+            onOverflow={() => void photosQuery.fetchNextPage()}
+            overflowLabel={`Load ${unloaded} more photos`}
+          />
+          {photosQuery.isFetchingNextPage ? (
+            <ActivityIndicator color={colors.accent} />
+          ) : null}
+          {photosQuery.isError ? (
+            // A list that stopped short is indistinguishable from one that
+            // ended, and here that silently under-states the album. Same
+            // sentence as the web's, and deliberately not the one above: some
+            // photos *did* load.
+            <Text style={styles.error}>Couldn’t load all the photos.</Text>
+          ) : null}
+        </>
       )}
-
-      {photosQuery.isError ? (
-        <Text style={styles.error}>Couldn’t load the photos.</Text>
-      ) : null}
 
       {lightboxIndex !== null && photos[lightboxIndex] ? (
         <PhotoLightbox

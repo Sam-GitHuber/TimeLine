@@ -171,7 +171,33 @@ rather than re-implemented, and the same grid + lightbox on both clients (see
 **Removing one is the uploader's, the organiser's, or a group admin's** — an
 album anyone can add to needs someone who can take something out of it, and
 organiser-or-admin is the moderation pair that already cancels and deletes the
-event. The 404/403 split is `PostDetailView`'s, unchanged.
+event.
+
+Two things about that sentence are narrower than they look, and both are
+deliberate:
+
+- **The uploader's limb is checked *first*, before the visibility gate.** You can
+  lose sight of an event by leaving the group or disconnecting from its
+  organiser, and your photos would go with it — so ownership wins ahead of
+  `can_view_event`, exactly as `_owned_comment` does and for the same stated
+  reason: your photo stays yours to remove. Gating first is what makes a photo
+  unremovable by the one person with the clearest claim to it.
+- **The organiser's and the admin's limbs reach only what they can see.** The
+  prune above is per viewer, and it is *not* widened for admins — an album is
+  the last place to make an exception to the app's single visibility rule. So a
+  group admin who isn't connected to an uploader never sees that photo and has
+  no id to remove. Behind them sits the maintainer: `EventPhoto` is registered
+  in the Django admin, and deactivating an account still sweeps everything it
+  authored. A member-facing **report** flow is the honest fix for the gap
+  between those two and is tracked separately — this is not a moderation story
+  that's finished.
+
+**A photo you can't see is a 404, not a 403** — `can_view_comment`'s split, not
+`PostDetailView`'s. The container gate can't decide this one: `EventPhoto.id` is
+a global sequential key, so answering 403 for a photo the prune deliberately hid
+would let anyone walk the ids and count what people they never connected to have
+been posting. The gate that decides *whether you may see it* has to be the same
+gate that decides *whether you're told it exists*.
 
 🔒 **The album filters `uploader__is_active`, in both queries.** Deactivating an
 account is the maintainer's takedown lever and has to reach *everything* that
@@ -574,20 +600,38 @@ The gate needs a *present* organiser. Two paths:
   form used by the staging strip, month day-lists and the calendar agenda,
   which are indexes you tap through rather than act in — the same reason it
   takes `showActions={false}` there.
-- **The tiles are the payload; opening one fetches the album.** Both clients
-  hold the lightbox's photos behind `enabled: lightboxOpen` on `['eventPhotos',
-  id]`, seeded from `event.photos` so the photo you clicked is on screen
-  immediately and the rest slot in behind it. A page of ten events must not
-  fire ten album requests, and four tiles is not something you can "scroll
-  through". It's the **same key** the event page's album uses, so a photo added
-  there and a viewer opened on a card can't disagree — one cache entry, one
-  invalidation.
+- **The tiles are the payload, and a card fetches nothing.** The previews ride
+  `event.photos` / `event.photo_count`, so a page of ten events fires zero album
+  requests. Tapping a tile opens a viewer holding **only those previews** — the
+  "+N" tile is not a fifth photo but a **link to the event page**, where the
+  paginated album lives. That split is the fix for a card that used to promise
+  more than it could show: the overlay counts `photo_count` (up to 200) while a
+  viewer opened from a card could only ever hold one DRF page, so "+46" opened a
+  viewer reading "4 / 20" with the rest unreachable. Per-tile labels therefore
+  count against the previews ("View event photo 1 of 4"), matching the counter
+  in the viewer they open, and the "+N" says where it goes ("See all 50 photos
+  on the event"). **Accepted consequence:** the photo under the "+N" tile isn't
+  openable from the grid — it's an arrow away inside the viewer. That reads like
+  a bug and isn't; both clients carry a comment saying so.
+- 🔑 **`['eventPhotos', id]` has exactly one consumer** — the event page's
+  album, and it holds the infinite-query shape. Nothing else may cache a bare
+  DRF page under it. The card once did, with a plain `useQuery`, which put two
+  incompatible shapes in one TanStack entry: mount the card's viewer first and
+  the event page's `getNextPageParam` destructured `undefined` and threw, and
+  with no `ErrorBoundary` in `main.jsx` that white-screened the whole app.
+  "One cache entry, one invalidation" is now true because there is one reader,
+  not because two readers agreed.
 - **The grid and the viewer are shared with posts, not copied.** `PhotoGrid`
   (`frontend/src/components/PhotoGrid.jsx`, `mobile/src/components/PhotoGrid.tsx`)
   was lifted out of `PostCard` on both clients and takes `max`/`total` for the
-  "+N"; `Lightbox`/`PhotoLightbox` gained a caption (who took it — a post's
+  "+N", plus `onOverflow`/`overflowLabel` for the event card's link-to-the-album
+  behaviour; `Lightbox`/`PhotoLightbox` gained a caption (who took it — a post's
   images inherit the post's author, an album's don't) and an optional Remove.
-  A post passes none of the new props and is unchanged.
+  A post passes none of the new props and is unchanged — and that's a constraint,
+  not an observation: a post's images are one bounded set with nowhere to
+  navigate to, so **the "+N" default must stay "open the viewer at that index"**.
+  Both clients pin it with a test that a post's grid is unchanged, because the
+  album's behaviour is the tempting thing to make the default.
 - **A refused photo write says so where the control is**, per
   [connections.md](connections.md#reporting-a-refused-write): the web renders
   inline beside Add photos and inside the confirm dialog for a remove; mobile

@@ -10,7 +10,8 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { Alert } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { router } from 'expo-router';
 
 import { api, ApiError } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
@@ -23,7 +24,25 @@ import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, Poll, User } from '@/types';
 
-import { androidIt, captureBackHandler, pressBack } from './helpers';
+import {
+  alertSpy,
+  androidIt,
+  captureBackHandler,
+  choosePhotoSource,
+  pressAlertButton,
+  pressBack,
+  resetMenuSpies,
+} from './helpers';
+
+// The album's "Add photos" goes through the shared picker, which opens the
+// camera-or-library menu and then a native module that doesn't exist under Node.
+jest.mock('expo-image-picker', () => ({
+  launchImageLibraryAsync: jest.fn(),
+  launchCameraAsync: jest.fn(),
+  requestCameraPermissionsAsync: jest.fn(),
+}));
+
+const pickFromLibrary = ImagePicker.launchImageLibraryAsync as jest.Mock;
 
 const mockParams: Record<string, string> = { eventId: '9', groupId: '7' };
 jest.mock('expo-router', () => ({
@@ -264,6 +283,9 @@ beforeEach(async () => {
   mockParams.eventId = '9';
   mockParams.groupId = '7';
   globalThis.fetch = mockFetch as unknown as typeof fetch;
+  (router.push as jest.Mock).mockClear();
+  resetMenuSpies();
+  pickFromLibrary.mockReset().mockResolvedValue({ canceled: true });
   await saveTokens({ access: 'a', refresh: 'r' });
 });
 
@@ -1142,9 +1164,12 @@ describe('EventTimelineEntry', () => {
 // --- The photo album -------------------------------------------------------
 //
 // Who may see which photo is enforced (and tested exhaustively) on the backend.
-// What the client owns is the two things below: a card shows the previews and
-// says how many more there are, and opening one gets you the *whole* album
-// rather than the four tiles the payload happened to carry.
+// What the client owns is that **no surface claims more photos than it can
+// show**. A card holds four previews and sends you to the event for the rest;
+// the event screen holds the whole album, a page at a time. The bug this
+// replaced had both of them counting an album they'd only been handed the first
+// slice of — a "+N" opening a viewer that stopped at the fourth photo, and a
+// heading saying 47 over twenty tiles with no way to reach the other 27.
 
 function makePhoto(id: number, uploaderName = 'Ada Lovelace', canDelete = false) {
   return {
@@ -1176,7 +1201,7 @@ describe('event photos', () => {
     expect(screen.getByLabelText('View event photo 2 of 2')).toBeTruthy();
   });
 
-  it('caps the tiles at four and puts the rest behind a +N', async () => {
+  it('caps the tiles at four and sends the "+N" to the event, not to a viewer', async () => {
     // The two numbers earning their keep: the payload carries four photos, the
     // album holds eleven, and the card has to say so rather than imply the
     // album is what it was sent.
@@ -1192,50 +1217,46 @@ describe('event photos', () => {
     await renderWith(<EventTimelineEntry event={event} variant="past" />);
 
     expect(screen.getByText('+7')).toBeTruthy();
-    expect(screen.getByLabelText('View all 11 photos')).toBeTruthy();
-    expect(screen.queryByLabelText('View event photo 5 of 11')).toBeNull();
+    // The label says what the control *does*. It used to promise all eleven and
+    // open a viewer holding four.
+    const overflow = screen.getByLabelText('See all 11 photos on the event');
+    expect(screen.queryByLabelText('View all 11 photos')).toBeNull();
+
+    await fireEvent.press(overflow);
+    expect(router.push).toHaveBeenCalledWith('/events/42');
   });
 
-  it('fetches the whole album only once a photo is opened', async () => {
-    // A group timeline of ten events must not fire ten album requests — but the
-    // moment you tap one you have to be able to swipe past the tiles that rode
-    // the payload.
+  it('labels the preview tiles against the viewer they open, not the album', async () => {
+    // 🔒 The regression: with the tiles labelled "1 of 11" and the viewer
+    // holding four, the counter read "1 / 4" over a label promising eleven.
     const event = makeEvent({
       id: 43,
       status: 'scheduled',
       is_past: true,
       event_date: '2026-04-05',
       starts_at: '2026-04-05T12:30:00Z',
-      photos: [makePhoto(1), makePhoto(2)],
-      photo_count: 6,
+      photos: [1, 2, 3, 4].map((n) => makePhoto(n)),
+      photo_count: 11,
     });
     mockFetch.mockImplementation(async (url: string) => {
       if (url.includes('/api/auth/user/')) return jsonResponse(ME);
-      if (url.includes('/api/events/43/photos/'))
-        return jsonResponse({
-          results: [1, 2, 3, 4, 5, 6].map((n) => makePhoto(n)),
-          next: null,
-          count: 6,
-        });
       return jsonResponse(null, 404);
     });
 
     await renderWith(<EventTimelineEntry event={event} variant="past" />);
+    expect(screen.queryByLabelText('View event photo 1 of 11')).toBeNull();
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('View event photo 1 of 4'));
+    });
+
+    // The counter agrees with the label, and the card fetched no album to fill
+    // a viewer it can't page — a group timeline of ten events must not fire ten
+    // album requests, and one un-paged page couldn't hold the album anyway.
+    await waitFor(() => expect(screen.getByText('1 / 4')).toBeTruthy());
     expect(
       mockFetch.mock.calls.some((c) => String(c[0]).includes('/photos/'))
     ).toBe(false);
-
-    await act(async () => {
-      fireEvent.press(screen.getByLabelText('View event photo 1 of 6'));
-    });
-
-    await waitFor(() =>
-      expect(
-        mockFetch.mock.calls.some((c) => String(c[0]).includes('/api/events/43/photos/'))
-      ).toBe(true)
-    );
-    // 1 / 6, not 1 / 2 — the whole album is now swipeable.
-    await waitFor(() => expect(screen.getByText(/1 \/ 6/)).toBeTruthy());
   });
 
   it('lists the album on the event screen and names who added each photo', async () => {
@@ -1292,12 +1313,22 @@ describe('event photos', () => {
     expect(screen.queryByLabelText('Remove this photo')).toBeNull();
   });
 
-  it('offers Remove on your own photo, and confirms before removing', async () => {
-    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
-    mockFetch.mockImplementation(async (url: string) => {
+  it('offers Remove on your own photo, confirms, and then removes it', async () => {
+    // The album empties once the DELETE lands, which is what the server does:
+    // the page is refetched after the write.
+    let removed = false;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
       if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/event-photos/1/') && init?.method === 'DELETE') {
+        removed = true;
+        return jsonResponse(null, 204);
+      }
       if (url.includes('/api/events/9/photos/'))
-        return jsonResponse({ results: [makePhoto(1, 'Me Myself', true)], next: null, count: 1 });
+        return jsonResponse({
+          results: removed ? [] : [makePhoto(1, 'Me Myself', true)],
+          next: null,
+          count: removed ? 0 : 1,
+        });
       if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
       return jsonResponse(null, 404);
     });
@@ -1320,7 +1351,177 @@ describe('event photos', () => {
     expect(
       mockFetch.mock.calls.some((c) => String(c[0]).includes('/api/event-photos/1/'))
     ).toBe(false);
-    alertSpy.mockRestore();
+
+    // And then the other half, which nothing used to press: the confirm has to
+    // actually reach the server. A Remove that stops at the dialog is a
+    // delete that never happens.
+    await act(async () => {
+      pressAlertButton('Remove this photo?', 'Remove');
+    });
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.some(
+          ([url, init]) =>
+            String(url).includes('/api/event-photos/1/') && init?.method === 'DELETE'
+        )
+      ).toBe(true)
+    );
+    // The viewer closes on success — it was showing a photo that's gone.
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Close photo viewer')).toBeNull()
+    );
+  });
+
+  it('uploads the photos you pick, capped at what one request may carry', async () => {
+    // 🔒 The cap is the point. `selectionLimit` left off means *the system
+    // maximum* to expo-image-picker — and every asset picked is read into
+    // memory at once before the request leaves, so an uncapped pick is an OOM
+    // on an older phone as well as a request the server will refuse.
+    pickFromLibrary.mockResolvedValue({
+      canceled: false,
+      // Twelve, so the request is trimmed even if the picker ignores the limit
+      // it was given — which is the half that protects the phone's memory.
+      assets: Array.from({ length: 12 }, (_, i) => ({
+        uri: `file:///tmp/${i}.jpg`,
+        fileName: `${i}.jpg`,
+        mimeType: 'image/jpeg',
+      })),
+    });
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/photos/'))
+        return jsonResponse({ results: [], next: null, count: 0 });
+      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Photos');
+
+    // Not awaited: `pickPhotos` doesn't resolve until the source is chosen.
+    fireEvent.press(screen.getByLabelText('Add photos to this event'));
+    await choosePhotoSource('Choose from Library');
+
+    expect(pickFromLibrary).toHaveBeenCalledWith(
+      expect.objectContaining({ allowsMultipleSelection: true, selectionLimit: 10 })
+    );
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.some(
+          ([url, init]) =>
+            String(url).includes('/api/events/9/photos/') && init?.method === 'POST'
+        )
+      ).toBe(true)
+    );
+    const post = mockFetch.mock.calls.find(
+      ([url, init]) =>
+        String(url).includes('/api/events/9/photos/') && init?.method === 'POST'
+    );
+    // Ten, the server's `MAX_PHOTOS_PER_UPLOAD` — and ten is also how many
+    // full-resolution images `api.ts` holds in memory at once building this
+    // body, which is the limit that matters on an older phone.
+    expect((post![1].body as FormData).getAll('photos')).toHaveLength(10);
+  });
+});
+
+// --- Paging the album ------------------------------------------------------
+//
+// One page is 20 and an album holds up to 200, so the album screen is the one
+// surface that has to page. It lives inside the event screen's scroll view, so
+// there's no `onEndReached` to hang this off: the last tile takes the "+N" and
+// loading the next page is a tap on it.
+
+/** A page of the album, `n` photos numbered from `from`. */
+function albumPage(from: number, n: number, count: number, next: string | null) {
+  return {
+    results: Array.from({ length: n }, (_, i) => makePhoto(from + i)),
+    next,
+    previous: null,
+    count,
+  };
+}
+
+describe('the album on the event screen', () => {
+  /** Page 1 of 20 with 5 behind it, and a page 2 that finishes the album. */
+  function pagedAlbum() {
+    mockFetch.mockImplementation(async (url: string) => {
+      const at = String(url);
+      if (at.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (at.includes('/api/events/9/photos/'))
+        return at.includes('page=2')
+          ? jsonResponse(albumPage(21, 5, 25, null))
+          : jsonResponse(
+              albumPage(1, 20, 25, 'https://api.example.test/api/events/9/photos/?page=2')
+            );
+      if (at.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+  }
+
+  it('reaches the photos past the first page', async () => {
+    // 🔒 The bug: 25 in the heading, 20 tiles, and no affordance of any kind for
+    // the other five.
+    pagedAlbum();
+    await renderWith(<EventScreen />);
+
+    await screen.findByText('Photos');
+    expect(await screen.findByText('25')).toBeTruthy();
+    // The last tile is the way to the rest, and says how many that is.
+    expect(await screen.findByText('+5')).toBeTruthy();
+    const more = screen.getByLabelText('Load 5 more photos');
+
+    await act(async () => {
+      fireEvent.press(more);
+    });
+
+    // Every photo is now on screen and openable, and nothing is left counting.
+    await waitFor(() =>
+      expect(screen.getByLabelText('View photo 25 of 25')).toBeTruthy()
+    );
+    expect(screen.queryByText('+5')).toBeNull();
+  });
+
+  it('says it could not load them, rather than that there are none', async () => {
+    // 🔒 The two lines used to render together: "No photos here yet" *and* the
+    // load error. The first is a claim the client can't make about a request
+    // that failed.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/photos/')) return jsonResponse(null, 500);
+      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+
+    expect(await screen.findByText('Couldn’t load the photos.')).toBeTruthy();
+    expect(screen.queryByText('No photos here yet — add the first.')).toBeNull();
+  });
+
+  it('says a *later* page failed without disowning the ones it has', async () => {
+    // The other half of the same rule: photos did load, so the album isn't
+    // empty and isn't unloadable — it's short, and the sentence says which.
+    mockFetch.mockImplementation(async (url: string) => {
+      const at = String(url);
+      if (at.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (at.includes('/api/events/9/photos/'))
+        return at.includes('page=2')
+          ? jsonResponse(null, 500)
+          : jsonResponse(
+              albumPage(1, 20, 25, 'https://api.example.test/api/events/9/photos/?page=2')
+            );
+      if (at.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    await act(async () => {
+      fireEvent.press(await screen.findByLabelText('Load 5 more photos'));
+    });
+
+    expect(await screen.findByText('Couldn’t load all the photos.')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load the photos.')).toBeNull();
+    expect(screen.getByLabelText('View photo 1 of 20')).toBeTruthy();
   });
 });
 

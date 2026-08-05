@@ -63,6 +63,14 @@
  *   All three gate their organisers on `connected_user_ids` exactly as
  *   `feed_posts` does (`PersonalCalendarView`, `GroupEventsView`,
  *   `GroupCalendarView`), and none of the four writes had ever named one.
+ * - **`['eventPhotos']` / `['event']`** — the album, which prunes on
+ *   `uploader_id__in=visible_reactor_ids(user)` exactly as the comment tree
+ *   does. Accepting or removing a connection therefore changes which photos it
+ *   may show *and* the count above them, and a cached album keeps the old prune
+ *   and the old number. `['event']` rides with it because the event payload now
+ *   carries `photos` + `photo_count` for the preview grid, which makes the whole
+ *   payload connection-sensitive — the gap predates the album but only started
+ *   showing a wrong number with it.
  * - **`['conversations']` / `['conversation']` / `['unreadMessages']`** —
  *   connecting and disconnecting flip your participation in shared group chats
  *   (`promote_shared_chats` / `sever_shared_chats`), so a chat can unlock or
@@ -113,6 +121,8 @@ export function invalidateConnectionChange(
     ['personalCalendar'],
     ['groupEvents'],
     ['groupCalendar'],
+    ['event'],
+    ['eventPhotos'],
     // Shared group chats promote/sever with the connection
     ['conversations'],
     ['conversation'],

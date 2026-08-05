@@ -9,6 +9,7 @@ from .models import (
     Connection,
     Conversation,
     ConversationRead,
+    EventPhoto,
     Group,
     GroupMembership,
     Notification,
@@ -18,6 +19,7 @@ from .models import (
     Report,
 )
 from .serializers import MESSAGE_THUMBNAIL_MAX_BYTES
+from .views import delete_files_on_commit
 
 # NOTE: ``Message`` is deliberately **not** imported or registered here, and
 # neither is ``MessageAttachment`` — a browsable list of chat photos is the same
@@ -218,6 +220,65 @@ class GroupMembershipAdmin(admin.ModelAdmin):
     list_filter = ("role", "status")
     search_fields = ("group__name", "user__email")
     ordering = ("-created_at",)
+
+
+@admin.register(EventPhoto)
+class EventPhotoAdmin(admin.ModelAdmin):
+    """Every photo in every event album — the maintainer's takedown lever for
+    the one content type nobody in the app can see all of (Phase 8b).
+
+    **Why this had to exist.** An event's album prunes per viewer on the
+    *uploader*, and that prune is deliberately **not** widened for the group's
+    admins: an organiser or group admin can remove only what they can see, like
+    everyone else, because widening it would make the album the first place in
+    TimeLine that shows you content from someone you never connected with. The
+    consequence is that a photo whose uploader is connected to nobody with
+    moderation powers has no in-app route to removal at all. That's fine — the
+    same is already true of a post from someone you aren't connected to — but
+    only because the maintainer's route reaches everything, and until this class
+    existed it didn't reach here. Do **not** answer this by loosening the query
+    instead; the decision is recorded in ``docs/reference/events.md``.
+
+    Read-only, and no add form. Uploads always go through the validated API
+    pipeline (``process_image`` strips EXIF/GPS and re-encodes), never the
+    admin, so the only verb this page needs is delete. The FKs are readonly for
+    ReportAdmin's reason too: an editable one renders a ``<select>`` of every
+    row in the target table.
+    """
+
+    list_display = ("id", "event", "uploader", "width", "height", "created_at")
+    list_select_related = ("event", "uploader")
+    list_filter = ("created_at",)
+    search_fields = (
+        "event__title",
+        "uploader__email",
+        "uploader__first_name",
+        "uploader__last_name",
+    )
+    ordering = ("-created_at",)
+    fields = ("event", "uploader", "image", "thumbnail", "width", "height",
+              "created_at")
+    readonly_fields = fields
+
+    def has_add_permission(self, request):
+        return False
+
+    # A takedown that leaves the JPEG on disk isn't a takedown, and a database
+    # delete never touches storage — so both delete paths gather the files first
+    # and sweep them, exactly as every API path that destroys an album does.
+    # ``delete_model`` runs inside the admin's transaction, so the sweep waits
+    # for the commit; the bulk action may not, in which case the callback fires
+    # inline — after the rows are already gone, which is the safe order either
+    # way (see ``delete_files_on_commit``).
+    def delete_model(self, request, obj):
+        files = [obj.image, obj.thumbnail]
+        super().delete_model(request, obj)
+        delete_files_on_commit(files)
+
+    def delete_queryset(self, request, queryset):
+        files = [f for photo in queryset for f in (photo.image, photo.thumbnail)]
+        super().delete_queryset(request, queryset)
+        delete_files_on_commit(files)
 
 
 @admin.register(Report)

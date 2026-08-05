@@ -190,7 +190,11 @@ function Pager({
           {current && onDelete && canDelete?.(current) ? (
             <Pressable
               onPress={() => onDelete(current)}
-              style={({ pressed }) => [styles.close, pressed && styles.deletePressed]}
+              style={({ pressed }) => [
+                styles.chip,
+                styles.remove,
+                pressed && styles.deletePressed,
+              ]}
               accessibilityRole="button"
               accessibilityLabel="Remove this photo"
               hitSlop={8}
@@ -200,7 +204,11 @@ function Pager({
           ) : null}
           <Pressable
             onPress={onClose}
-            style={({ pressed }) => [styles.close, pressed && styles.closePressed]}
+            style={({ pressed }) => [
+              styles.chip,
+              styles.close,
+              pressed && styles.closePressed,
+            ]}
             accessibilityRole="button"
             accessibilityLabel="Close photo viewer"
             hitSlop={8}
@@ -218,11 +226,25 @@ function Pager({
           style={[styles.counter, { bottom: insets.bottom + spacing.lg }]}
           pointerEvents="none"
         >
-          <Text style={styles.counterText} numberOfLines={1}>
-            {caption ? caption : ''}
-            {caption && count > 1 ? ' · ' : ''}
-            {count > 1 ? `${index + 1} / ${count}` : ''}
-          </Text>
+          {/* Three Texts, not one. **Only the name may be truncated** — sharing
+              one `numberOfLines={1}` with the counter meant a long uploader
+              name ellipsized "4 / 20" clean off the end, so the album's own
+              photos were the ones that lost the count. `flexShrink` is what
+              makes the name the part that gives. */}
+          {caption ? (
+            <Text
+              style={[styles.counterText, styles.caption]}
+              numberOfLines={1}
+            >
+              {caption}
+            </Text>
+          ) : null}
+          {caption && count > 1 ? (
+            <Text style={styles.counterText}> · </Text>
+          ) : null}
+          {count > 1 ? (
+            <Text style={styles.counterText}>{`${index + 1} / ${count}`}</Text>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -245,17 +267,23 @@ const styles = StyleSheet.create({
     padding: spacing.sm,
   },
   chromeRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  close: {
-    minWidth: CLOSE_SIZE,
+  // What the two chrome buttons share. **Deliberately carries no width**, so
+  // the round one and the worded one can each say what they need: the × is a
+  // circle, and a `minWidth` + padding on *that* ovalised it to ~48pt across on
+  // every screen this viewer serves, not just the album.
+  chip: {
     height: CLOSE_SIZE,
     borderRadius: CLOSE_SIZE / 2,
-    paddingHorizontal: spacing.md,
     alignItems: 'center',
     justifyContent: 'center',
     // A translucent white disc rather than a bare glyph: over a photo, a plain
     // × disappears against anything pale.
     backgroundColor: 'rgba(255,255,255,0.15)',
   },
+  // Square, so the radius draws a circle — Apple's 44pt minimum, exactly.
+  close: { width: CLOSE_SIZE },
+  // A word, so it takes the width the word needs and keeps 44pt of height.
+  remove: { minWidth: CLOSE_SIZE, paddingHorizontal: spacing.md },
   closePressed: { backgroundColor: 'rgba(255,255,255,0.3)' },
   closeText: { color: '#fff', fontSize: 26, lineHeight: 30, fontWeight: '300' },
   // Worded rather than an icon, and not tinted red until pressed: a destructive
@@ -266,11 +294,19 @@ const styles = StyleSheet.create({
   counter: {
     position: 'absolute',
     alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    // So the pill can't run off both edges of the screen when the name is long
+    // — it shrinks the name instead (see `caption`).
+    maxWidth: '90%',
     backgroundColor: 'rgba(0,0,0,0.55)',
     borderRadius: radius.pill,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs,
   },
+  // The only part of the pill allowed to give: the counter is four characters
+  // and always worth more than the tail of a name.
+  caption: { flexShrink: 1 },
   counterText: {
     color: '#fff',
     fontSize: fontSize.sm,

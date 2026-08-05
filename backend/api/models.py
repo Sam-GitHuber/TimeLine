@@ -1294,10 +1294,13 @@ class Notification(models.Model):
         CONNECTION_REQUEST = "connection_request", "Connection request"
         CONNECTION_ACCEPTED = "connection_accepted", "Connection accepted"
         GROUP_INVITE = "group_invite", "Group invitation"
-        # Group events (Phase 8b). The actor is always the event's organiser, so
-        # these ride the same connection gate as the content kinds — a member not
-        # connected to the organiser gets no row (see notifications.py). All five
-        # target the ``event`` FK and deep-link to /g/<gid>/events/<eid>.
+        # Group events (Phase 8b) — the organiser's five broadcasts. The actor is
+        # always the event's organiser, so these ride the same connection gate as
+        # the content kinds: a member not connected to the organiser gets no row
+        # (see notifications.py). Like the two event kinds added below them (a
+        # comment on an event, and photos added to one, both of which have a
+        # different actor), they target the ``event`` FK and deep-link to
+        # /g/<gid>/events/<eid>.
         EVENT_CREATED = "event_created", "New group event"
         POLL_OPENED = "poll_opened", "Poll opened on an event"
         EVENT_SCHEDULED = "event_scheduled", "Event date set"

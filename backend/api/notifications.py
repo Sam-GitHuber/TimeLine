@@ -89,8 +89,8 @@ _CONNECTION_GATED_KINDS = frozenset(
 #
 # The grouping mirrors the **per-type preferences**, so the OS-level control and
 # the in-app one tell the same story instead of contradicting each other. It is
-# deliberately *not* one channel per kind: five separate event channels would be
-# a wall of switches nobody reads.
+# deliberately *not* one channel per kind: the six kinds filed under ``events``
+# would be six separate switches, and that's a wall nobody reads.
 #
 # Two things make this fussier than it looks:
 #
@@ -198,6 +198,23 @@ def _are_connected(a_id, b_id):
     )
 
 
+def _connected_ids(user_id):
+    """Every user id ``user_id`` has an accepted connection with — the set form
+    of ``_are_connected``, for the bulk path below. Same rule, same table, one
+    query instead of one ``EXISTS`` per candidate recipient; and, like
+    ``_are_connected``, spelled out here rather than imported from ``views`` to
+    keep this module import-cycle-free."""
+    pairs = (
+        Connection.objects.filter(status=Connection.Status.ACCEPTED)
+        .filter(Q(requester_id=user_id) | Q(requestee_id=user_id))
+        .values_list("requester_id", "requestee_id")
+    )
+    return {
+        requestee if requester == user_id else requester
+        for requester, requestee in pairs
+    }
+
+
 def create_notification(recipient, actor, kind, *, post=None, comment=None,
                         group=None, connection=None, event=None):
     """Create (and return) a notification, or return ``None`` if it's suppressed.
@@ -267,6 +284,115 @@ def create_notification(recipient, actor, kind, *, post=None, comment=None,
             notification=notification, recipient=recipient
         )
     return notification
+
+
+def create_notifications(recipients, actor, kind, *, post=None, comment=None,
+                         group=None, connection=None, event=None,
+                         connected_ids=None):
+    """``create_notification`` for a whole audience at once, in a **bounded**
+    number of queries. Returns the notifications created or refreshed.
+
+    Every rule above is applied here, unchanged — no self-notification, muted
+    kinds dropped, ``_CONNECTION_GATED_KINDS`` enforced, ``_DEDUP_KINDS``
+    refreshing an existing *unread* row instead of stacking a second one, and a
+    ``PushOutbox`` row only for genuinely new notifications. The difference is
+    purely how they're evaluated: **set-wise instead of per recipient**.
+
+    **Why this exists.** The one-at-a-time version costs about seven statements
+    per recipient (preference, connection ``EXISTS``, dedup, ``BEGIN``, two
+    inserts, ``COMMIT``), and a broadcast to thirty people measured at 211. That
+    is fine for the one-off notifications the rest of the app fires, and not fine
+    for a fan-out that runs in the same request as an image upload on a single
+    worker. Here the same rules cost one preferences query, one connections
+    query, one dedup query, and one insert per table.
+
+    ``connected_ids`` lets a caller that has already computed the **actor's**
+    connection set — the event views all have it, they need it for the
+    visibility gate — hand it over rather than making this scan ``Connection``
+    a second time in one request. Pass the *actor's* set or nothing; passing
+    anyone else's would silently widen the gate.
+    """
+    ids = {r.id for r in recipients if actor is None or r.id != actor.id}
+    if not ids:
+        return []
+
+    if kind in Notification.MUTABLE_KINDS:
+        # Absence means enabled, exactly as the single-row path reads it, so we
+        # ask only for the rows that say "off".
+        ids -= set(
+            NotificationPreference.objects.filter(
+                user_id__in=ids, kind=kind, enabled=False
+            ).values_list("user_id", flat=True)
+        )
+
+    if kind in _CONNECTION_GATED_KINDS:
+        if actor is None:
+            return []
+        if connected_ids is None:
+            connected_ids = _connected_ids(actor.id)
+        ids &= set(connected_ids)
+
+    if not ids:
+        return []
+
+    refreshed = []
+    if kind in _DEDUP_KINDS:
+        # One query for everyone's still-unread row instead of one each. The
+        # queryset keeps ``Notification``'s newest-first ordering, so taking the
+        # first row seen per recipient is the same row ``.first()`` picked.
+        for existing in Notification.objects.filter(
+            recipient_id__in=ids,
+            actor=actor,
+            kind=kind,
+            post=post,
+            comment=comment,
+            event=event,
+            seen_at__isnull=True,
+        ):
+            if existing.recipient_id in ids:
+                ids.discard(existing.recipient_id)
+                refreshed.append(existing)
+        if refreshed:
+            now = timezone.now()
+            for existing in refreshed:
+                existing.created_at = now
+            # ``auto_now_add`` only fires on insert, so assigning ``created_at``
+            # is honoured — this bumps the rows to the top of the list, as the
+            # single-row path does with ``save(update_fields=…)``.
+            Notification.objects.filter(
+                pk__in=[n.pk for n in refreshed]
+            ).update(created_at=now)
+
+    if not ids:
+        return refreshed
+
+    # Atomic for the same reason the single-row path is: the notification and
+    # its outbox row are one fact, and nothing re-scans for un-enqueued
+    # notifications, so a failure between them would be a push that never goes.
+    with transaction.atomic():
+        created = Notification.objects.bulk_create(
+            [
+                Notification(
+                    recipient_id=user_id,
+                    actor=actor,
+                    kind=kind,
+                    post=post,
+                    comment=comment,
+                    group=group,
+                    connection=connection,
+                    event=event,
+                )
+                # Sorted so the insert order is stable and a test can read it.
+                for user_id in sorted(ids)
+            ]
+        )
+        PushOutbox.objects.bulk_create(
+            [
+                PushOutbox(notification=n, recipient_id=n.recipient_id)
+                for n in created
+            ]
+        )
+    return refreshed + created
 
 
 def enqueue_message_pushes(message):

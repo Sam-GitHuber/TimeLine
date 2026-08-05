@@ -173,8 +173,20 @@ deletes the `Connection` row outright), the locked `PendingChatPanel`, and
 approving from the requests inbox. It holds the relationship keys, the
 `visible_posts`-gated content keys (`['feed']`, `['userPosts', id]`,
 `['groupPosts']`, `['post']`, `['comments']`), the calendar/event family
-(`['personalCalendar']`, `['groupEvents']`, `['groupCalendar']`) and the shared
-group chats that promote and sever with the connection.
+(`['personalCalendar']`, `['groupEvents']`, `['groupCalendar']`, `['event']`,
+`['eventPhotos']`) and the shared group chats that promote and sever with the
+connection.
+
+`['eventPhotos']` and `['event']` joined that family with the album
+([events](events.md#6-an-event-carries-an-album-and-anyone-who-can-see-it-may-add-to-it)),
+and they're the clearest illustration of why this list is a rule rather than a
+habit. An album prunes on the **uploader**, so a connection write changes which
+photos it may show *and* the count beside them — and because a card's preview
+tiles ride the `event` payload rather than the album's, leaving `['event']` out
+would refresh the album while the card next to it kept the old number. The
+album shipped with **neither** key listed: connect with someone who had added
+photos to an event you can both see, reopen it inside `gcTime`, and their
+photos stayed hidden and the count stayed wrong.
 
 Before that each site kept its own list, written from the point of view of the
 screen it sits on, and the four had drifted apart (#278 on mobile, #288 on the

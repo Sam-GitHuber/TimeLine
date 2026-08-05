@@ -35,18 +35,16 @@
  * `formatEventTimeParts` pads its minutes the way `formatClockTime` does.
  */
 
-import { useQuery } from '@tanstack/react-query';
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '../Avatar';
 import { PhotoGrid } from '../PhotoGrid';
-import { PhotoLightbox, type LightboxPhoto } from '../PhotoLightbox';
+import { PhotoLightbox } from '../PhotoLightbox';
 import { ReactionBar } from '../ReactionBar';
 import { SPINE_COLUMN, Spine } from '../timeline';
 import { DimensionChips } from './DimensionChips';
-import { api } from '@/api';
 import {
   formatEventDate,
   formatEventTime,
@@ -71,22 +69,15 @@ export function EventTimelineEntry({
   const maybe = event.rsvp?.counts?.maybe ?? 0;
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
-  // The album's tiles ride the event payload (the first few, already pruned to
-  // the uploaders this viewer may see), but opening one has to let you scroll
-  // the *whole* album — that's what opening it is for. So the full album is
-  // fetched only once the viewer is open: a group timeline of ten events would
-  // otherwise fire ten album requests for photos nobody has tapped.
-  //
-  // Same query key the event screen's album uses, so a photo added there and a
-  // viewer opened here can't disagree — one cache entry, one invalidation.
-  const albumQuery = useQuery({
-    queryKey: ['eventPhotos', event.id],
-    queryFn: () => api.getEventPhotos(event.id),
-    enabled: lightboxIndex !== null,
-  });
-  // Until it lands, the previews *are* the album, so the photo you tapped is on
-  // screen immediately and the rest slot in behind it.
-  const album: LightboxPhoto[] = albumQuery.data?.results ?? event.photos ?? [];
+  // **The grid here is a preview, and the viewer it opens holds exactly the
+  // preview.** The album is paginated and can hold up to 200 photos; this card
+  // was handed the first four on the event payload. An earlier version fetched
+  // the album when the viewer opened, which sounds better and wasn't: one
+  // un-paginated page is 20 photos, so a "+N" counted off `photo_count` opened a
+  // viewer that stopped at 20 and read "4 / 20" on an album of forty-seven. The
+  // whole album lives on the event screen, which is paginated properly, so
+  // that's where the "+N" goes.
+  const previews = event.photos ?? [];
 
   const open = () => router.push(`/events/${event.id}`);
   const openOrganiser = () => router.push(`/u/${event.organiser.id}`);
@@ -175,16 +166,23 @@ export function EventTimelineEntry({
             the same reason: nesting makes "did I open the event or the photo?"
             a matter of touch-responder luck. */}
         <PhotoGrid
-          images={event.photos}
+          images={previews}
           total={event.photo_count}
           max={4}
           label="event photo"
           onOpen={setLightboxIndex}
+          // The "+N" tile opens the event, not the viewer. **Don't "fix" this
+          // back into a lightbox**: the album beyond these tiles isn't here to
+          // be shown, and a viewer that can't reach it would be back to
+          // counting photos it hasn't got. The photo under the overlay is still
+          // reachable — swipe to it from the tile beside it.
+          onOverflow={open}
+          overflowLabel={`See all ${event.photo_count} photos on the event`}
         />
 
-        {lightboxIndex !== null && album[lightboxIndex] ? (
+        {lightboxIndex !== null && previews[lightboxIndex] ? (
           <PhotoLightbox
-            images={album}
+            images={previews}
             initialIndex={lightboxIndex}
             onClose={() => setLightboxIndex(null)}
             captionFor={(photo) =>

@@ -396,8 +396,15 @@ re-auth, like a bank transfer). `delete_account()` does the teardown a naive
    photos are gathered from two cascades, not one: the user's own messages
    (`Message.sender`), and *every* message in their 1:1 conversations — deleting
    the user drops those conversations via `user_a`/`user_b`, which takes the other
-   person's messages in them too. Files are swept `on_commit`, so a rolled-back
-   delete can never destroy files whose rows survived.
+   person's messages in them too. **Event album photos** need two cascades for
+   the same reason: `EventPhoto.uploader` catches their own photos in anybody's
+   album, and `Event.organiser` catches the rest — an event's organiser is
+   `CASCADE` (the visibility gate needs a *living* organiser, see
+   [events.md](events.md)), so deleting the account deletes the events they
+   organised and that takes **other people's** photos on those events with it.
+   Their photo on someone else's surviving event is covered by the first clause;
+   that album lives on, one photo lighter. Files are swept `on_commit`, so a
+   rolled-back delete can never destroy files whose rows survived.
 2. **Last-admin guardrail:** a group whose only admin is leaving hands admin to
    the longest-standing remaining member (`Group.creator` is `SET_NULL`, so a
    group outlives its creator).
@@ -405,11 +412,27 @@ re-auth, like a bank transfer). `delete_account()` does the teardown a naive
    as dead space.
 
 The same file-sweep rule applies to the *ordinary* delete paths, which originally
-had none: deleting a post now removes its photos, and deleting a group removes its
-avatar, its posts' photos and its chats' attachments. `_post_image_files`,
-`_attachment_files` and `delete_files_on_commit` in `api/views.py` keep that in one
-place — **any new delete path has to use them**, because an orphaned file stays
-retrievable by URL, so "delete the post I regret" otherwise doesn't.
+had none: deleting a post now removes its photos, deleting an event removes its
+**whole album** (everyone's photos, not just the organiser's — the album dies
+with the event), removing a single album photo removes its pair of files, and
+deleting a group removes its avatar, its posts' photos, its events' album photos
+and its chats' attachments. `_stored_files`, `_group_files` and
+`delete_files_on_commit` in `api/views.py` keep that in one place — **any new
+delete path has to use them**, because an orphaned file stays retrievable by URL,
+so "delete the post I regret" otherwise doesn't.
+
+**Deactivation is not deletion**, and it's worth being exact about which is
+which. Setting `is_active=False` — the admin-approval flag doubling as the
+maintainer's takedown lever — **deletes nothing**. Every row survives; the
+content simply stops being *returned*, because each read query filters on the
+author still being active (`visible_posts`, `_comment_counts`, `visible_events`,
+and for an album both `event_photo_previews` and `EventPhotosView` GET, which
+filter `uploader__is_active=True`). Those two album queries have to agree, or the
+photo count on an event card and the grid it opens would disagree. Note that
+`connected_user_ids` deliberately doesn't check `is_active`, so **every consumer
+of that set has to**. Reactivating the account brings all of it straight back.
+Deletion is the other thing entirely: rows cascade away, files are swept, and
+nothing returns.
 
 **The confirm dialog can't be dismissed while the POST is open** (issue #254) —
 on either client, by Escape, the backdrop, Cancel or the Android hardware back.

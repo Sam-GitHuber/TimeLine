@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api.js";
+import { useScrollLock } from "./modalLayer.js";
 
 // Disconnecting/blocking someone severs any *group* chats you only share
 // through that connection — you're dropped to pending in them until you
@@ -44,13 +45,14 @@ export default function DisconnectWarningModal({
   }, [onCancel, busy]);
 
   // Lock background scroll, move focus into the dialog, restore it on close.
+  // The lock is counted and shared (`modalLayer.js`) rather than saved and put
+  // back here: a copy of it in every modal is only correct while exactly one is
+  // open, and the two that restore in the wrong order leave the page stuck.
+  useScrollLock();
   useEffect(() => {
     const previouslyFocused = document.activeElement;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
     return () => {
-      document.body.style.overflow = previousOverflow;
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
     };
   }, []);

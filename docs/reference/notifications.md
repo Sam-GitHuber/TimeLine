@@ -92,8 +92,9 @@ Notification:
   content half of resolve-elsewhere. Fetching a post's permalink
   (`PostDetailView` GET) or its comment tree (`PostCommentsView` GET) marks
   every unread notification pointing at that post *or any comment on it* seen;
-  opening an event (`EventDetailView` GET) does the same for the five event
-  kinds. Reading the reply **is** reading the notification: without this, the
+  opening an event (`EventDetailView` GET) does the same for everything aimed at
+  that event or at a comment on it. Reading the reply **is** reading the
+  notification: without this, the
   badge kept counting a reply someone had gone and read via the feed, which
   read as "the badge won't clear". Seen only, never addressed — the row keeps
   its not-yet-dealt-with weight in the centre. Matched on the target FKs, not
@@ -184,8 +185,9 @@ DB-unique, and adding a kind later is data, not a migration of everyone's blob).
 **Absence means enabled** (opt-out): new kinds notify by default; users mute what
 they don't want.
 
-Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, the five
-[event](events.md) kinds, and `mention`) are ever written here and exposed in the
+Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, all seven
+[event](events.md) kinds — the organiser's five broadcasts plus `event_comment`
+and `event_photos` — and `mention`) are ever written here and exposed in the
 API. The
 connection/invite kinds are **always-on**: muting "someone wants to connect" would
 hide something you must act
@@ -392,11 +394,12 @@ without waking a process every few seconds on a home server.
   (`Conversation` → `Message` → `PushOutbox`) **plus** an explicit check at send
   time, because message deletion is *soft* and so leaves the row standing — see
   [messaging.md](messaging.md#push-notifications).
-- **Dedup means one buzz, not several.** The `reaction` / `event_updated` dedup
-  path refreshes a still-unread notification instead of creating one, and
-  returns before the enqueue — so a re-reaction or a second edit doesn't buzz
-  again for something the recipient was already told about. The mild cost: two
-  quick edits to an event produce one push.
+- **Dedup means one buzz, not several.** The `reaction` / `event_updated` /
+  `event_photos` dedup path (`_DEDUP_KINDS`) refreshes a still-unread
+  notification instead of creating one, and returns before the enqueue — so a
+  re-reaction, a second edit, or a second batch of photos doesn't buzz again for
+  something the recipient was already told about. The mild cost: two quick edits
+  to an event produce one push.
 
 ### Sending
 
@@ -474,13 +477,16 @@ the in-app one tell the same story:
 |---|---|---|
 | `messages` | the message push (no `Notification` row) | high |
 | `mentions` | `mention` | high |
-| `replies` | `post_reply`, `comment_reply` | default |
+| `replies` | `post_reply`, `comment_reply`, `event_comment` | default |
 | `reactions` | `reaction` | **low** — nice to know, never urgent, and a popular post shouldn't buzz a pocket twenty times |
-| `events` | the five event kinds | default |
+| `events` | the organiser's five broadcast kinds **+ `event_photos`** | default |
 | `social` | `connection_request`, `connection_accepted`, `group_invite` | default |
 
-Deliberately **not one channel per kind**: five separate event channels would be
-a wall of switches nobody reads.
+Deliberately **not one channel per kind**: six separate event channels would be
+a wall of switches nobody reads. The two kinds whose actor *isn't* the organiser
+land on opposite sides of that grouping — `event_comment` in `replies`,
+`event_photos` in `events` — because the channel asks what the notification *is*
+to the person receiving it, not who generated it (see above).
 
 Three properties that make this fussier than it looks:
 
