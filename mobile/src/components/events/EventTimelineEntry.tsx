@@ -35,13 +35,18 @@
  * `formatEventTimeParts` pads its minutes the way `formatClockTime` does.
  */
 
+import { useQuery } from '@tanstack/react-query';
 import { router } from 'expo-router';
+import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '../Avatar';
+import { PhotoGrid } from '../PhotoGrid';
+import { PhotoLightbox, type LightboxPhoto } from '../PhotoLightbox';
 import { ReactionBar } from '../ReactionBar';
 import { SPINE_COLUMN, Spine } from '../timeline';
 import { DimensionChips } from './DimensionChips';
+import { api } from '@/api';
 import {
   formatEventDate,
   formatEventTime,
@@ -64,6 +69,24 @@ export function EventTimelineEntry({
   const cancelled = event.status === 'cancelled';
   const going = event.rsvp?.counts?.going ?? 0;
   const maybe = event.rsvp?.counts?.maybe ?? 0;
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+
+  // The album's tiles ride the event payload (the first few, already pruned to
+  // the uploaders this viewer may see), but opening one has to let you scroll
+  // the *whole* album — that's what opening it is for. So the full album is
+  // fetched only once the viewer is open: a group timeline of ten events would
+  // otherwise fire ten album requests for photos nobody has tapped.
+  //
+  // Same query key the event screen's album uses, so a photo added there and a
+  // viewer opened here can't disagree — one cache entry, one invalidation.
+  const albumQuery = useQuery({
+    queryKey: ['eventPhotos', event.id],
+    queryFn: () => api.getEventPhotos(event.id),
+    enabled: lightboxIndex !== null,
+  });
+  // Until it lands, the previews *are* the album, so the photo you tapped is on
+  // screen immediately and the rest slot in behind it.
+  const album: LightboxPhoto[] = albumQuery.data?.results ?? event.photos ?? [];
 
   const open = () => router.push(`/events/${event.id}`);
   const openOrganiser = () => router.push(`/u/${event.organiser.id}`);
@@ -141,6 +164,34 @@ export function EventTimelineEntry({
                 </Text>
               )}
         </Pressable>
+
+        {/* The album's first few, in the same two-column grid a post's photos
+            use — an event entry reads as part of the one line, so its photos
+            look like the line's photos. Drawn on a past recap as much as on a
+            future entry: "before, during and after" is the point, and the recap
+            is where the after lands.
+
+            Outside the Pressable above, like the reaction row below it and for
+            the same reason: nesting makes "did I open the event or the photo?"
+            a matter of touch-responder luck. */}
+        <PhotoGrid
+          images={event.photos}
+          total={event.photo_count}
+          max={4}
+          label="event photo"
+          onOpen={setLightboxIndex}
+        />
+
+        {lightboxIndex !== null && album[lightboxIndex] ? (
+          <PhotoLightbox
+            images={album}
+            initialIndex={lightboxIndex}
+            onClose={() => setLightboxIndex(null)}
+            captionFor={(photo) =>
+              'uploader' in photo ? photo.uploader.display_name : null
+            }
+          />
+        ) : null}
 
         {/* The same reaction row a post on this spine carries. Outside the
             Pressable above for the reason `PostCard` keeps its own outside: a tap

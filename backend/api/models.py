@@ -3,6 +3,8 @@ from django.db import models
 from django.db.models.functions import Greatest, Least
 
 from .imaging import (
+    event_photo_thumb_upload_to,
+    event_photo_upload_to,
     group_avatar_thumb_upload_to,
     group_avatar_upload_to,
     message_attachment_thumb_upload_to,
@@ -1308,6 +1310,14 @@ class Notification(models.Model):
         # on the thing you made" needs to know it was an event, since it targets
         # the ``event`` FK and deep-links to the event page.
         EVENT_COMMENT = "event_comment", "Comment on your event"
+        # Photos added to an event's album. Unlike the five broadcast kinds
+        # above, the actor is the **uploader**, not the organiser — the same
+        # shape as ``EVENT_COMMENT`` — and unlike that one it goes out to the
+        # people who RSVP'd going/maybe rather than to the organiser: "photos
+        # are up" is worth most to whoever was there. The uploader-as-actor is
+        # why the kind must sit in ``_CONNECTION_GATED_KINDS`` (notifications.py)
+        # rather than riding the organiser gate the five broadcasts get free.
+        EVENT_PHOTOS = "event_photos", "Photos added to an event"
         # Phase 9b M8. **No Notification row is ever created with this kind**,
         # and that isn't an omission. Messaging is deliberately outside the
         # activity centre — it has its own unread badge — so a mention has no
@@ -1341,6 +1351,7 @@ class Notification(models.Model):
             Kind.EVENT_UPDATED,
             Kind.EVENT_CANCELLED,
             Kind.EVENT_COMMENT,
+            Kind.EVENT_PHOTOS,
             # Mutable, and default-on like the rest: naming someone is how you
             # get their attention, so it should reach them by default — but
             # punching through a quiet they deliberately asked for has to be
@@ -1777,6 +1788,60 @@ class EventRSVP(models.Model):
 
     def __str__(self):
         return f"{self.user} · {self.event} ({self.response})"
+
+
+class EventPhoto(models.Model):
+    """One photo in an ``Event``'s album — added by any member who can see the
+    event, before, during or after it.
+
+    Shaped like ``PostImage`` (same two files, same width/height, written by the
+    same ``api.imaging.process_image``, so EXIF/GPS stripping and the HEIC
+    transcode are inherited rather than re-implemented) with one field a post's
+    images don't need: **``uploader``**.
+
+    That field is the whole difference between the two models. A post's photos
+    have no author of their own — they inherit the post's, and the post's gate
+    covers them. An event's album has *many* authors under one event, and the
+    app's one connection gate has to key on each photo's own uploader: you see
+    a photo iff you can see the event **and** you're connected to whoever added
+    it (or it's yours). So the album prunes per viewer exactly as the event's
+    comments and reactions do — see the "photos are authored content" decision
+    in ``docs/reference/events.md`` for why it follows those rather than the
+    complete-count rule the poll and RSVP tallies beside them use.
+
+    ``uploader`` is CASCADE for the same reason ``Comment.author`` is: a photo
+    with no author has nothing for the gate to read, so it goes with the
+    account. Deleting the event takes its photos too — and in both cases the
+    *files* must be swept separately (``delete_files_on_commit``), since a
+    database cascade doesn't touch storage.
+    """
+
+    event = models.ForeignKey(
+        Event,
+        on_delete=models.CASCADE,
+        related_name="photos",
+    )
+    uploader = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="event_photos",
+    )
+    image = models.ImageField(upload_to=event_photo_upload_to)
+    thumbnail = models.ImageField(upload_to=event_photo_thumb_upload_to)
+    width = models.PositiveIntegerField()
+    height = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Upload order, oldest first — an album reads as the event unfolded,
+        # unlike the feed's newest-first. ``id`` breaks ties for photos created
+        # in the same tick, which keeps a batch upload's order stable and (more
+        # importantly) makes the windowed preview query deterministic.
+        ordering = ["created_at", "id"]
+        indexes = [models.Index(fields=["event", "created_at"])]
+
+    def __str__(self):
+        return f"Photo {self.pk} on {self.event}"
 
 
 class DevicePushToken(models.Model):

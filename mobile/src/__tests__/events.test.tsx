@@ -10,6 +10,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 import { api, ApiError } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
@@ -232,6 +233,8 @@ function makeEvent(overrides: Partial<Event> = {}): Event {
     reactions: [],
     comment_count: 0,
     new_comment_count: 0,
+    photos: [],
+    photo_count: 0,
     created_at: '2026-07-18T10:00:00Z',
     updated_at: '2026-07-18T10:00:00Z',
     polls: [DATE_POLL],
@@ -1133,6 +1136,191 @@ describe('EventTimelineEntry', () => {
     // `eventFormat.test.ts`'s job. Same trap as the runner's timezone.
     const when = `${formatEventDate('2026-04-05')} · ${formatEventTime('19:00:00')}`;
     expect(screen.getByText(when)).toBeTruthy();
+  });
+});
+
+// --- The photo album -------------------------------------------------------
+//
+// Who may see which photo is enforced (and tested exhaustively) on the backend.
+// What the client owns is the two things below: a card shows the previews and
+// says how many more there are, and opening one gets you the *whole* album
+// rather than the four tiles the payload happened to carry.
+
+function makePhoto(id: number, uploaderName = 'Ada Lovelace', canDelete = false) {
+  return {
+    id,
+    image: `https://x/full-${id}.jpg`,
+    thumbnail: `https://x/thumb-${id}.jpg`,
+    width: 120,
+    height: 90,
+    uploader: { id: 2, display_name: uploaderName, avatar_thumb: null },
+    created_at: '2026-06-01T10:00:00Z',
+    can_delete: canDelete,
+  };
+}
+
+describe('event photos', () => {
+  it('shows the album previews on a timeline entry', async () => {
+    const event = makeEvent({
+      id: 41,
+      status: 'scheduled',
+      is_past: true,
+      event_date: '2026-04-05',
+      starts_at: '2026-04-05T12:30:00Z',
+      photos: [makePhoto(1), makePhoto(2)],
+      photo_count: 2,
+    });
+    await renderWith(<EventTimelineEntry event={event} variant="past" />);
+
+    expect(screen.getByLabelText('View event photo 1 of 2')).toBeTruthy();
+    expect(screen.getByLabelText('View event photo 2 of 2')).toBeTruthy();
+  });
+
+  it('caps the tiles at four and puts the rest behind a +N', async () => {
+    // The two numbers earning their keep: the payload carries four photos, the
+    // album holds eleven, and the card has to say so rather than imply the
+    // album is what it was sent.
+    const event = makeEvent({
+      id: 42,
+      status: 'scheduled',
+      is_past: true,
+      event_date: '2026-04-05',
+      starts_at: '2026-04-05T12:30:00Z',
+      photos: [1, 2, 3, 4].map((n) => makePhoto(n)),
+      photo_count: 11,
+    });
+    await renderWith(<EventTimelineEntry event={event} variant="past" />);
+
+    expect(screen.getByText('+7')).toBeTruthy();
+    expect(screen.getByLabelText('View all 11 photos')).toBeTruthy();
+    expect(screen.queryByLabelText('View event photo 5 of 11')).toBeNull();
+  });
+
+  it('fetches the whole album only once a photo is opened', async () => {
+    // A group timeline of ten events must not fire ten album requests — but the
+    // moment you tap one you have to be able to swipe past the tiles that rode
+    // the payload.
+    const event = makeEvent({
+      id: 43,
+      status: 'scheduled',
+      is_past: true,
+      event_date: '2026-04-05',
+      starts_at: '2026-04-05T12:30:00Z',
+      photos: [makePhoto(1), makePhoto(2)],
+      photo_count: 6,
+    });
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/43/photos/'))
+        return jsonResponse({
+          results: [1, 2, 3, 4, 5, 6].map((n) => makePhoto(n)),
+          next: null,
+          count: 6,
+        });
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventTimelineEntry event={event} variant="past" />);
+    expect(
+      mockFetch.mock.calls.some((c) => String(c[0]).includes('/photos/'))
+    ).toBe(false);
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('View event photo 1 of 6'));
+    });
+
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.some((c) => String(c[0]).includes('/api/events/43/photos/'))
+      ).toBe(true)
+    );
+    // 1 / 6, not 1 / 2 — the whole album is now swipeable.
+    await waitFor(() => expect(screen.getByText(/1 \/ 6/)).toBeTruthy());
+  });
+
+  it('lists the album on the event screen and names who added each photo', async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/photos/'))
+        return jsonResponse({ results: [makePhoto(1, 'Ali Khan')], next: null, count: 1 });
+      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Photos');
+
+    await act(async () => {
+      fireEvent.press(await screen.findByLabelText('View photo 1 of 1'));
+    });
+    await waitFor(() => expect(screen.getByText('Ali Khan')).toBeTruthy());
+  });
+
+  it("says the album is *this viewer's* slice, never that it's empty", async () => {
+    // Deliberate wording: what you see is pruned to the uploaders you may see,
+    // so "there are no photos" would be a claim the client can't make.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/photos/'))
+        return jsonResponse({ results: [], next: null, count: 0 });
+      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    expect(await screen.findByText('No photos here yet — add the first.')).toBeTruthy();
+  });
+
+  it('only offers Remove on a photo the payload says you can remove', async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/photos/'))
+        return jsonResponse({
+          results: [makePhoto(1, 'Ali Khan', false)],
+          next: null,
+          count: 1,
+        });
+      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    await act(async () => {
+      fireEvent.press(await screen.findByLabelText('View photo 1 of 1'));
+    });
+    await waitFor(() => expect(screen.getByLabelText('Close photo viewer')).toBeTruthy());
+    expect(screen.queryByLabelText('Remove this photo')).toBeNull();
+  });
+
+  it('offers Remove on your own photo, and confirms before removing', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/photos/'))
+        return jsonResponse({ results: [makePhoto(1, 'Me Myself', true)], next: null, count: 1 });
+      if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+      return jsonResponse(null, 404);
+    });
+
+    await renderWith(<EventScreen />);
+    await act(async () => {
+      fireEvent.press(await screen.findByLabelText('View photo 1 of 1'));
+    });
+    await act(async () => {
+      fireEvent.press(await screen.findByLabelText('Remove this photo'));
+    });
+
+    // A photo comes off for everyone, so it stops at a confirm first — the same
+    // rule a post's delete follows, worded for what this one takes.
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Remove this photo?',
+      expect.stringContaining('everyone who can see it'),
+      expect.any(Array)
+    );
+    expect(
+      mockFetch.mock.calls.some((c) => String(c[0]).includes('/api/event-photos/1/'))
+    ).toBe(false);
+    alertSpy.mockRestore();
   });
 });
 

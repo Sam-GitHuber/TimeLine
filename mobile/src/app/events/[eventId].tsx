@@ -32,6 +32,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, ApiError, serverMessage } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
+import { EventPhotos } from '@/components/events/EventPhotos';
 import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEditor';
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
@@ -113,9 +114,14 @@ export default function EventScreen() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['event', id] });
+    // The album's own key, so a photo added or removed anywhere refreshes the
+    // grid — including the copy a timeline entry's lightbox reads, which shares
+    // this key deliberately.
+    queryClient.invalidateQueries({ queryKey: ['eventPhotos', id] });
     if (event) {
       // The group's upcoming/past lists and calendars show the same RSVP/vote
-      // tallies and dimension values, so keep them in step once this write lands.
+      // tallies, dimension values and photo previews, so keep them in step once
+      // this write lands.
       queryClient.invalidateQueries({ queryKey: ['groupEvents', event.group.id] });
       queryClient.invalidateQueries({ queryKey: ['groupCalendar', event.group.id] });
       queryClient.invalidateQueries({ queryKey: ['personalCalendar'] });
@@ -368,6 +374,13 @@ export default function EventScreen() {
               <RsvpBar event={event} busy={rsvp.isPending} onRsvp={(b) => rsvp.mutateAsync(b)} />
             </View>
           ) : null}
+
+          {/* The album. Above the reactions and the thread because it's what
+              people come back to a past event for — and, unlike everything
+              above it, anyone who can see the event may add to it, whoever
+              organised it. Kept on a cancelled event too: a day that turned
+              into something else is still a day people photographed. */}
+          <EventPhotos eventId={event.id} onChange={invalidate} />
 
           {/* Reactions and the conversation — the same pair a post carries, in
               the same order. Below the RSVP because deciding whether you're

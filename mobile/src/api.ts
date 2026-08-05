@@ -34,6 +34,7 @@ import type {
   Conversation,
   DisconnectImpact,
   Event,
+  EventPhoto,
   Group,
   GroupInvite,
   GroupMember,
@@ -1200,6 +1201,35 @@ export const api = {
   /** The event's RSVPs on their own: complete counts + connection-gated lists. */
   getEventRsvps: (eventId: number | string) =>
     request<RsvpSummary>(`/api/events/${eventId}/rsvps/`),
+
+  /**
+   * The event's photo album — paginated, and **pruned to the uploaders you can
+   * see** (the organiser plus your connections), like the event's comments and
+   * unlike its poll/RSVP tallies. So `count` here is your slice of the album,
+   * not its true size. See events.md.
+   */
+  getEventPhotos: (eventId: number | string) =>
+    request<Paginated<EventPhoto>>(`/api/events/${eventId}/photos/`),
+
+  /**
+   * Add photos to an event's album — **any member who can see the event**,
+   * before, during or after it. The one write here that isn't the organiser's:
+   * the photos from a day out belong to whoever took them.
+   */
+  addEventPhotos: async (eventId: number | string, photos: PhotoUpload[]) => {
+    const form = new FormData();
+    for (const photo of photos) {
+      form.append('photos', (await toFilePart(photo)) as unknown as Blob);
+    }
+    return request<EventPhoto[]>(`/api/events/${eventId}/photos/`, {
+      method: 'POST',
+      body: form,
+    });
+  },
+
+  /** Remove one photo: the uploader, the organiser, or a group admin. */
+  deleteEventPhoto: (photoId: number | string) =>
+    request<void>(`/api/event-photos/${photoId}/`, { method: 'DELETE' }),
 
   /**
    * Cast/replace your votes on an open poll — `optionIds` is your **full**

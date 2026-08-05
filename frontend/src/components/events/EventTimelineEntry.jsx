@@ -1,7 +1,12 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import Avatar from "../Avatar.jsx";
 import DimensionChips from "./DimensionChips.jsx";
+import Lightbox from "../Lightbox.jsx";
+import PhotoGrid from "../PhotoGrid.jsx";
 import ReactionBar from "../ReactionBar.jsx";
+import { api } from "../../api.js";
 import {
   parseEventDate,
   formatEventWhen,
@@ -26,6 +31,26 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
   const cancelled = event.status === "cancelled";
   const going = event.rsvp?.counts?.going || 0;
   const maybe = event.rsvp?.counts?.maybe || 0;
+  const [lightboxIndex, setLightboxIndex] = useState(null);
+
+  // The album's tiles ride the event payload (the first few, already pruned to
+  // the uploaders this viewer may see), but the *viewer* has to be able to
+  // scroll the whole thing — that's the point of opening it. So the full album
+  // is fetched only once the lightbox is opened: a page of ten events would
+  // otherwise fire ten album requests for photos nobody has clicked.
+  //
+  // Same query key the event page's album uses, so a photo added there and a
+  // lightbox opened here can't disagree — one entry in the cache, one
+  // invalidation.
+  const albumQuery = useQuery({
+    queryKey: ["eventPhotos", event.id],
+    queryFn: () => api.getEventPhotos(event.id),
+    enabled: lightboxIndex !== null,
+  });
+  // Until it lands, the previews *are* the album — so opening a photo shows
+  // that photo immediately and the rest slot in behind it, rather than the
+  // viewer flashing empty while a request is out.
+  const album = albumQuery.data?.results ?? event.photos ?? [];
 
   return (
     <article
@@ -73,6 +98,19 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           <DimensionChips event={event} />
         </div>
 
+        {/* The album's first few, in the two-column grid a post's photos use —
+            an event entry reads as part of the one line, so its photos look
+            like the line's photos. Drawn on a past recap as much as on a future
+            entry: "before, during and after" is the whole point, and the recap
+            is where the after lands. */}
+        <PhotoGrid
+          images={event.photos}
+          total={event.photo_count}
+          max={4}
+          label="event photo"
+          onOpen={setLightboxIndex}
+        />
+
         {past
           ? going > 0 && (
               <p className="mt-1 text-xs text-ink-faint">{going} went</p>
@@ -114,6 +152,16 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           }
         />
       </div>
+
+      {lightboxIndex !== null && album[lightboxIndex] && (
+        <Lightbox
+          images={album}
+          index={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+          onIndexChange={setLightboxIndex}
+          caption={album[lightboxIndex].uploader?.display_name}
+        />
+      )}
     </article>
   );
 }

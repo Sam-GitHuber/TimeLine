@@ -34,6 +34,11 @@ vi.mock("./api.js", () => ({
     deleteEvent: vi.fn().mockResolvedValue({}),
     createEvent: vi.fn(),
     getPersonalCalendar: vi.fn(),
+    // The photo album.
+    getEventPhotos: vi.fn().mockResolvedValue({ results: [], next: null, count: 0 }),
+    addEventPhotos: vi.fn().mockResolvedValue([]),
+    deleteEventPhoto: vi.fn().mockResolvedValue(undefined),
+    getPage: vi.fn(),
     // Comments and reactions on the event itself.
     getComments: vi.fn().mockResolvedValue([]),
     addComment: vi.fn().mockResolvedValue({}),
@@ -78,6 +83,10 @@ function makeEvent(overrides = {}) {
     reactions: [],
     comment_count: 0,
     new_comment_count: 0,
+    // The album's first few tiles + its (pruned) size. Two numbers on purpose:
+    // `photo_count` can exceed `photos.length`, which is what the "+N" is.
+    photos: [],
+    photo_count: 0,
     polls: [
       {
         id: 11,
@@ -140,6 +149,14 @@ function renderEventPage() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` wipes the *calls*, not the implementations, so a
+  // `mockResolvedValue` set inside one test would otherwise be the album (or
+  // the upload failure) every test after it inherits. Re-establish the album's
+  // defaults here: every test starts from an empty album that accepts uploads,
+  // and says so explicitly when it wants otherwise.
+  api.getEventPhotos.mockResolvedValue({ results: [], next: null, count: 0 });
+  api.addEventPhotos.mockResolvedValue([]);
+  api.deleteEventPhoto.mockResolvedValue(undefined);
 });
 
 describe("EventPage", () => {
@@ -1209,6 +1226,228 @@ describe("PlanEventForm", () => {
 // outside the `<Routes>` so that navigating away — which delete does — doesn't
 // take the thing under test with it. Same reasoning as
 // `group-membership-cache.test.jsx`.
+// The album. Who may see which photo is enforced (and tested exhaustively) on
+// the backend; here we check the two things the client owns — that a card shows
+// the previews and says how many more there are, and that opening one gets you
+// the *whole* album rather than the four tiles the payload carried.
+function makePhoto(id, uploader = you, overrides = {}) {
+  return {
+    id,
+    image: `https://x/full-${id}.jpg`,
+    thumbnail: `https://x/thumb-${id}.jpg`,
+    width: 120,
+    height: 90,
+    uploader,
+    created_at: "2026-06-01T10:00:00Z",
+    can_delete: false,
+    ...overrides,
+  };
+}
+
+describe("event photos", () => {
+  const ali = { id: 2, display_name: "Ali", avatar_thumb: null };
+
+  it("shows the album's previews on a timeline entry", () => {
+    const event = makeEvent({
+      id: 9,
+      title: "Reunion",
+      status: "scheduled",
+      is_past: true,
+      event_date: "2026-06-01",
+      start_time: "13:00:00",
+      starts_at: "2026-06-01T13:00:00Z",
+      polls: [],
+      photos: [makePhoto(1), makePhoto(2)],
+      photo_count: 2,
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={[event]} />} />
+      </Routes>
+    );
+    expect(
+      screen.getByRole("button", { name: "View event photo 1 of 2" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "View event photo 2 of 2" })
+    ).toBeInTheDocument();
+  });
+
+  it("caps the tiles at four and puts the rest behind a +N", () => {
+    // The two numbers earning their keep: the payload carries four photos, the
+    // album holds eleven, and the card has to say so rather than imply the
+    // album is what it was sent.
+    const event = makeEvent({
+      id: 9,
+      title: "Reunion",
+      status: "scheduled",
+      is_past: true,
+      event_date: "2026-06-01",
+      starts_at: "2026-06-01T13:00:00Z",
+      polls: [],
+      photos: [1, 2, 3, 4].map((n) => makePhoto(n)),
+      photo_count: 11,
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={[event]} />} />
+      </Routes>
+    );
+    expect(document.querySelectorAll(".tl-entry--event img")).toHaveLength(4);
+    expect(screen.getByText("+7")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "View all 11 photos" })
+    ).toBeInTheDocument();
+  });
+
+  it("opening a preview fetches the whole album, not just the tiles", async () => {
+    // The point of the lazy fetch: a page of ten events must not fire ten album
+    // requests, but the moment you open one you have to be able to scroll past
+    // the four photos that rode the payload.
+    const event = makeEvent({
+      id: 9,
+      title: "Reunion",
+      status: "scheduled",
+      is_past: true,
+      event_date: "2026-06-01",
+      starts_at: "2026-06-01T13:00:00Z",
+      polls: [],
+      photos: [makePhoto(1), makePhoto(2)],
+      photo_count: 6,
+    });
+    api.getEventPhotos.mockResolvedValue({
+      results: [1, 2, 3, 4, 5, 6].map((n) => makePhoto(n, ali)),
+      next: null,
+      count: 6,
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={[event]} />} />
+      </Routes>
+    );
+
+    // Nothing is requested until a photo is actually clicked.
+    expect(api.getEventPhotos).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "View event photo 1 of 6" })
+    );
+
+    const viewer = await screen.findByRole("dialog", { name: "Photo viewer" });
+    await waitFor(() => expect(api.getEventPhotos).toHaveBeenCalledWith(9));
+    // 1 / 6, not 1 / 2 — the whole album is now flippable.
+    await waitFor(() =>
+      expect(within(viewer).getByText("1 / 6")).toBeInTheDocument()
+    );
+    expect(within(viewer).getByText("Ali")).toBeInTheDocument();
+  });
+
+  it("lists the album on the event page and names who added each photo", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.getEventPhotos.mockResolvedValue({
+      results: [makePhoto(1, ali)],
+      next: null,
+      count: 1,
+    });
+    renderEventPage();
+
+    expect(await screen.findByRole("heading", { name: /Photos/ })).toBeInTheDocument();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View photo 1 of 1" })
+    );
+    const viewer = await screen.findByRole("dialog", { name: "Photo viewer" });
+    expect(within(viewer).getByText("Ali")).toBeInTheDocument();
+  });
+
+  it("says the album is *this viewer's* slice, never that it's empty", async () => {
+    // Deliberate wording: what you see is pruned to the uploaders you may see,
+    // so "no photos yet" would be a claim the client can't make.
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    expect(
+      await screen.findByText("No photos here yet — add the first.")
+    ).toBeInTheDocument();
+  });
+
+  it("uploads what you pick and says so when the server refuses", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.addEventPhotos.mockRejectedValue(
+      apiError("This event's album is full (200 photos). Remove some first.", 400)
+    );
+    renderEventPage();
+    await screen.findByRole("heading", { name: /Photos/ });
+
+    const file = new File(["x"], "beach.jpg", { type: "image/jpeg" });
+    await userEvent.upload(
+      screen.getByLabelText("Add photos to this event"),
+      file
+    );
+
+    await waitFor(() => expect(api.addEventPhotos).toHaveBeenCalledWith(7, [file]));
+    // The server's own words — "which photo, and why not?" is most of the value,
+    // and a generic failure line would drop both.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This event's album is full"
+    );
+  });
+
+  it("falls back to its own words when the failure came from the network", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.addEventPhotos.mockRejectedValue(offlineError());
+    renderEventPage();
+    await screen.findByRole("heading", { name: /Photos/ });
+
+    await userEvent.upload(
+      screen.getByLabelText("Add photos to this event"),
+      new File(["x"], "beach.jpg", { type: "image/jpeg" })
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn't add those photos."
+    );
+  });
+
+  it("only offers Remove on a photo the payload says you can remove", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.getEventPhotos.mockResolvedValue({
+      results: [makePhoto(1, ali, { can_delete: false })],
+      next: null,
+      count: 1,
+    });
+    renderEventPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View photo 1 of 1" })
+    );
+    const viewer = await screen.findByRole("dialog", { name: "Photo viewer" });
+    expect(
+      within(viewer).queryByRole("button", { name: "Remove this photo" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("confirms before removing, then removes", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.getEventPhotos.mockResolvedValue({
+      results: [makePhoto(1, you, { can_delete: true })],
+      next: null,
+      count: 1,
+    });
+    renderEventPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View photo 1 of 1" })
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Remove this photo" })
+    );
+    // A photo comes off for everyone, so it stops at a confirm — the same rule
+    // a post's delete follows, with wording specific to what it takes.
+    const dialog = await screen.findByRole("dialog", { name: "Remove photo" });
+    expect(api.deleteEventPhoto).not.toHaveBeenCalled();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(api.deleteEventPhoto).toHaveBeenCalledWith(1));
+  });
+});
+
 describe("what an event write refreshes", () => {
   let loads;
 
@@ -1301,6 +1540,29 @@ describe("what an event write refreshes", () => {
     await waitFor(() => expect(api.finaliseEvent).toHaveBeenCalled());
     await waitFor(() =>
       expect(loadCounts()).toEqual({ groupCalendar: 2, personalCalendar: 2 })
+    );
+  });
+
+  it("refreshes every surface when a photo is added", async () => {
+    // A photo write moves two different things: the album on this page, and the
+    // preview tiles + "+N" that ride the *event* payload on every card and
+    // calendar entry. Naming only `['eventPhotos']` would leave the card beside
+    // it stating the old count — #279's shape, one surface further out.
+    await renderOverCalendars();
+    await screen.findByText("Picnic");
+    const before = api.getEvent.mock.calls.length;
+
+    await userEvent.upload(
+      screen.getByLabelText("Add photos to this event"),
+      new File(["x"], "beach.jpg", { type: "image/jpeg" })
+    );
+
+    await waitFor(() => expect(api.addEventPhotos).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ groupCalendar: 2, personalCalendar: 2 })
+    );
+    await waitFor(() =>
+      expect(api.getEvent.mock.calls.length).toBeGreaterThan(before)
     );
   });
 });

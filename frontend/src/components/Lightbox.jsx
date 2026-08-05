@@ -1,12 +1,24 @@
 import { useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
-// A full-screen photo viewer for a post's images. Opens at a given index and
-// lets you flip through with the on-screen arrows or the ← / → keys; Esc, the
-// close button, or a click on the dark backdrop dismiss it. Rendered in a
-// portal on <body> so it sits above the app chrome regardless of where the
-// clicked thumbnail lives in the layout.
-export default function Lightbox({ images, index, onClose, onIndexChange }) {
+// A full-screen photo viewer for a post's images or an event's album. Opens at
+// a given index and lets you flip through with the on-screen arrows or the
+// ← / → keys; Esc, the close button, or a click on the dark backdrop dismiss
+// it. Rendered in a portal on <body> so it sits above the app chrome regardless
+// of where the clicked thumbnail lives in the layout.
+//
+// `caption` and `onDelete` exist for the album, where a photo has an author of
+// its own (a post's images inherit the post's) and can be taken back down by
+// the person who added it, the organiser or a group admin. A post passes
+// neither, so its viewer is unchanged.
+export default function Lightbox({
+  images,
+  index,
+  onClose,
+  onIndexChange,
+  caption = null,
+  onDelete = null,
+}) {
   const count = images.length;
   const current = images[index];
   const dialogRef = useRef(null);
@@ -70,14 +82,29 @@ export default function Lightbox({ images, index, onClose, onIndexChange }) {
       onClick={onClose}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm outline-none"
     >
-      <button
-        type="button"
-        onClick={onClose}
-        aria-label="Close"
-        className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
-      >
-        <Icon path="M6 6l12 12M18 6L6 18" />
-      </button>
+      <div className="absolute right-3 top-3 flex items-center gap-2">
+        {onDelete && (
+          <button
+            type="button"
+            onClick={(e) => {
+              stop(e);
+              onDelete();
+            }}
+            aria-label="Remove this photo"
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-red-600/80"
+          >
+            <Icon path="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+        >
+          <Icon path="M6 6l12 12M18 6L6 18" />
+        </button>
+      </div>
 
       {count > 1 && (
         <button
@@ -114,9 +141,22 @@ export default function Lightbox({ images, index, onClose, onIndexChange }) {
         </button>
       )}
 
-      {count > 1 && (
-        <div className="absolute bottom-4 rounded-full bg-black/50 px-3 py-1 font-mono text-xs tabular-nums text-white">
-          {index + 1} / {count}
+      {/* Who took it, and where you are in the set. One row so a single photo
+          with a caption still gets a place to put it, and an album gets both
+          without stacking two floating pills on top of each other. */}
+      {(caption || count > 1) && (
+        <div className="absolute bottom-4 flex max-w-[92vw] items-center gap-2 rounded-full bg-black/50 px-3 py-1 text-xs text-white">
+          {caption && <span className="truncate">{caption}</span>}
+          {caption && count > 1 && (
+            <span aria-hidden="true" className="text-white/40">
+              ·
+            </span>
+          )}
+          {count > 1 && (
+            <span className="font-mono tabular-nums">
+              {index + 1} / {count}
+            </span>
+          )}
         </div>
       )}
     </div>,

@@ -29,6 +29,7 @@ from api.emoji import (
     InvalidEmoji,
     normalise_emoji,
 )
+from api.imaging import MAX_PHOTOS_PER_EVENT, MAX_PHOTOS_PER_UPLOAD
 from api.serializers import (
     CONVERSATION_TITLE_MAX_LENGTH,
     MESSAGE_ATTACHMENT_MAX_BYTES,
@@ -39,6 +40,7 @@ from api.serializers import (
     NotificationSerializer,
 )
 from api.views import (
+    EVENT_PHOTO_PREVIEW_COUNT,
     MESSAGE_EDIT_WINDOW,
     MESSAGE_IDS_MAX,
     activate,
@@ -58,6 +60,7 @@ from .models import (
     ConversationRead,
     DevicePushToken,
     Event,
+    EventPhoto,
     EventRSVP,
     Group,
     GroupMembership,
@@ -9129,6 +9132,637 @@ class EventCommentNotificationTests(EventsBase):
         self.assertIn("reacted to your event", row["text"])
         self.assertEqual(
             row["url"], f"/g/{self.group.id}/events/{event.id}"
+        )
+
+
+def event_photos_url(e):
+    return f"/api/events/{e.pk}/photos/"
+
+
+def event_photo_url(p):
+    return f"/api/event-photos/{p.pk}/"
+
+
+@override_settings(MEDIA_ROOT=_PHOTO_MEDIA_ROOT)
+class EventPhotoBase(EventsBase):
+    """Shared helper for the album tests — every one of them uploads files, so
+    they all need the throwaway ``MEDIA_ROOT`` the post-photo tests use."""
+
+    def add_photo(self, event, uploader, name="p.jpg"):
+        """Add one photo through the **API**, not the ORM.
+
+        Deliberately: the view is where the pipeline, the caps and the
+        notification live, and a fixture built with ``EventPhoto.objects.create``
+        would test a row shape rather than the feature.
+        """
+        self.client.force_authenticate(uploader)
+        resp = self.client.post(
+            event_photos_url(event),
+            {"photos": [make_image_upload(name)]},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return EventPhoto.objects.get(pk=resp.json()[0]["id"])
+
+
+class EventPhotoVisibilityTests(EventPhotoBase):
+    """The album prunes per viewer on the **uploader** — the authored-content
+    rule the event's comments and reactions follow, *not* the complete-count
+    rule its polls and RSVP follow.
+
+    ``me`` and ``ana`` are both connected to the organiser and neither is
+    connected to the other, which is the whole shape this feature has to get
+    right: two people at the same event who can't see each other's posts.
+    """
+
+    def test_album_hides_a_photo_from_someone_you_are_not_connected_to(self):
+        event = self.make_event()
+        self.add_photo(event, self.org, "org.jpg")
+        self.add_photo(event, self.ana, "ana.jpg")
+        mine = self.add_photo(event, self.me, "me.jpg")
+
+        self.client.force_authenticate(self.me)
+        listed = self.client.get(event_photos_url(event)).json()
+        uploaders = {p["uploader"]["id"] for p in listed["results"]}
+        self.assertEqual(uploaders, {self.org.id, self.me.id})
+        self.assertEqual(listed["count"], 2)
+        self.assertIn(mine.id, {p["id"] for p in listed["results"]})
+
+    def test_photo_count_on_the_event_is_pruned_too(self):
+        """The count has to prune with the list, or the "+N more" overlay
+        promises photos the lightbox will never show."""
+        event = self.make_event()
+        self.add_photo(event, self.org, "org.jpg")
+        self.add_photo(event, self.ana, "ana.jpg")
+
+        self.client.force_authenticate(self.me)
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(detail["photo_count"], 1)
+        self.assertEqual(
+            [p["uploader"]["id"] for p in detail["photos"]], [self.org.id]
+        )
+
+    def test_the_organiser_sees_every_photo(self):
+        """No carve-out needed: the audience *is* the organiser's connections,
+        so the one gate already puts everyone in front of them."""
+        event = self.make_event()
+        self.add_photo(event, self.me, "me.jpg")
+        self.add_photo(event, self.ana, "ana.jpg")
+
+        self.client.force_authenticate(self.org)
+        self.assertEqual(self.client.get(event_url(event)).json()["photo_count"], 2)
+
+    def test_rsvp_count_stays_complete_beside_a_pruned_album(self):
+        """Both rules on one page, pinned side by side exactly as
+        ``EventReactionTests`` pins the reaction/RSVP pair. The split follows
+        the thing being counted: an RSVP is a shared coordination number, a
+        photo is authored content."""
+        event = self.make_event()
+        EventRSVP.objects.create(event=event, user=self.ana, response="going")
+        self.add_photo(event, self.ana, "ana.jpg")
+
+        self.client.force_authenticate(self.me)
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(detail["rsvp"]["counts"]["going"], 1)  # complete
+        self.assertEqual(detail["photo_count"], 0)  # pruned
+
+    def test_a_deactivated_members_photos_leave_the_album(self):
+        """🔒 Deactivating an account is the maintainer's takedown lever, and it
+        has to reach everything that account authored.
+
+        The organiser has to be somebody *else*: deactivating the organiser
+        404s the whole event out from under the viewer (``can_view_event``
+        needs a living organiser), which would pass this test for the wrong
+        reason. So `admin` organises — and `me` needs a connection to them to
+        see it at all, which the base fixture doesn't give — while `org`, whose
+        photos `me` genuinely can see, is the one banned.
+        """
+        make_connection(self.me, self.admin)
+        event = self.make_event(organiser=self.admin)
+        self.add_photo(event, self.org, "org.jpg")
+        self.add_photo(event, self.me, "me.jpg")
+
+        self.client.force_authenticate(self.me)
+        self.assertEqual(self.client.get(event_url(event)).json()["photo_count"], 2)
+
+        self.org.is_active = False
+        self.org.save(update_fields=["is_active"])
+
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(detail["photo_count"], 1)
+        self.assertEqual(
+            [p["uploader"]["id"] for p in detail["photos"]], [self.me.id]
+        )
+        listed = self.client.get(event_photos_url(event)).json()
+        self.assertEqual(listed["count"], 1)
+
+    def test_invisible_event_404s_both_verbs(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(
+            self.client.get(event_photos_url(event)).status_code, 404
+        )
+        self.assertEqual(
+            self.client.post(
+                event_photos_url(event),
+                {"photos": [make_image_upload()]},
+                format="multipart",
+            ).status_code,
+            404,
+        )
+
+    def test_nonmember_404s(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.nonmember)
+        self.assertEqual(
+            self.client.get(event_photos_url(event)).status_code, 404
+        )
+
+
+class EventPhotoUploadTests(EventPhotoBase):
+    """Adding to the album: who may, what's rejected, and what the pipeline
+    does to the file on its way in."""
+
+    def test_any_member_who_can_see_the_event_can_add(self):
+        """The deliberate asymmetry with the rest of events: polls and
+        finalising are the organiser's, the photos are whoever took them."""
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        self.assertEqual(photo.uploader_id, self.me.id)
+
+    def test_uploader_is_taken_from_the_session_not_the_body(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_photos_url(event),
+            {"photos": [make_image_upload()], "uploader": self.org.id},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(
+            EventPhoto.objects.get(pk=resp.json()[0]["id"]).uploader_id, self.me.id
+        )
+
+    def test_several_photos_in_one_request(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_photos_url(event),
+            {"photos": [make_image_upload("a.jpg"), make_image_upload("b.jpg")]},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(resp.json()), 2)
+        self.assertEqual(EventPhoto.objects.filter(event=event).count(), 2)
+
+    def test_empty_upload_is_rejected(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(event_photos_url(event), {}, format="multipart")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_too_many_in_one_request_is_rejected(self):
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        files = [
+            make_image_upload(f"{i}.jpg")
+            for i in range(MAX_PHOTOS_PER_UPLOAD + 1)
+        ]
+        resp = self.client.post(
+            event_photos_url(event), {"photos": files}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(EventPhoto.objects.filter(event=event).exists())
+
+    def test_album_cap_counts_every_photo_not_just_the_visible_ones(self):
+        """The cap is a storage bound, not a visibility rule. Counting only the
+        uploader's own slice of a pruned album would let the true total drift
+        past the cap one connection-group at a time."""
+        event = self.make_event()
+        EventPhoto.objects.bulk_create(
+            EventPhoto(
+                event=event, uploader=self.ana, image="x.jpg",
+                thumbnail="t.jpg", width=1, height=1,
+            )
+            for _ in range(MAX_PHOTOS_PER_EVENT)
+        )
+        self.client.force_authenticate(self.me)  # sees none of ana's
+        resp = self.client.post(
+            event_photos_url(event),
+            {"photos": [make_image_upload()]},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("full", str(resp.json()["photos"]).lower())
+
+    def test_one_bad_file_rejects_the_whole_batch(self):
+        """Processed up front, as a post's photos are — a half-uploaded batch
+        is worse than a failed one, and the message names the offender."""
+        event = self.make_event()
+        bad = SimpleUploadedFile("notes.txt", b"not an image", content_type="image/jpeg")
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_photos_url(event),
+            {"photos": [make_image_upload("good.jpg"), bad]},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("notes.txt", str(resp.json()["photos"]))
+        self.assertFalse(EventPhoto.objects.filter(event=event).exists())
+
+    def test_exif_gps_is_stripped(self):
+        """Routed through the same ``process_image`` a post photo is, so the
+        privacy guarantee is inherited rather than re-implemented. This test
+        exists to prove the *routing*, not to re-test the pipeline."""
+        exif = Image.Exif()
+        exif[0x0110] = "SecretCameraModel"  # the Model tag, as PhotoPostTests uses
+        upload = make_image_upload("located.jpg", exif=exif)
+        self.assertTrue(len(Image.open(upload).getexif()) > 0)  # sanity
+        upload.seek(0)
+
+        event = self.make_event()
+        self.client.force_authenticate(self.me)
+        resp = self.client.post(
+            event_photos_url(event), {"photos": [upload]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, 201)
+        photo = EventPhoto.objects.get(pk=resp.json()[0]["id"])
+        with Image.open(photo.image.path) as stored:
+            self.assertEqual(len(stored.getexif()), 0)
+
+    def test_allowed_on_a_cancelled_event(self):
+        """A cancellation that turned into a pub instead is still a day people
+        photographed — the same reading of the tombstone the comment thread
+        takes."""
+        event = self.make_event(status=Event.Status.CANCELLED)
+        self.add_photo(event, self.me)
+
+    def test_allowed_on_a_past_event(self):
+        """The after-the-fact half of the feature, and the common case."""
+        event = self.make_event(
+            event_date=timezone.localdate() - timedelta(days=3),
+            status=Event.Status.SCHEDULED,
+        )
+        self.add_photo(event, self.me)
+
+
+class EventPhotoDeleteTests(EventPhotoBase):
+    """Three people may remove a photo, and everyone else gets the same
+    404/403 split ``PostDetailView`` uses."""
+
+    def test_uploader_can_remove_their_own(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        self.client.force_authenticate(self.me)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 204
+        )
+        self.assertFalse(EventPhoto.objects.filter(pk=photo.pk).exists())
+
+    def test_organiser_can_remove_anyones(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        self.client.force_authenticate(self.org)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 204
+        )
+
+    def test_group_admin_can_remove_anyones(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 204
+        )
+
+    def test_another_member_gets_403(self):
+        """``ana`` can see the event and isn't connected to ``me``, but she can
+        see the *photo* exists here only because the test handed her its id —
+        the 403 is what stops a member tidying up someone else's album."""
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        self.client.force_authenticate(self.ana)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 403
+        )
+        self.assertTrue(EventPhoto.objects.filter(pk=photo.pk).exists())
+
+    def test_someone_who_cannot_see_the_event_gets_404(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(
+            self.client.delete(event_photo_url(photo)).status_code, 404
+        )
+
+    def test_can_delete_flag_matches_the_three_limbs(self):
+        event = self.make_event()
+        self.add_photo(event, self.org, "org.jpg")
+        mine = self.add_photo(event, self.me, "me.jpg")
+
+        self.client.force_authenticate(self.me)
+        by_id = {
+            p["id"]: p
+            for p in self.client.get(event_photos_url(event)).json()["results"]
+        }
+        self.assertTrue(by_id[mine.id]["can_delete"])
+        self.assertFalse(
+            next(p for p in by_id.values() if p["id"] != mine.id)["can_delete"]
+        )
+
+        self.client.force_authenticate(self.admin)
+        listed = self.client.get(event_photos_url(event)).json()["results"]
+        self.assertTrue(all(p["can_delete"] for p in listed))
+
+    def test_delete_sweeps_the_files(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        image_path, thumb_path = photo.image.path, photo.thumbnail.path
+        self.assertTrue(os.path.exists(image_path))
+
+        self.client.force_authenticate(self.me)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.delete(event_photo_url(photo))
+        self.assertFalse(os.path.exists(image_path))
+        self.assertFalse(os.path.exists(thumb_path))
+
+
+class EventPhotoFileSweepTests(EventPhotoBase):
+    """A database cascade takes the rows; it never touches storage. Every path
+    that can destroy an album has to gather its files first."""
+
+    def test_deleting_the_event_sweeps_everyones_photos(self):
+        event = self.make_event()
+        mine = self.add_photo(event, self.me, "me.jpg")
+        theirs = self.add_photo(event, self.ana, "ana.jpg")
+        paths = [mine.image.path, theirs.image.path]
+
+        self.client.force_authenticate(self.org)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(
+                self.client.delete(event_url(event)).status_code, 204
+            )
+        for path in paths:
+            self.assertFalse(os.path.exists(path), path)
+
+    def test_deleting_the_group_sweeps_its_events_photos(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        path = photo.image.path
+
+        self.client.force_authenticate(self.admin)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.delete(f"/api/groups/{self.group.pk}/")
+        self.assertFalse(os.path.exists(path))
+
+    def test_deleting_an_account_sweeps_photos_it_uploaded(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)
+        path = photo.image.path
+
+        self.client.force_authenticate(self.me)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            )
+        self.assertFalse(os.path.exists(path))
+
+    def test_deleting_an_organiser_sweeps_other_peoples_photos_on_their_events(self):
+        """The trap: ``Event.organiser`` is CASCADE, so deleting the organiser
+        destroys albums full of *other members'* files. Gathering only the
+        departing user's own photos leaves those orphaned on disk."""
+        event = self.make_event()
+        photo = self.add_photo(event, self.me)  # me's photo, org's event
+        path = photo.image.path
+
+        self.client.force_authenticate(self.org)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            )
+        self.assertFalse(os.path.exists(path))
+
+
+class EventPhotoPayloadTests(EventPhotoBase):
+    """``photos``/``photo_count`` ride every surface that renders an event.
+
+    A list endpoint that doesn't pay for them says ``0``, which is
+    indistinguishable from an empty album — the same rule (and the same failure
+    mode) as the comment counts.
+    """
+
+    def test_every_event_list_carries_the_album(self):
+        event = self.make_event(
+            event_date=self.future(), status=Event.Status.SCHEDULED
+        )
+        self.add_photo(event, self.org)
+
+        self.client.force_authenticate(self.me)
+        for label, url in (
+            ("group events", group_events_url(self.group)),
+            ("group calendar", group_calendar_url(self.group)),
+            ("personal calendar", "/api/calendar/"),
+        ):
+            with self.subTest(surface=label):
+                rows = self.client.get(url).json()
+                row = next(r for r in rows if r["id"] == event.id)
+                self.assertEqual(row["photo_count"], 1, label)
+                self.assertEqual(len(row["photos"]), 1, label)
+
+    def test_previews_are_capped_but_the_count_is_not(self):
+        """The "+N more" overlay depends on these being two different numbers."""
+        event = self.make_event()
+        for i in range(EVENT_PHOTO_PREVIEW_COUNT + 3):
+            self.add_photo(event, self.org, f"{i}.jpg")
+
+        self.client.force_authenticate(self.me)
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(len(detail["photos"]), EVENT_PHOTO_PREVIEW_COUNT)
+        self.assertEqual(detail["photo_count"], EVENT_PHOTO_PREVIEW_COUNT + 3)
+
+    def test_previews_are_the_albums_first_photos_in_album_order(self):
+        """The window's ordering has to match the model's, or the four tiles on
+        a card are a different four from the first page of the album."""
+        event = self.make_event()
+        ids = [
+            self.add_photo(event, self.org, f"{i}.jpg").id
+            for i in range(EVENT_PHOTO_PREVIEW_COUNT + 2)
+        ]
+
+        self.client.force_authenticate(self.me)
+        detail = self.client.get(event_url(event)).json()
+        self.assertEqual(
+            [p["id"] for p in detail["photos"]],
+            ids[:EVENT_PHOTO_PREVIEW_COUNT],
+        )
+
+    def test_a_photo_carries_what_a_grid_and_a_lightbox_need(self):
+        event = self.make_event()
+        self.add_photo(event, self.me)
+        self.client.force_authenticate(self.me)
+        photo = self.client.get(event_url(event)).json()["photos"][0]
+        for field in ("id", "image", "thumbnail", "width", "height",
+                      "uploader", "created_at", "can_delete"):
+            self.assertIn(field, photo)
+        self.assertTrue(photo["image"].startswith("http"))
+
+    def test_previews_cost_the_same_however_big_the_album_gets(self):
+        """The reason ``event_photo_previews`` is a window function and not a
+        prefetch. Asserted as *no growth* rather than an absolute number: the
+        exact count is incidental and would make this test a tripwire for every
+        unrelated query change, whereas growth is the actual failure — one query
+        per event, or a prefetch that drags every row of every album back to
+        render four tiles."""
+        self.client.force_authenticate(self.me)
+
+        small = self.make_event(title="Small")
+        self.add_photo(small, self.org, "s.jpg")
+        self.client.force_authenticate(self.me)
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.get(group_events_url(self.group))
+        baseline = len(ctx)
+
+        # Four more events, and a fat album on the first one.
+        for i in range(4):
+            event = self.make_event(title=f"E{i}")
+            self.add_photo(event, self.org, f"{i}.jpg")
+        for i in range(12):
+            self.add_photo(small, self.org, f"extra{i}.jpg")
+
+        self.client.force_authenticate(self.me)
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.get(group_events_url(self.group))
+        self.assertEqual(len(ctx), baseline)
+
+
+class EventPhotoNotificationTests(EventPhotoBase):
+    """Who gets told photos are up."""
+
+    def _rsvp(self, event, user, response):
+        EventRSVP.objects.create(event=event, user=user, response=response)
+
+    def test_going_and_maybe_are_told(self):
+        event = self.make_event()
+        self._rsvp(event, self.me, "going")
+        self._rsvp(event, self.admin, "maybe")
+        self.add_photo(event, self.org)
+
+        for user in (self.me, self.admin):
+            self.assertTrue(
+                Notification.objects.filter(
+                    recipient=user, kind=Notification.Kind.EVENT_PHOTOS,
+                    event=event,
+                ).exists(),
+                user,
+            )
+
+    def test_declined_and_silent_members_are_not(self):
+        event = self.make_event()
+        self._rsvp(event, self.me, "declined")
+        self.add_photo(event, self.org)
+        self.assertFalse(
+            Notification.objects.filter(
+                kind=Notification.Kind.EVENT_PHOTOS
+            ).exists()
+        )
+
+    def test_the_uploader_is_never_told(self):
+        event = self.make_event()
+        self._rsvp(event, self.me, "going")
+        self.add_photo(event, self.me)
+        self.assertFalse(
+            Notification.objects.filter(
+                recipient=self.me, kind=Notification.Kind.EVENT_PHOTOS
+            ).exists()
+        )
+
+    def test_an_organiser_who_rsvpd_is_told(self):
+        """The organiser is the one recipient the other event kinds exclude,
+        because there they're the actor. Here the actor is the uploader."""
+        event = self.make_event()
+        self._rsvp(event, self.org, "going")
+        self.add_photo(event, self.me)
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=self.org, kind=Notification.Kind.EVENT_PHOTOS
+            ).exists()
+        )
+
+    def test_someone_not_connected_to_the_uploader_is_not_told(self):
+        """The gate doing real work, which is what makes this kind different
+        from the five organiser broadcasts: ``ana`` is going, but she can't see
+        ``me``'s photos, so telling her would link her to an empty page."""
+        event = self.make_event()
+        self._rsvp(event, self.ana, "going")
+        self.add_photo(event, self.me)
+        self.assertFalse(
+            Notification.objects.filter(
+                recipient=self.ana, kind=Notification.Kind.EVENT_PHOTOS
+            ).exists()
+        )
+
+    def test_a_second_batch_refreshes_one_unread_row_and_does_not_buzz_again(self):
+        """People upload in batches — eight now, four more when they notice
+        them. That's one thing that happened."""
+        event = self.make_event()
+        self._rsvp(event, self.me, "going")
+        self.add_photo(event, self.org, "a.jpg")
+        self.add_photo(event, self.org, "b.jpg")
+
+        notes = Notification.objects.filter(
+            recipient=self.me, kind=Notification.Kind.EVENT_PHOTOS
+        )
+        self.assertEqual(notes.count(), 1)
+        self.assertEqual(
+            PushOutbox.objects.filter(notification__in=notes).count(), 1
+        )
+
+    def test_reading_the_event_clears_it(self):
+        event = self.make_event()
+        self._rsvp(event, self.me, "going")
+        self.add_photo(event, self.org)
+        note = Notification.objects.get(
+            recipient=self.me, kind=Notification.Kind.EVENT_PHOTOS
+        )
+
+        self.client.force_authenticate(self.me)
+        self.client.get(event_url(event))
+        note.refresh_from_db()
+        self.assertIsNotNone(note.seen_at)
+
+    def test_text_and_deep_link(self):
+        event = self.make_event(title="Camping")
+        self._rsvp(event, self.me, "going")
+        self.add_photo(event, self.org)
+
+        self.client.force_authenticate(self.me)
+        row = next(
+            n for n in self.client.get("/api/notifications/").json()["results"]
+            if n["kind"] == "event_photos"
+        )
+        self.assertIn("added photos to Camping", row["text"])
+        self.assertEqual(row["url"], f"/g/{self.group.id}/events/{event.id}")
+        self.assertEqual(row["target"], {"type": "event", "id": event.id})
+
+    def test_android_channel_is_events_not_replies(self):
+        """It's the organiser-broadcast shape (an announcement about the event),
+        not the ``event_comment`` shape (somebody answering you)."""
+        self.assertEqual(
+            notifications.channel_for_kind(Notification.Kind.EVENT_PHOTOS),
+            "events",
+        )
+
+    def test_the_preference_can_be_muted(self):
+        event = self.make_event()
+        self._rsvp(event, self.me, "going")
+        NotificationPreference.objects.create(
+            user=self.me, kind=Notification.Kind.EVENT_PHOTOS, enabled=False
+        )
+        self.add_photo(event, self.org)
+        self.assertFalse(
+            Notification.objects.filter(
+                recipient=self.me, kind=Notification.Kind.EVENT_PHOTOS
+            ).exists()
         )
 
 

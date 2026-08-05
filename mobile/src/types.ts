@@ -547,6 +547,38 @@ export type Event = {
   reactions: Reaction[];
   comment_count: number;
   new_comment_count: number;
+  /**
+   * The album's first few photos — enough to draw the preview grid on a card
+   * without a request per event. Already **pruned to the uploaders you may
+   * see**, like the reactions above and unlike the poll/RSVP counts.
+   */
+  photos: EventPhoto[];
+  /**
+   * How many photos the album holds *for you*. Can exceed `photos.length`, which
+   * is what the "+N" overlay counts — and is not the album's true size, since
+   * the prune ran before it was counted.
+   */
+  photo_count: number;
+};
+
+/**
+ * One photo in an event's album. Shaped like a `PostImage` so the existing grid
+ * and lightbox render it unchanged, plus the two things an album needs and a
+ * post's images don't: whose photo it is, and whether you may remove it.
+ */
+export type EventPhoto = {
+  id: number;
+  image: string;
+  thumbnail: string;
+  width: number;
+  height: number;
+  uploader: Author;
+  created_at: string;
+  /**
+   * You uploaded it, you organised the event, or you run the group. A hint for
+   * drawing the affordance — the server re-checks all three.
+   */
+  can_delete: boolean;
 };
 
 /**

@@ -464,6 +464,15 @@ Both clients follow the same two rules, because both hit the same problem: a
 post may carry up to ten photos, and rendering them full-width each turns one
 entry into screens of scrolling, which buries the rest of the timeline.
 
+**Both the grid and the viewer are now shared with [events](events.md)**, whose
+albums hit exactly the same problem with a bigger set. `PhotoGrid`
+(`frontend/src/components/PhotoGrid.jsx`, `mobile/src/components/PhotoGrid.tsx`)
+was lifted out of `PostCard` on each client so the two can't drift; it takes an
+optional `max`/`total` pair for the album's "+N more" overlay, and
+`Lightbox`/`PhotoLightbox` gained an optional caption (an album photo has an
+author of its own — a post's images inherit the post's) and an optional Remove.
+A post passes none of those, so its grid and viewer are unchanged.
+
 - **One photo keeps its natural shape; several go into a two-column square
   grid.** The grid is *navigation* — a compact index of what's in the post — and
   is deliberately not where a photo gets looked at. Cost per post is then bounded
@@ -486,8 +495,8 @@ Two things worth knowing about the mobile viewer:
 
 ### The imaging pipeline (`api/imaging.py`)
 
-All image handling — post photos *and* avatars — funnels through
-`process_image`, the single place the safety rules live:
+All image handling — post photos, **event album photos** and avatars — funnels
+through `process_image`, the single place the safety rules live:
 
 - **Validate by decoding, not by extension/Content-Type.** A file is accepted
   only if Pillow opens it *and* its format is in a raster allow-list
@@ -521,7 +530,10 @@ All image handling — post photos *and* avatars — funnels through
   > leaves its pixels un-rotated — unlike any real camera. The regression test now
   > uses an already-upright fixture and asserts the dimensions come out unchanged.
 
-- **Bounded:** ≤30 MB per input file, ≤10 photos per post; originals downscaled
+- **Bounded:** ≤30 MB per input file, ≤10 photos per post (and ≤10 per *request*
+  on an event album, which additionally caps the album itself at 200 — a
+  per-request limit can't bound a collection many people add to over time; see
+  [events](events.md)); originals downscaled
   (long edge 2048), thumbnails generated (512 post / 128 square avatar).
   Processing is **synchronous** — fine at family scale; move to Celery if volume
   grows.

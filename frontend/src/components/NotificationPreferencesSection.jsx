@@ -20,6 +20,8 @@ const LABELS = {
   event_scheduled: "When an event's date is set",
   event_updated: "Changes to events you're going to",
   event_cancelled: "Events being cancelled",
+  event_comment: "Comments on events you organised",
+  event_photos: "Photos added to events you're going to",
   // Phase 9b M8. Deliberately phrased as exactly what it does: it is *not* a
   // blanket mentions on/off. A mention in an unmuted chat notifies either way;
   // this decides only whether one punches through a chat you silenced.

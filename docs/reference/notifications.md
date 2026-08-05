@@ -127,6 +127,8 @@ cross-cutting rules, so no call site can forget one.
 | `connection_accepted` | `ConnectView` / `ConnectionRequestActionView` (approve) | the requester | **always-on** |
 | `group_invite` | `GroupMembersView` (POST) | the invitee | **always-on** |
 | `event_created` / `poll_opened` / `event_scheduled` / `event_updated` / `event_cancelled` | the [group-event](events.md) views | members connected to the organiser (going/maybe RSVPs for updated/cancelled) | yes |
+| `event_comment` | `EventCommentsView` (top-level comment) | the event's **organiser** | yes |
+| `event_photos` | `EventPhotosView` (POST) | going/maybe RSVPs **∩ the uploader's connections** | yes |
 
 The five **event** kinds (Phase 8b) added a fifth concrete target FK
 (`Notification.event`) and widened the "at most one target" `CheckConstraint`
@@ -134,6 +136,18 @@ accordingly — the model was built to grow this way. Their actor is always the
 event's **organiser**, so rule 3 below lands them on exactly the audience that can
 see the event, with no event-specific gating. `event_updated` is de-duped while
 unread, like `reaction`. See [events](events.md).
+
+The two later event kinds break that "actor is the organiser" pattern, and the
+break is what makes each interesting. `event_comment` is the event twin of
+`post_reply` — actor the commenter, recipient the organiser — and its Android
+channel is **`replies`, not `events`**, because the channel groups by what the
+notification *is* to the person getting it and this is somebody answering you.
+`event_photos` keeps the `events` channel (an announcement about the event) but
+is the one kind here where **rule 3 does real work**: its actor is the
+uploader, two people in an event's audience needn't be connected to each other,
+and the album prunes on the uploader — so a going RSVP who can't see those
+photos must not be told about them. It is also de-duped while unread, because
+people upload in batches. See [events](events.md).
 
 ### The three rules `create_notification` enforces
 

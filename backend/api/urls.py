@@ -279,6 +279,20 @@ urlpatterns = [
         views.EventRSVPListView.as_view(),
         name="event-rsvps",
     ),
+    # The event's photo album: list (pruned to the viewer's connections, paged)
+    # and add. Removing one photo hangs off the photo's own id rather than the
+    # event's, matching ``comments/<pk>/`` — the row already knows which event
+    # it belongs to, and a nested route would invite a second copy of the gate.
+    path(
+        "events/<int:pk>/photos/",
+        views.EventPhotosView.as_view(),
+        name="event-photos",
+    ),
+    path(
+        "event-photos/<int:pk>/",
+        views.EventPhotoDetailView.as_view(),
+        name="event-photo-detail",
+    ),
     path(
         "events/<int:pk>/polls/",
         views.EventPollsView.as_view(),

@@ -65,6 +65,17 @@ _CONNECTION_GATED_KINDS = frozenset(
         # out of this set is exactly the kind of omission nobody notices until
         # the audience rule changes underneath it.
         Notification.Kind.EVENT_COMMENT,
+        # Someone added photos to an event you're going to. This is the one
+        # event kind where the gate does **real** work rather than belt-and-
+        # braces: its recipients are the event's going/maybe RSVPs, and two
+        # people in an event's audience are connected to the *organiser* without
+        # necessarily being connected to each other. The album prunes on the
+        # uploader for exactly that reason (see ``EventPhoto``), so notifying
+        # someone about photos they will not be shown would be a dangling
+        # deep-link at best and a leak of who was at the event at worst. Putting
+        # the kind in this set makes the recipient filter the same one line of
+        # code every other content kind uses.
+        Notification.Kind.EVENT_PHOTOS,
     }
 )
 
@@ -111,6 +122,14 @@ _KIND_CHANNELS = {
     Notification.Kind.EVENT_SCHEDULED: "events",
     Notification.Kind.EVENT_UPDATED: "events",
     Notification.Kind.EVENT_CANCELLED: "events",
+    # **"events", not "replies"** — the opposite call from ``EVENT_COMMENT``
+    # directly above, by the same rule. Photos going up is an announcement
+    # *about the event* to everyone who was there, not somebody answering you,
+    # so it belongs with the organiser's broadcasts. (The actor being the
+    # uploader rather than the organiser is a gating question, not a channel
+    # one: the channel groups by what the notification is to the person getting
+    # it.)
+    Notification.Kind.EVENT_PHOTOS: "events",
     # A mention rides the messaging surface but keeps its own channel, matching
     # its own preference: being named is the one thing that should still reach
     # you in a chat you've otherwise quietened.
@@ -148,10 +167,19 @@ def channel_for_kind(kind):
 
 
 # Kinds that refresh an existing *unread* row rather than stacking a duplicate:
-# a react/un-react/re-react, or repeated edits to one event within a short
-# window, bump a single line to the top instead of filling the centre.
+# a react/un-react/re-react, repeated edits to one event, or several batches of
+# photos added to one album, bump a single line to the top instead of filling
+# the centre. Photos belong here for the plainest possible reason — people
+# upload in batches. You take out your phone at the end of the evening, send
+# eight, notice four more, send those: that's one thing that happened, and the
+# ``PushOutbox`` row is only written for genuinely new notifications, so it's
+# also one buzz rather than two.
 _DEDUP_KINDS = frozenset(
-    {Notification.Kind.REACTION, Notification.Kind.EVENT_UPDATED}
+    {
+        Notification.Kind.REACTION,
+        Notification.Kind.EVENT_UPDATED,
+        Notification.Kind.EVENT_PHOTOS,
+    }
 )
 
 
