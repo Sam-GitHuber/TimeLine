@@ -756,6 +756,65 @@ describe("EventPage — a refused organiser write says so", () => {
     expect(screen.getByRole("button", { name: "Set the time" })).toBeInTheDocument();
   });
 
+  // The chip row sits directly above the editor that reports the write, and
+  // picking a different chip swaps that editor out — so it's a dismissal route
+  // like the Cancel beside it, and needs the same hold.
+  it("holds the chip row while an editor's write is in flight", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    let rejectSet;
+    api.finaliseEvent.mockImplementationOnce(
+      () => new Promise((_, reject) => (rejectSet = reject))
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Set" })[0]);
+    await userEvent.type(await screen.findByLabelText("Hour"), "10");
+    await userEvent.type(screen.getByLabelText("Minute"), "00");
+    await userEvent.click(screen.getByRole("button", { name: "Set the time" }));
+
+    // Every chip action is held — including the other chips', which is the one
+    // that would have swapped this editor out from under its own message.
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Poll" })[0]).toBeDisabled()
+    );
+    expect(screen.getAllByRole("button", { name: "Set" })[1]).toBeDisabled();
+
+    // Released once it settles, so the failure can be acted on.
+    rejectSet(apiError("That time has already passed.", 400));
+    await screen.findByText("That time has already passed.");
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Poll" })[0]).toBeEnabled()
+    );
+  });
+
+  // …and once it has settled, moving to another chip must not carry the old
+  // message under the new form. Mobile keys its editor for exactly this.
+  it("doesn't carry a settled editor error over to the next chip", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    api.finaliseEvent.mockRejectedValueOnce(
+      apiError("That time has already passed.", 400)
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Set" })[0]);
+    await userEvent.type(await screen.findByLabelText("Hour"), "10");
+    await userEvent.type(screen.getByLabelText("Minute"), "00");
+    await userEvent.click(screen.getByRole("button", { name: "Set the time" }));
+    expect(
+      await screen.findByText("That time has already passed.")
+    ).toBeInTheDocument();
+
+    // Switch to the Where chip's Set without cancelling first ([0] is Time,
+    // still open; the Date chip is polling, so it offers no Set).
+    await userEvent.click(screen.getAllByRole("button", { name: "Set" })[1]);
+    expect(await screen.findByLabelText("Set the place")).toBeInTheDocument();
+    expect(
+      screen.queryByText("That time has already passed.")
+    ).not.toBeInTheDocument();
+  });
+
   // The free-value box beside a poll: a rejection that also wiped what you typed
   // would make the retry mean typing it again.
   it("keeps a typed free value when finalising it is refused", async () => {

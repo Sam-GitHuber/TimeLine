@@ -6,7 +6,7 @@ import {
   menuDangerItemClass,
 } from "../useDropdownMenu.js";
 import PollOptionFields from "./PollOptionFields.jsx";
-import { optionValuePayload } from "./pollOptions.js";
+import { optionValuePayload, FINALISE_FALLBACK } from "./pollOptions.js";
 import { serverMessage } from "../../errors.js";
 import { formatEventDate, formatEventTime } from "../../utils.js";
 
@@ -76,17 +76,13 @@ export default function PollTally({
     }
   }
   // Which of the four things Set/Pin does didn't happen is most of the value, so
-  // the fallback names it rather than saying "something went wrong".
-  const finaliseFallback = {
-    date: "Couldn't set the date — try again.",
-    time: "Couldn't set the time — try again.",
-    location: "Couldn't set the place — try again.",
-    custom: "Couldn't pin that answer — try again.",
-  }[poll.dimension];
+  // the fallback names it rather than saying "something went wrong". Keyed off
+  // the dimension being finalised, not the poll's, since the free-value box on a
+  // date poll still finalises a date.
   const runFinalise = (dimension, opts) =>
     runAction(
       () => onFinalise(dimension, opts),
-      finaliseFallback || "That didn't work — try again."
+      FINALISE_FALLBACK[dimension] || "That didn't work — try again."
     );
 
   const [editing, setEditing] = useState(false);

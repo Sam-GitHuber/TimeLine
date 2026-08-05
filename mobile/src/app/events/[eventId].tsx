@@ -172,9 +172,10 @@ export default function EventScreen() {
   // The rest of the lifecycle. `onSuccess` is the only place the invalidation
   // runs, so before #237 a rejection repainted nothing at all: a close that 404'd
   // (another admin had removed the poll) left it on screen still open, and votes
-  // went on arriving into a poll the organiser believed was frozen. The alert
-  // says which of the three didn't happen — the fallback is per action, not a
-  // house "something went wrong" (connections.md, "Reporting a refused write").
+  // went on arriving into a poll the organiser believed was frozen. Each alert's
+  // *title* names which of the three didn't happen — that's where this screen
+  // carries the per-state half of connections.md's "Reporting a refused write",
+  // since an `Alert` has a title to put it in and the web's inline line doesn't.
   const closePoll = useMutation({
     mutationFn: (pollId: number) => api.closePoll(pollId),
     onSuccess: invalidate,

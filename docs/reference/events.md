@@ -443,12 +443,22 @@ The gate needs a *present* organiser. Two paths:
     that one is retired by a resync, and a refetch triggered by some *other*
     write is no answer to "did my Remove poll go through?"), `DimensionEditor`
     owns Set and Open poll, and only `cancel`/`remove` — whose buttons are on the
-    page — are rendered by the page. `DimensionEditor`'s Cancel is disabled while
-    its write is in flight for the other half of the same rule: it is now the
-    only renderer of that message, so it may not be dismissed before the message
-    arrives. Mobile needed none of this restructuring — an `Alert` isn't part of
-    the tree that raised it, which is the same property that makes it the phone's
-    answer to #261.
+    page — are rendered by the page. Mobile needed none of this restructuring —
+    an `Alert` isn't part of the tree that raised it, which is the same property
+    that makes it the phone's answer to #261.
+  - **Everything that could dismiss the editor is held while its write is out**,
+    which is the other half of the same rule — it is now the only renderer of
+    that message, so it may not be dismissed before the message arrives. That's
+    three routes, not one: its own **Cancel**, and the **chip row** above it,
+    where picking a different chip swaps the editor out just as effectively.
+    (`DimensionChips` therefore takes a `busy` prop; it doesn't hold the *goto*
+    jump on a polling chip, which only scrolls.) The Cancel gates on **this
+    editor's** write rather than the page's `busy` — #254 scopes the hold to the
+    write whose message would be lost, and a Cancel held shut by somebody else's
+    vote is wider than the rule asks for. The editor is additionally **keyed on
+    `dimension:mode`**, as mobile's copy already was: one instance is otherwise
+    re-propped from chip to chip, so a *settled* rejection from the Date editor
+    would sit on under the Where form you moved to.
   - The **free-value box** beside a poll keeps what you typed when the finalise
     is refused, rather than clearing it as it does on success. A rejection that
     also wipes the value means the retry is "type it again".

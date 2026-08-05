@@ -233,6 +233,7 @@ export default function EventPage() {
             event={event}
             canManage={event.can_manage}
             onAction={onChipAction}
+            busy={busy}
           />
 
           {editing && (
@@ -245,8 +246,17 @@ export default function EventPage() {
                   `{editing && …}` block, and the tally's Set/Pin finalises with
                   the editor *closed*, so on that path the paragraph wasn't
                   mounted and the failure had nowhere to appear (#237). Each
-                  caller now says it beside the button that was pressed. */}
+                  caller now says it beside the button that was pressed.
+
+                  Keyed on the chip it belongs to, as mobile already keys its
+                  copy: one instance is otherwise re-propped from chip to chip,
+                  so a rejection from the Date editor would still be sitting
+                  under the Where form you switched to. The chip row is held
+                  while a write is in flight (`busy` above) so the switch can't
+                  happen mid-request in the first place — the key is what keeps
+                  a *settled* message from outliving the form it belongs to. */}
               <DimensionEditor
+                key={`${editing.dimension}:${editing.mode}`}
                 dimension={editing.dimension}
                 mode={editing.mode}
                 busy={busy}
@@ -262,6 +272,7 @@ export default function EventPage() {
           {event.can_manage && !editing && (
             <button
               type="button"
+              disabled={busy}
               onClick={() => setEditing({ dimension: "custom", mode: "poll" })}
               className="mt-3 text-sm font-medium text-accent-deep hover:underline"
             >
