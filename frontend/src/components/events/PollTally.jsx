@@ -6,7 +6,7 @@ import {
   menuDangerItemClass,
 } from "../useDropdownMenu.js";
 import PollOptionFields from "./PollOptionFields.jsx";
-import { optionValuePayload } from "./pollOptions.js";
+import { optionValuePayload, FINALISE_FALLBACK } from "./pollOptions.js";
 import { serverMessage } from "../../errors.js";
 import { formatEventDate, formatEventTime } from "../../utils.js";
 
@@ -51,6 +51,40 @@ export default function PollTally({
     // through" sitting under a tick the server has since confirmed.
     setVoteError(null);
   }
+  // The organiser's lifecycle actions and the per-option Set/Pin. Each is handed
+  // down as `mutateAsync` so its rejection reaches the card the button is on —
+  // before #237 they had `onSuccess: invalidate` and nothing else, so a close
+  // that 404'd (another admin removed the poll) left it painted open with no
+  // message, and votes went on arriving into a poll the organiser had frozen.
+  //
+  // Kept apart from `voteError` on purpose: that one is retired by a resync
+  // (#226), and a refetch triggered by some *other* write on this page is no
+  // answer at all to "did my Remove poll go through?".
+  //
+  // Returns whether the write landed, which is how `FreeValueFinalise` knows to
+  // keep what you typed rather than clearing a value that never got set.
+  const [actionError, setActionError] = useState(null);
+  async function runAction(action, fallback) {
+    if (!action) return false;
+    setActionError(null);
+    try {
+      await action();
+      return true;
+    } catch (err) {
+      setActionError(serverMessage(err, fallback));
+      return false;
+    }
+  }
+  // Which of the four things Set/Pin does didn't happen is most of the value, so
+  // the fallback names it rather than saying "something went wrong". Keyed off
+  // the dimension being finalised, not the poll's, since the free-value box on a
+  // date poll still finalises a date.
+  const runFinalise = (dimension, opts) =>
+    runAction(
+      () => onFinalise(dimension, opts),
+      FINALISE_FALLBACK[dimension] || "That didn't work — try again."
+    );
+
   const [editing, setEditing] = useState(false);
   const open = poll.status === "open";
   const options = poll.options || [];
@@ -115,9 +149,15 @@ export default function PollTally({
               canEdit={canEdit}
               busy={busy}
               onEdit={() => setEditing(true)}
-              onClose={onClose}
-              onReopen={onReopen}
-              onDelete={onDelete}
+              onClose={() =>
+                runAction(onClose, "Couldn't close the poll — try again.")
+              }
+              onReopen={() =>
+                runAction(onReopen, "Couldn't re-open the poll — try again.")
+              }
+              onDelete={() =>
+                runAction(onDelete, "Couldn't remove the poll — try again.")
+              }
             />
           )}
         </div>
@@ -147,7 +187,7 @@ export default function PollTally({
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => finaliseOption(poll, opt, onFinalise)}
+                    onClick={() => finaliseOption(poll, opt, runFinalise)}
                     className="btn btn-ghost btn-sm shrink-0"
                     title="Make this the decision"
                   >
@@ -179,11 +219,17 @@ export default function PollTally({
         </p>
       )}
 
+      {actionError && (
+        <p role="alert" className="mt-2 text-sm text-red-600">
+          {actionError}
+        </p>
+      )}
+
       {canManage && !isCustom && (
         <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3">
           <FreeValueFinalise
             dimension={poll.dimension}
-            onFinalise={onFinalise}
+            onFinalise={runFinalise}
             busy={busy}
           />
         </div>
@@ -408,11 +454,13 @@ function FreeValueFinalise({ dimension, onFinalise, busy }) {
   return (
     <form
       className="flex items-center gap-2"
-      onSubmit={(e) => {
+      onSubmit={async (e) => {
         e.preventDefault();
         if (!value.trim()) return;
-        onFinalise(dimension, { value: value.trim() });
-        setValue("");
+        // Only clear once it's actually set — otherwise a rejected finalise
+        // wipes the value you typed at the same moment it tells you it failed,
+        // and the retry means typing it again.
+        if (await onFinalise(dimension, { value: value.trim() })) setValue("");
       }}
     >
       <input

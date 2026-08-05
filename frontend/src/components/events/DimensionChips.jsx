@@ -11,7 +11,13 @@ import { formatEventDate, formatEventTime } from "../../utils.js";
 // are then a glanceable status, with no actions.
 const LABELS = { date: "Date", time: "Time", location: "Where" };
 
-export default function DimensionChips({ event, canManage = false, onAction }) {
+// `busy` holds the organiser's *actions* while one of their writes is in flight.
+// The chips sit directly above the editor that reports that write's rejection,
+// and picking a different chip swaps that editor out — so an ungated chip row is
+// a dismissal route like any other, and the message would be gone before it
+// arrived (connections.md, "Reporting a refused write"). It doesn't hold the
+// "goto" jump on a polling chip: that only scrolls, and unmounts nothing.
+export default function DimensionChips({ event, canManage = false, onAction, busy = false }) {
   const dims = event.dimensions || {};
   const polls = event.polls || [];
 
@@ -42,13 +48,19 @@ export default function DimensionChips({ event, canManage = false, onAction }) {
   return (
     <ul className="ev-chips" aria-label="Event details">
       {[...builtins, ...customs].map((chip) => (
-        <Chip key={chip.key} chip={chip} canManage={canManage} onAction={onAction} />
+        <Chip
+          key={chip.key}
+          chip={chip}
+          canManage={canManage}
+          onAction={onAction}
+          busy={busy}
+        />
       ))}
     </ul>
   );
 }
 
-function Chip({ chip, canManage, onAction }) {
+function Chip({ chip, canManage, onAction, busy }) {
   const { dim, label, state, value, pollId, total } = chip;
   const act = (mode) => onAction && onAction(dim, mode, pollId);
 
@@ -82,11 +94,21 @@ function Chip({ chip, canManage, onAction }) {
         {value && <span className="ev-chip-value font-mono">{value}</span>}
         {canManage && dim && (
           <span className="ev-chip-actions">
-            <button type="button" className="ev-chip-btn" onClick={() => act("set")}>
+            <button
+              type="button"
+              disabled={busy}
+              className="ev-chip-btn"
+              onClick={() => act("set")}
+            >
               Change
             </button>
             <span className="ev-chip-sep" aria-hidden="true">·</span>
-            <button type="button" className="ev-chip-btn" onClick={() => act("poll")}>
+            <button
+              type="button"
+              disabled={busy}
+              className="ev-chip-btn"
+              onClick={() => act("poll")}
+            >
               Poll
             </button>
           </span>
@@ -101,11 +123,21 @@ function Chip({ chip, canManage, onAction }) {
       <span className="ev-chip-label">{label}</span>
       {canManage && dim ? (
         <span className="ev-chip-actions">
-          <button type="button" className="ev-chip-btn" onClick={() => act("set")}>
+          <button
+            type="button"
+            disabled={busy}
+            className="ev-chip-btn"
+            onClick={() => act("set")}
+          >
             Set
           </button>
           <span className="ev-chip-sep" aria-hidden="true">·</span>
-          <button type="button" className="ev-chip-btn" onClick={() => act("poll")}>
+          <button
+            type="button"
+            disabled={busy}
+            className="ev-chip-btn"
+            onClick={() => act("poll")}
+          >
             Poll
           </button>
         </span>

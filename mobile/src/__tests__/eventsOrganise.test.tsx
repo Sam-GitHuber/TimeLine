@@ -17,7 +17,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { Platform } from 'react-native';
 
-import { api } from '@/api';
+import { api, ApiError } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
 import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
@@ -435,7 +435,7 @@ describe('setting a dimension', () => {
     serveEvent(planningEvent());
     const finalise = jest
       .spyOn(api, 'finaliseDimension')
-      .mockRejectedValue(new Error('Server said no'));
+      .mockRejectedValue(new ApiError('That date has already passed.', 400, null));
 
     await renderWith(<EventScreen />);
 
@@ -444,10 +444,36 @@ describe('setting a dimension', () => {
     await fireEvent.press(screen.getByText('Set the date'));
 
     await waitFor(() =>
-      expect(alertSpy).toHaveBeenCalledWith('Couldn’t save', 'Server said no')
+      expect(alertSpy).toHaveBeenCalledWith('Couldn’t save', 'That date has already passed.')
     );
     // The editor stays open on error so the organiser can retry.
     expect(screen.getByText('Set the date')).toBeTruthy();
+    finalise.mockRestore();
+  });
+
+  // The same write, rejected by something that wrote no sentence for a person —
+  // a bare runtime `Error` (offline is React Native's `TypeError`, a 500 behind
+  // Caddy is HTML). This alert used to read `err.message`, so it put the raw
+  // runtime string on screen; `serverMessage` keeps ours (#237, and the rule in
+  // connections.md#reporting-a-refused-write).
+  it('falls back to our own words when the rejection wrote none', async () => {
+    serveEvent(planningEvent());
+    const finalise = jest
+      .spyOn(api, 'finaliseDimension')
+      .mockRejectedValue(new TypeError('Network request failed'));
+
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByLabelText('Set Date'));
+    await pickDateTimeValue('date');
+    await fireEvent.press(screen.getByText('Set the date'));
+
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t save',
+        'Something went wrong — try again in a moment.'
+      )
+    );
     finalise.mockRestore();
   });
 
@@ -519,6 +545,59 @@ describe('cancel and delete', () => {
     await act(async () => pressAlertButton('Delete this event?', 'Delete'));
 
     await waitFor(() => expect(del).toHaveBeenCalledWith(9));
+    del.mockRestore();
+  });
+
+  // #237: neither write repaints anything except from `onSuccess`, so a refused
+  // cancel was pixel-identical to one that worked — right down to the confirm
+  // that promised everyone who RSVP'd would be told. Nobody is notified and the
+  // organiser has no reason to doubt it; they find out when people turn up.
+  it('says so when the cancel is refused', async () => {
+    serveEvent(planningEvent());
+    const cancel = jest
+      .spyOn(api, 'cancelEvent')
+      .mockRejectedValue(new ApiError('You can no longer manage this event.', 403, null));
+
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByText('Cancel event'));
+    await act(async () => pressAlertButton('Cancel this event?', 'Cancel event'));
+
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith(9));
+    // The server's own sentence, not our fallback — it says more than we could.
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t cancel the event',
+        'You can no longer manage this event.'
+      )
+    );
+    cancel.mockRestore();
+  });
+
+  it('says so when the delete is refused, and stays on the event', async () => {
+    serveEvent(planningEvent());
+    // Offline: React Native rejects with a bare `TypeError`, which carries no
+    // sentence worth showing — so this is the case the fallback exists for, and
+    // the one a tester on patchy signal hits first.
+    const del = jest
+      .spyOn(api, 'deleteEvent')
+      .mockRejectedValue(new TypeError('Network request failed'));
+
+    await renderWith(<EventScreen />);
+
+    await fireEvent.press(await screen.findByText('Delete event'));
+    await act(async () => pressAlertButton('Delete this event?', 'Delete'));
+
+    await waitFor(() => expect(del).toHaveBeenCalledWith(9));
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t delete the event',
+        'Something went wrong — try again in a moment.'
+      )
+    );
+    // `goBack` runs from `onSuccess` only, so the event is still on screen —
+    // which is exactly why it needed something to say.
+    expect(screen.getByText('Summer camping weekend')).toBeTruthy();
     del.mockRestore();
   });
 

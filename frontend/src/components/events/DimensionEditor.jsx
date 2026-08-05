@@ -1,6 +1,12 @@
 import { useRef, useState } from "react";
 import PollOptionFields from "./PollOptionFields.jsx";
-import { blankOption, optionValuePayload, OPTION_NOUN } from "./pollOptions.js";
+import {
+  blankOption,
+  optionValuePayload,
+  FINALISE_FALLBACK,
+  OPTION_NOUN,
+} from "./pollOptions.js";
+import { serverMessage } from "../../errors.js";
 
 // The one contextual editor that opens beneath the chip row when the organiser
 // clicks Set or Poll on a chip. It already knows *which* dimension — the chip
@@ -10,13 +16,67 @@ import { blankOption, optionValuePayload, OPTION_NOUN } from "./pollOptions.js";
 const SET_VERB = { date: "Set the date", time: "Set the time", location: "Set the place" };
 const PLACEHOLDER = { location: "e.g. The Oakhouse" };
 
+// `onSet` and `onPoll` return a promise (`EventPage` hands them down as
+// `mutateAsync`), and its rejection is reported here rather than by the page:
+// the editor is the only thing on screen that knows a Set or an Open poll was
+// pressed, and the page's paragraph only rendered while the editor was open —
+// which the tally's Set/Pin isn't (#237). Cancel is disabled while the write is
+// out for the other half of the same rule: this is the only renderer of that
+// message, so it may not be dismissed before the message arrives
+// (connections.md, "Reporting a refused write").
 export default function DimensionEditor({ dimension, mode, onSet, onPoll, onCancel, busy }) {
+  const [error, setError] = useState(null);
+  // Deliberately *this editor's* write, not the page's `busy` — which is the OR
+  // of every mutation on the page, a vote in some poll below included. #254
+  // scopes the hold to the write whose message would be lost ("may not be
+  // dismissed while **that** write is in flight"), and a Cancel held open by
+  // somebody else's vote is a wider gate than the rule asks for. `busy` still
+  // drives the *submit* buttons, which is its own older job: stopping a second
+  // write while any is out.
+  const [pending, setPending] = useState(false);
+
+  async function run(action, fallback) {
+    setError(null);
+    setPending(true);
+    try {
+      await action();
+    } catch (err) {
+      setError(serverMessage(err, fallback));
+    } finally {
+      setPending(false);
+    }
+  }
+
   return (
     <div className="ev-editor">
       {mode === "set" ? (
-        <SetField dimension={dimension} onSet={onSet} onCancel={onCancel} busy={busy} />
+        <SetField
+          dimension={dimension}
+          onSet={(d, value) =>
+            run(
+              () => onSet(d, value),
+              FINALISE_FALLBACK[d] || "That didn't work — try again."
+            )
+          }
+          onCancel={onCancel}
+          busy={busy}
+          pending={pending}
+        />
       ) : (
-        <PollBuilder dimension={dimension} onPoll={onPoll} onCancel={onCancel} busy={busy} />
+        <PollBuilder
+          dimension={dimension}
+          onPoll={(body) =>
+            run(() => onPoll(body), "Couldn't open the poll — try again.")
+          }
+          onCancel={onCancel}
+          busy={busy}
+          pending={pending}
+        />
+      )}
+      {error && (
+        <p role="alert" className="mt-2 text-sm text-red-600">
+          {error}
+        </p>
       )}
     </div>
   );
@@ -26,19 +86,25 @@ export default function DimensionEditor({ dimension, mode, onSet, onPoll, onCanc
 // filled (type "19" "07" "2026", or "10" "00", no reaching for Tab) — deterministic
 // across browsers. Location is plain text. (Each branch is its own component so no
 // hook is ever called conditionally.)
-function SetField({ dimension, onSet, onCancel, busy }) {
+function SetField({ dimension, onSet, onCancel, busy, pending }) {
   if (dimension === "time") {
-    return <TimeSetField onSet={onSet} onCancel={onCancel} busy={busy} />;
+    return <TimeSetField onSet={onSet} onCancel={onCancel} busy={busy} pending={pending} />;
   }
   if (dimension === "date") {
-    return <DateSetField onSet={onSet} onCancel={onCancel} busy={busy} />;
+    return <DateSetField onSet={onSet} onCancel={onCancel} busy={busy} pending={pending} />;
   }
   return (
-    <TextSetField dimension={dimension} onSet={onSet} onCancel={onCancel} busy={busy} />
+    <TextSetField
+      dimension={dimension}
+      onSet={onSet}
+      onCancel={onCancel}
+      busy={busy}
+      pending={pending}
+    />
   );
 }
 
-function TextSetField({ dimension, onSet, onCancel, busy }) {
+function TextSetField({ dimension, onSet, onCancel, busy, pending }) {
   const [value, setValue] = useState("");
   return (
     <form
@@ -60,7 +126,12 @@ function TextSetField({ dimension, onSet, onCancel, busy }) {
       <button type="submit" disabled={busy || !value.trim()} className="btn btn-primary btn-sm">
         {SET_VERB[dimension]}
       </button>
-      <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+      <button
+        type="button"
+        disabled={pending}
+        onClick={onCancel}
+        className="btn btn-ghost btn-sm"
+      >
         Cancel
       </button>
     </form>
@@ -71,7 +142,7 @@ function TextSetField({ dimension, onSet, onCancel, busy }) {
 // it's never ambiguous). Filling a box jumps to the next: "19" → "07" → "2026".
 // The value handed up is always ISO "YYYY-MM-DD" (what the API expects); an
 // impossible date (31 Feb) leaves the button disabled.
-function DateSetField({ onSet, onCancel, busy }) {
+function DateSetField({ onSet, onCancel, busy, pending }) {
   const [dd, setDd] = useState("");
   const [mm, setMm] = useState("");
   const [yy, setYy] = useState("");
@@ -147,7 +218,12 @@ function DateSetField({ onSet, onCancel, busy }) {
       <button type="submit" disabled={busy || !valid} className="btn btn-primary btn-sm">
         Set the date
       </button>
-      <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+      <button
+        type="button"
+        disabled={pending}
+        onClick={onCancel}
+        className="btn btn-ghost btn-sm"
+      >
         Cancel
       </button>
     </form>
@@ -166,7 +242,7 @@ function isRealDate(y, m, d) {
 // A 24-hour HH:MM entry. Typing two digits in the hour box jumps focus to the
 // minute box, so "10" then "00" sets 10:00 with no reaching for Tab. Digits only;
 // the value handed up is always zero-padded "HH:MM" (what the API expects).
-function TimeSetField({ onSet, onCancel, busy }) {
+function TimeSetField({ onSet, onCancel, busy, pending }) {
   const [hh, setHh] = useState("");
   const [mm, setMm] = useState("");
   const minuteRef = useRef(null);
@@ -222,7 +298,12 @@ function TimeSetField({ onSet, onCancel, busy }) {
       <button type="submit" disabled={busy || !valid} className="btn btn-primary btn-sm">
         Set the time
       </button>
-      <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+      <button
+        type="button"
+        disabled={pending}
+        onClick={onCancel}
+        className="btn btn-ghost btn-sm"
+      >
         Cancel
       </button>
     </form>
@@ -231,7 +312,7 @@ function TimeSetField({ onSet, onCancel, busy }) {
 
 // Candidate options, typed to the dimension. Date/time use native pickers; a
 // custom poll also names its question. At least two options to open.
-function PollBuilder({ dimension, onPoll, onCancel, busy }) {
+function PollBuilder({ dimension, onPoll, onCancel, busy, pending }) {
   const [question, setQuestion] = useState("");
   const [options, setOptions] = useState(() => [blankOption(), blankOption()]);
   // Seed the pick-one/pick-many choice from the same per-dimension default the
@@ -282,7 +363,12 @@ function PollBuilder({ dimension, onPoll, onCancel, busy }) {
         <button type="submit" disabled={!canOpen || busy} className="btn btn-primary btn-sm">
           Open poll
         </button>
-        <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+        <button
+          type="button"
+          disabled={pending}
+          onClick={onCancel}
+          className="btn btn-ghost btn-sm"
+        >
           Cancel
         </button>
       </div>

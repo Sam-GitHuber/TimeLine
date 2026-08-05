@@ -199,8 +199,13 @@ function AuthGate() {
  *     dialog with no way out — worse than the silence #236 fixed.
  *   - `components/MessageButton.tsx` (#236) — alerts from `onError`; paused, the
  *     button sticks on "Opening…" forever.
+ *   - `app/events/[eventId].tsx` (#237) — seven of the organiser's writes
+ *     (`finalise`, `openPoll`, `closePoll`, `reopenPoll`, `deletePoll`, `cancel`,
+ *     `remove`) report *only* from `onError`. Paused, every one of them is
+ *     silent again, which is the whole bug #237 fixed — and `cancel` is the one
+ *     that leaves you believing everyone who RSVP'd was told.
  *
- * Check all five before wiring it.)
+ * Check all six before wiring it.)
  */
 function useRefetchOnForeground() {
   useEffect(() => {

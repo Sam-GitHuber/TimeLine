@@ -13,13 +13,14 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 
-import { api } from '@/api';
+import { api, ApiError } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
 import { AuthProvider } from '@/auth';
 import { saveTokens } from '@/tokens';
 import type { Event, Poll, User } from '@/types';
 
 import {
+  alertSpy,
   androidIt,
   captureBackHandler,
   menuOptions,
@@ -353,6 +354,56 @@ describe('poll lifecycle', () => {
 
     await waitFor(() => expect(del).toHaveBeenCalledWith(5));
     del.mockRestore();
+  });
+
+  // #237: all three lifecycle writes only repaint from `onSuccess`, so a
+  // rejection used to leave the poll exactly as it was — a close that 404'd
+  // (another admin removed the poll) read as "the menu is broken", and votes went
+  // on arriving into a poll the organiser believed was frozen.
+  it.each([
+    ['closePoll', 'Close poll', 'Couldn’t close the poll'] as const,
+    ['deletePoll', 'Remove poll', 'Couldn’t remove the poll'] as const,
+  ])('says so when %s is refused', async (method, item, title) => {
+    serve(makeEvent({ polls: [locationPoll()] }));
+    const write = jest
+      .spyOn(api, method)
+      .mockRejectedValue(new ApiError('That poll no longer exists.', 404, null));
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Poll options'));
+    await act(async () => pickMenuOption(item));
+    // Remove asks for a confirm first; Close acts straight away.
+    if (item === 'Remove poll') {
+      await act(async () => pressAlertButton('Remove this poll?', 'Remove poll'));
+    }
+
+    await waitFor(() => expect(write).toHaveBeenCalledWith(5));
+    // The server's own words win where it wrote any — the fallback is only for
+    // a rejection that carries nothing readable.
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(title, 'That poll no longer exists.')
+    );
+    write.mockRestore();
+  });
+
+  it('says so when re-opening a closed poll is refused', async () => {
+    serve(makeEvent({ polls: [locationPoll({ status: 'closed' })] }));
+    const reopen = jest
+      .spyOn(api, 'reopenPoll')
+      .mockRejectedValue(new ApiError('That poll no longer exists.', 404, null));
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Poll options'));
+    await act(async () => pickMenuOption('Re-open poll'));
+
+    await waitFor(() => expect(reopen).toHaveBeenCalledWith(5));
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t re-open the poll',
+        'That poll no longer exists.'
+      )
+    );
+    reopen.mockRestore();
   });
 
   it('offers Edit only while the poll is unvoted', async () => {

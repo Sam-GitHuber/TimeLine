@@ -233,6 +233,7 @@ export default function EventPage() {
             event={event}
             canManage={event.can_manage}
             onAction={onChipAction}
+            busy={busy}
           />
 
           {editing && (
@@ -240,28 +241,38 @@ export default function EventPage() {
               <p className="mb-2 text-sm font-semibold text-ink">
                 {EDITOR_TITLE[editing.dimension]?.[editing.mode]}
               </p>
+              {/* Handed down as `mutateAsync` so the editor can report its own
+                  rejection. This page used to render it — but only inside this
+                  `{editing && …}` block, and the tally's Set/Pin finalises with
+                  the editor *closed*, so on that path the paragraph wasn't
+                  mounted and the failure had nowhere to appear (#237). Each
+                  caller now says it beside the button that was pressed.
+
+                  Keyed on the chip it belongs to, as mobile already keys its
+                  copy: one instance is otherwise re-propped from chip to chip,
+                  so a rejection from the Date editor would still be sitting
+                  under the Where form you switched to. The chip row is held
+                  while a write is in flight (`busy` above) so the switch can't
+                  happen mid-request in the first place — the key is what keeps
+                  a *settled* message from outliving the form it belongs to. */}
               <DimensionEditor
+                key={`${editing.dimension}:${editing.mode}`}
                 dimension={editing.dimension}
                 mode={editing.mode}
                 busy={busy}
-                onSet={(dimension, value) => finalise.mutate({ dimension, value })}
-                onPoll={(body) => createPoll.mutate(body)}
+                onSet={(dimension, value) =>
+                  finalise.mutateAsync({ dimension, value })
+                }
+                onPoll={(body) => createPoll.mutateAsync(body)}
                 onCancel={() => setEditing(null)}
               />
-              {(finalise.isError || createPoll.isError) && (
-                <p role="alert" className="mt-2 text-sm text-red-600">
-                  {serverMessage(
-                    finalise.error || createPoll.error,
-                    "That didn't work — try again."
-                  )}
-                </p>
-              )}
             </div>
           )}
 
           {event.can_manage && !editing && (
             <button
               type="button"
+              disabled={busy}
               onClick={() => setEditing({ dimension: "custom", mode: "poll" })}
               className="mt-3 text-sm font-medium text-accent-deep hover:underline"
             >
@@ -283,11 +294,16 @@ export default function EventPage() {
                 onVote={(optionIds) =>
                   vote.mutateAsync({ pollId: poll.id, optionIds })
                 }
-                onFinalise={(dimension, opts) => finalise.mutate({ dimension, ...opts })}
+                // All `mutateAsync`, for the reason `onVote` and `onEdit` already
+                // were: the tally is where these were pressed, so it's where the
+                // rejection has to be said (#237).
+                onFinalise={(dimension, opts) =>
+                  finalise.mutateAsync({ dimension, ...opts })
+                }
                 onEdit={(payload) => editPoll.mutateAsync({ pollId: poll.id, ...payload })}
-                onClose={() => closePoll.mutate(poll.id)}
-                onReopen={() => reopenPoll.mutate(poll.id)}
-                onDelete={() => deletePoll.mutate(poll.id)}
+                onClose={() => closePoll.mutateAsync(poll.id)}
+                onReopen={() => reopenPoll.mutateAsync(poll.id)}
+                onDelete={() => deletePoll.mutateAsync(poll.id)}
               />
             </div>
           ))}
@@ -365,6 +381,28 @@ export default function EventPage() {
           >
             Delete
           </button>
+          {/* Both writes only repaint anything from `onSuccess`, so a rejection
+              used to leave the page exactly as it was — and a cancel that
+              failed is pixel-identical to one that worked, right down to the
+              confirm that promised the RSVPs would be told (#237). Each states
+              its own failure: knowing *which* of the two didn't happen is most
+              of the value. */}
+          {cancel.isError && (
+            <p role="alert" className="w-full text-sm text-red-600">
+              {serverMessage(
+                cancel.error,
+                "Couldn't cancel the event — try again."
+              )}
+            </p>
+          )}
+          {remove.isError && (
+            <p role="alert" className="w-full text-sm text-red-600">
+              {serverMessage(
+                remove.error,
+                "Couldn't delete the event — try again."
+              )}
+            </p>
+          )}
         </section>
       )}
     </div>
