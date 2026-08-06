@@ -44,10 +44,16 @@ export default function GroupInvitePicker({ groupId, onClose }) {
     <div className="border-b border-line bg-raised/50 px-5 py-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-ink">Invite a connection</h2>
+        {/* "Close" is a Cancel by another name: it unmounts the panel, and the
+            per-row outcome above — including a refused invite's message — lives
+            in this component's `sent` state and goes with it. Held while an
+            invite is out (#259), so "I ticked them and pressed Invite" can't
+            end with three invitations you believe went out and didn't. */}
         <button
           type="button"
           onClick={onClose}
-          className="text-sm text-ink-faint hover:text-ink"
+          disabled={invite.isPending}
+          className="text-sm text-ink-faint hover:text-ink disabled:opacity-50"
         >
           Close
         </button>

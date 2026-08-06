@@ -55,14 +55,15 @@ export function StrokeIcon({ path, size = 20 }) {
 // alone. Left undefined (the default) the button stays a plain button — an
 // `aria-pressed="false"` on a one-shot action would announce a state it doesn't
 // have.
-export function IconButton({ onClick, label, children, pressed }) {
+export function IconButton({ onClick, label, children, pressed, disabled }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-label={label}
       aria-pressed={pressed}
-      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition hover:bg-accent-tint hover:text-accent-deep ${
+      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition hover:bg-accent-tint hover:text-accent-deep disabled:opacity-45 ${
         pressed ? "text-ink-faint" : "text-ink-soft"
       }`}
     >
@@ -77,11 +78,18 @@ export function IconButton({ onClick, label, children, pressed }) {
 // MessagesDrawer) so a picker component like NewChatPicker can use the same
 // header without an import cycle.
 export function PanelHeader({ onBack, actions, children }) {
-  const { close } = useMessaging();
+  const { close, isWriting } = useMessaging();
+  // Both of these unmount the panel below — Back switches `view`, ✕ closes the
+  // drawer outright — and two of the panels are the only renderer of their own
+  // rejection (#258). So while one has a write out, both **hold**: visibly
+  // unavailable, the way `ConfirmDeleteDialog` holds its Cancel, rather than
+  // silently swallowing the press. ✕ especially: "I'm finished with messages" is
+  // a real intention, and a button that just does nothing reads as broken.
+  // `close()` declines on its own too, for the Escape key that has no button.
   return (
     <header className="flex items-center gap-1.5 border-b border-line px-3 py-2.5">
       {onBack && (
-        <IconButton onClick={onBack} label="Back">
+        <IconButton onClick={onBack} label="Back" disabled={isWriting}>
           <StrokeIcon path="M15 5l-7 7 7 7" />
         </IconButton>
       )}
@@ -89,7 +97,7 @@ export function PanelHeader({ onBack, actions, children }) {
         {children}
       </div>
       {actions}
-      <IconButton onClick={close} label="Close messages">
+      <IconButton onClick={close} label="Close messages" disabled={isWriting}>
         <StrokeIcon path="M6 6l12 12M18 6L6 18" />
       </IconButton>
     </header>

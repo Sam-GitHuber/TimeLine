@@ -36,6 +36,10 @@ export default function MessagesDrawer() {
   // Esc closes; focus lands in the panel so keys + screen readers work. We
   // deliberately don't trap focus or set aria-modal — the rest of the page is
   // meant to stay usable (that's the whole point of the companion panel).
+  //
+  // `close()` itself declines while a panel has a write out (#258) — this
+  // listener is the one dismissal route with no button to hold, so the refusal
+  // has to live in the function rather than beside the control.
   useEffect(() => {
     if (!isOpen) return;
     function onKey(event) {

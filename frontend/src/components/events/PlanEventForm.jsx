@@ -66,7 +66,16 @@ export default function PlanEventForm({ groupId, onClose }) {
         >
           Plan an event
         </button>
-        <button type="button" onClick={onClose} className="btn btn-ghost btn-sm">
+        {/* Held while the POST is out (#259). Planning an event is a thing you
+            do once, so "did that work?" isn't a question you get a second look
+            at — a create that failed into an unmounted form is only discovered
+            when nobody turns up. */}
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={create.isPending}
+          className="btn btn-ghost btn-sm"
+        >
           Cancel
         </button>
       </div>

@@ -181,7 +181,20 @@ beside the home feed). The group-invites nav badge lives on the toggle. The
 `/g/:id` page reuses the design-system components (`Timeline` spine, `PostCard`,
 `ComposeBox`, `CommentThread`, `Avatar`); admin controls (invite/remove/edit/
 delete) show only to admins. On narrow viewports the two drawers coordinate
-(opening one closes the other below 800px, via a `useMediaQuery` hook).
+(opening one closes the other below 800px, via a `useMediaQuery` hook) — and
+since #258 that coordination can be *refused*, because the messages drawer holds
+itself open while a panel inside it has a write out; `Layout` then holds the
+Groups button rather than opening a full-width drawer over the message the
+refusal exists to show.
+
+Two of this feature's forms were part of #259's sweep, both on the web: the
+invite picker's **"Close"** and the create/edit page's **Cancel** are now held
+while their write is in flight. The second is the one worth remembering, because
+the dismissal is a **navigation** rather than a collapse — press Create then
+Cancel, and a 400 used to land on a page that had already been left, so you
+arrived at `/groups` with no new group and nothing said. The rule and every site
+it covers are in
+[connections.md](connections.md#reporting-a-refused-write).
 
 Group invitations generate a `group_invite` notification in the unified activity
 centre (accepting or rejecting **addresses** it) — see

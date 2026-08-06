@@ -3,7 +3,7 @@ import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
 import { invalidateConnectionChange } from "../connectionCache.js";
-import { useMessaging } from "../messaging.jsx";
+import { useHoldMessagesOpen, useMessaging } from "../messaging.jsx";
 
 // The locked view for a group chat you've been added to but aren't an active
 // member of yet (Phase 6a's clique-gated invite): you can't see messages or
@@ -38,6 +38,12 @@ export default function PendingChatPanel({ mustConnectWith, conversationId }) {
       openList();
     },
   });
+
+  // This panel is *inside* the drawer, so the drawer's ✕, Escape and Back tear
+  // it down like any other — and a refused connection request is reported here
+  // and nowhere else (#258). Waiting to be let into a chat is precisely when
+  // "did that request go?" matters, so the drawer holds until the answer lands.
+  useHoldMessagesOpen(connectMutation.isPending);
 
   const people = mustConnectWith ?? [];
   const names = people.map((person) => person.display_name);

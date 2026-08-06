@@ -175,9 +175,15 @@ export default function ProfileEditForm({ onDone }) {
       )}
 
       <div className="flex justify-end gap-2">
+        {/* Cancel unmounts this form, and the form is the only thing rendering
+            the PATCH's rejection — so it holds while the write is out, the same
+            way Save beside it does. See
+            `docs/reference/connections.md#reporting-a-refused-write`; the
+            asymmetry (Save gated, Cancel not) was the tell in #259. */}
         <button
           type="button"
           onClick={() => onDone?.()}
+          disabled={mutation.isPending}
           className="btn btn-ghost btn-sm"
         >
           Cancel

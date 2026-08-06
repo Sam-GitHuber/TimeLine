@@ -3827,3 +3827,299 @@ describe("Profile messaging + block controls", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+/**
+ * Issues #257 and #258 — **the drawer may not be dismissed while a panel inside
+ * it has a write out.**
+ *
+ * The same rule as the dialogs in #254/#255, but the routes out belong to the
+ * *chrome*: Escape (`MessagesDrawer`), the ✕ and Back (`PanelHeader`), and the
+ * nav button (`Layout`) — every one of them a level above the panel doing the
+ * writing, with no way to see its mutation. So the panel declares the write
+ * (`useHoldMessagesOpen`) and the chrome holds until the answer lands.
+ *
+ * #257 is the same defect reached differently again: nothing unmounts, but
+ * `stopEditing()` ends with `editMutation.reset()`, which detaches the observer
+ * from the running PATCH — so a rejection arriving after you'd pressed Escape
+ * had nothing left to paint it.
+ *
+ * Each test drives the whole sequence rather than asserting a disabled
+ * attribute: press the write, try to leave, *then* let the server refuse, and
+ * insist the message is on screen. That's the sequence people actually perform,
+ * and the swallow only shows up at the end of it.
+ */
+describe("Messages drawer — a write in flight holds it open (#257, #258)", () => {
+  function msg(overrides = {}) {
+    return {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hi",
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  const mineSender = { id: fakeUser.pk, display_name: "you", avatar_thumb: null };
+
+  /** A request that hangs until the test refuses it. */
+  function hanging() {
+    let refuse;
+    const promise = new Promise((_resolve, reject) => {
+      refuse = reject;
+    });
+    promise.catch(() => {});
+    return {
+      promise,
+      reject: async (error) => {
+        refuse(error);
+        // Macrotasks, not a microtask flush: React Query walks a rejection
+        // through its own settle machinery before the observer repaints.
+        await act(async () => {
+          for (let i = 0; i < 3; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        });
+      },
+    };
+  }
+
+  const drawer = () => screen.queryByRole("dialog", { name: "Messages" });
+
+  it("holds Escape, ✕ and Back while people are being added to a chat", async () => {
+    const user = userEvent.setup();
+    const add = hanging();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.listUsers.mockResolvedValue(
+      page([{ id: 4, display_name: "Nadia", connection_status: "connected" }])
+    );
+    api.addParticipants.mockReturnValue(add.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: /add people/i }));
+    await user.click(await screen.findByRole("checkbox", { name: "Nadia" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(api.addParticipants).toHaveBeenCalled());
+
+    // All three ways out of the picker, which is the only thing that will ever
+    // render this rejection.
+    expect(screen.getByRole("button", { name: "Close messages" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(drawer()).toBeInTheDocument();
+
+    await add.reject(apiError("Nadia has blocked you.", 400));
+
+    // Without the hold this ended with the drawer shut, the participant list
+    // unchanged, and you certain Nadia had been added.
+    expect(await screen.findByText("Nadia has blocked you.")).toBeInTheDocument();
+  });
+
+  it("holds the drawer while a group rename is out, and lets go when it lands", async () => {
+    const user = userEvent.setup();
+    const rename = hanging();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.renameConversation.mockReturnValue(rename.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    await user.click(await screen.findByRole("button", { name: "Rename" }));
+    const field = screen.getByRole("textbox", { name: "Chat name" });
+    await user.clear(field);
+    await user.type(field, "Reading Club");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.renameConversation).toHaveBeenCalled());
+
+    await user.keyboard("{Escape}");
+    expect(drawer()).toBeInTheDocument();
+
+    await rename.reject(apiError("You’re no longer in this chat.", 403));
+    expect(
+      await screen.findByText("You’re no longer in this chat.")
+    ).toBeInTheDocument();
+
+    // And the gate lets go the moment the answer lands — it exists so a
+    // rejection has somewhere to go, not to seal you into a panel afterwards.
+    expect(screen.getByRole("button", { name: "Close messages" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Close messages" }));
+    expect(drawer()).not.toBeInTheDocument();
+  });
+
+  it("keeps a refused message edit that Escape used to throw away", async () => {
+    const user = userEvent.setup();
+    const save = hanging();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mineSender })])
+    );
+    api.editMessage.mockReturnValue(save.promise);
+
+    renderAt("/messages/7");
+    await screen.findByText("helo");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const box = screen.getByPlaceholderText(/edit your message/i);
+    await user.clear(box);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.editMessage).toHaveBeenCalledWith(7, 5, "hello"));
+
+    // Escape does nothing at all here — leaving edit mode calls `reset()`,
+    // which detaches the observer from the PATCH still on its way back.
+    await user.keyboard("{Escape}");
+    expect(screen.getByText("Editing message")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /cancel editing/i })
+    ).toBeDisabled();
+
+    await save.reject(
+      apiError("Editing is only allowed for 15 minutes.", 403)
+    );
+
+    // The bubble still reads "helo" with no Edited marker, so silence here is
+    // indistinguishable from having cancelled — you'd leave believing the typo
+    // was fixed.
+    expect(
+      await screen.findByText("Editing is only allowed for 15 minutes.")
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("helo").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Edited/)).toBeNull();
+  });
+
+  it("holds the drawer's own Escape while an edit is out, wherever focus is", async () => {
+    const user = userEvent.setup();
+    const save = hanging();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mineSender })])
+    );
+    api.editMessage.mockReturnValue(save.promise);
+
+    renderAt("/messages/7");
+    await screen.findByText("helo");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const box = screen.getByPlaceholderText(/edit your message/i);
+    await user.clear(box);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.editMessage).toHaveBeenCalled());
+
+    // Away from the textarea, so the composer's own handler never sees the key
+    // and `MessagesDrawer`'s document listener catches it instead — which used
+    // to tear the whole panel down, error bar and all.
+    await act(async () => {
+      document.body.focus();
+    });
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(drawer()).toBeInTheDocument();
+    await save.reject(apiError("Editing is only allowed for 15 minutes.", 403));
+    expect(
+      await screen.findByText("Editing is only allowed for 15 minutes.")
+    ).toBeInTheDocument();
+  });
+
+  it("stands Details and Add people down while an edit is saving", async () => {
+    const user = userEvent.setup();
+    const save = hanging();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mineSender })])
+    );
+    api.editMessage.mockReturnValue(save.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText("helo");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const box = screen.getByPlaceholderText(/edit your message/i);
+    await user.clear(box);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.editMessage).toHaveBeenCalled());
+
+    // Both switch `view`, which unmounts the thread and the error bar with it.
+    // Absent rather than greyed, the way Delete leaves the selection bar.
+    await openHeaderMenu(user);
+    const menu = within(screen.getByRole("dialog", { name: "Conversation options" }));
+    expect(menu.queryByRole("button", { name: "Details" })).toBeNull();
+    expect(menu.queryByRole("button", { name: /add people/i })).toBeNull();
+    // Mute doesn't leave the view, so it stays.
+    expect(menu.getByRole("button", { name: /mute/i })).toBeInTheDocument();
+
+    await save.reject(apiError("Editing is only allowed for 15 minutes.", 403));
+    expect(
+      await screen.findByText("Editing is only allowed for 15 minutes.")
+    ).toBeInTheDocument();
+  });
+
+  // Not in #258's list — found sweeping for the same root cause while the fix
+  // was open. The locked panel is inside the drawer like any other, and its
+  // Connect is the one write on it that reports itself.
+  it("holds the drawer while a locked chat's Connect request is out", async () => {
+    const user = userEvent.setup();
+    const connect = hanging();
+    api.getConversation.mockResolvedValue(
+      groupConvoDetail({
+        my_status: "pending",
+        must_connect_with: [{ id: 5, display_name: "Amara", avatar_thumb: null }],
+        can_send: false,
+      })
+    );
+    api.connect.mockReturnValue(connect.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText(/connect with/i);
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledWith(5));
+
+    await user.keyboard("{Escape}");
+    expect(drawer()).toBeInTheDocument();
+
+    await connect.reject(apiError("You can’t connect with this person.", 400));
+    expect(
+      await screen.findByText("You can’t connect with this person.")
+    ).toBeInTheDocument();
+  });
+
+  it("holds the nav's Messages button, rather than letting it close the drawer", async () => {
+    const user = userEvent.setup();
+    const rename = hanging();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.renameConversation.mockReturnValue(rename.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    await user.click(await screen.findByRole("button", { name: "Rename" }));
+    const field = screen.getByRole("textbox", { name: "Chat name" });
+    await user.clear(field);
+    await user.type(field, "Reading Club");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.renameConversation).toHaveBeenCalled());
+
+    // Shown as held, not silently ignored: a nav button that does nothing when
+    // pressed reads as broken.
+    const nav = screen.getByRole("button", { name: /^Messages$/ });
+    expect(nav).toBeDisabled();
+    await user.click(nav);
+    expect(drawer()).toBeInTheDocument();
+
+    await rename.reject(apiError("You’re no longer in this chat.", 403));
+    expect(
+      await screen.findByText("You’re no longer in this chat.")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Messages$/ })).toBeEnabled();
+  });
+});

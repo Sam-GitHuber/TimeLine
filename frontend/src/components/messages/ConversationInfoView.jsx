@@ -9,7 +9,7 @@ import AvatarStack from "./AvatarStack.jsx";
 import { api } from "../../api.js";
 import { useAuth } from "../../auth.jsx";
 import { serverMessage } from "../../errors.js";
-import { useMessaging } from "../../messaging.jsx";
+import { useHoldMessagesOpen, useMessaging } from "../../messaging.jsx";
 
 /**
  * A conversation's info panel (Phase 9b M9e, porting the app's M6 info screen) —
@@ -82,6 +82,14 @@ export default function ConversationInfoView() {
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
+
+  // The rename is the only write on this panel that reports itself *here* (mute
+  // and leave say nothing yet — #238), so the drawer's Escape, ✕ and Back hold
+  // while it's out (#258). `MessagesDrawer`'s own comment is right that this
+  // panel holds nothing worth preserving across a visit — that's a judgement
+  // about the *draft*. Abandoning a rename you haven't sent is free; abandoning
+  // one the server is about to refuse is the bug.
+  useHoldMessagesOpen(renameMutation.isPending);
 
   const muteMutation = useMutation({
     mutationFn: (muted) => api.setConversationMuted(conversationId, muted),

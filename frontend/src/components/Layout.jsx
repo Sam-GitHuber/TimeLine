@@ -27,8 +27,15 @@ export default function Layout() {
   // toggle is about to *open* its own, never when it's closing.
   const tooNarrowForBoth = useMediaQuery("(max-width: 799px)");
 
+  // Opening Groups on a narrow viewport closes Messages first — and Messages
+  // can now refuse, while a panel inside it has a write out (#258). Take that
+  // refusal seriously rather than opening anyway: below 640px the groups drawer
+  // is full-width and portalled after this one, so it would sit *on top of* the
+  // message the refusal exists to show — swapping a destroyed error for a hidden
+  // one, which is the same family's other spelling (#253). The Groups button
+  // holds for the length of that request instead.
   function toggleGroups() {
-    if (tooNarrowForBoth && !groupsDrawer.isOpen) messaging.close();
+    if (tooNarrowForBoth && !groupsDrawer.isOpen && !messaging.close()) return;
     groupsDrawer.toggle();
   }
 
@@ -36,6 +43,12 @@ export default function Layout() {
     if (tooNarrowForBoth && !messaging.isOpen) groupsDrawer.close();
     messaging.toggle();
   }
+
+  // Both holds above are shown, not just enforced. A nav button that quietly
+  // does nothing reads as broken — the same reason the drawer's own ✕ is
+  // disabled rather than ignored while a write is out (#258).
+  const heldByMessagesWrite =
+    messaging.isWriting && tooNarrowForBoth && !groupsDrawer.isOpen;
 
   // Connection requests and group invitations no longer carry their own nav
   // badges: as of Phase 8 they generate notifications and surface in the unified
@@ -114,9 +127,10 @@ export default function Layout() {
               <button
                 type="button"
                 onClick={toggleGroups}
+                disabled={heldByMessagesWrite}
                 aria-pressed={groupsDrawer.isOpen}
                 aria-label="Groups"
-                className={`${navItemBase} ${stateClass(groupsDrawer.isOpen)}`}
+                className={`${navItemBase} ${stateClass(groupsDrawer.isOpen)} disabled:opacity-45`}
               >
                 <GroupsIcon className="h-5 w-5 sm:hidden" />
                 <span className="hidden sm:inline">Groups</span>
@@ -132,13 +146,16 @@ export default function Layout() {
               <button
                 type="button"
                 onClick={toggleMessages}
+                // Pressing this while the drawer is open is a close, and a close
+                // waits for the write inside it (#258).
+                disabled={messaging.isOpen && messaging.isWriting}
                 aria-pressed={messaging.isOpen}
                 aria-label={
                   unreadMessages > 0
                     ? `Messages, ${unreadMessages} unread`
                     : "Messages"
                 }
-                className={`${navItemBase} ${stateClass(messaging.isOpen)}`}
+                className={`${navItemBase} ${stateClass(messaging.isOpen)} disabled:opacity-45`}
               >
                 <MessagesIcon className="h-5 w-5 sm:hidden" />
                 <span className="hidden sm:inline">Messages</span>

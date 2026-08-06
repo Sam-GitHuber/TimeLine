@@ -4,7 +4,7 @@ import Avatar from "./Avatar.jsx";
 import { PanelHeader } from "./drawer-chrome.jsx";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
-import { useMessaging } from "../messaging.jsx";
+import { useHoldMessagesOpen, useMessaging } from "../messaging.jsx";
 import { useConnections } from "../hooks.js";
 
 // Start a new conversation: check one or more connections, add an optional
@@ -83,6 +83,12 @@ export default function NewChatPicker({ prefill }) {
       }
     },
   });
+
+  // This panel renders the only copy of a refused add/create (below the Create
+  // button), so the drawer's Escape, ✕ and Back hold while it's out (#258).
+  // Ticking two people and pressing Create, then closing the drawer, used to
+  // leave you certain they'd been added to a chat they were never added to.
+  useHoldMessagesOpen(create.isPending);
 
   return (
     <>
