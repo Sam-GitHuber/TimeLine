@@ -296,6 +296,12 @@ export default function ConversationInfoView() {
           {(isGroup || (other && otherQuery.data)) && (
           <Section>
             {isGroup && (
+              /* Leaving unmounts this panel and so would drop a rename still in
+                 flight — deliberately not held on `renameMutation.isPending`,
+                 unlike the drawer's chrome. It asks first and means it: someone
+                 who confirms "leave this chat" has decided the chat is over, and
+                 what its name ended up being is no longer an answer they'd act
+                 on. Same reading as the thread header's Leave. */
               <button
                 type="button"
                 onClick={() => {

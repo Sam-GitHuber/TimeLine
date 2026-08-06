@@ -4090,6 +4090,81 @@ describe("Messages drawer — a write in flight holds it open (#257, #258)", () 
     ).toBeInTheDocument();
   });
 
+  // The edit isn't the only write reported in that bar. A bulk delete is the
+  // *longer* window of the two — its mutation walks the selection one DELETE at
+  // a time — and leaving the thread mid-way swallowed it exactly the same way.
+  it("holds the drawer while a bulk delete is still working through the selection", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 6, text: "and this", sender: mineSender }),
+        msg({ id: 5, text: "delete this", sender: mineSender }),
+      ])
+    );
+    // The first DELETE lands, the second hangs — the middle of the walk.
+    const second = hanging();
+    api.deleteMessage
+      .mockResolvedValueOnce({})
+      .mockReturnValueOnce(second.promise);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderAt("/messages/7");
+    const bubble = (await screen.findByText("delete this")).closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    await user.click(screen.getByRole("button", { name: "Select" }));
+    await screen.findByText("1 selected");
+    await user.click(screen.getByText("and this"));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    confirm.mockRestore();
+    await waitFor(() => expect(api.deleteMessage).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByRole("button", { name: "Close messages" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(drawer()).toBeInTheDocument();
+
+    await second.reject(apiError("That message is already gone.", 404));
+
+    // Its own wording, not the server's: a partial failure means *some* of them
+    // are still there, which is what you need to know and not what any one
+    // response says.
+    expect(
+      await screen.findByText("Some messages are still there. Try again.")
+    ).toBeInTheDocument();
+  });
+
+  // Regression: the hold made `close`'s identity depend on `isWriting`, and the
+  // drawer's Escape effect — keyed on `close` — also called `panelRef.focus()`.
+  // Left together, starting a write threw focus onto the drawer container, and
+  // its settling did it a second time, mid-typing.
+  it("doesn't throw focus around when a write starts and settles", async () => {
+    const user = userEvent.setup();
+    const save = hanging();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mineSender })])
+    );
+    api.editMessage.mockReturnValue(save.promise);
+
+    renderAt("/messages/7");
+    await screen.findByText("helo");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const box = screen.getByPlaceholderText(/edit your message/i);
+    await user.clear(box);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.editMessage).toHaveBeenCalled());
+
+    const panel = drawer();
+    expect(document.activeElement).not.toBe(panel);
+
+    await save.reject(apiError("Editing is only allowed for 15 minutes.", 403));
+    expect(document.activeElement).not.toBe(panel);
+  });
+
   it("holds the nav's Messages button, rather than letting it close the drawer", async () => {
     const user = userEvent.setup();
     const rename = hanging();

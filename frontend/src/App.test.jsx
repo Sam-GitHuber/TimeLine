@@ -708,6 +708,38 @@ describe("Companion drawer coordination", () => {
     );
   });
 
+  // Issue #258. On a narrow viewport that coordination is destructive: the
+  // groups drawer is full-width and portalled after this one, so opening it over
+  // a messages panel that has a write out would cover the very message the hold
+  // exists to show — a destroyed error swapped for a hidden one (#253's
+  // spelling). So the Groups button holds instead, and says so by being greyed.
+  it("holds the Groups button while a messages panel has a write out", async () => {
+    setViewportTooNarrowForBoth(true);
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([]));
+    api.listUsers.mockResolvedValue(
+      page([{ id: 4, display_name: "Nadia", connection_status: "connected" }])
+    );
+    // Never answers: the picker's create stays in flight.
+    api.openConversation.mockReturnValue(new Promise(() => {}));
+
+    renderAt("/");
+    await user.click(screen.getByRole("button", { name: /Messages/ }));
+    const [compose] = await screen.findAllByRole("button", {
+      name: /New message/i,
+    });
+    await user.click(compose);
+    await user.click(await screen.findByRole("checkbox", { name: "Nadia" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(api.openConversation).toHaveBeenCalled());
+
+    const groups = screen.getByRole("button", { name: /Groups/ });
+    expect(groups).toBeDisabled();
+    await user.click(groups);
+    expect(screen.queryByRole("dialog", { name: "Groups" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Messages" })).toBeInTheDocument();
+  });
+
   it("keeps both drawers open on a wide viewport", async () => {
     setViewportTooNarrowForBoth(false);
     const user = userEvent.setup();

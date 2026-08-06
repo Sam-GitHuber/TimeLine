@@ -33,20 +33,30 @@ export default function MessagesDrawer() {
   const { isOpen, view, close, newPrefill, conversationId } = useMessaging();
   const panelRef = useRef(null);
 
-  // Esc closes; focus lands in the panel so keys + screen readers work. We
+  // Focus lands in the panel **on open** so keys + screen readers work. We
   // deliberately don't trap focus or set aria-modal — the rest of the page is
   // meant to stay usable (that's the whole point of the companion panel).
   //
-  // `close()` itself declines while a panel has a write out (#258) — this
-  // listener is the one dismissal route with no button to hold, so the refusal
-  // has to live in the function rather than beside the control.
+  // ⚠️ Its own effect, keyed on `isOpen` alone, and that separation is
+  // load-bearing rather than tidiness. It used to share the effect below, which
+  // is keyed on `close` — and since #258 `close`'s identity changes every time a
+  // panel's write starts *and* every time one settles. Left together, pressing
+  // Save on a message edit re-ran this line and yanked focus out of the
+  // composer, then did it again when the answer landed, mid-typing. An effect
+  // that grabs focus must depend only on the thing that should grab it.
+  useEffect(() => {
+    if (isOpen) panelRef.current?.focus();
+  }, [isOpen]);
+
+  // Esc closes. `close()` itself declines while a panel has a write out
+  // (#258) — this listener is the one dismissal route with no button to hold, so
+  // the refusal has to live in the function rather than beside the control.
   useEffect(() => {
     if (!isOpen) return;
     function onKey(event) {
       if (event.key === "Escape") close();
     }
     document.addEventListener("keydown", onKey);
-    panelRef.current?.focus();
     return () => document.removeEventListener("keydown", onKey);
   }, [isOpen, close]);
 

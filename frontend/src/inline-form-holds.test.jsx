@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import ChangePasswordSection from "./components/ChangePasswordSection.jsx";
@@ -110,6 +110,35 @@ describe("Profile edit", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "That name isn’t allowed."
     );
+  });
+
+  it("lets Cancel go when the PATCH lands, not when the follow-up does", async () => {
+    const user = userEvent.setup();
+    api.updateProfile.mockResolvedValue({});
+    // `onSuccess` awaits `refreshUser()` — a second request — and React Query
+    // keeps `isPending` true for the whole of `onSuccess`. A gate left on that
+    // alone stays shut across a round trip that has nothing left to report,
+    // which is the trap #255 named on the delete-account dialog.
+    let finishRefresh;
+    const refreshUser = vi.fn(
+      () => new Promise((resolve) => { finishRefresh = resolve; })
+    );
+
+    renderWithAuth(<ProfileEditForm onDone={vi.fn()} />, {
+      auth: { refreshUser },
+    });
+
+    await user.type(screen.getByLabelText(/first name/i), "Ada");
+    await user.type(screen.getByLabelText(/last name/i), "Lovelace");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(refreshUser).toHaveBeenCalled());
+    expect(cancelButton()).toBeEnabled();
+
+    await act(async () => {
+      finishRefresh(fakeUser);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
   });
 
   it("lets Cancel go the moment the answer lands", async () => {

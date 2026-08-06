@@ -77,9 +77,14 @@ function GroupsRoute() {
   const navigate = useNavigate();
   useEffect(() => {
     // Same coordination as Layout's nav button: on a narrow viewport, opening
-    // this drawer closes the messages drawer so they don't overlap.
-    if (tooNarrowForBoth) messaging.close();
-    open();
+    // this drawer closes the messages drawer so they don't overlap — and, since
+    // #258, that close can be *refused* while a panel in there has a write out.
+    // Honour the refusal here exactly as `toggleGroups` does, or a full-width
+    // groups drawer opens on top of the message the refusal exists to show. The
+    // URL is normalised either way: the drawer is a companion, so `/groups`
+    // shouldn't stay in the bar whether or not it managed to open.
+    const held = tooNarrowForBoth && !messaging.close();
+    if (!held) open();
     navigate("/", { replace: true });
   }, [open, messaging, tooNarrowForBoth, navigate]);
   return null;

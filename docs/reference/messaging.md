@@ -1868,8 +1868,12 @@ So **the panel declares the write and the chrome reads the flag**:
 into messaging context; `close()` declines while the count is above zero, and
 `PanelHeader` renders Back and ✕ disabled. Four panels declare one:
 `NewChatPicker` (add people / start a chat), `ConversationInfoView` (rename),
-`ConversationThreadView` (a message edit) and `PendingChatPanel` (the locked
-chat's Connect).
+`ConversationThreadView` (a message edit **and** a bulk delete — both report
+themselves in the same error bar, and the delete is the longer window of the
+two, since its mutation walks the selection one `DELETE` at a time) and
+`PendingChatPanel` (the locked chat's Connect). The bar's third occupant,
+`photoError`, deliberately isn't one: preparing a photo is a client-side
+decode/re-encode, not a request whose answer you're waiting on.
 
 Four things worth keeping:
 
@@ -1889,12 +1893,27 @@ Four things worth keeping:
   thread instead drops **Details** and **Add people** from its `⋯` while an edit
   is saving, and holds the group-name button that is the other way to the info
   panel.
-- **It reaches outside the drawer, once.** On a viewport under 800px opening the
-  Groups drawer closes this one, so `close()` returns whether it actually closed
-  and `Layout` doesn't open Groups when it didn't. Below 640px that drawer is
+- **It reaches outside the drawer, in three places.** On a viewport under 800px
+  opening the Groups drawer closes this one, so `close()` **returns whether it
+  actually closed** and neither caller opens Groups when it didn't — `Layout`'s
+  nav button (which greys itself to say so) and `App`'s `GroupsRoute`, the legacy
+  `/groups` URL, whose own comment calls itself "the same coordination as
+  Layout's nav button" and so has to stay that. Below 640px that drawer is
   full-width and portalled later, so opening it anyway would put it *on top of*
   the message the refusal exists to show — trading a destroyed error for a hidden
-  one, which is this family's other spelling (#253).
+  one, which is this family's other spelling (#253). The third is
+  `MessageButton` on a profile: the drawer is non-modal, so the page behind it
+  stays clickable, and its `openThread` would switch `view` out from under a
+  panel mid-write.
+
+- **An effect that grabs focus must depend only on what should grab it.** Gating
+  `close` on the write gave it a new identity every time one starts and every
+  time one settles, and `MessagesDrawer`'s Escape effect — keyed on `close` —
+  also called `panelRef.focus()`. Pressing Save on an edit threw focus onto the
+  drawer container, and the answer landing threw it again, mid-typing. Focus now
+  has its own effect keyed on `isOpen`. Worth remembering as a general hazard of
+  turning a stable callback into a stateful one: every effect that lists it in
+  its deps re-runs, and any imperative side effect in there re-fires with it.
 
 **#257 is the same defect reached without any unmount at all.** `stopEditing()`
 ends with `editMutation.reset()` — written to clear a *settled* failure that
@@ -1906,9 +1925,20 @@ said. Both hand routes out of edit mode (Escape, and the ✕ on the quoted
 message) now hold while the PATCH is out, which is what makes the `reset()` on
 the way out safe rather than needing to be conditional.
 
-Pinned in `messaging.test.jsx` ("a write in flight holds it open"), which drives
-the whole sequence each time — press the write, try to leave, *then* let the
-server refuse — because the swallow only shows up at the end of it.
+**What is deliberately *not* held: Leave.** All three of the drawer's Leave
+controls (the thread header's, the info panel's, and `PendingChatPanel`'s
+"Decline / Leave") sit beside a write that the hold covers, and each unmounts
+its panel on success. They stay open anyway, on one reading: leaving takes you
+out of the conversation for good, so whether the rename landed, the edit was
+refused, or the connection request was rejected stops being an answer you'd act
+on. The gate exists to keep a message you'd *do something with*; there's nothing
+left to do. Two of the three ask for confirmation first, which makes the
+intention explicit.
+
+Pinned in `messaging.test.jsx` ("a write in flight holds it open") and
+`App.test.jsx` (the narrow-viewport Groups button), which drive the whole
+sequence each time — press the write, try to leave, *then* let the server
+refuse — because the swallow only shows up at the end of it.
 
 ### Mentions, formatting and multi-select on the web (Phase 9b M9f)
 

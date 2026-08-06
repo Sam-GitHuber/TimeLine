@@ -180,10 +180,21 @@ rather than a collapse, and `PendingChatPanel`, where it's the drawer's chrome
 - **Plan an event** is a thing you do once, so "did that work?" isn't a question
   you get a second look at. You find out when nobody turns up.
 
-One thing the gate must *not* copy from Save: **gate on `isPending` alone, never
-on the submit button's own `canSave`.** Several of these compute one condition
-for both — empty text, unchanged fields — and a Cancel wearing it is a Cancel you
-can't press after clearing the box.
+Two things the gate must *not* copy from Save:
+
+- **Gate on `isPending` alone, never on the submit button's own `canSave`.**
+  Several of these compute one condition for both — empty text, unchanged
+  fields — and a Cancel wearing it is a Cancel you can't press after clearing the
+  box.
+- **`isPending` isn't the write when `onSuccess` does more work.** React Query
+  holds a mutation in its pending state for the whole of `onSuccess`, so a form
+  whose success handler awaits a *second* request keeps the gate shut across it —
+  and that request has nothing to report, so the hold is pure trap. That's the
+  same "moved the trap rather than removing it" the bullet above records for the
+  delete dialogs, and `ProfileEditForm` is where it bites on the web: its
+  `onSuccess` awaits `refreshUser()`. It sets a `saved` flag first and its Cancel
+  reads `isPending && !saved`, which is the rule stated exactly — *release the
+  flag the moment the write lands, not when the screen goes.*
 
 **Issue #258 is the case where the component can't gate its own route**, because
 the route belongs to something above it. The messages drawer's Escape, ✕, Back

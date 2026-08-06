@@ -82,6 +82,13 @@ export default function PendingChatPanel({ mustConnectWith, conversationId }) {
         </p>
       )}
 
+      {/* Not held on `connectMutation.isPending`, unlike the drawer's chrome
+          above, and that's a decision rather than an oversight: leaving takes
+          you out of this conversation for good, so whether the connection
+          request you sent a second ago was refused stops being a thing you need
+          told. The gate exists to keep an answer you'd act on; there's no action
+          left here. Same reading as the thread's own "Leave chat" beside a
+          message edit. */}
       <button
         type="button"
         onClick={() => leaveMutation.mutate()}

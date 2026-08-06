@@ -737,12 +737,6 @@ export default function ConversationThreadView() {
     },
   });
 
-  // The error bar at the foot of this view is the only place a refused edit is
-  // reported, and leaving the thread unmounts the whole view — so while the
-  // PATCH is out, the drawer's Escape, ✕ and Back hold (#257, #258). The bar's
-  // own comment used to say this was somebody else's open bug; it isn't now.
-  useHoldMessagesOpen(editMutation.isPending);
-
   const deleteMutation = useMutation({
     mutationFn: (messageId) => api.deleteMessage(conversationId, messageId),
     onSuccess: () => {
@@ -781,6 +775,24 @@ export default function ConversationThreadView() {
       queryClient.invalidateQueries({ queryKey: ["thread", conversationId] });
     },
   });
+
+  /**
+   * **Both writes that report themselves in the error bar hold the drawer open**
+   * (#257, #258). That bar at the foot of this view is the only place either is
+   * reported, and leaving the thread unmounts the whole view — so while one is
+   * out, the drawer's Escape, ✕, Back and nav button hold. The bar's own comment
+   * used to say the unmounting half was somebody else's open bug; it isn't now.
+   *
+   * The bulk delete belongs here as much as the edit, and is the *longer* window
+   * of the two: its `mutationFn` walks the selection one `DELETE` at a time, so
+   * `isPending` spans every one of them.
+   *
+   * The bar's third occupant, `photoError`, deliberately isn't here. Preparing a
+   * photo is a client-side decode/re-encode, not a write — the rule is about a
+   * request whose answer you're waiting on, and holding the whole drawer shut
+   * while a picture is being resized would be the gate outstaying its purpose.
+   */
+  useHoldMessagesOpen(editMutation.isPending || deleteManyMutation.isPending);
 
   // Leave (or, while pending, decline) a chat — group-only in the header;
   // PendingChatPanel has its own copy of this for the locked view, and the
@@ -826,13 +838,16 @@ export default function ConversationThreadView() {
   /**
    * Leave edit mode and put the pre-edit draft back in the composer.
    *
-   * **Only ever called once the PATCH has settled** — the two ways out of edit
-   * mode by hand (Escape and the ✕ beside the quoted message) hold while
-   * `editMutation.isPending`, and the third caller is the mutation's own
-   * `onSuccess`. That's what makes the `reset()` below safe, and it was issue
-   * #257 when it wasn't: `reset()` detaches the observer from a running
-   * mutation, so a 403 arriving after you'd pressed Escape had nothing left to
-   * paint it. You'd leave believing the typo was fixed.
+   * **Never called with a PATCH in flight**, by any of its four routes: the two
+   * ways out of edit mode by hand (Escape and the ✕ beside the quoted message)
+   * hold while `editMutation.isPending`; the mutation's own `onSuccess` runs
+   * when the answer has arrived; and `handleSubmit`'s unchanged-text branch —
+   * which leaves edit mode *instead of* sending anything — is behind
+   * `canSubmit`, whose `editing` arm carries `!editMutation.isPending` too.
+   * That's what makes the `reset()` below safe, and it was issue #257 when it
+   * wasn't: `reset()` detaches the observer from a running mutation, so a 403
+   * arriving after you'd pressed Escape had nothing left to paint it. You'd
+   * leave believing the typo was fixed.
    *
    * The guard is deliberately *not* in here as a blanket `if (isPending)
    * return`: React Query runs `onSuccess` before the mutation leaves its
@@ -1785,7 +1800,7 @@ export default function ConversationThreadView() {
           it. That unmount was its own bug, #258, and #253 could only stop the
           *hiding*, not the *unmounting*: the drawer's Back, ✕ and Escape sit a
           level above this component and couldn't see a write in flight. They can
-          now — `useHoldMessagesOpen(editMutation.isPending)` above tells them,
+          now — `useHoldMessagesOpen` above tells them, for both writes in here,
           and they hold until the answer lands. */}
       {(photoError || editMutation.isError || deleteManyMutation.isError) && (
         <div className="space-y-1 px-3 pb-3 text-sm text-red-600">
