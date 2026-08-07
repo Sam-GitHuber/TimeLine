@@ -209,10 +209,56 @@ unconditionally, which detaches the observer from a PATCH still on its way back.
 All of these are pinned on the web in `inline-form-holds.test.jsx` and
 `messaging.test.jsx`.
 
-**The phone has all of this still open**, tracked separately: #256 (Android back
-registered where the in-flight flag isn't in scope, at five forms), #261 (three
-`Modal`s that cover the edit error's only renderer), and the mobile halves of
-#257 and #259.
+**On the phone the same rule needed a mechanism, because the routes out don't
+belong to the form** (#256, plus the mobile halves of #257 and #259). A web form
+owns its own Cancel; a mobile one is dismissed by things it can't see:
+
+- **Android's hardware back.** `useAndroidBack` is registered per dismissible
+  state on the component that owns the open/closed flag ([mobile-app.md](mobile-app.md#android-s-back-button)),
+  which is one level *above* the child doing the write. The two could never
+  agree, because the pending flag wasn't in scope — that mismatch is the
+  structural cause, and it's why every one of these had a correctly-gated Save
+  next to an ungated hardware button.
+- **The screen's own "← Back"**, two levels above the request in the Settings
+  case.
+- **iOS's interactive swipe-back**, which has no button at all: the only way to
+  decline it is to turn the gesture off for as long as the write is out.
+
+So the child **declares** its write and whichever ancestor owns the routes reads
+the count — the shape the web settled on for its drawer in #258.
+`mobile/src/writeHold.tsx` holds all of it: `useWriteHold()` in the component
+that owns the routes, `<WriteHoldProvider>` around what it covers,
+`useHoldOpen(pending)` in the component doing the writing, plus
+`useHoldSwipeBack` and `useHoldScreen` for the navigator-owned exits. **A hold
+forwards itself to any hold above it**, which is the only reason the Settings
+screen learns about a password change declared two levels below it.
+
+Fourteen forms across nine screens: both `CommentThread` write boxes, the poll
+edit form, `ProfileEditForm`, `ChangePasswordSection`, `PrivacySection`,
+`NotificationPreferencesSection`, the new-chat picker, `GroupForm` (both
+screens), `PlanEventForm`, the RSVP bar, a poll vote, the message edit, and
+`PendingChatPanel`'s Connect. Three phone-specific things a change here has to
+keep:
+
+- **One `useAndroidBack` registration per press, never two.** A hold that adds
+  its own handler alongside an existing one makes "which one claims the press"
+  a matter of hook order — the race that file already keeps one write box per
+  comment to avoid. Where a screen already registers for the state being held,
+  gate *that* handler and take only `useHoldSwipeBack`; `useHoldScreen` is for
+  screens that register nothing else.
+- **A silent decline reads as a broken app.** Every visible control renders
+  unavailable (dimmed, `disabled`) as well as declining, so the gate is the
+  backstop rather than the whole fix. The one exception is an action-sheet item,
+  which can't be disabled.
+- **`Alert.alert` is exempt.** It's a native dialog drawn above the RN tree, so
+  a write that reports through one survives its own component going — which is
+  why the bulk delete and the two photo paths in the message thread stay
+  ungated, and why only the three `mutateAsync` writes on the event screen
+  needed holding.
+
+Still open on the phone: **#261**, which is the *other* spelling — three
+screen-level `Modal`s that cover the message edit's error while it stays mounted
+(#253's family, not this one).
 
 ### A connection *is* the boundary, so its writes refresh everything it gates
 

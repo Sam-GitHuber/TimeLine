@@ -42,6 +42,7 @@ import { ReactionBar } from '@/components/ReactionBar';
 import { formatEventWhen } from '@/eventFormat';
 import { dismissEventNotifications } from '@/push';
 import { useAndroidBack } from '@/useAndroidBack';
+import { useHoldSwipeBack } from '@/writeHold';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 
 /**
@@ -91,11 +92,6 @@ export default function EventScreen() {
   // Which chip's editor is open (organiser's Set/Change/Poll), or null.
   const [editing, setEditing] = useState<Editing | null>(null);
 
-  // Android back closes that editor rather than the event — the hardware
-  // equivalent of its Cancel. Without it, a press meant to back out of a poll
-  // you'd started drafting drops you back on the group timeline (#168).
-  useAndroidBack(editing !== null, () => setEditing(null));
-
   const eventQuery = useQuery({
     queryKey: ['event', id],
     queryFn: () => api.getEvent(id),
@@ -129,6 +125,8 @@ export default function EventScreen() {
   };
 
   const goBack = () => {
+    // The control renders unavailable too; this is the backstop.
+    if (holding) return;
     if (router.canGoBack()) router.back();
     else if (event) router.replace(`/groups/${event.group.id}`);
     else router.replace('/groups');
@@ -197,6 +195,41 @@ export default function EventScreen() {
     onSuccess: invalidate,
     onError: (err) => Alert.alert('Couldn’t remove the poll', serverMessage(err, WENT_WRONG)),
   });
+  /**
+   * Three writes on this screen report themselves **inside their own component
+   * and nowhere else** (#256), so leaving mid-flight swallows the answer. All
+   * three are handed down as `mutateAsync` for exactly that reason, and none of
+   * them has an `onError: Alert.alert` — the rest of this screen's mutations do.
+   *
+   * - the **RSVP** — the guests and note are typed into `RsvpBar`, which is
+   *   where its refusal renders (#229). Tap Going, set 2 guests and a note, tap
+   *   Update, leave, and a 403 for a group you were removed from lands nowhere:
+   *   you believe you're down for three, and nobody is expecting you.
+   * - a **vote** — the tick is optimistic, so `PollTally` has to roll it back
+   *   and say so (#227). Leave first and the rollback runs in a dead component;
+   *   the tally you come back to reads as "nobody has voted" rather than "your
+   *   vote never landed".
+   * - a **poll edit** — the 409 ("voting has started") is surfaced in the edit
+   *   form in place, which is the whole reason that one is `mutateAsync`.
+   *
+   * Hoisted to one predicate read by all three gates below, so they can't drift
+   * apart — the shape the web settled on in #300.
+   */
+  const holding = rsvp.isPending || vote.isPending || editPoll.isPending;
+  useHoldSwipeBack(holding);
+
+  // Android back closes the open editor rather than the event — the hardware
+  // equivalent of its Cancel. Without it, a press meant to back out of a poll
+  // you'd started drafting drops you back on the group timeline (#168).
+  //
+  // One registration for both jobs, not two: RN runs the most recently
+  // registered handler first, so a second handler for the hold would order
+  // itself by an accident of hook order.
+  useAndroidBack(editing !== null || holding, () => {
+    if (holding) return;
+    setEditing(null);
+  });
+
   // `finalise` is in here too: the tally's per-option Set/Pin is a finalise, so it
   // must disable while one is in flight — otherwise a double-tap fires it twice.
   const pollBusy =
@@ -245,8 +278,16 @@ export default function EventScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.topBar}>
-        <Pressable onPress={goBack} accessibilityRole="button" accessibilityLabel="Back" hitSlop={8}>
-          <Text style={styles.back}>← {event ? event.group.name : 'Back'}</Text>
+        <Pressable
+          onPress={goBack}
+          disabled={holding}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          hitSlop={8}
+        >
+          <Text style={[styles.back, holding && styles.backDisabled]}>
+            ← {event ? event.group.name : 'Back'}
+          </Text>
         </Pressable>
       </View>
 
@@ -449,6 +490,8 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.line,
   },
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  // Unavailable rather than silently declining — a dead Back reads as broken.
+  backDisabled: { opacity: 0.4 },
   spinner: { marginTop: spacing.xl },
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.sm },
   emptyTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink, textAlign: 'center' },

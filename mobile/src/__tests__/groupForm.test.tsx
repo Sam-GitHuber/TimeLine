@@ -10,17 +10,34 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
 
 import { router } from 'expo-router';
 
 import { api } from '@/api';
+import NewGroupScreen from '@/app/groups/new';
 import { GroupForm } from '@/components/GroupForm';
-import { choosePhotoSource, resetMenuSpies } from './helpers';
+
+import {
+  androidIt,
+  captureBackHandler,
+  choosePhotoSource,
+  pressBack,
+  resetMenuSpies,
+} from './helpers';
 
 jest.mock('expo-router', () => ({
   router: { push: jest.fn(), back: jest.fn(), replace: jest.fn() },
+  // The form holds both navigator-owned ways off the screen while its write is
+  // out (#259), and both need a navigator: `useAndroidBack` scopes itself to
+  // focus, and the swipe hold sets an option on the screen. Same stand-ins as
+  // `jest.setup.js`, whose global stubs this factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
+  useNavigation: () => ({ setOptions: () => {} }),
 }));
 
 jest.mock('expo-image-picker', () => ({
@@ -137,4 +154,90 @@ it('lets you take the group photo with the camera', async () => {
 
   expect(await screen.findByRole('button', { name: 'Change photo' })).toBeTruthy();
   expect(pick).not.toHaveBeenCalled();
+});
+
+/**
+ * Nothing leaves the screen while the write is out (#259).
+ *
+ * This form has **no Cancel** — the ways out are the screen's "← Back",
+ * Android's hardware back and iOS's swipe — so "gate the Cancel" has nothing to
+ * gate here. All three unmount the screen, and the error above the button is the
+ * only renderer of a refusal: press Create, leave, and a POST that 400s leaves
+ * you on the Groups tab with no group and nothing said.
+ */
+describe('holding the group form open until the server answers', () => {
+  /** Start a create that won't answer until the returned `refuse` is called. */
+  function stall() {
+    let refuse: (error: Error) => void = () => {};
+    createGroup.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        refuse = reject;
+      }) as ReturnType<typeof api.createGroup>
+    );
+    return {
+      refuse: async (message: string) => {
+        await act(async () => {
+          refuse(new Error(message));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      },
+    };
+  }
+
+  androidIt('refuses hardware back, then shows the refusal', async () => {
+    captureBackHandler();
+    await renderForm();
+    await fireEvent.changeText(screen.getByLabelText('Group name'), 'Book Club');
+
+    const server = stall();
+    await act(async () => {
+      fireEvent.press(screen.getByRole('button', { name: 'Create group' }));
+    });
+    // `find`, not `get`: React Query dispatches the pending state through its
+    // notify manager, so it lands a macrotask after the press — assert too
+    // early and the rest of the test proves nothing.
+    expect(await screen.findByText('Creating…')).toBeTruthy();
+
+    await act(async () => {
+      // Claimed, not passed on: falling through would pop the screen and take
+      // the error with it.
+      expect(pressBack()).toBe(true);
+    });
+
+    await server.refuse('A group with that name already exists.');
+    expect(
+      await screen.findByText('A group with that name already exists.')
+    ).toBeTruthy();
+  });
+
+  it('refuses the screen’s Back, then shows the refusal', async () => {
+    // The Back belongs to the screen and the mutation to the form, so this
+    // passes only because the form declares its write to the screen's hold.
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    await render(
+      <QueryClientProvider client={queryClient}>
+        <NewGroupScreen />
+      </QueryClientProvider>
+    );
+    await fireEvent.changeText(screen.getByLabelText('Group name'), 'Book Club');
+
+    const server = stall();
+    await act(async () => {
+      fireEvent.press(screen.getByRole('button', { name: 'Create group' }));
+    });
+    expect(await screen.findByText('Creating…')).toBeTruthy();
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(router.back).not.toHaveBeenCalled();
+
+    await server.refuse('A group with that name already exists.');
+    expect(
+      await screen.findByText('A group with that name already exists.')
+    ).toBeTruthy();
+  });
 });

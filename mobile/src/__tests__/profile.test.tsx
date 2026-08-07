@@ -22,6 +22,7 @@ import {
   androidIt,
   captureBackHandler,
   choosePhotoSource,
+  holdRequest,
   pressBack,
   resetMenuSpies,
 } from './helpers';
@@ -31,6 +32,7 @@ import {
 // them (its one exception to the out-of-scope-variable rule).
 const mockParams: { userId: string } = { userId: '1' };
 const mockPush = jest.fn();
+const mockBack = jest.fn();
 
 jest.mock('expo-router', () => ({
   // The screen is always focused under test, so focus is a plain effect — see
@@ -40,13 +42,17 @@ jest.mock('expo-router', () => ({
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
+  // The screen's swipe-back hold (`useHoldSwipeBack`) reaches for the navigator;
+  // there isn't one under test and the option it sets governs an iOS gesture
+  // Node can't perform. Same stand-in as the global stub this overrides.
+  useNavigation: () => ({ setOptions: () => {} }),
   // `push` reads `mockPush` lazily: the factory runs while the hoisted imports
   // load expo-router, which is *before* the `const mockPush` line executes, so
   // referencing it directly would capture `undefined`. An arrow defers the read
   // to call time, by when it's initialised.
   router: {
     push: (...args: unknown[]) => mockPush(...args),
-    back: jest.fn(),
+    back: (...args: unknown[]) => mockBack(...args),
     replace: jest.fn(),
     canGoBack: () => true,
   },
@@ -210,6 +216,7 @@ beforeEach(() => {
   resetMe();
   mockParams.userId = '1';
   mockPush.mockReset();
+  mockBack.mockReset();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -359,6 +366,98 @@ describe('editing your profile', () => {
     // navigator would have taken us.
     expect(screen.queryByLabelText('Bio')).toBeNull();
     expect(screen.getByRole('button', { name: 'Edit profile' })).toBeTruthy();
+  });
+
+  /**
+   * …but nothing closes it while the PATCH is out (#256/#259).
+   *
+   * The form is the only renderer of a refused save, and all four ways out of it
+   * unmount it: its own Cancel, Android's hardware back, the screen's "← Back"
+   * and iOS's swipe. Pick a new avatar on mobile data, hit Save, leave — and an
+   * upload the server then rejects for its image allow-list leaves the old
+   * avatar showing and nothing said, which reads as the save being ignored.
+   *
+   * The registration for that back press is on the *screen*, one component above
+   * the mutation, which is the structural cause #256 names.
+   */
+  describe('holding the editor open until the server answers', () => {
+    async function startSaving() {
+      serve({ user: profile({ id: 1 }), posts: [] });
+      await renderScreen();
+      await fireEvent.press(
+        await screen.findByRole('button', { name: 'Edit profile' })
+      );
+      await fireEvent.changeText(
+        await screen.findByLabelText('First name'),
+        'Alicia'
+      );
+
+      const server = holdRequest(
+        mockFetch,
+        { detail: 'That name isn’t allowed.' },
+        400
+      );
+      await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
+      await server.inFlight('Saving…');
+      return server;
+    }
+
+    it('refuses Cancel, then shows the refusal', async () => {
+      const server = await startSaving();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.getByLabelText('First name')).toBeTruthy();
+
+      await server.refuse();
+      expect(await screen.findByText('That name isn’t allowed.')).toBeTruthy();
+    });
+
+    it('refuses the screen’s Back, then shows the refusal', async () => {
+      const server = await startSaving();
+
+      await fireEvent.press(screen.getByLabelText('Back'));
+      expect(mockBack).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('First name')).toBeTruthy();
+
+      await server.refuse();
+      expect(await screen.findByText('That name isn’t allowed.')).toBeTruthy();
+    });
+
+    androidIt('refuses hardware back, then shows the refusal', async () => {
+      captureBackHandler();
+      const server = await startSaving();
+
+      await act(async () => {
+        // Claimed, not passed on — falling through would leave the profile.
+        expect(pressBack()).toBe(true);
+      });
+      expect(screen.getByLabelText('First name')).toBeTruthy();
+
+      await server.refuse();
+      expect(await screen.findByText('That name isn’t allowed.')).toBeTruthy();
+    });
+
+    it('lets go the moment the PATCH lands, not when refreshUser finishes', async () => {
+      // React Query holds a mutation pending for the whole of `onSuccess`, and
+      // this one awaits a *second* request (`refreshUser`). A hold left on
+      // `isPending` alone would stay shut across a round trip with nothing to
+      // report — moving the trap rather than removing it (#255, #259).
+      serve({ user: profile({ id: 1 }), posts: [] });
+      await renderScreen();
+      await fireEvent.press(
+        await screen.findByRole('button', { name: 'Edit profile' })
+      );
+      await fireEvent.changeText(
+        await screen.findByLabelText('First name'),
+        'Alicia'
+      );
+      await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
+
+      // The editor closes on its own here, which is the point: nothing was left
+      // holding it shut behind the follow-up read.
+      expect(await screen.findByText('Alicia Anderson')).toBeTruthy();
+      expect(screen.queryByLabelText('First name')).toBeNull();
+    });
   });
 });
 

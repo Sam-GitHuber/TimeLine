@@ -477,7 +477,23 @@ The gate needs a *present* organiser. Two paths:
   a create that failed into a dismissed form isn't a question you get a second
   look at — you find out when nobody turns up. Same rule as
   [connections.md](connections.md#reporting-a-refused-write); `DimensionEditor`'s
-  four Cancels already had it from #296. The
+  four Cancels already had it from #296. **The phone's plan form has no Cancel at
+  all** — it's a pushed screen, so the ways out are its "← Back", Android's
+  hardware back and iOS's swipe, and all three are held instead (#259). The
+
+  **The event screen holds its own "← Back" for three writes** and nothing else:
+  the **RSVP**, a **vote**, and a **poll edit**. Those are exactly the three
+  handed to their child as `mutateAsync` rather than given an
+  `onError: Alert.alert`, and for the same reason — the guests and note are typed
+  into `RsvpBar`, the vote's tick is drawn optimistically by `PollTally`, and the
+  409 that says voting has started belongs in the edit form in place. Each of
+  them therefore reports itself in a component the screen would unmount, so
+  leaving mid-flight is the swallow: you believe you're down for three guests and
+  nobody is expecting you, or the tally you come back to reads as "nobody has
+  voted" rather than "your vote never landed". One hoisted `holding` predicate
+  feeds the Back button, its dimming, `goBack` and the screen's single
+  `useAndroidBack` registration; every other write here alerts, so none of them
+  needs it. The
   header (name · ⋯ · description) is a **second sticky bar pinned directly under
   the nav** (`GroupPage` measures the nav height so it stacks correctly), so the
   group's identity stays put while the upcoming region and timeline scroll up

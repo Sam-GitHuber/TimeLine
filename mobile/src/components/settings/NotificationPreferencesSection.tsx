@@ -17,6 +17,7 @@ import { ActivityIndicator, StyleSheet, Switch, Text, View } from 'react-native'
 
 import { api } from '@/api';
 import { colors, fontSize, spacing } from '@/theme';
+import { useHoldOpen } from '@/writeHold';
 import type { NotificationPreferences } from '@/types';
 
 // Friendly labels per kind. A kind the backend adds later still renders (falling
@@ -72,6 +73,12 @@ export function NotificationPreferencesSection() {
       queryClient.setQueryData(PREFS_KEY, data);
     },
   });
+
+  // Leaving Settings mid-save would take the one line that says it failed
+  // (#256). The rollback in `onError` puts the switch back, but it puts it back
+  // in a screen nobody is looking at — so you'd walk away believing reactions
+  // had stopped buzzing your phone.
+  useHoldOpen(mutation.isPending);
 
   const entries = prefs ? Object.entries(prefs) : [];
 

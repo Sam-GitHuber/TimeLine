@@ -458,8 +458,8 @@ hijacked session (e.g. via XSS) can't silently rotate the password, and a
 shoulder-surfer at an unlocked screen can't lock the owner out. Frontend is an
 inline expanding section on `/settings`.
 
-**Close is held while the POST is out** (issue #259 on the web, still open on the
-phone as part of #256). The section is the only renderer of its own rejection, and
+**Close is held while the POST is out** (issue #259 on the web, #256 on the
+phone). The section is the only renderer of its own rejection, and
 Close collapses it — so pressing Change password and then Close meant a 400 of
 *"Your old password was entered incorrectly"* landed nowhere at all, leaving you
 believing your password had been rotated when it hadn't. Of everything in that
@@ -468,6 +468,24 @@ is why it's called out here as well as in
 [connections.md](connections.md#reporting-a-refused-write). The flag is released
 the moment the request settles, not when the section closes — the success line
 needs a way out too.
+
+**On the phone there are four ways out, not one**, and the form can see none of
+them: Close, Android's hardware back (registered on the section, which owns
+`open`), and the Settings screen's own "← Back" and iOS swipe-back — two levels
+above the request. The form declares the write once and both holds read it,
+which is the one place the *forwarding* in `mobile/src/writeHold.tsx` earns its
+keep: a declaration reaches only the nearest hold, so without it the screen
+would never learn a password change was in flight. The two other Settings
+sections that render their own rejection — read receipts and the notification
+toggles — declare into the same hold; `DeleteAccountSection` deliberately does
+not, because it holds its own dialog and then lets go *before* a teardown that
+is itself two network round trips.
+
+**The phone's profile editor is the same shape with one extra wrinkle**: its
+`onSuccess` awaits `refreshUser()`, and React Query keeps a mutation pending for
+the whole of `onSuccess` — so it sets a `saved` flag first and holds on
+`isPending && !saved`, or Cancel would stay shut across a second round trip that
+has nothing to report. Same fix as the web's (#259), same reason.
 
 ## Password reset (forgotten password)
 

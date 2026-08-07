@@ -13,12 +13,12 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 
 import NewChatScreen from '@/app/messages/new';
 import type { PersonSummary } from '@/types';
 
-import { settle } from './helpers';
+import { androidIt, captureBackHandler, holdRequest, pressBack, settle } from './helpers';
 
 const mockParams: { addTo?: string } = {};
 const mockPush = jest.fn();
@@ -26,6 +26,14 @@ const mockReplace = jest.fn();
 const mockBack = jest.fn();
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => mockParams,
+  // The screen holds Android's back and iOS's swipe while Create is out (#259).
+  // Both want a navigator there isn't one of under test — same stand-ins as
+  // `jest.setup.js`, whose global stubs this factory overrides.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
+  useNavigation: () => ({ setOptions: () => {} }),
   router: {
     push: (...args: unknown[]) => mockPush(...args),
     replace: (...args: unknown[]) => mockReplace(...args),
@@ -124,6 +132,7 @@ beforeEach(() => {
   mockPush.mockReset();
   mockReplace.mockReset();
   mockBack.mockReset();
+  captureBackHandler();
   mockParams.addTo = undefined;
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
@@ -314,4 +323,62 @@ it('keeps asking for nothing while you type into a truncated list', async () => 
 
   await settle();
   expect(pageTwoRequests()).toHaveLength(1);
+});
+
+/**
+ * Nothing leaves this screen while Create is out (#259).
+ *
+ * The error line under the footer is the only renderer of a refusal, and all
+ * three ways off the screen — the header's Back, Android's hardware back, iOS's
+ * swipe — unmount it. Pick participants, tap Create, swipe back, and the chat is
+ * never created while you go looking for the thread you think you started.
+ */
+describe('holding the picker open until the server answers', () => {
+  async function startCreating() {
+    serve();
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+    await fireEvent.press(screen.getByLabelText('Grace Hopper'));
+
+    const server = holdRequest(
+      mockFetch,
+      { detail: 'You can only message people you’re connected with.' },
+      400
+    );
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Create'));
+    });
+    await server.inFlight('Creating…');
+    return server;
+  }
+
+  it('refuses the header’s Back, then shows the refusal', async () => {
+    const server = await startCreating();
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(mockBack).not.toHaveBeenCalled();
+
+    await server.refuse();
+    expect(
+      await screen.findByText(
+        'You can only message people you’re connected with.'
+      )
+    ).toBeTruthy();
+  });
+
+  androidIt('refuses hardware back, then shows the refusal', async () => {
+    const server = await startCreating();
+
+    await act(async () => {
+      // Claimed, not passed on: falling through would pop the screen.
+      expect(pressBack()).toBe(true);
+    });
+
+    await server.refuse();
+    expect(
+      await screen.findByText(
+        'You can only message people you’re connected with.'
+      )
+    ).toBeTruthy();
+  });
 });

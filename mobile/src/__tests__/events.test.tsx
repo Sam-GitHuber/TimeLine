@@ -53,6 +53,10 @@ jest.mock('expo-router', () => ({
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
+  // The event screen holds iOS's swipe-back while a write is out (#256); there
+  // is no navigator under test and no gesture Node can perform. Same stand-in
+  // as `jest.setup.js`, whose global stub this factory overrides.
+  useNavigation: () => ({ setOptions: () => {} }),
   router: {
     push: jest.fn(),
     back: jest.fn(),
@@ -845,6 +849,96 @@ describe('RSVP guests and note', () => {
 });
 
 // --- The personal Calendar tab ---------------------------------------------
+
+/**
+ * The event screen's own way out is held while a write that reports itself
+ * *inside a child* is in flight (#256).
+ *
+ * Both of these are handed down as `mutateAsync` precisely so the rejection
+ * reaches the component that drew the optimistic state, and neither has an
+ * `onError: Alert.alert` to fall back on — so leaving first destroys the only
+ * copy of the message.
+ */
+describe('holding the event screen while a child’s write is out', () => {
+  function serveEvent(event: Event) {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/')) return jsonResponse(event);
+      return jsonResponse(null, 404);
+    });
+  }
+
+  /** A promise that only settles when the returned `refuse` is called. */
+  function stall<T>(spy: jest.SpyInstance) {
+    let refuse: (error: Error) => void = () => {};
+    spy.mockReturnValue(
+      new Promise<T>((_resolve, reject) => {
+        refuse = reject;
+      })
+    );
+    return async (error: Error) => {
+      await act(async () => {
+        refuse(error);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+  }
+
+  it('refuses Back while an RSVP is saving, then says it was refused', async () => {
+    // You tap Going, set your guests and type a note, then leave. The 403 for a
+    // group you were removed from lands in a screen that's gone: you believe
+    // you're down for three, and nobody is expecting you.
+    serveEvent(makeEvent({}));
+    const rsvp = jest.spyOn(api, 'rsvpEvent');
+    const refuse = stall<Event>(rsvp);
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+    // The write is genuinely out: React Query dispatches `isPending` through
+    // its notify manager, so it lands a macrotask after the press — check too
+    // early and nothing below is being tested.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Going/ })).toBeDisabled()
+    );
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(router.back).not.toHaveBeenCalled();
+
+    await refuse(new ApiError('You’re no longer in this group.', 403, null));
+    expect(
+      await screen.findByText('You’re no longer in this group.')
+    ).toBeTruthy();
+    rsvp.mockRestore();
+  });
+
+  it('refuses Back while a vote is out, then says it was refused', async () => {
+    // The tick is optimistic, so leaving takes both the rollback and the
+    // message: the tally you come back to reads as "nobody has voted".
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest.spyOn(api, 'votePoll');
+    const refuse = stall<unknown>(vote);
+
+    await renderWith(<EventScreen />);
+    const drinks = await screen.findByRole('button', { name: /Drinks/ });
+    // Braced, not awaited: `toggle` is `async`, so awaiting the press would
+    // wait on the very request this test is holding open.
+    await act(async () => {
+      fireEvent.press(drinks);
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Drinks/ })).toBeDisabled()
+    );
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(router.back).not.toHaveBeenCalled();
+
+    await refuse(new ApiError('This poll is closed.', 409, null));
+    expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Drinks/ })).not.toBeSelected();
+    vote.mockRestore();
+  });
+});
 
 describe('calendar tab', () => {
   it('lists the events across your groups', async () => {

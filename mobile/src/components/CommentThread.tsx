@@ -49,6 +49,7 @@ import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Comment } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
 import { formatRelativeTime } from '@/utils';
+import { useHoldOpen, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 /*
  * ---------------------------------------------------------------------------
@@ -363,15 +364,33 @@ function CommentNode({
   const replies = comment.replies ?? [];
   const [showReply, setShowReply] = useState(false);
   const [editing, setEditing] = useState(false);
-  useAndroidBack(editing, () => setEditing(false));
+  /**
+   * Neither write box may be taken off screen while its request is out (#256).
+   *
+   * Both of them are the only renderer of their own rejection, and both of them
+   * are dismissed from *here* — the back handlers below, the ⋯ menu and the
+   * Reply toggle all live in this component, while `isPending` lives in the
+   * child. That gap is the whole bug: this node decides when the box closes and
+   * couldn't see whether anything was in flight. Now the child declares its
+   * write (`useHoldOpen`) and every route out of it reads `hold.held`.
+   */
+  const hold = useWriteHold();
+  useAndroidBack(editing, () => {
+    if (hold.held) return;
+    setEditing(false);
+  });
   // Android back closes the reply box rather than the post — it's the only way
-  // to abandon a reply without losing the post you were reading (#168).
+  // to abandon a reply without losing the post you were reading (#168), and
+  // never while the reply itself is being posted (#256).
   //
   // Per comment, so opening a second box while a first is still open leaves two
   // subscribed. React Native runs the most recently registered first, which
   // closes the one you just opened — the right answer, and the reason this
   // doesn't need a single owner for the whole tree.
-  useAndroidBack(showReply, () => setShowReply(false));
+  useAndroidBack(showReply, () => {
+    if (hold.held) return;
+    setShowReply(false);
+  });
   const [reporting, setReporting] = useState(false);
   // A tombstone (issue #128): the author deleted it, and it only survives
   // because replies hang off it. Everything below keys off this — it offers no
@@ -438,6 +457,13 @@ function CommentNode({
             {
               label: 'Edit comment',
               onPress: () => {
+                // Opening the editor closes the reply box below, so it's a
+                // dismissal route like any other and declines the same way
+                // (#256). Silent rather than shown as unavailable because a
+                // menu item can't be disabled — and the menu is opened from a
+                // ⋯ that is only on screen for the second or two a reply POST
+                // is out, which is not a control anyone is waiting on.
+                if (hold.held) return;
                 setEditing(true);
                 // **One write box per comment**, and on Android that's a
                 // correctness rule, not tidiness: `useAndroidBack` is registered
@@ -556,10 +582,18 @@ function CommentNode({
             // One write box per comment — see the ⋯ menu's Edit.
             setEditing(false);
           }}
+          // Both halves of this toggle close a write box — the second press
+          // closes the reply box, and the first closes the editor — so it holds
+          // while either has a request out (#256). Shown as unavailable rather
+          // than silently declining, because it's a visible control sitting
+          // beside the box it would tear down.
+          disabled={hold.held}
           accessibilityRole="button"
           hitSlop={6}
         >
-          <Text style={styles.action}>Reply</Text>
+          <Text style={[styles.action, hold.held && styles.actionDisabled]}>
+            Reply
+          </Text>
         </Pressable>
       ) : null}
 
@@ -678,12 +712,17 @@ function CommentNode({
             {isDeleted ? (
               <Text style={[styles.text, styles.deleted]}>Comment deleted</Text>
             ) : editing ? (
-              <CommentEditor
-                commentId={comment.id}
-                target={target}
-                initialText={comment.text}
-                onDone={() => setEditing(false)}
-              />
+              // The provider renders no view, so it sits inside the layout
+              // rather than around it: the editor declares its PATCH into
+              // `hold`, and the routes that would close it read the flag.
+              <WriteHoldProvider hold={hold}>
+                <CommentEditor
+                  commentId={comment.id}
+                  target={target}
+                  initialText={comment.text}
+                  onDone={() => setEditing(false)}
+                />
+              </WriteHoldProvider>
             ) : (
               <Text style={styles.text}>{comment.text}</Text>
             )}
@@ -698,13 +737,15 @@ function CommentNode({
             {actions}
 
             {showReply && !isDeleted ? (
-              <CommentComposer
-                target={target}
-                parentId={comment.id}
-                autoFocus
-                placeholder={`Reply to ${comment.author.display_name}…`}
-                onDone={() => setShowReply(false)}
-              />
+              <WriteHoldProvider hold={hold}>
+                <CommentComposer
+                  target={target}
+                  parentId={comment.id}
+                  autoFocus
+                  placeholder={`Reply to ${comment.author.display_name}…`}
+                  onDone={() => setShowReply(false)}
+                />
+              </WriteHoldProvider>
             ) : null}
 
             {menu}
@@ -797,6 +838,12 @@ function CommentEditor({
     },
   });
 
+  // Nothing may close this editor while the PATCH is out — the error below is
+  // the only place a refusal is spoken (#256). Declared rather than passed up,
+  // so the node above can hold its back handler, its ⋯ and its Reply toggle on
+  // one flag.
+  useHoldOpen(isPending);
+
   const trimmed = text.trim();
   // Emptying a comment is a delete, and delete is its own action — the server
   // says the same, so a disabled Save can never 400.
@@ -840,8 +887,20 @@ function CommentEditor({
       ) : null}
 
       <View style={styles.composerActions}>
-        <Pressable onPress={onDone} accessibilityRole="button" hitSlop={6}>
-          <Text style={styles.cancel}>Cancel</Text>
+        {/* Held while the PATCH is out: `onDone` puts the comment back in read
+            mode, which unmounts the error above — the only thing that says the
+            edit was refused (#256). On `isPending` alone, never on `canSave`,
+            which is also false for an empty box: that would be a Cancel you
+            couldn't press after clearing the text. */}
+        <Pressable
+          onPress={onDone}
+          disabled={isPending}
+          accessibilityRole="button"
+          hitSlop={6}
+        >
+          <Text style={[styles.cancel, isPending && styles.cancelDisabled]}>
+            Cancel
+          </Text>
         </Pressable>
         <Pressable
           onPress={save}
@@ -899,6 +958,12 @@ function CommentComposer({
     },
   });
 
+  // Same hold as the editor's, for the same reason: Cancel, Android back and the
+  // Reply toggle all unmount this box, and a failed reply that leaves no trace
+  // reads as one that posted somewhere off-screen (#256). The thread-level
+  // composer has no ancestor holding, and needs none — nothing dismisses it.
+  useHoldOpen(isPending);
+
   const trimmed = text.trim();
 
   return (
@@ -923,8 +988,15 @@ function CommentComposer({
 
       <View style={styles.composerActions}>
         {onDone ? (
-          <Pressable onPress={onDone} accessibilityRole="button" hitSlop={6}>
-            <Text style={styles.cancel}>Cancel</Text>
+          <Pressable
+            onPress={onDone}
+            disabled={isPending}
+            accessibilityRole="button"
+            hitSlop={6}
+          >
+            <Text style={[styles.cancel, isPending && styles.cancelDisabled]}>
+              Cancel
+            </Text>
           </Pressable>
         ) : null}
         <Pressable
@@ -1042,6 +1114,10 @@ const styles = StyleSheet.create({
   deleted: { color: colors.inkFaint, fontStyle: 'italic' },
   actions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   action: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  // Held while a write box below has a request out (#256) — the same dimming
+  // the Save/Cancel pair uses, so "unavailable for a moment" reads the same way
+  // wherever it appears in this thread.
+  actionDisabled: { opacity: 0.4 },
   toggle: { fontSize: fontSize.sm, color: colors.accentDeep, fontWeight: '600' },
   composer: { marginTop: spacing.sm, gap: spacing.sm },
   input: {
@@ -1063,6 +1139,7 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   cancel: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  cancelDisabled: { opacity: 0.4 },
   // The edit sheet's disclosure, worded and styled as `PostEditModal`'s is —
   // you're told the marker is coming *before* you save, not only after.
   note: { fontSize: fontSize.sm, color: colors.inkFaint },

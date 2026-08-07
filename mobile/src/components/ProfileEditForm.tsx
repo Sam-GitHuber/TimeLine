@@ -33,6 +33,7 @@ import { usePhotoPicker } from '@/photoSource';
 import { AvatarCropModal } from './AvatarCropModal';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
+import { useHoldOpen } from '@/writeHold';
 
 /** A just-picked photo waiting to be reframed in the crop modal. */
 type PendingCrop = { uri: string; width: number; height: number };
@@ -51,6 +52,9 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
   const [removeAvatar, setRemoveAvatar] = useState(false);
   // A just-chosen photo waiting to be reframed in the crop modal.
   const [pendingCrop, setPendingCrop] = useState<PendingCrop | null>(null);
+  // The PATCH has landed — set before `onSuccess` does its follow-up work. See
+  // `holding` below for why `mutation.isPending` alone is the wrong flag.
+  const [saved, setSaved] = useState(false);
   const { pickPhotos, photoMenu } = usePhotoPicker();
 
   const mutation = useMutation({
@@ -66,6 +70,14 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
         removeAvatar,
       }),
     onSuccess: async () => {
+      // The write has landed, so there is no longer a rejection for this form to
+      // be the only renderer of — let go *now*, before the follow-up below.
+      // React Query keeps `isPending` true for the whole of `onSuccess`, so a
+      // hold left on it alone would stay shut across the `refreshUser()` round
+      // trip, which has nothing to report: that moves the trap rather than
+      // removing it (#255's note on the delete dialogs, #259's on the web's
+      // ProfileEditForm).
+      setSaved(true);
       // The profile is already saved server-side here. Refreshing "who am I" is
       // best-effort — if that refetch blips, don't strand the user in an open
       // editor with no error (the mutation succeeded); close anyway and let the
@@ -123,6 +135,19 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
 
   const canSave =
     firstName.trim() !== '' && lastName.trim() !== '' && !mutation.isPending;
+
+  /**
+   * Nothing may close this form while the PATCH is out (#256/#259).
+   *
+   * The error above is its only renderer, and every way out unmounts it: this
+   * form's own Cancel, Android's hardware back and the profile screen's
+   * "← Back" (both held by the screen, which reads this through the hold) and
+   * iOS's swipe-back. Pick a new avatar on mobile data, hit Save, leave — and a
+   * multipart upload the server then rejects for its image allow-list leaves the
+   * old avatar showing and nothing said.
+   */
+  const holding = mutation.isPending && !saved;
+  useHoldOpen(holding);
 
   return (
     <View style={styles.form}>
@@ -198,8 +223,9 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
       <View style={styles.actions}>
         <Pressable
           onPress={onDone}
+          disabled={holding}
           accessibilityRole="button"
-          style={styles.ghostButton}
+          style={[styles.ghostButton, holding && styles.ghostDisabled]}
         >
           <Text style={styles.ghostLabel}>Cancel</Text>
         </Pressable>
@@ -262,6 +288,9 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
   },
   ghostLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.ink },
+  // Matches `saveDisabled` beside it: while the write is out both halves of the
+  // pair are unavailable, which is the asymmetry #259 was about.
+  ghostDisabled: { opacity: 0.5 },
   danger: { color: colors.danger },
   saveButton: {
     paddingHorizontal: spacing.lg,

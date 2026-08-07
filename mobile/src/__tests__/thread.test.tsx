@@ -45,9 +45,11 @@ import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
 import {
+  androidIt,
   backHandlerCount,
   captureBackHandler,
   choosePhotoSource,
+  holdRequest,
   pressBack,
   resetMenuSpies,
   settle,
@@ -1069,6 +1071,97 @@ it('cancelling an edit restores the draft you were typing', async () => {
       ['PATCH', 'DELETE'].includes(String(init?.method))
     )
   ).toBe(false);
+});
+
+/**
+ * Leaving edit mode may not throw away a rejection that hasn't arrived (#257).
+ *
+ * `stopEditing()` ends with `editMutation.reset()`, written to clear a
+ * **settled** failure — an error from a finished edit shouldn't hang over a
+ * composer that isn't editing anything. But `reset()` doesn't distinguish that
+ * from an edit still in flight: it detaches the observer from the running
+ * mutation, so the PATCH's answer arrives with nothing left to paint the error
+ * line, which is its only renderer.
+ *
+ * So both hand routes out of edit mode hold while the write is out, which is
+ * what makes that `reset()` safe rather than conditional. A blanket
+ * `if (!isPending)` guard on the call itself couldn't work: React Query runs
+ * `onSuccess` before the mutation leaves its pending state, so it would refuse
+ * the one call that has to work — the last test here is what pins that.
+ */
+describe('holding edit mode until the server answers', () => {
+  const REFUSAL = 'Editing is only allowed for 15 minutes.';
+
+  async function startSaving() {
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+    });
+
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
+
+    const server = holdRequest(mockFetch, { detail: REFUSAL }, 403);
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Save'));
+    });
+    await server.inFlight('Saving…');
+    return server;
+  }
+
+  it('refuses the ✕, then shows the refusal', async () => {
+    const server = await startSaving();
+
+    await fireEvent.press(screen.getByLabelText('Cancel editing'));
+    expect(screen.getByText('Editing message')).toBeTruthy();
+
+    await server.refuse();
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  it('refuses the header’s Back, which would unmount the whole screen', async () => {
+    const server = await startSaving();
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(mockBack).not.toHaveBeenCalled();
+
+    await server.refuse();
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  androidIt('refuses hardware back, then shows the refusal', async () => {
+    captureBackHandler();
+    const server = await startSaving();
+
+    await act(async () => {
+      // Claimed, not passed on: an unclaimed press leaves the conversation.
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.getByText('Editing message')).toBeTruthy();
+
+    await server.refuse();
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  it('still leaves edit mode when the save succeeds', async () => {
+    // `onSuccess` calls `stopEditing` while the mutation is *still* pending, so
+    // a hold written as a guard inside `stopEditing` would strand the composer
+    // in edit mode on every successful save.
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+    });
+
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
+    await fireEvent.press(screen.getByLabelText('Save'));
+
+    await waitFor(() => expect(screen.queryByText('Editing message')).toBeNull());
+  });
 });
 
 it('keeps the original draft when you switch from one edit to another', async () => {
@@ -2583,6 +2676,78 @@ it('locks a pending thread behind the connect panel instead of messages', async 
   expect(
     mockFetch.mock.calls.some(([url]) => String(url).includes('/messages/'))
   ).toBe(false);
+});
+
+/**
+ * Nothing takes the locked panel off screen while its Connect is out (#259).
+ *
+ * The panel's error line is the only renderer of a refused connect, and both
+ * ways out unmount it: the screen's "← Back" (and Android's hardware back,
+ * which reads the same declaration) and the panel's own Decline / Leave. Walk
+ * away first and you believe you're waiting on them to accept — you're not in
+ * anyone's inbox, and the chat stays locked with no explanation.
+ */
+describe('holding the locked chat panel while a connect is out', () => {
+  const REFUSAL = 'You can’t connect with this person.';
+
+  async function startConnecting() {
+    serve({
+      conversation: detail({
+        kind: 'group',
+        other: null,
+        title: 'Hikers',
+        my_status: 'pending',
+        can_send: false,
+        must_connect_with: [ADA],
+      }),
+    });
+
+    await renderScreen();
+    const server = holdRequest(mockFetch, { detail: REFUSAL }, 400);
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Connect with Ada Lovelace'));
+    });
+    await settle(1);
+    return server;
+  }
+
+  it('refuses the header’s Back, then shows the refusal', async () => {
+    const server = await startConnecting();
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(mockBack).not.toHaveBeenCalled();
+
+    await server.refuse();
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  it('refuses Decline / Leave, whose answer would outlive this chat', async () => {
+    // Held where the web deliberately leaves its Leave controls open, and the
+    // difference is what the pending write is *about*: a connection request
+    // changes a relationship that outlives the conversation.
+    const server = await startConnecting();
+
+    await fireEvent.press(screen.getByText('Decline / Leave'));
+    expect(
+      mockFetch.mock.calls.some(([url]) => String(url).includes('/leave/'))
+    ).toBe(false);
+
+    await server.refuse();
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  androidIt('refuses hardware back, then shows the refusal', async () => {
+    captureBackHandler();
+    const server = await startConnecting();
+
+    await act(async () => {
+      // Claimed, not passed on: falling through would pop the screen.
+      expect(pressBack()).toBe(true);
+    });
+
+    await server.refuse();
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
 });
 
 it('replaces the composer with a read-only note when you can’t send', async () => {

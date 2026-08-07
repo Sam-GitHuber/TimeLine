@@ -21,6 +21,7 @@ import { Avatar } from '@/components/Avatar';
 import { invalidateConnectionChange } from '@/connectionCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Author } from '@/types';
+import { useHoldOpen } from '@/writeHold';
 
 export function PendingChatPanel({
   mustConnectWith,
@@ -53,6 +54,25 @@ export function PendingChatPanel({
       onLeave();
     },
   });
+
+  /**
+   * Nothing takes this panel off screen while a Connect is out (#259).
+   *
+   * The error below is its only renderer, and both routes out unmount it: the
+   * screen's "← Back" (and Android's hardware back, which the screen holds by
+   * reading this declaration) and the Decline / Leave button right here. Tap
+   * Connect, tap Decline while it's slow, and a 400 — you've blocked them, the
+   * request is already pending, you're offline — lands nowhere. You believe
+   * you're waiting on them to accept; you're not in anyone's inbox, and the
+   * chat stays locked with no explanation.
+   *
+   * Leaving is held here where the web deliberately leaves its Leave controls
+   * open, and the difference is what the pending write is *about*: those were
+   * conversation-scoped writes whose answer stops mattering once you're out of
+   * the conversation. A connection request isn't — it changes a relationship
+   * that outlives this chat entirely.
+   */
+  useHoldOpen(connectMutation.isPending);
 
   const people = mustConnectWith ?? [];
 
@@ -96,9 +116,12 @@ export function PendingChatPanel({
 
       <Pressable
         onPress={() => leaveMutation.mutate()}
-        disabled={leaveMutation.isPending}
+        disabled={leaveMutation.isPending || connectMutation.isPending}
         accessibilityRole="button"
-        style={({ pressed }) => [styles.leave, pressed && styles.pressed]}
+        style={({ pressed }) => [
+          styles.leave,
+          (pressed || connectMutation.isPending) && styles.pressed,
+        ]}
       >
         <Text style={styles.leaveLabel}>
           {leaveMutation.isPending ? 'Leaving…' : 'Decline / Leave'}

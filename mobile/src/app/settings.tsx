@@ -30,20 +30,46 @@ import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSec
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
 import { PrivacySection } from '@/components/settings/PrivacySection';
 import { colors, fontSize, spacing } from '@/theme';
+import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 export default function SettingsScreen() {
-  const goBack = () => (router.canGoBack() ? router.back() : router.replace('/'));
+  /**
+   * Leaving Settings is held while a section below has a write out (#256).
+   *
+   * `ChangePasswordSection` is the sharpest case in this whole family, because
+   * it leaves you wrong about your own credentials: fill the three fields, tap
+   * Change password, leave, and the 400 of *"Your old password was entered
+   * incorrectly"* lands in a form that has already gone. Nothing is said, and
+   * you go on believing your password is the new one.
+   *
+   * The section is two levels above the request, so the hold is declared from
+   * the form and read here rather than passed down as a prop. Android's back is
+   * claimed by the section itself (it collapses the form rather than leaving the
+   * screen), so only the swipe is taken here — two registrations for one press
+   * would race on hook order.
+   */
+  const hold = useWriteHold();
+  useHoldSwipeBack(hold.held);
+
+  const goBack = () => {
+    if (hold.held) return;
+    if (router.canGoBack()) router.back();
+    else router.replace('/');
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.topBar}>
         <Pressable
           onPress={goBack}
+          disabled={hold.held}
           accessibilityRole="button"
           accessibilityLabel="Back"
           hitSlop={8}
         >
-          <Text style={styles.back}>← Back</Text>
+          <Text style={[styles.back, hold.held && styles.backDisabled]}>
+            ← Back
+          </Text>
         </Pressable>
         <Text style={styles.title}>Settings</Text>
         <View style={styles.spacer} />
@@ -59,12 +85,19 @@ export default function SettingsScreen() {
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
       >
-        <FeedPreferencesSection />
-        <NotificationPreferencesSection />
-        <PrivacySection />
-        <ChangePasswordSection />
-        <LegalSection />
-        <DeleteAccountSection />
+        {/* Renders no view of its own. `DeleteAccountSection` is inside it and
+            declares nothing: it holds its own dialog open (#255) and, once the
+            delete lands, deliberately lets go before a teardown that is itself
+            two network round trips — a hold across those would seal someone
+            into a "Deleting…" box with no way out. */}
+        <WriteHoldProvider hold={hold}>
+          <FeedPreferencesSection />
+          <NotificationPreferencesSection />
+          <PrivacySection />
+          <ChangePasswordSection />
+          <LegalSection />
+          <DeleteAccountSection />
+        </WriteHoldProvider>
       </KeyboardAwareScroll>
     </SafeAreaView>
   );
@@ -107,6 +140,9 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.line,
   },
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  // Shown as unavailable rather than silently declining — a Back that answers a
+  // press with nothing reads as broken.
+  backDisabled: { opacity: 0.4 },
   title: {
     flex: 1,
     textAlign: 'center',

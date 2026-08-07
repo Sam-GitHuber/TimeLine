@@ -39,6 +39,10 @@ jest.mock('expo-router', () => ({
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
+  // The event screen holds iOS's swipe-back while a write is out (#256); there
+  // is no navigator under test and no gesture Node can perform. Same stand-in
+  // as `jest.setup.js`, whose global stub this factory overrides.
+  useNavigation: () => ({ setOptions: () => {} }),
   router: { push: jest.fn(), replace: jest.fn(), back: jest.fn(), canGoBack: () => true },
 }));
 
@@ -474,6 +478,61 @@ describe('poll lifecycle', () => {
     expect(screen.getAllByText('What should we bring?').length).toBeGreaterThan(0);
     expect(screen.queryByText('Cake')).toBeNull();
     expect(edit).not.toHaveBeenCalled();
+    edit.mockRestore();
+  });
+
+  /**
+   * …but not while the save is out (#256).
+   *
+   * This is the sharpest case in that issue, because the silence is the exact
+   * message the design went out of its way to deliver: `editPoll` is the **only**
+   * poll mutation on this screen with no `onError: Alert.alert`, deliberately —
+   * it's `mutateAsync` so the form can surface a 409 ("voting has started") in
+   * place, matching the web. Unmount the form mid-save and the one message that
+   * whole handoff exists to carry is never spoken.
+   *
+   * The registration for that back press sits on the tally, one component above
+   * the `saving` flag — which is exactly why its own Cancel was already gated
+   * and the hardware button wasn't.
+   */
+  androidIt('holds the poll edit form open while the save is out', async () => {
+    captureBackHandler();
+    serve(makeEvent({ polls: [customPoll()] }));
+    let refuse: (error: Error) => void = () => {};
+    const edit = jest
+      .spyOn(api, 'editPoll')
+      .mockReturnValue(
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        })
+      );
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('Poll options'));
+    await act(async () => pickMenuOption('Edit poll'));
+    await fireEvent.changeText(screen.getByLabelText('Option 2'), 'Cake');
+    // Braced, not a bare arrow: `submit` is `async`, so returning its promise
+    // to `act` would wait on the very request this test never lets answer.
+    await act(async () => {
+      fireEvent.press(screen.getByText('Save changes'));
+    });
+    expect(screen.getByText('Saving…')).toBeTruthy();
+
+    await act(async () => {
+      // Claimed, not passed to the navigator: falling through would leave the
+      // event screen entirely.
+      expect(pressBack()).toBe(true);
+    });
+    expect(screen.getByText('Saving…')).toBeTruthy();
+
+    await act(async () => {
+      refuse(new Error('Voting has already started on this poll.'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(
+      await screen.findByText('Voting has already started on this poll.')
+    ).toBeTruthy();
     edit.mockRestore();
   });
 });
