@@ -41,7 +41,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
@@ -117,6 +117,18 @@ export default function ConversationInfoScreen() {
       queryClient.invalidateQueries({ queryKey: ['conversation', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
+    // #238 — the write that lied hardest on this screen. The switch is driven
+    // by `detail.muted`, so it deliberately doesn't move until the server says
+    // it has: correct, and the reason a refused mute was *pixel-identical* to
+    // one that worked. You believe a noisy group chat is silenced and your
+    // phone buzzes all evening with nothing to suggest the app is at fault.
+    // The title names the direction, because which of the two didn't happen is
+    // most of the value (connections.md).
+    onError: (error, muted) =>
+      Alert.alert(
+        muted ? 'Couldn’t mute this chat' : 'Couldn’t unmute this chat',
+        serverMessage(error, WENT_WRONG)
+      ),
   });
 
   const leaveMutation = useMutation({
@@ -132,6 +144,12 @@ export default function ConversationInfoScreen() {
       if (router.canDismiss?.()) router.dismissTo('/messages');
       else router.replace('/messages');
     },
+    // #238: the `dismissTo` above runs only on success, so a refused leave left
+    // you standing on the Details screen of a chat you'd just confirmed
+    // leaving, with nothing said — which reads as a broken button, and invites
+    // pressing it again.
+    onError: (error) =>
+      Alert.alert('Couldn’t leave this chat', serverMessage(error, WENT_WRONG)),
   });
 
   function confirmLeave() {

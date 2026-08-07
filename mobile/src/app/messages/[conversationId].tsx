@@ -88,6 +88,8 @@ import {
   CONVERSATION_DETAIL_POLL_MS,
   MESSAGE_EDIT_WINDOW_MS,
   MESSAGE_POLL_MS,
+  serverMessage,
+  WENT_WRONG,
 } from '@/api';
 import { useAuth } from '@/auth';
 import { prepareChatPhoto } from '@/chatPhotos';
@@ -967,6 +969,16 @@ export default function ThreadScreen() {
       queryClient.invalidateQueries({ queryKey: ['messages', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
+    // #220 §2 — the one mutation on this screen without the `onError` its
+    // siblings all have. You confirm "Delete message?", the request fails on a
+    // dropped connection, and the bubble stays: indistinguishable from the tap
+    // not registering, so the natural response is to delete it again, against a
+    // server that may have succeeded the first time.
+    onError: (error) =>
+      Alert.alert(
+        'Couldn’t delete that message',
+        serverMessage(error, WENT_WRONG)
+      ),
   });
 
   /**
@@ -1009,6 +1021,28 @@ export default function ThreadScreen() {
       // doesn't reorder the list.
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
+    /**
+     * #261 — the *other* spelling of an unreported write, and the reason this
+     * alert exists alongside the line under the composer rather than replacing
+     * it.
+     *
+     * The line below is inside the `KeyboardAvoider`, and three screen-level
+     * `Modal`s are siblings of it: the strand, the photo lightbox and the
+     * reactors sheet. Each is opaque and each stays reachable while the PATCH
+     * is out — `busy` greys the Save button and nothing else — so a 403 landing
+     * while one is open paints into a subtree drawn *underneath* it. The strand
+     * also sets `accessibilityViewIsModal`, which takes the composer out of the
+     * accessibility tree, so VoiceOver/TalkBack announce nothing at all and
+     * never replay it.
+     *
+     * An `Alert` isn't part of this screen's tree, so being covered can't
+     * happen to it — the same reason the bulk delete and both photo paths use
+     * one. The inline line stays because it's the better answer when nothing is
+     * covering it: it persists in context beside the text you're still editing,
+     * where a dismissed dialog is gone.
+     */
+    onError: (error) =>
+      Alert.alert('Couldn’t save the edit', serverMessage(error, WENT_WRONG)),
   });
 
   const reactMutation = useMutation({
@@ -1079,7 +1113,7 @@ export default function ThreadScreen() {
    * next to the state it reads rather than 800 lines further down.
    */
   /**
-   * A write on this screen whose refusal renders here and nowhere else.
+   * A write on this screen that a hasty exit would silence.
    *
    * Two of them, and they never coexist because the panel replaces the whole
    * transcript: the message **edit** (#257 — see `stopEditing`) and the pending
@@ -1089,6 +1123,20 @@ export default function ThreadScreen() {
    *
    * The bulk delete stays out: it reports through `Alert.alert`, which is a
    * native dialog and outlives the screen that fired it.
+   *
+   * ⚠️ **The edit stays in even though #261 gave it an `Alert` too**, and the
+   * reason is not the obvious one. `reset()` and the mutation's `onError` come
+   * apart: measured against this version of React Query, `stopEditing`'s
+   * `editMutation.reset()` on a PATCH still in flight clears the observer's
+   * error state — so the line below is destroyed, which is #257 — but the
+   * `onError` **still fires**, so since #261 the refusal reaches you either way.
+   *
+   * What the hold buys is no longer *whether* you're told; it's having anything
+   * to do about it. Leaving edit mode drops the composer back to your pre-edit
+   * draft, so an alert saying the correction failed would arrive with the
+   * correction already gone, and the header's Back pops the screen outright.
+   * The condition here is "a write a hasty exit would leave you unable to act
+   * on", not "a write with only one renderer".
    */
   const reportingWrite = editMutation.isPending || hold.held;
 

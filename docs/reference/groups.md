@@ -135,8 +135,10 @@ above the list, and the same variables the success handler forks on give the
 fallback its wording: *"Couldn't accept that invitation."* rather than one
 sentence for both, since which of the two didn't happen is most of the value. See
 [connections.md](connections.md#reporting-a-refused-write) for the rule and the
-requests inbox that had it identically wrong. Still open for the app
-(`app/(tabs)/groups.tsx`).
+requests inbox that had it identically wrong. The app's copy
+(`app/(tabs)/groups.tsx`) had the same hole and took the same fix one screen
+over, through an `Alert` rather than a line — a row's failure has no room of its
+own in a `FlatList`, and a native dialog can't be scrolled past.
 
 The mobile roster is the one site where the rule has to be applied
 **conditionally**, and #282 is what that costs. Its single mutation covers

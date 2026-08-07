@@ -8,6 +8,7 @@
 
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 import GroupsScreen from '@/app/(tabs)/groups';
 import type { Group, GroupInvite } from '@/types';
@@ -117,6 +118,65 @@ it('shows invites and accepts one, refreshing the shared count', async () => {
   await waitFor(() =>
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['groupInvites'] })
   );
+});
+
+/**
+ * Issue #239 — **the write had no error path at all**, the same defect as the
+ * requests inbox next door and fixed with the same edit.
+ *
+ * `onSuccess` is the only place an invalidation runs, so an invite the group
+ * had already revoked answered 404 and the row sat exactly where it was: press
+ * it again, or walk away believing you'd joined a group you hadn't. The row
+ * staying is asserted deliberately — it's correct, and it's what made the
+ * silence read as a broken button.
+ */
+it('says so when accepting an invitation is refused', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  serve();
+  await renderScreen();
+  await screen.findByText('The Andersons');
+  fireEvent.press(screen.getByText('Invites'));
+  await screen.findByText('Book Club');
+
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse({ detail: 'That invitation is no longer available.' }, 404);
+  });
+  fireEvent.press(screen.getByLabelText('Accept Book Club'));
+
+  await waitFor(() =>
+    expect(alert).toHaveBeenCalledWith(
+      'Couldn’t accept that invitation',
+      'That invitation is no longer available.'
+    )
+  );
+  expect(screen.getByText('Book Club')).toBeTruthy();
+  alert.mockRestore();
+});
+
+it('names the decision when a decline is refused with nothing readable', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  serve();
+  await renderScreen();
+  await screen.findByText('The Andersons');
+  fireEvent.press(screen.getByText('Invites'));
+  await screen.findByText('Book Club');
+
+  // A 500 with no DRF body, so `serverMessage` has nothing of the server's to
+  // prefer and our own sentence is the one that has to show.
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse(null, 500);
+  });
+  fireEvent.press(screen.getByLabelText('Decline Book Club'));
+
+  await waitFor(() =>
+    expect(alert).toHaveBeenCalledWith(
+      'Couldn’t decline that invitation',
+      'Something went wrong — try again in a moment.'
+    )
+  );
+  alert.mockRestore();
 });
 
 it('declines an invite via the reject endpoint', async () => {

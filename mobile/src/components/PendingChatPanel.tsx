@@ -14,9 +14,9 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { invalidateConnectionChange } from '@/connectionCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -53,6 +53,14 @@ export function PendingChatPanel({
       queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
       onLeave();
     },
+    // #238: `onLeave()` runs only on success, so a refused decline put the
+    // button back from "Leaving…" to "Decline / Leave" and left the invite in
+    // your list next time you opened Messages — with nothing to say it hadn't
+    // worked. Through `Alert` rather than the inline line the Connect uses,
+    // because a native dialog outlives the panel; the hold below is what the
+    // Connect needs *instead* of that, and this write doesn't (messaging.md).
+    onError: (error) =>
+      Alert.alert('Couldn’t leave this chat', serverMessage(error, WENT_WRONG)),
   });
 
   /**

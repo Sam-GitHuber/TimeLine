@@ -9,6 +9,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 import PeopleScreen from '@/app/(tabs)/people';
 
@@ -130,6 +131,67 @@ it('shows incoming requests and approves one, refreshing the shared count', asyn
   await waitFor(() =>
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['connectionRequests'] })
   );
+});
+
+/**
+ * Issue #239 — **the write had no error path, and the list's did not stand in
+ * for one.**
+ *
+ * `onSuccess` is the only place an invalidation runs, so a request the other
+ * person had since withdrawn answered 404 and the row stayed exactly where it
+ * was. Nothing appeared. It reads as a broken button — and on the approve path
+ * you walk away believing you're connected to someone you aren't, wondering
+ * later why their posts never reach your feed.
+ *
+ * The row staying put is asserted on purpose: it is still the right behaviour,
+ * and it is what made the silence invisible.
+ */
+it('says so when approving a request is refused', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  await renderPeople();
+  await screen.findByText('Ada Lovelace');
+  fireEvent.press(screen.getByText('Requests'));
+  await screen.findByText('Alan Turing');
+
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse({ detail: 'That request is no longer pending.' }, 404);
+  });
+  fireEvent.press(screen.getByLabelText('Approve Alan Turing'));
+
+  await waitFor(() =>
+    expect(alert).toHaveBeenCalledWith(
+      'Couldn’t approve that request',
+      'That request is no longer pending.'
+    )
+  );
+  expect(screen.getByText('Alan Turing')).toBeTruthy();
+  alert.mockRestore();
+});
+
+it('names the decision when a reject is refused with nothing readable', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  await renderPeople();
+  await screen.findByText('Ada Lovelace');
+  fireEvent.press(screen.getByText('Requests'));
+  await screen.findByText('Alan Turing');
+
+  // A 500 with no DRF body: `serverMessage` has nothing of the server's to
+  // prefer, so our own sentence has to be the one that shows. Which of the two
+  // decisions failed lives in the title (connections.md).
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse(null, 500);
+  });
+  fireEvent.press(screen.getByLabelText('Reject Alan Turing'));
+
+  await waitFor(() =>
+    expect(alert).toHaveBeenCalledWith(
+      'Couldn’t reject that request',
+      'Something went wrong — try again in a moment.'
+    )
+  );
+  alert.mockRestore();
 });
 
 it('offers a retry on a load error and recovers when tapped', async () => {

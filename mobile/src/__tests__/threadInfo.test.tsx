@@ -316,6 +316,91 @@ it('confirms before leaving a group', async () => {
   alert.mockRestore();
 });
 
+/**
+ * Issue #238 — **mute and leave said nothing at all when they failed**, in a
+ * screen where the rename beside them already alerted.
+ *
+ * Mute is the one that lied hardest. The switch is driven by `detail.muted`, so
+ * it deliberately doesn't move until the server says it has — correct, and
+ * exactly why a refused mute was pixel-identical to one that worked. You
+ * believe a noisy group chat is silenced and your phone buzzes all evening with
+ * nothing to suggest the app is at fault.
+ *
+ * Through `Alert` rather than a line on the screen, which is the phone's answer
+ * to the whole family: a native dialog is drawn above the RN tree, so it
+ * survives the screen being covered or popped (messaging.md).
+ */
+it('says so when a mute is refused, since the switch cannot', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  serve(detail({}));
+
+  await renderScreen();
+  const toggle = await screen.findByLabelText('Mute notifications');
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse({ detail: 'You’re no longer in this chat.' }, 403);
+  });
+  await fireEvent.press(toggle);
+
+  await waitFor(() =>
+    expect(alert).toHaveBeenCalledWith(
+      'Couldn’t mute this chat',
+      'You’re no longer in this chat.'
+    )
+  );
+  alert.mockRestore();
+});
+
+it('names the direction when an unmute is refused with nothing readable', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  serve(detail({ muted: true }));
+
+  await renderScreen();
+  const toggle = await screen.findByLabelText('Mute notifications');
+  // A 500 with no DRF body: nothing of the server's to prefer, so our own
+  // sentence shows and the *title* carries which direction failed
+  // (connections.md — the fallback is per state, never generic).
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse(null, 500);
+  });
+  await fireEvent.press(toggle);
+
+  await waitFor(() =>
+    expect(alert).toHaveBeenCalledWith(
+      'Couldn’t unmute this chat',
+      'Something went wrong — try again in a moment.'
+    )
+  );
+  alert.mockRestore();
+});
+
+it('says so when leaving is refused, and keeps you on this screen', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  serve(group());
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('Leave chat'));
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse({ detail: 'You’re no longer in this chat.' }, 403);
+  });
+  const [, , buttons] = alert.mock.calls[0];
+  await buttons?.find((b) => b.style === 'destructive')?.onPress?.();
+
+  await waitFor(() =>
+    expect(alert).toHaveBeenCalledWith(
+      'Couldn’t leave this chat',
+      'You’re no longer in this chat.'
+    )
+  );
+  // The `dismissTo` runs only on success, so you're still standing on the
+  // Details screen of a chat you just confirmed leaving — which is precisely
+  // why it has to say something.
+  expect(mockDismissTo).not.toHaveBeenCalled();
+  alert.mockRestore();
+});
+
 it('routes Add people to the picker, scoped to this chat', async () => {
   serve(group());
 

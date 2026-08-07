@@ -29,7 +29,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError, serverMessage } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
 import { EventPhotos } from '@/components/events/EventPhotos';
@@ -44,15 +44,6 @@ import { dismissEventNotifications } from '@/push';
 import { useAndroidBack } from '@/useAndroidBack';
 import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
-
-/**
- * The body of an organiser-write alert when the server wrote nothing readable —
- * offline, or a 5xx with no DRF detail. The *title* carries which action failed
- * ("Couldn't cancel the event"), which is the part that matters, so the body
- * only has to say it's worth retrying. `serverMessage` prefers the server's own
- * sentence over this whenever there is one.
- */
-const WENT_WRONG = 'Something went wrong — try again in a moment.';
 
 type PollDimension = 'date' | 'time' | 'location' | 'custom';
 /** Which chip's editor is open, and whether it's setting a value or opening a poll. */
