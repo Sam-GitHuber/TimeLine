@@ -31,7 +31,7 @@ import { serverMessage } from "../../errors.js";
 import { useDayBoundary } from "../../hooks.js";
 import { useMentions } from "../../mentions.js";
 import { insertMessage, patchReactions } from "../../messageCache.js";
-import { useMessaging } from "../../messaging.jsx";
+import { useHoldMessagesOpen, useMessaging } from "../../messaging.jsx";
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from "../../outbox.js";
 import { readStateFor, receiptsVisible } from "../../readReceipts.js";
 import { firstUnreadId, toThreadRows } from "../../threadRows.js";
@@ -776,6 +776,34 @@ export default function ConversationThreadView() {
     },
   });
 
+  /**
+   * **Both writes that report themselves in the error bar hold the drawer open**
+   * (#257, #258). That bar at the foot of this view is the only place either is
+   * reported, and leaving the thread unmounts the whole view — so while one is
+   * out, the drawer's Escape, ✕, Back and nav button hold. The bar's own comment
+   * used to say the unmounting half was somebody else's open bug; it isn't now.
+   *
+   * The bulk delete belongs here as much as the edit, and is the *longer* window
+   * of the two: its `mutationFn` walks the selection one `DELETE` at a time, so
+   * `isPending` spans every one of them.
+   *
+   * The bar's third occupant, `photoError`, deliberately isn't here. Preparing a
+   * photo is a client-side decode/re-encode, not a write — the rule is about a
+   * request whose answer you're waiting on, and holding the whole drawer shut
+   * while a picture is being resized would be the gate outstaying its purpose.
+   *
+   * Named once and read everywhere, because the drawer's four exits are not the
+   * only way out of this view: the controls inside it that switch `view` unmount
+   * it just as completely, and they have to hold on the *same* condition. Two of
+   * them gated on the edit alone until this was hoisted, which left the bulk
+   * delete — the longer window — reported into a bar the user could still
+   * navigate out from under.
+   */
+  const reportingWrite =
+    editMutation.isPending || deleteManyMutation.isPending;
+
+  useHoldMessagesOpen(reportingWrite);
+
   // Leave (or, while pending, decline) a chat — group-only in the header;
   // PendingChatPanel has its own copy of this for the locked view, and the
   // Details panel a third. All three now refresh the same two keys, as all three
@@ -817,13 +845,31 @@ export default function ConversationThreadView() {
     inputRef.current?.focus();
   }
 
-  /** Leave edit mode and put the pre-edit draft back in the composer. */
+  /**
+   * Leave edit mode and put the pre-edit draft back in the composer.
+   *
+   * **Never called with a PATCH in flight**, by any of its four routes: the two
+   * ways out of edit mode by hand (Escape and the ✕ beside the quoted message)
+   * hold while `editMutation.isPending`; the mutation's own `onSuccess` runs
+   * when the answer has arrived; and `handleSubmit`'s unchanged-text branch —
+   * which leaves edit mode *instead of* sending anything — is behind
+   * `canSubmit`, whose `editing` arm carries `!editMutation.isPending` too.
+   * That's what makes the `reset()` below safe, and it was issue #257 when it
+   * wasn't: `reset()` detaches the observer from a running mutation, so a 403
+   * arriving after you'd pressed Escape had nothing left to paint it. You'd
+   * leave believing the typo was fixed.
+   *
+   * The guard is deliberately *not* in here as a blanket `if (isPending)
+   * return`: React Query runs `onSuccess` before the mutation leaves its
+   * pending state, so a guard here would refuse the one call that has to work.
+   */
   function stopEditing() {
     setEditing(null);
     setText(stashedDraft);
     setStashedDraft("");
-    // Clear any failed-edit error with the mode that produced it, or it lingers
-    // over a composer that's no longer editing anything.
+    // Clear the failed-edit error with the mode that produced it, or it lingers
+    // over a composer that's no longer editing anything. Settled by the time we
+    // get here, so this only ever discards an answer that has already arrived.
     editMutation.reset();
   }
 
@@ -1141,20 +1187,33 @@ export default function ConversationThreadView() {
    *
    * Add and Leave are group-only: there's nobody to add to a 1:1, and leaving
    * one is what Block is for.
+   *
+   * **Details and Add stand down while either reported write is out** (#257,
+   * #258). Both switch the drawer to another `view`, which unmounts this one and
+   * takes the error bar — the only renderer of a refused edit or a refused bulk
+   * delete — with it. Absent rather than greyed, matching the way Delete leaves
+   * the selection bar: `getActions` is called when the menu opens, so what it
+   * offers is a fact about now.
+   *
+   * Mute stays because it doesn't change `view` at all. Leave stays because it
+   * asks first and means it: someone who confirms "leave this chat" has decided
+   * the chat is over, and holding that behind a typo correction would be the
+   * gate outstaying its purpose.
    */
   function headerActions() {
     const actions = [
-      { label: "Details", onClick: openInfo },
+      ...(reportingWrite ? [] : [{ label: "Details", onClick: openInfo }]),
       {
         label: detail.muted ? "Unmute" : "Mute",
         onClick: () => muteMutation.mutate(!detail.muted),
       },
     ];
     if (isGroup) {
-      actions.push({
-        label: "Add people",
-        onClick: () => openNew({ addToConversationId: conversationId }),
-      });
+      if (!reportingWrite)
+        actions.push({
+          label: "Add people",
+          onClick: () => openNew({ addToConversationId: conversationId }),
+        });
       actions.push({
         label: "Leave chat",
         danger: true,
@@ -1241,7 +1300,15 @@ export default function ConversationThreadView() {
           <button
             type="button"
             onClick={openInfo}
-            className="flex min-w-0 items-center gap-2 text-left"
+            // The other way to the info panel, and it unmounts this view the
+            // same way the menu item does — so it holds on the same condition
+            // (#257, #258), for the same reason. Note this one is reachable
+            // *during* a bulk delete in a way the menu item isn't obviously so:
+            // `confirmDeleteSelected` clears the selection as soon as it fires,
+            // which drops the header out of its "N selected" arm and puts this
+            // button back on screen with the deletes still going.
+            disabled={reportingWrite}
+            className="flex min-w-0 items-center gap-2 text-left disabled:opacity-45"
             title="Conversation details"
           >
             <AvatarStack participants={participants} />
@@ -1495,11 +1562,16 @@ export default function ConversationThreadView() {
                           {editing.text}
                         </p>
                       </div>
+                      {/* Held while the save is out (#257) — same asymmetry the
+                          rest of this family had, with Save gated and the ✕
+                          next to it wide open. Leaving edit mode discards the
+                          rejection (see `stopEditing`). */}
                       <button
                         type="button"
                         onClick={stopEditing}
+                        disabled={editMutation.isPending}
                         aria-label="Cancel editing"
-                        className="shrink-0 rounded-full px-1 text-ink-faint transition hover:text-ink"
+                        className="shrink-0 rounded-full px-1 text-ink-faint transition hover:text-ink disabled:opacity-45"
                       >
                         ✕
                       </button>
@@ -1604,10 +1676,16 @@ export default function ConversationThreadView() {
                         // Escape leaves edit mode rather than closing the drawer:
                         // the nearer thing wins, and losing the whole panel
                         // mid-correction would be a surprise.
+                        //
+                        // Except while the save is out (#257), when it does
+                        // nothing at all: leaving edit mode throws the pending
+                        // rejection away. The press is still swallowed — passing
+                        // it on would reach the drawer's own Escape, which is
+                        // the *bigger* version of the same mistake.
                         if (e.key === "Escape" && editing) {
                           e.preventDefault();
                           e.stopPropagation();
-                          stopEditing();
+                          if (!editMutation.isPending) stopEditing();
                         }
                       }}
                       rows={1}
@@ -1733,10 +1811,11 @@ export default function ConversationThreadView() {
           message is worth *more* over an open strand, not less, because leaving
           the thread for the conversation list unmounts this view (`MessagesDrawer`
           renders it only while `view === "thread"`) and takes the message with
-          it. That unmount is its own open bug, #258: the drawer's Back, ✕ and
-          Escape are a level above this component and can't see a write in
-          flight, so they can still tear the bar down with everything else. This
-          change stops the *hiding*; it doesn't stop the *unmounting*. */}
+          it. That unmount was its own bug, #258, and #253 could only stop the
+          *hiding*, not the *unmounting*: the drawer's Back, ✕ and Escape sit a
+          level above this component and couldn't see a write in flight. They can
+          now — `useHoldMessagesOpen` above tells them, for both writes in here,
+          and they hold until the answer lands. */}
       {(photoError || editMutation.isError || deleteManyMutation.isError) && (
         <div className="space-y-1 px-3 pb-3 text-sm text-red-600">
           {/* A photo that couldn't be prepared never reached the outbox, so it

@@ -191,9 +191,15 @@ export default function GroupFormPage() {
         )}
 
         <div className="flex justify-end gap-2">
+          {/* Cancel navigates away, which unmounts this page and the error above
+              with it — the same defect as the inline forms in #259, spelled as a
+              route change rather than a collapse. Press Create, then Cancel, and
+              a POST that 400s left you on /groups with no group and nothing
+              said. Held until the write lands, like the Create beside it. */}
           <button
             type="button"
             onClick={() => navigate(isEdit ? `/g/${groupId}` : "/groups")}
+            disabled={mutation.isPending}
             className="btn btn-ghost btn-sm"
           >
             Cancel

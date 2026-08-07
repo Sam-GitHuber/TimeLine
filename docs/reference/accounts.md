@@ -458,6 +458,17 @@ hijacked session (e.g. via XSS) can't silently rotate the password, and a
 shoulder-surfer at an unlocked screen can't lock the owner out. Frontend is an
 inline expanding section on `/settings`.
 
+**Close is held while the POST is out** (issue #259 on the web, still open on the
+phone as part of #256). The section is the only renderer of its own rejection, and
+Close collapses it — so pressing Change password and then Close meant a 400 of
+*"Your old password was entered incorrectly"* landed nowhere at all, leaving you
+believing your password had been rotated when it hadn't. Of everything in that
+family this is the one where silence leaves you wrong about a *credential*, which
+is why it's called out here as well as in
+[connections.md](connections.md#reporting-a-refused-write). The flag is released
+the moment the request settles, not when the section closes — the success line
+needs a way out too.
+
 ## Password reset (forgotten password)
 
 Self-service recovery for a member who's forgotten their password (#38) — without

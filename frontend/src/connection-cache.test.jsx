@@ -28,6 +28,10 @@ import { api } from "./api.js";
 
 vi.mock("./messaging.jsx", () => ({
   useMessaging: vi.fn(() => ({ openList: vi.fn(), openThread: vi.fn() })),
+  // The locked panel holds the drawer open while its Connect is in flight
+  // (#258). Nothing here renders a drawer to hold, so it's a no-op — but it
+  // has to *exist*, or the component throws before it can invalidate anything.
+  useHoldMessagesOpen: vi.fn(),
 }));
 
 vi.mock("./api.js", () => ({

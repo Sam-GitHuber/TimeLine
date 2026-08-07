@@ -15,7 +15,7 @@ import { useMessaging } from "../messaging.jsx";
 // for its own Connect: react-query clears it on the next attempt, so there's no
 // state here to keep in step.
 export default function MessageButton({ userId }) {
-  const { openThread } = useMessaging();
+  const { openThread, isWriting } = useMessaging();
 
   const mutation = useMutation({
     mutationFn: () => api.openConversation(userId),
@@ -26,10 +26,17 @@ export default function MessageButton({ userId }) {
     // A column so the message stacks under the button rather than competing
     // with it for width in the profile's horizontal action row.
     <span className="inline-flex shrink-0 flex-col items-end gap-1">
+      {/* Held while a panel already in the drawer has a write out (#258). This
+          is the one route into the drawer that isn't *in* it: the panel is
+          non-modal, so the profile behind it stays clickable, and `openThread`
+          switches `view` — tearing down whichever panel is holding a rejection
+          that hasn't arrived. `openThread` can't be gated centrally the way
+          `close` is, because mutations call it from their own success handlers,
+          so the hold goes on the way in. */}
       <button
         type="button"
         onClick={() => mutation.mutate()}
-        disabled={mutation.isPending}
+        disabled={mutation.isPending || isWriting}
         className="btn btn-primary btn-sm"
       >
         {mutation.isPending ? "Opening…" : "Message"}

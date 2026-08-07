@@ -1674,16 +1674,13 @@ rather than merely conditioned on `!strand`, because the message is worth *more*
 over an open strand. A `role="alert"` in a `display: none` subtree isn't
 announced either, so this was silent to a screen reader as well as invisible.
 
-⚠️ **This closes the hiding half, not the unmounting half.** Leaving the thread
-for the conversation list unmounts the whole view — `MessagesDrawer` renders it
-only while `view === "thread"` (the `key={conversationId}` beside it is what
-forces a remount when you switch *between* chats, a different thing) — and that
-takes the bar with it, mid-write and all. The drawer's Back, ✕ and Escape sit a
-level above this component and can't see a write in flight, so they can still
-tear it down: that's **#258**, still open, and its fix is a `useMessaging`
-in-flight flag the chrome reads. `editMutation` has a second hole of its own in
-**#257** (`stopEditing` calls `reset()` unconditionally, discarding a rejection
-that hasn't arrived). Both are the same family one dismissal-route spelling over.
+⚠️ **That closed the hiding half; #257/#258 closed the unmounting half.**
+Leaving the thread for the conversation list unmounts the whole view —
+`MessagesDrawer` renders it only while `view === "thread"` (the
+`key={conversationId}` beside it is what forces a remount when you switch
+*between* chats, a different thing) — and that took the bar with it, mid-write
+and all. See [the drawer holds open](#the-drawer-holds-open-while-a-panel-inside-it-has-a-write-out-257258)
+below for how the chrome learned to see a write it can't reach.
 
 **So the invariant is about the rendering, not about who can reach what:**
 nothing in that column may be the only renderer of a write that can outlive the
@@ -1853,6 +1850,101 @@ exception stayed behind: **a muted thread still says "Muted" up there**, because
 everything else the header carried was an *action* and belongs in the menu, while
 mute is a *state* and the whole risk of it is forgetting you did. Leave now
 confirms first, matching the app and the rest of the web's destructive actions.
+
+### The drawer holds open while a panel inside it has a write out (#257/#258)
+
+The house rule is
+[connections.md](connections.md#reporting-a-refused-write): **a component that is
+the only renderer of its own error may not be dismissed while that write is in
+flight.** Everywhere else in that family the control and the mutation are in the
+same file, so the fix is `disabled={mutation.isPending}` on the button beside
+Save. Not here. The messages drawer's ways out belong to the **chrome** — Escape
+(`MessagesDrawer`), the ✕ and Back (`PanelHeader`), the nav button (`Layout`) —
+and every one of them sits a level above whichever panel is showing, with no way
+to see its mutation.
+
+So **the panel declares the write and the chrome reads the flag**:
+`useHoldMessagesOpen(mutation.isPending)` (in `messaging.jsx`) counts a write
+into messaging context; `close()` declines while the count is above zero, and
+`PanelHeader` renders Back and ✕ disabled. Four panels declare one:
+`NewChatPicker` (add people / start a chat), `ConversationInfoView` (rename),
+`ConversationThreadView` (a message edit **and** a bulk delete — both report
+themselves in the same error bar, and the delete is the longer window of the
+two, since its mutation walks the selection one `DELETE` at a time) and
+`PendingChatPanel` (the locked chat's Connect). The bar's third occupant,
+`photoError`, deliberately isn't one: preparing a photo is a client-side
+decode/re-encode, not a request whose answer you're waiting on.
+
+Four things worth keeping:
+
+- **Counted, not a boolean.** Panels mount and unmount as `view` walks between
+  them, and a bare flag lets one panel's cleanup clear a hold another had taken.
+- **The gate is on `close`, but the *hold* is on the buttons.** Escape has no
+  control to disable, so the refusal has to live in the function — but a ✕ that
+  silently does nothing reads as broken, and "I'm finished with messages" is a
+  real intention. Both are true at once, which is why the visible controls are
+  disabled *and* `close()` declines behind them. Same treatment
+  `ConfirmDeleteDialog` gives its Cancel.
+- **`openInfo` and `openNew` are not gated centrally**, even though they unmount
+  the panel too, because `openThread`/`openList` are reached from mutation
+  *success* handlers and a blanket gate would refuse the one call that has to
+  work (React Query runs `onSuccess` before the mutation leaves its pending
+  state — the same trap that stops `stopEditing` taking a blanket guard). The
+  thread instead drops **Details** and **Add people** from its `⋯`, and holds the
+  group-name button that is the other way to the info panel, on the same
+  `reportingWrite` the drawer's own hold reads — *both* writes that report into
+  the error bar, the edit and the bulk delete, not just the edit. Naming it once
+  is the point: gating these three on `editMutation.isPending` alone left the
+  bulk delete open, and open in the least obvious way, because
+  `confirmDeleteSelected` clears the selection as soon as it fires. The header
+  falls out of its "N selected" arm and puts the group-name button back on screen
+  with every `DELETE` still in flight.
+- **It reaches outside the drawer, in three places.** On a viewport under 800px
+  opening the Groups drawer closes this one, so `close()` **returns whether it
+  actually closed** and neither caller opens Groups when it didn't — `Layout`'s
+  nav button (which greys itself to say so) and `App`'s `GroupsRoute`, the legacy
+  `/groups` URL, whose own comment calls itself "the same coordination as
+  Layout's nav button" and so has to stay that. Below 640px that drawer is
+  full-width and portalled later, so opening it anyway would put it *on top of*
+  the message the refusal exists to show — trading a destroyed error for a hidden
+  one, which is this family's other spelling (#253). The third is
+  `MessageButton` on a profile: the drawer is non-modal, so the page behind it
+  stays clickable, and its `openThread` would switch `view` out from under a
+  panel mid-write.
+
+- **An effect that grabs focus must depend only on what should grab it.** Gating
+  `close` on the write gave it a new identity every time one starts and every
+  time one settles, and `MessagesDrawer`'s Escape effect — keyed on `close` —
+  also called `panelRef.focus()`. Pressing Save on an edit threw focus onto the
+  drawer container, and the answer landing threw it again, mid-typing. Focus now
+  has its own effect keyed on `isOpen`. Worth remembering as a general hazard of
+  turning a stable callback into a stateful one: every effect that lists it in
+  its deps re-runs, and any imperative side effect in there re-fires with it.
+
+**#257 is the same defect reached without any unmount at all.** `stopEditing()`
+ends with `editMutation.reset()` — written to clear a *settled* failure that
+would otherwise hang over a composer no longer editing anything, which is right.
+But `reset()` detaches the observer from a *running* mutation too, so pressing
+Escape after Save dropped a 403 that hadn't arrived yet: edit mode ended, the
+bubble kept the un-corrected text with no "· edited" marker, and nothing was
+said. Both hand routes out of edit mode (Escape, and the ✕ on the quoted
+message) now hold while the PATCH is out, which is what makes the `reset()` on
+the way out safe rather than needing to be conditional.
+
+**What is deliberately *not* held: Leave.** All three of the drawer's Leave
+controls (the thread header's, the info panel's, and `PendingChatPanel`'s
+"Decline / Leave") sit beside a write that the hold covers, and each unmounts
+its panel on success. They stay open anyway, on one reading: leaving takes you
+out of the conversation for good, so whether the rename landed, the edit was
+refused, or the connection request was rejected stops being an answer you'd act
+on. The gate exists to keep a message you'd *do something with*; there's nothing
+left to do. Two of the three ask for confirmation first, which makes the
+intention explicit.
+
+Pinned in `messaging.test.jsx` ("a write in flight holds it open") and
+`App.test.jsx` (the narrow-viewport Groups button), which drive the whole
+sequence each time — press the write, try to leave, *then* let the server
+refuse — because the swallow only shows up at the end of it.
 
 ### Mentions, formatting and multi-select on the web (Phase 9b M9f)
 

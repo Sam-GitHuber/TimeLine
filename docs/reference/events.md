@@ -470,7 +470,14 @@ The gate needs a *present* organiser. Two paths:
 - The group page's actions (**Plan an event**, Invite, Members, Start a chat,
   Leave, and — for admins — Edit, Delete) live behind a single
   **`GroupActionsMenu`** ("⋯"); choosing "Plan an event" reveals the plan form at
-  the now boundary (inset via `.tl-inset` so its inputs clear the spine). The
+  the now boundary (inset via `.tl-inset` so its inputs clear the spine). Its
+  **Cancel is held while the POST is out** (#259, on the web) for the reason the
+  organiser's other writes report themselves at all: the form is the only
+  renderer of its own rejection, and planning an event is a thing you do once, so
+  a create that failed into a dismissed form isn't a question you get a second
+  look at — you find out when nobody turns up. Same rule as
+  [connections.md](connections.md#reporting-a-refused-write); `DimensionEditor`'s
+  four Cancels already had it from #296. The
   header (name · ⋯ · description) is a **second sticky bar pinned directly under
   the nav** (`GroupPage` measures the nav height so it stacks correctly), so the
   group's identity stays put while the upcoming region and timeline scroll up

@@ -517,10 +517,16 @@ function CommentEditor({ commentId, target, initialText, onDone }) {
         </p>
       )}
       <div className="mt-1.5 flex justify-end gap-2">
+        {/* Held while the PATCH is out: `onDone` puts the comment back in read
+            mode, which unmounts the only thing rendering the rejection above
+            (#259). Gated on `isPending` rather than `canSave`, which is also
+            false for an empty box — that would be a Cancel you couldn't press
+            after clearing the text. */}
         <button
           type="button"
           onClick={onDone}
-          className="rounded-lg px-3 py-1 text-xs font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
+          disabled={mutation.isPending}
+          className="rounded-lg px-3 py-1 text-xs font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep disabled:opacity-50"
         >
           Cancel
         </button>
@@ -589,7 +595,8 @@ function CommentComposer({
           <button
             type="button"
             onClick={onDone}
-            className="rounded-lg px-3 py-1 text-xs font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
+            disabled={mutation.isPending}
+            className="rounded-lg px-3 py-1 text-xs font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep disabled:opacity-50"
           >
             Cancel
           </button>

@@ -134,9 +134,17 @@ function ChangePasswordForm({ onDone }) {
       )}
 
       <div className="flex justify-end gap-2">
+        {/* Held while the request is out (#259). This is the sharpest case in
+            the family, because it leaves you wrong about your own credentials:
+            fill the three fields, press Change password, press Close, and a 400
+            of "Your old password was entered incorrectly" lands in a form that
+            has already been collapsed. Nothing is said, and you go on believing
+            your password is the new one. Released as soon as it settles — the
+            success line below needs a way out too. */}
         <button
           type="button"
           onClick={onDone}
+          disabled={saving}
           className="btn btn-ghost btn-sm"
         >
           Close

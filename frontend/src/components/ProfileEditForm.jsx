@@ -28,6 +28,10 @@ export default function ProfileEditForm({ onDone }) {
   const [avatarFile, setAvatarFile] = useState(null);
   const [pendingFile, setPendingFile] = useState(null);
   const [removeAvatar, setRemoveAvatar] = useState(false);
+  // The PATCH has landed — set before `onSuccess` does its follow-up work. See
+  // the Cancel button for why `mutation.isPending` alone is the wrong flag to
+  // hold it on.
+  const [saved, setSaved] = useState(false);
 
   // Local preview for a freshly chosen avatar; revoked on change/unmount.
   const preview = useMemo(
@@ -49,6 +53,15 @@ export default function ProfileEditForm({ onDone }) {
         removeAvatar: removeAvatar && !avatarFile,
       }),
     onSuccess: async () => {
+      // The write has landed, so there is no longer a rejection for this form to
+      // be the only renderer of — let Cancel go *now*, before the follow-up
+      // below. React Query keeps `isPending` true for the whole of `onSuccess`,
+      // so a gate left on it would stay shut across the `refreshUser()` round
+      // trip: exactly the trap #255 named on the delete-account dialog, where a
+      // hold held across a post-success teardown moved the trap rather than
+      // removing it. Nothing here can report an error anyway — the `catch`
+      // below deliberately swallows one.
+      setSaved(true);
       // The profile is already saved server-side at this point. Refreshing
       // "who am I" is best-effort — if that refetch blips, don't strand the
       // user in an open editor with no error (the mutation succeeded); close
@@ -175,9 +188,18 @@ export default function ProfileEditForm({ onDone }) {
       )}
 
       <div className="flex justify-end gap-2">
+        {/* Cancel unmounts this form, and the form is the only thing rendering
+            the PATCH's rejection — so it holds while the write is out, the same
+            way Save beside it does. See
+            `docs/reference/connections.md#reporting-a-refused-write`; the
+            asymmetry (Save gated, Cancel not) was the tell in #259.
+            `&& !saved` because this `onSuccess` awaits a *second* request, and
+            the rule is to release the moment the write lands — not when the
+            screen goes. */}
         <button
           type="button"
           onClick={() => onDone?.()}
+          disabled={mutation.isPending && !saved}
           className="btn btn-ghost btn-sm"
         >
           Cancel

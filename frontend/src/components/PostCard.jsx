@@ -255,10 +255,14 @@ function PostEditor({ postId, initialText, hasImages = false, onDone }) {
         </p>
       )}
       <div className="mt-1.5 flex justify-end gap-2">
+        {/* Held while the PATCH is out — leaving edit mode unmounts the error
+            line above, so a rejected edit would leave the card showing the old
+            text with nothing said (#259). */}
         <button
           type="button"
           onClick={onDone}
-          className="rounded-lg px-3 py-1 text-sm font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
+          disabled={mutation.isPending}
+          className="rounded-lg px-3 py-1 text-sm font-semibold text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep disabled:opacity-50"
         >
           Cancel
         </button>

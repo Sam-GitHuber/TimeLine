@@ -160,6 +160,60 @@ Two things a change here has to keep:
   them: an offline `fetch` rejects rather than pausing, and the gate lets go. Move
   one onto a mutation and it joins that list.
 
+**Issue #259 widened it from dialogs to every shape a form takes**, on the web.
+The rule was written about dialogs because that's where it was found, but nothing
+in it is about being a dialog: an **inline** form that expands in place has no
+backdrop and no Escape, and its Cancel unmounts it exactly the way a backdrop
+click unmounts a modal. The tell in all nine was the same asymmetry — **Save
+disabled while the write was in flight, and Cancel right beside it wasn't**:
+`ProfileEditForm`, both write boxes in `CommentThread`, `PostCard`'s
+`PostEditor`, `GroupInvitePicker` (whose "Close" is a Cancel by another name),
+`PlanEventForm`, `ChangePasswordSection`, and — the two the sweep turned up that
+the issue hadn't listed — `GroupFormPage`, where the dismissal is a **navigation**
+rather than a collapse, and `PendingChatPanel`, where it's the drawer's chrome
+(below). Two of them are worth naming for what silence costs:
+
+- **Change password** leaves you wrong about your own credentials. Fill the three
+  fields, press Change password, press Close; the 400 of *"Your old password was
+  entered incorrectly"* lands in a section that has already collapsed, and you go
+  on believing your password is the new one.
+- **Plan an event** is a thing you do once, so "did that work?" isn't a question
+  you get a second look at. You find out when nobody turns up.
+
+Two things the gate must *not* copy from Save:
+
+- **Gate on `isPending` alone, never on the submit button's own `canSave`.**
+  Several of these compute one condition for both — empty text, unchanged
+  fields — and a Cancel wearing it is a Cancel you can't press after clearing the
+  box.
+- **`isPending` isn't the write when `onSuccess` does more work.** React Query
+  holds a mutation in its pending state for the whole of `onSuccess`, so a form
+  whose success handler awaits a *second* request keeps the gate shut across it —
+  and that request has nothing to report, so the hold is pure trap. That's the
+  same "moved the trap rather than removing it" the bullet above records for the
+  delete dialogs, and `ProfileEditForm` is where it bites on the web: its
+  `onSuccess` awaits `refreshUser()`. It sets a `saved` flag first and its Cancel
+  reads `isPending && !saved`, which is the rule stated exactly — *release the
+  flag the moment the write lands, not when the screen goes.*
+
+**Issue #258 is the case where the component can't gate its own route**, because
+the route belongs to something above it. The messages drawer's Escape, ✕, Back
+and nav button are all a level up from the panel doing the writing and can't see
+its mutation at all, so the panel declares the write into messaging context and
+the chrome reads the flag —
+[messaging.md](messaging.md#the-drawer-holds-open-while-a-panel-inside-it-has-a-write-out-257258)
+has the shape, including why a gate placed on the *mutation's* success path
+instead would refuse the one call that has to work. **#257** is the same family
+again with nothing unmounted at all: `stopEditing()` called `reset()`
+unconditionally, which detaches the observer from a PATCH still on its way back.
+All of these are pinned on the web in `inline-form-holds.test.jsx` and
+`messaging.test.jsx`.
+
+**The phone has all of this still open**, tracked separately: #256 (Android back
+registered where the in-flight flag isn't in scope, at five forms), #261 (three
+`Modal`s that cover the edit error's only renderer), and the mobile halves of
+#257 and #259.
+
 ### A connection *is* the boundary, so its writes refresh everything it gates
 
 `connected_user_ids` is the one set the feed, profiles, group timelines, comment
