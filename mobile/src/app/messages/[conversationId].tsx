@@ -1275,9 +1275,10 @@ export default function ThreadScreen() {
     });
   }
 
-  /** Leave edit mode and put the pre-edit draft back in the composer. */
   /**
-   * Leave edit mode: the ✕, Android back, and `editMutation`'s own success.
+   * Leave edit mode, putting the pre-edit draft back in the composer.
+   *
+   * Three callers: the ✕, Android back, and `editMutation`'s own success.
    *
    * The `reset()` is only ever wanted for a **settled** failure — an error left
    * over from a finished edit shouldn't hang over a composer that isn't editing

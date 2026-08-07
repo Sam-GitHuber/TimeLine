@@ -205,7 +205,20 @@ function AuthGate() {
  *     silent again, which is the whole bug #237 fixed — and `cancel` is the one
  *     that leaves you believing everyone who RSVP'd was told.
  *
- * Check all six before wiring it.)
+ * **And, as of #256/#257/#259, every form that holds itself open while its
+ * write is in flight** — `src/writeHold.tsx` and its callers. These are the
+ * same shape as the `DisconnectWarningModal` case above and just as sharp:
+ * a paused mutation never settles, so the hold never lets go and the form
+ * refuses its Cancel, the screen's Back, Android's back and iOS's swipe
+ * *forever*. That is a screen with no way out at all, reached by pressing Save
+ * with no signal — the single most likely way any of this is used. Fourteen
+ * forms across nine screens; grep `useHoldOpen` / `useHoldScreen` for the
+ * current list rather than trusting a copy here, and note that three of the
+ * event screen's own writes (`rsvp`, `vote`, `editPoll`) join the seven listed
+ * above for a second reason.
+ *
+ * Check all of it before wiring it — and if it is wired, these holds need a
+ * bypass, because "offline" stops being a rejection they can report.)
  */
 function useRefetchOnForeground() {
   useEffect(() => {

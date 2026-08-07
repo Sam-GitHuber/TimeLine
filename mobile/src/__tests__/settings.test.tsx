@@ -367,6 +367,28 @@ describe('leaving Settings while a section is saving', () => {
     ).toBeTruthy();
   });
 
+  androidIt('refuses hardware back while read receipts are saving', async () => {
+    // The section registers no `useAndroidBack` of its own — only
+    // `ChangePasswordSection` does, and only while its accordion is open — so
+    // without the screen's registration this press is unclaimed and pops
+    // Settings, which is the swallow all over again.
+    captureBackHandler();
+    await renderScreen();
+    const server = holdRequest(mockFetch, { detail: 'Nope.' }, 500);
+    await act(async () => {
+      fireEvent(screen.getByLabelText('Send read receipts'), 'valueChange', false);
+    });
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    await server.refuse();
+    expect(
+      await screen.findByText('Couldn’t save that. Please try again.')
+    ).toBeTruthy();
+  });
+
   it('refuses Back while a notification preference is saving', async () => {
     await renderScreen();
     const toggle = await screen.findByLabelText(

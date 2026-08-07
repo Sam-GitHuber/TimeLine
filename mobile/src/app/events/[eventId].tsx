@@ -42,7 +42,7 @@ import { ReactionBar } from '@/components/ReactionBar';
 import { formatEventWhen } from '@/eventFormat';
 import { dismissEventNotifications } from '@/push';
 import { useAndroidBack } from '@/useAndroidBack';
-import { useHoldSwipeBack } from '@/writeHold';
+import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 
 /**
@@ -212,10 +212,17 @@ export default function EventScreen() {
    * - a **poll edit** — the 409 ("voting has started") is surfaced in the edit
    *   form in place, which is the whole reason that one is `mutateAsync`.
    *
-   * Hoisted to one predicate read by all three gates below, so they can't drift
+   * `hold` picks up a **fourth**: a comment edit or reply in the `CommentThread`
+   * further down this screen, whose write box is the only renderer of its own
+   * refusal too. `CommentNode` holds the routes it owns and forwards up to here
+   * for the two it can't see — this screen's Back and the swipe.
+   *
+   * Hoisted to one predicate read by all the gates below, so they can't drift
    * apart — the shape the web settled on in #300.
    */
-  const holding = rsvp.isPending || vote.isPending || editPoll.isPending;
+  const hold = useWriteHold();
+  const holding =
+    rsvp.isPending || vote.isPending || editPoll.isPending || hold.held;
   useHoldSwipeBack(holding);
 
   // Android back closes the open editor rather than the event — the hardware
@@ -442,10 +449,12 @@ export default function EventScreen() {
                 ) : null
               }
             />
-            <CommentThread
-              target={{ eventId: event.id, groupId: event.group.id }}
-              highlightCommentId={highlightCommentId}
-            />
+            <WriteHoldProvider hold={hold}>
+              <CommentThread
+                target={{ eventId: event.id, groupId: event.group.id }}
+                highlightCommentId={highlightCommentId}
+              />
+            </WriteHoldProvider>
           </View>
 
           {/* Cancel/delete — the organiser or a group admin (`can_moderate`).

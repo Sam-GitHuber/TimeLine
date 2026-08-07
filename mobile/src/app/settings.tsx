@@ -30,6 +30,7 @@ import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSec
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
 import { PrivacySection } from '@/components/settings/PrivacySection';
 import { colors, fontSize, spacing } from '@/theme';
+import { useAndroidBack } from '@/useAndroidBack';
 import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 export default function SettingsScreen() {
@@ -50,6 +51,16 @@ export default function SettingsScreen() {
    */
   const hold = useWriteHold();
   useHoldSwipeBack(hold.held);
+  // Android's hardware back is the fourth exit, and the only section that
+  // claims it is `ChangePasswordSection` — and only while its accordion is
+  // open. A read-receipts or notification toggle saving is neither, so without
+  // this the press falls through to the navigator and pops the whole screen.
+  //
+  // Two registrations can be live at once here (this one and the section's),
+  // and that's fine because they *agree*: both decline while the hold is up.
+  // What must never happen is two that would do different things — see
+  // `writeHold.tsx`.
+  useAndroidBack(hold.held, () => {});
 
   const goBack = () => {
     if (hold.held) return;

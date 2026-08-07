@@ -228,6 +228,16 @@ group **posts** only, never events. (E4b moved it there from the feed header,
 where E3a first shipped it.) The `group_invite` push notification deep-links to
 the Groups tab.
 
+**The create/edit screen has no Cancel**, which is what made it the phone's
+clearest case of the refused-write rule (#259): the ways out are the screen's
+"← Back", Android's hardware back and iOS's swipe-back, so a "gate the Cancel"
+fix has nothing to gate. All three are held while the write is in flight, since
+the error above the button is its only renderer — press Create, leave, and a POST
+that 400s on a duplicate name left you on the Groups tab with no group and
+nothing said. The form declares the write and the screen's Back reads it; see
+[connections.md](connections.md#reporting-a-refused-write) for the mechanism and
+why the phone needed one where the web needed a `disabled` attribute.
+
 **Events (the group's upcoming-events section, event detail, RSVP, polls, the
 calendar) are E3b/E3c** — E3a is groups only.
 

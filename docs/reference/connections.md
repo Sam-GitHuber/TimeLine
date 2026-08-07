@@ -123,6 +123,10 @@ unwired to NetInfo, because wiring it makes React Query *pause* an offline
 mutation rather than reject it, and a dialog that refuses Cancel while busy would
 then never let go. The deferral note in `mobile/src/app/_layout.tsx` names every
 component that depends on it — add to that list, don't just add the dependency.
+**Every form in the write-hold sweep below joins that list**, which is what turns
+the tripwire from sharp into decisive: wired, a form that can't be dismissed
+while pending becomes a screen with no way out at all, reached by pressing Save
+with no signal.
 
 **Issue #254 made that hold the rule for every dialog that renders its own
 rejection**, which is the *unmount* spelling of the same bug: the message is
@@ -240,12 +244,13 @@ screens), `PlanEventForm`, the RSVP bar, a poll vote, the message edit, and
 `PendingChatPanel`'s Connect. Three phone-specific things a change here has to
 keep:
 
-- **One `useAndroidBack` registration per press, never two.** A hold that adds
-  its own handler alongside an existing one makes "which one claims the press"
-  a matter of hook order — the race that file already keeps one write box per
-  comment to avoid. Where a screen already registers for the state being held,
-  gate *that* handler and take only `useHoldSwipeBack`; `useHoldScreen` is for
-  screens that register nothing else.
+- **Two Android-back registrations must never *disagree* about one press.** RN
+  runs the most recently registered handler first, so two that would do
+  different things rank themselves by an accident of hook order — the race
+  `CommentThread` already keeps one write box per comment to avoid. Two that
+  both decline are harmless. In practice: where a screen already registers for
+  the state being held, gate *that* handler and take only `useHoldSwipeBack`;
+  `useHoldScreen` is for screens with nothing else registered.
 - **A silent decline reads as a broken app.** Every visible control renders
   unavailable (dimmed, `disabled`) as well as declining, so the gate is the
   backstop rather than the whole fix. The one exception is an action-sheet item,

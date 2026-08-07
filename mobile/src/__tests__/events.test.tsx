@@ -29,6 +29,7 @@ import {
   androidIt,
   captureBackHandler,
   choosePhotoSource,
+  holdRequest,
   pressAlertButton,
   pressBack,
   resetMenuSpies,
@@ -910,6 +911,32 @@ describe('holding the event screen while a child’s write is out', () => {
       await screen.findByText('You’re no longer in this group.')
     ).toBeTruthy();
     rsvp.mockRestore();
+  });
+
+  it('refuses Back while a comment on the event is saving', async () => {
+    // The fourth write on this screen, and the one that doesn't belong to it:
+    // `CommentThread`'s reply box is the only renderer of its own refusal, and
+    // its hold forwards up to the screen that owns Back and the swipe.
+    serveEvent(makeEvent({}));
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    await fireEvent.changeText(
+      await screen.findByLabelText('Write a comment…'),
+      'see you there'
+    );
+
+    const server = holdRequest(mockFetch, { detail: 'This event is closed.' }, 403);
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Post comment'));
+    });
+    await server.inFlight('Posting…');
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(router.back).not.toHaveBeenCalled();
+
+    await server.refuse();
+    expect(await screen.findByText('This event is closed.')).toBeTruthy();
   });
 
   it('refuses Back while a vote is out, then says it was refused', async () => {

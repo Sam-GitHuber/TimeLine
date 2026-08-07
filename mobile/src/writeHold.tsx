@@ -36,13 +36,15 @@
  * - **Hold on the pending flag alone, never on the submit button's `canSave`.**
  *   That is also false for an empty box, which would be a Cancel you couldn't
  *   press after clearing the text.
- * - **Don't stack two Android-back registrations for one state.** RN runs the
- *   most recently registered handler first, so two handlers claiming one press
- *   order themselves by an accident of hook order — the race
- *   `CommentThread.tsx` keeps one write box per comment to avoid. Where a
- *   screen already registers `useAndroidBack` for the state being held, gate
- *   *that* handler and use `useHoldSwipeBack` on its own; `useHoldScreen` is for
- *   screens that register nothing else.
+ * - **Never let two Android-back registrations *disagree* about one press.** RN
+ *   runs the most recently registered handler first, so two handlers that would
+ *   do different things rank themselves by an accident of hook order — the race
+ *   `CommentThread.tsx` keeps one write box per comment to avoid. Two that both
+ *   decline are harmless, which is what makes the Settings screen's
+ *   screen-level hold safe alongside `ChangePasswordSection`'s own. The rule in
+ *   practice: where a screen already registers `useAndroidBack` for the state
+ *   being held, prefer gating *that* handler and taking `useHoldSwipeBack`
+ *   alone; `useHoldScreen` is for screens with nothing else registered.
  */
 
 import { useNavigation } from 'expo-router';
