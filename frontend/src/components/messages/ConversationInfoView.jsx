@@ -117,11 +117,12 @@ export default function ConversationInfoView() {
    * haven't sent is free; abandoning one the server is about to refuse is the
    * bug, and the same now goes for the other two.
    */
-  useHoldMessagesOpen(
+  const reportingWrite =
     renameMutation.isPending ||
-      muteMutation.isPending ||
-      leaveMutation.isPending
-  );
+    muteMutation.isPending ||
+    leaveMutation.isPending;
+
+  useHoldMessagesOpen(reportingWrite);
 
   const groupName =
     detail?.title ||
@@ -299,13 +300,26 @@ export default function ConversationInfoView() {
               </p>
             )}
 
+            {/* ⚠️ Gated on `reportingWrite`, not left open. The drawer's own
+                hold cannot reach this: `openNew` switches `view`, and
+                `openInfo`/`openNew` are deliberately *not* gated centrally
+                (`messaging.jsx`) because `openThread`/`openList` are called from
+                mutation success handlers. So this button is an exit out of the
+                panel that the ✕ and Back can't cover, and it unmounts the only
+                renderer of all three of this panel's rejections — the same
+                escape hatch `ConversationThreadView` closes by dropping Details
+                and Add people from its `⋯` while its own writes are out.
+                Disabled rather than absent, because this one is a row in a
+                settings list: a row that vanishes and comes back reads as the
+                list rearranging itself. */}
             {isGroup && (
               <button
                 type="button"
                 onClick={() =>
                   openNew({ addToConversationId: conversationId })
                 }
-                className="block w-full px-5 py-2.5 text-left transition hover:bg-accent-tint/40"
+                disabled={reportingWrite}
+                className="block w-full px-5 py-2.5 text-left transition hover:bg-accent-tint/40 disabled:opacity-45 disabled:hover:bg-transparent"
               >
                 <span className="block text-sm font-semibold text-ink">
                   Add people

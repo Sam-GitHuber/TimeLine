@@ -1901,13 +1901,24 @@ Four things worth keeping:
   state — the same trap that stops `stopEditing` taking a blanket guard). The
   thread instead drops **Details** and **Add people** from its `⋯`, and holds the
   group-name button that is the other way to the info panel, on the same
-  `reportingWrite` the drawer's own hold reads — *both* writes that report into
-  the error bar, the edit and the bulk delete, not just the edit. Naming it once
-  is the point: gating these three on `editMutation.isPending` alone left the
-  bulk delete open, and open in the least obvious way, because
-  `confirmDeleteSelected` clears the selection as soon as it fires. The header
-  falls out of its "N selected" arm and puts the group-name button back on screen
-  with every `DELETE` still in flight.
+  `reportingWrite` the drawer's own hold reads — **every** write that reports
+  into the error bar, which was the edit and the bulk delete and is five of them
+  since #238. Naming it once is the point: gating these three on
+  `editMutation.isPending` alone left the bulk delete open, and open in the least
+  obvious way, because `confirmDeleteSelected` clears the selection as soon as it
+  fires. The header falls out of its "N selected" arm and puts the group-name
+  button back on screen with every `DELETE` still in flight.
+
+  **The info panel needed the same treatment and hadn't had it** — found in
+  review of #238. Its "Add people" row calls `openNew`, so it is an exit out of
+  that panel which the ✕ and Back can't cover, and it takes the only renderer of
+  the panel's rename, mute and leave with it. It now reads a `reportingWrite` of
+  its own. The gap predates #238 (the rename was exposed to it all along) but
+  #238 is what made it matter, by putting two more rejections behind that button.
+  Worth stating as the general shape: **not gating `openInfo`/`openNew`
+  centrally means every control that calls one is a hold site**, and a panel that
+  starts reporting a new write has to be re-checked against its own exits, not
+  just the drawer's.
 - **It reaches outside the drawer, in three places.** On a viewport under 800px
   opening the Groups drawer closes this one, so `close()` **returns whether it
   actually closed** and neither caller opens Groups when it didn't — `Layout`'s

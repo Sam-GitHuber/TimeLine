@@ -4506,6 +4506,40 @@ describe("Messages drawer — a refused write says so (#238)", () => {
     ).toBeEnabled();
   });
 
+  // Found in review of this fix, not in the issue. The drawer's chrome is not
+  // the only way out of the Details panel: its own "Add people" row calls
+  // `openNew`, which switches `view` — and `openInfo`/`openNew` are deliberately
+  // *not* gated centrally (`messaging.jsx`), so a control that calls one is a
+  // hold site in its own right. The thread view closes that hatch by dropping
+  // Details and Add people from its ⋯; this panel never had the equivalent.
+  it("holds the Details panel's own Add people while its mute is out", async () => {
+    const user = userEvent.setup();
+    const mute = hanging();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.setConversationMuted.mockReturnValue(mute.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+    await user.click(
+      await screen.findByRole("switch", { name: "Mute notifications" })
+    );
+    await waitFor(() => expect(api.setConversationMuted).toHaveBeenCalled());
+
+    const add = screen.getByRole("button", { name: /add people/i });
+    expect(add).toBeDisabled();
+    await user.click(add);
+
+    // Still on Details — the picker would have unmounted the one thing that can
+    // report the mute, and the mute is the write that lies hardest when it does.
+    await mute.reject(unauthoredError(500));
+    expect(
+      await screen.findByText("Couldn’t mute this chat.")
+    ).toBeInTheDocument();
+  });
+
   it("holds the Details panel's Back while its mute is out", async () => {
     const user = userEvent.setup();
     const mute = hanging();
