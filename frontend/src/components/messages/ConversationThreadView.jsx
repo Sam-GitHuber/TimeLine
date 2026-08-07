@@ -776,34 +776,6 @@ export default function ConversationThreadView() {
     },
   });
 
-  /**
-   * **Both writes that report themselves in the error bar hold the drawer open**
-   * (#257, #258). That bar at the foot of this view is the only place either is
-   * reported, and leaving the thread unmounts the whole view — so while one is
-   * out, the drawer's Escape, ✕, Back and nav button hold. The bar's own comment
-   * used to say the unmounting half was somebody else's open bug; it isn't now.
-   *
-   * The bulk delete belongs here as much as the edit, and is the *longer* window
-   * of the two: its `mutationFn` walks the selection one `DELETE` at a time, so
-   * `isPending` spans every one of them.
-   *
-   * The bar's third occupant, `photoError`, deliberately isn't here. Preparing a
-   * photo is a client-side decode/re-encode, not a write — the rule is about a
-   * request whose answer you're waiting on, and holding the whole drawer shut
-   * while a picture is being resized would be the gate outstaying its purpose.
-   *
-   * Named once and read everywhere, because the drawer's four exits are not the
-   * only way out of this view: the controls inside it that switch `view` unmount
-   * it just as completely, and they have to hold on the *same* condition. Two of
-   * them gated on the edit alone until this was hoisted, which left the bulk
-   * delete — the longer window — reported into a bar the user could still
-   * navigate out from under.
-   */
-  const reportingWrite =
-    editMutation.isPending || deleteManyMutation.isPending;
-
-  useHoldMessagesOpen(reportingWrite);
-
   // Leave (or, while pending, decline) a chat — group-only in the header;
   // PendingChatPanel has its own copy of this for the locked view, and the
   // Details panel a third. All three now refresh the same two keys, as all three
@@ -833,6 +805,45 @@ export default function ConversationThreadView() {
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
+
+  /**
+   * **Every write that reports itself in the error bar holds the drawer open**
+   * (#257, #258, #238). That bar at the foot of this view is the only place any
+   * of them is reported, and leaving the thread unmounts the whole view — so
+   * while one is out, the drawer's Escape, ✕, Back and nav button hold. The
+   * bar's own comment used to say the unmounting half was somebody else's open
+   * bug; it isn't now.
+   *
+   * It was the edit and the bulk delete alone until #238, because the other
+   * three said nothing when they failed and so had nothing to protect. The bulk
+   * delete is still the *longest* window: its `mutationFn` walks the selection
+   * one `DELETE` at a time, so `isPending` spans every one of them.
+   *
+   * The bar's remaining occupant, `photoError`, deliberately isn't here.
+   * Preparing a photo is a client-side decode/re-encode, not a write — the rule
+   * is about a request whose answer you're waiting on, and holding the whole
+   * drawer shut while a picture is being resized would be the gate outstaying
+   * its purpose.
+   *
+   * Named once and read everywhere, because the drawer's four exits are not the
+   * only way out of this view: the controls inside it that switch `view` unmount
+   * it just as completely, and they have to hold on the *same* condition. Two of
+   * them gated on the edit alone until this was hoisted, which left the bulk
+   * delete — the longer window — reported into a bar the user could still
+   * navigate out from under.
+   *
+   * ⚠️ Declared below all five mutations, not beside the first two. It reads
+   * every one of them, and a `const` hoisted above `leaveMutation` would be a
+   * temporal-dead-zone throw rather than a stale read.
+   */
+  const reportingWrite =
+    editMutation.isPending ||
+    deleteManyMutation.isPending ||
+    deleteMutation.isPending ||
+    leaveMutation.isPending ||
+    muteMutation.isPending;
+
+  useHoldMessagesOpen(reportingWrite);
 
   function startEditing(message) {
     // Only stash on the way *into* edit mode. Switching straight from editing
@@ -1188,15 +1199,15 @@ export default function ConversationThreadView() {
    * Add and Leave are group-only: there's nobody to add to a 1:1, and leaving
    * one is what Block is for.
    *
-   * **Details and Add stand down while either reported write is out** (#257,
-   * #258). Both switch the drawer to another `view`, which unmounts this one and
-   * takes the error bar — the only renderer of a refused edit or a refused bulk
-   * delete — with it. Absent rather than greyed, matching the way Delete leaves
+   * **Details and Add stand down while any reported write is out** (#257, #258,
+   * #238). Both switch the drawer to another `view`, which unmounts this one and
+   * takes the error bar — the only renderer of all five of `reportingWrite`'s
+   * writes — with it. Absent rather than greyed, matching the way Delete leaves
    * the selection bar: `getActions` is called when the menu opens, so what it
    * offers is a fact about now.
    *
-   * Mute stays because it doesn't change `view` at all. Leave stays because it
-   * asks first and means it: someone who confirms "leave this chat" has decided
+   * Mute and Leave stay in the menu. Mute doesn't change `view` at all; Leave
+   * asks first and means it — someone who confirms "leave this chat" has decided
    * the chat is over, and holding that behind a typo correction would be the
    * gate outstaying its purpose.
    */
@@ -1783,8 +1794,11 @@ export default function ConversationThreadView() {
         </div>
       )}
 
-      {/* The three failures with nowhere nearer to go, in a bar under whichever
-          of the transcript and the strand is on screen.
+      {/* The failures with nowhere nearer to go, in a bar under whichever of the
+          transcript and the strand is on screen. Three when #253 moved it here
+          (a photo that couldn't be prepared, a refused edit, a partly-refused
+          bulk delete); six since #238 gave the single-message delete, Leave and
+          Mute the renderer they never had.
 
           **They used to sit in the composer, and that was the bug (#253).** The
           composer belongs to the transcript column, which is given `hidden` — a
@@ -1814,9 +1828,15 @@ export default function ConversationThreadView() {
           it. That unmount was its own bug, #258, and #253 could only stop the
           *hiding*, not the *unmounting*: the drawer's Back, ✕ and Escape sit a
           level above this component and couldn't see a write in flight. They can
-          now — `useHoldMessagesOpen` above tells them, for both writes in here,
-          and they hold until the answer lands. */}
-      {(photoError || editMutation.isError || deleteManyMutation.isError) && (
+          now — `useHoldMessagesOpen` above tells them, for every write that
+          reports in here (`reportingWrite`, five of them since #238), and they
+          hold until the answer lands. */}
+      {(photoError ||
+        editMutation.isError ||
+        deleteManyMutation.isError ||
+        deleteMutation.isError ||
+        leaveMutation.isError ||
+        muteMutation.isError) && (
         <div className="space-y-1 px-3 pb-3 text-sm text-red-600">
           {/* A photo that couldn't be prepared never reached the outbox, so it
               has no bubble to fail on. Same window as the other two: preparing
@@ -1835,6 +1855,48 @@ export default function ConversationThreadView() {
               not what any one response says. */}
           {deleteManyMutation.isError && (
             <p role="alert">Some messages are still there. Try again.</p>
+          )}
+          {/* The three #238 additions. All of them said nothing at all when they
+              failed, in a file where the two above already reported — omissions
+              rather than a house style.
+
+              **Single-message delete** is offered from the bubble's ⋯ and from
+              inside a strand. The bubble simply stayed where it was, and the
+              natural response is to delete it again — against a server that may
+              well have succeeded the first time.
+
+              **Leave.** `openList()` runs only on `onSuccess`, so a refused
+              leave left you staring at the thread you'd just confirmed leaving.
+
+              **Mute** is the one that lies hardest. The menu closes on the
+              click, and the header's muted mark only appears once `detail.muted`
+              comes back changed — which it won't, because the write failed. A
+              mute that 500'd is pixel-identical to a mute that worked, so you
+              believe a noisy group chat is silenced and your phone buzzes all
+              evening. `ConversationListView` names this exact failure in its own
+              comment and handles it; this view didn't. */}
+          {deleteMutation.isError && (
+            <p role="alert">
+              {serverMessage(
+                deleteMutation.error,
+                "Couldn’t delete that message."
+              )}
+            </p>
+          )}
+          {leaveMutation.isError && (
+            <p role="alert">
+              {serverMessage(leaveMutation.error, "Couldn’t leave this chat.")}
+            </p>
+          )}
+          {muteMutation.isError && (
+            <p role="alert">
+              {serverMessage(
+                muteMutation.error,
+                muteMutation.variables
+                  ? "Couldn’t mute this chat."
+                  : "Couldn’t unmute this chat."
+              )}
+            </p>
           )}
         </div>
       )}

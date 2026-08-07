@@ -96,9 +96,15 @@ export function MessagingProvider({ children }) {
   /**
    * Close the drawer — **unless a panel inside it has a write out** (#258).
    *
-   * Closing unmounts whichever panel is showing, and two of them are the only
-   * renderer of their own rejection: `NewChatPicker` (add people / start a chat)
-   * and `ConversationInfoView` (rename), plus the thread's message edit (#257).
+   * Closing unmounts whichever panel is showing, and **all four of them are the
+   * only renderer of at least one rejection**: `NewChatPicker` (add people /
+   * start a chat), `ConversationInfoView` (rename, mute, leave),
+   * `ConversationThreadView` (a message edit, a bulk delete, a single-message
+   * delete, leave, mute — the `reportingWrite` its error bar reports) and
+   * `PendingChatPanel` (Connect, and its Decline). It was two of them at #257 /
+   * #258; #238 gave the other six writes the renderer they'd never had, and a
+   * renderer is exactly what makes a panel worth holding shut.
+   *
    * A close that lands before the server answers takes the message with it, so
    * you walk away believing two people were added and they weren't.
    *

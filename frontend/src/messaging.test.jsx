@@ -4250,3 +4250,319 @@ describe("Messages drawer — a write in flight holds it open (#257, #258)", () 
     expect(screen.getByRole("button", { name: /^Messages$/ })).toBeEnabled();
   });
 });
+
+/**
+ * Issue #238 — **a write that is refused has to say so.**
+ *
+ * Six writes across three of the drawer's panels reported nothing at all when
+ * they failed, and in every case a sibling mutation in the same file already
+ * did: the thread view rendered its edit and its bulk delete, the info panel its
+ * rename, the locked panel its Connect. Omissions, not a house style.
+ *
+ * Mute is the one that lies hardest, and it's why these are worth a block of
+ * their own rather than a line in the fix. The menu closes on the click and both
+ * controls read `detail.muted` straight from the server — deliberately, so
+ * nothing moves before the write lands — so a mute that 500'd was
+ * pixel-identical to a mute that worked. You believe a noisy group chat is
+ * silenced and your phone buzzes all evening with no reason to suspect the app.
+ *
+ * Each test drives the whole sequence and insists on the message, rather than
+ * asserting a handler was wired: the swallow only shows at the end of it.
+ */
+describe("Messages drawer — a refused write says so (#238)", () => {
+  function msg(overrides = {}) {
+    return {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hi",
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  const mineSender = { id: fakeUser.pk, display_name: "you", avatar_thumb: null };
+
+  async function openInfo(user) {
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: "Details" }));
+  }
+
+  /** A request that hangs until the test refuses it — see the #257/#258 block. */
+  function hanging() {
+    let refuse;
+    const promise = new Promise((_resolve, reject) => {
+      refuse = reject;
+    });
+    promise.catch(() => {});
+    return {
+      promise,
+      reject: async (error) => {
+        refuse(error);
+        await act(async () => {
+          for (let i = 0; i < 3; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        });
+      },
+    };
+  }
+
+  it("says so when the thread header's Mute is refused", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.setConversationMuted.mockRejectedValue(
+      apiError("You’re no longer in this chat.", 403)
+    );
+
+    renderAt("/messages/7");
+    await screen.findByText("Priya");
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: "Mute" }));
+
+    await waitFor(() =>
+      expect(api.setConversationMuted).toHaveBeenCalledWith(7, true)
+    );
+    // The server's own words where it wrote any (connections.md).
+    expect(
+      await screen.findByText("You’re no longer in this chat.")
+    ).toBeInTheDocument();
+    // And the thread is still unmuted, because it always was — the switch never
+    // moved. That's the half that made this invisible.
+    expect(screen.queryByText("Muted")).toBeNull();
+  });
+
+  it("names the direction when Mute is refused with nothing readable", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail({ muted: true }));
+    api.getMessages.mockResolvedValue(page([]));
+    api.setConversationMuted.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+    await screen.findByText("Priya");
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: "Unmute" }));
+
+    await waitFor(() =>
+      expect(api.setConversationMuted).toHaveBeenCalledWith(7, false)
+    );
+    // Per state, never generic: which of the two didn't happen is most of the
+    // value, and a 500 with no DRF body has no words of its own to use.
+    expect(
+      await screen.findByText("Couldn’t unmute this chat.")
+    ).toBeInTheDocument();
+  });
+
+  it("says so when the thread header's Leave is refused, and keeps you there", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.leaveConversation.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: /leave/i }));
+    confirm.mockRestore();
+
+    await waitFor(() => expect(api.leaveConversation).toHaveBeenCalledWith(11));
+    // `openList()` runs only on success, so you're still looking at the thread
+    // you just confirmed leaving — which said nothing about why.
+    expect(
+      await screen.findByText("Couldn’t leave this chat.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Book Club")).toBeInTheDocument();
+  });
+
+  it("says so when a single-message delete is refused", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([msg({ id: 5, text: "helo", sender: mineSender })])
+    );
+    api.deleteMessage.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+    await screen.findByText("helo");
+    await user.click(screen.getByRole("button", { name: "Message options" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(api.deleteMessage).toHaveBeenCalledWith(7, 5));
+    // The bubble simply stayed put before this — and the natural response is to
+    // delete it again, against a server that may have succeeded the first time.
+    expect(
+      await screen.findByText("Couldn’t delete that message.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("helo")).toBeInTheDocument();
+  });
+
+  it("says so when the Details panel's Mute is refused", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.setConversationMuted.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+    await user.click(
+      await screen.findByRole("switch", { name: "Mute notifications" })
+    );
+
+    await waitFor(() =>
+      expect(api.setConversationMuted).toHaveBeenCalledWith(11, true)
+    );
+    expect(
+      await screen.findByText("Couldn’t mute this chat.")
+    ).toBeInTheDocument();
+    // The switch is driven by the server's answer, so it correctly hasn't
+    // moved — which is exactly why it had to be said out loud.
+    expect(
+      screen.getByRole("switch", { name: "Mute notifications" })
+    ).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("says so when the Details panel's Leave is refused, and keeps you there", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.leaveConversation.mockRejectedValue(
+      apiError("You’re no longer in this chat.", 403)
+    );
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await user.click(await screen.findByRole("button", { name: /leave chat/i }));
+    confirm.mockRestore();
+
+    await waitFor(() => expect(api.leaveConversation).toHaveBeenCalledWith(11));
+    expect(
+      await screen.findByText("You’re no longer in this chat.")
+    ).toBeInTheDocument();
+    // Still on Details rather than back at the list, because `openList()` only
+    // runs on success — so this is the panel that has to carry the message.
+    expect(screen.getByText("Details")).toBeInTheDocument();
+  });
+
+  it("says so when the locked panel's Decline is refused", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(
+      groupConvoDetail({
+        my_status: "pending",
+        can_send: false,
+        must_connect_with: [{ id: 5, display_name: "Amara", avatar_thumb: null }],
+      })
+    );
+    api.getMessages.mockResolvedValue(page([]));
+    api.leaveConversation.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await user.click(screen.getByRole("button", { name: /decline|leave/i }));
+
+    await waitFor(() => expect(api.leaveConversation).toHaveBeenCalledWith(11));
+    // The button went back from "Leaving…" to "Decline / Leave" and the invite
+    // was still there next time — with nothing to say it hadn't worked.
+    expect(
+      await screen.findByText("Couldn’t leave this chat.")
+    ).toBeInTheDocument();
+  });
+
+  // The other half of the rule (#258): these panels are now the only renderer of
+  // three more rejections apiece, so the drawer's chrome has to hold for them
+  // too. Reporting a refusal into a panel the ✕ can tear down first is the same
+  // bug one step along.
+  it("holds the drawer's ✕ while a mute is out", async () => {
+    const user = userEvent.setup();
+    const mute = hanging();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.setConversationMuted.mockReturnValue(mute.promise);
+
+    renderAt("/messages/7");
+    await screen.findByText("Priya");
+    await openHeaderMenu(user);
+    await user.click(screen.getByRole("button", { name: "Mute" }));
+    await waitFor(() => expect(api.setConversationMuted).toHaveBeenCalled());
+
+    const close = screen.getByRole("button", { name: "Close messages" });
+    expect(close).toBeDisabled();
+    await user.click(close);
+    expect(screen.queryByRole("dialog", { name: "Messages" })).toBeInTheDocument();
+
+    await mute.reject(unauthoredError(500));
+    expect(
+      await screen.findByText("Couldn’t mute this chat.")
+    ).toBeInTheDocument();
+    // And it lets go the moment the answer lands, so the message isn't a trap.
+    expect(
+      screen.getByRole("button", { name: "Close messages" })
+    ).toBeEnabled();
+  });
+
+  // Found in review of this fix, not in the issue. The drawer's chrome is not
+  // the only way out of the Details panel: its own "Add people" row calls
+  // `openNew`, which switches `view` — and `openInfo`/`openNew` are deliberately
+  // *not* gated centrally (`messaging.jsx`), so a control that calls one is a
+  // hold site in its own right. The thread view closes that hatch by dropping
+  // Details and Add people from its ⋯; this panel never had the equivalent.
+  it("holds the Details panel's own Add people while its mute is out", async () => {
+    const user = userEvent.setup();
+    const mute = hanging();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.setConversationMuted.mockReturnValue(mute.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+    await user.click(
+      await screen.findByRole("switch", { name: "Mute notifications" })
+    );
+    await waitFor(() => expect(api.setConversationMuted).toHaveBeenCalled());
+
+    const add = screen.getByRole("button", { name: /add people/i });
+    expect(add).toBeDisabled();
+    await user.click(add);
+
+    // Still on Details — the picker would have unmounted the one thing that can
+    // report the mute, and the mute is the write that lies hardest when it does.
+    await mute.reject(unauthoredError(500));
+    expect(
+      await screen.findByText("Couldn’t mute this chat.")
+    ).toBeInTheDocument();
+  });
+
+  it("holds the Details panel's Back while its mute is out", async () => {
+    const user = userEvent.setup();
+    const mute = hanging();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.setConversationMuted.mockReturnValue(mute.promise);
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+    await user.click(
+      await screen.findByRole("switch", { name: "Mute notifications" })
+    );
+    await waitFor(() => expect(api.setConversationMuted).toHaveBeenCalled());
+
+    // Back switches `view` to the transcript, which unmounts this panel just as
+    // completely as the ✕ closes the drawer.
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+
+    await mute.reject(unauthoredError(500));
+    expect(
+      await screen.findByText("Couldn’t mute this chat.")
+    ).toBeInTheDocument();
+  });
+});

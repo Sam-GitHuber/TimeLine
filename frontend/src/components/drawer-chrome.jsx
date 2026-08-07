@@ -80,8 +80,9 @@ export function IconButton({ onClick, label, children, pressed, disabled }) {
 export function PanelHeader({ onBack, actions, children }) {
   const { close, isWriting } = useMessaging();
   // Both of these unmount the panel below — Back switches `view`, ✕ closes the
-  // drawer outright — and two of the panels are the only renderer of their own
-  // rejection (#258). So while one has a write out, both **hold**: visibly
+  // drawer outright — and every one of the panels is the only renderer of at
+  // least one rejection (#258, and six more writes since #238 — `messaging.jsx`
+  // lists them). So while one has a write out, both **hold**: visibly
   // unavailable, the way `ConfirmDeleteDialog` holds its Cancel, rather than
   // silently swallowing the press. ✕ especially: "I'm finished with messages" is
   // a real intention, and a button that just does nothing reads as broken.

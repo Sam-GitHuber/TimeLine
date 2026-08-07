@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { Link, Routes, Route } from "react-router-dom";
 import App from "./App.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
-import { renderWithAuth } from "./test-utils.jsx";
+import { renderWithAuth, apiError, unauthoredError } from "./test-utils.jsx";
 import { api } from "./api.js";
 
 // The pages now fetch from the real API, so we mock the api module and assert
@@ -432,6 +432,74 @@ describe("Requests page", () => {
     await user.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(api.approveRequest).toHaveBeenCalledWith(55));
+  });
+
+  /**
+   * Issue #239 — **the error this page rendered belonged to the query, not to
+   * the write.**
+   *
+   * "Couldn't load requests." is the read's failure, and it can't fire in the
+   * case that matters: the list arrived fine and it's the Approve that failed.
+   * Nothing rendered `decide.isError`, so a request the other person had since
+   * withdrawn answered 404, no `onSuccess` ran, no invalidation ran, and the row
+   * stayed exactly where it was — which reads as a broken button, and on the
+   * approve path leaves you believing you're connected to someone you aren't.
+   *
+   * The row staying put is asserted deliberately: it's what made the silence
+   * invisible, and it's still the correct behaviour now that there's a message.
+   */
+  it("says so when approving a request is refused", async () => {
+    const user = userEvent.setup();
+    api.getConnectionRequests.mockResolvedValue(
+      page([
+        {
+          id: 55,
+          requester: { id: 2, display_name: "Priya" },
+          created_at: "2026-07-04T08:00:00Z",
+        },
+      ])
+    );
+    api.approveRequest.mockRejectedValue(
+      apiError("That request is no longer pending.", 404)
+    );
+
+    renderAt("/requests");
+
+    await screen.findByText("Priya");
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(
+      await screen.findByText("That request is no longer pending.")
+    ).toBeInTheDocument();
+    // Not the query's message, which never had anything to do with this.
+    expect(screen.queryByText("Couldn't load requests.")).toBeNull();
+    expect(screen.getByText("Priya")).toBeInTheDocument();
+  });
+
+  it("names the decision when a reject is refused with nothing readable", async () => {
+    const user = userEvent.setup();
+    api.getConnectionRequests.mockResolvedValue(
+      page([
+        {
+          id: 55,
+          requester: { id: 2, display_name: "Priya" },
+          created_at: "2026-07-04T08:00:00Z",
+        },
+      ])
+    );
+    api.rejectRequest.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/requests");
+
+    await screen.findByText("Priya");
+    await user.click(screen.getByRole("button", { name: "Reject" }));
+
+    // Per state, never generic (connections.md): knowing *which* of the two
+    // didn't happen is most of the value, and a 500 with no DRF body has no
+    // words of its own to borrow.
+    expect(
+      await screen.findByText("Couldn’t reject that request.")
+    ).toBeInTheDocument();
   });
 
   it("is reachable as a tab within the People hub", async () => {

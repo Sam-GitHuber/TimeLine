@@ -40,10 +40,16 @@ export default function PendingChatPanel({ mustConnectWith, conversationId }) {
   });
 
   // This panel is *inside* the drawer, so the drawer's ✕, Escape and Back tear
-  // it down like any other — and a refused connection request is reported here
-  // and nowhere else (#258). Waiting to be let into a chat is precisely when
+  // it down like any other — and both of its writes are reported here and
+  // nowhere else (#258, #238). Waiting to be let into a chat is precisely when
   // "did that request go?" matters, so the drawer holds until the answer lands.
-  useHoldMessagesOpen(connectMutation.isPending);
+  //
+  // Declining is held too, now that it says something when it fails. It used to
+  // be deliberately exempt, on the reading that leaving takes you out of the
+  // conversation for good so a refused *connection* stops being worth telling —
+  // which was right about the connect error and silent about its own. A decline
+  // that 500s leaves you in the chat, so the answer is one you'd act on.
+  useHoldMessagesOpen(connectMutation.isPending || leaveMutation.isPending);
 
   const people = mustConnectWith ?? [];
   const names = people.map((person) => person.display_name);
@@ -82,13 +88,12 @@ export default function PendingChatPanel({ mustConnectWith, conversationId }) {
         </p>
       )}
 
-      {/* Not held on `connectMutation.isPending`, unlike the drawer's chrome
-          above, and that's a decision rather than an oversight: leaving takes
-          you out of this conversation for good, so whether the connection
-          request you sent a second ago was refused stops being a thing you need
-          told. The gate exists to keep an answer you'd act on; there's no action
-          left here. Same reading as the thread's own "Leave chat" beside a
-          message edit. */}
+      {/* Not disabled while *connecting*, unlike the drawer's chrome above, and
+          that's a decision rather than an oversight: leaving takes you out of
+          this conversation for good, so whether the connection request you sent
+          a second ago was refused stops being a thing you need told. The gate
+          exists to keep an answer you'd act on; there's no action left here.
+          Same reading as the thread's own "Leave chat" beside a message edit. */}
       <button
         type="button"
         onClick={() => leaveMutation.mutate()}
@@ -97,6 +102,17 @@ export default function PendingChatPanel({ mustConnectWith, conversationId }) {
       >
         {leaveMutation.isPending ? "Leaving…" : "Decline / Leave"}
       </button>
+
+      {/* #238: this said nothing at all when it failed. `openList()` only runs
+          on success, so a refused decline put the button back from "Leaving…" to
+          "Decline / Leave" and left you on the same locked panel — the invite
+          still in your list the next time you opened messages, with no reason to
+          think anything had gone wrong. */}
+      {leaveMutation.isError && (
+        <p role="alert" className="text-sm text-red-600">
+          {serverMessage(leaveMutation.error, "Couldn’t leave this chat.")}
+        </p>
+      )}
     </div>
   );
 }

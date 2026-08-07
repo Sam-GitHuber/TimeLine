@@ -126,6 +126,18 @@ Declining an invite is deliberately *not* in this set: it deletes the invite row
 and joins nothing — which is why both invite inboxes pass the decision to the
 success handler as a boolean it can fork on, rather than as an opaque function.
 
+That boolean earns its keep a second time on the web (#239). The invites inbox
+rendered the **query's** failure and nothing of the `decide` mutation's, so an
+invite the group had since revoked answered 404, `onSuccess` never ran, no
+invalidation ran, and the row sat exactly where it was — a page with an error
+path that covered the read and never the write. It now renders `decide.isError`
+above the list, and the same variables the success handler forks on give the
+fallback its wording: *"Couldn't accept that invitation."* rather than one
+sentence for both, since which of the two didn't happen is most of the value. See
+[connections.md](connections.md#reporting-a-refused-write) for the rule and the
+requests inbox that had it identically wrong. Still open for the app
+(`app/(tabs)/groups.tsx`).
+
 The mobile roster is the one site where the rule has to be applied
 **conditionally**, and #282 is what that costs. Its single mutation covers
 promote, demote and remove, so it forks on the action rather than on the screen:

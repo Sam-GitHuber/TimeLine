@@ -1867,13 +1867,22 @@ So **the panel declares the write and the chrome reads the flag**:
 `useHoldMessagesOpen(mutation.isPending)` (in `messaging.jsx`) counts a write
 into messaging context; `close()` declines while the count is above zero, and
 `PanelHeader` renders Back and ✕ disabled. Four panels declare one:
-`NewChatPicker` (add people / start a chat), `ConversationInfoView` (rename),
-`ConversationThreadView` (a message edit **and** a bulk delete — both report
-themselves in the same error bar, and the delete is the longer window of the
-two, since its mutation walks the selection one `DELETE` at a time) and
-`PendingChatPanel` (the locked chat's Connect). The bar's third occupant,
+`NewChatPicker` (add people / start a chat), `ConversationInfoView` (rename,
+mute, leave), `ConversationThreadView` (a message edit, a bulk delete, a
+single-message delete, leave and mute — all of them report themselves in the
+same error bar, and the bulk delete is the longest window of the five, since its
+mutation walks the selection one `DELETE` at a time) and `PendingChatPanel` (the
+locked chat's Connect and its Decline). The bar's remaining occupant,
 `photoError`, deliberately isn't one: preparing a photo is a client-side
 decode/re-encode, not a request whose answer you're waiting on.
+
+**The last six of those declarations arrived with #238, and only because the
+writes started reporting at all.** Mute, leave and the single-message delete
+rendered nothing anywhere when they failed, so there was no message for the
+chrome to protect — the hold and the renderer are one change, not two, and a
+hold added over a write that says nothing is decoration. See
+[connections.md](connections.md#reporting-a-refused-write) for what each of them
+cost, and why mute was the worst of them.
 
 Four things worth keeping:
 
@@ -1892,13 +1901,24 @@ Four things worth keeping:
   state — the same trap that stops `stopEditing` taking a blanket guard). The
   thread instead drops **Details** and **Add people** from its `⋯`, and holds the
   group-name button that is the other way to the info panel, on the same
-  `reportingWrite` the drawer's own hold reads — *both* writes that report into
-  the error bar, the edit and the bulk delete, not just the edit. Naming it once
-  is the point: gating these three on `editMutation.isPending` alone left the
-  bulk delete open, and open in the least obvious way, because
-  `confirmDeleteSelected` clears the selection as soon as it fires. The header
-  falls out of its "N selected" arm and puts the group-name button back on screen
-  with every `DELETE` still in flight.
+  `reportingWrite` the drawer's own hold reads — **every** write that reports
+  into the error bar, which was the edit and the bulk delete and is five of them
+  since #238. Naming it once is the point: gating these three on
+  `editMutation.isPending` alone left the bulk delete open, and open in the least
+  obvious way, because `confirmDeleteSelected` clears the selection as soon as it
+  fires. The header falls out of its "N selected" arm and puts the group-name
+  button back on screen with every `DELETE` still in flight.
+
+  **The info panel needed the same treatment and hadn't had it** — found in
+  review of #238. Its "Add people" row calls `openNew`, so it is an exit out of
+  that panel which the ✕ and Back can't cover, and it takes the only renderer of
+  the panel's rename, mute and leave with it. It now reads a `reportingWrite` of
+  its own. The gap predates #238 (the rename was exposed to it all along) but
+  #238 is what made it matter, by putting two more rejections behind that button.
+  Worth stating as the general shape: **not gating `openInfo`/`openNew`
+  centrally means every control that calls one is a hold site**, and a panel that
+  starts reporting a new write has to be re-checked against its own exits, not
+  just the drawer's.
 - **It reaches outside the drawer, in three places.** On a viewport under 800px
   opening the Groups drawer closes this one, so `close()` **returns whether it
   actually closed** and neither caller opens Groups when it didn't — `Layout`'s
@@ -1931,15 +1951,22 @@ said. Both hand routes out of edit mode (Escape, and the ✕ on the quoted
 message) now hold while the PATCH is out, which is what makes the `reset()` on
 the way out safe rather than needing to be conditional.
 
-**What is deliberately *not* held: Leave.** All three of the drawer's Leave
-controls (the thread header's, the info panel's, and `PendingChatPanel`'s
-"Decline / Leave") sit beside a write that the hold covers, and each unmounts
-its panel on success. They stay open anyway, on one reading: leaving takes you
-out of the conversation for good, so whether the rename landed, the edit was
-refused, or the connection request was rejected stops being an answer you'd act
-on. The gate exists to keep a message you'd *do something with*; there's nothing
-left to do. Two of the three ask for confirmation first, which makes the
-intention explicit.
+**What is deliberately *not* held: the Leave *controls*.** All three of the
+drawer's Leave controls (the thread header's, the info panel's, and
+`PendingChatPanel`'s "Decline / Leave") sit beside a write that the hold covers,
+and each unmounts its panel on success. They stay pressable anyway, on one
+reading: leaving takes you out of the conversation for good, so whether the
+rename landed, the edit was refused, or the connection request was rejected stops
+being an answer you'd act on. The gate exists to keep a message you'd *do
+something with*; there's nothing left to do. Two of the three ask for
+confirmation first, which makes the intention explicit.
+
+That is a statement about pressing Leave **while something else is out**, and
+#238 made the distinction load-bearing: a leave *of its own* now declares a hold
+like any other write, because `openList()` runs only on success and a refused
+leave therefore leaves you on the very panel that has to report it. The two
+readings don't conflict — one is about a message that has stopped mattering, the
+other about one that has just been created.
 
 Pinned in `messaging.test.jsx` ("a write in flight holds it open") and
 `App.test.jsx` (the narrow-viewport Groups button), which drive the whole
