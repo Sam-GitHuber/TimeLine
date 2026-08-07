@@ -2,4 +2,9 @@ node_modules/
 dist/
 .vite/
 *.local
+# local env files. The whole `.env.*` family, not just `.env`, so a stray copy
+# can't be swept into a public repo by a `git add -A`; a committed
+# `.env.example` would be named back in. Same patterns as `mobile/.gitignore`.
 .env
+.env.*
+!.env.example
