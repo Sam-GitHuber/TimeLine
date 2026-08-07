@@ -34,10 +34,14 @@ import type { Comment } from '@/types';
 
 import {
   alertSpy,
+  androidIt,
+  captureBackHandler,
   menuDestructiveOption,
   menuOptions,
   pickMenuOption,
   pressAlertButton,
+  holdRequest,
+  pressBack,
   resetMenuSpies,
 } from './helpers';
 
@@ -129,6 +133,7 @@ async function openEditor(tree: Comment[]) {
 beforeEach(() => {
   mockFetch.mockReset();
   resetMenuSpies();
+  captureBackHandler();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -329,5 +334,163 @@ describe('a deleted comment (the tombstone)', () => {
       }),
     ]);
     expect(screen.queryByText('· edited')).toBeNull();
+  });
+});
+
+/**
+ * A write box may not be taken off screen while its request is out (#256).
+ *
+ * Both boxes here render their own rejection and nothing else does, so every
+ * route that unmounts one — its Cancel, the Reply toggle, Android's hardware
+ * back — swallows the answer whole. The sequence is the point: press the write,
+ * *then* try to leave, *then* let the server refuse. Each of these passes
+ * trivially if you only check the first two steps.
+ */
+describe('holding a write box open until the server answers', () => {
+  it('refuses Cancel on the editor, then shows the refusal', async () => {
+    await openEditor([comment({ id: 5 })]);
+    await fireEvent.changeText(
+      screen.getByLabelText('Edit comment text'),
+      'Comment 5, fixed'
+    );
+
+    const server = holdRequest(
+      mockFetch,
+      { detail: 'Editing is only allowed for 15 minutes.' },
+      403
+    );
+    await act(async () => fireEvent.press(screen.getByLabelText('Save comment')));
+    await server.inFlight('Saving…');
+
+    // The tell in #259: Save gated, Cancel beside it wide open.
+    await fireEvent.press(screen.getByText('Cancel'));
+    expect(screen.getByLabelText('Edit comment text')).toBeTruthy();
+
+    await server.refuse();
+    expect(
+      await screen.findByText('Editing is only allowed for 15 minutes.')
+    ).toBeTruthy();
+  });
+
+  androidIt('refuses hardware back on the editor', async () => {
+    // The registration sits on the node above, where `isPending` isn't in
+    // scope — the structural cause #256 names.
+    await openEditor([comment({ id: 5 })]);
+    await fireEvent.changeText(
+      screen.getByLabelText('Edit comment text'),
+      'Comment 5, fixed'
+    );
+
+    const server = holdRequest(
+      mockFetch,
+      { detail: 'Editing is only allowed for 15 minutes.' },
+      403
+    );
+    await act(async () => fireEvent.press(screen.getByLabelText('Save comment')));
+    await server.inFlight('Saving…');
+
+    let handled = false;
+    await act(async () => {
+      handled = pressBack();
+    });
+    // Claimed, not passed on: falling through to the navigator would leave the
+    // post screen entirely, which is worse than closing the editor.
+    expect(handled).toBe(true);
+    expect(screen.getByLabelText('Edit comment text')).toBeTruthy();
+
+    await server.refuse();
+    expect(
+      await screen.findByText('Editing is only allowed for 15 minutes.')
+    ).toBeTruthy();
+  });
+
+  it('refuses the Reply toggle, which would close the editor', async () => {
+    await openEditor([comment({ id: 5 })]);
+    await fireEvent.changeText(
+      screen.getByLabelText('Edit comment text'),
+      'Comment 5, fixed'
+    );
+
+    const server = holdRequest(mockFetch, { detail: 'No.' }, 403);
+    await act(async () => fireEvent.press(screen.getByLabelText('Save comment')));
+    await server.inFlight('Saving…');
+
+    await fireEvent.press(screen.getByText('Reply'));
+    expect(screen.getByLabelText('Edit comment text')).toBeTruthy();
+
+    await server.refuse();
+    expect(await screen.findByText('No.')).toBeTruthy();
+  });
+
+  it('refuses Cancel on the reply box, then shows the refusal', async () => {
+    // A failed reply that leaves no trace is indistinguishable from one that
+    // posted somewhere off-screen — so you assume it went.
+    await renderThread([comment({ id: 5 })]);
+    await act(async () => fireEvent.press(screen.getByText('Reply')));
+    await fireEvent.changeText(
+      screen.getByLabelText('Reply to Me Myself…'),
+      'a reply'
+    );
+
+    const server = holdRequest(
+      mockFetch,
+      { detail: 'This thread is closed.' },
+      403
+    );
+    await act(async () => fireEvent.press(screen.getByLabelText('Post reply')));
+    await server.inFlight('Posting…');
+
+    await fireEvent.press(screen.getByText('Cancel'));
+    expect(screen.getByLabelText('Reply to Me Myself…')).toBeTruthy();
+
+    await server.refuse();
+    expect(await screen.findByText('This thread is closed.')).toBeTruthy();
+  });
+
+  androidIt('refuses hardware back on the reply box', async () => {
+    await renderThread([comment({ id: 5 })]);
+    await act(async () => fireEvent.press(screen.getByText('Reply')));
+    await fireEvent.changeText(
+      screen.getByLabelText('Reply to Me Myself…'),
+      'a reply'
+    );
+
+    const server = holdRequest(
+      mockFetch,
+      { detail: 'This thread is closed.' },
+      403
+    );
+    await act(async () => fireEvent.press(screen.getByLabelText('Post reply')));
+    await server.inFlight('Posting…');
+
+    let handled = false;
+    await act(async () => {
+      handled = pressBack();
+    });
+    expect(handled).toBe(true);
+    expect(screen.getByLabelText('Reply to Me Myself…')).toBeTruthy();
+
+    await server.refuse();
+    expect(await screen.findByText('This thread is closed.')).toBeTruthy();
+  });
+
+  it('lets go the moment the write lands, so the box still closes', async () => {
+    // The other half of the rule: the hold exists so a *rejection* has
+    // somewhere to render. Held any longer and it's a second trap.
+    const { invalidate } = await openEditor([comment({ id: 5 })]);
+    await fireEvent.changeText(
+      screen.getByLabelText('Edit comment text'),
+      'Comment 5, fixed'
+    );
+
+    mockFetch.mockResolvedValue(
+      jsonResponse(comment({ id: 5, text: 'Comment 5, fixed' }))
+    );
+    await act(async () => fireEvent.press(screen.getByLabelText('Save comment')));
+
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Edit comment text')).toBeNull()
+    );
+    expect(invalidate).toHaveBeenCalled();
   });
 });

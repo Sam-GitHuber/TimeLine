@@ -34,6 +34,7 @@ import {
 import { PostCard } from '@/components/PostCard';
 import { dismissPostNotifications } from '@/push';
 import { colors, fontSize, spacing } from '@/theme';
+import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 export default function PostScreen() {
   const { postId, comment } = useLocalSearchParams<{
@@ -139,16 +140,37 @@ export default function PostScreen() {
 
   const notFound = error instanceof ApiError && error.status === 404;
 
+  /**
+   * A comment edit or a reply reports its refusal inside its own write box and
+   * nowhere else, so leaving the post takes the message with it (#256).
+   *
+   * `CommentNode` already holds the routes it owns — Cancel, Android's back, the
+   * Reply toggle — and its hold forwards up to this one, which owns the two it
+   * can't see: "← Feed" and iOS's swipe-back. Android's back is claimed by the
+   * node's own registration, so only the swipe is taken here; a second handler
+   * for the same press would be the hook-order race `writeHold.tsx` warns about.
+   */
+  const hold = useWriteHold();
+  useHoldSwipeBack(hold.held);
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <Pressable
-          onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+          onPress={() => {
+            // The control renders unavailable too; this is the backstop.
+            if (hold.held) return;
+            if (router.canGoBack()) router.back();
+            else router.replace('/');
+          }}
+          disabled={hold.held}
           accessibilityRole="button"
           accessibilityLabel="Back to feed"
           hitSlop={8}
         >
-          <Text style={styles.back}>← Feed</Text>
+          <Text style={[styles.back, hold.held && styles.backDisabled]}>
+            ← Feed
+          </Text>
         </Pressable>
       </View>
 
@@ -184,11 +206,13 @@ export default function PostScreen() {
               style={styles.thread}
               onLayout={handleThreadLayout}
             >
-              <CommentThread
-                target={{ postId: id }}
-                highlightCommentId={highlightCommentId}
-                onHighlightLayout={scrollToThreadOffset}
-              />
+              <WriteHoldProvider hold={hold}>
+                <CommentThread
+                  target={{ postId: id }}
+                  highlightCommentId={highlightCommentId}
+                  onHighlightLayout={scrollToThreadOffset}
+                />
+              </WriteHoldProvider>
             </View>
           </>
         ) : null}
@@ -202,6 +226,8 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   header: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  // Unavailable rather than silently declining — a dead Back reads as broken.
+  backDisabled: { opacity: 0.4 },
   content: { paddingBottom: spacing.xxl },
   spinner: { marginTop: spacing.xl },
   thread: {

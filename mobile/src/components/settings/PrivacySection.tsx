@@ -21,6 +21,7 @@ import { StyleSheet, Switch, Text, View } from 'react-native';
 import { api } from '@/api';
 import { useAuth } from '@/auth';
 import { colors, fontSize, spacing } from '@/theme';
+import { useHoldOpen } from '@/writeHold';
 
 export function PrivacySection() {
   const { user, refreshUser } = useAuth();
@@ -32,6 +33,12 @@ export function PrivacySection() {
   // fetch — `send_read_receipts` rides on the same "who am I" payload that
   // renders the rest of the app.
   const enabled = user?.send_read_receipts ?? true;
+
+  // Leaving Settings mid-save would take the one line that says it failed
+  // (#256): this section reports through `failed` below and nowhere else, so a
+  // refused toggle would leave you believing read receipts are off while the
+  // server still has them on — broadcasting when you've read people's messages.
+  useHoldOpen(saving);
 
   async function toggle(next: boolean) {
     setSaving(true);

@@ -14,6 +14,7 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { api } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
+import { useHoldOpen, useHoldScreen } from '@/writeHold';
 
 export function PlanEventForm({ groupId }: { groupId: number }) {
   const [title, setTitle] = useState('');
@@ -28,6 +29,22 @@ export function PlanEventForm({ groupId }: { groupId: number }) {
       router.replace(`/events/${event.id}`);
     },
   });
+
+  /**
+   * Every way off the screen is held while the POST is out (#259).
+   *
+   * Like `GroupForm` there is no Cancel here — the ways out are the screen's
+   * "← Back", Android's hardware back and iOS's swipe — and the error below is
+   * the only renderer of a refusal. Planning an event is a thing you do *once*,
+   * so "did that work?" isn't a question you get a second look at: you find out
+   * when nobody turns up.
+   *
+   * The two navigator-owned routes are held here, where the mutation is; the
+   * screen's Back reads the declaration. Nothing else there registers a back
+   * handler.
+   */
+  useHoldScreen(create.isPending);
+  useHoldOpen(create.isPending);
 
   const trimmed = title.trim();
 

@@ -18,6 +18,7 @@ import { AvatarCropModal } from './AvatarCropModal';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Group } from '@/types';
+import { useHoldOpen, useHoldScreen } from '@/writeHold';
 
 const NAME_MAX = 100;
 const DESCRIPTION_MAX = 2000;
@@ -89,6 +90,22 @@ export function GroupForm({
       ? { display_name: name || '?', avatar_thumb: null }
       : { display_name: name || '?', avatar_thumb: initial?.avatar_thumb ?? null };
   const hasAvatar = Boolean(avatarFile || (initial?.avatar_thumb && !removeAvatar));
+
+  /**
+   * Every way off the screen is held while the write is out (#259).
+   *
+   * This form has no Cancel — the way out is the screen's "← Back", Android's
+   * hardware back and iOS's swipe-back, so a "gate the Cancel" fix has nothing
+   * to gate. All three unmount the screen, and the error above is the only
+   * renderer of a refusal: press Create, leave, and a POST that 400s on a
+   * duplicate name leaves you on the Groups tab with no group and nothing said.
+   *
+   * The two navigator-owned routes are held here, where the mutation is; the
+   * screens' own Back buttons read the declaration. Nothing else on either
+   * screen registers a back handler.
+   */
+  useHoldScreen(mutation.isPending);
+  useHoldOpen(mutation.isPending);
 
   const canSave = name.trim() !== '' && !mutation.isPending;
 

@@ -45,6 +45,7 @@ import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { dedupeById, useFetchAllPages } from '@/lists';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation, PersonSummary } from '@/types';
+import { useHoldScreen } from '@/writeHold';
 
 const FOOTER_PAD = spacing.sm + 2;
 
@@ -57,8 +58,16 @@ export default function NewChatScreen() {
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [title, setTitle] = useState('');
 
-  const goBack = () =>
-    router.canGoBack() ? router.back() : router.replace('/messages');
+  const goBack = () => {
+    // Nothing leaves this screen while Create is out (#259): the error line
+    // under the footer is the only renderer of a refusal, and every way off the
+    // screen unmounts it. Pick participants, tap Create, swipe back — and the
+    // chat is never created while you go looking for the thread you think you
+    // just started.
+    if (holding) return;
+    if (router.canGoBack()) router.back();
+    else router.replace('/messages');
+  };
 
   // All your connections (following `next`), so search covers everyone, not just
   // the first page. Same key + query as the People screen's Connections list.
@@ -126,6 +135,21 @@ export default function NewChatScreen() {
     },
   });
 
+  /**
+   * The three routes off this screen, held together (#259).
+   *
+   * `goBack` above covers the header's own "← Back"; `useHoldScreen` covers the
+   * two that belong to the navigator rather than to any button — Android's
+   * hardware back and iOS's swipe-back. Nothing else registers a back handler
+   * here, so the hook's `useAndroidBack` has the press to itself.
+   *
+   * `create.isPending` alone: `onSuccess` navigates rather than awaiting a
+   * second request, so there's no window where the write has landed and the
+   * hold is still shut.
+   */
+  const holding = create.isPending;
+  useHoldScreen(holding);
+
   const errorMessage =
     create.error instanceof Error
       ? create.error.message
@@ -138,11 +162,14 @@ export default function NewChatScreen() {
       <View style={styles.topBar}>
         <Pressable
           onPress={goBack}
+          disabled={holding}
           accessibilityRole="button"
           accessibilityLabel="Back"
           hitSlop={8}
         >
-          <Text style={styles.back}>← Back</Text>
+          <Text style={[styles.back, holding && styles.backDisabled]}>
+            ← Back
+          </Text>
         </Pressable>
         <Text style={styles.title} numberOfLines={1}>
           {addToId ? 'Add people' : 'New message'}
@@ -318,6 +345,9 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.sm,
   },
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  // Unavailable rather than silently declining — a Back that answers a press
+  // with nothing reads as a broken app.
+  backDisabled: { opacity: 0.4 },
   backSpacer: { width: 48 },
   title: {
     flex: 1,

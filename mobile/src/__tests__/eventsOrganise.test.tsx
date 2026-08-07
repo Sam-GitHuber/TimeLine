@@ -21,6 +21,7 @@ import { api, ApiError } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
 import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
+import PlanEventScreen from '@/app/groups/[groupId]/plan';
 import { PlanEventForm } from '@/components/events/PlanEventForm';
 import { saveTokens } from '@/tokens';
 import type { Event, Group, User } from '@/types';
@@ -53,6 +54,7 @@ const pickerStub = jest.requireMock('@react-native-community/datetimepicker') as
 const mockParams: Record<string, string> = { eventId: '9', groupId: '7' };
 const mockPush = jest.fn();
 const mockReplace = jest.fn();
+const mockBack = jest.fn();
 jest.mock('expo-router', () => ({
   // The screen is always focused under test, so focus is a plain effect — see
   // `jest.setup.js`, whose global stub this local factory overrides.
@@ -61,11 +63,15 @@ jest.mock('expo-router', () => ({
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     require('react').useEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
+  // The event screen holds iOS's swipe-back while a write is out (#256); there
+  // is no navigator under test and no gesture Node can perform. Same stand-in
+  // as `jest.setup.js`, whose global stub this factory overrides.
+  useNavigation: () => ({ setOptions: () => {} }),
   // Arrows read the spies lazily (the factory runs before the consts init).
   router: {
     push: (...a: unknown[]) => mockPush(...a),
     replace: (...a: unknown[]) => mockReplace(...a),
-    back: jest.fn(),
+    back: (...a: unknown[]) => mockBack(...a),
     canGoBack: () => true,
   },
 }));
@@ -178,6 +184,7 @@ beforeEach(async () => {
   resetMenuSpies();
   mockPush.mockReset();
   mockReplace.mockReset();
+  mockBack.mockReset();
   mockParams.eventId = '9';
   mockParams.groupId = '7';
   globalThis.fetch = mockFetch as unknown as typeof fetch;
@@ -223,6 +230,74 @@ describe('PlanEventForm', () => {
 
     expect(create).not.toHaveBeenCalled();
     create.mockRestore();
+  });
+
+  /**
+   * Nothing leaves the screen while the POST is out (#259).
+   *
+   * There is no Cancel on this form — the ways out are the screen's "← Back",
+   * Android's hardware back and iOS's swipe — and the error above the button is
+   * its only renderer. Planning an event is a thing you do *once*, so "did that
+   * work?" isn't a question you get a second look at: you find out when nobody
+   * turns up.
+   */
+  describe('holding the screen while the event is being created', () => {
+    async function startCreating() {
+      let refuse: (error: Error) => void = () => {};
+      const create = jest.spyOn(api, 'createEvent').mockReturnValue(
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        }) as ReturnType<typeof api.createEvent>
+      );
+      await renderWith(<PlanEventScreen />);
+      await fireEvent.changeText(
+        screen.getByLabelText('What are you planning?'),
+        'Grandma’s 80th'
+      );
+      await act(async () => {
+        // By role: the screen's title says "Plan an event" too.
+        fireEvent.press(screen.getByRole('button', { name: 'Plan an event' }));
+      });
+      expect(await screen.findByText('Planning…')).toBeTruthy();
+      return {
+        create,
+        refuse: async (message: string) => {
+          await act(async () => {
+            refuse(new Error(message));
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          });
+        },
+      };
+    }
+
+    it('refuses the screen’s Back, then shows the refusal', async () => {
+      const server = await startCreating();
+
+      await fireEvent.press(screen.getByLabelText('Back'));
+      expect(mockBack).not.toHaveBeenCalled();
+
+      await server.refuse('You’re no longer in this group.');
+      expect(
+        await screen.findByText('You’re no longer in this group.')
+      ).toBeTruthy();
+      server.create.mockRestore();
+    });
+
+    androidIt('refuses hardware back, then shows the refusal', async () => {
+      captureBackHandler();
+      const server = await startCreating();
+
+      await act(async () => {
+        // Claimed, not passed on: falling through would pop the screen.
+        expect(pressBack()).toBe(true);
+      });
+
+      await server.refuse('You’re no longer in this group.');
+      expect(
+        await screen.findByText('You’re no longer in this group.')
+      ).toBeTruthy();
+      server.create.mockRestore();
+    });
   });
 });
 

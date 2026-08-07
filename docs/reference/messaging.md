@@ -1946,6 +1946,31 @@ Pinned in `messaging.test.jsx` ("a write in flight holds it open") and
 sequence each time — press the write, try to leave, *then* let the server
 refuse — because the swallow only shows up at the end of it.
 
+**The phone has the same two writes and different exits.** There is no drawer:
+the conversation is a pushed screen, so the routes are the header's "← Back",
+Android's hardware back, and the ✕ on the editing banner (iOS's swipe-back is
+already off on this screen — see
+[the back gesture it cost](#swipe-to-reply-and-the-back-gesture-it-cost)). All
+three read one hoisted `reportingWrite`, exactly as the web's three view
+switches do. Two differences worth knowing:
+
+- **`stopEditing`'s `reset()` needed no change either**, for the same reason —
+  the back handler and the ✕ hold, so the call on the way out can stay
+  unconditional. A blanket `if (!isPending)` guard would refuse the call
+  `onSuccess` makes, which is the one that has to work.
+- **`PendingChatPanel`'s Decline / Leave *is* held on the phone**, where the
+  web's three Leave controls are deliberately open. The reading above turns on
+  what the pending write is *about*: a rename or an edit stops mattering once
+  you're out of the conversation, but a connection request changes a
+  relationship that outlives the chat entirely, and the panel's error line is
+  its only renderer. The screen's Back reads the panel's declaration through
+  `writeHold` ([connections.md](connections.md#reporting-a-refused-write)); the
+  panel's own button reads its mutation directly.
+
+The bulk delete stays out of the phone's hold, unlike the web's, because it
+reports through `Alert.alert` — a native dialog outlives the screen that fired
+it. So do the two photo paths. Pinned in `thread.test.tsx`.
+
 ### Mentions, formatting and multi-select on the web (Phase 9b M9f)
 
 M9f closed the gap. It brought

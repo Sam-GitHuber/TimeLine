@@ -135,6 +135,7 @@ import type {
   Reaction,
 } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
+import { useWriteHold, WriteHoldProvider } from '@/writeHold';
 import { useDayBoundary } from '@/useDayBoundary';
 
 /** The composer bar's base vertical padding, before the home-indicator inset. */
@@ -413,46 +414,21 @@ export default function ThreadScreen() {
   const selecting = selected !== null;
 
   /**
-   * What Android's back button means on this screen (#168).
-   *
-   * Back is how Android dismisses things, and this screen stacks three
-   * dismissible states that aren't Modals. An unclaimed press falls through to
-   * the navigator and leaves the thread entirely — and in the edit case it
-   * takes typed text with it, because cancelling is the *only* path that puts
-   * `stashedDraft` back in the composer. Back on a half-written message you'd
-   * paused to fix a typo in would have lost it, two screens ago.
-   *
-   * One handler rather than one `useAndroidBack` per state, because the
-   * priority is the interesting part and this is the only place it's written
-   * down. React Native runs back handlers most-recently-registered-first, so
-   * three separate calls would order themselves by the sequence you happened to
-   * *open* things in — a photo staged before you hit Edit would claim the press
-   * ahead of the edit. Topmost first, decided here.
-   *
-   * "Topmost" means *what you can actually see*, which is why **selection comes
-   * first**. Select mode takes over the composer's slot entirely (see the bulk
-   * bar below), so while it's on, the editing banner and the staged-photo
-   * preview aren't on screen at all. Staging a photo and then long-pressing
-   * → Select is an ordinary sequence, and closing the photo underneath would
-   * look like a dead press that silently threw the photo away — you'd only find
-   * out after leaving select mode. Edit before photo below it, for the same
-   * reason read the other way round: an edit *hides* the staged preview (#164 —
-   * a `PATCH` can't carry it, so showing it would promise otherwise), so back
-   * ends the edit and brings the photo back into view rather than dismissing
-   * something you can't see and can't tell went.
-   *
-   * `stopEditing` is a hoisted function declaration, which is what lets this sit
-   * next to the state it reads rather than 800 lines further down.
+   * A hold for writes made by a child that owns neither of this screen's ways
+   * out — today just `PendingChatPanel`'s Connect (#259).
    */
-  const dismissible = selecting || Boolean(editing) || attachment !== null;
-  useAndroidBack(dismissible, () => {
-    if (selecting) setSelected(null);
-    else if (editing) stopEditing();
-    else if (attachment) setAttachment(null);
-  });
+  const hold = useWriteHold();
 
-  const goBack = () =>
-    router.canGoBack() ? router.back() : router.replace('/messages');
+  const goBack = () => {
+    // Leaving the conversation unmounts the composer, and with it the only
+    // renderer of a refused edit (#257) or of a refused Connect on the pending
+    // panel (#259). The header's Back renders unavailable too; this is the
+    // backstop. iOS's swipe-back is already off on this screen (see
+    // `app/_layout.tsx`), and Android's hardware back is held above.
+    if (reportingWrite) return;
+    if (router.canGoBack()) router.back();
+    else router.replace('/messages');
+  };
 
   /**
    * The thread's header, membership — and, since M4, the participants' read
@@ -1071,6 +1047,69 @@ export default function ThreadScreen() {
   });
 
   /**
+   * What Android's back button means on this screen (#168).
+   *
+   * Back is how Android dismisses things, and this screen stacks three
+   * dismissible states that aren't Modals. An unclaimed press falls through to
+   * the navigator and leaves the thread entirely — and in the edit case it
+   * takes typed text with it, because cancelling is the *only* path that puts
+   * `stashedDraft` back in the composer. Back on a half-written message you'd
+   * paused to fix a typo in would have lost it, two screens ago.
+   *
+   * One handler rather than one `useAndroidBack` per state, because the
+   * priority is the interesting part and this is the only place it's written
+   * down. React Native runs back handlers most-recently-registered-first, so
+   * three separate calls would order themselves by the sequence you happened to
+   * *open* things in — a photo staged before you hit Edit would claim the press
+   * ahead of the edit. Topmost first, decided here.
+   *
+   * "Topmost" means *what you can actually see*, which is why **selection comes
+   * first**. Select mode takes over the composer's slot entirely (see the bulk
+   * bar below), so while it's on, the editing banner and the staged-photo
+   * preview aren't on screen at all. Staging a photo and then long-pressing
+   * → Select is an ordinary sequence, and closing the photo underneath would
+   * look like a dead press that silently threw the photo away — you'd only find
+   * out after leaving select mode. Edit before photo below it, for the same
+   * reason read the other way round: an edit *hides* the staged preview (#164 —
+   * a `PATCH` can't carry it, so showing it would promise otherwise), so back
+   * ends the edit and brings the photo back into view rather than dismissing
+   * something you can't see and can't tell went.
+   *
+   * `stopEditing` is a hoisted function declaration, which is what lets this sit
+   * next to the state it reads rather than 800 lines further down.
+   */
+  /**
+   * A write on this screen whose refusal renders here and nowhere else.
+   *
+   * Two of them, and they never coexist because the panel replaces the whole
+   * transcript: the message **edit** (#257 — see `stopEditing`) and the pending
+   * panel's **Connect** (#259), which declares itself into `hold`. Hoisted to a
+   * single predicate so the four gates that read it — this back handler,
+   * `goBack`, the header's Back and its dimming — can't drift apart.
+   *
+   * The bulk delete stays out: it reports through `Alert.alert`, which is a
+   * native dialog and outlives the screen that fired it.
+   */
+  const reportingWrite = editMutation.isPending || hold.held;
+
+  const dismissible =
+    selecting || Boolean(editing) || attachment !== null || reportingWrite;
+  useAndroidBack(dismissible, () => {
+    // A write whose refusal renders on this screen and nowhere else outranks
+    // every dismissal below it: while one is out the press does nothing rather
+    // than falling through to the navigator, which would take the screen and
+    // the message with it (#257/#259).
+    if (reportingWrite) return;
+    if (selecting) setSelected(null);
+    // Leaving edit mode is held by `reportingWrite` above, not here (#257):
+    // `stopEditing` calls `editMutation.reset()`, which detaches the observer
+    // from a PATCH still on its way back, and the error line below is the only
+    // thing that would have spoken the 403.
+    else if (editing) stopEditing();
+    else if (attachment) setAttachment(null);
+  });
+
+  /**
    * Only an *edit* blocks the composer now (M4).
    *
    * Sending used to disable it until the round trip finished, which meant firing
@@ -1236,13 +1275,27 @@ export default function ThreadScreen() {
     });
   }
 
-  /** Leave edit mode and put the pre-edit draft back in the composer. */
+  /**
+   * Leave edit mode, putting the pre-edit draft back in the composer.
+   *
+   * Three callers: the ✕, Android back, and `editMutation`'s own success.
+   *
+   * The `reset()` is only ever wanted for a **settled** failure — an error left
+   * over from a finished edit shouldn't hang over a composer that isn't editing
+   * anything. But `reset()` doesn't distinguish that from an edit still in
+   * flight: in React Query v5 it detaches the observer from the running
+   * mutation, so the PATCH's answer arrives with nothing left to paint the error
+   * line (#257). The two hand routes in therefore hold while the write is out,
+   * which is what makes this call safe rather than conditional.
+   *
+   * It can't take a blanket `if (!isPending)` guard instead: React Query runs
+   * `onSuccess` *before* the mutation leaves its pending state, so one would
+   * refuse the one call that has to work.
+   */
   function stopEditing() {
     setEditing(null);
     setText(stashedDraft);
     setStashedDraft('');
-    // Clear any failed-edit error with the mode that produced it, or it lingers
-    // over a composer that's no longer editing anything.
     editMutation.reset();
   }
 
@@ -1390,11 +1443,14 @@ export default function ThreadScreen() {
       <View style={styles.topBar}>
         <Pressable
           onPress={goBack}
+          disabled={reportingWrite}
           accessibilityRole="button"
           accessibilityLabel="Back"
           hitSlop={8}
         >
-          <Text style={styles.back}>← Back</Text>
+          <Text style={[styles.back, reportingWrite && styles.backDisabled]}>
+            ← Back
+          </Text>
         </Pressable>
 
         <View style={styles.identity}>
@@ -1465,11 +1521,13 @@ export default function ThreadScreen() {
           </Pressable>
         </View>
       ) : isPending ? (
-        <PendingChatPanel
-          mustConnectWith={detail.must_connect_with}
-          conversationId={id}
-          onLeave={goBack}
-        />
+        <WriteHoldProvider hold={hold}>
+          <PendingChatPanel
+            mustConnectWith={detail.must_connect_with}
+            conversationId={id}
+            onLeave={goBack}
+          />
+        </WriteHoldProvider>
       ) : (
         <KeyboardAvoider style={styles.fill} enabled={thread === null}>
           {/* `enabled` is off while the focused thread is open. The thread is a
@@ -1741,13 +1799,25 @@ export default function ThreadScreen() {
                         {editing.text}
                       </Text>
                     </View>
+                    {/* Held while the PATCH is out (#257) — same reason as the
+                        back handler, and shown as unavailable rather than
+                        silently declining, because a ✕ that answers a press
+                        with nothing reads as broken. */}
                     <Pressable
                       onPress={stopEditing}
+                      disabled={busy}
                       accessibilityRole="button"
                       accessibilityLabel="Cancel editing"
                       hitSlop={8}
                     >
-                      <Text style={styles.editingCancel}>✕</Text>
+                      <Text
+                        style={[
+                          styles.editingCancel,
+                          busy && styles.editingCancelDisabled,
+                        ]}
+                      >
+                        ✕
+                      </Text>
                     </Pressable>
                   </View>
                 ) : null}
@@ -2047,6 +2117,7 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.line,
   },
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  backDisabled: { opacity: 0.4 },
   identity: { flex: 1, alignItems: 'center' },
   headerRow: {
     flexDirection: 'row',
@@ -2163,6 +2234,9 @@ const styles = StyleSheet.create({
     color: colors.inkSoft,
     paddingHorizontal: spacing.xs,
   },
+  // Held while the edit's PATCH is out (#257), dimmed the same way Save beside
+  // it already is.
+  editingCancelDisabled: { opacity: 0.4 },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
   // Sized to match the input's collapsed height so the three controls sit on one
   // line rather than the ＋ floating above a grown, multi-line composer.

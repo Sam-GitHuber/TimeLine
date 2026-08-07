@@ -34,6 +34,7 @@ import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 import type { Poll, PollOptionPayload, PollResultOption } from '@/types';
 import { useActionMenu } from '@/components/ActionMenu';
 import { useAndroidBack } from '@/useAndroidBack';
+import { useHoldOpen, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 /** What `onFinalise` carries: a free value or a pinned option, for a dimension. */
 export type FinaliseArg = { dimension: PollDimension; value?: string; optionId?: number };
@@ -104,8 +105,19 @@ export function PollTally({
   const [editing, setEditing] = useState(false);
 
   // Android back leaves the edit form rather than the event screen — the
-  // hardware equivalent of its Cancel (#168).
-  useAndroidBack(editing, () => setEditing(false));
+  // hardware equivalent of its Cancel (#168), and held while the save is out
+  // for the same reason its Cancel already is (#256).
+  //
+  // `editPoll` is the only poll mutation on the event screen with no
+  // `onError: Alert.alert`, deliberately: it's `mutateAsync` so the form can
+  // surface a 409 ("voting has started") *in place*, matching the web. Unmount
+  // the form mid-save and that one message — the whole reason for the
+  // `mutateAsync` handoff — is never spoken.
+  const hold = useWriteHold();
+  useAndroidBack(editing, () => {
+    if (hold.held) return;
+    setEditing(false);
+  });
 
   async function toggle(optionId: number) {
     if (!open || busy) return;
@@ -167,7 +179,9 @@ export function PollTally({
 
   if (editing) {
     return (
-      <PollEditForm poll={poll} onSave={onEdit} onDone={() => setEditing(false)} />
+      <WriteHoldProvider hold={hold}>
+        <PollEditForm poll={poll} onSave={onEdit} onDone={() => setEditing(false)} />
+      </WriteHoldProvider>
     );
   }
 
@@ -275,6 +289,11 @@ function PollEditForm({
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The tally above owns Android's back; this is where the request is. Its own
+  // Cancel was already gated on `saving`, which is what made the hardware
+  // button look like an oversight rather than a decision (#256).
+  useHoldOpen(saving);
 
   async function submit() {
     if (dim === 'custom' && !question.trim()) {

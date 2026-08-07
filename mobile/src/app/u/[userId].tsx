@@ -45,6 +45,7 @@ import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Post } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
 import { useDayBoundary } from '@/useDayBoundary';
+import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 export default function ProfileScreen() {
   const { userId } = useLocalSearchParams<{ userId: string }>();
@@ -54,10 +55,30 @@ export default function ProfileScreen() {
 
   const [editing, setEditing] = useState(false);
 
+  /**
+   * Every way off this screen is held while the editor has its PATCH out
+   * (#256/#259) — the form is the only renderer of a refused save, and all four
+   * routes below unmount it.
+   *
+   * The editor declares the write; this screen owns the routes. `useAndroidBack`
+   * is registered *here*, on the state the form doesn't own, which is the
+   * structural cause #256 names: the two could never agree because the flag
+   * wasn't in scope.
+   *
+   * Only the swipe hold is taken from `writeHold` — a second `useAndroidBack`
+   * for the same press would race the one below on hook order, so that one
+   * declines instead.
+   */
+  const hold = useWriteHold();
+  useHoldSwipeBack(hold.held);
+
   // Android back closes the inline editor instead of the profile — the same
   // thing the form's Cancel does. Without it the press leaves the screen and
   // the half-typed bio goes with it (#168).
-  useAndroidBack(editing, () => setEditing(false));
+  useAndroidBack(editing, () => {
+    if (hold.held) return;
+    setEditing(false);
+  });
 
   // Only *other* people's profiles need this fetch — your own header renders
   // from the auth `me` (kept fresh by refreshUser), and `canSeePosts` below
@@ -102,8 +123,13 @@ export default function ProfileScreen() {
     ]);
   }
 
-  const goBack = () =>
-    router.canGoBack() ? router.back() : router.replace('/');
+  const goBack = () => {
+    // Leaving takes the editor — and the refusal it is the only renderer of —
+    // with it. The control renders unavailable too; this is the backstop.
+    if (hold.held) return;
+    if (router.canGoBack()) router.back();
+    else router.replace('/');
+  };
 
   // A real 404 means "no such user"; a transient 5xx/network error must not
   // masquerade as that, so it gets a retry instead of telling someone a user who
@@ -114,7 +140,9 @@ export default function ProfileScreen() {
   const header = (
     <View style={styles.profileHeader}>
       {isSelf && editing ? (
-        <ProfileEditForm onDone={() => setEditing(false)} />
+        <WriteHoldProvider hold={hold}>
+          <ProfileEditForm onDone={() => setEditing(false)} />
+        </WriteHoldProvider>
       ) : (
         <View style={styles.headerRow}>
           {/* For self the auth user is the freshest source (refreshUser keeps it
@@ -203,11 +231,14 @@ export default function ProfileScreen() {
       <View style={styles.topBar}>
         <Pressable
           onPress={goBack}
+          disabled={hold.held}
           accessibilityRole="button"
           accessibilityLabel="Back"
           hitSlop={8}
         >
-          <Text style={styles.back}>← Back</Text>
+          <Text style={[styles.back, hold.held && styles.backDisabled]}>
+            ← Back
+          </Text>
         </Pressable>
         {/* Settings lives behind a gear on your own profile — five tabs is the
             iOS max and already full, so account controls get a non-tab home
@@ -305,6 +336,9 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.sm,
   },
   back: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
+  // Rendered unavailable rather than silently declining: a Back that does
+  // nothing when pressed reads as a broken app, not as a deliberate hold.
+  backDisabled: { opacity: 0.4 },
   profileHeader: {
     paddingHorizontal: spacing.md,
     paddingTop: spacing.sm,

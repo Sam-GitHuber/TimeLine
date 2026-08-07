@@ -324,6 +324,83 @@ export async function pickDateTimeValue(
   await fireEvent.press(screen.getByLabelText('Pick a value'));
 }
 
+// --- Writes held mid-flight -------------------------------------------------
+
+/**
+ * A request that doesn't answer until the test says so, for driving the holds
+ * in #256/#257/#259.
+ *
+ * That whole family of bugs lives *between* pressing the write and the server
+ * answering, and shows itself only at the end of the sequence — press the
+ * write, try to leave, then let the server refuse. A test that stops after the
+ * second step passes against a build with no hold at all, because the form is
+ * still on screen either way; what it has to prove is that the refusal is
+ * spoken.
+ *
+ * ```ts
+ * const server = holdRequest(mockFetch, { detail: 'No.' }, 403);
+ * await act(async () => fireEvent.press(screen.getByLabelText('Save')));
+ * await server.inFlight('Saving…');
+ * // …try every way out…
+ * await server.refuse();
+ * expect(await screen.findByText('No.')).toBeTruthy();
+ * ```
+ *
+ * Takes the suite's own `fetch` spy rather than installing one, because every
+ * suite already serves its screen's reads through one.
+ */
+export function holdRequest(
+  mockFetch: jest.Mock,
+  body: unknown,
+  status: number
+): {
+  inFlight: (pendingLabel: string) => Promise<void>;
+  refuse: () => Promise<void>;
+} {
+  let release: () => void = () => {};
+  const answered = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mockFetch.mockImplementation(async () => {
+    await answered;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => (body === null ? '' : JSON.stringify(body)),
+      json: async () => body,
+    };
+  });
+
+  return {
+    /**
+     * Wait until the request is genuinely in flight, and say how you know.
+     *
+     * React Query dispatches a mutation's pending state through its notify
+     * manager, so it lands a macrotask *after* the press — check straight after
+     * `fireEvent` and you're reading a mutation that hasn't started, which
+     * would pass against a build with no hold at all. `pendingLabel` is the
+     * button's own "Saving…" wording, so the wait is anchored to something the
+     * user can see rather than to a sleep.
+     */
+    inFlight: async (pendingLabel: string) => {
+      await settle(1);
+      if (screen.queryByText(pendingLabel) === null) {
+        throw new Error(
+          `holdRequest: nothing on screen reads "${pendingLabel}" — the write ` +
+            'never started, so nothing below is being tested'
+        );
+      }
+    },
+    /** Let the server answer, and let the refusal reach the screen. */
+    refuse: async () => {
+      await act(async () => {
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    },
+  };
+}
+
 // --- Settling ---------------------------------------------------------------
 
 /**

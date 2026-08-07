@@ -4,14 +4,17 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { ScrollView } from 'react-native';
 
 import PostScreen from '@/app/post/[postId]';
 import type { Post } from '@/types';
 
+import { holdRequest, pickMenuOption, resetMenuSpies } from './helpers';
+
 const params: { postId: string; comment?: string } = { postId: '7' };
 
+const mockBack = jest.fn();
 jest.mock('expo-router', () => ({
   // The screen is always focused under test, so focus is a plain effect — see
   // `jest.setup.js`, whose global stub this local factory overrides.
@@ -19,8 +22,16 @@ jest.mock('expo-router', () => ({
     // `require`, not an import: the factory is hoisted above the imports.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     require('react').useEffect(callback, [callback]),
+  // The screen holds iOS's swipe-back while a comment write is out (#256);
+  // there's no navigator under test and no gesture Node can perform.
+  useNavigation: () => ({ setOptions: () => {} }),
   useLocalSearchParams: () => params,
-  router: { push: jest.fn(), back: jest.fn(), replace: jest.fn(), canGoBack: () => true },
+  router: {
+    push: jest.fn(),
+    back: (...args: unknown[]) => mockBack(...args),
+    replace: jest.fn(),
+    canGoBack: () => true,
+  },
 }));
 
 // The post card's ⋯ menu and each comment's Report affordance read the current
@@ -97,6 +108,8 @@ async function renderScreen(
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockBack.mockReset();
+  resetMenuSpies();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
   params.comment = undefined;
 });
@@ -394,4 +407,56 @@ it('refreshes the unread notification count once the post lands (seen-on-view)',
   await waitFor(() =>
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] })
   );
+});
+
+/**
+ * Leaving the post is held while a comment write is out (#256).
+ *
+ * `CommentNode` holds the routes it owns — Cancel, Android's back, the Reply
+ * toggle — but "← Feed" and iOS's swipe belong to this screen, and both unmount
+ * the write box that is the only renderer of a refused edit. The node declares
+ * the write and this screen reads it, which is the whole point of the hold
+ * forwarding upward.
+ */
+it('refuses “← Feed” while a comment edit is saving, then shows the refusal', async () => {
+  serve({
+    post: jsonResponse(makePost()),
+    comments: [
+      {
+        id: 1,
+        // The viewer (pk 99 — see the auth stub above), so the ⋯ offers Edit.
+        author: { id: 99, display_name: 'Test Viewer', avatar_thumb: null },
+        parent: null,
+        text: 'Mine',
+        created_at: '2026-07-18T11:00:00Z',
+        replies: [],
+        reactions: [],
+      },
+    ],
+  });
+
+  await renderScreen();
+  await screen.findByText('Mine');
+  await fireEvent.press(screen.getByLabelText('Comment options'));
+  await act(async () => pickMenuOption('Edit comment'));
+  await fireEvent.changeText(
+    screen.getByLabelText('Edit comment text'),
+    'Mine, fixed'
+  );
+
+  const server = holdRequest(
+    mockFetch,
+    { detail: 'Editing is only allowed for 15 minutes.' },
+    403
+  );
+  await act(async () => fireEvent.press(screen.getByLabelText('Save comment')));
+  await server.inFlight('Saving…');
+
+  await fireEvent.press(screen.getByLabelText('Back to feed'));
+  expect(mockBack).not.toHaveBeenCalled();
+
+  await server.refuse();
+  expect(
+    await screen.findByText('Editing is only allowed for 15 minutes.')
+  ).toBeTruthy();
 });

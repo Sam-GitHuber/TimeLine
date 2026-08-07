@@ -110,9 +110,16 @@ jest.mock('react-native-safe-area-context', () =>
  * `router` or `useLocalSearchParams`) overrides this and must include the same
  * stub — that's a property of `jest.mock`, not something this can prevent.
  */
+// `useNavigation` needs one for the same reason, and `useHoldSwipeBack`
+// (`src/writeHold.tsx`) calls it on every screen that holds a form open while
+// its write is out. The only option it ever sets is `gestureEnabled`, which
+// governs iOS's interactive pop — a real gesture on a real navigator, and
+// nothing a Node test can perform. A suite that wants to assert the hold takes
+// the option supplies its own stand-in with a spy (`writeHold.test.tsx`).
 jest.mock('expo-router', () => ({
   ...jest.requireActual('expo-router'),
   useFocusEffect: (callback) => require('react').useEffect(callback, [callback]),
+  useNavigation: () => ({ setOptions: () => {} }),
 }));
 
 // `@react-native-community/datetimepicker` is a native module (the OS date/time

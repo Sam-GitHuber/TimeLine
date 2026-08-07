@@ -24,13 +24,47 @@ import {
 } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
 
+import SettingsScreen from '@/app/settings';
 import { ChangePasswordSection } from '@/components/settings/ChangePasswordSection';
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
 import { PrivacySection } from '@/components/settings/PrivacySection';
 
-import { androidIt, captureBackHandler, pressBack, switchValue } from './helpers';
+import {
+  androidIt,
+  captureBackHandler,
+  holdRequest,
+  pressBack,
+  settle,
+  switchValue,
+} from './helpers';
+
+const mockBack = jest.fn();
+jest.mock('expo-router', () => ({
+  // Spread first: this suite mounts the whole Settings screen, and a factory
+  // that replaced the module wholesale would leave every other export
+  // `undefined` — which renders as a blank tree rather than as an error, and
+  // takes every test after it down with the broken act scope.
+  ...jest.requireActual('expo-router'),
+  // Focus is a plain effect under test, and there is no navigator to take the
+  // swipe option — the stand-ins `jest.setup.js` installs globally, repeated
+  // because this factory overrides them.
+  useFocusEffect: (callback: () => void | (() => void)) =>
+    // `require`, not an import: the factory is hoisted above the imports.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('react').useEffect(callback, [callback]),
+  useNavigation: () => ({ setOptions: () => {} }),
+  router: {
+    back: (...args: unknown[]) => mockBack(...args),
+    replace: jest.fn(),
+    canGoBack: () => true,
+  },
+}));
+
+// The legal rows open the web app's own hosted pages in an in-app browser; the
+// whole screen is mounted below, so the native module needs a stand-in.
+jest.mock('expo-web-browser', () => ({ openBrowserAsync: jest.fn() }));
 
 const mockSignOut = jest.fn();
 const mockRefreshUser = jest.fn();
@@ -100,6 +134,7 @@ beforeEach(() => {
   mockSignOut.mockReset();
   mockSetIncludeGroups.mockReset();
   mockRefreshUser.mockReset();
+  mockBack.mockReset();
   mockIncludeGroups = false;
   mockUser = { send_read_receipts: true };
   globalThis.fetch = mockFetch as unknown as typeof fetch;
@@ -221,6 +256,161 @@ describe('ChangePasswordSection', () => {
       new_password2: 'new-pw-123',
     });
     expect(await screen.findByText('Your password has been changed.')).toBeTruthy();
+  });
+
+  /**
+   * Nothing collapses the form while the POST is out (#256).
+   *
+   * This is the sharpest case in that family, because it leaves you wrong about
+   * your own credentials: the 400 of *"Your old password was entered
+   * incorrectly"* renders inside this form and nowhere else, so a route that
+   * takes the form off screen takes the sentence with it — and you go on
+   * believing your password is the new one.
+   *
+   * Abandoning a half-*filled* password change is what the back handler is for
+   * and stays fine; a half-*sent* one is the bug.
+   */
+  describe('holding the form open until the server answers', () => {
+    const REFUSAL = 'Your old password was entered incorrectly.';
+
+    async function startSaving() {
+      await fireEvent.changeText(screen.getByLabelText('Current password'), 'old-pw');
+      await fireEvent.changeText(screen.getByLabelText('New password'), 'new-pw-123');
+      await fireEvent.changeText(
+        screen.getByLabelText('Confirm new password'),
+        'new-pw-123'
+      );
+
+      const server = holdRequest(mockFetch, { old_password: [REFUSAL] }, 400);
+      // Braced, not a bare arrow: `handleSubmit` is `async`, so returning its
+      // promise to `act` would wait on the very request this test is holding
+      // open — and pressing outside `act` leaves its continuation to land in
+      // whatever comes next.
+      await act(async () => {
+        fireEvent.press(screen.getByRole('button', { name: 'Change password' }));
+      });
+      await server.inFlight('Saving…');
+      return server;
+    }
+
+    it('refuses Close, then shows the refusal', async () => {
+      await openForm();
+      const server = await startSaving();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Close' }));
+      expect(screen.getByLabelText('Current password')).toBeTruthy();
+
+      await server.refuse();
+      expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    });
+
+    androidIt('refuses hardware back, then shows the refusal', async () => {
+      captureBackHandler();
+      await openForm();
+      const server = await startSaving();
+
+      await act(async () => {
+        // Claimed, not passed on: falling through would leave Settings too.
+        expect(pressBack()).toBe(true);
+      });
+      expect(screen.getByLabelText('Current password')).toBeTruthy();
+
+      await server.refuse();
+      expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    });
+
+    it('refuses the Settings screen’s Back, two levels above the request', async () => {
+      // The screen's Back is the route the section itself can't see. A
+      // declaration reaches only the nearest hold, so this passes only because
+      // the section's hold forwards itself to the screen's.
+      mockFetch.mockResolvedValue(jsonResponse({}, 200));
+      await renderWithClient(<SettingsScreen />);
+      await fireEvent.press(screen.getByText('Change password…'));
+      const server = await startSaving();
+
+      await fireEvent.press(screen.getByLabelText('Back'));
+      expect(mockBack).not.toHaveBeenCalled();
+
+      await server.refuse();
+      expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    });
+  });
+});
+
+/**
+ * The other two sections that report a refusal inside themselves and nowhere
+ * else (#256). Both are one-line declarations into the same hold the change-
+ * password form uses; what they need pinning for is that leaving Settings while
+ * a toggle is saving would take the message with it.
+ */
+describe('leaving Settings while a section is saving', () => {
+  async function renderScreen() {
+    mockFetch.mockResolvedValue(jsonResponse({ reaction: true }, 200));
+    await renderWithClient(<SettingsScreen />);
+  }
+
+  it('refuses Back while read receipts are saving, then says it failed', async () => {
+    // A privacy setting you believe you changed and haven't: you go on
+    // broadcasting when you've read people's messages.
+    await renderScreen();
+    const server = holdRequest(mockFetch, { detail: 'Nope.' }, 500);
+    await act(async () => {
+      fireEvent(screen.getByLabelText('Send read receipts'), 'valueChange', false);
+    });
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(mockBack).not.toHaveBeenCalled();
+
+    await server.refuse();
+    expect(
+      await screen.findByText('Couldn’t save that. Please try again.')
+    ).toBeTruthy();
+  });
+
+  androidIt('refuses hardware back while read receipts are saving', async () => {
+    // The section registers no `useAndroidBack` of its own — only
+    // `ChangePasswordSection` does, and only while its accordion is open — so
+    // without the screen's registration this press is unclaimed and pops
+    // Settings, which is the swallow all over again.
+    captureBackHandler();
+    await renderScreen();
+    const server = holdRequest(mockFetch, { detail: 'Nope.' }, 500);
+    await act(async () => {
+      fireEvent(screen.getByLabelText('Send read receipts'), 'valueChange', false);
+    });
+
+    await act(async () => {
+      expect(pressBack()).toBe(true);
+    });
+
+    await server.refuse();
+    expect(
+      await screen.findByText('Couldn’t save that. Please try again.')
+    ).toBeTruthy();
+  });
+
+  it('refuses Back while a notification preference is saving', async () => {
+    await renderScreen();
+    const toggle = await screen.findByLabelText(
+      'Reactions to your posts and comments'
+    );
+    const server = holdRequest(mockFetch, { detail: 'Nope.' }, 500);
+    await act(async () => {
+      fireEvent(toggle, 'valueChange', false);
+    });
+    // React Query dispatches `isPending` through its notify manager, so it
+    // lands a macrotask after the flip — press Back before that and nothing
+    // below is being tested. (`toBeDisabled` can't stand in here: RN's Switch
+    // doesn't put `disabled` into `accessibilityState`.)
+    await settle(1);
+
+    await fireEvent.press(screen.getByLabelText('Back'));
+    expect(mockBack).not.toHaveBeenCalled();
+
+    await server.refuse();
+    expect(
+      await screen.findByText('Couldn’t save that preference. Please try again.')
+    ).toBeTruthy();
   });
 });
 

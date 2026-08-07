@@ -628,6 +628,27 @@ screen: `gestureEnabled` is iOS-only (Android's back gesture belongs to the OS
 and ignores it), and a route-level option belongs in the layout rather than in
 the screen, so it holds from the first frame.
 
+**The one exception is temporary and belongs to the screen**: a form holding
+itself open while its write is in flight turns the gesture off for the length of
+that request and puts it back
+(`useHoldSwipeBack`, `mobile/src/writeHold.tsx`), because a swipe is a dismissal
+route with no button to disable. The rule it serves — *a form that is the only
+renderer of its own error may not be dismissed while that write is in flight* —
+and the reason the phone needed a mechanism where the web needed a `disabled`
+attribute are in
+[connections.md](connections.md#reporting-a-refused-write). The load-bearing
+constraint for anything in this section: **hold the state a screen already
+registers `useAndroidBack` for by gating that handler, never by adding a second
+registration** — two handlers for one press rank themselves by hook order, which
+is the race this whole section exists to avoid.
+
+Under test, `useHoldSwipeBack` reaches for the navigator that isn't there, so
+`jest.setup.js` stubs `useNavigation` alongside `useFocusEffect` — a suite with
+its own `expo-router` factory needs both, and needs to spread
+`jest.requireActual` if it mounts a whole screen (a factory that drops the
+module's other exports renders a blank tree rather than throwing, and takes
+every test after it down with it).
+
 ### The date/time picker
 
 `@react-native-community/datetimepicker` is **two different components behind one

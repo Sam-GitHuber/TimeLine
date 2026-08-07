@@ -21,13 +21,32 @@ import {
 import { api } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import { useAndroidBack } from '@/useAndroidBack';
+import { useHoldOpen, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 export function ChangePasswordSection() {
   const [open, setOpen] = useState(false);
 
+  /**
+   * Collapsing this section is held while the POST is out (#256).
+   *
+   * Abandoning a half-*filled* password change is fine, and is what the back
+   * handler below exists for. Abandoning a half-*sent* one is the bug: the form
+   * is the only renderer of *"Your old password was entered incorrectly"*, and
+   * collapsing it takes the sentence with it. You then believe your password is
+   * the new one.
+   *
+   * A hold of its own rather than Settings' — this section decides when the
+   * form goes, and the screen only needs to know that *something* is writing,
+   * which the form declares to both.
+   */
+  const hold = useWriteHold();
+
   // Android back collapses the form rather than leaving Settings, so a press
   // meant to abandon a half-filled password change doesn't do both (#168).
-  useAndroidBack(open, () => setOpen(false));
+  useAndroidBack(open, () => {
+    if (hold.held) return;
+    setOpen(false);
+  });
 
   return (
     <View style={styles.section}>
@@ -37,7 +56,9 @@ export function ChangePasswordSection() {
       </Text>
 
       {open ? (
-        <ChangePasswordForm onDone={() => setOpen(false)} />
+        <WriteHoldProvider hold={hold}>
+          <ChangePasswordForm onDone={() => setOpen(false)} />
+        </WriteHoldProvider>
       ) : (
         <Pressable
           onPress={() => setOpen(true)}
@@ -63,6 +84,16 @@ function ChangePasswordForm({ onDone }: { onDone: () => void }) {
   // the backend re-checks everything regardless.
   const mismatch = confirm.length > 0 && next !== confirm;
   const canSubmit = Boolean(current && next && confirm) && !mismatch && !saving;
+
+  // One declaration, reaching both holds above: the section's (which owns Close
+  // and Android back) and — because a hold forwards itself upward — the
+  // screen's (which owns "← Back" and the swipe). Every one of those routes
+  // unmounts this form.
+  //
+  // Released the moment the request settles, not when the form goes — the
+  // success note below needs a way out too, and `saving` is already false by
+  // then.
+  useHoldOpen(saving);
 
   async function handleSubmit() {
     if (!canSubmit) return;
@@ -128,8 +159,9 @@ function ChangePasswordForm({ onDone }: { onDone: () => void }) {
       <View style={styles.actions}>
         <Pressable
           onPress={onDone}
+          disabled={saving}
           accessibilityRole="button"
-          style={styles.ghostButton}
+          style={[styles.ghostButton, saving && styles.ghostDisabled]}
         >
           <Text style={styles.ghostLabel}>Close</Text>
         </Pressable>
@@ -219,6 +251,10 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   ghostLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.ink },
+  // The same dimming `saveDisabled` uses: while the request is out, both
+  // buttons in the pair are unavailable. Save being gated and Close beside it
+  // wide open was the tell in #259.
+  ghostDisabled: { opacity: 0.5 },
   saveButton: {
     marginTop: spacing.md,
     paddingHorizontal: spacing.lg,
