@@ -1867,13 +1867,22 @@ So **the panel declares the write and the chrome reads the flag**:
 `useHoldMessagesOpen(mutation.isPending)` (in `messaging.jsx`) counts a write
 into messaging context; `close()` declines while the count is above zero, and
 `PanelHeader` renders Back and ✕ disabled. Four panels declare one:
-`NewChatPicker` (add people / start a chat), `ConversationInfoView` (rename),
-`ConversationThreadView` (a message edit **and** a bulk delete — both report
-themselves in the same error bar, and the delete is the longer window of the
-two, since its mutation walks the selection one `DELETE` at a time) and
-`PendingChatPanel` (the locked chat's Connect). The bar's third occupant,
+`NewChatPicker` (add people / start a chat), `ConversationInfoView` (rename,
+mute, leave), `ConversationThreadView` (a message edit, a bulk delete, a
+single-message delete, leave and mute — all of them report themselves in the
+same error bar, and the bulk delete is the longest window of the five, since its
+mutation walks the selection one `DELETE` at a time) and `PendingChatPanel` (the
+locked chat's Connect and its Decline). The bar's remaining occupant,
 `photoError`, deliberately isn't one: preparing a photo is a client-side
 decode/re-encode, not a request whose answer you're waiting on.
+
+**The last six of those declarations arrived with #238, and only because the
+writes started reporting at all.** Mute, leave and the single-message delete
+rendered nothing anywhere when they failed, so there was no message for the
+chrome to protect — the hold and the renderer are one change, not two, and a
+hold added over a write that says nothing is decoration. See
+[connections.md](connections.md#reporting-a-refused-write) for what each of them
+cost, and why mute was the worst of them.
 
 Four things worth keeping:
 
@@ -1931,15 +1940,22 @@ said. Both hand routes out of edit mode (Escape, and the ✕ on the quoted
 message) now hold while the PATCH is out, which is what makes the `reset()` on
 the way out safe rather than needing to be conditional.
 
-**What is deliberately *not* held: Leave.** All three of the drawer's Leave
-controls (the thread header's, the info panel's, and `PendingChatPanel`'s
-"Decline / Leave") sit beside a write that the hold covers, and each unmounts
-its panel on success. They stay open anyway, on one reading: leaving takes you
-out of the conversation for good, so whether the rename landed, the edit was
-refused, or the connection request was rejected stops being an answer you'd act
-on. The gate exists to keep a message you'd *do something with*; there's nothing
-left to do. Two of the three ask for confirmation first, which makes the
-intention explicit.
+**What is deliberately *not* held: the Leave *controls*.** All three of the
+drawer's Leave controls (the thread header's, the info panel's, and
+`PendingChatPanel`'s "Decline / Leave") sit beside a write that the hold covers,
+and each unmounts its panel on success. They stay pressable anyway, on one
+reading: leaving takes you out of the conversation for good, so whether the
+rename landed, the edit was refused, or the connection request was rejected stops
+being an answer you'd act on. The gate exists to keep a message you'd *do
+something with*; there's nothing left to do. Two of the three ask for
+confirmation first, which makes the intention explicit.
+
+That is a statement about pressing Leave **while something else is out**, and
+#238 made the distinction load-bearing: a leave *of its own* now declares a hold
+like any other write, because `openList()` runs only on success and a refused
+leave therefore leaves you on the very panel that has to report it. The two
+readings don't conflict — one is about a message that has stopped mattering, the
+other about one that has just been created.
 
 Pinned in `messaging.test.jsx` ("a write in flight holds it open") and
 `App.test.jsx` (the narrow-viewport Groups button), which drive the whole

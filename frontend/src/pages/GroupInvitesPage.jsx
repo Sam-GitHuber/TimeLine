@@ -42,6 +42,26 @@ export default function GroupInvitesPage() {
         Group invitations
       </h1>
 
+      {/* The **write's** rejection, not the query's (#239). The "Couldn't load
+          invitations." line below covers the read and can never fire here: the
+          list arrived fine and it's the Accept that failed. Until now nothing
+          rendered `decide.isError`, so an invite the group had already revoked
+          answered 404, no `onSuccess` ran, no invalidation ran, and the row
+          stayed put — leaving you to press it again, or to believe you'd joined
+          a group you hadn't. Named per decision (`connections.md`: the fallback
+          is per state, never generic), off the variables of the attempt that
+          failed. */}
+      {decide.isError && (
+        <p role="alert" className="px-5 py-2.5 text-sm text-red-600">
+          {serverMessage(
+            decide.error,
+            decide.variables?.accept
+              ? "Couldn’t accept that invitation."
+              : "Couldn’t decline that invitation."
+          )}
+        </p>
+      )}
+
       {isLoading && (
         <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>
       )}

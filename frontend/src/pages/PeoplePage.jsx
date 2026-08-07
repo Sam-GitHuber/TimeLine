@@ -332,6 +332,35 @@ function RequestsList() {
     },
   });
 
+  /**
+   * The **write's** rejection, which is a different thing from the query's
+   * (#239).
+   *
+   * `isError` above belongs to the list, and "Couldn't load requests." can never
+   * fire in the case that matters: the list loaded fine, and it's the Approve
+   * that failed. Nothing rendered `decide.isError`, so a request the other
+   * person withdrew — or a group that revoked your invite — answered 404, no
+   * `onSuccess` ran, no invalidation ran, and the row sat exactly where it was.
+   * Pressing it again is the natural reading, and on the approve path you walk
+   * away believing you're connected to someone you aren't.
+   *
+   * Above the list rather than per row: `decide` is one mutation shared by every
+   * row's two buttons, so it has one error at a time and one place to put it —
+   * the shape `GroupMembersPanel` settled on. The fallback names *which* of the
+   * two didn't happen (`connections.md`: per state, never generic), read off the
+   * variables of the attempt that failed rather than any current state.
+   */
+  const decideError = decide.isError ? (
+    <p role="alert" className="px-5 py-2.5 text-sm text-red-600">
+      {serverMessage(
+        decide.error,
+        decide.variables?.approve
+          ? "Couldn’t approve that request."
+          : "Couldn’t reject that request."
+      )}
+    </p>
+  ) : null;
+
   if (isLoading)
     return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
   if (isError)
@@ -342,13 +371,17 @@ function RequestsList() {
     );
   if (requests.length === 0)
     return (
-      <p className="px-6 py-10 text-center text-ink-faint">
-        No pending requests.
-      </p>
+      <>
+        {decideError}
+        <p className="px-6 py-10 text-center text-ink-faint">
+          No pending requests.
+        </p>
+      </>
     );
 
   return (
     <>
+      {decideError}
       {requests.map((req) => (
         <PersonRow
           key={req.id}

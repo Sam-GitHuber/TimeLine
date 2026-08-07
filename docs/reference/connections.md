@@ -115,6 +115,37 @@ surfaces in the same family (#237–#240):
   reaction chips in [reactions.md](reactions.md#frontend) (issue #242), where
   the "answer" is simply whether that emoji is yours.
 
+**Issues #238 and #239 finished the family on the web**, and they're worth
+keeping apart because they fail a reader differently. #238 is a write with **no
+error path at all** — six of them, across `ConversationThreadView` (single-message
+delete, leave, mute), `ConversationInfoView` (mute, leave) and
+`PendingChatPanel` (the Decline). Every one had a *sibling mutation in the same
+file that already reported* — the edit and the bulk delete, the rename, the
+Connect — so these were omissions rather than a house style, and a sweep by file
+would have called each file covered.
+
+#239 is the sharper one, because the file **looks** handled: `PeoplePage`'s
+requests inbox and `GroupInvitesPage` both destructure `isError`/`error` from
+the **query** and render "Couldn't load requests." / "Couldn't load
+invitations.", while the `decide` mutation right below has nothing. That message
+can never fire in the case that matters — the list arrived fine and it's the
+Approve that failed — so the page has an error path that covers the read and
+never the write. **A rendered `isError` is evidence of nothing until you check
+which observer it came off.** Both now render `decide.isError` above the list,
+with a fallback per decision read off `mutation.variables` (approve/reject,
+accept/decline), the shape `GroupMembersPanel` settled on.
+
+Mute is the one that lied hardest, and it's the reason silence here isn't a
+cosmetic bug. Both controls read `muted` straight from the server and
+deliberately don't move until the write lands, so a mute that 500'd was
+*pixel-identical* to a mute that worked: you believe a noisy group chat is
+silenced and your phone buzzes all evening with nothing to suggest the app is at
+fault. `ConversationListView` named that exact failure in its own comment and
+handled it; the other two panels didn't. Pinned in `messaging.test.jsx`,
+`App.test.jsx` and `group-membership-cache.test.jsx`. **Still open for mobile**
+on both issues — `info.tsx` and `PendingChatPanel.tsx` for #238 (the app's
+single-message delete is #220 §2), `people.tsx` and `groups.tsx` for #239.
+
 The disconnect and block paths additionally hold their confirmation modal open
 until the write lands, so the failure has somewhere to go — see
 [messaging.md](messaging.md#blocking) for why that matters most on the block.

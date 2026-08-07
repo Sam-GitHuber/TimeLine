@@ -83,14 +83,6 @@ export default function ConversationInfoView() {
     },
   });
 
-  // The rename is the only write on this panel that reports itself *here* (mute
-  // and leave say nothing yet — #238), so the drawer's Escape, ✕ and Back hold
-  // while it's out (#258). `MessagesDrawer`'s own comment is right that this
-  // panel holds nothing worth preserving across a visit — that's a judgement
-  // about the *draft*. Abandoning a rename you haven't sent is free; abandoning
-  // one the server is about to refuse is the bug.
-  useHoldMessagesOpen(renameMutation.isPending);
-
   const muteMutation = useMutation({
     mutationFn: (muted) => api.setConversationMuted(conversationId, muted),
     onSuccess: () => {
@@ -112,6 +104,24 @@ export default function ConversationInfoView() {
       openList();
     },
   });
+
+  /**
+   * All three writes on this panel are reported *here* and nowhere else, so the
+   * drawer's Escape, ✕ and Back — and the Back to the transcript, which unmounts
+   * this panel just as completely — hold while any of them is out (#258, #238).
+   *
+   * The rename was the only one until #238; mute and leave said nothing at all
+   * when they failed, so there was nothing to hold for. `MessagesDrawer`'s own
+   * comment is right that this panel holds nothing worth preserving across a
+   * visit — that's a judgement about the *draft*. Abandoning a rename you
+   * haven't sent is free; abandoning one the server is about to refuse is the
+   * bug, and the same now goes for the other two.
+   */
+  useHoldMessagesOpen(
+    renameMutation.isPending ||
+      muteMutation.isPending ||
+      leaveMutation.isPending
+  );
 
   const groupName =
     detail?.title ||
@@ -270,6 +280,25 @@ export default function ConversationInfoView() {
               </button>
             </div>
 
+            {/* #238 — the one that lied hardest. The switch reads `detail.muted`
+                straight from the server, so it deliberately doesn't move until
+                the write lands; what it did instead was not move and not say
+                why, making a mute that 500'd pixel-identical to one that worked.
+                You believe a noisy group chat is silenced and your phone buzzes
+                all evening with nothing to suggest the app is at fault.
+                `ConversationListView` names this exact failure in its own
+                comment and handles it; this panel didn't. */}
+            {muteMutation.isError && (
+              <p role="alert" className="px-5 pb-2 text-sm text-red-600">
+                {serverMessage(
+                  muteMutation.error,
+                  muteMutation.variables
+                    ? "Couldn’t mute this chat."
+                    : "Couldn’t unmute this chat."
+                )}
+              </p>
+            )}
+
             {isGroup && (
               <button
                 type="button"
@@ -323,6 +352,17 @@ export default function ConversationInfoView() {
                   You’ll stop receiving messages here.
                 </span>
               </button>
+            )}
+
+            {/* #238: `openList()` runs only on success, so a refused leave left
+                you looking at the Details panel of a chat you'd just confirmed
+                leaving, with nothing said. The natural reading is that the
+                button is broken — and the natural response is to press it
+                again. */}
+            {leaveMutation.isError && (
+              <p role="alert" className="px-5 pb-2 text-sm text-red-600">
+                {serverMessage(leaveMutation.error, "Couldn’t leave this chat.")}
+              </p>
             )}
 
             {/* Block is the strong, explicit cut — it severs the connection,

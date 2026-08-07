@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
-import { renderWithAuth } from "./test-utils.jsx";
+import { renderWithAuth, apiError, unauthoredError } from "./test-utils.jsx";
 import { api } from "./api.js";
 
 // What each write to **your own** group membership *refreshes*, not just what it
@@ -238,5 +238,55 @@ describe("deciding on a group invitation", () => {
     // if the feed were in the set it would have refetched by now too.
     await waitFor(() => expect(api.getGroupInvites).toHaveBeenCalledTimes(2));
     expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 2 });
+  });
+
+  /**
+   * Issue #239 — **the error this page rendered belonged to the query, not to
+   * the write.**
+   *
+   * The read has a failure line ("Couldn't load invitations.") and the write had
+   * none, which is worse than having neither: a reviewer grepping for `isError`
+   * finds one and ticks the box. It can't fire in the case that matters — the
+   * list arrived fine and it's the Accept that failed. `onSuccess` is the only
+   * place an invalidation runs, so a revoked invite answered 404 and the row
+   * stayed exactly where it was, leaving you to press it again or to walk away
+   * believing you'd joined.
+   *
+   * Bundled into this file rather than a suite of its own because these are its
+   * subject twice over: the two gated surfaces prove the refusal changed nothing
+   * on the server either, which is the other half of "nothing happened".
+   */
+  it("says so when accepting an invitation is refused", async () => {
+    api.acceptGroupInvite.mockRejectedValue(
+      apiError("That invitation is no longer available.", 404)
+    );
+    await renderOverGatedSurfaces(invitesRoute, "/group-invites");
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Accept" }));
+
+    expect(
+      await screen.findByText("That invitation is no longer available.")
+    ).toBeInTheDocument();
+    // Not the query's line, which was never about this.
+    expect(screen.queryByText("Couldn't load invitations.")).toBeNull();
+    // Nothing joined, so nothing gated is refreshed — and the row is still
+    // there, which is exactly why the silence read as a broken button.
+    expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 });
+    expect(screen.getByText("Book Club")).toBeInTheDocument();
+  });
+
+  it("names the decision when a decline is refused with nothing readable", async () => {
+    api.rejectGroupInvite.mockRejectedValue(unauthoredError(500));
+    await renderOverGatedSurfaces(invitesRoute, "/group-invites");
+    expect(await screen.findByText("Book Club")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Decline" }));
+
+    // Per state, never generic (connections.md) — and a 500 with no DRF body
+    // leaves nothing of the server's to show.
+    expect(
+      await screen.findByText("Couldn’t decline that invitation.")
+    ).toBeInTheDocument();
   });
 });
