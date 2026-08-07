@@ -1890,9 +1890,15 @@ Four things worth keeping:
   *success* handlers and a blanket gate would refuse the one call that has to
   work (React Query runs `onSuccess` before the mutation leaves its pending
   state — the same trap that stops `stopEditing` taking a blanket guard). The
-  thread instead drops **Details** and **Add people** from its `⋯` while an edit
-  is saving, and holds the group-name button that is the other way to the info
-  panel.
+  thread instead drops **Details** and **Add people** from its `⋯`, and holds the
+  group-name button that is the other way to the info panel, on the same
+  `reportingWrite` the drawer's own hold reads — *both* writes that report into
+  the error bar, the edit and the bulk delete, not just the edit. Naming it once
+  is the point: gating these three on `editMutation.isPending` alone left the
+  bulk delete open, and open in the least obvious way, because
+  `confirmDeleteSelected` clears the selection as soon as it fires. The header
+  falls out of its "N selected" arm and puts the group-name button back on screen
+  with every `DELETE` still in flight.
 - **It reaches outside the drawer, in three places.** On a viewport under 800px
   opening the Groups drawer closes this one, so `close()` **returns whether it
   actually closed** and neither caller opens Groups when it didn't — `Layout`'s

@@ -791,8 +791,18 @@ export default function ConversationThreadView() {
    * photo is a client-side decode/re-encode, not a write — the rule is about a
    * request whose answer you're waiting on, and holding the whole drawer shut
    * while a picture is being resized would be the gate outstaying its purpose.
+   *
+   * Named once and read everywhere, because the drawer's four exits are not the
+   * only way out of this view: the controls inside it that switch `view` unmount
+   * it just as completely, and they have to hold on the *same* condition. Two of
+   * them gated on the edit alone until this was hoisted, which left the bulk
+   * delete — the longer window — reported into a bar the user could still
+   * navigate out from under.
    */
-  useHoldMessagesOpen(editMutation.isPending || deleteManyMutation.isPending);
+  const reportingWrite =
+    editMutation.isPending || deleteManyMutation.isPending;
+
+  useHoldMessagesOpen(reportingWrite);
 
   // Leave (or, while pending, decline) a chat — group-only in the header;
   // PendingChatPanel has its own copy of this for the locked view, and the
@@ -1178,11 +1188,12 @@ export default function ConversationThreadView() {
    * Add and Leave are group-only: there's nobody to add to a 1:1, and leaving
    * one is what Block is for.
    *
-   * **Details and Add stand down while a message edit is saving** (#257). Both
-   * switch the drawer to another `view`, which unmounts this one and takes the
-   * error bar — the only renderer of a refused edit — with it. Absent rather
-   * than greyed, matching the way Delete leaves the selection bar: `getActions`
-   * is called when the menu opens, so what it offers is a fact about now.
+   * **Details and Add stand down while either reported write is out** (#257,
+   * #258). Both switch the drawer to another `view`, which unmounts this one and
+   * takes the error bar — the only renderer of a refused edit or a refused bulk
+   * delete — with it. Absent rather than greyed, matching the way Delete leaves
+   * the selection bar: `getActions` is called when the menu opens, so what it
+   * offers is a fact about now.
    *
    * Mute stays because it doesn't change `view` at all. Leave stays because it
    * asks first and means it: someone who confirms "leave this chat" has decided
@@ -1190,16 +1201,15 @@ export default function ConversationThreadView() {
    * gate outstaying its purpose.
    */
   function headerActions() {
-    const savingEdit = editMutation.isPending;
     const actions = [
-      ...(savingEdit ? [] : [{ label: "Details", onClick: openInfo }]),
+      ...(reportingWrite ? [] : [{ label: "Details", onClick: openInfo }]),
       {
         label: detail.muted ? "Unmute" : "Mute",
         onClick: () => muteMutation.mutate(!detail.muted),
       },
     ];
     if (isGroup) {
-      if (!savingEdit)
+      if (!reportingWrite)
         actions.push({
           label: "Add people",
           onClick: () => openNew({ addToConversationId: conversationId }),
@@ -1291,9 +1301,13 @@ export default function ConversationThreadView() {
             type="button"
             onClick={openInfo}
             // The other way to the info panel, and it unmounts this view the
-            // same way the menu item does — so it holds while an edit is saving
-            // (#257), for the same reason.
-            disabled={editMutation.isPending}
+            // same way the menu item does — so it holds on the same condition
+            // (#257, #258), for the same reason. Note this one is reachable
+            // *during* a bulk delete in a way the menu item isn't obviously so:
+            // `confirmDeleteSelected` clears the selection as soon as it fires,
+            // which drops the header out of its "N selected" arm and puts this
+            // button back on screen with the deletes still going.
+            disabled={reportingWrite}
             className="flex min-w-0 items-center gap-2 text-left disabled:opacity-45"
             title="Conversation details"
           >

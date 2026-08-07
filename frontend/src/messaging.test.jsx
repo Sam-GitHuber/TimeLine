@@ -4135,6 +4135,58 @@ describe("Messages drawer — a write in flight holds it open (#257, #258)", () 
     ).toBeInTheDocument();
   });
 
+  // Regression: the drawer's four exits held for the bulk delete, but the three
+  // controls *inside* the view that switch `view` still gated on the edit alone
+  // — and this is the case where that shows, because `confirmDeleteSelected`
+  // clears the selection the moment it fires. The header drops straight out of
+  // "N selected" and back to the group's name button with every DELETE still in
+  // flight, so the one route that looked safest was the one standing open.
+  it("stands the in-view routes down while a bulk delete is working, too", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        msg({ id: 6, text: "and this", sender: mineSender }),
+        msg({ id: 5, text: "delete this", sender: mineSender }),
+      ])
+    );
+    const second = hanging();
+    api.deleteMessage
+      .mockResolvedValueOnce({})
+      .mockReturnValueOnce(second.promise);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderAt("/messages/11");
+    const bubble = (await screen.findByText("delete this")).closest("li");
+    await user.click(
+      within(bubble).getByRole("button", { name: "Message options" })
+    );
+    await user.click(screen.getByRole("button", { name: "Select" }));
+    await screen.findByText("1 selected");
+    await user.click(screen.getByText("and this"));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    confirm.mockRestore();
+    await waitFor(() => expect(api.deleteMessage).toHaveBeenCalledTimes(2));
+
+    // The selection is already gone, so the group's name button is back — and
+    // it opens the info panel, which unmounts the bar this delete reports into.
+    expect(screen.getByTitle("Conversation details")).toBeDisabled();
+
+    await openHeaderMenu(user);
+    const menu = within(
+      screen.getByRole("dialog", { name: "Conversation options" })
+    );
+    expect(menu.queryByRole("button", { name: "Details" })).toBeNull();
+    expect(menu.queryByRole("button", { name: /add people/i })).toBeNull();
+    expect(menu.getByRole("button", { name: /mute/i })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    await second.reject(apiError("That message is already gone.", 404));
+    expect(
+      await screen.findByText("Some messages are still there. Try again.")
+    ).toBeInTheDocument();
+  });
+
   // Regression: the hold made `close`'s identity depend on `isWriting`, and the
   // drawer's Escape effect — keyed on `close` — also called `panelRef.focus()`.
   // Left together, starting a write threw focus onto the drawer container, and
