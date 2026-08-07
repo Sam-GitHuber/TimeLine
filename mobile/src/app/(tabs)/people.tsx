@@ -27,6 +27,7 @@ import { router } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -36,7 +37,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { ConnectButton } from '@/components/ConnectButton';
 import { invalidateConnectionChange } from '@/connectionCache';
@@ -419,6 +420,25 @@ function RequestsList() {
       queryClient.invalidateQueries({ queryKey: ['users'] });
       queryClient.invalidateQueries({ queryKey: ['user', requesterId] });
     },
+    /**
+     * #239 — the write had no error path, and the screen's *query* error is not
+     * a substitute for one. `onSuccess` is the only place an invalidation runs,
+     * so a request the other person had since withdrawn answered 404 and the
+     * row stayed exactly where it was: it reads as a broken button, and on the
+     * approve path you walk away believing you're connected to someone you
+     * aren't, wondering later why their posts never reach your feed.
+     *
+     * An `Alert` rather than an inline line, matching the two screens that had
+     * this shape right already (the messages list's `rowAction`, the group
+     * roster's): a row's failure has no room of its own in a `FlatList`, and a
+     * native dialog can't be scrolled past. The title names the decision, since
+     * which of the two didn't happen is most of the value (connections.md).
+     */
+    onError: (error, { approve }) =>
+      Alert.alert(
+        approve ? 'Couldn’t approve that request' : 'Couldn’t reject that request',
+        serverMessage(error, WENT_WRONG)
+      ),
   });
 
   const requests = dedupeById(

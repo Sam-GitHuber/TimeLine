@@ -956,6 +956,49 @@ it('deletes your own message from the long-press menu → confirm', async () => 
   alertSpy.mockRestore();
 });
 
+/**
+ * Issue #220 §2 — the one mutation on this screen without the `onError` its
+ * siblings all have.
+ *
+ * You confirm "Delete message?", the request fails on a dropped connection, and
+ * the bubble stays. That is indistinguishable from the tap not registering, so
+ * the natural response is to delete it again — against a server that may well
+ * have succeeded the first time.
+ *
+ * The confirm and the refusal are both `Alert`s, so the spy sees two calls: the
+ * assertion names the *second*, because a spy that only proved "an alert
+ * happened" would pass against the build with no `onError` at all.
+ */
+it('says so when a single-message delete is refused', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'oops typo' })],
+  });
+  const alertSpy = jest
+    .spyOn(Alert, 'alert')
+    .mockImplementation((_title, _msg, buttons) => {
+      buttons?.find((b) => b.style === 'destructive')?.onPress?.();
+    });
+
+  await renderScreen();
+  await openMenu('Your message: oops typo');
+  mockFetch.mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return jsonResponse({ detail: 'You can only delete your own messages.' }, 403);
+  });
+  await fireEvent.press(screen.getByLabelText('Delete'));
+
+  await waitFor(() =>
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Couldn’t delete that message',
+      'You can only delete your own messages.'
+    )
+  );
+  // Still there, which is right — and was the whole of the feedback before.
+  expect(screen.getByText('oops typo')).toBeTruthy();
+  alertSpy.mockRestore();
+});
+
 /* ---- The long-press action menu + edit (Phase 9b M1) --------------------- */
 
 it('offers Copy/Edit/Delete on your own message', async () => {
@@ -1143,6 +1186,33 @@ describe('holding edit mode until the server answers', () => {
 
     await server.refuse();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  /**
+   * Issue #261 — the *other* spelling of an unreported write, and why the alert
+   * exists alongside the line rather than instead of it.
+   *
+   * The line lives inside the composer's `KeyboardAvoider`, and three
+   * screen-level `Modal`s are siblings of it — the strand, the photo lightbox
+   * and the reactors sheet. Each is opaque, and each stays reachable while the
+   * PATCH is out (`busy` greys the Save button and nothing else), so a 403
+   * landing while one is open paints underneath it. The strand also sets
+   * `accessibilityViewIsModal`, so the announcement is dropped outright and
+   * never replayed.
+   *
+   * An `Alert` isn't part of this screen's tree, so being covered can't happen
+   * to it. Both are asserted here: the line is still the better answer when
+   * nothing is covering it, because it persists beside the text you're editing.
+   */
+  it('reports a refused edit through an Alert as well as the line', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+
+    await server.refuse();
+
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    expect(alertSpy).toHaveBeenCalledWith('Couldn’t save the edit', REFUSAL);
+    alertSpy.mockRestore();
   });
 
   it('still leaves edit mode when the save succeeds', async () => {
@@ -2734,6 +2804,44 @@ describe('holding the locked chat panel while a connect is out', () => {
 
     await server.refuse();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  /**
+   * Issue #238 — Decline had no error path of its own. `onLeave()` runs only on
+   * success, so a refused decline put the button back from "Leaving…" to
+   * "Decline / Leave" and left the invite in your list the next time you opened
+   * Messages, with nothing to say it hadn't worked.
+   *
+   * Reported through an `Alert`, not the inline line the Connect uses: the line
+   * is what the Connect needs a *hold* for, and a native dialog needs neither
+   * because it outlives the panel.
+   */
+  it('says so when Decline / Leave is itself refused', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({
+      conversation: detail({
+        kind: 'group',
+        my_status: 'pending',
+        can_send: false,
+        must_connect_with: [ADA],
+      }),
+    });
+
+    await renderScreen();
+    await screen.findByText('Decline / Leave');
+    mockFetch.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return jsonResponse({ detail: 'You’re no longer in this chat.' }, 403);
+    });
+    await fireEvent.press(screen.getByText('Decline / Leave'));
+
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t leave this chat',
+        'You’re no longer in this chat.'
+      )
+    );
+    alertSpy.mockRestore();
   });
 
   androidIt('refuses hardware back, then shows the refusal', async () => {

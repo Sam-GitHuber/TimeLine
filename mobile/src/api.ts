@@ -245,6 +245,23 @@ export function serverMessage(err: unknown, fallback: string): string {
 }
 
 /**
+ * The body of a refused-write alert when the server wrote nothing readable —
+ * offline, or a 5xx with no DRF detail.
+ *
+ * The **title** carries which action failed ("Couldn't unmute this chat"),
+ * which is the part that matters, so the body only has to say it's worth
+ * retrying. `serverMessage` prefers the server's own sentence over this
+ * whenever there is one.
+ *
+ * Lives beside `serverMessage` rather than in a screen because the two are one
+ * idea and there are now a dozen callers across events, messaging and the two
+ * invite inboxes. It started as a `const` in the event screen (#296); #238
+ * needed the same sentence in five more files and a second copy of a sentence
+ * is how two of them end up saying slightly different things.
+ */
+export const WENT_WRONG = 'Something went wrong — try again in a moment.';
+
+/**
  * DRF returns validation errors as `{ field: ["msg", ...] }` or
  * `{ detail: "msg" }` / `{ non_field_errors: [...] }`. Pull out something
  * showable. Mirrors the web app's helper of the same name.

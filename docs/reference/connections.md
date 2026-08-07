@@ -142,9 +142,37 @@ deliberately don't move until the write lands, so a mute that 500'd was
 silenced and your phone buzzes all evening with nothing to suggest the app is at
 fault. `ConversationListView` named that exact failure in its own comment and
 handled it; the other two panels didn't. Pinned in `messaging.test.jsx`,
-`App.test.jsx` and `group-membership-cache.test.jsx`. **Still open for mobile**
-on both issues — `info.tsx` and `PendingChatPanel.tsx` for #238 (the app's
-single-message delete is #220 §2), `people.tsx` and `groups.tsx` for #239.
+`App.test.jsx` and `group-membership-cache.test.jsx`.
+
+**The phone needed the same six writes reported and almost none of the
+machinery**, which is the one thing worth carrying away from doing it twice. On
+the web a rejection is a `<p>` inside the component that made the request, so
+every new renderer is a new thing that can be unmounted or covered, and the fix
+drags a hold along with it. On the phone the same rejection is an `Alert` —
+drawn above the RN tree by the OS, outliving the screen that fired it — so
+**there is nothing to hold**. `mobile/src/app/messages/[conversationId]/info.tsx`
+(mute, leave), `PendingChatPanel.tsx` (Decline), `app/(tabs)/people.tsx` and
+`app/(tabs)/groups.tsx` (both `decide`s) took an `onError` each and no gating at
+all. Two more came with them, same surface and same one-line remedy:
+
+- **#220 §2** — the app's single-message delete, the only mutation on the thread
+  screen without the `onError` its siblings had.
+- **#261** — the *other* spelling, and the reason the alert is worth having even
+  where a renderer already exists. The message edit's error line lives inside
+  the composer, and three screen-level `Modal`s (the strand, the lightbox, the
+  reactors sheet) are its siblings and all reachable while the PATCH is out —
+  so a refusal painted *underneath* an opaque overlay, and the strand's
+  `accessibilityViewIsModal` dropped the announcement outright. The line stays
+  (it persists beside the text you're still editing, where a dismissed dialog is
+  gone); the alert is what makes delivery unconditional.
+
+All six go through **`serverMessage(err, WENT_WRONG)`**, not the
+`err instanceof Error ? err.message` spelling most of the app still uses — that
+spelling is #243's ~25 sites, and adding six more to a list someone has to work
+through later would be a strange way to fix a reporting bug. `WENT_WRONG` moved
+from a `const` in the event screen into `mobile/src/api.ts` beside
+`serverMessage` when the second file needed it. Pinned in `threadInfo.test.tsx`,
+`thread.test.tsx`, `people.test.tsx` and `groups.test.tsx`.
 
 The disconnect and block paths additionally hold their confirmation modal open
 until the write lands, so the failure has somewhere to go — see
@@ -292,9 +320,13 @@ keep:
   ungated, and why only the three `mutateAsync` writes on the event screen
   needed holding.
 
-Still open on the phone: **#261**, which is the *other* spelling — three
-screen-level `Modal`s that cover the message edit's error while it stays mounted
-(#253's family, not this one).
+**#261 was the *other* spelling** — three screen-level `Modal`s covering the
+message edit's error while it stayed mounted (#253's family, not this one) —
+and it closed with #238's sweep rather than needing a hold of its own, because
+the exemption above is also the remedy: the edit reports through an `Alert` now,
+and an overlay can't cover what isn't in the tree. That is the general lesson of
+the two halves. **On the web, gating is the only answer, so a new renderer means
+a new hold; on the phone, choosing `Alert` means there is nothing to gate.**
 
 ### A connection *is* the boundary, so its writes refresh everything it gates
 

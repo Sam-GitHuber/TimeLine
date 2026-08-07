@@ -24,6 +24,7 @@ import { router } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -33,7 +34,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { ComposeIcon } from '@/components/icons';
 import { invalidateGroupMembership } from '@/groupCache';
@@ -254,6 +255,18 @@ function InvitesList() {
       if (accept) invalidateGroupMembership(queryClient);
       else queryClient.invalidateQueries({ queryKey: ['groups'] });
     },
+    // #239, the same defect as the requests inbox next door: no error path on
+    // the write, so an invite the group had already revoked answered 404 and
+    // the row sat exactly where it was — press it again, or believe you'd
+    // joined. The flag `onSuccess` forks on names the failure too, rather than
+    // one sentence covering both (connections.md).
+    onError: (error, { accept }) =>
+      Alert.alert(
+        accept
+          ? 'Couldn’t accept that invitation'
+          : 'Couldn’t decline that invitation',
+        serverMessage(error, WENT_WRONG)
+      ),
   });
 
   const invites = dedupeById(query.data?.pages.flatMap((p) => p.results) ?? []);

@@ -88,6 +88,8 @@ import {
   CONVERSATION_DETAIL_POLL_MS,
   MESSAGE_EDIT_WINDOW_MS,
   MESSAGE_POLL_MS,
+  serverMessage,
+  WENT_WRONG,
 } from '@/api';
 import { useAuth } from '@/auth';
 import { prepareChatPhoto } from '@/chatPhotos';
@@ -967,6 +969,16 @@ export default function ThreadScreen() {
       queryClient.invalidateQueries({ queryKey: ['messages', id] });
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
+    // #220 §2 — the one mutation on this screen without the `onError` its
+    // siblings all have. You confirm "Delete message?", the request fails on a
+    // dropped connection, and the bubble stays: indistinguishable from the tap
+    // not registering, so the natural response is to delete it again, against a
+    // server that may have succeeded the first time.
+    onError: (error) =>
+      Alert.alert(
+        'Couldn’t delete that message',
+        serverMessage(error, WENT_WRONG)
+      ),
   });
 
   /**
@@ -1009,6 +1021,28 @@ export default function ThreadScreen() {
       // doesn't reorder the list.
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
+    /**
+     * #261 — the *other* spelling of an unreported write, and the reason this
+     * alert exists alongside the line under the composer rather than replacing
+     * it.
+     *
+     * The line below is inside the `KeyboardAvoider`, and three screen-level
+     * `Modal`s are siblings of it: the strand, the photo lightbox and the
+     * reactors sheet. Each is opaque and each stays reachable while the PATCH
+     * is out — `busy` greys the Save button and nothing else — so a 403 landing
+     * while one is open paints into a subtree drawn *underneath* it. The strand
+     * also sets `accessibilityViewIsModal`, which takes the composer out of the
+     * accessibility tree, so VoiceOver/TalkBack announce nothing at all and
+     * never replay it.
+     *
+     * An `Alert` isn't part of this screen's tree, so being covered can't
+     * happen to it — the same reason the bulk delete and both photo paths use
+     * one. The inline line stays because it's the better answer when nothing is
+     * covering it: it persists in context beside the text you're still editing,
+     * where a dismissed dialog is gone.
+     */
+    onError: (error) =>
+      Alert.alert('Couldn’t save the edit', serverMessage(error, WENT_WRONG)),
   });
 
   const reactMutation = useMutation({
