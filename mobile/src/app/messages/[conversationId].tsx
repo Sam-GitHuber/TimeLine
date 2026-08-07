@@ -1113,7 +1113,7 @@ export default function ThreadScreen() {
    * next to the state it reads rather than 800 lines further down.
    */
   /**
-   * A write on this screen whose refusal renders here and nowhere else.
+   * A write on this screen that a hasty exit would silence.
    *
    * Two of them, and they never coexist because the panel replaces the whole
    * transcript: the message **edit** (#257 — see `stopEditing`) and the pending
@@ -1123,6 +1123,20 @@ export default function ThreadScreen() {
    *
    * The bulk delete stays out: it reports through `Alert.alert`, which is a
    * native dialog and outlives the screen that fired it.
+   *
+   * ⚠️ **The edit stays in even though #261 gave it an `Alert` too**, and the
+   * reason is not the obvious one. `reset()` and the mutation's `onError` come
+   * apart: measured against this version of React Query, `stopEditing`'s
+   * `editMutation.reset()` on a PATCH still in flight clears the observer's
+   * error state — so the line below is destroyed, which is #257 — but the
+   * `onError` **still fires**, so since #261 the refusal reaches you either way.
+   *
+   * What the hold buys is no longer *whether* you're told; it's having anything
+   * to do about it. Leaving edit mode drops the composer back to your pre-edit
+   * draft, so an alert saying the correction failed would arrive with the
+   * correction already gone, and the header's Back pops the screen outright.
+   * The condition here is "a write a hasty exit would leave you unable to act
+   * on", not "a write with only one renderer".
    */
   const reportingWrite = editMutation.isPending || hold.held;
 

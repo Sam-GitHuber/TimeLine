@@ -144,7 +144,7 @@ fault. `ConversationListView` named that exact failure in its own comment and
 handled it; the other two panels didn't. Pinned in `messaging.test.jsx`,
 `App.test.jsx` and `group-membership-cache.test.jsx`.
 
-**The phone needed the same six writes reported and almost none of the
+**The phone needed the same writes reported and almost none of the
 machinery**, which is the one thing worth carrying away from doing it twice. On
 the web a rejection is a `<p>` inside the component that made the request, so
 every new renderer is a new thing that can be unmounted or covered, and the fix
@@ -152,8 +152,9 @@ drags a hold along with it. On the phone the same rejection is an `Alert` —
 drawn above the RN tree by the OS, outliving the screen that fired it — so
 **there is nothing to hold**. `mobile/src/app/messages/[conversationId]/info.tsx`
 (mute, leave), `PendingChatPanel.tsx` (Decline), `app/(tabs)/people.tsx` and
-`app/(tabs)/groups.tsx` (both `decide`s) took an `onError` each and no gating at
-all. Two more came with them, same surface and same one-line remedy:
+`app/(tabs)/groups.tsx` (both `decide`s) — the five these two issues name — took
+an `onError` each and no gating at all. Two more came with them, same surface and
+same one-line remedy:
 
 - **#220 §2** — the app's single-message delete, the only mutation on the thread
   screen without the `onError` its siblings had.
@@ -166,9 +167,9 @@ all. Two more came with them, same surface and same one-line remedy:
   (it persists beside the text you're still editing, where a dismissed dialog is
   gone); the alert is what makes delivery unconditional.
 
-All six go through **`serverMessage(err, WENT_WRONG)`**, not the
+All seven go through **`serverMessage(err, WENT_WRONG)`**, not the
 `err instanceof Error ? err.message` spelling most of the app still uses — that
-spelling is #243's ~25 sites, and adding six more to a list someone has to work
+spelling is #243's ~25 sites, and adding seven more to a list someone has to work
 through later would be a strange way to fix a reporting bug. `WENT_WRONG` moved
 from a `const` in the event screen into `mobile/src/api.ts` beside
 `serverMessage` when the second file needed it. Pinned in `threadInfo.test.tsx`,

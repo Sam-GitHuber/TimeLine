@@ -1999,8 +1999,8 @@ reports through `Alert.alert` — a native dialog outlives the screen that fired
 it. So do the two photo paths. Pinned in `thread.test.tsx`.
 
 **#238 turned that exemption from a footnote into the phone's whole answer.**
-Where the web needed six new renderers *and* six new holds, the app needed six
-`onError`s and no gating at all: `info.tsx`'s mute and leave, `PendingChatPanel`
+Where the web needed six new renderers *and* six new holds, the app needed five
+`onError`s on these screens and no gating at all: `info.tsx`'s mute and leave, `PendingChatPanel`
 's Decline, the thread's single-message delete (#220 §2) and — the one that
 proves the point — the **message edit** (#261), whose error line was being
 covered by the strand, the lightbox and the reactors sheet, all three reachable
