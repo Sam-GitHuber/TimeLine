@@ -134,10 +134,14 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments. `.env` is local dev and `.env.prod` holds the production
+# secrets on the box; the whole `.env.*` family is ignored with them, so a stray
+# copy — a `.env.bak-prod` kept during a deploy — can't be swept into this
+# public repo by a `git add -A`. The two committed templates are named back in.
 .env
-# Production secrets file (the committed template is .env.prod.example).
-.env.prod
+.env.*
+!.env.example
+!.env.prod.example
 .venv
 env/
 venv/
