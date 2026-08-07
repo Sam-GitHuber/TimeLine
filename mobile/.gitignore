@@ -44,9 +44,13 @@ yarn-error.*
 *.pem
 
 # local env files. `.env` is a personal override (e.g. pointing at a local
-# Django); `.env.example` is committed and documents what can go in it.
+# Django); the whole `.env.*` family goes with it, so a stray copy — a
+# `.env.bak-prod` kept during a deploy — can't be swept into a public repo by a
+# `git add -A`. `.env.example` is committed and documents what can go in it, so
+# it's named back in.
 .env
-.env*.local
+.env.*
+!.env.example
 
 # typescript
 *.tsbuildinfo
