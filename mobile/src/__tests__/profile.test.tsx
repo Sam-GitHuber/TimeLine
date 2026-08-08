@@ -25,6 +25,7 @@ import {
   holdRequest,
   pressBack,
   resetMenuSpies,
+  settle,
 } from './helpers';
 
 // A mutable route param so each test can view a different person. Both this and
@@ -194,17 +195,20 @@ function makeQueryClient() {
   });
 }
 
-async function renderScreen() {
+// Hands the client back so a test can drive a refetch (and read the query's
+// state afterwards); every caller that doesn't care can keep ignoring it.
+async function renderScreen(client = makeQueryClient()) {
   // Prime a session so the real AuthProvider resolves to `me` rather than the
   // signed-out state — the screen's self/other branch turns on `me.pk`.
   await saveTokens({ access: 'access-token', refresh: 'refresh-token' });
-  return render(
-    <QueryClientProvider client={makeQueryClient()}>
+  const view = await render(
+    <QueryClientProvider client={client}>
       <AuthProvider>
         <ProfileScreen />
       </AuthProvider>
     </QueryClientProvider>
   );
+  return { client, ...view };
 }
 
 beforeEach(() => {
@@ -480,5 +484,86 @@ describe('reaching a profile', () => {
     // gives the deeper Text the tap, but a device pass confirms it for real.)
     expect(mockPush).toHaveBeenCalledTimes(1);
     expect(mockPush).toHaveBeenCalledWith('/u/42');
+  });
+});
+
+// --- A refresh that fails (#309) --------------------------------------------
+
+/**
+ * A failed *refresh* of the profile must not take the profile off the screen.
+ *
+ * `query-core`'s error action keeps the data it has and only flips `status` to
+ * 'error', and `staleTime` is 0 with `focusManager` wired to `AppState` — so
+ * every foreground refetches `['user', id]`, and one that fails on patchy signal
+ * used to replace the header, the connection state and the whole timeline with
+ * "Couldn't load this profile".
+ */
+describe('a refresh that fails', () => {
+  /** Someone else's profile, so the fetch is live (your own is disabled). */
+  function viewingAda() {
+    mockParams.userId = '2';
+    serve({
+      user: profile({ id: 2, display_name: 'Ada Lovelace' }),
+      posts: [makePost({ id: 5, text: 'A day on the hills' })],
+    });
+  }
+
+  /** The profile request fails from here on; their posts keep working. */
+  function breakTheProfile(status: number, reason: string) {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string }) =>
+        url.includes('/api/users/') && !url.includes('/posts/')
+          ? jsonResponse({ detail: reason }, status)
+          : base(url, init)
+    );
+  }
+
+  it('keeps the profile and its timeline', async () => {
+    viewingAda();
+    const { client } = await renderScreen();
+    await screen.findByText('A day on the hills');
+    breakTheProfile(503, 'Service unavailable.');
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['user', 2] });
+    });
+
+    await waitFor(() =>
+      expect(client.getQueryState(['user', 2])?.status).toBe('error')
+    );
+    // `getQueryState` reads the cache, which goes 'error' a render *before* the
+    // screen does — React Query notifies through `notifyManager`, which batches
+    // on a macrotask. Without this flush the assertions below run against the
+    // pre-error tree and pass against a screen with the bug still in it.
+    await settle(2);
+    expect(screen.queryByText('Couldn’t load this profile')).toBeNull();
+    expect(screen.getByText('A day on the hills')).toBeTruthy();
+    expect(screen.getAllByText('Ada Lovelace').length).toBeGreaterThan(0);
+  });
+
+  it('still says the user is gone on a 404, even holding a copy', async () => {
+    // A 404 is an answer about *now* — no such user — not a failure to ask, so
+    // it outranks the cached copy.
+    viewingAda();
+    const { client } = await renderScreen();
+    await screen.findByText('A day on the hills');
+    breakTheProfile(404, 'Not found.');
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['user', 2] });
+    });
+
+    expect(await screen.findByText('User not found')).toBeTruthy();
+    expect(screen.queryByText('A day on the hills')).toBeNull();
+  });
+
+  it('still shows the error card when the first load fails', async () => {
+    // Nothing cached to fall back on — the case the card is for.
+    viewingAda();
+    breakTheProfile(503, 'Service unavailable.');
+    await renderScreen();
+
+    expect(await screen.findByText('Couldn’t load this profile')).toBeTruthy();
   });
 });

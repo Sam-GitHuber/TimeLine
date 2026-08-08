@@ -486,3 +486,41 @@ it('reads the gallery through the messages endpoint, not one of its own', async 
     )
   ).toBe(true);
 });
+
+// --- Gone and unreachable are different answers (#309) -----------------------
+
+describe('a details screen that can’t reach the conversation', () => {
+  function breakTheDetail(status: number, reason: string) {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/auth/user/')) return jsonResponse(ME);
+      if (/\/api\/conversations\/5\/(\?|$)/.test(String(url))) {
+        return jsonResponse({ detail: reason }, status);
+      }
+      return jsonResponse(null, 404);
+    });
+  }
+
+  it('says the load failed, not that the conversation has been removed', async () => {
+    // `!detail` used to answer for every failure, so a 500 on a cold open (a
+    // push deep-link, or after a session reset cleared the shared cache) told
+    // you a live chat had gone — with no way to retry.
+    breakTheDetail(503, 'Service unavailable.');
+    await renderScreen();
+
+    expect(
+      await screen.findByText('Couldn’t load this conversation.')
+    ).toBeTruthy();
+    expect(screen.queryByText('This conversation isn’t available.')).toBeNull();
+    expect(screen.getByText('Try again')).toBeTruthy();
+  });
+
+  it('still says the conversation has gone on a 404', async () => {
+    breakTheDetail(404, 'Not found.');
+    await renderScreen();
+
+    expect(
+      await screen.findByText('This conversation isn’t available.')
+    ).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load this conversation.')).toBeNull();
+  });
+});

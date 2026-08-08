@@ -1453,9 +1453,26 @@ export default function ThreadScreen() {
   }
 
   const other = detail?.other;
-  const loadError = convoQuery.isError;
   const notAvailable =
     convoQuery.error instanceof ApiError && convoQuery.error.status === 404;
+
+  /**
+   * **The transcript we have beats an error about refreshing it.** This used to
+   * be a bare `convoQuery.isError`, and that is true of a *failed refetch* too:
+   * query-core's error action sets `status: 'error'` while keeping the data the
+   * query already holds. `staleTime` is 0, `focusManager` is wired to
+   * `AppState`, and the detail is re-polled every
+   * `CONVERSATION_DETAIL_POLL_MS` — so backgrounding the app and coming back on
+   * patchy signal reliably failed a refetch of a fully-loaded chat, and the
+   * header, the transcript and the composer (with whatever was half-typed in
+   * it) were replaced by an error card. Nothing had been lost server-side; the
+   * screen simply stopped showing what it had.
+   *
+   * A 404 is the exception and still outranks the cached copy: the thread being
+   * deleted or out of reach is a real answer about *now*, not a failure to ask.
+   * Same rule as `post/[postId].tsx` and `CommentThread` (#307/#308).
+   */
+  const loadError = notAvailable || (convoQuery.isError && !detail);
 
   /** Whether every ticked message is one you could delete — Delete is offered
    * only then. A bulk action that silently did *part* of what it says (yours,

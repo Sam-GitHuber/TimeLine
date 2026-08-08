@@ -289,15 +289,38 @@ export default function EventScreen() {
         </Pressable>
       </View>
 
-      {eventQuery.isLoading ? (
-        <ActivityIndicator color={colors.accent} style={styles.spinner} />
-      ) : notFound || !event ? (
+      {/* **A missing event and an unreachable one are different answers**, and
+          `notFound || !event` gave the first for both. With `retry: false`, a
+          dropped packet or a 500 on the *first* load leaves `isLoading` false
+          and no data, so this screen stated the event "may have been cancelled"
+          — something the client has no way of knowing — for what was a bad
+          connection. Kept apart now, the way `CommentThread` does it and
+          `EventPhotos` does two files over. The event we have also outranks a
+          failed *refresh* of it: `staleTime` is 0 and every foreground refetches
+          this key, and a failed one keeps its data while flipping `status`. */}
+      {notFound ? (
         <View style={styles.centre}>
           <Text style={styles.emptyTitle}>Event not available</Text>
           <Text style={styles.emptyBody}>
             It may have been cancelled, or you’re not connected to whoever organised it.
           </Text>
         </View>
+      ) : !event ? (
+        eventQuery.isError ? (
+          <View style={styles.centre}>
+            <Text style={styles.emptyTitle}>Couldn’t load this event</Text>
+            <Text style={styles.emptyBody}>
+              {eventQuery.error instanceof Error
+                ? eventQuery.error.message
+                : 'Something went wrong.'}
+            </Text>
+            <Pressable style={styles.retry} onPress={() => eventQuery.refetch()}>
+              <Text style={styles.retryText}>Try again</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <ActivityIndicator color={colors.accent} style={styles.spinner} />
+        )
       ) : (
         <KeyboardAwareScroll
           style={styles.fill}
@@ -496,6 +519,16 @@ const styles = StyleSheet.create({
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.sm },
   emptyTitle: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink, textAlign: 'center' },
   emptyBody: { fontSize: fontSize.sm, color: colors.inkSoft, textAlign: 'center', lineHeight: 20 },
+  // Same outlined button as the profile and group screens' retry.
+  retry: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  retryText: { color: colors.ink, fontWeight: '600' },
   fill: { flex: 1 },
   content: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.xxl },
   titleRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },

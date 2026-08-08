@@ -41,7 +41,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, serverMessage, WENT_WRONG } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
@@ -74,6 +74,9 @@ export default function ConversationInfoScreen() {
     queryFn: () => api.getConversation(id),
   });
   const detail = convoQuery.data;
+  // A real 404 is the thread having gone; anything else is a failure to ask.
+  const notFound =
+    convoQuery.error instanceof ApiError && convoQuery.error.status === 404;
   const isGroup = detail?.kind === 'group';
   const canRename = isGroup && detail?.my_status === 'active';
   const other = detail?.other;
@@ -186,14 +189,32 @@ export default function ConversationInfoScreen() {
         <View style={styles.spacer} />
       </View>
 
-      {convoQuery.isLoading ? (
-        <ActivityIndicator color={colors.accent} style={styles.spinner} />
-      ) : !detail ? (
+      {/* **Gone and unreachable are different answers** (#309), and `!detail`
+          gave the first for both. This screen shares `['conversation', id]`
+          with the thread, so it's usually warm — but reached cold (a push
+          deep-link, or after a session reset cleared the cache) a 500 or a
+          dropped packet left `isLoading` false with no data, and the screen
+          declared a live conversation removed, with no way to retry. The thread
+          one level up keeps the two apart; so does this now. */}
+      {notFound ? (
         <View style={styles.centre}>
           <Text style={styles.emptyTitle}>
             This conversation isn’t available.
           </Text>
         </View>
+      ) : !detail ? (
+        convoQuery.isError ? (
+          <View style={styles.centre}>
+            <Text style={styles.emptyTitle}>
+              Couldn’t load this conversation.
+            </Text>
+            <Pressable style={styles.retry} onPress={() => convoQuery.refetch()}>
+              <Text style={styles.retryText}>Try again</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <ActivityIndicator color={colors.accent} style={styles.spinner} />
+        )
       ) : (
         <KeyboardAwareScroll
           style={styles.fill}
@@ -525,8 +546,24 @@ const styles = StyleSheet.create({
   spacer: { width: 56 },
   spinner: { marginTop: spacing.xl },
   content: { paddingBottom: spacing.xl },
-  centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
+  centre: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.xl,
+    gap: spacing.sm,
+  },
   emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
+  // Same outlined button as the thread, profile and group screens' retry.
+  retry: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  retryText: { color: colors.ink, fontWeight: '600' },
   identity: {
     alignItems: 'center',
     gap: spacing.xs,

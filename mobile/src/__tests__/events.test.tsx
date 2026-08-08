@@ -33,6 +33,7 @@ import {
   pressAlertButton,
   pressBack,
   resetMenuSpies,
+  settle,
 } from './helpers';
 
 // The album's "Add photos" goes through the shared picker, which opens the
@@ -269,18 +270,23 @@ function makeEvent(overrides: Partial<Event> = {}): Event {
 // `await render(...)`: under React 19's concurrent root the initial commit lands
 // in a microtask, so an unawaited render leaves `screen` unpopulated (the shared
 // helper pattern the other suites use — see people.test / groupDetail.test).
-async function renderWith(node: React.ReactElement) {
-  const queryClient = new QueryClient({
+async function renderWith(
+  node: React.ReactElement,
+  queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
       mutations: { gcTime: 0 },
     },
-  });
-  return render(
+  })
+) {
+  // The client comes back so a test can drive a refetch and read the query's
+  // state afterwards; callers that don't care can keep ignoring it.
+  const view = await render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>{node}</AuthProvider>
     </QueryClientProvider>
   );
+  return { client: queryClient, ...view };
 }
 
 beforeEach(async () => {
@@ -1699,5 +1705,66 @@ describe('MonthGrid', () => {
     // Still on the calendar, with the affordance to reopen it.
     expect(screen.getByText('August 2026')).toBeTruthy();
     expect(screen.getByText('+1 more')).toBeTruthy();
+  });
+});
+
+// --- Unreachable is not the same as cancelled (#309) -------------------------
+
+/**
+ * The screen used to branch on `notFound || !event`, which gave the *missing*
+ * answer to every kind of failure. With `retry: false` on this query, a dropped
+ * packet or a 500 on the first load leaves `isLoading` false with no data — so a
+ * bad connection was reported as "It may have been cancelled, or you're not
+ * connected to whoever organised it", something the client has no way of
+ * knowing. And once an event *is* loaded, a failed refresh of it must not take
+ * it off the screen either: `staleTime` is 0 and every foreground refetches
+ * `['event', id]`.
+ */
+describe('an event that can’t be reached', () => {
+  function serveEvent(status: number, body: unknown) {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+      if (url.includes('/api/events/9/')) return jsonResponse(body, status);
+      return jsonResponse(null, 404);
+    });
+  }
+
+  it('says the load failed, not that the event may have been cancelled', async () => {
+    serveEvent(503, { detail: 'Service unavailable.' });
+
+    await renderWith(<EventScreen />);
+
+    expect(await screen.findByText('Couldn’t load this event')).toBeTruthy();
+    expect(screen.queryByText('Event not available')).toBeNull();
+  });
+
+  it('still says the event is gone on a 404', async () => {
+    // The answer this copy was written for, and the only one it should give.
+    serveEvent(404, { detail: 'Not found.' });
+
+    await renderWith(<EventScreen />);
+
+    expect(await screen.findByText('Event not available')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load this event')).toBeNull();
+  });
+
+  it('keeps a loaded event when a refresh of it fails', async () => {
+    serveEvent(200, makeEvent());
+    const { client } = await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+    serveEvent(503, { detail: 'Service unavailable.' });
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['event', 9] });
+    });
+
+    await waitFor(() =>
+      expect(client.getQueryState(['event', 9])?.status).toBe('error')
+    );
+    // The cache flips to 'error' a render before the screen does — see the
+    // profile suite's twin for why this flush is load-bearing.
+    await settle(2);
+    expect(screen.getByText('Summer camping weekend')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load this event')).toBeNull();
   });
 });
