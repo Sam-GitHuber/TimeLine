@@ -23,6 +23,16 @@ function seen(post, postId) {
     : post;
 }
 
+// **`undefined` is how you decline to write.** `setQueryData` bails out the
+// moment its updater returns `undefined`, and returning anything else — the
+// *identical object included* — is a write: it dispatches a success, which
+// resets `isInvalidated` to false. Handing back the unchanged data therefore
+// isn't the no-op it reads as; it quietly cancels an invalidation somebody else
+// just made. That flow is real and routine: posting a comment invalidates every
+// post list (`invalidateComments`) and refetches the tree, and the refetch is
+// what calls this — so an unconditional write would un-mark the profile and
+// group timelines a tick after they were marked, and they'd come back holding
+// yesterday's `comment_count`. Only `staleTime: 0` everywhere hides it today.
 export function markPostCommentsSeen(queryClient, postId) {
   // Paginated lists: only rebuild a page (and the list) if it actually holds
   // the post with a non-zero count, so unrelated cache entries keep their
@@ -30,13 +40,13 @@ export function markPostCommentsSeen(queryClient, postId) {
   queryClient.setQueriesData(
     { predicate: (query) => POST_LIST_KEYS.has(query.queryKey[0]) },
     (data) => {
-      if (!data?.pages) return data;
+      if (!data?.pages) return undefined;
       const hit = data.pages.some((page) =>
         page?.results?.some(
           (p) => p.id === postId && p.new_comment_count > 0
         )
       );
-      if (!hit) return data;
+      if (!hit) return undefined;
       return {
         ...data,
         pages: data.pages.map((page) => ({
@@ -48,9 +58,11 @@ export function markPostCommentsSeen(queryClient, postId) {
   );
 
   // The single-post permalink query (/p/:id): data is the post object itself.
-  queryClient.setQueryData(["post", String(postId)], (post) =>
-    post ? seen(post, postId) : post
-  );
+  // Same rule as above — `undefined` unless the count actually moves.
+  queryClient.setQueryData(["post", String(postId)], (post) => {
+    const next = post ? seen(post, postId) : undefined;
+    return next === post ? undefined : next;
+  });
 }
 
 // Refetch everything a *change* to a post's comment tree touches: the tree

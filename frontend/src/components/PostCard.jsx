@@ -34,13 +34,10 @@ export default function PostCard({
   // Whether the post text is flipped into its inline editor (issue #62).
   const [editing, setEditing] = useState(false);
 
-  // Nothing here marks the comments seen. The server stamps `last_seen_at` as a
-  // side effect of the comments GET, so the cache write that mirrors it belongs
-  // with that request — it lives in `CommentThread`, fired once the tree is
-  // actually in (#230). Doing it from this click cleared the badge before the
-  // GET had even been issued, and a failed one then left the card claiming
-  // you'd read comments the server still had unseen. A permalink needs no
-  // special case either: it opens expanded, so it goes through the same query.
+  // Nothing here marks the comments seen: that write belongs to the request
+  // that does the stamping, so it lives in `CommentThread` (#230). A permalink
+  // needs no special case either — it opens expanded, so it goes through the
+  // same query.
 
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
