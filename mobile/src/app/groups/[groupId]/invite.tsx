@@ -85,6 +85,26 @@ export default function GroupInviteScreen() {
     ? connections.filter((p) => p.display_name.toLowerCase().includes(needle))
     : connections;
 
+  /**
+   * Who is actually going to be invited: the ticks, **intersected with the pool
+   * they were ticked from**.
+   *
+   * `selected` is raw user input and outlives the list it was made against, so
+   * it can't be the answer on its own. The case that matters is the roster
+   * arriving *late*: the picker offers Ada while the roster is missing, Ada gets
+   * ticked, the roster lands and takes her out of the list — and a `selected`
+   * read directly would still carry her, so Invite would fire at a member and
+   * come back "Invited 2 of 3". That is the bug this screen was fixed for,
+   * delayed by one tap rather than prevented.
+   *
+   * Derived rather than pruned in an effect: the pool is already a value on
+   * every render, and an effect racing the roster's arrival is the same class of
+   * mistake one layer down. Against `connections`, not `filtered` — typing in
+   * the search box must not untick anyone.
+   */
+  const pool = new Set(connections.map((person) => person.id));
+  const chosen = [...selected].filter((uid) => pool.has(uid));
+
   function toggle(uid: number) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -101,7 +121,7 @@ export default function GroupInviteScreen() {
     // that succeeded. We tally the outcomes and report them, rather than failing
     // the whole batch on the first rejection.
     mutationFn: async () => {
-      const ids = [...selected];
+      const ids = chosen;
       const results = await Promise.allSettled(
         ids.map((uid) => api.inviteToGroup(id, uid))
       );
@@ -239,35 +259,38 @@ export default function GroupInviteScreen() {
           ListEmptyComponent={
             connectionsQuery.isLoading || membersQuery.isLoading ? (
               <Text style={styles.message}>Loading…</Text>
+            ) : connections.length > 0 ? (
+              // The pool isn't empty, so this is a search miss and nothing else
+              // — true whatever the roster did, and said whatever it did.
+              <Text style={styles.message}>No connections match “{term}”.</Text>
             ) : connectionsQuery.isError || rosterMissing ? (
-              // The header already says it, and says it whether the list came
-              // back empty or merely short. What must not happen here is the
-              // line below: with nothing loaded, "everyone is already in this
-              // group" is the same lie in stronger terms — the truth is that we
-              // failed to ask.
+              // An *empty pool*, on the other hand, is a claim about the server's
+              // answer. The header already says what went wrong, and says it
+              // whether the list came back empty or merely short. What must not
+              // happen here is the line below: with nothing loaded, "everyone is
+              // already in this group" is the same lie in stronger terms — the
+              // truth is that we failed to ask.
               null
-            ) : connections.length === 0 ? (
+            ) : (
               <Text style={styles.message}>
                 Everyone you’re connected with is already in this group.
               </Text>
-            ) : (
-              <Text style={styles.message}>No connections match “{term}”.</Text>
             )
           }
         />
 
         <View style={[styles.footer, { paddingBottom: FOOTER_PAD + insets.bottom }]}>
           <Text style={styles.count}>
-            {selected.size === 0 ? 'Select who to invite' : `${selected.size} selected`}
+            {chosen.length === 0 ? 'Select who to invite' : `${chosen.length} selected`}
           </Text>
           <Pressable
             onPress={sendInvites}
-            disabled={selected.size === 0 || invite.isPending}
+            disabled={chosen.length === 0 || invite.isPending}
             accessibilityRole="button"
             accessibilityLabel="Invite"
             style={({ pressed }) => [
               styles.inviteBtn,
-              (selected.size === 0 || invite.isPending) && styles.disabled,
+              (chosen.length === 0 || invite.isPending) && styles.disabled,
               pressed && styles.pressed,
             ]}
           >

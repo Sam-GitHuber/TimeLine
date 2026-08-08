@@ -146,3 +146,18 @@ it('keeps the form when a refresh fails', async () => {
   expect(screen.getByDisplayValue('The Andersons')).toBeTruthy();
   expect(screen.queryByText('Couldn’t load this group')).toBeNull();
 });
+
+it('says the group is gone on a 404, without offering a retry', async () => {
+  // A 404 is an answer about *now* — deleted, or you've been removed — so it
+  // outranks the transient-failure card. Offering "Try again" for a request that
+  // will 404 forever replaces one dead end with another, which is the failure
+  // this screen was fixed for. `groups/[groupId].tsx` and `u/[userId].tsx` both
+  // branch on the status first.
+  mockFetch.mockImplementation(async () =>
+    jsonResponse({ detail: 'Not found.' }, 404)
+  );
+  await renderScreen();
+
+  expect(await screen.findByText('This group isn’t available.')).toBeTruthy();
+  expect(screen.queryByText('Try again')).toBeNull();
+});

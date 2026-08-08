@@ -633,3 +633,32 @@ describe('a posts fetch that fails', () => {
     expect(screen.queryByText('Couldn’t load these posts')).toBeNull();
   });
 });
+
+it('doesn’t contradict the empty state when a refresh of it fails', async () => {
+  // Ada really has posted nothing: page one comes back `{count: 0, results: []}`,
+  // so `postsQuery.data` is defined and `rows` is empty. A foreground refetch
+  // then fails — routine, since `staleTime` is 0. Keyed off `data`, the partial
+  // note would print "Couldn't load any older posts." directly under "Ada hasn't
+  // posted yet": two claims at once, the second wrong twice over since no posts
+  // loaded to be older than.
+  mockParams.userId = '2';
+  serve({ user: profile({ id: 2, display_name: 'Ada Lovelace' }), posts: [] });
+  const { client } = await renderScreen();
+  await screen.findByText('Ada Lovelace hasn’t posted yet.');
+
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string }) => {
+      if (!url.includes('/posts/')) return base(url, init);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return jsonResponse({ detail: 'Server error.' }, 500);
+    }
+  );
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['userPosts', 2] });
+  });
+  await settle(2);
+
+  expect(screen.getByText('Ada Lovelace hasn’t posted yet.')).toBeTruthy();
+  expect(screen.queryByText('Couldn’t load any older posts.')).toBeNull();
+});

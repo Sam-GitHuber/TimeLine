@@ -333,10 +333,12 @@ the server. A guard can't close that one — the write has to ride the request, 
 The opposite mistake — reading `isError` *never* rather than too early — is a
 separate family, because an empty state written as a statement of fact reports a
 dropped packet as an answer. Fixed on the app's two worst sites in #312 and on
-the rest in #317. **Every one of them names `loadFailed = isError && !data`
-beside its query and branches on that before the empty state** — `&& !data`, so a
-failed *refresh* still keeps what's on screen, which is the rule above and the
-half that #309/#311 had backwards:
+the rest in #317. **Each names the failure once, up beside its query, and every
+branch reads that name rather than re-deriving it** — usually
+`loadFailed = isError && !data`, and on the invite picker `rosterMissing = !roster`,
+which is stricter because a roster still in flight filters the list no better
+than one that failed. `&& !data` in all of them, so a failed *refresh* still
+keeps what's on screen — the rule above, and the half #309/#311 had backwards:
 
 - **`app/(tabs)/calendar.tsx`** told someone with a group dinner tomorrow that
   they had nothing on. It reads `isError && !data` now, with a *Try again*.
@@ -363,20 +365,31 @@ half that #309/#311 had backwards:
   its blurb over zero toggles: "there are no settings" rather than "we couldn't
   load them", with no retry.
 
-Two of them reach past the display, and both take the answer the web gave first:
+Two of them are not a wrong sentence:
 
-- **`groups/[groupId]/invite.tsx` turned a failed read into a wrong write.** The
-  roster is what filters the picker, so `(membersQuery.data ?? [])` made "we
-  couldn't ask who's in this group" into "this group has nobody in it" — and the
-  picker then offered people who were already members, took three ticks, and
-  came back "Invited 0 of 3". The roster is named once now (`rosterMissing`), the
-  list and the write read the same value, and **Invite refuses and refetches**
-  rather than firing at a list it couldn't filter. Not `disabled`: a control that
-  goes dead with no explanation is its own dead end, and the picker looks
-  entirely normal in this state. Same shape as the web's "Start a chat" (#314).
-- **`groups/[groupId]/edit.tsx` was a spinner that never resolved.** Not a false
-  empty state — the same missing branch reaching the same dead end, for an admin
-  who tapped ⋯ → Edit group on bad signal.
+- **`groups/[groupId]/invite.tsx` reaches past the display, and turned a failed
+  read into a wrong write.** The roster is what filters the picker, so
+  `(membersQuery.data ?? [])` made "we couldn't ask who's in this group" into
+  "this group has nobody in it" — and the picker then offered people who were
+  already members, took three ticks, and came back "Invited 0 of 3". The roster
+  is named once now, the list and the write read the same value, and **Invite
+  refuses and refetches** rather than firing at a list it couldn't filter. Not
+  `disabled`: a control that goes dead with no explanation is its own dead end,
+  and the picker looks entirely normal in this state. Same shape as the web's
+  "Start a chat" (#314).
+
+  **The refusal is only half of it**, and the half that's easy to stop at. What
+  actually goes out is `chosen` — the ticks intersected with the pool they were
+  ticked from, derived on every render. Without that, a roster arriving *late*
+  leaves an already-member ticked and counted after she's gone from the list, and
+  the second press invites her: the wrong write delayed by one tap rather than
+  prevented. Selection state outlives the list it was made against, so it can't
+  be the answer on its own.
+- **`groups/[groupId]/edit.tsx` was a spinner that never resolved.** It reaches
+  no write — it's the same missing branch reaching the same dead end, for an
+  admin who tapped ⋯ → Edit group on bad signal. It takes the 404 branch too, for
+  the same reason the group page and the profile do: a retry against a request
+  that will 404 forever is one dead end swapped for another.
 
 **The web finished its half first (#314)** — eleven sites, including the two
 that reach past the display: the activity centre's seen-write waits on the list

@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, serverMessage, WENT_WRONG } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { GroupForm } from '@/components/GroupForm';
 import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -26,6 +26,12 @@ export default function EditGroupScreen() {
   const id = Number(groupId);
   const groupQuery = useQuery({ queryKey: ['group', id], queryFn: () => api.getGroup(id) });
   const group = groupQuery.data;
+  // A 404 outranks a retry, the same way it does on the group page and the
+  // profile: deleted, or you've been removed. Offering *Try again* for a request
+  // that will 404 forever replaces one dead end with another, which is the
+  // failure this screen was fixed for.
+  const notFound =
+    groupQuery.error instanceof ApiError && groupQuery.error.status === 404;
   // `&& !group` for the same reason every other screen has it: a failed
   // *refresh* must leave the form — and whatever has been typed into it — alone.
   const loadFailed = groupQuery.isError && !group;
@@ -54,7 +60,14 @@ export default function EditGroupScreen() {
         <Text style={styles.title}>Edit group</Text>
         <View style={styles.spacer} />
       </View>
-      {group ? (
+      {notFound ? (
+        <View style={styles.centre}>
+          <Text style={styles.emptyTitle}>This group isn’t available.</Text>
+          <Text style={styles.emptyBody}>
+            It may have been deleted, or you may no longer be a member.
+          </Text>
+        </View>
+      ) : group ? (
         <KeyboardAwareScroll style={styles.fill} keyboardShouldPersistTaps="handled">
           <WriteHoldProvider hold={hold}>
             <GroupForm

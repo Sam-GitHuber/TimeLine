@@ -230,9 +230,15 @@ export default function GroupScreen() {
       <Text style={styles.inlineError}>
         {serverMessage(upcomingQuery.error, 'Couldn’t load what’s coming up.')}
       </Text>
+      {/* Named, not a bare "Try again": more than one of these can be on screen
+          at once — one outage takes down the upcoming fetch and the posts
+          together — and to a screen reader they'd otherwise be the same
+          control twice, with the sentence explaining each in a separate
+          element. */}
       <Pressable
         onPress={() => upcomingQuery.refetch()}
         accessibilityRole="button"
+        accessibilityLabel="Try loading the upcoming events again"
         style={({ pressed }) => [styles.retry, styles.retryInline, pressed && styles.pressed]}
       >
         <Text style={styles.retryText}>Try again</Text>
@@ -330,6 +336,7 @@ export default function GroupScreen() {
               <Pressable
                 onPress={() => calendarQuery.refetch()}
                 accessibilityRole="button"
+                accessibilityLabel="Try loading the calendar again"
                 style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
               >
                 <Text style={styles.retryText}>Try again</Text>
@@ -376,6 +383,7 @@ export default function GroupScreen() {
                 <Pressable
                   onPress={() => postsQuery.refetch()}
                   accessibilityRole="button"
+                  accessibilityLabel="Try loading the posts again"
                   style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
                 >
                   <Text style={styles.retryText}>Try again</Text>
@@ -407,19 +415,55 @@ export default function GroupScreen() {
                     gets its turn. That case says the whole timeline is missing,
                     not merely its tail. */}
                 {postsQuery.isError && rows.length > 0 ? (
-                  <Text style={[styles.inlineError, styles.footerNote]}>
-                    {postsLoadFailed
-                      ? 'Couldn’t load this group’s posts.'
-                      : 'Couldn’t load any older posts.'}
-                  </Text>
+                  <View style={styles.footerNote}>
+                    <Text style={styles.inlineError}>
+                      {postsLoadFailed
+                        ? 'Couldn’t load this group’s posts.'
+                        : 'Couldn’t load any older posts.'}
+                    </Text>
+                    {/* The cold case gets a way out, because it has none
+                        otherwise: the card that owns the Try again lives in
+                        `ListEmptyComponent`, which a list full of recaps never
+                        renders, and this screen passes no `refreshControl`.
+                        The *older posts* case doesn't need one — scrolling on
+                        re-arms `onEndReached`. */}
+                    {postsLoadFailed ? (
+                      <Pressable
+                        onPress={() => postsQuery.refetch()}
+                        accessibilityRole="button"
+                        accessibilityLabel="Try loading the posts again"
+                        style={({ pressed }) => [
+                          styles.retry,
+                          styles.retryInline,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Text style={styles.retryText}>Try again</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 ) : null}
                 {pastEventsLoadFailed ? (
-                  <Text style={[styles.inlineError, styles.footerNote]}>
-                    {serverMessage(
-                      pastEventsQuery.error,
-                      'Couldn’t load this group’s past events.'
-                    )}
-                  </Text>
+                  <View style={styles.footerNote}>
+                    <Text style={styles.inlineError}>
+                      {serverMessage(
+                        pastEventsQuery.error,
+                        'Couldn’t load this group’s past events.'
+                      )}
+                    </Text>
+                    <Pressable
+                      onPress={() => pastEventsQuery.refetch()}
+                      accessibilityRole="button"
+                      accessibilityLabel="Try loading the past events again"
+                      style={({ pressed }) => [
+                        styles.retry,
+                        styles.retryInline,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.retryText}>Try again</Text>
+                    </Pressable>
+                  </View>
                 ) : null}
               </>
             )

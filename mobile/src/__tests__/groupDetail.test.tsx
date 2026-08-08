@@ -310,8 +310,12 @@ describe('a sub-request that fails', () => {
    */
   function breakEndpoint(match: string, reason = 'Server error.') {
     const base = mockFetch.getMockImplementation()!;
-    mockFetch.mockImplementation(async (url: string) => {
-      if (!url.includes(match)) return base(url);
+    // `init` is forwarded, not dropped: `serve` answers by URL today, but this
+    // screen renders a `ComposeBox`, so the moment it grows a method-aware
+    // branch every request routed through here would reach it looking like a
+    // GET — and would surface as some unrelated test failing on a wrong body.
+    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!url.includes(match)) return base(url, init);
       await new Promise((resolve) => setTimeout(resolve, 0));
       return jsonResponse({ detail: reason }, 500);
     });
@@ -345,6 +349,13 @@ describe('a sub-request that fails', () => {
     expect(await screen.findByText('Summer camping weekend')).toBeTruthy();
     expect(
       screen.getByText('Couldn’t load this group’s posts.')
+    ).toBeTruthy();
+    // And a way out. The card that owns the other Try again is in
+    // `ListEmptyComponent`, which a list full of recaps never renders, and this
+    // screen passes no `refreshControl` — so without this the line is a dead end
+    // of exactly the kind #317 filed `edit.tsx` for.
+    expect(
+      screen.getByLabelText('Try loading the posts again')
     ).toBeTruthy();
   });
 

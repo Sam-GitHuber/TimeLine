@@ -233,8 +233,11 @@ and create/edit are pushed screens reusing the connection-picker and the profile
 editor's round avatar cropper. **The invite screen's Invite refuses when the
 member roster hasn't loaded** (#317) — the roster is what filters existing
 members out of the picker, so without it the list has *too many* people rather
-than too few, and inviting from it produced "Invited 0 of 3"; see
-[`mobile-app.md`](mobile-app.md#the-mirror-image-no-error-branch-at-all). The group photo can be **taken with the camera as
+than too few, and inviting from it produced "Invited 0 of 3". What goes out is
+the ticks intersected with the pool, so a roster arriving late unticks whoever it
+turns out to have; see
+[`mobile-app.md`](mobile-app.md#the-mirror-image-no-error-branch-at-all).
+The group photo can be **taken with the camera as
 well as picked from the library** — that step is the shared `usePhotoPicker`, and
 its contract (one `await`, assets or `null`, plus a `{photoMenu}` to render) is
 written up in

@@ -342,6 +342,7 @@ export default function ProfileScreen() {
                   <Pressable
                     onPress={() => postsQuery.refetch()}
                     accessibilityRole="button"
+                    accessibilityLabel="Try loading the posts again"
                     style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
                   >
                     <Text style={styles.retryText}>Try again</Text>
@@ -362,10 +363,17 @@ export default function ProfileScreen() {
             ListFooterComponent={
               postsQuery.isFetchingNextPage ? (
                 <ActivityIndicator style={styles.footer} color={colors.accent} />
-              ) : postsQuery.isError && postsQuery.data ? (
+              ) : postsQuery.isError && rows.length > 0 ? (
                 // The partial case (`EventPhotos`' shape): a timeline that
                 // stopped short looks exactly like one that ended, which here
                 // quietly under-states how much someone has posted.
+                //
+                // Keyed off the rendered rows, not off `postsQuery.data`. A
+                // timeline that loaded and is genuinely empty has `data` and no
+                // rows, so a failed refresh of *that* would print this line
+                // directly under "Ada hasn't posted yet" — two claims at once,
+                // the second of them wrong twice over since no posts loaded to
+                // be older than.
                 <Text style={styles.inlineError}>
                   Couldn’t load any older posts.
                 </Text>
