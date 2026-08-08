@@ -394,11 +394,13 @@ describe('pull-to-refresh trimming', () => {
     expect(trimmed!.pages[0].results[0].id).toBe(1);
   });
 
-  it('returns the same object when there is nothing to trim', () => {
-    // Identity matters: a new object here would re-render the whole feed for no
-    // reason on every pull.
-    const one = pages(1);
-    expect(trimToFirstPage(one)).toBe(one);
+  it('declines to write when there is nothing to trim', () => {
+    // `undefined` rather than the data back. Identity still matters — a new
+    // object here would re-render the whole feed for no reason on every pull —
+    // but declining does that *and* leaves an invalidation alone: handing back
+    // the identical object is still a write, and a write resets `isInvalidated`
+    // (#307). `lists.test.ts` pins that half.
+    expect(trimToFirstPage(pages(1))).toBeUndefined();
     expect(trimToFirstPage(undefined)).toBeUndefined();
   });
 });

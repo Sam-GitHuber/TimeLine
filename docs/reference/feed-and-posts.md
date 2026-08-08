@@ -385,13 +385,14 @@ counts exclude your own messages.
   that the server still had unseen until the next feed refetch. It also removes
   the permalink's special case: `/p/:id` opens expanded, so it goes through the
   same query as a click does.
-- **The web goes one step further and does the write inside its `queryFn`,
-  because having `data` is not the same as this fetch having succeeded.**
-  `useQuery` hands back a cached tree *synchronously* on a reopen, so an effect
-  gated on `data` fires on the stale tree before the refetch has been anywhere —
-  and if that refetch then fails you have #230 again on the reopen path. A
-  `queryFn` resolves exactly when the server stamped, which is the fact being
-  mirrored. **The app still uses the effect form and still has that gap (#307).**
+- **The write goes inside the `queryFn`, because having `data` is not the same as
+  this fetch having succeeded.** `useQuery` hands back a cached tree
+  *synchronously* on a reopen, so an effect gated on `data` fires on the stale
+  tree before the refetch has been anywhere — and if that refetch then fails you
+  have #230 again on the reopen path. A `queryFn` resolves exactly when the
+  server stamped, which is the fact being mirrored. Both clients do it there now
+  (web #306, app #307); the app's version marks the **event** twin from the same
+  place, which the web has no equivalent of.
 - **`markPostCommentsSeen` returns `undefined` from its updaters when there is
   nothing to change, and that is load-bearing.** `setQueryData` bails out on
   `undefined` and treats *any other* return — the identical object included — as
@@ -401,15 +402,56 @@ counts exclude your own messages.
   `markPostCommentsSeen`. Returning the data unchanged would therefore cancel the
   invalidation a tick after it was made, and the profile and group timelines
   would come back holding the old `comment_count`. Only `staleTime: 0` everywhere
-  keeps that survivable today. (Mobile's copy still returns the data — #307.)
-- **`CommentThread` branches on the tree, not on the query flags.** A query the
-  *browser* has paused — offline, with the default `networkMode: 'online'` this
-  app never overrides — sits at `status: 'pending'`, `fetchStatus: 'paused'`, and
-  `isLoading` is `isPending && isFetching`, so it reads **false with no data
-  behind it**. Rendering the list on `!isLoading && !isError` therefore hit
-  `comments.length` on `undefined`, and with no ErrorBoundary anywhere in the web
-  tree (#299) that unmounted the whole app to a blank page. Offline is the single
-  likeliest way this request fails, so it gets a sentence of its own.
+  keeps that survivable today — and the app is where it can least be relied on,
+  since a tab navigator keeps screens mounted. Both clients' four updaters
+  decline with `undefined` (web #306, app #307, which also covers the event
+  twin), and so does the app's only other no-op updater,
+  `trimToFirstPage` in `mobile/src/lists.ts`. **That one was safe on an argument
+  rather than a rule** — its four callers either `await refetch()` straight after
+  or trim on unmount — and the argument rested on `staleTime: 0`, which is the
+  crutch this bullet says can't be leaned on, so it now follows the rule instead.
+  Declining costs it nothing; no caller wants a write when there's nothing to
+  trim.
+- **What that closes and what it doesn't.** The bail-outs decline, but a write
+  that *does* have something to clear still resets `isInvalidated` on that one
+  list. Closing that would mean re-invalidating the post lists immediately after
+  — a refetch of every timeline on every thread open, which is the round trip the
+  mirror exists to avoid — so the residue is deliberate and bounded: it needs a
+  list holding this post with a live count at the moment the tree's refetch
+  lands. It becomes visible the day a post list gets a `staleTime`.
+- **`CommentThread` branches on the tree, not on the query flags.** Three states
+  — we have a tree, we're never getting one, we're still waiting — and only the
+  first can be rendered, so the tree decides and the flags only pick which way of
+  having nothing to say this is. Both clients had a bug from getting that
+  backwards, in opposite directions:
+  - **The web crashed on a paused query.** Offline, with the default
+    `networkMode: 'online'` neither client overrides, a query sits at
+    `status: 'pending'`, `fetchStatus: 'paused'` — and `isLoading` is
+    `isPending && isFetching`, so it reads **false with no data behind it**.
+    Rendering the list on `!isLoading && !isError` hit `comments.length` on
+    `undefined`, and with no ErrorBoundary anywhere in the tree (#299) that
+    unmounted the whole app to a blank page (#306). Offline is the single
+    likeliest way this request fails, so it now says so in words.
+  - **The app dropped a thread it already had.** It returned on `error` *before*
+    looking at the tree, and query-core's error action sets `status: 'error'`
+    while keeping the data — so a failed foreground refetch of an open thread
+    replaced the whole conversation with one line of red text and took the
+    composer, and any half-typed reply, with it (#307). A failed refresh of
+    something already on screen is not a reason to take it off screen.
+  - The app's paused branch is **unreachable today and handled anyway**:
+    `onlineManager` is deliberately left unwired to NetInfo (see
+    `mobile/src/app/_layout.tsx` for the long list of things wiring it would
+    break), so an offline GET rejects rather than pausing. Wiring it is a
+    one-liner, and the failure here would be a spinner that never stops.
+  - **The same rule has to hold one level up, or the thread's care is undone from
+    above.** `mobile/src/app/post/[postId].tsx` returned on its own query's
+    `error` before it looked at the post it had, so a failed refetch of
+    `['post', id]` replaced the card, the thread *and* the half-typed reply — and
+    that refetch is routine, since `invalidateComments` invalidates that very key
+    on every comment write. It renders the post it has; a **404** still outranks
+    the cached copy, because that's an answer about now (deleted, or out of
+    reach), not a failure to ask. Three more app screens and three web views have
+    the same defect and are *not* fixed: #309 and #310.
 - **That cache write matches on the first key segment, not the whole key** —
   `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
   clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post

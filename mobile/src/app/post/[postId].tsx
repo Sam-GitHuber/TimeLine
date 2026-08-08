@@ -182,20 +182,22 @@ export default function PostScreen() {
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
       >
-        {isLoading ? (
-          <ActivityIndicator color={colors.accent} style={styles.spinner} />
-        ) : notFound ? (
+        {/* **The post we have beats an error about refreshing it**, which is the
+            same rule `CommentThread` follows one level down — and it has to hold
+            here too, or the thread's own care is undone from above. A failed
+            refetch of `['post', id]` keeps its data and flips `status` to
+            'error', and that refetch is *routine*: posting a comment
+            invalidates this very key (`invalidateComments`), and every
+            foreground does too. Returning on `error` first therefore replaced
+            the card, the thread and a half-typed reply with an error panel a
+            second after a comment went through on a patchy connection.
+            A 404 still wins over the cached copy: that's the post having been
+            deleted or taken out of reach, which is a real answer about *now*. */}
+        {notFound ? (
           <View style={styles.centre}>
             <Text style={styles.emptyTitle}>Post not available</Text>
             <Text style={styles.emptyBody}>
               This post doesn’t exist, or you don’t have access to it.
-            </Text>
-          </View>
-        ) : error ? (
-          <View style={styles.centre}>
-            <Text style={styles.emptyTitle}>Couldn’t load this post</Text>
-            <Text style={styles.emptyBody}>
-              {error instanceof Error ? error.message : 'Something went wrong.'}
             </Text>
           </View>
         ) : post ? (
@@ -215,6 +217,15 @@ export default function PostScreen() {
               </WriteHoldProvider>
             </View>
           </>
+        ) : error ? (
+          <View style={styles.centre}>
+            <Text style={styles.emptyTitle}>Couldn’t load this post</Text>
+            <Text style={styles.emptyBody}>
+              {error instanceof Error ? error.message : 'Something went wrong.'}
+            </Text>
+          </View>
+        ) : isLoading ? (
+          <ActivityIndicator color={colors.accent} style={styles.spinner} />
         ) : null}
       </KeyboardAwareScroll>
     </SafeAreaView>

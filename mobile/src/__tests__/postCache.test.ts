@@ -12,6 +12,7 @@
 import { QueryClient } from '@tanstack/react-query';
 
 import {
+  invalidateComments,
   invalidatePostComments,
   markEventCommentsSeen,
   markPostCommentsSeen,
@@ -156,6 +157,32 @@ describe('markPostCommentsSeen', () => {
   it('does nothing, and throws nothing, on an empty cache', () => {
     const client = makeClient();
     expect(() => markPostCommentsSeen(client, 42)).not.toThrow();
+  });
+
+  it('doesn’t un-invalidate a list it has nothing to change', () => {
+    // A `setQueryData` updater that hands back the data unchanged is still a
+    // *write*: it dispatches a success, which resets `isInvalidated` to false.
+    // Not academic — the two helpers meet in one ordinary flow. Posting a
+    // comment invalidates every post list and refetches the tree, and the tree's
+    // refetch is what calls this. So an unconditional write cancels the
+    // invalidation a tick after `invalidatePostComments` made it, and the
+    // profile and group timelines come back holding the old `comment_count`.
+    //
+    // All three bail-outs at once: a list that doesn't hold the post, a matching
+    // key whose data isn't a paginated list at all, and a permalink already at 0.
+    const client = makeClient();
+    client.setQueryData(['feed', false], list([page([post(1, 2)])]));
+    client.setQueryData(['groupPosts', 'nonsense'], { anything: true });
+    client.setQueryData(['post', '42'], post(42, 0));
+    invalidatePostComments(client, 42);
+
+    markPostCommentsSeen(client, 42);
+
+    for (const key of [['feed'], ['groupPosts'], ['post', '42']]) {
+      const matches = client.getQueryCache().findAll({ queryKey: key });
+      expect(matches.length).toBeGreaterThan(0);
+      expect(matches.every((q) => q.state.isInvalidated)).toBe(true);
+    }
   });
 });
 
@@ -322,5 +349,25 @@ describe('markEventCommentsSeen', () => {
   it('does nothing, and throws nothing, on an empty cache', () => {
     const client = makeClient();
     expect(() => markEventCommentsSeen(client, 9)).not.toThrow();
+  });
+
+  it('doesn’t un-invalidate a list it has nothing to change', () => {
+    // Same rule as the post twin above, and the same flow reaches it: commenting
+    // on an event invalidates all four of its surfaces and refetches the tree,
+    // whose refetch calls this. Here nothing needs clearing — another event's
+    // row, and this event's own record already at 0 — so nothing may be written.
+    const client = makeClient();
+    client.setQueryData(['groupEvents', 7, 'upcoming'], [event(10, 2)]);
+    client.setQueryData(['personalCalendar'], 'not a list');
+    client.setQueryData(['event', 9], event(9, 0));
+    invalidateComments(client, { eventId: 9, groupId: 7 });
+
+    markEventCommentsSeen(client, 9);
+
+    for (const key of [['groupEvents'], ['personalCalendar'], ['event', 9]]) {
+      const matches = client.getQueryCache().findAll({ queryKey: key });
+      expect(matches.length).toBeGreaterThan(0);
+      expect(matches.every((q) => q.state.isInvalidated)).toBe(true);
+    }
   });
 });

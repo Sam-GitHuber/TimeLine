@@ -7,11 +7,17 @@
  * without dropping or reordering anything.
  */
 
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
+import {
+  QueryClient,
+  QueryClientProvider,
+  onlineManager,
+  useQuery,
+} from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 
 import { CommentThread, ancestorIdsOf } from '@/components/CommentThread';
+import { commentsQueryKey } from '@/postCache';
 import type { Comment } from '@/types';
 
 import { androidIt, captureBackHandler, pressBack } from './helpers';
@@ -49,13 +55,26 @@ function comment(overrides: Partial<Comment> & { id: number }): Comment {
   };
 }
 
-function renderThread(props: Partial<Parameters<typeof CommentThread>[0]> = {}) {
-  const queryClient = new QueryClient({
+/**
+ * `gcTime: 0` keeps Jest able to exit: the default five-minute collection timer
+ * holds Node's event loop open, which hangs the CI job rather than failing it.
+ * The price is that an *unobserved* seeded cache entry is collected on the next
+ * tick — so anything asserted on across an `await` has to be mounted, not seeded
+ * (see `renderThreadOverTimelines` and `renderFeed`).
+ */
+function makeClient() {
+  return new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
       mutations: { gcTime: 0 },
     },
   });
+}
+
+function renderThread(
+  props: Partial<Parameters<typeof CommentThread>[0]> = {},
+  queryClient: QueryClient = makeClient()
+) {
   return render(
     <QueryClientProvider client={queryClient}>
       <CommentThread target={{ postId: 7 }} {...props} />
@@ -106,18 +125,13 @@ function postList(newCommentCount: number) {
  * why a stale count sat there in the first place (#273). A seeded, unobserved
  * cache entry doesn't reproduce that: with `staleTime` at 0 an unmounted screen
  * refetches on its next mount whatever we do here, so it would pass against the
- * broken build. Asserting on refetches also side-steps a race — the
- * seen-marking effect writes to these same queries a tick after the thread
- * refetches, and a `setQueryData` clears `isInvalidated`, so the flag is not a
- * dependable thing to wait on.
+ * broken build. Asserting on refetches also side-steps a race — the seen-marking
+ * write resolves with the thread's own refetch and lands on these same queries,
+ * and a `setQueryData` that changes something clears `isInvalidated`, so the flag
+ * is not a dependable thing to wait on.
  */
 async function renderThreadOverTimelines() {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: 0 },
-      mutations: { gcTime: 0 },
-    },
-  });
+  const queryClient = makeClient();
   // Non-zero `new_comment_count`, so the seen-marking write really does fire on
   // these queries and the test covers the two writes interleaving.
   const screens = {
@@ -161,6 +175,14 @@ function loadCounts(screens: Screens) {
 beforeEach(() => {
   mockFetch.mockReset();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
+});
+
+// `onlineManager` is a module-level singleton, so a test that takes it offline
+// would take every test after it offline too. Restored here rather than in the
+// test, which runs before RNTL's cleanup: resuming a paused query on a component
+// about to be unmounted is a warning nobody needs to read.
+afterEach(() => {
+  onlineManager.setOnline(true);
 });
 
 describe('ancestorIdsOf', () => {
@@ -259,6 +281,63 @@ describe('the tree', () => {
     expect(
       await screen.findByText('No comments yet. Start the conversation.')
     ).toBeTruthy();
+  });
+
+  it('says so when the thread can’t be loaded at all', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'That post is gone.' }, 404));
+
+    await renderThread();
+
+    expect(await screen.findByText('That post is gone.')).toBeTruthy();
+    // No write box over nothing: there's no thread to add to.
+    expect(screen.queryByLabelText('Write a comment…')).toBeNull();
+  });
+
+  it('keeps an open thread when a refetch fails', async () => {
+    // The render used to return on `error` before it looked at the tree — and
+    // query-core's error action sets `status: 'error'` while *keeping* the data
+    // it has. So a failed foreground refetch of an open thread replaced the
+    // whole conversation with one line of red text and took the composer, and
+    // any half-typed reply, with it. A failed refresh of something already on
+    // screen is not a reason to take it off screen.
+    const queryClient = makeClient();
+    queryClient.setQueryData(commentsQueryKey({ postId: 7 }), [
+      comment({ id: 1, text: 'Already read this' }),
+    ]);
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Offline.' }, 500));
+
+    await renderThread({}, queryClient);
+    // The cached tree paints synchronously, before the refetch goes anywhere.
+    expect(screen.getByText('Already read this')).toBeTruthy();
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState(commentsQueryKey({ postId: 7 }))?.status
+      ).toBe('error')
+    );
+
+    expect(screen.getByText('Already read this')).toBeTruthy();
+    expect(screen.getByLabelText('Write a comment…')).toBeTruthy();
+  });
+
+  /**
+   * Unreachable in the shipped app, and pinning the branch anyway.
+   *
+   * `onlineManager` is deliberately left unwired to NetInfo (`app/_layout.tsx`),
+   * so an offline GET *rejects* and lands on the error line above. Wiring it is a
+   * one-line change, and on the day someone does, the failure here would be a
+   * spinner that never stops with nothing on screen saying why. Driving
+   * `onlineManager` directly is exactly what that change does.
+   */
+  it('says so, rather than spinning for ever, when the request is paused', async () => {
+    onlineManager.setOnline(false);
+    mockFetch.mockResolvedValue(jsonResponse([]));
+
+    await renderThread();
+
+    expect(await screen.findByText('Waiting for a connection…')).toBeTruthy();
+    // Paused means not yet attempted — the request is still to come.
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -416,6 +495,147 @@ describe('writing', () => {
     await fireEvent.press(screen.getByLabelText('Post comment'));
 
     expect(await screen.findByText('That post is gone.')).toBeTruthy();
+  });
+});
+
+/**
+ * **When** the badge clears (#307, the mobile half of #230).
+ *
+ * The server stamps `last_seen_at` as a side effect of the comments GET, so the
+ * cache write that mirrors it has to be the resolution of that GET. An effect
+ * gated on `data` is not that: `useQuery` hands back a cached tree
+ * *synchronously*, so on a reopen the effect fired on the stale tree before the
+ * refetch had been anywhere near the server.
+ *
+ * **The feed is mounted and loaded before the thread arrives, deliberately.** The
+ * mirror only reaches what is *in* the cache when the GET lands, so a feed still
+ * in flight isn't written to at all — and a test that mounts both at once would
+ * pass against the effect version by accident, for that reason rather than the
+ * right one.
+ */
+describe('the “· N new” badge follows the request, not the render', () => {
+  /** A loaded feed carrying post 7 with a live badge, and nothing else yet. */
+  async function renderFeed() {
+    const queryClient = makeClient();
+    const feed = jest.fn(async () => postList(2));
+    const view = await render(
+      <QueryClientProvider client={queryClient}>
+        <TimelineScreen queryKey={['feed', false]} queryFn={feed} />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(newCount(queryClient)).toBe(2));
+
+    /**
+     * Mount the thread over it, as opening a post does.
+     *
+     * Awaited: `rerender` is a Promise here, and without it the tree the thread
+     * paints from the cache isn't on screen yet when the assertion runs.
+     */
+    const openThread = async (cachedTree: Comment[] | null = null) => {
+      if (cachedTree) {
+        queryClient.setQueryData(commentsQueryKey({ postId: 7 }), cachedTree);
+      }
+      await view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <TimelineScreen queryKey={['feed', false]} queryFn={feed} />
+          <CommentThread target={{ postId: 7 }} />
+        </QueryClientProvider>
+      );
+    };
+    return { queryClient, openThread };
+  }
+
+  function newCount(queryClient: QueryClient) {
+    const data = queryClient.getQueryData(['feed', false]) as
+      | ReturnType<typeof postList>
+      | undefined;
+    return data?.pages[0].results[0].new_comment_count;
+  }
+
+  it('keeps the badge on a reopen whose refetch fails', async () => {
+    // The reopen path: the thread was read once, a new comment has since
+    // legitimately re-badged the card, and now there's no signal. The cached
+    // tree paints instantly — and that paint is what the old effect fired on.
+    const { queryClient, openThread } = await renderFeed();
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Offline.' }, 500));
+
+    await openThread([comment({ id: 1, text: 'Read this one earlier' })]);
+    expect(screen.getByText('Read this one earlier')).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState(commentsQueryKey({ postId: 7 }))?.status
+      ).toBe('error')
+    );
+
+    // The server still has that comment unseen, so the card must still say so.
+    expect(newCount(queryClient)).toBe(2);
+  });
+
+  it('keeps the badge when a first open fails', async () => {
+    // #230's shape, which mobile never had — with no cached tree the effect had
+    // nothing to fire on either. A pin, so the move can't reintroduce it.
+    const { queryClient, openThread } = await renderFeed();
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Offline.' }, 500));
+
+    await openThread();
+    expect(await screen.findByText('Offline.')).toBeTruthy();
+
+    expect(newCount(queryClient)).toBe(2);
+  });
+
+  it('clears the badge once the thread has actually loaded', async () => {
+    // What the move must not break.
+    const { queryClient, openThread } = await renderFeed();
+    mockFetch.mockResolvedValue(jsonResponse([]));
+
+    await openThread();
+    // Waited for on screen, not on the cache. The write happens inside the
+    // `queryFn` *before* it resolves, so the thread having rendered is proof the
+    // write landed — and waiting on the render is what keeps React's update
+    // inside `act`, where a `waitFor` on cache data alone leaves it outside and
+    // warns. (The warning is worth keeping quiet: it's also how a real ordering
+    // flake would announce itself.)
+    await screen.findByText('No comments yet. Start the conversation.');
+
+    expect(newCount(queryClient)).toBe(0);
+  });
+
+  /**
+   * The event twin, which the web has no equivalent of: an event's badge is
+   * rendered by the *group* screen off `['groupEvents', …]`, and that screen
+   * stays mounted behind the event you pushed, so nothing else clears it. It
+   * moved into the same `queryFn`, so it needs the same pin — this is the branch
+   * a port from the web would silently drop.
+   */
+  it('clears an event’s badge from its own request too', async () => {
+    const queryClient = makeClient();
+    const events = jest.fn(async () => [
+      { id: 9, comment_count: 3, new_comment_count: 2 },
+    ]);
+    const view = await render(
+      <QueryClientProvider client={queryClient}>
+        <TimelineScreen queryKey={['groupEvents', 5, 'upcoming']} queryFn={events} />
+      </QueryClientProvider>
+    );
+    const badge = () =>
+      (
+        queryClient.getQueryData(['groupEvents', 5, 'upcoming']) as {
+          new_comment_count: number;
+        }[]
+      )[0].new_comment_count;
+    await waitFor(() => expect(badge()).toBe(2));
+    mockFetch.mockResolvedValue(jsonResponse([]));
+
+    // Awaited, like the post one above: `rerender` is a Promise here, and the
+    // thread's mount and its cache write land outside `act` without it.
+    await view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <TimelineScreen queryKey={['groupEvents', 5, 'upcoming']} queryFn={events} />
+        <CommentThread target={{ eventId: 9, groupId: 5 }} />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => expect(badge()).toBe(0));
   });
 });
 

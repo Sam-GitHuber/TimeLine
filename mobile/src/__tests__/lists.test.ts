@@ -12,7 +12,7 @@
  * survives even if all three screens are rewritten.
  */
 
-import type { InfiniteData } from '@tanstack/react-query';
+import { QueryClient, type InfiniteData } from '@tanstack/react-query';
 import { renderHook } from '@testing-library/react-native';
 
 import { dedupeById, trimToFirstPage, useFetchAllPages } from '@/lists';
@@ -53,11 +53,26 @@ describe('trimToFirstPage', () => {
     expect(trimmed?.pageParams).toHaveLength(1);
   });
 
-  it('returns the same reference when there is nothing to trim', () => {
-    const one = pages(1);
-    // Identity preserved so no needless cache-driven re-render fires.
-    expect(trimToFirstPage(one)).toBe(one);
+  it('declines to write at all when there is nothing to trim', () => {
+    // `undefined`, not the data back: `setQueryData` bails out only on
+    // `undefined`, and handing back the identical object is still a *write* —
+    // it dispatches a success, which resets `isInvalidated` and so cancels an
+    // invalidation someone else just made (#307, where that cost `postCache` a
+    // bug). Declining also keeps the entry's identity, which was the original
+    // reason for the unchanged return.
+    expect(trimToFirstPage(pages(1))).toBeUndefined();
     expect(trimToFirstPage(undefined)).toBeUndefined();
+  });
+
+  it('leaves an invalidated query invalidated when it has nothing to trim', () => {
+    // The rule where it actually bites, rather than on the return value alone.
+    const client = new QueryClient({ defaultOptions: { queries: { gcTime: 0 } } });
+    client.setQueryData(['feed', false], pages(1));
+    client.invalidateQueries({ queryKey: ['feed'] });
+
+    client.setQueryData(['feed', false], trimToFirstPage);
+
+    expect(client.getQueryState(['feed', false])?.isInvalidated).toBe(true);
   });
 });
 

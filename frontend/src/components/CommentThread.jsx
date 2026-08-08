@@ -98,7 +98,8 @@ export default function CommentThread({ target, highlightCommentId = null }) {
     // on the stale tree before the refetch has been anywhere — and if that
     // refetch then fails, you have the bug above again on the reopen path. The
     // stamp happens exactly when this function resolves; so does the mirror.
-    // (The app still uses the effect form, so it has that reopen gap — #307.)
+    // (The app's twin does the same, from the same place, as of #307 — it marks
+    // the event target from there too, which is the half the web doesn't need.)
     //
     // Only a post carries a "N new" badge the web mirrors; an event's lives on
     // `groupEvents` / `personalCalendar`, which are only ever rendered by a

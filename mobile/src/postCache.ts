@@ -57,6 +57,34 @@ function seen(post: Post, postId: number): Post {
     : post;
 }
 
+/**
+ * **`undefined` is how you decline to write, and every bail-out below uses it.**
+ *
+ * `setQueryData` stops only on `undefined`. Returning anything else — *the
+ * identical object included* — is a write, and a write dispatches a success,
+ * which resets `isInvalidated` to false. So handing back the unchanged data
+ * isn't the no-op it reads as: it quietly cancels an invalidation somebody else
+ * just made.
+ *
+ * That flow is routine, not hypothetical. Posting a comment calls
+ * `invalidateComments` (marking every post list) and refetches the tree, and
+ * the tree's refetch is what calls this — so an unconditional write un-marks
+ * the profile and group timelines a tick after they were marked, and they come
+ * back holding the old `comment_count`. Only `staleTime: 0` everywhere hides
+ * that today, and the app is exactly where it can't be relied on: a tab
+ * navigator keeps screens mounted (#273/#275/#277), so the first `staleTime` or
+ * `refetchOnMount: false` added anywhere would make it visible. The web's twin
+ * carries the same rule (`frontend/src/postCache.js`).
+ *
+ * **What this narrows and does not close:** when there *is* something to clear,
+ * the write happens and still resets `isInvalidated` on that one list. Closing
+ * that would mean re-invalidating the post lists straight afterwards — a refetch
+ * of every timeline on every thread open, which is the exact round trip this
+ * whole file exists to avoid. So the residue is deliberate, and it's bounded to
+ * a list that holds this post with a live count at the moment the tree's refetch
+ * lands. If a `staleTime` is ever added to a post list, that's the case to
+ * re-examine, not this comment.
+ */
 export function markPostCommentsSeen(
   queryClient: QueryClient,
   postId: number
@@ -67,25 +95,32 @@ export function markPostCommentsSeen(
   queryClient.setQueriesData<InfiniteData<Paginated<Post>, string>>(
     { predicate: (query) => POST_LIST_KEYS.has(query.queryKey[0] as string) },
     (data) => {
-      if (!data?.pages) return data;
+      if (!data?.pages) return undefined;
       const hit = data.pages.some((page) =>
         page?.results?.some((p) => p.id === postId && p.new_comment_count > 0)
       );
-      if (!hit) return data;
+      if (!hit) return undefined;
       return {
         ...data,
-        pages: data.pages.map((page) => ({
-          ...page,
-          results: page.results.map((p) => seen(p, postId)),
-        })),
+        // As guarded as the hit-check above, which is not belt-and-braces: the
+        // two ran on different assumptions, so one page without `results`
+        // alongside one holding the post threw. That throw *used* to spoil a
+        // render; now this runs inside the thread's `queryFn`, it would reject a
+        // GET that had already succeeded and already stamped `last_seen_at`
+        // server-side — an un-clearable badge over comments you'd read.
+        pages: data.pages.map((page) =>
+          page?.results ? { ...page, results: page.results.map((p) => seen(p, postId)) } : page
+        ),
       };
     }
   );
 
-  // The single-post permalink query, whose data is the post itself.
-  queryClient.setQueryData<Post>(['post', String(postId)], (post) =>
-    post ? seen(post, postId) : post
-  );
+  // The single-post permalink query, whose data is the post itself. Same rule:
+  // `undefined` unless the count actually moves.
+  queryClient.setQueryData<Post>(['post', String(postId)], (post) => {
+    const next = post ? seen(post, postId) : undefined;
+    return next === post ? undefined : next;
+  });
 }
 
 /**
@@ -133,6 +168,11 @@ export function invalidatePostComments(
  * is one: the server has already given its answer, so re-asking for it is a
  * round trip to learn something we know. The web needs no equivalent — its
  * `GroupPage` remounts and refetches on client-side navigation.
+ *
+ * Declines to write with `undefined`, for the reason spelled out on
+ * `markPostCommentsSeen` above: the unchanged data is still a write, and a write
+ * un-invalidates. Both of this one's keys are invalidated by
+ * `invalidateComments` on a comment write, which is the same flow.
  */
 export function markEventCommentsSeen(
   queryClient: QueryClient,
@@ -149,20 +189,21 @@ export function markEventCommentsSeen(
         EVENT_LIST_KEYS.has(query.queryKey[0] as string),
     },
     (rows) => {
-      if (!Array.isArray(rows)) return rows;
+      if (!Array.isArray(rows)) return undefined;
       // Only rebuild a list that actually holds this event with a live count,
       // so unrelated entries keep their identity and don't re-render.
       if (!rows.some((e) => e.id === eventId && e.new_comment_count > 0)) {
-        return rows;
+        return undefined;
       }
       return rows.map(seenEvent);
     }
   );
 
   // The event screen's own copy: keyed by number, matching `EventScreen`.
-  queryClient.setQueryData<EventRow>(['event', eventId], (event) =>
-    event ? seenEvent(event) : event
-  );
+  queryClient.setQueryData<EventRow>(['event', eventId], (event) => {
+    const next = event ? seenEvent(event) : undefined;
+    return next === event ? undefined : next;
+  });
 }
 
 /**
