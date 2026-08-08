@@ -476,21 +476,31 @@ export default function ConversationThreadView() {
    */
   const detailLoaded = !!detail;
   useEffect(() => {
-    if (convoQuery.isError || isPending || !detailLoaded) return;
+    // `convoQuery.isError` used to be in this guard, back when it meant the same
+    // thing as "nothing is on screen" — an error was an error card with no
+    // transcript, so not marking read was right. This commit is exactly what
+    // stops that being true: a failed refetch now keeps the thread up, and the
+    // reader is looking at the messages while this returns early, with the tab
+    // badge and the conversation list going on claiming unread mail they have
+    // just read. `detailLoaded` beside it is now the condition that means "is
+    // anything shown", so the flag comes out of the guard and out of the deps.
+    if (isPending || !detailLoaded) return;
     // The unread count has already been latched during render, above — this is
     // the write it has to survive.
-    api.markConversationRead(conversationId).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["unreadMessages"] });
-      queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    });
-  }, [
-    conversationId,
-    messageCount,
-    convoQuery.isError,
-    isPending,
-    detailLoaded,
-    queryClient,
-  ]);
+    //
+    // `.catch()` because that guard is what used to keep this write off a
+    // failing connection. Without it the POST fires exactly when it is most
+    // likely to reject, and an unhandled rejection is noise for a failure that
+    // genuinely doesn't matter: the reader has read them either way, and the
+    // next open marks it again.
+    api
+      .markConversationRead(conversationId)
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ["unreadMessages"] });
+        queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      })
+      .catch(() => {});
+  }, [conversationId, messageCount, isPending, detailLoaded, queryClient]);
 
   /**
    * Keep the draft store in step with the composer.
@@ -1003,6 +1013,25 @@ export default function ConversationThreadView() {
     queueSend(value, { photo: attachment ?? undefined, mentionIds });
   }
 
+  /**
+   * **Whether a failed fetch is allowed to take the thread off screen.**
+   *
+   * `query-core`'s error action writes `status`, `error` and `isInvalidated` and
+   * never touches `data`, so `isError` goes true on a failed *refetch* of a
+   * query that is rendering a perfectly good transcript. This view refetches
+   * constantly — `staleTime` is 0, `refetchOnWindowFocus` is on, and the detail
+   * polls on `CONVERSATION_DETAIL_POLL_MS` besides — so reading the flag before
+   * the data replaced the transcript, the header identity *and* the composer
+   * with a half-typed reply in it the moment one request lost a packet, having
+   * lost nothing server-side.
+   *
+   * A 404 is the exception and still outranks the cached copy: deleted, left, or
+   * out of reach is a real answer about *now*. Everything else only gets a say
+   * when there is nothing cached to keep showing.
+   */
+  const gone = convoQuery.error?.status === 404;
+  const loadFailed = convoQuery.isError && !detail;
+
   const other = detail?.other;
   // Memoised, not a bare `?? []`: the detail is re-fetched every
   // `CONVERSATION_DETAIL_POLL_MS` now, and a fresh empty array each time would
@@ -1282,7 +1311,8 @@ export default function ConversationThreadView() {
               Cancel
             </button>
           ) : (
-            !convoQuery.isError &&
+            !gone &&
+            !loadFailed &&
             !isPending &&
             detail && (
               <DrawerMenu getActions={headerActions} label="Conversation options" />
@@ -1305,7 +1335,7 @@ export default function ConversationThreadView() {
           >
             {selected.size} selected
           </span>
-        ) : convoQuery.isError ? (
+        ) : gone || loadFailed ? (
           <span className="font-semibold text-ink">Conversation</span>
         ) : isGroup ? (
           <button
@@ -1342,10 +1372,10 @@ export default function ConversationThreadView() {
         )}
       </PanelHeader>
 
-      {convoQuery.isError ? (
+      {gone || loadFailed ? (
         <div className="flex-1 px-6 py-16 text-center text-ink-faint">
           <p className="font-medium text-ink">
-            {convoQuery.error?.status === 404
+            {gone
               ? "This conversation isn’t available."
               : "Couldn’t load this conversation."}
           </p>

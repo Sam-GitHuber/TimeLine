@@ -4,8 +4,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import BlockButton from "./components/BlockButton.jsx";
 import ConnectButton from "./components/ConnectButton.jsx";
+import DisconnectWarningModal from "./components/DisconnectWarningModal.jsx";
 import { api } from "./api.js";
-import { unauthoredError } from "./test-utils.jsx";
+import { unauthoredError, failRefetch } from "./test-utils.jsx";
 
 /**
  * When a failure message on the Block / Connect controls is allowed to *retire*
@@ -47,7 +48,11 @@ function renderButton(ui) {
     <QueryClientProvider client={queryClient}>{node}</QueryClientProvider>
   );
   const utils = render(wrap(ui));
-  return { ...utils, setProps: (node) => utils.rerender(wrap(node)) };
+  return {
+    ...utils,
+    queryClient,
+    setProps: (node) => utils.rerender(wrap(node)),
+  };
 }
 
 beforeEach(() => {
@@ -140,5 +145,57 @@ describe("ConnectButton", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Couldn’t withdraw that request — try again."
     );
+  });
+});
+
+/**
+ * Issue #310, at the site where getting it wrong is most expensive.
+ *
+ * The list of group chats a disconnect will throw you out of is the entire
+ * reason this modal exists. `query-core`'s error action keeps `data` and only
+ * flips `status`, and this key is refetched on every open (`staleTime` is 0) —
+ * so testing `isError` above the list handed you "You can still continue" with
+ * the concrete warning sitting unread in the cache, and Confirm live.
+ */
+describe("DisconnectWarningModal — a failed re-check keeps the warning", () => {
+  const impact = {
+    chats: [
+      { id: 4, title: "Book Club" },
+      { id: 9, title: "Sunday lunch" },
+    ],
+  };
+
+  function renderModal() {
+    return renderButton(
+      <DisconnectWarningModal
+        userId={2}
+        userName="Priya"
+        action="disconnect"
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />
+    );
+  }
+
+  it("still names the chats when the re-check fails", async () => {
+    api.getDisconnectImpact.mockResolvedValue(impact);
+    const { queryClient } = renderModal();
+    await screen.findByText("Book Club");
+
+    api.getDisconnectImpact.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["disconnect-impact", 2]);
+
+    expect(screen.getByText("Book Club")).toBeInTheDocument();
+    expect(screen.getByText("Sunday lunch")).toBeInTheDocument();
+    expect(screen.queryByText(/You can still continue/)).toBeNull();
+  });
+
+  it("says it couldn't check when there is nothing cached to show", async () => {
+    api.getDisconnectImpact.mockRejectedValue(unauthoredError(500));
+    renderModal();
+
+    expect(
+      await screen.findByText(/Couldn’t check for shared chats/)
+    ).toBeInTheDocument();
   });
 });

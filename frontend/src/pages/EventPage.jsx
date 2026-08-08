@@ -132,7 +132,21 @@ export default function EventPage() {
     },
   });
 
-  if (eventQuery.isError) {
+  // **A missing event and an unreachable one are different answers**, and one
+  // branch on `isError` gave the first for both. Two things follow from that.
+  //
+  // A *failed refetch* keeps the data the query already has — `query-core`'s
+  // error action writes `status`, `error` and `isInvalidated` and never touches
+  // `data` — and this page refetches on window focus with a `staleTime` of 0,
+  // and again after every RSVP or vote through `invalidate()` above. So one
+  // dropped packet replaced a fully rendered event with an error card: the
+  // polls, the RSVP bar with your typed guest count, the album, the comments.
+  //
+  // And with `retry: false` on the query, a 500 or a blip on the *first* load
+  // left `isLoading` false with no data, so this told you the event "may have
+  // been cancelled" — something the client has no way of knowing. Only a 404
+  // says that now. Same split the app took in #311 (issue #310).
+  if (eventQuery.error?.status === 404) {
     return (
       <div className="px-6 py-16 text-center">
         <p className="text-lg font-medium text-ink">Event not available</p>
@@ -149,11 +163,29 @@ export default function EventPage() {
       </div>
     );
   }
-  if (eventQuery.isLoading) {
+
+  const event = eventQuery.data;
+
+  if (!event) {
+    if (eventQuery.isError) {
+      return (
+        <div className="px-6 py-16 text-center">
+          <p className="text-lg font-medium text-red-600">
+            {serverMessage(eventQuery.error, "Couldn't load this event.")}
+          </p>
+          <button
+            type="button"
+            onClick={() => eventQuery.refetch()}
+            className="btn btn-ghost btn-sm mt-4"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
     return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
   }
 
-  const event = eventQuery.data;
   const cancelled = event.status === "cancelled";
   const busy =
     finalise.isPending ||

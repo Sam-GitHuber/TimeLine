@@ -7,6 +7,7 @@ import {
   fakeUser,
   apiError,
   unauthoredError,
+  failRefetch,
 } from "./test-utils.jsx";
 import { api } from "./api.js";
 import { MessagingProvider } from "./messaging.jsx";
@@ -612,6 +613,145 @@ describe("Messages drawer — thread", () => {
     expect(screen.getByText("hello!")).toBeInTheDocument();
     await waitFor(() =>
       expect(api.markConversationRead).toHaveBeenCalledWith(7)
+    );
+  });
+
+  /**
+   * Issue #310 — the costly site.
+   *
+   * A failed **refetch** keeps the data the query already has: `query-core`'s
+   * error action writes `status`, `error` and `isInvalidated`, and never touches
+   * `data`. This view reads that key constantly — `staleTime` is 0,
+   * `refetchOnWindowFocus` is on, and the detail polls on a timer besides — so
+   * reading `isError` before the data replaced the transcript, the header
+   * identity *and* the composer with a half-typed reply in it, the moment one
+   * request lost a packet. Nothing had been lost server-side.
+   */
+  it("keeps the transcript, the header and a typed reply when a refresh fails", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 1,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "hey there",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Open conversation with Priya/,
+      })
+    );
+    await screen.findByText("hey there");
+    const box = await screen.findByPlaceholderText(/write a message/i);
+    await user.type(box, "on my way");
+
+    api.getConversation.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["conversation", 7]);
+
+    expect(screen.getByText("hey there")).toBeInTheDocument();
+    expect(screen.getByText("Priya")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/write a message/i)).toHaveValue(
+      "on my way"
+    );
+    expect(screen.queryByText(/Couldn’t load this conversation/)).toBeNull();
+  });
+
+  // The one error that still outranks the cached copy: gone, or no longer yours
+  // to read, is an answer about *now* — a 500 is only an answer about the request.
+  it("still says the conversation is unavailable when a refresh 404s", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 1,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "hey there",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Open conversation with Priya/,
+      })
+    );
+    await screen.findByText("hey there");
+
+    api.getConversation.mockRejectedValue(apiError("Not found.", 404));
+    await failRefetch(queryClient, ["conversation", 7]);
+
+    expect(
+      await screen.findByText(/This conversation isn’t available/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText("hey there")).toBeNull();
+  });
+
+  /**
+   * `convoQuery.isError` used to sit in the mark-read guard, back when it meant
+   * the same thing as "nothing is on screen". The fix above is exactly what
+   * stops that being true — so the flag had to come out, or the reader would be
+   * looking at the messages while the tab badge and the conversation list went
+   * on claiming unread mail they had just read.
+   */
+  it("still marks read when a message lands after a failed refresh", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    const first = {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hey there",
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+    };
+    api.getMessages.mockResolvedValue(page([first]));
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Open conversation with Priya/,
+      })
+    );
+    await screen.findByText("hey there");
+    await waitFor(() =>
+      expect(api.markConversationRead).toHaveBeenCalledWith(7)
+    );
+    const before = api.markConversationRead.mock.calls.length;
+
+    api.getConversation.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["conversation", 7]);
+
+    // A new message arrives while the detail refresh is still failing.
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          ...first,
+          id: 2,
+          text: "and another",
+        },
+        first,
+      ])
+    );
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["messages", 7] });
+    });
+    await screen.findByText("and another");
+
+    await waitFor(() =>
+      expect(api.markConversationRead.mock.calls.length).toBeGreaterThan(before)
     );
   });
 

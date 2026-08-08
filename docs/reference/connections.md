@@ -135,6 +135,14 @@ which observer it came off.** Both now render `decide.isError` above the list,
 with a fallback per decision read off `mutation.variables` (approve/reject,
 accept/decline), the shape `GroupMembersPanel` settled on.
 
+There was a second way to lose that same message, closed by #310: `PeoplePage`'s
+inbox used to `return` on the *query's* `isError` above the branches that render
+`decideError`, so a list refetch failing in the same frame as a refused Approve
+took the write's own error off screen with it — #231's shape, reached from the
+read side. The list's error is a line *under* the rows now, so nothing above it
+is unmounted to show it. See *Branch on the data, not the query flags — the
+web's seven sites* in `feed-and-posts.md`.
+
 Mute is the one that lied hardest, and it's the reason silence here isn't a
 cosmetic bug. Both controls read `muted` straight from the server and
 deliberately don't move until the write lands, so a mute that 500'd was
