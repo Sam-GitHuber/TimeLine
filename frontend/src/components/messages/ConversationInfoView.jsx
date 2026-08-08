@@ -50,6 +50,21 @@ export default function ConversationInfoView() {
     queryFn: () => api.getConversation(conversationId),
   });
   const detail = convoQuery.data;
+
+  /**
+   * **"This conversation isn't available" was doing two jobs** (#314). The one
+   * `!detail` branch below covered a real 404 *and* a dropped packet alike, so
+   * tapping Details on a chat you are actively in — with the transcript still
+   * behind this panel — announced that the chat was gone. This panel isn't
+   * polled, so its query is often cold when you open it, and there is no retry:
+   * the only way out was Back to messages.
+   *
+   * The thread view next door names exactly these two (`gone` / `loadFailed`),
+   * off the same query key; same names here so the pair can't drift.
+   */
+  const gone = convoQuery.error?.status === 404;
+  const loadFailed = convoQuery.isError && !detail;
+
   const isGroup = detail?.kind === "group";
   const canRename = isGroup && detail?.my_status === "active";
   const other = detail?.other;
@@ -140,9 +155,10 @@ export default function ConversationInfoView() {
         </h2>
       </PanelHeader>
 
-      {convoQuery.isLoading ? (
-        <p className="flex-1 px-5 py-10 text-center text-ink-faint">Loading…</p>
-      ) : !detail ? (
+      {gone ? (
+        // A real answer about *now* — deleted, left, or out of reach — and the
+        // chat behind this panel is gone with it, so the list is the way out.
+        // First, so it still outranks a cached copy, exactly as in the thread.
         <div className="flex-1 px-6 py-16 text-center text-ink-faint">
           <p className="font-medium text-ink">
             This conversation isn’t available.
@@ -155,6 +171,37 @@ export default function ConversationInfoView() {
             Back to messages
           </button>
         </div>
+      ) : loadFailed ? (
+        // Couldn't ask. The way out is to ask again, and the thread you came
+        // from is still there behind this panel — so Back goes to it, not to
+        // the list.
+        <div className="flex-1 px-6 py-16 text-center text-ink-faint">
+          <p className="font-medium text-red-600">
+            {serverMessage(convoQuery.error, "Couldn’t load these details.")}
+          </p>
+          <div className="mt-4 flex items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => convoQuery.refetch()}
+              className="btn btn-ghost btn-sm"
+            >
+              Try again
+            </button>
+            <button
+              type="button"
+              onClick={() => openThread(conversationId)}
+              className="btn btn-ghost btn-sm"
+            >
+              Back to the chat
+            </button>
+          </div>
+        </div>
+      ) : !detail ? (
+        // No data and no error: still waiting. `isLoading` alone isn't the test
+        // — offline the query sits *paused*, which is neither loading nor
+        // errored, and the "isn't available" branch above used to catch it and
+        // declare a live chat gone (#306's trap).
+        <p className="flex-1 px-5 py-10 text-center text-ink-faint">Loading…</p>
       ) : (
         <div className="flex-1 overflow-y-auto pb-8">
           <div className="flex flex-col items-center gap-1.5 px-5 py-6 text-center">
@@ -479,7 +526,30 @@ function MediaGallery({ conversationId }) {
   const photos = (mediaQuery.data?.results ?? []).flatMap(
     (message) => message.attachments ?? []
   );
-  if (photos.length === 0) return null;
+
+  // **The section's absence is itself a claim** (#314, folded in from the
+  // sweep). It only appears once a photo has been sent, so "not there" reads as
+  // "this chat has no photos" — which a failed fetch then says on the strength
+  // of a request that never arrived. Quieter than the other sites because it's
+  // an omission rather than a sentence, so the fix is a line rather than a
+  // whole state: say we couldn't ask, and leave the grid out.
+  if (photos.length === 0) {
+    if (!(mediaQuery.isError && !mediaQuery.data)) return null;
+    return (
+      <Section title="Photos">
+        <p className="px-5 py-1.5 text-sm text-red-600">
+          Couldn’t load the photos in this chat.{" "}
+          <button
+            type="button"
+            onClick={() => mediaQuery.refetch()}
+            className="font-medium underline"
+          >
+            Try again
+          </button>
+        </p>
+      </Section>
+    );
+  }
 
   /**
    * How many photos the chat holds, which is **not** how many are drawn below.

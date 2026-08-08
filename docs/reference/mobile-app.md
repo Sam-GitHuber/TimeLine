@@ -344,6 +344,16 @@ Other sites in this family are still open (#317): the group timeline, the group
 calendar, the profile timeline, notification preferences, and the invite
 picker's member roster (which reaches a *write*, not just a display).
 
+**The web finished its half first (#314)** — eleven sites, including the two
+that reach past the display: the activity centre's seen-write now waits on the
+list landing, and the group page's "Start a chat" refuses rather than building a
+chat from an empty roster. The app's twins of both are the ones still listed
+above, so [`feed-and-posts.md`](feed-and-posts.md) § *The mirror image: no error
+branch at all — the web's sites* is the shape to port, not to re-derive. It also
+records the **badge-shaped counts** decision — deliberately left reading zero on
+a failed poll, on both clients, *except* the app-icon badge in
+`useBadgeCount.ts`, which re-asserts a known count on purpose.
+
 ### Taking a photo: camera or library
 
 Every place that adds a photo — a post, a chat message, a profile or group

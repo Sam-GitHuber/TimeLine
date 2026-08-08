@@ -280,6 +280,50 @@ describe("Profile page", () => {
     expect(screen.queryByRole("heading", { name: "Priya" })).toBeNull();
   });
 
+  // #314. The header comes from `userQuery` and the timeline from `postsQuery`,
+  // and only the first had an error branch — so a failed posts fetch rendered a
+  // complete, confident profile above the sentence "*Priya* hasn't posted yet",
+  // naming a person on the strength of a request that never arrived.
+  it("says the posts failed instead of claiming this person hasn't posted", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    api.getUserPosts.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/u/2");
+
+    // The header still renders — it's a different query, and it succeeded.
+    expect(
+      await screen.findByRole("heading", { name: "Priya" })
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Couldn’t load Priya’s posts.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/hasn’t posted yet/)).toBeNull();
+  });
+
+  it("keeps the posts it has when a later page fails", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    api.getUserPosts.mockResolvedValue(
+      page([post(1, 2, "Priya", "Booked flights", "2026-06-30T21:00:00Z")])
+    );
+    const { queryClient } = renderAt("/u/2");
+    await screen.findByText(/Booked flights/);
+
+    api.getUserPosts.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["userPosts", 2]);
+
+    // The rows stay; the failure is an extra line, not a replacement.
+    expect(screen.getByText(/Booked flights/)).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load Priya’s posts.")).toBeNull();
+  });
+
   it("does not show a connect button on your own profile", async () => {
     api.getUser.mockResolvedValue({
       id: 1,

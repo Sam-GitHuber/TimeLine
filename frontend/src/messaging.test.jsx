@@ -805,6 +805,51 @@ describe("Messages drawer — thread", () => {
     expect(api.markConversationRead.mock.calls.length).toBe(before);
   });
 
+  /**
+   * #314. The header, the participants and the mute state all come from
+   * `convoQuery`, so they render perfectly while `messagesQuery` is errored —
+   * and "No messages yet — say hello." then appeared in a thread with years of
+   * history, under the name of the person whose messages had just gone missing.
+   * `messagesQuery.isError` appeared nowhere in the file.
+   */
+  it("says the messages failed instead of claiming the thread is empty", async () => {
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+
+    // The header lands — it's the other query, and it succeeded.
+    expect(await screen.findByText("Priya")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Couldn’t load these messages.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No messages yet/)).toBeNull();
+  });
+
+  it("keeps the transcript when a message poll fails", async () => {
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 1,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "hey there",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
+
+    const { queryClient } = renderAt("/messages/7");
+    await screen.findByText("hey there");
+
+    api.getMessages.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["messages", 7]);
+
+    expect(screen.getByText("hey there")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load these messages.")).toBeNull();
+  });
+
   it("sends a message from the composer", async () => {
     const user = userEvent.setup();
     api.getConversations.mockResolvedValue(page([convoRow()]));
@@ -3334,6 +3379,81 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
     // The one thing that stayed beside the name when the header emptied into a
     // menu: mute is a *state*, and the whole risk of it is forgetting you did.
     expect(await screen.findByText("Muted")).toBeInTheDocument();
+  });
+
+  // #314, folded in from the sweep. The photo section only appears once a photo
+  // has been sent, so its *absence* reads as "this chat has no photos" — which
+  // a failed media fetch used to say silently, by rendering nothing at all.
+  it("says so when the photo gallery can't be loaded", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+
+    expect(
+      await screen.findByText(/Couldn’t load the photos in this chat/)
+    ).toBeInTheDocument();
+  });
+
+  // #314. One `!detail` branch was doing two jobs, so a dropped packet on this
+  // panel's cold fetch announced that a chat you are actively in — with the
+  // transcript still behind the panel — wasn't available. And there was no
+  // retry: the only way out was Back to messages.
+  it("says the details failed rather than that the chat is gone", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+
+    const { queryClient } = renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+    await screen.findByText("3 people");
+
+    // Cold and failing — the case this panel actually meets, since it isn't
+    // polled and the cache entry only lives `gcTime` (five minutes) past the
+    // last observer. `resetQueries` reproduces it: data cleared, refetched, and
+    // this time the request doesn't land.
+    api.getConversation.mockRejectedValue(unauthoredError(500));
+    await act(async () => {
+      await queryClient.resetQueries({ queryKey: ["conversation", 11] });
+    });
+    await settle(3);
+
+    expect(
+      await screen.findByText("Couldn’t load these details.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/This conversation isn’t available/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    // Back goes to the chat, which is still there — not out to the list.
+    expect(
+      screen.getByRole("button", { name: "Back to the chat" })
+    ).toBeInTheDocument();
+  });
+
+  // The 404 still outranks everything, and still sends you to the list.
+  it("still says the chat is unavailable on a 404", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(groupConvoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+
+    const { queryClient } = renderAt("/messages/11");
+    await screen.findByText("Book Club");
+    await openInfo(user);
+    await screen.findByText("3 people");
+
+    api.getConversation.mockRejectedValue(apiError("Not found.", 404));
+    await failRefetch(queryClient, ["conversation", 11]);
+
+    expect(
+      await screen.findByText(/This conversation isn’t available/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load these details.")).toBeNull();
   });
 });
 

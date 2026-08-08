@@ -37,6 +37,12 @@ export default function GroupMembersPanel({ groupId, isAdmin }) {
   const members = membersQuery.data ?? [];
   const actionError = setRole.error || remove.error;
 
+  // **A "Members" heading over an empty list reads as a group with no members**
+  // (#314) — and worse, the admin controls simply aren't there to press, so an
+  // admin who came here to remove someone finds no one to remove. `!data`
+  // rather than a bare `isError`: a failed refetch keeps the roster it has.
+  const loadFailed = membersQuery.isError && !membersQuery.data;
+
   return (
     <section className="border-b border-line px-5 py-4">
       <h2 className="mb-3 text-sm font-semibold text-ink">
@@ -45,6 +51,19 @@ export default function GroupMembersPanel({ groupId, isAdmin }) {
 
       {membersQuery.isLoading && (
         <p className="text-sm text-ink-faint">Loading…</p>
+      )}
+
+      {loadFailed && (
+        <p className="text-sm text-red-600">
+          {serverMessage(membersQuery.error, "Couldn’t load the members.")}{" "}
+          <button
+            type="button"
+            onClick={() => membersQuery.refetch()}
+            className="font-medium underline"
+          >
+            Try again
+          </button>
+        </p>
       )}
 
       {actionError && (

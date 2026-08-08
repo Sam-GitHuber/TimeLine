@@ -288,6 +288,19 @@ export default function ConversationThreadView() {
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const pages = messagesQuery.data;
+  /**
+   * **The transcript is a second query, and it fails separately** (#314). The
+   * header, the participants and the mute state all come from `convoQuery`, so
+   * they render perfectly while this one is errored — and "No messages yet —
+   * say hello." then appeared in a thread with years of history, under the name
+   * of the person whose messages had just gone missing. `messagesQuery.isError`
+   * appeared nowhere in this file.
+   *
+   * `!pages` rather than a bare `isError`, the same way round as `loadFailed`
+   * above: a failed poll (this one polls on `MESSAGE_POLL_MS`) or a failed page
+   * of older messages must not take the transcript off screen.
+   */
+  const messagesLoadFailed = messagesQuery.isError && !pages;
   /** What the server has accepted, newest-first. The outbox sits in front of it
    * when the rows are built, below. */
   const loaded = useMemo(
@@ -1442,7 +1455,26 @@ export default function ConversationThreadView() {
                 aria-label="Conversation"
                 className="flex h-full flex-col-reverse overflow-y-auto px-4 py-4"
               >
-                {messagesQuery.isLoading ? (
+                {messagesLoadFailed && rows.length === 0 ? (
+                  // `rows` rather than `loaded`: an unsent message in the
+                  // outbox is still something on screen, and replacing it with
+                  // an apology would look like it had been thrown away.
+                  <div className="py-10 text-center">
+                    <p className="text-red-600">
+                      {serverMessage(
+                        messagesQuery.error,
+                        "Couldn’t load these messages."
+                      )}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => messagesQuery.refetch()}
+                      className="btn btn-ghost btn-sm mt-3"
+                    >
+                      Try again
+                    </button>
+                  </div>
+                ) : messagesQuery.isLoading ? (
                   <p className="py-10 text-center text-ink-faint">Loading…</p>
                 ) : rows.length === 0 ? (
                   <p className="py-10 text-center text-ink-faint">
