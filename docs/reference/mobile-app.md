@@ -326,7 +326,7 @@ Still open, same shape, different fix: `post/[postId].tsx` and
 `!!data`, and a **warm cache** hands that data back synchronously on the first
 render, so the dismissal lands before the mount refetch has been anywhere near
 the server. A guard can't close that one — the write has to ride the request, as
-`CommentThread`'s did in #308.
+`CommentThread`'s did in #308. Tracked as #318.
 
 #### The mirror image: no error branch at all
 
@@ -340,7 +340,7 @@ dropped packet as an answer. Fixed on the app's two worst sites in #312:
   besides; see [notifications.md](notifications.md) for that half. Its error
   branch lives in `ListEmptyComponent`, per the rule above.
 
-Other sites in this family are still open: the group timeline, the group
+Other sites in this family are still open (#317): the group timeline, the group
 calendar, the profile timeline, notification preferences, and the invite
 picker's member roster (which reaches a *write*, not just a display).
 
