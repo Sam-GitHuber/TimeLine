@@ -130,6 +130,24 @@ function servePages(pages: Notification[][]) {
   });
 }
 
+/**
+ * The list GET fails; everything else still answers.
+ *
+ * Deliberately *not* a variant of `servePages`, because the point of these
+ * tests is that the seen POST and the dismissals are reachable and simply
+ * mustn't be reached — a mock that refused them too would pass for the wrong
+ * reason.
+ */
+function failList(status = 503, detail = 'Service unavailable.') {
+  mockFetch.mockImplementation(async (url: string) => {
+    if (/\/api\/notifications\/(\?|$)/.test(url)) {
+      return jsonResponse({ detail }, status);
+    }
+    if (/unread-count/.test(url)) return jsonResponse({ count: 3 });
+    return jsonResponse({ updated: 0 });
+  });
+}
+
 function listGets() {
   return mockFetch.mock.calls
     .filter(([url, init]) => (init?.method ?? 'GET') === 'GET')
@@ -366,6 +384,103 @@ describe('ActivityScreen', () => {
     await renderWithClient(<ActivityScreen />);
 
     expect(await screen.findByText(/all caught up/i)).toBeTruthy();
+  });
+
+  /**
+   * A failed load is not an answer (#312).
+   *
+   * The screen read no error flag at all: `data` came back undefined, the
+   * flattened array fell to `[]`, and "You're all caught up" — a flat statement
+   * of fact — rendered on the strength of a request that never arrived. Losing
+   * signal does it, and so does catching the box mid-restart, which is what
+   * publishing a GitHub Release does (`deploy.md`).
+   */
+  describe('when the list fails to load', () => {
+    it('says so instead of claiming you are all caught up', async () => {
+      failList();
+      await renderWithClient(<ActivityScreen />);
+
+      expect(await screen.findByText(/Couldn’t load your activity/)).toBeTruthy();
+      // The server's own sentence, not a synthesized one.
+      expect(screen.getByText('Service unavailable.')).toBeTruthy();
+      expect(screen.queryByText(/all caught up/i)).toBeNull();
+    });
+
+    it('does not mark everything seen, or clear the shade', async () => {
+      // The costly half. The mount effect fired the POST regardless of whether
+      // the list landed, so a failed open both said "all caught up" *and*
+      // cleared every unread server-side — killing the badge that would have
+      // brought the reader back, having just told them there was nothing to
+      // come back for.
+      failList();
+      mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+        {
+          request: {
+            identifier: 'bell',
+            content: { data: { url: '/p/42', notificationId: 1 } },
+          },
+        },
+      ] as never);
+
+      await renderWithClient(<ActivityScreen />);
+      await screen.findByText(/Couldn’t load your activity/);
+
+      expect(made(/\/api\/notifications\/seen\/$/, 'POST')).toBe(false);
+      expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalled();
+    });
+
+    it('loads the list, and marks it seen, when Try again works', async () => {
+      // The write is deferred, not abandoned: it rides whichever read finally
+      // puts the rows on screen.
+      failList();
+      await renderWithClient(<ActivityScreen />);
+      await screen.findByText(/Couldn’t load your activity/);
+
+      serveList([notification({ id: 1, text: 'Ada replied to your post' })]);
+      await fireEvent.press(screen.getByText('Try again'));
+
+      expect(await screen.findByText('Ada replied to your post')).toBeTruthy();
+      await waitFor(() =>
+        expect(made(/\/api\/notifications\/seen\/$/, 'POST')).toBe(true)
+      );
+    });
+  });
+
+  it('keeps the rows, and still marks them seen, when a refresh fails', async () => {
+    // The other side of the same rule, and the guard against over-correcting
+    // it: the error branch is `isError && !listLoaded`, not a bare `isError`,
+    // so a warm list whose refetch failed stays on screen rather than being
+    // replaced by an apology — and those rows have been seen.
+    servePages([[notification({ id: 1, text: 'Ada replied to your post' })]]);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ActivityScreen />
+        </QueryClientProvider>
+      );
+    });
+    await screen.findByText('Ada replied to your post');
+
+    failList();
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['notifications'] });
+    });
+    // The cache flips to 'error' a render before the screen does — React Query
+    // notifies on a macrotask — so without this flush the assertion below reads
+    // the pre-error tree and passes with the bug still in place.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByText('Ada replied to your post')).toBeTruthy();
+    expect(screen.queryByText(/Couldn’t load your activity/)).toBeNull();
+    expect(made(/\/api\/notifications\/seen\/$/, 'POST')).toBe(true);
   });
 });
 

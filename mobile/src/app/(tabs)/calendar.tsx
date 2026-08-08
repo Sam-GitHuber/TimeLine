@@ -21,7 +21,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { EventCard } from '@/components/events/EventCard';
 import { MonthGrid } from '@/components/events/MonthGrid';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -34,6 +34,20 @@ export default function CalendarScreen() {
     queryFn: () => api.getPersonalCalendar(),
   });
   const events = calendar.data ?? [];
+  /**
+   * **An empty calendar and an unanswered one are different things** (#312).
+   * This screen had no error branch at all: a failed load leaves `data`
+   * undefined, `events` falls back to `[]`, and the empty state below — written
+   * as a flat statement of fact — told someone with a group dinner tomorrow that
+   * they were free. Losing signal does it, and so does catching the box
+   * mid-restart, which is what publishing a GitHub Release does (`deploy.md`).
+   *
+   * `!calendar.data` rather than a bare `isError`, the same way round as every
+   * other screen (see *Branch on the data, not the query flags* in
+   * `mobile-app.md`): a failed *refetch* keeps the events it already has, and
+   * those stay on screen rather than being replaced by an apology.
+   */
+  const loadFailed = calendar.isError && !calendar.data;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -59,7 +73,21 @@ export default function CalendarScreen() {
         </View>
       </View>
 
-      {calendar.isLoading ? (
+      {loadFailed ? (
+        <View style={styles.centre}>
+          <Text style={styles.emptyTitle}>Couldn&rsquo;t load your calendar</Text>
+          <Text style={styles.emptyBody}>
+            {serverMessage(calendar.error, WENT_WRONG)}
+          </Text>
+          <Pressable
+            onPress={() => calendar.refetch()}
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+          >
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
+        </View>
+      ) : calendar.isLoading ? (
         <ActivityIndicator color={colors.accent} style={styles.spinner} />
       ) : events.length === 0 ? (
         <View style={styles.centre}>
@@ -104,7 +132,25 @@ const styles = StyleSheet.create({
   toggleText: { fontSize: fontSize.sm, fontWeight: '600', color: colors.inkSoft },
   toggleTextOn: { color: colors.raised },
   spinner: { marginTop: spacing.xl },
-  centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
+  centre: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.xl,
+    gap: spacing.sm,
+  },
+  emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
   emptyBody: { fontSize: fontSize.sm, color: colors.inkSoft, textAlign: 'center', lineHeight: 20 },
+  // The same outlined button as the feed, messages and profile screens' retry.
+  retry: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  retryText: { color: colors.ink, fontWeight: '600' },
+  pressed: { opacity: 0.7 },
   content: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.xxl },
 });
