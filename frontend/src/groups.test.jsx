@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { onlineManager } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
 import PostCard from "./components/PostCard.jsx";
 import ComposeBox from "./components/ComposeBox.jsx";
@@ -10,7 +11,11 @@ import { GroupsDrawerProvider } from "./groups-drawer.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
 import GroupInvitePicker from "./components/GroupInvitePicker.jsx";
-import { renderWithAuth, failRefetch } from "./test-utils.jsx";
+import {
+  renderWithAuth,
+  failRefetch,
+  unauthoredError,
+} from "./test-utils.jsx";
 import { api } from "./api.js";
 import { useMessaging } from "./messaging.jsx";
 
@@ -446,6 +451,151 @@ describe("GroupPage admin controls", () => {
   });
 });
 
+// #314. `groupQuery` has had an error branch since #310; the four queries beside
+// it had none, so a page with a perfectly good header could simultaneously claim
+// the group had no posts, no events and an empty calendar — none of which anyone
+// had asked the server about.
+describe("GroupPage — a failed load is not an empty group", () => {
+  const group = {
+    id: 7,
+    name: "Trip",
+    description: "",
+    avatar_thumb: null,
+    member_count: 2,
+    your_role: "admin",
+  };
+
+  beforeEach(() => {
+    api.getGroup.mockResolvedValue(group);
+  });
+
+  // The loudest one: "Be the first to share something" on a group with two
+  // years of history, whose natural response is to post into it again.
+  it("says the posts failed instead of claiming the group is empty", async () => {
+    api.getGroupPosts.mockRejectedValue(unauthoredError(500));
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    expect(
+      await screen.findByText("Couldn’t load this group’s posts.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Be the first to share/)).toBeNull();
+  });
+
+  it("keeps the posts it has when a later page fails", async () => {
+    api.getGroupPosts.mockResolvedValue({
+      results: [
+        {
+          id: 1,
+          author: { id: 2, display_name: "Priya" },
+          text: "hi group",
+          created_at: "2026-07-04T08:00:00Z",
+          images: [],
+          group: { id: 7, name: "Trip" },
+        },
+      ],
+      next: null,
+    });
+    const { queryClient } = renderGroupAt("/g/7");
+    await screen.findByText("hi group");
+
+    api.getGroupPosts.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["groupPosts", 7]);
+
+    expect(screen.getByText("hi group")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load this group’s posts.")).toBeNull();
+  });
+
+  // The invisible one: a failed upcoming fetch makes the count compute 0, which
+  // hides the "↑ N upcoming events" cue along with the events — so without a
+  // line of its own nothing distinguishes "nothing planned" from "couldn't ask".
+  it("says so when the upcoming events fail, since the cue hides itself", async () => {
+    api.getGroupEvents.mockImplementation((_id, window) =>
+      window === "upcoming"
+        ? Promise.reject(unauthoredError(500))
+        : Promise.resolve([])
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    expect(
+      await screen.findByText(/Couldn’t load what’s coming up/)
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /upcoming event/ })).toBeNull();
+  });
+
+  it("says so when the past events fail, rather than dropping them silently", async () => {
+    api.getGroupEvents.mockImplementation((_id, window) =>
+      window === "past"
+        ? Promise.reject(unauthoredError(500))
+        : Promise.resolve([])
+    );
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    expect(
+      await screen.findByText("Couldn’t load this group’s past events.")
+    ).toBeInTheDocument();
+  });
+
+  // A drawn month with nothing in it is the most confident possible lie about
+  // a calendar.
+  it("doesn't draw an empty month grid when the calendar fails", async () => {
+    const user = userEvent.setup();
+    api.getGroupCalendar.mockRejectedValue(unauthoredError(500));
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    await user.click(screen.getByRole("button", { name: "Calendar" }));
+
+    expect(
+      await screen.findByText("Couldn’t load this group’s calendar.")
+    ).toBeInTheDocument();
+    // The grid names its weekdays; none of them are on screen.
+    expect(screen.queryByText("Mon")).toBeNull();
+  });
+
+  // The paused state: offline, the request is never sent, and `isLoading` is
+  // false with no data behind it — so a branch gated on `!isLoading` printed
+  // "Be the first to share something" for a group nobody had asked about
+  // (#306's trap, and what the first cut of this fix missed).
+  it("says it's waiting rather than that the group is empty", async () => {
+    const { queryClient } = renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    // Signal goes once the header is up — the group query keeps its cached
+    // copy, so the page stays, and only the timeline is left with nothing.
+    onlineManager.setOnline(false);
+    try {
+      await act(async () => {
+        queryClient.resetQueries({ queryKey: ["groupPosts", 7] });
+      });
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Be the first to share/)).toBeNull();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  // A "Members" heading over an empty list reads as a group with no members —
+  // and the admin controls simply aren't there to press.
+  it("says the member list failed instead of showing an empty roster", async () => {
+    const user = userEvent.setup();
+    api.getGroupMembers.mockRejectedValue(unauthoredError(500));
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    await user.click(screen.getByRole("button", { name: "Group actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Members" }));
+
+    expect(
+      await screen.findByText("Couldn’t load the members.")
+    ).toBeInTheDocument();
+  });
+});
+
 describe("GroupPage start a chat", () => {
   it("opens the new-chat picker scoped to the group's members", async () => {
     const user = userEvent.setup();
@@ -476,6 +626,37 @@ describe("GroupPage start a chat", () => {
       groupName: "Trip",
       memberIds: [1, 2],
     });
+  });
+
+  // #314, the half that reaches a *write*. `(membersQuery.data ?? [])` turned
+  // "we couldn't ask who's in this group" into "this group has nobody in it",
+  // so this created a group chat with an empty member list rather than the
+  // action refusing.
+  it("refuses rather than starting a chat with nobody in it", async () => {
+    const user = userEvent.setup();
+    const openNew = vi.fn();
+    useMessaging.mockReturnValue({ openNew });
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    api.getGroupMembers.mockRejectedValue(unauthoredError(500));
+
+    renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+    await user.click(screen.getByRole("button", { name: "Group actions" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Start a chat" })
+    );
+
+    expect(openNew).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(/Couldn’t check who’s in this group/)
+    ).toBeInTheDocument();
   });
 });
 

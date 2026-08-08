@@ -80,7 +80,8 @@ Notification:
 
 - **Opening the centre** marks all currently-unread items **seen** (`POST
   /notifications/seen/`) → the badge clears, but every item stays in the list.
-  ⚠️ **On the app that write waits for the list to arrive** (#312). It used to
+  ⚠️ **On both clients that write waits for the list to arrive** (#312 for the
+  app, #314 for the web). It used to
   fire from a mount effect, unconditionally, and the two came apart in the case
   that matters: open the bell with no signal, the fetch fails, and the screen —
   which had no error branch at all — said *You're all caught up* while the POST
@@ -91,7 +92,13 @@ Notification:
   still a screen full of notifications someone is looking at. That is the
   #307/#308 rule on a second surface: a write that mirrors what the reader has
   *seen* rides the read that showed it to them, not a render that happened
-  anyway. The web's copy is still ungated — see #314.
+  anyway. `ActivityCenter.jsx` gates on the same `listLoaded`, fires once per
+  *open* (a ref, since the panel stays mounted and the badge poll keeps moving
+  underneath it), and carries a `.catch()` — a failed seen-write leaves the
+  badge up, which is the honest answer, and the next open tries again. On the
+  web it had the extra failure the app can't have: the badge is a *separate*
+  query, so a succeeding count poll beside a failing list fetch put "Activity, 5
+  unread" directly above "You're all caught up".
 - **Acting on an item** marks it **addressed**. Two ways in:
   1. **Click-through** in the dropdown (`POST /notifications/<id>/addressed/`),
      which also implies seen.

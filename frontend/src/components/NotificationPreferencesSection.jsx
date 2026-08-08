@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 
 // The "Notifications" section on the settings page (Phase 8). The API returns a
 // { kind: bool } map over just the *mutable* kinds — the connection/invite kinds
@@ -31,10 +32,18 @@ const LABELS = {
 export default function NotificationPreferencesSection() {
   const queryClient = useQueryClient();
 
-  const { data: prefs, isLoading } = useQuery({
+  const prefsQuery = useQuery({
     queryKey: ["notificationPreferences"],
     queryFn: api.getNotificationPreferences,
   });
+  const prefs = prefsQuery.data;
+
+  // **Zero toggles under this heading says "there are no settings", not
+  // "we couldn't load them"** (#314). Only `mutation.isError` was ever
+  // rendered; the query's error never was, so a failed load left the section
+  // heading and its blurb standing over nothing, with no retry — the only
+  // recovery was guessing that leaving Settings and coming back might help.
+  const loadFailed = prefsQuery.isError && !prefs;
 
   const mutation = useMutation({
     mutationFn: (patch) => api.updateNotificationPreferences(patch),
@@ -74,8 +83,22 @@ export default function NotificationPreferencesSection() {
         group invitations always notify you.
       </p>
 
-      {isLoading ? (
-        <p className="mt-4 text-sm text-ink-faint">Loading…</p>
+      {loadFailed ? (
+        <p className="mt-4 text-sm text-red-600">
+          {serverMessage(
+            prefsQuery.error,
+            "Couldn’t load your notification settings."
+          )}{" "}
+          <button
+            type="button"
+            onClick={() => prefsQuery.refetch()}
+            className="font-medium underline"
+          >
+            Try again
+          </button>
+        </p>
+      ) : !prefs ? (
+        <p className="mt-4 text-sm text-ink-faint">{waitingMessage(prefsQuery)}</p>
       ) : (
         <ul className="mt-4 max-w-sm divide-y divide-line">
           {entries.map(([kind, enabled]) => (

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { onlineManager } from "@tanstack/react-query";
 import { Link, Routes, Route } from "react-router-dom";
 import App from "./App.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
@@ -278,6 +279,78 @@ describe("Profile page", () => {
 
     expect(await screen.findByText("User not found")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Priya" })).toBeNull();
+  });
+
+  // #314. The header comes from `userQuery` and the timeline from `postsQuery`,
+  // and only the first had an error branch — so a failed posts fetch rendered a
+  // complete, confident profile above the sentence "*Priya* hasn't posted yet",
+  // naming a person on the strength of a request that never arrived.
+  it("says the posts failed instead of claiming this person hasn't posted", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    api.getUserPosts.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/u/2");
+
+    // The header still renders — it's a different query, and it succeeded.
+    expect(
+      await screen.findByRole("heading", { name: "Priya" })
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Couldn’t load Priya’s posts.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/hasn’t posted yet/)).toBeNull();
+  });
+
+  it("keeps the posts it has when a later page fails", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    api.getUserPosts.mockResolvedValue(
+      page([post(1, 2, "Priya", "Booked flights", "2026-06-30T21:00:00Z")])
+    );
+    const { queryClient } = renderAt("/u/2");
+    await screen.findByText(/Booked flights/);
+
+    api.getUserPosts.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["userPosts", 2]);
+
+    // The rows stay; the failure is an extra line, not a replacement.
+    expect(screen.getByText(/Booked flights/)).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load Priya’s posts.")).toBeNull();
+  });
+
+  // The paused state — offline, `networkMode: 'online'`, so the request is
+  // never sent and `isLoading` is false with no data. Gating on `!isLoading`
+  // let the empty state render anyway (#306's trap).
+  it("says it's waiting rather than that this person hasn't posted", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    const { queryClient } = renderAt("/u/2");
+    await screen.findByRole("heading", { name: "Priya" });
+
+    // Signal goes after the header is up, and the timeline is asked again.
+    onlineManager.setOnline(false);
+    try {
+      await act(async () => {
+        queryClient.resetQueries({ queryKey: ["userPosts", 2] });
+      });
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/hasn’t posted yet/)).toBeNull();
+    } finally {
+      onlineManager.setOnline(true);
+    }
   });
 
   it("does not show a connect button on your own profile", async () => {

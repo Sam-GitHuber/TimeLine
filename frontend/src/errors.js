@@ -32,3 +32,36 @@
 export function serverMessage(err, fallback) {
   return err?.fromServer && err.message ? err.message : fallback;
 }
+
+/**
+ * What to say while a query has told us nothing yet — the *third* state, and the
+ * one that is easy to miss.
+ *
+ * `main.jsx` builds a bare `new QueryClient()`, so `networkMode` is the default
+ * `'online'`: offline, a query doesn't fail, it **pauses**. `status` stays
+ * `'pending'` and `fetchStatus` goes to `'paused'`, which makes `isLoading`
+ * (`isPending && isFetching`) **false** — with no data behind it and no error
+ * either. A render gated on `isLoading` therefore falls straight past this state
+ * into whatever comes next, which on most screens is an empty state written as a
+ * statement of fact. That's #306's lesson, and #314's: the branch a screen owes
+ * this state is **`!data`**, not `!isLoading`.
+ *
+ * So call sites read `!query.data` and hand the query here for the wording,
+ * rather than each deciding for itself whether being offline counts as loading.
+ * Two different sentences because they ask two different things of the reader:
+ * "Loading…" says wait, and "Waiting for a connection…" says the request hasn't
+ * been *sent* and won't be until the signal comes back. A spinner that never
+ * resolves and never explains is a dead end.
+ *
+ * The shape this pairs with, in full:
+ *
+ *   loadFailed ? <error + retry/>          // isError && !data
+ *     : !data ? <p>{waitingMessage(q)}</p> // pending or paused
+ *     : items.length === 0 ? <empty/>      // an answer, and it was none
+ *     : <content/>
+ *
+ * `CommentThread.jsx` is the original of it (#306), written inline there.
+ */
+export function waitingMessage(query) {
+  return query.isPaused ? "Waiting for a connection…" : "Loading…";
+}

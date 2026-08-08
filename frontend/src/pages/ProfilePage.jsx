@@ -11,7 +11,7 @@ import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 
 // A single person's page: their details plus their own posts, newest-first.
 // Users are identified by numeric id in the URL (there is no username).
@@ -89,13 +89,25 @@ export default function ProfilePage() {
         </div>
       );
     }
-    return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
+    return (
+      <p className="px-6 py-10 text-center text-ink-faint">
+        {waitingMessage(userQuery)}
+      </p>
+    );
   }
 
   const posts = postsQuery.items;
   // Private-by-default: unless it's you or a connection, the backend returns no
   // posts, and we show a locked state explaining why.
   const canSeePosts = isSelf || user.connection_status === "connected";
+
+  // **The posts are a second query, and it can fail on its own** (#314). The
+  // header above comes from `userQuery`, so it renders fine while this one is
+  // errored — and the empty state below then says "*Ada* hasn't posted yet",
+  // naming a person, on the strength of a request that never arrived. `!data`
+  // rather than a bare `isError` for the usual reason: a failed *page two*
+  // must not take page one's posts off screen (#310/#313).
+  const postsLoadFailed = postsQuery.isError && !postsQuery.data;
 
   return (
     <div>
@@ -182,12 +194,38 @@ export default function ProfilePage() {
                 : "Connect, and once they approve you’ll see each other’s posts here."}
           </p>
         </div>
-      ) : postsQuery.isLoading ? (
-        <p className="px-6 py-10 text-center text-ink-faint">Loading posts…</p>
+      ) : postsLoadFailed ? (
+        <div className="px-6 py-14 text-center">
+          <p className="font-medium text-red-600">
+            {serverMessage(
+              postsQuery.error,
+              `Couldn’t load ${isSelf ? "your" : `${user.display_name}’s`} posts.`
+            )}
+          </p>
+          <button
+            type="button"
+            onClick={() => postsQuery.refetch()}
+            className="btn btn-ghost btn-sm mt-4"
+          >
+            Try again
+          </button>
+        </div>
+      ) : !postsQuery.data ? (
+        <p className="px-6 py-10 text-center text-ink-faint">
+          {waitingMessage(postsQuery)}
+        </p>
       ) : posts.length > 0 ? (
         <>
           <Timeline posts={posts} />
           <LoadMoreButton query={postsQuery} />
+          {postsQuery.isError && (
+            // The partial case, the shape `EventPhotos` set: a timeline that
+            // stopped short is indistinguishable from one that ended, so say so
+            // below the rows rather than replacing them.
+            <p className="px-6 pb-6 text-center text-sm text-red-600">
+              Couldn’t load any older posts.
+            </p>
+          )}
         </>
       ) : (
         <p className="px-6 py-14 text-center text-ink-faint">

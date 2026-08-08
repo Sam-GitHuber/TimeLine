@@ -15,7 +15,7 @@ import { useInfiniteList } from "../hooks.js";
 import { eventLocalStart } from "../utils.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 import { invalidateGroupMembership } from "../groupCache.js";
 import { useMessaging } from "../messaging.jsx";
 
@@ -40,6 +40,9 @@ export default function GroupPage() {
   const [showMembers, setShowMembers] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [view, setView] = useState("agenda"); // "agenda" (the spine) | "month"
+  // Set when "Start a chat" is refused because the member list never loaded —
+  // see `startChat`.
+  const [chatBlocked, setChatBlocked] = useState(false);
 
   const groupQuery = useQuery({
     queryKey: ["group", groupId],
@@ -192,7 +195,11 @@ export default function GroupPage() {
         </div>
       );
     }
-    return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
+    return (
+      <p className="px-6 py-10 text-center text-ink-faint">
+        {waitingMessage(groupQuery)}
+      </p>
+    );
   }
 
   const isAdmin = group.your_role === "admin";
@@ -202,6 +209,26 @@ export default function GroupPage() {
   // upcoming spine/staging (they resurface as a past recap once their date
   // passes, and the detail page keeps them). This also keeps the "N upcoming"
   // cue count equal to the number of entries actually shown above now.
+  /**
+   * **Four more queries hang off this page, and each can fail on its own**
+   * (#314). `groupQuery` above has had an error branch since #310; none of the
+   * others did, so a page that renders a perfectly good header could
+   * simultaneously claim the group has no posts, no events and an empty
+   * calendar — none of which anyone had asked the server about.
+   *
+   * `!data` rather than a bare `isError` throughout, the same way round as the
+   * group branch above: a failed *refetch* keeps what's already on screen
+   * (#310/#313). Note `upcoming` is the one whose absence is otherwise
+   * *invisible* — a failed fetch makes `upcomingCount` compute 0, which hides
+   * the "↑ N upcoming events" cue along with the events themselves, so nothing
+   * on screen distinguishes "nothing is planned" from "we couldn't ask".
+   */
+  const postsLoadFailed = postsQuery.isError && !postsQuery.data;
+  const upcomingLoadFailed = upcomingQuery.isError && !upcomingQuery.data;
+  const pastEventsLoadFailed =
+    pastEventsQuery.isError && !pastEventsQuery.data;
+  const calendarLoadFailed = calendarQuery.isError && !calendarQuery.data;
+
   const upcoming = upcomingQuery.data || [];
   const live = upcoming.filter((e) => e.status !== "cancelled");
   const staging = live.filter((e) => !e.event_date);
@@ -225,11 +252,28 @@ export default function GroupPage() {
     )
       remove.mutate();
   }
+  /**
+   * **A failed read must not become a wrong write** (#314). The roster is what
+   * seeds the new chat, and `?? []` turned "we couldn't ask who's in this
+   * group" into "this group has nobody in it" — so opening this while
+   * `membersQuery` is errored created a group chat with an *empty* member list
+   * rather than the action refusing.
+   *
+   * The menu item is already disabled while the roster is loading, so the case
+   * that reaches here is the one that matters: offline, where the query sits
+   * paused, `isLoading` is false and the item is live. Refuse and say so.
+   */
   function startChat() {
+    if (!membersQuery.data) {
+      setChatBlocked(true);
+      membersQuery.refetch();
+      return;
+    }
+    setChatBlocked(false);
     openNew({
       groupId: group.id,
       groupName: group.name,
-      memberIds: (membersQuery.data ?? []).map((m) => m.user.id),
+      memberIds: membersQuery.data.map((m) => m.user.id),
     });
   }
 
@@ -324,6 +368,13 @@ export default function GroupPage() {
         </p>
       )}
 
+      {chatBlocked && !membersQuery.data && (
+        <p role="alert" className="px-5 py-2 text-sm text-red-600">
+          Couldn’t check who’s in this group, so there’s no one to start a chat
+          with yet. Trying again — give it a moment.
+        </p>
+      )}
+
       {showInvite && (
         <GroupInvitePicker groupId={group.id} onClose={() => setShowInvite(false)} />
       )}
@@ -333,8 +384,28 @@ export default function GroupPage() {
         <section className="px-5 py-5">
           {/* No spine in the month view, so the plan form isn't inset. */}
           {planning && <div className="mb-4">{planForm}</div>}
-          {calendarQuery.isLoading ? (
-            <p className="mt-4 text-sm text-ink-faint">Loading calendar…</p>
+          {calendarLoadFailed ? (
+            // Not an empty grid: a drawn month with nothing in it is the most
+            // confident possible lie about a calendar.
+            <div className="mt-4 py-10 text-center">
+              <p className="font-medium text-red-600">
+                {serverMessage(
+                  calendarQuery.error,
+                  "Couldn’t load this group’s calendar."
+                )}
+              </p>
+              <button
+                type="button"
+                onClick={() => calendarQuery.refetch()}
+                className="btn btn-ghost btn-sm mt-4"
+              >
+                Try again
+              </button>
+            </div>
+          ) : !calendarQuery.data ? (
+            <p className="mt-4 text-sm text-ink-faint">
+              {waitingMessage(calendarQuery)}
+            </p>
           ) : (
             <div className="mt-4">
               <MonthGrid events={calendarQuery.data || []} />
@@ -371,6 +442,27 @@ export default function GroupPage() {
                 aria-hidden="true"
               />
 
+              {/* Where the missing future gets said. The cue below only
+                  renders when there *are* upcoming events, so without this a
+                  failed fetch leaves the region silent and indistinguishable
+                  from a group with nothing planned. Inset to the body column,
+                  like the staging block above it. */}
+              {upcomingLoadFailed && (
+                <p className="tl-inset my-3 text-sm text-red-600">
+                  {serverMessage(
+                    upcomingQuery.error,
+                    "Couldn’t load what’s coming up."
+                  )}{" "}
+                  <button
+                    type="button"
+                    onClick={() => upcomingQuery.refetch()}
+                    className="font-medium underline"
+                  >
+                    Try again
+                  </button>
+                </p>
+              )}
+
               {upcomingCount > 0 && (
                 <button
                   type="button"
@@ -397,12 +489,50 @@ export default function GroupPage() {
 
       {view === "agenda" && (
         <>
-          {postsQuery.isLoading && (
-            <p className="px-6 py-10 text-center text-ink-faint">Loading posts…</p>
-          )}
-          {!postsQuery.isLoading && posts.length === 0 && (
+          {/* The loudest one. "No posts yet. Be the first…" on a group with two
+              years of shared history reads as a brand-new group, and the
+              natural response to that sentence is to post into it again. */}
+          {postsLoadFailed ? (
+            <div className="px-6 py-12 text-center">
+              <p className="font-medium text-red-600">
+                {serverMessage(
+                  postsQuery.error,
+                  "Couldn’t load this group’s posts."
+                )}
+              </p>
+              <button
+                type="button"
+                onClick={() => postsQuery.refetch()}
+                className="btn btn-ghost btn-sm mt-4"
+              >
+                Try again
+              </button>
+            </div>
+          ) : !postsQuery.data ? (
+            <p className="px-6 py-10 text-center text-ink-faint">
+              {waitingMessage(postsQuery)}
+            </p>
+          ) : posts.length === 0 ? (
             <p className="px-6 py-12 text-center text-ink-faint">
               No posts yet. Be the first to share something with the group.
+            </p>
+          ) : (
+            postsQuery.isError && (
+              // The partial case: a timeline that stopped short looks exactly
+              // like one that ended (`EventPhotos`' shape).
+              <p className="px-6 pb-4 text-center text-sm text-red-600">
+                Couldn’t load any older posts.
+              </p>
+            )
+          )}
+          {/* Past event recaps live on the same spine as the posts, so their
+              absence reads as "nothing happened", not "we couldn't ask". */}
+          {pastEventsLoadFailed && (
+            <p className="px-6 pb-4 text-center text-sm text-red-600">
+              {serverMessage(
+                pastEventsQuery.error,
+                "Couldn’t load this group’s past events."
+              )}
             </p>
           )}
           <LoadMoreButton query={postsQuery} />

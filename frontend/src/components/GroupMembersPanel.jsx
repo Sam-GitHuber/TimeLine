@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 
 // The members of a group, each with their role. If the viewer is an admin, each
 // other member gets promote/demote + remove controls. The backend enforces the
@@ -37,14 +37,36 @@ export default function GroupMembersPanel({ groupId, isAdmin }) {
   const members = membersQuery.data ?? [];
   const actionError = setRole.error || remove.error;
 
+  // **A "Members" heading over an empty list reads as a group with no members**
+  // (#314) — and worse, the admin controls simply aren't there to press, so an
+  // admin who came here to remove someone finds no one to remove. `!data`
+  // rather than a bare `isError`: a failed refetch keeps the roster it has.
+  const loadFailed = membersQuery.isError && !membersQuery.data;
+
   return (
     <section className="border-b border-line px-5 py-4">
       <h2 className="mb-3 text-sm font-semibold text-ink">
         Members{members.length > 0 && ` (${members.length})`}
       </h2>
 
-      {membersQuery.isLoading && (
-        <p className="text-sm text-ink-faint">Loading…</p>
+      {!loadFailed && !membersQuery.data && (
+        // `!data`, not `isLoading`: offline the query is *paused*, which is
+        // neither loading nor errored, and the roster would otherwise render as
+        // an empty list with no explanation (#306's trap).
+        <p className="text-sm text-ink-faint">{waitingMessage(membersQuery)}</p>
+      )}
+
+      {loadFailed && (
+        <p className="text-sm text-red-600">
+          {serverMessage(membersQuery.error, "Couldn’t load the members.")}{" "}
+          <button
+            type="button"
+            onClick={() => membersQuery.refetch()}
+            className="font-medium underline"
+          >
+            Try again
+          </button>
+        </p>
       )}
 
       {actionError && (
