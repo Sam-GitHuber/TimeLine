@@ -134,14 +134,55 @@ export function configureNotificationHandler(): void {
  * Android is not left with nothing: launchers derive their dot from the
  * notification shade, and #178 is what keeps that honest.
  *
- * Best-effort and silent on failure, like every other push nicety in this file.
- * A badge that didn't update is the behaviour we had before this existed.
+ * **Still best-effort, but no longer silent about it (#233).** Resolves to
+ * whether the write actually landed: `setBadgeCountAsync` returns a *boolean*,
+ * and `false` is not an error — it is the module telling us iOS declined,
+ * because badges are switched off for the app, or a Focus filter or Deliver
+ * Quietly is in force. Throwing that away made a refused write indistinguishable
+ * from a successful one, which is exactly the bit #234's investigation needed
+ * and had to go and read the module's Swift source to guess at.
+ *
+ * What it deliberately does *not* do is change what the user sees. A refused
+ * write stays a no-op: it never throws, never blocks a render, never retries.
+ * It is their phone and their setting, and the failure mode — an icon that
+ * keeps the last number the server pushed — is the behaviour we had before
+ * #179 existed. The return value exists so a caller *could* act, and so the
+ * next investigation can answer this on-device in seconds.
+ *
+ * Resolves `false` on Android too, for the same reading: no badge was set.
  */
-export function setAppBadge(count: number): void {
-  if (Platform.OS !== 'ios') return;
+export async function setAppBadge(count: number): Promise<boolean> {
+  if (Platform.OS !== 'ios') return false;
   // Negative would be a bug upstream, but it's a native call — clamp rather
   // than hand UIKit something it has no defined behaviour for.
-  void Notifications.setBadgeCountAsync(Math.max(0, count)).catch(() => {});
+  const accepted = await Notifications.setBadgeCountAsync(
+    Math.max(0, count),
+  ).catch(() => false);
+  warnOnceIfRefused(accepted);
+  return accepted;
+}
+
+/**
+ * The last thing we knew about whether iOS is accepting badge writes, so the
+ * `__DEV__` warning fires on the **transition** rather than on every write.
+ *
+ * It has to: since #232 the badge is re-asserted on every successful count
+ * fetch, so a phone with badges switched off would otherwise log on every
+ * foreground and every mark-read, and a warning that prints constantly is one
+ * nobody reads. `null` is "we haven't written yet".
+ */
+let badgeWritesAccepted: boolean | null = null;
+
+function warnOnceIfRefused(accepted: boolean): void {
+  const changed = badgeWritesAccepted !== accepted;
+  badgeWritesAccepted = accepted;
+  if (__DEV__ && changed && !accepted) {
+    console.warn(
+      '[push] iOS refused the app-icon badge write — badges are off for this ' +
+        'app, or a Focus filter or Deliver Quietly is in force. The icon will ' +
+        'keep whatever number the last push put there (#233).',
+    );
+  }
 }
 
 /**

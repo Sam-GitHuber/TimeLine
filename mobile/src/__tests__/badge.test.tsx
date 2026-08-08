@@ -55,6 +55,21 @@ function tick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * Wait long enough that the next fetch is stamped a different millisecond.
+ *
+ * The re-assert rides `dataUpdatedAt`, which React Query sets from `Date.now()`
+ * on every successful fetch. Two fetches inside the same millisecond would
+ * carry the same stamp and the effect wouldn't re-run — irrelevant in the app,
+ * where the trigger is a foreground or a mark-read seconds apart, but a real
+ * source of flake in a test that refetches immediately. `setTimeout` fires no
+ * *earlier* than its delay, so this makes the gap a certainty rather than a
+ * likelihood.
+ */
+function laterMillisecond() {
+  return new Promise((resolve) => setTimeout(resolve, 5));
+}
+
 let client: QueryClient;
 
 beforeEach(() => {
@@ -164,6 +179,32 @@ it('follows the counts down as things are read', async () => {
   });
 
   expect(badge()).toBe(1);
+});
+
+it('re-asserts the number when a fetch confirms what we already believed', async () => {
+  // **#232, and the reason the badge is level-triggered rather than
+  // edge-triggered.** The icon has two writers, and only one of them is us: a
+  // push sets it while the app is backgrounded, and it can then stop being true
+  // without the app observing anything — the messages get read on the web, or
+  // the post behind a notification is deleted. On foreground our counts refetch
+  // and land on the number already in the cache. Keyed on the count alone, the
+  // effect never runs, and the server's stale number stands. That is how a
+  // tester's icon sat on 2 with nothing at all waiting, unclearable by anything
+  // she did in the app, because her counts were already right.
+  counts({ messages: 0, activity: 0 });
+  await openApp();
+  const writes = mockSetAppBadge.mock.calls.length;
+  expect(badge()).toBe(0);
+
+  await laterMillisecond();
+  await act(async () => {
+    // Both keys, which is what a foreground refetch does.
+    await client.invalidateQueries();
+    await tick();
+  });
+
+  expect(mockSetAppBadge.mock.calls.length).toBeGreaterThan(writes);
+  expect(badge()).toBe(0);
 });
 
 it('clears the icon on the way out', async () => {

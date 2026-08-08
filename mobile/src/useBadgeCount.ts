@@ -42,12 +42,15 @@ export function useBadgeCount(): void {
 
   // Both share their key with the in-app badge that already reads it, so this
   // costs one cache subscription rather than a second source of truth.
-  const { data: messages } = useQuery({
+  //
+  // `dataUpdatedAt` is taken alongside the data because the badge has to be
+  // **level-triggered, not edge-triggered** (#232). See the effect below.
+  const { data: messages, dataUpdatedAt: messagesAt } = useQuery({
     queryKey: ['unreadMessages'],
     queryFn: api.getUnreadMessageCount,
     enabled: signedIn,
   });
-  const { data: activity } = useQuery({
+  const { data: activity, dataUpdatedAt: activityAt } = useQuery({
     queryKey: ['notificationsUnread'],
     queryFn: api.getUnreadNotificationCount,
     enabled: signedIn,
@@ -59,6 +62,27 @@ export function useBadgeCount(): void {
   const total =
     messages && activity ? messages.count + activity.count : null;
 
+  // **Re-assert on every landed count, not only on a changed one (#232).**
+  //
+  // The icon has two writers — the server, on every push, and this hook — and
+  // an effect keyed on `total` alone only fires when *our* number moves. So
+  // when the server moved the icon behind our back and our counts then land on
+  // the value already in the cache, the deps don't change, the effect doesn't
+  // run, and the server's number stands. That is exactly how a tester's icon
+  // sat on 2 with nothing at all waiting: a push set it while the app was
+  // backgrounded, the messages were read on the web, and the foreground
+  // refetch returned the same 0 the cache already held. Nothing she could do
+  // in the app would ever move it again, because the counts were already right.
+  //
+  // `dataUpdatedAt` changes on every *successful* fetch — mount, foreground
+  // refetch, any invalidation — whether or not the number did, so putting it in
+  // the deps turns "write when our count changes" into "re-assert whatever we
+  // believe, whenever we've just confirmed it". `setBadgeCountAsync` with the
+  // number already showing is a no-op, so the extra writes cost nothing.
+  //
+  // A *failed* fetch deliberately writes nothing: `dataUpdatedAt` doesn't move
+  // on an error, and the last number the server pushed is a better guess than
+  // a stale one of ours. That is now a decision rather than an accident.
   useEffect(() => {
     // Signed out — including a session that expired out from under us. The
     // count belonged to whoever was signed in, and it must not sit on the icon
@@ -66,10 +90,12 @@ export function useBadgeCount(): void {
     // cold-start moment before we know, and clearing there would flash the
     // badge off on every launch.
     if (status === 'signedOut') {
-      setAppBadge(0);
+      void setAppBadge(0);
       return;
     }
     if (total === null) return;
-    setAppBadge(total);
-  }, [status, total]);
+    void setAppBadge(total);
+    // `messagesAt`/`activityAt` are unused in the body on purpose: they are the
+    // level trigger, not an input to the number.
+  }, [status, total, messagesAt, activityAt]);
 }

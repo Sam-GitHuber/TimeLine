@@ -808,6 +808,20 @@ disagree about what's waiting.
   already being told — but they do fetch on mount and on foreground, so the icon
   is right when the phone is picked up.
 
+  **And it re-asserts on every landed count, not only on a changed one** (#232).
+  That distinction is the whole difference between the icon self-correcting and
+  sticking, because there are *two* writers: an effect keyed on our count alone
+  fires only when **our** number moves, so when the server moved the icon behind
+  our back and our counts then land on the value the cache already holds, the
+  deps don't change and the server's number stands. `dataUpdatedAt` from both
+  `useQuery` results is in the effect's deps for exactly this: it advances on
+  every *successful* fetch whether or not the number did, which turns "write
+  when our count changes" into "re-assert what we believe, whenever we've just
+  confirmed it". `setBadgeCountAsync` with the number already showing is a
+  no-op, so the extra writes cost nothing. A *failed* fetch deliberately writes
+  nothing — `dataUpdatedAt` doesn't move on an error, and the last number the
+  server pushed is a better guess than a stale one of ours.
+
 **Which means the icon and the in-app badges are the same numbers**, not two
 counts that agree by convention: `badge_count_for` is `unread_message_total` +
 `unread_notification_total`, and those are the two functions
@@ -867,7 +881,26 @@ thread is still unread and the badge is still right.
 **The known stale case is the same one as above:** read a thread on the web and
 this phone's badge is wrong until the next push or the next foreground. Nothing
 in APNs corrects a badge without sending something, so it inherits Phase 10b's
-background-delivery question along with everything else in this section.
+background-delivery question along with everything else in this section. Until
+#232 the foreground half of that sentence was aspirational — the refetch fired
+but wrote nothing when the number hadn't moved, which is precisely the case a
+web-side read produces, so the icon stayed wrong indefinitely. It now holds.
+
+**A refused write is reported rather than discarded** (#233). `setBadgeCountAsync`
+resolves to a **boolean**, and `false` is not an error: it is the module saying
+iOS declined, because badges are off for the app in Settings, or a Focus filter
+or Deliver Quietly is in force. `setAppBadge` returns that instead of throwing it
+away, and warns in `__DEV__` on the *transition* into refusal — deduped, because
+level-triggering means a phone with badges off would otherwise log on every
+foreground and every mark-read.
+
+What it deliberately does **not** do is change what the user sees: a refused
+write stays a silent no-op, never a retry, a throw, or a nag. It's their phone
+and their setting, and the failure mode — an icon holding the last number the
+server pushed — is the behaviour we had before any of this existed. The point is
+that the *next* investigation can answer "did our write land?" on-device in
+seconds, rather than by reading the Expo module's Swift source and asking a
+tester to photograph a Settings screen, which is what #234 actually cost.
 
 ## Frontend
 
