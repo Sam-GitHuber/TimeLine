@@ -4172,3 +4172,59 @@ describe('a refresh of the conversation that fails', () => {
     expect(screen.queryByLabelText('Message')).toBeNull();
   });
 });
+
+/**
+ * Reading a thread whose *refresh* failed still marks it read (#309).
+ *
+ * The guard used to include `convoQuery.isError`, which meant the same thing as
+ * "nothing is on screen" only for as long as a failed refetch took the thread
+ * off the screen. Now that it doesn't, the reader is looking at the messages —
+ * and skipping the write left the lock-screen notification and the tab badge
+ * claiming unread mail they had just read.
+ */
+it('marks the thread read even when the detail refresh has failed', async () => {
+  // The array is read by the mock at call time, so pushing to it is how a new
+  // message "arrives" — and `messageCount` changing is what re-runs the effect.
+  const transcript = [message({ id: 1, text: 'See you at six' })];
+  serve({ conversation: detail({ unread_count: 1 }), messages: transcript });
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  await renderScreen(client);
+  await screen.findByText('See you at six');
+
+  const readPosts = () =>
+    mockFetch.mock.calls.filter(
+      ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
+    ).length;
+  const before = readPosts();
+
+  // The detail fails from here on; the transcript keeps working, which is the
+  // state this whole PR creates — thread on screen, `convoQuery` in error.
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      if (/\/api\/conversations\/5\/(\?|$)/.test(url)) {
+        return jsonResponse({ detail: 'Service unavailable.' }, 503);
+      }
+      return base(url, init);
+    }
+  );
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['conversation', 5] });
+  });
+  await settle(2);
+  expect(screen.getByText('See you at six')).toBeTruthy();
+
+  // Someone says something else while we're in that state.
+  transcript.push(message({ id: 2, text: 'Running late' }));
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['messages', 5] });
+  });
+  await screen.findByText('Running late');
+
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(before));
+});

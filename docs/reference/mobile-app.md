@@ -268,7 +268,7 @@ notFound ? gone : data ? content : isError ? "couldn't load" : spinner
 
 A **404 outranks the cached copy** — deleted or out of reach is an answer about
 *now* — and nothing else does. Two distinct mistakes come out of getting this
-wrong, and #309 fixed both across six sites:
+wrong, and #309 fixed both across seven sites:
 
 - **Throwing away data we have.** `u/[userId].tsx`, `groups/[groupId].tsx`,
   `messages/[conversationId].tsx`, `components/ReactorsSheet.tsx` and

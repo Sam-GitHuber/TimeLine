@@ -452,7 +452,7 @@ counts exclude your own messages.
     the cached copy, because that's an answer about now (deleted, or out of
     reach), not a failure to ask.
   - **It's a whole-client rule, not a comment-thread one.** The same defect was
-    at six more places in the app and is fixed there too (#309) — see
+    at seven more places in the app and is fixed there too (#309) — see
     *Branch on the data, not the query flags* in `mobile-app.md` for the list and
     the shape. The **web's** three views are still open: #310.
 - **That cache write matches on the first key segment, not the whole key** —
