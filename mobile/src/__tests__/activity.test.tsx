@@ -27,6 +27,8 @@ import ActivityScreen from '@/app/activity';
 import { ActivityBell } from '@/components/ActivityBell';
 import type { Notification } from '@/types';
 
+import { settle } from './helpers';
+
 jest.mock('expo-router', () => ({
   router: {
     navigate: jest.fn(),
@@ -447,10 +449,11 @@ describe('ActivityScreen', () => {
   });
 
   it('keeps the rows, and still marks them seen, when a refresh fails', async () => {
-    // The other side of the same rule, and the guard against over-correcting
-    // it: the error branch is `isError && !listLoaded`, not a bare `isError`,
-    // so a warm list whose refetch failed stays on screen rather than being
-    // replaced by an apology — and those rows have been seen.
+    // The other side of the same rule: a warm list whose refetch failed is
+    // still a screen full of notifications the reader is looking at, and those
+    // have been seen. (The rows surviving is structural — the error branch
+    // lives in `ListEmptyComponent`, which can't render while there are rows.
+    // The test below is the one that pins `!listLoaded`.)
     servePages([[notification({ id: 1, text: 'Ada replied to your post' })]]);
     const queryClient = new QueryClient({
       defaultOptions: {
@@ -472,15 +475,51 @@ describe('ActivityScreen', () => {
       await queryClient.invalidateQueries({ queryKey: ['notifications'] });
     });
     // The cache flips to 'error' a render before the screen does — React Query
-    // notifies on a macrotask — so without this flush the assertion below reads
-    // the pre-error tree and passes with the bug still in place.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    // notifies through `notifyManager` on a macrotask — so without this the
+    // assertions below read the pre-error tree and pass against a screen with
+    // the bug still in it. The shared `settle`, not a hand-rolled flush: its
+    // docblock says the hand-written copy is the one that's subtly wrong, and
+    // this file had no other reason to own one.
+    await settle(2);
 
     expect(screen.getByText('Ada replied to your post')).toBeTruthy();
-    expect(screen.queryByText(/Couldn’t load your activity/)).toBeNull();
     expect(made(/\/api\/notifications\/seen\/$/, 'POST')).toBe(true);
+  });
+
+  it('still says you are caught up when an empty list fails to refresh', async () => {
+    // The case that actually pins `isError && !listLoaded` rather than a bare
+    // `isError` — and the only one that can, because the error branch lives in
+    // `ListEmptyComponent`: while there are rows it cannot render whatever the
+    // flag says, so a list with rows in it proves nothing about the guard.
+    //
+    // Someone who genuinely has no notifications, whose next poll drops, must
+    // still be told they're caught up. Answering "couldn't load your activity"
+    // there is the mirror of the bug this PR fixes — a failed refresh reported
+    // as the state of the world.
+    servePages([[]]);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ActivityScreen />
+        </QueryClientProvider>
+      );
+    });
+    await screen.findByText(/all caught up/i);
+
+    failList();
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['notifications'] });
+    });
+    await settle(2);
+
+    expect(screen.getByText(/all caught up/i)).toBeTruthy();
+    expect(screen.queryByText(/Couldn’t load your activity/)).toBeNull();
   });
 });
 

@@ -563,9 +563,9 @@ Two consequences worth knowing:
   phrasing of the same question is how the two halves of a file drift apart.
   `markConversationRead` carries a `.catch()` besides, since the old guard was
   what used to keep the write off a failing connection. The app made the first
-  half of this correction in #311 and the 404 half in #315, and now reads one
-  `showingThread` in the same three places — see *Ask "is it on screen" once, not
-  twice* in [`mobile-app.md`](mobile-app.md).
+  half of this correction in #311 and the 404 half in #315, declaring the same
+  three flags in one block so no site re-derives the answer — see *Ask "is it on
+  screen" once, not twice* in [`mobile-app.md`](mobile-app.md).
 - **A failed refresh stays silent** while stale content is up, on both clients —
   see the app's doc for why a banner was weighed and declined.
 

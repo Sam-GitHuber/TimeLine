@@ -4238,7 +4238,9 @@ it('marks the thread read even when the detail refresh has failed', async () => 
  * detail stays truthy while every render branch has switched to *This
  * conversation isn't available*. The effect went on POSTing `mark_read` for a
  * conversation showing nothing, on the detail poll's schedule, for as long as
- * the screen stayed open. Both halves read `showingThread` now.
+ * the screen stayed open. The effect reads `showingThread` now, derived in the
+ * same block as the `loadError` the render branches read, so neither half
+ * re-derives the answer for itself.
  */
 it('stops marking read once a 404 has taken the thread off the screen', async () => {
   const transcript = [message({ id: 1, text: 'See you at six' })];

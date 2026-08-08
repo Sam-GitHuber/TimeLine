@@ -311,9 +311,13 @@ guarded on `detailLoaded` while the render decided from
 `notAvailable || (isError && !detail)`, so a conversation you'd been removed from
 went on POSTing `mark_read` for as long as the screen stayed open, on the detail
 poll's schedule. `notAvailable`, `loadError` and the `showingThread` derived from
-them are declared **once, up beside the data**, and the effect, the `⋯` menu gate
-and the body branch all read that one value. A second phrasing of the same
-question is how the two halves of a file drift apart — which is the whole point.
+them are now declared **once, up beside the data**, in one block: the mark-read
+effect and the `⋯` menu gate read `showingThread`, the header and body branches
+read `loadError` and `notAvailable`, and every one of them is the same three
+lines rather than a fresh phrasing at each site. That is the property that
+matters — not that one identifier appears everywhere, but that no site
+re-derives the answer for itself, which is how the two halves of a file drift
+apart.
 `markConversationRead` carries a `.catch()` besides, since the old error flag in
 the guard was what used to keep the write off a failing connection.
 
