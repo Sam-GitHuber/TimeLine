@@ -11,7 +11,7 @@ import LoadMoreButton from "../components/LoadMoreButton.jsx";
 import { useInfiniteList } from "../hooks.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 
 // A single person's page: their details plus their own posts, newest-first.
 // Users are identified by numeric id in the URL (there is no username).
@@ -89,7 +89,11 @@ export default function ProfilePage() {
         </div>
       );
     }
-    return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
+    return (
+      <p className="px-6 py-10 text-center text-ink-faint">
+        {waitingMessage(userQuery)}
+      </p>
+    );
   }
 
   const posts = postsQuery.items;
@@ -206,8 +210,10 @@ export default function ProfilePage() {
             Try again
           </button>
         </div>
-      ) : postsQuery.isLoading ? (
-        <p className="px-6 py-10 text-center text-ink-faint">Loading posts…</p>
+      ) : !postsQuery.data ? (
+        <p className="px-6 py-10 text-center text-ink-faint">
+          {waitingMessage(postsQuery)}
+        </p>
       ) : posts.length > 0 ? (
         <>
           <Timeline posts={posts} />

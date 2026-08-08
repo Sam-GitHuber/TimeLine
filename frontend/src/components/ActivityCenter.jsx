@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, NOTIFICATIONS_POLL_MS } from "../api.js";
 import { useInfiniteList, trimToFirstPage } from "../hooks.js";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 import { formatRelativeTime } from "../utils.js";
 import Avatar from "./Avatar.jsx";
 import LoadMoreButton from "./LoadMoreButton.jsx";
@@ -46,7 +46,7 @@ export default function ActivityCenter() {
     api.getNotifications,
     { enabled: open }
   );
-  const { items: notifications, isLoading } = notificationsQuery;
+  const { items: notifications } = notificationsQuery;
 
   /**
    * **Is the list itself on screen?** (#314) This panel had no error branch at
@@ -217,9 +217,9 @@ export default function ActivityCenter() {
                   Try again
                 </button>
               </div>
-            ) : isLoading ? (
+            ) : !listLoaded ? (
               <p className="px-4 py-6 text-center text-sm text-ink-faint">
-                Loading…
+                {waitingMessage(notificationsQuery)}
               </p>
             ) : notifications.length === 0 ? (
               <p className="px-4 py-8 text-center text-sm text-ink-faint">

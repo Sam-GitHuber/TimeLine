@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api.js";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 import EventCard from "../components/events/EventCard.jsx";
 import MonthGrid from "../components/events/MonthGrid.jsx";
 
@@ -79,8 +79,8 @@ export default function CalendarPage() {
             Try again
           </button>
         </div>
-      ) : calendar.isLoading ? (
-        <p className="text-sm text-ink-faint">Loading…</p>
+      ) : !calendar.data ? (
+        <p className="text-sm text-ink-faint">{waitingMessage(calendar)}</p>
       ) : events.length === 0 ? (
         <p className="py-12 text-center text-ink-faint">
           Nothing on the calendar. When a group plans an event, it shows up here.

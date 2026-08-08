@@ -8,7 +8,7 @@ import { PanelHeader } from "../drawer-chrome.jsx";
 import AvatarStack from "./AvatarStack.jsx";
 import { api } from "../../api.js";
 import { useAuth } from "../../auth.jsx";
-import { serverMessage } from "../../errors.js";
+import { serverMessage, waitingMessage } from "../../errors.js";
 import { useHoldMessagesOpen, useMessaging } from "../../messaging.jsx";
 
 /**
@@ -201,7 +201,9 @@ export default function ConversationInfoView() {
         // — offline the query sits *paused*, which is neither loading nor
         // errored, and the "isn't available" branch above used to catch it and
         // declare a live chat gone (#306's trap).
-        <p className="flex-1 px-5 py-10 text-center text-ink-faint">Loading…</p>
+        <p className="flex-1 px-5 py-10 text-center text-ink-faint">
+          {waitingMessage(convoQuery)}
+        </p>
       ) : (
         <div className="flex-1 overflow-y-auto pb-8">
           <div className="flex flex-col items-center gap-1.5 px-5 py-6 text-center">
@@ -501,6 +503,11 @@ function PersonRow({ person, meId }) {
  * state — a heading over a blank square is a feature announcing that it has
  * nothing for you. A chat that has never carried a picture simply doesn't have
  * this section, and it appears the first time one is sent.
+ *
+ * The one exception, and the reason it is one: when the fetch *failed* we have
+ * no idea whether there are photos, and "no section" is this component's way of
+ * saying there are none. So a failed load gets the heading and a line, which is
+ * the whole of #314 in miniature — an absence is a claim too.
  *
  * 🔒 It reads the *messages* endpoint with a `media=1` filter, not a gallery
  * endpoint of its own, so the photos here are the same interval-clipped set the

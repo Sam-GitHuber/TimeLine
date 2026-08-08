@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useQuery } from "@tanstack/react-query";
+import { onlineManager, useQuery } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
 import DimensionEditor from "./components/events/DimensionEditor.jsx";
 import EventPage from "./pages/EventPage.jsx";
@@ -1275,6 +1275,31 @@ describe("CalendarPage", () => {
 
     expect(screen.getByText("Picnic")).toBeInTheDocument();
     expect(screen.queryByText("Couldn’t load your calendar.")).toBeNull();
+  });
+
+  /**
+   * The state that is neither loading nor errored, and the one the first cut of
+   * this fix missed. With `networkMode: 'online'` (a bare `new QueryClient()`)
+   * a query on an offline browser is **paused**: `status` stays `pending`,
+   * `fetchStatus` goes to `paused`, the request is never sent, and `isLoading`
+   * — `isPending && isFetching` — is *false* with no data behind it. Gating the
+   * empty state on `!isLoading` therefore let it render anyway. #306 hit this
+   * in `CommentThread`; the branch every screen owes this state is `!data`.
+   */
+  it("says it's waiting for a connection, not that the calendar is empty", async () => {
+    api.getPersonalCalendar.mockResolvedValue([]);
+    onlineManager.setOnline(false);
+    try {
+      renderWithAuth(<CalendarPage />);
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Nothing on the calendar/)).toBeNull();
+      // The request was never sent — this is not a failure, it's a pause.
+      expect(api.getPersonalCalendar).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
   });
 
   // Retrying has to actually ask again.

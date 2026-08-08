@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { onlineManager } from "@tanstack/react-query";
 import { Link, Routes, Route } from "react-router-dom";
 import App from "./App.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
@@ -322,6 +323,34 @@ describe("Profile page", () => {
     // The rows stay; the failure is an extra line, not a replacement.
     expect(screen.getByText(/Booked flights/)).toBeInTheDocument();
     expect(screen.queryByText("Couldn’t load Priya’s posts.")).toBeNull();
+  });
+
+  // The paused state — offline, `networkMode: 'online'`, so the request is
+  // never sent and `isLoading` is false with no data. Gating on `!isLoading`
+  // let the empty state render anyway (#306's trap).
+  it("says it's waiting rather than that this person hasn't posted", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    api.getUserPosts.mockResolvedValue(page([]));
+    const { queryClient } = renderAt("/u/2");
+    await screen.findByRole("heading", { name: "Priya" });
+
+    // Signal goes after the header is up, and the timeline is asked again.
+    onlineManager.setOnline(false);
+    try {
+      await act(async () => {
+        queryClient.resetQueries({ queryKey: ["userPosts", 2] });
+      });
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/hasn’t posted yet/)).toBeNull();
+    } finally {
+      onlineManager.setOnline(true);
+    }
   });
 
   it("does not show a connect button on your own profile", async () => {

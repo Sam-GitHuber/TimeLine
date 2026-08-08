@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { onlineManager } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
 import PostCard from "./components/PostCard.jsx";
 import ComposeBox from "./components/ComposeBox.jsx";
@@ -552,6 +553,30 @@ describe("GroupPage — a failed load is not an empty group", () => {
     ).toBeInTheDocument();
     // The grid names its weekdays; none of them are on screen.
     expect(screen.queryByText("Mon")).toBeNull();
+  });
+
+  // The paused state: offline, the request is never sent, and `isLoading` is
+  // false with no data behind it — so a branch gated on `!isLoading` printed
+  // "Be the first to share something" for a group nobody had asked about
+  // (#306's trap, and what the first cut of this fix missed).
+  it("says it's waiting rather than that the group is empty", async () => {
+    const { queryClient } = renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    // Signal goes once the header is up — the group query keeps its cached
+    // copy, so the page stays, and only the timeline is left with nothing.
+    onlineManager.setOnline(false);
+    try {
+      await act(async () => {
+        queryClient.resetQueries({ queryKey: ["groupPosts", 7] });
+      });
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Be the first to share/)).toBeNull();
+    } finally {
+      onlineManager.setOnline(true);
+    }
   });
 
   // A "Members" heading over an empty list reads as a group with no members —

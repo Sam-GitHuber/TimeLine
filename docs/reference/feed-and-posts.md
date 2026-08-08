@@ -580,10 +580,31 @@ Fixed for the web in #314 (the app's two worst sites went in #312; the rest are
 
 **Offline it paints instantly, with no spinner.** `main.jsx` builds a bare
 `new QueryClient()`, so `networkMode` is the default `'online'` and an offline
-query sits **paused** — `isLoading` is `isPending && isFetching`, which is false
+query sits **paused** — `status` stays `pending`, `fetchStatus` goes to `paused`,
+the request is never *sent*, and `isLoading` (`isPending && isFetching`) is false
 with no data behind it. So `!isLoading && !isError` is *not* enough on its own,
 which is #306's lesson; a branch that only handles "loading" and "errored"
 leaves the empty state as the fall-through for "we haven't asked yet".
+
+**Which is why the waiting branch is gated on `!data`, not on `isLoading`.** The
+first cut of #314 got the error branch right and left the loading branch reading
+`isLoading`, so the paused case still fell through to the empty state — the exact
+bug, on the exact screens, with the fix already in the file. Caught in review.
+The full shape, and the order matters:
+
+```jsx
+loadFailed ? <error + retry/>            // isError && !data
+  : !data ? <p>{waitingMessage(q)}</p>   // pending *or* paused
+  : items.length === 0 ? <empty/>        // an answer, and it was none
+  : <content/>
+```
+
+`waitingMessage()` (`errors.js`) is the shared wording: "Loading…" while a
+request is genuinely out, "Waiting for a connection…" when it hasn't been sent
+and won't be until the signal returns. Two sentences because they ask two
+different things of the reader, and because a spinner that never resolves and
+never explains is its own dead end. `CommentThread.jsx` is the original, written
+inline there for #306.
 
 Eleven sites, plus the photo gallery found in the same sweep, all fixed by
 naming `loadFailed = isError && !data` next to the query and branching on it

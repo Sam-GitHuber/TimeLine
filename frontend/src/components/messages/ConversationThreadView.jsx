@@ -27,7 +27,7 @@ import {
 import { useAuth } from "../../auth.jsx";
 import { prepareChatPhoto } from "../../chatPhotos.js";
 import { getDraft, setDraft } from "../../drafts.js";
-import { serverMessage } from "../../errors.js";
+import { serverMessage, waitingMessage } from "../../errors.js";
 import { useDayBoundary } from "../../hooks.js";
 import { useMentions } from "../../mentions.js";
 import { insertMessage, patchReactions } from "../../messageCache.js";
@@ -1474,8 +1474,10 @@ export default function ConversationThreadView() {
                       Try again
                     </button>
                   </div>
-                ) : messagesQuery.isLoading ? (
-                  <p className="py-10 text-center text-ink-faint">Loading…</p>
+                ) : !pages && rows.length === 0 ? (
+                  <p className="py-10 text-center text-ink-faint">
+                    {waitingMessage(messagesQuery)}
+                  </p>
                 ) : rows.length === 0 ? (
                   <p className="py-10 text-center text-ink-faint">
                     No messages yet — say hello.

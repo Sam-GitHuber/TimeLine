@@ -1839,9 +1839,37 @@ behind. It carries what the app's screen does: participants with their **Pending
 badges, mute, add people, leave, block on a 1:1, **rename a group in place**, and
 the **media gallery** (`?media=1&order=desc`, one page, `count` for the heading
 because the grid isn't the whole chat, and **nothing at all** when there are no
-photos). A rename writes the server's response straight into the
-`['conversation', id]` cache the thread header reads, so the new name is up before
-any refetch lands.
+photos — with one exception, below). A rename writes the server's response
+straight into the `['conversation', id]` cache the thread header reads, so the
+new name is up before any refetch lands.
+
+**Both web panels distinguish "gone" from "couldn't ask"** (#314), and the
+transcript and the gallery each answer for their own query:
+
+- `ConversationInfoView` used to run one `!detail` branch for both, so a dropped
+  packet on its cold fetch said *This conversation isn't available* about a chat
+  you were actively in, with the transcript still behind the panel and no retry.
+  It names `gone` (a 404) and `loadFailed` (`isError && !detail`) — the same two
+  the thread names off the same query key, deliberately spelt the same way so the
+  pair can't drift. A 404 still outranks a cached copy and sends you to the list;
+  a transient failure offers *Try again* and *Back to the chat*, because the chat
+  is still there.
+- **The transcript is a second query and fails separately.** The header,
+  participants and mute state come from `convoQuery`, so they render perfectly
+  while `messagesQuery` is errored — and "No messages yet — say hello." appeared
+  in threads with years of history. `messagesLoadFailed` is `isError && !pages`,
+  and the empty state is gated on `rows`, not `loaded`, so an unsent message
+  waiting in the outbox is never replaced by an apology.
+- **The gallery's silence was a claim too.** The section only appears once a
+  photo has been sent, so rendering nothing on a *failed* fetch said "this chat
+  has no photos". That's the one case where it now shows a heading and a line.
+
+All three read `!data` rather than a bare `isError`, so a failed refresh keeps
+what's on screen (#310/#313), and all three treat "no data, no error" as still
+waiting — offline a query is **paused**, not loading, so `isLoading` is false
+with nothing behind it. `waitingMessage()` in `errors.js` is the shared wording
+for that state; see *The mirror image: no error branch at all — the web's sites*
+in [`feed-and-posts.md`](feed-and-posts.md) for the whole rule.
 
 **The thread header is now identity + `⋯`** — Details · Mute · Add people ·
 Leave — for the reason the app's is: three icon buttons were crowding the name of

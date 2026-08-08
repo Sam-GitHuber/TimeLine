@@ -15,7 +15,7 @@ import { useInfiniteList } from "../hooks.js";
 import { eventLocalStart } from "../utils.js";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 import { invalidateGroupMembership } from "../groupCache.js";
 import { useMessaging } from "../messaging.jsx";
 
@@ -195,7 +195,11 @@ export default function GroupPage() {
         </div>
       );
     }
-    return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
+    return (
+      <p className="px-6 py-10 text-center text-ink-faint">
+        {waitingMessage(groupQuery)}
+      </p>
+    );
   }
 
   const isAdmin = group.your_role === "admin";
@@ -398,8 +402,10 @@ export default function GroupPage() {
                 Try again
               </button>
             </div>
-          ) : calendarQuery.isLoading ? (
-            <p className="mt-4 text-sm text-ink-faint">Loading calendar…</p>
+          ) : !calendarQuery.data ? (
+            <p className="mt-4 text-sm text-ink-faint">
+              {waitingMessage(calendarQuery)}
+            </p>
           ) : (
             <div className="mt-4">
               <MonthGrid events={calendarQuery.data || []} />
@@ -443,7 +449,10 @@ export default function GroupPage() {
                   like the staging block above it. */}
               {upcomingLoadFailed && (
                 <p className="tl-inset my-3 text-sm text-red-600">
-                  Couldn’t load what’s coming up.{" "}
+                  {serverMessage(
+                    upcomingQuery.error,
+                    "Couldn’t load what’s coming up."
+                  )}{" "}
                   <button
                     type="button"
                     onClick={() => upcomingQuery.refetch()}
@@ -499,8 +508,10 @@ export default function GroupPage() {
                 Try again
               </button>
             </div>
-          ) : postsQuery.isLoading ? (
-            <p className="px-6 py-10 text-center text-ink-faint">Loading posts…</p>
+          ) : !postsQuery.data ? (
+            <p className="px-6 py-10 text-center text-ink-faint">
+              {waitingMessage(postsQuery)}
+            </p>
           ) : posts.length === 0 ? (
             <p className="px-6 py-12 text-center text-ink-faint">
               No posts yet. Be the first to share something with the group.
@@ -518,7 +529,10 @@ export default function GroupPage() {
               absence reads as "nothing happened", not "we couldn't ask". */}
           {pastEventsLoadFailed && (
             <p className="px-6 pb-4 text-center text-sm text-red-600">
-              Couldn’t load this group’s past events.
+              {serverMessage(
+                pastEventsQuery.error,
+                "Couldn’t load this group’s past events."
+              )}
             </p>
           )}
           <LoadMoreButton query={postsQuery} />

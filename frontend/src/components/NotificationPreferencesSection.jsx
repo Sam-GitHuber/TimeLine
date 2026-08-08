@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
-import { serverMessage } from "../errors.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 
 // The "Notifications" section on the settings page (Phase 8). The API returns a
 // { kind: bool } map over just the *mutable* kinds — the connection/invite kinds
@@ -36,7 +36,7 @@ export default function NotificationPreferencesSection() {
     queryKey: ["notificationPreferences"],
     queryFn: api.getNotificationPreferences,
   });
-  const { data: prefs, isLoading } = prefsQuery;
+  const prefs = prefsQuery.data;
 
   // **Zero toggles under this heading says "there are no settings", not
   // "we couldn't load them"** (#314). Only `mutation.isError` was ever
@@ -97,8 +97,8 @@ export default function NotificationPreferencesSection() {
             Try again
           </button>
         </p>
-      ) : isLoading ? (
-        <p className="mt-4 text-sm text-ink-faint">Loading…</p>
+      ) : !prefs ? (
+        <p className="mt-4 text-sm text-ink-faint">{waitingMessage(prefsQuery)}</p>
       ) : (
         <ul className="mt-4 max-w-sm divide-y divide-line">
           {entries.map(([kind, enabled]) => (

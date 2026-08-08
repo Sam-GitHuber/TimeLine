@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { onlineManager } from "@tanstack/react-query";
 import { useLocation } from "react-router-dom";
 import ActivityCenter from "./components/ActivityCenter.jsx";
 import NotificationPreferencesSection from "./components/NotificationPreferencesSection.jsx";
@@ -121,6 +122,31 @@ describe("ActivityCenter", () => {
     expect(
       screen.getByRole("button", { name: /Activity, 5 unread/ })
     ).toBeInTheDocument();
+  });
+
+  // The paused state, and the worst instance of it: offline the list request is
+  // never sent, so `isLoading` is false with no data — and "You're all caught
+  // up" rendered under a bell that may well still read "5 unread" from a count
+  // fetched before the signal went (#306's trap).
+  it("says it's waiting rather than that you're all caught up", async () => {
+    const user = userEvent.setup();
+    api.getUnreadNotificationCount.mockResolvedValue({ count: 5 });
+    api.getNotifications.mockResolvedValue(page([]));
+    renderWithAuth(<ActivityCenter />);
+    const bell = await screen.findByRole("button", { name: /Activity, 5 unread/ });
+
+    onlineManager.setOnline(false);
+    try {
+      await user.click(bell);
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/all caught up/i)).toBeNull();
+      // And nothing was marked seen, so the badge that brings you back survives.
+      expect(api.markNotificationsSeen).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
   });
 
   // The write half, and the more serious one. Marking seen used to fire on the
