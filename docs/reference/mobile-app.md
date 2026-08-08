@@ -354,6 +354,20 @@ records the **badge-shaped counts** decision — deliberately left reading zero 
 a failed poll, on both clients, *except* the app-icon badge in
 `useBadgeCount.ts`, which re-asserts a known count on purpose.
 
+⚠️ **One part of the web's shape does *not* port yet, and will the day someone
+wires `onlineManager`.** The web gates its waiting branch on `!data` rather than
+`isLoading`, because with `networkMode: 'online'` an offline query **pauses** —
+never sent, never failed, `isLoading` false with nothing behind it — and an empty
+state gated on `!isLoading` renders anyway. The app doesn't have that state:
+`onlineManager` is deliberately left unwired to NetInfo (`app/_layout.tsx`), so
+an offline request *rejects*, which lands in the `isError` branch. Wiring it
+would hand every screen here the paused state at once, and every empty state
+gated on `isLoading` would start stating a request that was never sent as fact.
+That is the same warning `_layout.tsx`, `MessageButton.tsx`, `BlockButton.tsx`
+and `CommentThread.tsx` already carry for the *write* side; it applies to reads
+too, and the web's `waitingMessage()` (`errors.js`) is the shape to port when it
+happens.
+
 ### Taking a photo: camera or library
 
 Every place that adds a photo — a post, a chat message, a profile or group
