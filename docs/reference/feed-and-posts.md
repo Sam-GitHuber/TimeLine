@@ -451,10 +451,11 @@ counts exclude your own messages.
     on every comment write. It renders the post it has; a **404** still outranks
     the cached copy, because that's an answer about now (deleted, or out of
     reach), not a failure to ask.
-  - **It's a whole-client rule, not a comment-thread one.** The same defect was
-    at seven more places in the app and is fixed there too (#309) — see
-    *Branch on the data, not the query flags* in `mobile-app.md` for the list and
-    the shape. The **web's** three views are still open: #310.
+  - **It's a whole-client rule, not a comment-thread one, and it holds on both
+    clients.** The same defect was at seven more places in the app (#309) and at
+    seven on the web (#310), and is fixed in both. See *Branch on the data, not
+    the query flags* in `mobile-app.md` for the rule, the shape, and the two
+    idioms that only look wrong; the web's sites are listed just below.
 - **That cache write matches on the first key segment, not the whole key** —
   `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
   clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post
@@ -494,6 +495,88 @@ counts exclude your own messages.
   `isInvalidated`, so on an *unobserved* query the flag is cleared again shortly
   after being set. Harmless at `staleTime` 0 — but don't write a test that waits
   on that flag.
+
+### Branch on the data, not the query flags — the web's seven sites
+
+The rule and the reasoning are written up once, under the same heading in
+[`mobile-app.md`](mobile-app.md); this is the web half of it. **`main.jsx` builds
+a bare `new QueryClient()`**, so `staleTime` is 0 and `refetchOnWindowFocus` is
+on: coming back to a tab that has been sitting open refetches everything mounted
+in it. While the box is restarting — which publishing a GitHub Release does
+(`deploy.md`) — those refetches fail. That is the trigger, and it's routine.
+
+Reading `isError` before the data therefore threw working content away in five
+places, and #310 fixed all of them by branching on the data instead, with a
+**404 still outranking the cached copy**:
+
+- **`components/messages/ConversationThreadView.jsx`** — the costly one, exactly
+  as on the app: the transcript, the header identity *and* the composer with a
+  half-typed reply in it, replaced by "Couldn't load this conversation." and a
+  *Back to messages* button, having lost nothing server-side. `gone` (a 404) and
+  `loadFailed` (`isError && !detail`) are named once and drive all three render
+  sites.
+- **`components/DisconnectWarningModal.jsx`** — the dangerous one, again as on
+  the app: the concrete list of chats you're about to be thrown out of, swapped
+  for "You can still continue" in front of a destructive action with Confirm
+  still live. Guarded with `isError && !impactQuery.data`, matching the app
+  line-for-line.
+- **`pages/GroupFormPage.jsx`** — the one that destroys typing. `name` and
+  `description` are component state seeded once from the query, plus a chosen
+  avatar and its crop; the early return unmounted the form and took a rewritten
+  group description with it, and nothing persists a draft. A 404 still wins:
+  there is nothing left to save the edit to.
+- **`pages/ProfilePage.jsx`** and **`pages/GroupPage.jsx`** — the whole profile;
+  the group's timeline, upcoming events and calendar.
+
+And two on the *other* side of the same rule — a missing thing and an
+unreachable one are different answers:
+
+- **`pages/EventPage.jsx`** had one `isError` branch doing both jobs, and with
+  `retry: false` on the query, a single dropped packet on the first load told
+  you the event "may have been cancelled" — something the client has no way of
+  knowing. Only a 404 says that now.
+- **`pages/PeoplePage.jsx`**'s three `useInfiniteList` segments returned on
+  `isError` before looking at `items`, so a failed *page two* took every row you
+  were reading with it, and "you're not connected with anyone yet" was said on
+  the strength of a request that failed. They now use the shape `FeedPage` and
+  `GroupsDrawer` already had for this hook: rows, then the error as an extra
+  line under them, then the empty state gated on `!isError`. The Requests
+  segment lost something extra on the way out — `decideError`, the message
+  saying an Approve or Reject was refused, renders below the old early return,
+  so a list refetch failing in the same frame took the write's own error off
+  screen with it (#231's shape, by another route).
+
+Two consequences worth knowing:
+
+- **The mark-read guard had to change with it, and `!!detail` is not the
+  replacement.** `convoQuery.isError` in `ConversationThreadView`'s mark-read
+  effect used to mean the same thing as "nothing is on screen". Once a failed
+  refetch keeps the thread up, it doesn't — the reader is looking at the
+  messages while the effect returns early, and the tab badge goes on claiming
+  unread mail they have just read. But swapping in a bare "have we got a detail"
+  check is wrong in the other direction: a **404** doesn't clear the cached
+  detail either, so it stays truthy while the render branches have all switched
+  to *This conversation isn't available*, and the effect would fire a doomed
+  write for a conversation showing nothing. `gone`, `loadFailed` and the
+  `showingThread` derived from them are declared once, up beside the data, and
+  the effect and the render branches both read that same value — a second
+  phrasing of the same question is how the two halves of a file drift apart.
+  `markConversationRead` carries a `.catch()` besides, since the old guard was
+  what used to keep the write off a failing connection. The app made the first
+  half of this correction in #311 and still guards on its own `detailLoaded`;
+  the 404 half is open for it.
+- **A failed refresh stays silent** while stale content is up, on both clients —
+  see the app's doc for why a banner was weighed and declined.
+
+The **mirror-image** mistake — screens with *no* error branch at all, where an
+empty state states as fact what was really a failed request — is a separate
+family, tracked apart: #312 for the app, and the web's sites are in its own
+issue. Sites that already get this right and shouldn't be "fixed": `FeedPage`,
+`GroupsDrawer`, `NewChatPicker`, `ConversationListView`, `ReactorsPopover`,
+`PostPage`, `GroupInvitesPage`, `MessageStrandPanel`, `GroupInvitePicker`, and
+`components/events/EventPhotos.jsx` (the best example in the repo — a cold-load
+error branch *and* a separate "couldn't load all the photos" line under a
+rendered grid).
 
 ## Photos
 

@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthContext } from "./auth.jsx";
@@ -58,6 +58,39 @@ export function renderWithAuth(ui, { route = "/", auth = {} } = {}) {
     queryClient,
     setProps: (node) => utils.rerender(wrap(node)),
   };
+}
+
+/**
+ * Make the next fetch of `key` fail, and don't return until the *screen* knows.
+ *
+ * For the tests that pin issue #310: a failed **refetch** keeps the data the
+ * query already has (`query-core`'s error action writes `status`, `error` and
+ * `isInvalidated`, and never touches `data`), so a view that reads `isError`
+ * before it reads the data tears working content off the screen. To test that,
+ * the mock has to be swapped for a rejecting one and the query re-run — which is
+ * what this does.
+ *
+ * **The waiting is the load-bearing part.** React Query notifies observers
+ * through `notifyManager`, which batches onto a macrotask, so the cache reaches
+ * `status: 'error'` a render before the component does. Asserting straight after
+ * `invalidateQueries` reads the pre-error tree, which passes just as happily
+ * against a page that still has the bug — a vacuous test. So this waits for the
+ * cache to record the error and then turns the loop over for the re-render.
+ *
+ * Call it *after* pointing the api mock at a rejection.
+ */
+export async function failRefetch(queryClient, key) {
+  await act(async () => {
+    await queryClient.invalidateQueries({ queryKey: key });
+  });
+  await waitFor(() =>
+    expect(queryClient.getQueryState(key)?.status).toBe("error")
+  );
+  for (let i = 0; i < 2; i += 1) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

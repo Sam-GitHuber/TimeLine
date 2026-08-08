@@ -79,9 +79,18 @@ export default function DisconnectWarningModal({
         onClick={stop}
         className="w-full max-w-sm rounded-2xl border border-line bg-raised p-5 shadow-xl outline-none"
       >
+        {/* **The impact we have beats an error about re-checking it** (issue
+            #310) — `&& !impactQuery.data`, which is the same guard the app took
+            in #311. This is the dangerous instance of the rule: the list of
+            chats you're about to be thrown out of is the entire reason this
+            modal exists, and reading `isError` first swapped it for an
+            invitation to continue blind, in front of a destructive action, with
+            Confirm still live. The list is right there in `impactQuery.data`,
+            which a failed refetch never touches — and it gets one on every open,
+            since `staleTime` is 0. */}
         {impactQuery.isLoading ? (
           <p className="text-sm text-ink-faint">Checking shared chats…</p>
-        ) : impactQuery.isError ? (
+        ) : impactQuery.isError && !impactQuery.data ? (
           <p className="text-sm text-red-600">
             Couldn’t check for shared chats. You can still continue.
           </p>

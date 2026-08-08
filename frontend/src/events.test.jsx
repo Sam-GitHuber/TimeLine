@@ -10,7 +10,13 @@ import EventCard from "./components/events/EventCard.jsx";
 import MonthGrid from "./components/events/MonthGrid.jsx";
 import PlanEventForm from "./components/events/PlanEventForm.jsx";
 import Timeline from "./components/Timeline.jsx";
-import { renderWithAuth, apiError, offlineError } from "./test-utils.jsx";
+import {
+  renderWithAuth,
+  apiError,
+  offlineError,
+  unauthoredError,
+  failRefetch,
+} from "./test-utils.jsx";
 import { formatEventDate } from "./utils.js";
 import { api } from "./api.js";
 
@@ -646,6 +652,48 @@ describe("EventPage", () => {
     api.getEvent.mockRejectedValue({ status: 404 });
     renderEventPage();
     expect(await screen.findByText("Event not available")).toBeInTheDocument();
+  });
+
+  // Issue #310. `retry: false` on this query means a single dropped packet on
+  // the *first* load left `isLoading` false with no data — and the page then
+  // told you the event may have been cancelled, which the client has no way of
+  // knowing. Only a 404 is allowed to say that now.
+  it("says the load failed, not that the event was cancelled, on a 500", async () => {
+    api.getEvent.mockRejectedValue(unauthoredError(500));
+    renderEventPage();
+    expect(
+      await screen.findByRole("button", { name: /try again/i })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Event not available")).toBeNull();
+  });
+
+  // …and a failed *refresh* of an event already on screen keeps it there: the
+  // polls, the RSVP bar with a typed guest count, the album, the comments. The
+  // page refetches on window focus and again after every RSVP or vote, so this
+  // is routine.
+  it("keeps a loaded event on screen when a refresh fails", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    const { queryClient } = renderEventPage();
+    await screen.findByText("Picnic");
+
+    api.getEvent.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["event", 7]);
+
+    expect(screen.getByText("Picnic")).toBeInTheDocument();
+    expect(screen.queryByText("Event not available")).toBeNull();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+  });
+
+  it("still takes the event away when a refresh 404s", async () => {
+    api.getEvent.mockResolvedValue(makeEvent());
+    const { queryClient } = renderEventPage();
+    await screen.findByText("Picnic");
+
+    api.getEvent.mockRejectedValue(apiError("Not found.", 404));
+    await failRefetch(queryClient, ["event", 7]);
+
+    expect(await screen.findByText("Event not available")).toBeInTheDocument();
+    expect(screen.queryByText("Picnic")).toBeNull();
   });
 });
 

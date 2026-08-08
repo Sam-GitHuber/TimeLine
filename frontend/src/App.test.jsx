@@ -4,7 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { Link, Routes, Route } from "react-router-dom";
 import App from "./App.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
-import { renderWithAuth, apiError, unauthoredError } from "./test-utils.jsx";
+import {
+  renderWithAuth,
+  apiError,
+  unauthoredError,
+  failRefetch,
+} from "./test-utils.jsx";
 import { api } from "./api.js";
 
 // The pages now fetch from the real API, so we mock the api module and assert
@@ -69,6 +74,7 @@ function post(id, authorId, name, text, createdAt) {
 function renderAt(path = "/", auth) {
   return renderWithAuth(<App />, { route: path, auth });
 }
+
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -228,6 +234,50 @@ describe("Profile page", () => {
       await screen.findByRole("button", { name: /try again/i })
     ).toBeInTheDocument();
     expect(screen.queryByText("User not found")).not.toBeInTheDocument();
+  });
+
+  // A failed *refetch* keeps the data the query already has — `query-core`'s
+  // error action writes `status`, `error` and `isInvalidated` and never touches
+  // `data`. `main.jsx` builds a bare QueryClient, so `staleTime` is 0 and
+  // `refetchOnWindowFocus` is on: coming back to a left-open tab refetches this
+  // key, and while the box is restarting (which every release does) that refetch
+  // fails. Issue #310.
+  it("keeps a loaded profile on screen when a refresh fails", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    api.getUserPosts.mockResolvedValue(
+      page([post(1, 2, "Priya", "Booked flights", "2026-06-30T21:00:00Z")])
+    );
+    const { queryClient } = renderAt("/u/2");
+    await screen.findByRole("heading", { name: "Priya" });
+
+    api.getUser.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["user", 2]);
+
+    expect(screen.getByRole("heading", { name: "Priya" })).toBeInTheDocument();
+    expect(screen.getByText(/Booked flights/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+  });
+
+  // The one error that still outranks the cached copy: gone is an answer about
+  // *now*, where a 500 or a dropped packet is only an answer about the request.
+  it("still takes the profile away when a refresh 404s", async () => {
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+    });
+    const { queryClient } = renderAt("/u/2");
+    await screen.findByRole("heading", { name: "Priya" });
+
+    api.getUser.mockRejectedValue(apiError("Not found.", 404));
+    await failRefetch(queryClient, ["user", 2]);
+
+    expect(await screen.findByText("User not found")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Priya" })).toBeNull();
   });
 
   it("does not show a connect button on your own profile", async () => {

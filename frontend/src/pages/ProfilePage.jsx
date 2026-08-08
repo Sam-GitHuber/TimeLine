@@ -61,28 +61,37 @@ export default function ProfilePage() {
     );
   }
 
-  if (userQuery.isError) {
-    return (
-      <div className="px-6 py-16 text-center">
-        <p className="text-lg font-medium text-red-600">
-          {serverMessage(userQuery.error, "Couldn't load this profile.")}
-        </p>
-        <button
-          type="button"
-          onClick={() => userQuery.refetch()}
-          className="btn btn-ghost btn-sm mt-4"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
+  const user = userQuery.data;
 
-  if (userQuery.isLoading) {
+  // **The profile we have beats an error about refreshing it.** A failed
+  // refetch keeps its data and only flips `status` to 'error', and this app
+  // refetches constantly: `main.jsx` builds a bare QueryClient, so `staleTime`
+  // is 0 and `refetchOnWindowFocus` is on — coming back to a tab refetches this
+  // key. Reading `isError` before the data therefore replaced a fully loaded
+  // profile with an error card because one background request lost a packet.
+  // So the flags only get a say when there is nothing on screen to keep. The
+  // 404 branch above is the exception, and stays above: deleted or out of reach
+  // is a real answer about *now*, and it outranks the cached copy.
+  if (!user) {
+    if (userQuery.isError) {
+      return (
+        <div className="px-6 py-16 text-center">
+          <p className="text-lg font-medium text-red-600">
+            {serverMessage(userQuery.error, "Couldn't load this profile.")}
+          </p>
+          <button
+            type="button"
+            onClick={() => userQuery.refetch()}
+            className="btn btn-ghost btn-sm mt-4"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
     return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
   }
 
-  const user = userQuery.data;
   const posts = postsQuery.items;
   // Private-by-default: unless it's you or a connection, the backend returns no
   // posts, and we show a locked state explaining why.

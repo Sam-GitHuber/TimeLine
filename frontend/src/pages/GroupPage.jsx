@@ -166,27 +166,35 @@ export default function GroupPage() {
       </div>
     );
   }
-  if (groupQuery.isError) {
-    return (
-      <div className="px-6 py-16 text-center">
-        <p className="text-lg font-medium text-red-600">
-          {serverMessage(groupQuery.error, "Couldn't load this group.")}
-        </p>
-        <button
-          type="button"
-          onClick={() => groupQuery.refetch()}
-          className="btn btn-ghost btn-sm mt-4"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-  if (groupQuery.isLoading) {
+  const group = groupQuery.data;
+
+  // **The group we have beats an error about refreshing it** — same rule as the
+  // profile page, for the same reason: a failed refetch keeps its data and only
+  // flips `status` to 'error', and with `staleTime` 0 and `refetchOnWindowFocus`
+  // on, returning to a backgrounded tab refetches this key. Reading `isError`
+  // first threw away the timeline, the upcoming events and the calendar over one
+  // lost request. The 404 branch above still wins over the cached copy — not a
+  // member, or no such group, is an answer about *now*.
+  if (!group) {
+    if (groupQuery.isError) {
+      return (
+        <div className="px-6 py-16 text-center">
+          <p className="text-lg font-medium text-red-600">
+            {serverMessage(groupQuery.error, "Couldn't load this group.")}
+          </p>
+          <button
+            type="button"
+            onClick={() => groupQuery.refetch()}
+            className="btn btn-ghost btn-sm mt-4"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
     return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
   }
 
-  const group = groupQuery.data;
   const isAdmin = group.your_role === "admin";
   const posts = postsQuery.items;
 

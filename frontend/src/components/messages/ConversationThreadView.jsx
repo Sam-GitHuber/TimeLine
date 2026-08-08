@@ -229,6 +229,32 @@ export default function ConversationThreadView() {
   });
 
   const detail = convoQuery.data;
+
+  /**
+   * **Whether a failed fetch is allowed to take the thread off screen.**
+   *
+   * `query-core`'s error action writes `status`, `error` and `isInvalidated` and
+   * never touches `data`, so `isError` goes true on a failed *refetch* of a
+   * query that is rendering a perfectly good transcript. This view refetches
+   * constantly — `staleTime` is 0, `refetchOnWindowFocus` is on, and the detail
+   * polls on `CONVERSATION_DETAIL_POLL_MS` besides — so reading the flag before
+   * the data replaced the transcript, the header identity *and* the composer
+   * with a half-typed reply in it the moment one request lost a packet, having
+   * lost nothing server-side.
+   *
+   * A 404 is the exception and still outranks the cached copy: deleted, left, or
+   * out of reach is a real answer about *now*. Everything else only gets a say
+   * when there is nothing cached to keep showing.
+   *
+   * Declared up here, next to the data they read, rather than beside the JSX
+   * that uses them — because the mark-read effect below has to ask the same
+   * question, and asking it a second way is how the two answers drift apart.
+   */
+  const gone = convoQuery.error?.status === 404;
+  const loadFailed = convoQuery.isError && !detail;
+  /** Is any of this conversation actually on screen? */
+  const showingThread = !gone && !loadFailed && !!detail;
+
   const isGroup = detail?.kind === "group";
   // A pending group member (someone invited who hasn't connected with the
   // whole clique yet) can't read or send here — the backend 403s the messages
@@ -474,23 +500,39 @@ export default function ConversationThreadView() {
    * zeroes it, so running before the detail lands makes the two race, with the
    * divider missing whenever the write wins.
    */
-  const detailLoaded = !!detail;
   useEffect(() => {
-    if (convoQuery.isError || isPending || !detailLoaded) return;
+    // **This asks the same question the render branches ask, through the same
+    // value.** `convoQuery.isError` used to be the guard here, back when it
+    // meant the same thing as "nothing is on screen" — an error was an error
+    // card with no transcript, so not marking read was right. This commit is
+    // exactly what stops that being true: a failed refetch now keeps the thread
+    // up, and the reader is looking at the messages while this returns early,
+    // with the tab badge and the conversation list going on claiming unread
+    // mail they have just read.
+    //
+    // `!!detail` on its own isn't the replacement, tempting as it looks. A
+    // *404* on a refetch never clears the cached detail either, so `detail`
+    // stays truthy while every render branch has switched to "This conversation
+    // isn't available" — and this would fire a doomed write for a conversation
+    // that is showing nothing. `showingThread` is the one value both halves of
+    // the file read, so they can't drift.
+    if (isPending || !showingThread) return;
     // The unread count has already been latched during render, above — this is
     // the write it has to survive.
-    api.markConversationRead(conversationId).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["unreadMessages"] });
-      queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    });
-  }, [
-    conversationId,
-    messageCount,
-    convoQuery.isError,
-    isPending,
-    detailLoaded,
-    queryClient,
-  ]);
+    //
+    // `.catch()` because that guard is what used to keep this write off a
+    // failing connection. Without it the POST fires exactly when it is most
+    // likely to reject, and an unhandled rejection is noise for a failure that
+    // genuinely doesn't matter: the reader has read them either way, and the
+    // next open marks it again.
+    api
+      .markConversationRead(conversationId)
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ["unreadMessages"] });
+        queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      })
+      .catch(() => {});
+  }, [conversationId, messageCount, isPending, showingThread, queryClient]);
 
   /**
    * Keep the draft store in step with the composer.
@@ -1282,9 +1324,8 @@ export default function ConversationThreadView() {
               Cancel
             </button>
           ) : (
-            !convoQuery.isError &&
-            !isPending &&
-            detail && (
+            showingThread &&
+            !isPending && (
               <DrawerMenu getActions={headerActions} label="Conversation options" />
             )
           )
@@ -1305,7 +1346,7 @@ export default function ConversationThreadView() {
           >
             {selected.size} selected
           </span>
-        ) : convoQuery.isError ? (
+        ) : gone || loadFailed ? (
           <span className="font-semibold text-ink">Conversation</span>
         ) : isGroup ? (
           <button
@@ -1342,10 +1383,10 @@ export default function ConversationThreadView() {
         )}
       </PanelHeader>
 
-      {convoQuery.isError ? (
+      {gone || loadFailed ? (
         <div className="flex-1 px-6 py-16 text-center text-ink-faint">
           <p className="font-medium text-ink">
-            {convoQuery.error?.status === 404
+            {gone
               ? "This conversation isn’t available."
               : "Couldn’t load this conversation."}
           </p>

@@ -95,12 +95,28 @@ export default function GroupFormPage() {
     mutation.mutate();
   }
 
-  if (isEdit && existing.isError) {
+  // **This return destroys typing, so it only fires when there is nothing to
+  // destroy** (issue #310). `name` and `description` are component state seeded
+  // once from `existing.data`, plus a chosen avatar and its crop; unmounting the
+  // form throws all of it away, and nothing persists a draft. Meanwhile
+  // `["group", id]` refetches on window focus with a `staleTime` of 0 and is
+  // invalidated by any membership write — so a single failed background request
+  // silently deleted a rewritten group description mid-edit.
+  //
+  // A 404 still wins over the form: the group is gone or you're no longer in it,
+  // and there is nothing left to save the edit to. Everything else waits until
+  // there is no group to edit.
+  if (isEdit && existing.error?.status === 404) {
     return (
       <p className="px-6 py-10 text-center text-red-600">
-        {existing.error?.status === 404
-          ? "This group doesn't exist, or you're not in it."
-          : serverMessage(existing.error, "Couldn't load the group.")}
+        This group doesn't exist, or you're not in it.
+      </p>
+    );
+  }
+  if (isEdit && existing.isError && !group) {
+    return (
+      <p className="px-6 py-10 text-center text-red-600">
+        {serverMessage(existing.error, "Couldn't load the group.")}
       </p>
     );
   }

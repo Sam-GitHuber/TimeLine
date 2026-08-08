@@ -10,7 +10,7 @@ import { GroupsDrawerProvider } from "./groups-drawer.jsx";
 import GroupPage from "./pages/GroupPage.jsx";
 import GroupFormPage from "./pages/GroupFormPage.jsx";
 import GroupInvitePicker from "./components/GroupInvitePicker.jsx";
-import { renderWithAuth } from "./test-utils.jsx";
+import { renderWithAuth, failRefetch } from "./test-utils.jsx";
 import { api } from "./api.js";
 import { useMessaging } from "./messaging.jsx";
 
@@ -399,6 +399,51 @@ describe("GroupPage admin controls", () => {
       await screen.findByText("Group not available")
     ).toBeInTheDocument();
   });
+
+  // Issue #310. A failed *refetch* keeps the data the query already has —
+  // `query-core`'s error action writes `status`, `error` and `isInvalidated` and
+  // never touches `data` — and this page refetches on window focus with a
+  // `staleTime` of 0. Reading `isError` before the data threw away the timeline,
+  // the upcoming events and the calendar over one lost request.
+  it("keeps a loaded group on screen when a refresh fails", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    const { queryClient } = renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    api.getGroup.mockRejectedValue({ status: 500, message: "Server error" });
+    await failRefetch(queryClient, ["group", 7]);
+
+    expect(screen.getByText("Trip")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+  });
+
+  // The one error that still outranks the cached copy: removed from the group,
+  // or the group deleted, is an answer about *now*.
+  it("still takes the group away when a refresh 404s", async () => {
+    api.getGroup.mockResolvedValue({
+      id: 7,
+      name: "Trip",
+      description: "",
+      avatar_thumb: null,
+      member_count: 2,
+      your_role: "member",
+    });
+    const { queryClient } = renderGroupAt("/g/7");
+    await screen.findByText("Trip");
+
+    api.getGroup.mockRejectedValue({ status: 404 });
+    await failRefetch(queryClient, ["group", 7]);
+
+    expect(await screen.findByText("Group not available")).toBeInTheDocument();
+    expect(screen.queryByText("Trip")).toBeNull();
+  });
 });
 
 describe("GroupPage start a chat", () => {
@@ -509,6 +554,76 @@ describe("GroupInvitePicker", () => {
     expect(
       screen.queryByText(/You can only invite people you're connected with/)
     ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Issue #310, at the only site in this PR that destroys something the user
+ * typed. `name` and `description` are component state seeded once from
+ * `existing.data`, plus a chosen avatar and its crop; the early return unmounts
+ * the form and takes all of it, and nothing persists a draft. Meanwhile
+ * `["group", id]` refetches on window focus with a `staleTime` of 0 and is
+ * invalidated by any membership write.
+ */
+describe("GroupFormPage edit — a failed refetch doesn't eat your typing", () => {
+  const group = {
+    id: 7,
+    name: "Trip",
+    description: "Weekend away",
+    avatar_thumb: null,
+    member_count: 2,
+    your_role: "admin",
+  };
+
+  function renderEdit() {
+    return renderWithAuth(
+      <Routes>
+        <Route path="/g/:id/edit" element={<GroupFormPage />} />
+      </Routes>,
+      { route: "/g/7/edit" }
+    );
+  }
+
+  it("keeps the form, and the rewritten description, through a failed refetch", async () => {
+    const user = userEvent.setup();
+    api.getGroup.mockResolvedValue(group);
+    const { queryClient } = renderEdit();
+    const description = await screen.findByDisplayValue("Weekend away");
+
+    await user.clear(description);
+    await user.type(description, "Now a fortnight, and the ferry is booked");
+
+    api.getGroup.mockRejectedValue({ status: 500, message: "Server error" });
+    await failRefetch(queryClient, ["group", 7]);
+
+    expect(
+      screen.getByDisplayValue("Now a fortnight, and the ferry is booked")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load the group/)).toBeNull();
+  });
+
+  // A 404 still wins: the group is gone, or you're no longer in it, and there is
+  // nothing left to save the edit to.
+  it("still gives up the form when the refetch 404s", async () => {
+    api.getGroup.mockResolvedValue(group);
+    const { queryClient } = renderEdit();
+    await screen.findByDisplayValue("Weekend away");
+
+    api.getGroup.mockRejectedValue({ status: 404 });
+    await failRefetch(queryClient, ["group", 7]);
+
+    expect(
+      await screen.findByText(/This group doesn't exist, or you're not in it/)
+    ).toBeInTheDocument();
+  });
+
+  it("says the load failed when there's no group to show at all", async () => {
+    api.getGroup.mockRejectedValue({ status: 500, message: "Server error" });
+    renderEdit();
+
+    expect(
+      await screen.findByText(/Couldn't load the group/)
+    ).toBeInTheDocument();
   });
 });
 

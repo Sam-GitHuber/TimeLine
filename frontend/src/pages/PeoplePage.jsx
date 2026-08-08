@@ -194,26 +194,14 @@ function ConnectionsList({ onFindPeople }) {
         Loading connections…
       </p>
     );
-  if (isError)
-    return (
-      <p className="px-6 py-10 text-center text-red-600">
-        {serverMessage(error, "Couldn't load your connections.")}
-      </p>
-    );
-  if (people.length === 0)
-    return (
-      <div className="px-6 py-10 text-center">
-        <p className="text-ink-faint">You're not connected with anyone yet.</p>
-        <button
-          type="button"
-          onClick={onFindPeople}
-          className="btn btn-primary btn-sm mt-4"
-        >
-          Find people
-        </button>
-      </div>
-    );
 
+  // **The error goes under the list, not instead of it** (issue #310). A failed
+  // fetch keeps the pages `useInfiniteList` has already accumulated —
+  // `query-core`'s error action writes `status` and leaves `data` alone — so an
+  // early return on `isError` swept away every loaded row. The common way in is
+  // the most annoying one: scroll a long list, press "Load more", have page two
+  // fail, and lose the eighty rows you were reading to one line of red. This is
+  // the shape `FeedPage` and `GroupsDrawer` already use for the same hook.
   return (
     <>
       {people.map((person) => (
@@ -239,6 +227,23 @@ function ConnectionsList({ onFindPeople }) {
           }
         />
       ))}
+      {isError && (
+        <p className="px-6 py-10 text-center text-red-600">
+          {serverMessage(error, "Couldn't load your connections.")}
+        </p>
+      )}
+      {!isError && people.length === 0 && (
+        <div className="px-6 py-10 text-center">
+          <p className="text-ink-faint">You're not connected with anyone yet.</p>
+          <button
+            type="button"
+            onClick={onFindPeople}
+            className="btn btn-primary btn-sm mt-4"
+          >
+            Find people
+          </button>
+        </div>
+      )}
       <LoadMoreButton query={query} />
     </>
   );
@@ -253,19 +258,10 @@ function DiscoverList() {
 
   if (isLoading)
     return <p className="px-6 py-10 text-center text-ink-faint">Loading people…</p>;
-  if (isError)
-    return (
-      <p className="px-6 py-10 text-center text-red-600">
-        {serverMessage(error, "Couldn't load people.")}
-      </p>
-    );
-  if (users.length === 0)
-    return (
-      <p className="px-6 py-10 text-center text-ink-faint">
-        You're connected with everyone here already.
-      </p>
-    );
 
+  // Same reordering as `ConnectionsList` above, and for the same reason — plus
+  // one of its own: "You're connected with everyone here already" is a confident
+  // statement of fact, and a failed page-two fetch is no evidence for it.
   return (
     <>
       {users.map((person) => (
@@ -281,6 +277,16 @@ function DiscoverList() {
           }
         />
       ))}
+      {isError && (
+        <p className="px-6 py-10 text-center text-red-600">
+          {serverMessage(error, "Couldn't load people.")}
+        </p>
+      )}
+      {!isError && users.length === 0 && (
+        <p className="px-6 py-10 text-center text-ink-faint">
+          You're connected with everyone here already.
+        </p>
+      )}
       <LoadMoreButton query={query} />
     </>
   );
@@ -363,22 +369,13 @@ function RequestsList() {
 
   if (isLoading)
     return <p className="px-6 py-10 text-center text-ink-faint">Loading…</p>;
-  if (isError)
-    return (
-      <p className="px-6 py-10 text-center text-red-600">
-        {serverMessage(error, "Couldn't load requests.")}
-      </p>
-    );
-  if (requests.length === 0)
-    return (
-      <>
-        {decideError}
-        <p className="px-6 py-10 text-center text-ink-faint">
-          No pending requests.
-        </p>
-      </>
-    );
 
+  // Same reordering as the two lists above. This one lost something extra on the
+  // way out: `decideError` — the message saying an Approve or a Reject was
+  // refused — is rendered by the branches *below* the early return, so a list
+  // refetch failing in the same frame took the write's own error off screen with
+  // it. That is #231's shape ("a vote that fails in the same batch as a refetch
+  // loses its error message"), reached by a different route.
   return (
     <>
       {decideError}
@@ -420,6 +417,16 @@ function RequestsList() {
           }
         />
       ))}
+      {isError && (
+        <p className="px-6 py-10 text-center text-red-600">
+          {serverMessage(error, "Couldn't load requests.")}
+        </p>
+      )}
+      {!isError && requests.length === 0 && (
+        <p className="px-6 py-10 text-center text-ink-faint">
+          No pending requests.
+        </p>
+      )}
       <LoadMoreButton query={query} />
     </>
   );
