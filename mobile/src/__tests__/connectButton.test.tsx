@@ -8,11 +8,13 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { Alert } from 'react-native';
 
 import { ConnectButton } from '@/components/ConnectButton';
 import type { ProfileUser } from '@/types';
+
+import { settle } from './helpers';
 
 const mockFetch = jest.fn();
 
@@ -41,7 +43,7 @@ async function renderButton(status: ProfileUser['connection_status']) {
       <ConnectButton userId={42} displayName="Ada Lovelace" connectionStatus={status} />
     </QueryClientProvider>
   );
-  return { ...utils, invalidate };
+  return { ...utils, invalidate, client: queryClient };
 }
 
 beforeEach(() => {
@@ -212,4 +214,53 @@ describe('a rejected write', () => {
     expect(screen.queryByText('Disconnect')).toBeTruthy();
     alert.mockRestore();
   });
+});
+
+/**
+ * A failed *refresh* of the impact check must not take the warning off the
+ * warning (#309).
+ *
+ * `query-core`'s error action keeps the data it has and only flips `status` to
+ * 'error'. `['disconnect-impact', userId]` is cached across mounts and refetched
+ * on every foreground, so a re-opened modal on patchy signal used to swap the
+ * concrete list of chats you're about to be thrown out of for "You can still
+ * continue" — in front of a destructive action, at the moment the warning
+ * mattered most.
+ */
+it('keeps the impacted chats when the impact check’s refresh fails', async () => {
+  mockFetch.mockResolvedValueOnce(
+    jsonResponse({ chats: [{ id: 1, title: 'Hiking crew', kind: 'group' }] })
+  );
+  const { client } = await renderButton('connected');
+
+  fireEvent.press(screen.getByText('Connected'));
+  await screen.findByText('Hiking crew');
+
+  mockFetch.mockResolvedValue(jsonResponse({ detail: 'Service unavailable.' }, 503));
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['disconnect-impact', 42] });
+  });
+  await waitFor(() =>
+    expect(client.getQueryState(['disconnect-impact', 42])?.status).toBe('error')
+  );
+  // The cache flips to 'error' a render before the modal does — React Query
+  // notifies on a macrotask, so without this flush the assertions below read the
+  // pre-error tree and pass with the bug still in place.
+  await settle(2);
+
+  expect(screen.getByText('Hiking crew')).toBeTruthy();
+  expect(screen.queryByText(/Couldn’t check for shared chats/)).toBeNull();
+});
+
+it('still says it couldn’t check when there is nothing cached', async () => {
+  // The case that line is for: no answer at all, so the modal has to admit it
+  // doesn't know rather than implying the disconnect is harmless.
+  mockFetch.mockResolvedValue(jsonResponse({ detail: 'Service unavailable.' }, 503));
+  await renderButton('connected');
+
+  fireEvent.press(screen.getByText('Connected'));
+
+  expect(
+    await screen.findByText(/Couldn’t check for shared chats/)
+  ).toBeTruthy();
 });

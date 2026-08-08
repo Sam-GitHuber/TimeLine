@@ -775,7 +775,7 @@ export default function ThreadScreen() {
 
   /**
    * Mark read on open and as new messages land, clearing the tab badge and this
-   * thread's pill. Guarded on error so a failed load doesn't clear the badge.
+   * thread's pill.
    *
    * **It waits for the detail now** (M5), where it used to fire on mount. The
    * unread divider is drawn from `unread_count` on that payload, and this POST
@@ -783,10 +783,20 @@ export default function ThreadScreen() {
    * the divider missing whenever the write wins. Waiting also stops a `pending`
    * viewer marking a thread read they can't see a line of, which was harmless
    * but never intended.
+   *
+   * **`detailLoaded` is the whole guard now, and `convoQuery.isError` is gone
+   * from it (#309).** The two used to mean the same thing here — an error meant
+   * the screen was an error card with no transcript on it, so not marking read
+   * was right. That stopped being true the moment a failed *refetch* started
+   * keeping the thread on screen: the reader is looking at the messages, and
+   * skipping the write left the lock-screen notification and the tab badge
+   * claiming unread mail they'd just read, until the detail poll next
+   * succeeded. "Is anything shown" is the question, and `detailLoaded` is what
+   * answers it — the same move as the render branches below.
    */
   const detailLoaded = !!detail;
   useEffect(() => {
-    if (convoQuery.isError || isPending || !detailLoaded) return;
+    if (isPending || !detailLoaded) return;
     // Take back this thread's notifications from the phone's notification
     // centre (#178). Reading a thread in the app is the commonest way a
     // notification goes stale, and until this landed nothing ever removed one:
@@ -798,14 +808,23 @@ export default function ThreadScreen() {
     void dismissConversationNotifications([id]);
     // The unread count has already been latched during render, above — this is
     // the write it has to survive.
-    api.markConversationRead(id).then(() => {
-      queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
-    });
+    api
+      .markConversationRead(id)
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
+        queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      })
+      // Swallowed on purpose, and it has to be caught now the error guard above
+      // is gone: this fires while the connection is patchy, which is exactly
+      // when it will reject. There is nothing to tell the reader — they have
+      // read the messages either way, and the next open marks it again — but an
+      // uncaught rejection is a redbox in development and a warning in
+      // production, for a write whose failure is genuinely uninteresting.
+      .catch(() => {});
     // `detailLoaded` rather than `detail`: the payload is re-fetched every
     // `CONVERSATION_DETAIL_POLL_MS`, so depending on the object itself would
     // turn this into a mark-read poll of its own. A boolean flips once.
-  }, [id, messageCount, convoQuery.isError, isPending, detailLoaded, queryClient]);
+  }, [id, messageCount, isPending, detailLoaded, queryClient]);
 
   /**
    * Tell the notification handler this thread is the one on screen (#178), so a
@@ -1453,9 +1472,26 @@ export default function ThreadScreen() {
   }
 
   const other = detail?.other;
-  const loadError = convoQuery.isError;
   const notAvailable =
     convoQuery.error instanceof ApiError && convoQuery.error.status === 404;
+
+  /**
+   * **The transcript we have beats an error about refreshing it.** This used to
+   * be a bare `convoQuery.isError`, and that is true of a *failed refetch* too:
+   * query-core's error action sets `status: 'error'` while keeping the data the
+   * query already holds. `staleTime` is 0, `focusManager` is wired to
+   * `AppState`, and the detail is re-polled every
+   * `CONVERSATION_DETAIL_POLL_MS` — so backgrounding the app and coming back on
+   * patchy signal reliably failed a refetch of a fully-loaded chat, and the
+   * header, the transcript and the composer (with whatever was half-typed in
+   * it) were replaced by an error card. Nothing had been lost server-side; the
+   * screen simply stopped showing what it had.
+   *
+   * A 404 is the exception and still outranks the cached copy: the thread being
+   * deleted or out of reach is a real answer about *now*, not a failure to ask.
+   * Same rule as `post/[postId].tsx` and `CommentThread` (#307/#308).
+   */
+  const loadError = notAvailable || (convoQuery.isError && !detail);
 
   /** Whether every ticked message is one you could delete — Delete is offered
    * only then. A bulk action that silently did *part* of what it says (yours,

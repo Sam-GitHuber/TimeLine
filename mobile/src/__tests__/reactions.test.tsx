@@ -11,8 +11,11 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-
 import { Alert, Text } from 'react-native';
 
 import { ReactionBar } from '@/components/ReactionBar';
+import { ReactorsSheet } from '@/components/ReactorsSheet';
 import { trayPosition } from '@/components/ReactionTray';
 import type { Reaction } from '@/types';
+
+import { settle } from './helpers';
 
 /**
  * The emoji grid is the library's own UI, so it's stubbed and its props are
@@ -344,3 +347,81 @@ function sharesRowWith(
   }
   return false;
 }
+
+// --- A refresh of "Who reacted" that fails (#309) ----------------------------
+
+/**
+ * `ReactorsSheet` deliberately keeps its cache alive after it closes, so a
+ * re-open renders the old list and refetches behind it (see the docblock on
+ * `reactorsQueryKey`). `query-core`'s error action keeps that data and only
+ * flips `status` to 'error' — so reading `error` ahead of `data` replaced a
+ * full, correct list with one line of red text whenever the reopen's refresh
+ * missed, taking your own removable row with it.
+ */
+describe('the reactors sheet on a failed refresh', () => {
+  const REACTORS = [
+    { emoji: '👍', count: 1, users: [{ id: 2, display_name: 'Ada Lovelace', avatar_thumb: null }] },
+  ];
+
+  function client() {
+    return new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+  }
+
+  async function openSheet(queryClient: QueryClient) {
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <ReactorsSheet visible onClose={() => {}} postId={5} />
+      </QueryClientProvider>
+    );
+  }
+
+  it('keeps the list it already has', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(REACTORS),
+      json: async () => REACTORS,
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+    const queryClient = client();
+    await openSheet(queryClient);
+    await screen.findByText('Ada Lovelace');
+
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({ detail: 'Service unavailable.' }),
+      json: async () => ({ detail: 'Service unavailable.' }),
+    });
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['reactors', 5, null, null, null] });
+    });
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState(['reactors', 5, null, null, null])?.status
+      ).toBe('error')
+    );
+    // The cache errors a render before the sheet does — see the profile suite's
+    // twin for why this flush is what makes the assertion real.
+    await settle(2);
+
+    expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+    expect(screen.queryByText('Service unavailable.')).toBeNull();
+  });
+
+  it('still shows the error when it has no list at all', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({ detail: 'Service unavailable.' }),
+      json: async () => ({ detail: 'Service unavailable.' }),
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    await openSheet(client());
+
+    expect(await screen.findByText('Service unavailable.')).toBeTruthy();
+  });
+});

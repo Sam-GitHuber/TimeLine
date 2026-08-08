@@ -450,8 +450,11 @@ counts exclude your own messages.
     that refetch is routine, since `invalidateComments` invalidates that very key
     on every comment write. It renders the post it has; a **404** still outranks
     the cached copy, because that's an answer about now (deleted, or out of
-    reach), not a failure to ask. Three more app screens and three web views have
-    the same defect and are *not* fixed: #309 and #310.
+    reach), not a failure to ask.
+  - **It's a whole-client rule, not a comment-thread one.** The same defect was
+    at seven more places in the app and is fixed there too (#309) — see
+    *Branch on the data, not the query flags* in `mobile-app.md` for the list and
+    the shape. The **web's** three views are still open: #310.
 - **That cache write matches on the first key segment, not the whole key** —
   `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
   clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post

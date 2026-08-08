@@ -4061,3 +4061,170 @@ it('leaves the action menu alone while selecting', async () => {
 
   expect(screen.queryByLabelText('Close message actions')).toBeNull();
 });
+
+// --- A refresh that fails (#309) --------------------------------------------
+
+/**
+ * A failed *refresh* of the conversation must not take the thread off the
+ * screen.
+ *
+ * `query-core`'s error action keeps the data it has and only flips `status` to
+ * 'error', and a refetch of `['conversation', id]` is constant here: `staleTime`
+ * is 0, `focusManager` is wired to `AppState`, and the detail is re-polled every
+ * `CONVERSATION_DETAIL_POLL_MS`. With the error branch ahead of the data,
+ * backgrounding the app and coming back on patchy signal replaced the header,
+ * the transcript and the composer — with whatever was half-typed in it — with an
+ * error card and a *Back to messages* button.
+ */
+describe('a refresh of the conversation that fails', () => {
+  /** The conversation detail fails from here on; the transcript keeps working. */
+  function breakTheDetail(status: number, reason: string) {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        // The detail route only: `/messages/` and `/read/` hang off the same
+        // prefix, and breaking those would be testing something else.
+        if (/\/api\/conversations\/5\/(\?|$)/.test(url)) {
+          return jsonResponse({ detail: reason }, status);
+        }
+        return base(url, init);
+      }
+    );
+  }
+
+  it('keeps the transcript, the header and the composer', async () => {
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1, text: 'See you at six' })],
+    });
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    await renderScreen(client);
+    await screen.findByText('See you at six');
+
+    // A half-typed reply — the costly half of what used to be thrown away.
+    await fireEvent.changeText(
+      await screen.findByLabelText('Message'),
+      'On my way'
+    );
+    breakTheDetail(503, 'Service unavailable.');
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['conversation', 5] });
+    });
+
+    await waitFor(() =>
+      expect(client.getQueryState(['conversation', 5])?.status).toBe('error')
+    );
+    // The cache flips to 'error' a render before the screen does — React Query
+    // notifies on a macrotask. Without this flush the assertions below run
+    // against the pre-error tree and pass with the bug still in place.
+    await settle(2);
+    expect(screen.queryByText('Couldn’t load this conversation.')).toBeNull();
+    expect(screen.getByText('See you at six')).toBeTruthy();
+    // Who you're talking to, rather than the anonymous "Conversation" the error
+    // header fell back to.
+    expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+    expect(screen.getByLabelText('Message').props.value).toBe('On my way');
+  });
+
+  it('still says the conversation has gone on a 404, holding a copy of it', async () => {
+    // The one error that outranks the cached copy: a 404 is an answer about
+    // *now* — deleted, or put out of reach — not a failure to ask.
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1, text: 'See you at six' })],
+    });
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    await renderScreen(client);
+    await screen.findByText('See you at six');
+    breakTheDetail(404, 'Not found.');
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['conversation', 5] });
+    });
+
+    expect(
+      await screen.findByText('This conversation isn’t available.')
+    ).toBeTruthy();
+    expect(screen.queryByText('See you at six')).toBeNull();
+  });
+
+  it('still shows the error card when the first load fails', async () => {
+    // Nothing cached to fall back on — this is the case the card is for, and
+    // the branch that keeps a loaded thread up must not swallow it.
+    serve({ conversation: detail({}), messages: [] });
+    breakTheDetail(503, 'Service unavailable.');
+    await renderScreen();
+
+    expect(
+      await screen.findByText('Couldn’t load this conversation.')
+    ).toBeTruthy();
+    expect(screen.queryByLabelText('Message')).toBeNull();
+  });
+});
+
+/**
+ * Reading a thread whose *refresh* failed still marks it read (#309).
+ *
+ * The guard used to include `convoQuery.isError`, which meant the same thing as
+ * "nothing is on screen" only for as long as a failed refetch took the thread
+ * off the screen. Now that it doesn't, the reader is looking at the messages —
+ * and skipping the write left the lock-screen notification and the tab badge
+ * claiming unread mail they had just read.
+ */
+it('marks the thread read even when the detail refresh has failed', async () => {
+  // The array is read by the mock at call time, so pushing to it is how a new
+  // message "arrives" — and `messageCount` changing is what re-runs the effect.
+  const transcript = [message({ id: 1, text: 'See you at six' })];
+  serve({ conversation: detail({ unread_count: 1 }), messages: transcript });
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  await renderScreen(client);
+  await screen.findByText('See you at six');
+
+  const readPosts = () =>
+    mockFetch.mock.calls.filter(
+      ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
+    ).length;
+  const before = readPosts();
+
+  // The detail fails from here on; the transcript keeps working, which is the
+  // state this whole PR creates — thread on screen, `convoQuery` in error.
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      if (/\/api\/conversations\/5\/(\?|$)/.test(url)) {
+        return jsonResponse({ detail: 'Service unavailable.' }, 503);
+      }
+      return base(url, init);
+    }
+  );
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['conversation', 5] });
+  });
+  await settle(2);
+  expect(screen.getByText('See you at six')).toBeTruthy();
+
+  // Someone says something else while we're in that state.
+  transcript.push(message({ id: 2, text: 'Running late' }));
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['messages', 5] });
+  });
+  await screen.findByText('Running late');
+
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(before));
+});

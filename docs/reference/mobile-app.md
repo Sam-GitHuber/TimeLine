@@ -245,6 +245,58 @@ default cruft. **Both** usage strings name posts, chats *and* profiles: Apple
 shows those sentences to the person in the prompt and to App Review, and they're
 the only explanation either gets.
 
+### Branch on the data, not the query flags
+
+**A failed refresh of something already on screen is not a reason to take it off
+screen.** `query-core`'s `error` action sets `status: 'error'` **while keeping the
+data the query already has** — it writes `status`, `error` and `isInvalidated` and
+never touches `data`. So `isError` is true on a *failed refetch* of a query that
+is rendering perfectly good content, and any screen that reads the flags before it
+reads the data throws that content away.
+
+That refetch is not an edge case in this app: `staleTime` is 0 everywhere,
+`focusManager` is wired to `AppState` (`app/_layout.tsx`), a native stack keeps
+pushed screens mounted, and the conversation detail polls on a timer besides. So
+**backgrounding the app and coming back on patchy signal** is a foreground refetch
+against a screen full of cached data — the single commonest thing a phone does.
+
+The shape every screen uses (`post/[postId].tsx` is the reference):
+
+```
+notFound ? gone : data ? content : isError ? "couldn't load" : spinner
+```
+
+A **404 outranks the cached copy** — deleted or out of reach is an answer about
+*now* — and nothing else does. Two distinct mistakes come out of getting this
+wrong, and #309 fixed both across seven sites:
+
+- **Throwing away data we have.** `u/[userId].tsx`, `groups/[groupId].tsx`,
+  `messages/[conversationId].tsx`, `components/ReactorsSheet.tsx` and
+  `components/DisconnectWarningModal.tsx` all read the error flag first. The chat
+  was the costly one: the transcript, the header identity *and* the composer with
+  a half-typed message in it were replaced by "Couldn't load this conversation."
+  and a *Back to messages* button, having lost nothing server-side. The
+  disconnect modal was the dangerous one: a failed re-check swapped the concrete
+  list of chats you're about to be ejected from for "You can still continue", in
+  front of a destructive action.
+- **Answering "gone" when the truth is "couldn't ask".** `events/[eventId].tsx`
+  (`notFound || !event`) and `messages/[conversationId]/info.tsx` (`!detail`)
+  reported a dropped packet as a cancelled event / a removed conversation.
+  A missing thing and an unreachable one are different answers, and only the
+  server's 404 justifies the first.
+
+**A failed refresh stays silent** while stale content is up — no "you may be
+looking at an old copy" banner. That was weighed and declined in #309: it would
+be a new piece of UI on every screen, firing on every flaky refetch, to say
+something the next successful refetch fixes by itself. `CommentThread` and the
+web behave the same way.
+
+Two idioms in this codebase are already correct and shouldn't be "fixed":
+`isError && items.length === 0` (`components/events/EventPhotos.tsx`, with its own
+note on why), and every list screen whose error branch lives in
+`ListEmptyComponent` — which only renders when the list is empty, so it is the
+data check, structurally.
+
 ### Taking a photo: camera or library
 
 Every place that adds a photo — a post, a chat message, a profile or group

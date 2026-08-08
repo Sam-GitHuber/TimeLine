@@ -126,7 +126,13 @@ export function ReactorsSheet({
 
           {isLoading ? (
             <ActivityIndicator color={colors.accent} style={styles.spinner} />
-          ) : error ? (
+          ) : /* `&& !data` (#309): the cache above deliberately outlives the
+                 sheet, so a re-open renders the old list and refetches behind
+                 it — and a failed refetch keeps that data while flipping
+                 `status` to 'error'. Reading `error` on its own therefore
+                 replaced a full, correct list with one line of red text every
+                 time the reopen's refresh missed. */
+            error && !data ? (
             <Text style={styles.error}>
               {error instanceof Error ? error.message : 'Couldn’t load that.'}
             </Text>

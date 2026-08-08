@@ -88,7 +88,13 @@ export function DisconnectWarningModal({
         <Pressable style={styles.card} onPress={() => {}}>
           {impactQuery.isLoading ? (
             <Text style={styles.body}>Checking shared chats…</Text>
-          ) : impactQuery.isError ? (
+          ) : /* Only when there's genuinely nothing to warn with (#309). A
+                 failed *refetch* keeps the data it has and just flips `status`,
+                 and this key is cached across mounts and refetched on every
+                 foreground — so reading `isError` first swapped a concrete list
+                 of chats you're about to be thrown out of for an invitation to
+                 continue blind, in front of a destructive action. */
+            impactQuery.isError && !impactQuery.data ? (
             <Text style={styles.body}>
               Couldn’t check for shared chats. You can still continue.
             </Text>

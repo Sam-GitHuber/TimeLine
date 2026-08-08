@@ -137,6 +137,12 @@ export default function ProfileScreen() {
   const notFound =
     userQuery.error instanceof ApiError && userQuery.error.status === 404;
 
+  // Whether there is a profile to draw at all — either one the query has (even
+  // a stale one whose last refetch failed) or your own, which renders from the
+  // auth `me` with the fetch disabled. This, not the query flags, is what
+  // decides between the page and a placeholder.
+  const hasProfile = isSelf || !!user;
+
   const header = (
     <View style={styles.profileHeader}>
       {isSelf && editing ? (
@@ -255,25 +261,36 @@ export default function ProfileScreen() {
         ) : null}
       </View>
 
-      {userQuery.isLoading ? (
-        <ActivityIndicator color={colors.accent} style={styles.spinner} />
-      ) : notFound ? (
+      {/* **The profile we have beats an error about refreshing it** — the same
+          rule `CommentThread` and the post screen follow. A failed refetch keeps
+          its data and only flips `status` to 'error', and that refetch is
+          routine: `staleTime` is 0 and every foreground refetches this key, so
+          reading `isError` before the data replaced a whole loaded profile with
+          an error card the moment the app came back on patchy signal.
+          A 404 still wins over the cached copy — deleted or out of reach is a
+          real answer about *now*. `isSelf` renders from the auth `me` with the
+          fetch disabled, so it counts as having content of its own. */}
+      {notFound ? (
         <View style={styles.centre}>
           <Text style={styles.emptyTitle}>User not found</Text>
           <Text style={styles.emptyBody}>No one here goes by that id.</Text>
         </View>
-      ) : userQuery.isError ? (
-        <View style={styles.centre}>
-          <Text style={styles.emptyTitle}>Couldn’t load this profile</Text>
-          <Text style={styles.emptyBody}>
-            {userQuery.error instanceof Error
-              ? userQuery.error.message
-              : 'Something went wrong.'}
-          </Text>
-          <Pressable style={styles.retry} onPress={() => userQuery.refetch()}>
-            <Text style={styles.retryText}>Try again</Text>
-          </Pressable>
-        </View>
+      ) : !hasProfile ? (
+        userQuery.isError ? (
+          <View style={styles.centre}>
+            <Text style={styles.emptyTitle}>Couldn’t load this profile</Text>
+            <Text style={styles.emptyBody}>
+              {userQuery.error instanceof Error
+                ? userQuery.error.message
+                : 'Something went wrong.'}
+            </Text>
+            <Pressable style={styles.retry} onPress={() => userQuery.refetch()}>
+              <Text style={styles.retryText}>Try again</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <ActivityIndicator color={colors.accent} style={styles.spinner} />
+        )
       ) : (
         <KeyboardAvoider style={styles.fill}>
           <TimelineList

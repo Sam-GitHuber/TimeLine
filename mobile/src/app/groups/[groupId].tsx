@@ -244,22 +244,31 @@ export default function GroupScreen() {
         )}
       </View>
 
-      {groupQuery.isLoading ? (
-        <ActivityIndicator color={colors.accent} style={styles.spinner} />
-      ) : notFound ? (
+      {/* **The group we have beats an error about refreshing it** — the same
+          rule `CommentThread` and the post screen follow. A failed refetch keeps
+          its data and only flips `status` to 'error', and `staleTime` is 0 with
+          every foreground refetching this key, so reading `isError` before the
+          data threw away a loaded timeline, its events and the calendar the
+          moment the app came back on patchy signal. A 404 still wins over the
+          cached copy: private-now or left-now is a real answer about *now*. */}
+      {notFound ? (
         <View style={styles.centre}>
           <Text style={styles.emptyTitle}>This group isn’t available.</Text>
           <Text style={styles.emptyBody}>
             It may be private, or you may have left it.
           </Text>
         </View>
-      ) : groupQuery.isError ? (
-        <View style={styles.centre}>
-          <Text style={styles.emptyTitle}>Couldn’t load this group</Text>
-          <Pressable style={styles.retry} onPress={() => groupQuery.refetch()}>
-            <Text style={styles.retryText}>Try again</Text>
-          </Pressable>
-        </View>
+      ) : !group ? (
+        groupQuery.isError ? (
+          <View style={styles.centre}>
+            <Text style={styles.emptyTitle}>Couldn’t load this group</Text>
+            <Pressable style={styles.retry} onPress={() => groupQuery.refetch()}>
+              <Text style={styles.retryText}>Try again</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <ActivityIndicator color={colors.accent} style={styles.spinner} />
+        )
       ) : view === 'calendar' ? (
         <ScrollView contentContainerStyle={styles.calendarContent}>
           {identity}
