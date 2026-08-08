@@ -45,6 +45,15 @@ export function dedupeById<T extends { id: number }>(items: T[]): T[] {
  *
  * Returns the input unchanged when there's nothing to trim, so the cache entry
  * keeps its identity and no needless re-render is triggered.
+ *
+ * **Unchanged is still a write, and that's checked rather than assumed here.**
+ * `setQueryData` declines only on `undefined`; handing back the identical object
+ * dispatches a success, which resets `isInvalidated` — the trap that cost
+ * `postCache.ts` a bug (#307). It's harmless at every call site of this one: the
+ * three pull-to-refresh handlers `await refetch()` immediately after, and
+ * `activity.tsx` trims on unmount, where the query has no observer left and
+ * refetches on its next mount at `staleTime` 0. Anything that trims *without* a
+ * fetch to follow it needs `undefined` here instead.
  */
 export function trimToFirstPage<T>(
   data: InfiniteData<Paginated<T>, string> | undefined

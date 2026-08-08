@@ -19,7 +19,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -255,47 +255,46 @@ export function CommentThread({
 
   const {
     data: comments,
-    isLoading,
+    isPaused,
+    isError,
     error,
   } = useQuery({
     queryKey: commentsQueryKey(target),
-    queryFn: () => api.getComments(target),
+    /**
+     * **The seen-write is bolted to the request, not to a render.**
+     *
+     * The server stamps your `last_seen_at` as a *side effect of this GET*, so
+     * the cache write that mirrors it has to be the resolution of this GET and
+     * nothing else. This lives here rather than on the screen for that reason:
+     * clearing the badge when the *post* loaded meant a failed comments request
+     * left the feed showing nothing new while the server still had the thread
+     * unseen (#195-era), and the web's version of the same mistake cleared it
+     * in the toggle's `onClick`, with nothing to roll back (#230).
+     *
+     * **An effect on `data` isn't the same thing and wasn't enough** — which is
+     * what #307 fixed here. `useQuery` hands back a cached tree
+     * *synchronously*, so an effect gated on `comments` fires on the stale tree
+     * on a reopen, before the refetch has been anywhere near the server; if
+     * that refetch then failed, the badge went and the comment behind it stayed
+     * unseen. The stamp happens exactly when this function resolves, so that's
+     * where the mirror goes. The web's twin carries the same rule
+     * (`frontend/src/components/CommentThread.jsx`).
+     *
+     * Both kinds of target carry a `· N new` badge on a card elsewhere, and
+     * both are mirrored rather than refetched — see the two helpers for why an
+     * event's is not simply the post one with a different id (the web needs
+     * only the post half).
+     */
+    queryFn: async () => {
+      const tree = await api.getComments(target);
+      if (target.postId != null) {
+        markPostCommentsSeen(queryClient, Number(target.postId));
+      } else if (target.eventId != null) {
+        markEventCommentsSeen(queryClient, Number(target.eventId));
+      }
+      return tree;
+    },
   });
-
-  /**
-   * Mirror the server's "seen" stamp into the cache — but only once the GET that
-   * *does* the stamping has actually succeeded.
-   *
-   * This lives here rather than on the screen for that reason: the stamp is a
-   * side effect of this request, so anything else keying off it can get out of
-   * step. Clearing the badge when the *post* loaded meant a failed comments
-   * request left the feed showing nothing new while the server still had the
-   * thread unseen — the comments were then invisible until something else
-   * refetched. The web follows the same rule now, in its twin of this file
-   * (`frontend/src/components/CommentThread.jsx`). It used to mark on the
-   * *open-comments action*, and this comment used to call that the same rule —
-   * it isn't, and saying so was the reason nobody went and checked. The action
-   * still runs ahead of the request, so the web had the failure above in its
-   * own shape (#230): the badge cleared on the click while the thread below it
-   * read "Couldn't load comments."
-   *
-   * The web goes one step further and does the write **inside its `queryFn`**,
-   * because `data` being present is not the same as this fetch having
-   * succeeded: `useQuery` returns a cached tree synchronously on a reopen, so
-   * this effect fires on the stale one before the refetch has been anywhere.
-   * That gap is still open here — see #307.
-   */
-  useEffect(() => {
-    if (!comments) return;
-    // Both kinds carry a `· N new` badge on a card elsewhere, and both are
-    // mirrored rather than refetched — see the two helpers for why an event's
-    // is not simply the post one with a different id.
-    if (target.postId != null) {
-      markPostCommentsSeen(queryClient, Number(target.postId));
-    } else if (target.eventId != null) {
-      markEventCommentsSeen(queryClient, Number(target.eventId));
-    }
-  }, [comments, target.postId, target.eventId, queryClient]);
 
   // Memoised because it walks the whole tree: without this, every keystroke in
   // the composer below re-walks it and hands every node a fresh Set.
@@ -307,21 +306,44 @@ export function CommentThread({
     [comments, highlightCommentId]
   );
 
-  if (isLoading) {
+  /**
+   * **Branch on the tree, not on the query flags.** The three states are "we
+   * have a tree", "we're never going to get one" and "we're still waiting", and
+   * only the first can be rendered — so `comments` decides, and the flags only
+   * choose which way of having nothing to say this is.
+   *
+   * Returning on `error` first was the bug: query-core's error action sets
+   * `status: 'error'` **while keeping the data it already has**, so a *failed
+   * refetch* of an open thread — the foreground refetch, or the one a comment
+   * write triggers — replaced the whole tree with one line of red text, taking
+   * the composer and any half-typed reply with it. A failed refresh of
+   * something already on screen is not a reason to take it off screen. The web
+   * fixed the same thing in its twin (#306, #230's review).
+   *
+   * `isPaused` is the third case and is **unreachable today**, deliberately:
+   * with `onlineManager` left unwired to NetInfo (see `app/_layout.tsx` for why,
+   * and what wiring it would break) an offline GET *rejects* rather than
+   * pausing, so offline lands on the error line above. It's handled anyway
+   * because wiring `onlineManager` is a one-line change whose failure here would
+   * otherwise be a spinner that never stops, with nothing on screen saying why.
+   */
+  if (!comments) {
+    if (isError) {
+      return (
+        <Text style={styles.error}>
+          {error instanceof Error ? error.message : 'Couldn’t load comments.'}
+        </Text>
+      );
+    }
+    if (isPaused) {
+      return <Text style={styles.waiting}>Waiting for a connection…</Text>;
+    }
     return <ActivityIndicator color={colors.accent} style={styles.loading} />;
-  }
-
-  if (error) {
-    return (
-      <Text style={styles.error}>
-        {error instanceof Error ? error.message : 'Couldn’t load comments.'}
-      </Text>
-    );
   }
 
   return (
     <View style={styles.thread}>
-      {comments && comments.length > 0 ? (
+      {comments.length > 0 ? (
         comments.map((comment, index) => (
           <CommentNode
             key={comment.id}
@@ -1169,4 +1191,7 @@ const styles = StyleSheet.create({
     marginLeft: THREAD_INDENT, // see `threadComposer`
   },
   error: { fontSize: fontSize.sm, color: colors.danger },
+  // Not an error — nothing has failed yet, so it reads as quietly as the empty
+  // state rather than as red text.
+  waiting: { fontSize: fontSize.sm, color: colors.inkFaint },
 });
