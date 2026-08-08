@@ -13,10 +13,17 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ActivityIndicator, StyleSheet, Switch, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Pressable,
+  StyleSheet,
+  Switch,
+  Text,
+  View,
+} from 'react-native';
 
-import { api } from '@/api';
-import { colors, fontSize, spacing } from '@/theme';
+import { api, serverMessage } from '@/api';
+import { colors, fontSize, radius, spacing } from '@/theme';
 import { useHoldOpen } from '@/writeHold';
 import type { NotificationPreferences } from '@/types';
 
@@ -44,10 +51,26 @@ const PREFS_KEY = ['notificationPreferences'] as const;
 export function NotificationPreferencesSection() {
   const queryClient = useQueryClient();
 
-  const { data: prefs, isLoading } = useQuery({
+  const prefsQuery = useQuery({
     queryKey: PREFS_KEY,
     queryFn: api.getNotificationPreferences,
   });
+  const { data: prefs, isLoading } = prefsQuery;
+
+  /**
+   * **Zero toggles is a claim, and it was the wrong one** (#317).
+   *
+   * Only `mutation.isError` was ever rendered; the *query*'s error never was. So
+   * a failed load left `prefs` undefined, `entries` fell back to `[]`, and the
+   * "Notifications" heading and its blurb sat over nothing at all — which reads
+   * as "there are no settings" rather than "we couldn't load them". No retry
+   * either, so the only recovery was to guess that leaving Settings and coming
+   * back might help.
+   *
+   * `&& !prefs`, never a bare `isError`: a failed refresh keeps the switches
+   * you're looking at, and their optimistic rollback keeps working.
+   */
+  const loadFailed = prefsQuery.isError && !prefs;
 
   const mutation = useMutation({
     mutationFn: (patch: NotificationPreferences) =>
@@ -90,7 +113,23 @@ export function NotificationPreferencesSection() {
         Connection requests and group invitations always notify you.
       </Text>
 
-      {isLoading ? (
+      {loadFailed ? (
+        <View style={styles.failure}>
+          <Text style={styles.error} accessibilityRole="alert">
+            {serverMessage(
+              prefsQuery.error,
+              'Couldn’t load your notification settings.'
+            )}
+          </Text>
+          <Pressable
+            onPress={() => prefsQuery.refetch()}
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+          >
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
+        </View>
+      ) : isLoading ? (
         <ActivityIndicator color={colors.accent} style={styles.spinner} />
       ) : (
         <View style={styles.list}>
@@ -149,4 +188,16 @@ const styles = StyleSheet.create({
   rowDivider: { borderTopWidth: 1, borderTopColor: colors.line },
   rowLabel: { flex: 1, fontSize: fontSize.base, color: colors.ink },
   error: { marginTop: spacing.sm, fontSize: fontSize.sm, color: colors.danger },
+  failure: { alignItems: 'flex-start' },
+  // The same outlined button as every other retry in the app.
+  retry: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  retryText: { color: colors.ink, fontWeight: '600' },
+  pressed: { opacity: 0.7 },
 });

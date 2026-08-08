@@ -190,6 +190,70 @@ describe('NotificationPreferencesSection', () => {
     // A kind with no friendly label still renders its toggle rather than dropping.
     expect(await screen.findByLabelText('some_new_kind')).toBeTruthy();
   });
+
+  // --- A load that fails (#317) ---------------------------------------------
+
+  it('says the settings didn’t load rather than showing no settings', async () => {
+    // The whole family: only `mutation.isError` was ever rendered, so a failed
+    // GET left the heading and its blurb over zero toggles — which reads as
+    // "there are no settings", not "we couldn't load them".
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Server error.' }, 500));
+    await renderWithClient(<NotificationPreferencesSection />);
+
+    expect(await screen.findByText('Server error.')).toBeTruthy();
+    // And a way to ask again — without one the only recovery was to guess that
+    // leaving Settings and coming back might help.
+    expect(screen.getByText('Try again')).toBeTruthy();
+  });
+
+  it('retries the load when asked', async () => {
+    let calls = 0;
+    mockFetch.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1
+        ? jsonResponse({ detail: 'Server error.' }, 500)
+        : jsonResponse({ post_reply: true });
+    });
+    await renderWithClient(<NotificationPreferencesSection />);
+
+    await fireEvent.press(await screen.findByText('Try again'));
+
+    expect(await screen.findByLabelText('Replies to your posts')).toBeTruthy();
+    expect(screen.queryByText('Try again')).toBeNull();
+  });
+
+  it('keeps the toggles when a refresh fails', async () => {
+    // `isError && !prefs`, not a bare `isError`: the switches you are looking at
+    // stay put when a refetch behind them fails.
+    let calls = 0;
+    mockFetch.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1
+        ? jsonResponse({ post_reply: true })
+        : jsonResponse({ detail: 'Server error.' }, 500);
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <NotificationPreferencesSection />
+        </QueryClientProvider>
+      );
+    });
+    await screen.findByLabelText('Replies to your posts');
+
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ['notificationPreferences'],
+      });
+    });
+    await settle(2);
+
+    expect(screen.getByLabelText('Replies to your posts')).toBeTruthy();
+    expect(screen.queryByText('Try again')).toBeNull();
+  });
 });
 
 describe('ChangePasswordSection', () => {

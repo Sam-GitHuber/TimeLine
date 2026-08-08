@@ -567,3 +567,69 @@ describe('a refresh that fails', () => {
     expect(await screen.findByText('Couldn’t load this profile')).toBeTruthy();
   });
 });
+
+// --- A posts fetch that fails (#317) ----------------------------------------
+
+/**
+ * The mirror image of the block above: this screen read `userQuery.isError` and
+ * never `postsQuery`'s, so a failed *timeline* fetch fell through to an empty
+ * state that names the person while it says it — under a header that had loaded
+ * perfectly, because it is a different query.
+ */
+describe('a posts fetch that fails', () => {
+  /** Their posts fail from here on; the profile header keeps working. */
+  function breakThePosts(reason = 'Server error.') {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string }) => {
+        if (!url.includes('/posts/')) return base(url, init);
+        // A macrotask late, as a real request is — an instant rejection settles
+        // inside the render's own batch and doesn't behave like one.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: reason }, 500);
+      }
+    );
+  }
+
+  it('doesn’t say someone hasn’t posted when we couldn’t ask', async () => {
+    mockParams.userId = '2';
+    serve({ user: profile({ id: 2, display_name: 'Ada Lovelace' }) });
+    breakThePosts();
+    await renderScreen();
+
+    expect(await screen.findByText('Couldn’t load these posts')).toBeTruthy();
+    expect(screen.queryByText('Ada Lovelace hasn’t posted yet.')).toBeNull();
+  });
+
+  it('doesn’t say *you* haven’t posted when we couldn’t ask', async () => {
+    // Worse on your own profile: `userQuery` is disabled entirely there, so the
+    // posts query is the only thing that can fail — and the sentence it fell
+    // through to was said to you about your own timeline.
+    serve({ user: profile({ id: 1 }) });
+    breakThePosts();
+    await renderScreen();
+
+    expect(await screen.findByText('Couldn’t load these posts')).toBeTruthy();
+    expect(screen.queryByText('You haven’t posted yet.')).toBeNull();
+  });
+
+  it('keeps the posts already on screen when a refresh fails', async () => {
+    // `isError && !data`, never a bare `isError` (#309/#311).
+    mockParams.userId = '2';
+    serve({
+      user: profile({ id: 2, display_name: 'Ada Lovelace' }),
+      posts: [makePost({ id: 5, text: 'A day on the hills' })],
+    });
+    const { client } = await renderScreen();
+    await screen.findByText('A day on the hills');
+    breakThePosts();
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['userPosts', 2] });
+    });
+    await settle(2);
+
+    expect(screen.getByText('A day on the hills')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load these posts')).toBeNull();
+  });
+});

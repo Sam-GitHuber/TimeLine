@@ -30,7 +30,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { SettingsIcon } from '@/components/icons';
@@ -107,6 +107,21 @@ export default function ProfileScreen() {
     // skipping the call keeps the locked state from flashing a spinner first.
     enabled: canSeePosts,
   });
+
+  /**
+   * **A profile with no posts and one we couldn't ask about are different
+   * things** (#317). This screen reads `userQuery.isError` for the header but
+   * never `postsQuery`'s, so a failed timeline fetch left `data` undefined, the
+   * `?? []` below made that an empty array, and the empty state named a person
+   * while it said it: "*Ada* hasn't posted yet" — under a header that had loaded
+   * perfectly, because it is a different query. Worse on your **own** profile,
+   * where `userQuery` is disabled entirely and the sentence becomes "You haven't
+   * posted yet", said to you about your own timeline.
+   *
+   * `&& !data`, never a bare `isError`: a failed *refresh* keeps the posts
+   * already on screen (#309/#311), exactly as the header above it does.
+   */
+  const postsLoadFailed = postsQuery.isError && !postsQuery.data;
 
   // `today` changes at midnight and is what re-derives the day-divider labels.
   const today = useDayBoundary();
@@ -318,6 +333,20 @@ export default function ProfileScreen() {
                         : 'Once you’re connected, you’ll see each other’s posts here.'}
                   </Text>
                 </View>
+              ) : postsLoadFailed ? (
+                <View style={styles.locked}>
+                  <Text style={styles.emptyTitle}>Couldn’t load these posts</Text>
+                  <Text style={styles.emptyBody}>
+                    {serverMessage(postsQuery.error, WENT_WRONG)}
+                  </Text>
+                  <Pressable
+                    onPress={() => postsQuery.refetch()}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.retryText}>Try again</Text>
+                  </Pressable>
+                </View>
               ) : postsQuery.isLoading ? (
                 <ActivityIndicator color={colors.accent} style={styles.spinner} />
               ) : (
@@ -333,6 +362,13 @@ export default function ProfileScreen() {
             ListFooterComponent={
               postsQuery.isFetchingNextPage ? (
                 <ActivityIndicator style={styles.footer} color={colors.accent} />
+              ) : postsQuery.isError && postsQuery.data ? (
+                // The partial case (`EventPhotos`' shape): a timeline that
+                // stopped short looks exactly like one that ended, which here
+                // quietly under-states how much someone has posted.
+                <Text style={styles.inlineError}>
+                  Couldn’t load any older posts.
+                </Text>
               ) : null
             }
           />
@@ -415,5 +451,15 @@ const styles = StyleSheet.create({
     borderColor: colors.lineStrong,
   },
   retryText: { color: colors.ink, fontWeight: '600' },
+  pressed: { opacity: 0.7 },
+  // The quieter form: a line under posts that did load, saying what didn't.
+  inlineError: {
+    marginVertical: spacing.lg,
+    paddingHorizontal: spacing.md,
+    fontSize: fontSize.sm,
+    color: colors.danger,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
   footer: { marginVertical: spacing.lg },
 });

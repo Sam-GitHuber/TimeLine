@@ -35,7 +35,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from '@/components/ActionMenu';
 import { useGroupActions } from '@/components/useGroupActions';
@@ -91,6 +91,28 @@ export default function GroupScreen() {
     queryFn: () => api.getGroupCalendar(id),
     enabled: !!group && view === 'calendar',
   });
+
+  /**
+   * **An empty group and an unanswered one are different things** (#317).
+   *
+   * Four queries hang off this page, and none of them had an error branch: the
+   * fetch fails, `data` is undefined, the `?? []` below turns that into an empty
+   * array, and an empty state written as a flat statement of fact renders. "No
+   * posts here yet — say something to the group" on a group with two years of
+   * shared history reads as a brand-new one, and the natural response to that
+   * sentence is to post into it again. Losing signal does it, and so does
+   * catching the box mid-restart, which is what publishing a GitHub Release does
+   * (`deploy.md`).
+   *
+   * `&& !data` in every one of them, never a bare `isError` — a failed *refresh*
+   * keeps the posts, events and calendar it already has, and those stay on
+   * screen rather than being replaced by an apology (#309/#311, and the same
+   * rule the group header above follows).
+   */
+  const postsLoadFailed = postsQuery.isError && !postsQuery.data;
+  const calendarLoadFailed = calendarQuery.isError && !calendarQuery.data;
+  const upcomingLoadFailed = upcomingQuery.isError && !upcomingQuery.data;
+  const pastEventsLoadFailed = pastEventsQuery.isError && !pastEventsQuery.data;
 
   const today = useDayBoundary();
   const rows = useMemo(
@@ -199,6 +221,25 @@ export default function GroupScreen() {
     </View>
   );
 
+  // Where the missing future gets said. The region below only renders when
+  // there *are* upcoming events, so without this a failed fetch leaves the space
+  // above the composer silent — and nothing on screen distinguishes "nothing is
+  // planned" from "we couldn't ask".
+  const upcomingFailure = upcomingLoadFailed ? (
+    <View style={styles.upcoming}>
+      <Text style={styles.inlineError}>
+        {serverMessage(upcomingQuery.error, 'Couldn’t load what’s coming up.')}
+      </Text>
+      <Pressable
+        onPress={() => upcomingQuery.refetch()}
+        accessibilityRole="button"
+        style={({ pressed }) => [styles.retry, styles.retryInline, pressed && styles.pressed]}
+      >
+        <Text style={styles.retryText}>Try again</Text>
+      </Pressable>
+    </View>
+  ) : null;
+
   // The upcoming region — furthest-first, so the nearest event sits just above
   // the composer's "now". Date-less "being planned" events follow in a staging
   // strip. Rendered above the composer in the timeline view's header.
@@ -273,7 +314,28 @@ export default function GroupScreen() {
         <ScrollView contentContainerStyle={styles.calendarContent}>
           {identity}
           {toggle}
-          {calendarQuery.isLoading ? (
+          {calendarLoadFailed ? (
+            // Not "no dated events yet", and not an empty grid either: a drawn
+            // month with nothing in it is the most confident possible lie about
+            // a calendar, told to someone with a wedding in this group on
+            // Saturday.
+            // `locked`, not `centre`: this sits inside a ScrollView whose
+            // content container isn't `flexGrow`, where a `flex: 1` child
+            // collapses to nothing.
+            <View style={styles.locked}>
+              <Text style={styles.emptyTitle}>Couldn’t load the calendar</Text>
+              <Text style={styles.emptyBody}>
+                {serverMessage(calendarQuery.error, WENT_WRONG)}
+              </Text>
+              <Pressable
+                onPress={() => calendarQuery.refetch()}
+                accessibilityRole="button"
+                style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+              >
+                <Text style={styles.retryText}>Try again</Text>
+              </Pressable>
+            </View>
+          ) : calendarQuery.isLoading ? (
             <ActivityIndicator color={colors.accent} style={styles.spinner} />
           ) : (calendarQuery.data ?? []).length === 0 ? (
             <Text style={styles.calendarEmpty}>
@@ -291,6 +353,7 @@ export default function GroupScreen() {
             <>
               {identity}
               {toggle}
+              {upcomingFailure}
               {upcomingSection}
               <ComposeBox user={me} groupId={id} />
             </>
@@ -301,7 +364,24 @@ export default function GroupScreen() {
             }
           }}
           ListEmptyComponent={
-            postsQuery.isLoading ? (
+            postsLoadFailed ? (
+              // The loudest one in this family. Said to someone whose group has
+              // two years of history behind it, the empty state below invites
+              // them to post it all again.
+              <View style={styles.locked}>
+                <Text style={styles.emptyTitle}>Couldn’t load these posts</Text>
+                <Text style={styles.emptyBody}>
+                  {serverMessage(postsQuery.error, WENT_WRONG)}
+                </Text>
+                <Pressable
+                  onPress={() => postsQuery.refetch()}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+                >
+                  <Text style={styles.retryText}>Try again</Text>
+                </Pressable>
+              </View>
+            ) : postsQuery.isLoading ? (
               <ActivityIndicator color={colors.accent} style={styles.spinner} />
             ) : (
               <View style={styles.locked}>
@@ -314,7 +394,35 @@ export default function GroupScreen() {
           ListFooterComponent={
             postsQuery.isFetchingNextPage ? (
               <ActivityIndicator style={styles.footer} color={colors.accent} />
-            ) : null
+            ) : (
+              <>
+                {/* The partial cases, `EventPhotos`' shape: a timeline that
+                    stopped short looks exactly like one that ended, and a
+                    missing recap leaves no hole behind it. Both are a line under
+                    content that did load, not a state replacing it.
+                    Keyed off `rows`, not off `postsQuery.data`, because the
+                    recaps land on this same spine from a *different* query — so
+                    a cold posts failure beside events that loaded fine leaves a
+                    non-empty list, and the state in `ListEmptyComponent` never
+                    gets its turn. That case says the whole timeline is missing,
+                    not merely its tail. */}
+                {postsQuery.isError && rows.length > 0 ? (
+                  <Text style={[styles.inlineError, styles.footerNote]}>
+                    {postsLoadFailed
+                      ? 'Couldn’t load this group’s posts.'
+                      : 'Couldn’t load any older posts.'}
+                  </Text>
+                ) : null}
+                {pastEventsLoadFailed ? (
+                  <Text style={[styles.inlineError, styles.footerNote]}>
+                    {serverMessage(
+                      pastEventsQuery.error,
+                      'Couldn’t load this group’s past events.'
+                    )}
+                  </Text>
+                ) : null}
+              </>
+            )
           }
         />
       )}
@@ -397,5 +505,16 @@ const styles = StyleSheet.create({
     borderColor: colors.lineStrong,
   },
   retryText: { color: colors.ink, fontWeight: '600' },
+  // A retry that sits under a single line rather than in a centred card.
+  retryInline: { alignSelf: 'center', marginTop: spacing.xs },
+  pressed: { opacity: 0.7 },
+  // The quieter form: a line beside content that did load, saying what didn't.
+  inlineError: {
+    fontSize: fontSize.sm,
+    color: colors.danger,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  footerNote: { paddingHorizontal: spacing.md, marginTop: spacing.md },
   footer: { marginVertical: spacing.lg },
 });
