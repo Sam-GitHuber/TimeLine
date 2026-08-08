@@ -367,13 +367,49 @@ counts exclude your own messages.
   opening a conversation clears its unread badge. The upsert is wrapped to
   survive a concurrent-open race (two tabs both INSERT ⇒ one falls back to an
   UPDATE, not a 500).
-- **Frontend keeps the badge honest via the cache, not a flag.** On open, the
-  client zeroes `new_comment_count` for that post in the cached feed / profile /
-  group / permalink queries (`markPostCommentsSeen`), mirroring the server's
-  reset without a refetch. The badge is then driven purely by that server-shaped
-  count — so it clears on open **and** genuinely-new later comments re-badge once
-  a refetch legitimately raises the count. (A per-card "already opened" flag
-  would suppress those later comments until the card remounted.)
+- **Frontend keeps the badge honest via the cache, not a flag.** Once the tree
+  has loaded, the client zeroes `new_comment_count` for that post in the cached
+  feed / profile / group / permalink queries (`markPostCommentsSeen`), mirroring
+  the server's reset without a refetch. The badge is then driven purely by that
+  server-shaped count — so it clears on open **and** genuinely-new later comments
+  re-badge once a refetch legitimately raises the count. (A per-card "already
+  opened" flag would suppress those later comments until the card remounted.)
+- **That write belongs to the request, not to the click.** On both clients it
+  lives in `CommentThread`, never on the card that opens the thread. The stamp is
+  a *side effect of the GET*, so anything hung off the tap runs ahead of it with
+  nothing to roll back. Both clients shipped that way and both were wrong in
+  their own shape: mobile cleared the badge when the *post* loaded (#195-era),
+  the web cleared it in the toggle's `onClick` (#230) — click a card reading
+  *· 3 new* with no signal and the badge went while the thread underneath read
+  "Couldn't load comments.", leaving the card claiming three comments were read
+  that the server still had unseen until the next feed refetch. It also removes
+  the permalink's special case: `/p/:id` opens expanded, so it goes through the
+  same query as a click does.
+- **The web goes one step further and does the write inside its `queryFn`,
+  because having `data` is not the same as this fetch having succeeded.**
+  `useQuery` hands back a cached tree *synchronously* on a reopen, so an effect
+  gated on `data` fires on the stale tree before the refetch has been anywhere —
+  and if that refetch then fails you have #230 again on the reopen path. A
+  `queryFn` resolves exactly when the server stamped, which is the fact being
+  mirrored. **The app still uses the effect form and still has that gap (#307).**
+- **`markPostCommentsSeen` returns `undefined` from its updaters when there is
+  nothing to change, and that is load-bearing.** `setQueryData` bails out on
+  `undefined` and treats *any other* return — the identical object included — as
+  a write, which dispatches a success and resets `isInvalidated` to false. The
+  two helpers meet: posting a comment calls `invalidateComments` (marking every
+  post list) and refetches the tree, and that refetch is what calls
+  `markPostCommentsSeen`. Returning the data unchanged would therefore cancel the
+  invalidation a tick after it was made, and the profile and group timelines
+  would come back holding the old `comment_count`. Only `staleTime: 0` everywhere
+  keeps that survivable today. (Mobile's copy still returns the data — #307.)
+- **`CommentThread` branches on the tree, not on the query flags.** A query the
+  *browser* has paused — offline, with the default `networkMode: 'online'` this
+  app never overrides — sits at `status: 'pending'`, `fetchStatus: 'paused'`, and
+  `isLoading` is `isPending && isFetching`, so it reads **false with no data
+  behind it**. Rendering the list on `!isLoading && !isError` therefore hit
+  `comments.length` on `undefined`, and with no ErrorBoundary anywhere in the web
+  tree (#299) that unmounted the whole app to a blank page. Offline is the single
+  likeliest way this request fails, so it gets a sentence of its own.
 - **That cache write matches on the first key segment, not the whole key** —
   `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
   clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post

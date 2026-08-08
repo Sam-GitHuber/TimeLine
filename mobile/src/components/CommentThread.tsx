@@ -271,8 +271,19 @@ export function CommentThread({
    * step. Clearing the badge when the *post* loaded meant a failed comments
    * request left the feed showing nothing new while the server still had the
    * thread unseen — the comments were then invisible until something else
-   * refetched. Same rule as the web, which marks seen on the open-comments
-   * action rather than on the post render (frontend/src/components/PostCard.jsx).
+   * refetched. The web follows the same rule now, in its twin of this file
+   * (`frontend/src/components/CommentThread.jsx`). It used to mark on the
+   * *open-comments action*, and this comment used to call that the same rule —
+   * it isn't, and saying so was the reason nobody went and checked. The action
+   * still runs ahead of the request, so the web had the failure above in its
+   * own shape (#230): the badge cleared on the click while the thread below it
+   * read "Couldn't load comments."
+   *
+   * The web goes one step further and does the write **inside its `queryFn`**,
+   * because `data` being present is not the same as this fetch having
+   * succeeded: `useQuery` returns a cached tree synchronously on a reopen, so
+   * this effect fires on the stale one before the refetch has been anywhere.
+   * That gap is still open here — see #307.
    */
   useEffect(() => {
     if (!comments) return;

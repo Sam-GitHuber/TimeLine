@@ -9,7 +9,11 @@ import { ReportModal } from "./ReportModal.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { serverMessage } from "../errors.js";
-import { commentsQueryKey, invalidateComments } from "../postCache.js";
+import {
+  commentsQueryKey,
+  invalidateComments,
+  markPostCommentsSeen,
+} from "../postCache.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
 // The set of comment ids that are *ancestors* of `targetId` — the nodes whose
@@ -71,9 +75,43 @@ const DEEP_FROM = 4;
 // scrolled into view, and it pulses briefly so the eye lands on it — the point
 // of a "someone replied" link.
 export default function CommentThread({ target, highlightCommentId = null }) {
-  const { data: comments, isLoading, isError, error } = useQuery({
+  const queryClient = useQueryClient();
+  const {
+    data: comments,
+    isPaused,
+    isError,
+    error,
+  } = useQuery({
     queryKey: commentsQueryKey(target),
-    queryFn: () => api.getComments(target),
+    // **The seen-write is bolted to the request, not to a render.**
+    //
+    // The server stamps your `last_seen_at` as a *side effect of this GET*, so
+    // the cache write that mirrors it has to be the resolution of this GET and
+    // nothing else. Hanging it off the card's click ran it before the request
+    // was even issued, with nothing to roll back (#230): the "· 3 new" badge
+    // went, the thread underneath read "Couldn't load comments.", and the card
+    // then claimed you'd read three comments the server still had unseen —
+    // with no trace of them once you collapsed it again.
+    //
+    // An effect on `data` isn't the same thing and isn't enough. `useQuery`
+    // hands back a cached tree *synchronously* on a reopen, so an effect fires
+    // on the stale tree before the refetch has been anywhere — and if that
+    // refetch then fails, you have the bug above again on the reopen path. The
+    // stamp happens exactly when this function resolves; so does the mirror.
+    // (The app still uses the effect form, so it has that reopen gap — #307.)
+    //
+    // Only a post carries a "N new" badge the web mirrors; an event's lives on
+    // `groupEvents` / `personalCalendar`, which are only ever rendered by a
+    // screen you have to navigate *back* to, and that refetches on mount at
+    // staleTime 0. Give any of those a staleTime and this needs the event twin
+    // the app already has (`markEventCommentsSeen`).
+    queryFn: async () => {
+      const tree = await api.getComments(target);
+      if (target.postId != null) {
+        markPostCommentsSeen(queryClient, Number(target.postId));
+      }
+      return tree;
+    },
   });
 
   // Which comment to visually highlight; cleared after a moment so the pulse
@@ -96,21 +134,43 @@ export default function CommentThread({ target, highlightCommentId = null }) {
       ? ancestorIdsOf(comments, highlightCommentId)
       : null;
 
+  // **Branch on the tree, not on the flags.** The three states are "we have a
+  // tree", "we're never going to get one" and "we're still waiting", and only
+  // the first of them can be rendered — so `comments` decides, and the flags
+  // only choose which way of having nothing to say this is.
+  //
+  // Driving it off `!isLoading && !isError` instead was a crash waiting for a
+  // train journey. A query the *browser* has paused — offline, `networkMode`
+  // 'online', which is the default this app never overrides — sits at
+  // `status: 'pending'`, `fetchStatus: 'paused'`, and `isLoading` is
+  // `isPending && isFetching`, so it reads **false** with no data behind it.
+  // Both flags false, no tree: `comments.length` threw, and with no
+  // ErrorBoundary in the tree (#299) that unmounted the whole app to a blank
+  // page. Being offline is the single likeliest way this request fails.
+  //
+  // The other way round matters too: a *background* refetch that fails still
+  // has the tree it loaded a minute ago. Dropping to the error line there threw
+  // away comments the user was reading and a reply they were half-way through
+  // typing, because the composer went with it. A failed refresh of something
+  // already on screen is not a reason to take it off screen.
   return (
     <div className="tl-thread">
-      {isLoading && (
-        <p className="tl-thread-foot text-sm text-ink-faint">
-          Loading comments…
-        </p>
-      )}
+      {!comments &&
+        (isError ? (
+          <p className="tl-thread-foot text-sm text-red-600">
+            {serverMessage(error, "Couldn't load comments.")}
+          </p>
+        ) : isPaused ? (
+          <p className="tl-thread-foot text-sm text-ink-faint">
+            Waiting for a connection…
+          </p>
+        ) : (
+          <p className="tl-thread-foot text-sm text-ink-faint">
+            Loading comments…
+          </p>
+        ))}
 
-      {isError && (
-        <p className="tl-thread-foot text-sm text-red-600">
-          {serverMessage(error, "Couldn't load comments.")}
-        </p>
-      )}
-
-      {!isLoading && !isError && (
+      {comments && (
         <>
           {comments.length === 0 ? (
             <p className="tl-thread-foot text-sm text-ink-faint">

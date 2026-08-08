@@ -60,6 +60,28 @@ describe("markPostCommentsSeen", () => {
     const qc = new QueryClient();
     expect(() => markPostCommentsSeen(qc, 42)).not.toThrow();
   });
+
+  it("doesn't un-invalidate a list it has nothing to change", () => {
+    // A `setQueryData` updater that returns the data unchanged is still a
+    // *write*: it dispatches a success, which resets `isInvalidated` to false.
+    // That's not academic — the two helpers meet in one flow. Posting a comment
+    // invalidates every post list and refetches the tree, and the refetch is
+    // what calls this. So an unconditional write would cancel the invalidation
+    // a tick after `invalidateComments` made it, and the profile and group
+    // timelines would come back holding yesterday's `comment_count`.
+    const qc = new QueryClient();
+    qc.setQueryData(["feed", {}], listData(post(42, 0))); // nothing to clear
+    qc.setQueryData(["post", "42"], post(42, 0));
+    invalidatePostComments(qc, 42);
+
+    markPostCommentsSeen(qc, 42);
+
+    for (const key of [["feed"], ["post", "42"]]) {
+      const matches = qc.getQueryCache().findAll({ queryKey: key });
+      expect(matches.length).toBeGreaterThan(0);
+      expect(matches.every((q) => q.state.isInvalidated)).toBe(true);
+    }
+  });
 });
 
 // Invalidating after the tree *changes* (issue #215). The failure this guards
