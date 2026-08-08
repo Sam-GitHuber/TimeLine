@@ -69,6 +69,11 @@ const MEMBERS: GroupMember[] = [
 function serve({
   failUserIds = [] as number[],
   connections = 'ok' as 'ok' | 'partial' | 'fail',
+  members = MEMBERS,
+}: {
+  failUserIds?: number[];
+  connections?: 'ok' | 'partial' | 'fail';
+  members?: GroupMember[];
 } = {}) {
   mockFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
     if (url.includes('/api/users/?filter=connected')) {
@@ -94,7 +99,7 @@ function serve({
         ? jsonResponse({ detail: 'Cannot invite this person.' }, 400)
         : jsonResponse(null, 204);
     }
-    if (url.includes('/api/groups/7/members/')) return jsonResponse(MEMBERS);
+    if (url.includes('/api/groups/7/members/')) return jsonResponse(members);
     return jsonResponse(null, 404);
   });
 }
@@ -207,4 +212,180 @@ it('keeps the picker open when no invite succeeds', async () => {
     )
   );
   expect(router.back).not.toHaveBeenCalled();
+});
+
+// --- A roster we don't have (#317) ------------------------------------------
+
+/**
+ * The roster is what filters this picker, so failing to load it produces a
+ * **wrong** list rather than a short one — and then the Invite button acted on
+ * it. `(membersQuery.data ?? [])` turned "we couldn't ask who's in this group"
+ * into "this group has nobody in it", so people already in the group were
+ * offered, ticked, and invited: the tally came back "Invited 0 of 3".
+ *
+ * The web's twin is `GroupPage`'s "Start a chat" (#314).
+ */
+describe('when the member roster doesn’t load', () => {
+  /** The roster GET fails; connections and the invite POST keep working. */
+  function breakTheRoster() {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        if (!url.includes('/api/groups/7/members/') || init?.method === 'POST') {
+          return base(url, init);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: 'Server error.' }, 500);
+      }
+    );
+  }
+
+  it('says the list may include people who are already members', async () => {
+    serve();
+    breakTheRoster();
+    await renderScreen();
+
+    // Before the tick, not after the "Invited 0 of 3": nothing about the rows
+    // themselves shows that the filter never ran.
+    expect(
+      await screen.findByText(
+        /Couldn’t check who’s already in this group/
+      )
+    ).toBeTruthy();
+  });
+
+  it('refuses to invite rather than firing at an unfiltered list', async () => {
+    serve();
+    breakTheRoster();
+    await renderScreen();
+
+    await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+    await fireEvent.press(screen.getByLabelText('Invite'));
+    await settle(2);
+
+    // Not one invite went out, and the refusal says why.
+    expect(invitePosts()).toHaveLength(0);
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Couldn’t check who’s already in this group',
+      expect.stringContaining('may already be members')
+    );
+    // The picker stays open, and the refusal asks the server again itself.
+    expect(router.back).not.toHaveBeenCalled();
+  });
+
+  it('takes existing members out of the pool when the roster does land', async () => {
+    // The premise the rest of this block rests on. With the default fixtures the
+    // only member is you (id 1) and the connections are 2 and 3, so the filter
+    // removes nobody and every assertion around it would pass with `memberIds`
+    // deleted outright.
+    serve({
+      members: [
+        ...MEMBERS,
+        {
+          user: { id: 2, display_name: 'Ada Lovelace', avatar_thumb: null },
+          role: 'member',
+        },
+      ],
+    });
+    await renderScreen();
+
+    expect(await screen.findByLabelText('Bob Newman')).toBeTruthy();
+    expect(screen.queryByLabelText('Ada Lovelace')).toBeNull();
+  });
+
+  it('doesn’t invite someone the arriving roster turns out to have', async () => {
+    // The refusal alone only *delays* the wrong write. Ada is ticked off the
+    // unfiltered list; the roster then lands and says she's already a member, so
+    // she leaves the list — and a selection read straight off the ticks would
+    // still carry her into the POSTs, which is "Invited 1 of 2" for exactly the
+    // reason this screen was fixed.
+    const withAda: GroupMember[] = [
+      ...MEMBERS,
+      {
+        user: { id: 2, display_name: 'Ada Lovelace', avatar_thumb: null },
+        role: 'member',
+      },
+    ];
+    serve({ members: withAda });
+    const base = mockFetch.getMockImplementation()!;
+    let rosterCalls = 0;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        const isRoster =
+          url.includes('/api/groups/7/members/') && init?.method !== 'POST';
+        if (isRoster) rosterCalls += 1;
+        if (isRoster && rosterCalls === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return jsonResponse({ detail: 'Server error.' }, 500);
+        }
+        return base(url, init);
+      }
+    );
+    await renderScreen();
+
+    // Unfiltered, so Ada is offered even though she's in the group.
+    await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+    await fireEvent.press(await screen.findByLabelText('Bob Newman'));
+    // Refused, and the refusal refetches the roster.
+    await fireEvent.press(screen.getByLabelText('Invite'));
+    await settle(2);
+    expect(invitePosts()).toHaveLength(0);
+
+    // Ada is gone from the list now, and must be gone from the selection too.
+    expect(screen.queryByLabelText('Ada Lovelace')).toBeNull();
+    expect(screen.getByText('1 selected')).toBeTruthy();
+
+    await fireEvent.press(screen.getByLabelText('Invite'));
+    await waitFor(() => expect(invitePosts()).toHaveLength(1));
+    expect(JSON.parse(invitePosts()[0][1].body)).toEqual({ user_id: 3 });
+  });
+
+  it('still says a search matched nothing', async () => {
+    // The suppressed empty state is only about the *pool* being empty — that's
+    // the claim a missing roster makes unsafe. A search that matches none of a
+    // pool we do have is an answer we can stand behind, and swallowing it leaves
+    // a blank area under the banner with nothing said at all.
+    serve();
+    breakTheRoster();
+    await renderScreen();
+    await screen.findByLabelText('Ada Lovelace');
+
+    await fireEvent.changeText(
+      screen.getByLabelText('Search your connections'),
+      'zzz'
+    );
+
+    expect(screen.getByText('No connections match “zzz”.')).toBeTruthy();
+  });
+
+  it('invites normally once the roster arrives', async () => {
+    // The refusal is about the missing roster, not a dead button: the retry it
+    // fires off must put the screen back in working order.
+    serve();
+    const base = mockFetch.getMockImplementation()!;
+    let rosterCalls = 0;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        const isRoster =
+          url.includes('/api/groups/7/members/') && init?.method !== 'POST';
+        if (isRoster) rosterCalls += 1;
+        if (isRoster && rosterCalls === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return jsonResponse({ detail: 'Server error.' }, 500);
+        }
+        return base(url, init);
+      }
+    );
+    await renderScreen();
+
+    await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+    await fireEvent.press(screen.getByLabelText('Invite'));
+    await settle(2);
+    expect(invitePosts()).toHaveLength(0);
+
+    // The refetch the refusal fired has landed by now; pressing again works.
+    await fireEvent.press(screen.getByLabelText('Invite'));
+    await waitFor(() => expect(invitePosts()).toHaveLength(1));
+    await waitFor(() => expect(router.back).toHaveBeenCalled());
+  });
 });

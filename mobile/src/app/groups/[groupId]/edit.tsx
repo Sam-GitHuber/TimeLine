@@ -15,10 +15,10 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { GroupForm } from '@/components/GroupForm';
 import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
-import { colors, fontSize, spacing } from '@/theme';
+import { colors, fontSize, radius, spacing } from '@/theme';
 import { useWriteHold, WriteHoldProvider } from '@/writeHold';
 
 export default function EditGroupScreen() {
@@ -26,6 +26,15 @@ export default function EditGroupScreen() {
   const id = Number(groupId);
   const groupQuery = useQuery({ queryKey: ['group', id], queryFn: () => api.getGroup(id) });
   const group = groupQuery.data;
+  // A 404 outranks a retry, the same way it does on the group page and the
+  // profile: deleted, or you've been removed. Offering *Try again* for a request
+  // that will 404 forever replaces one dead end with another, which is the
+  // failure this screen was fixed for.
+  const notFound =
+    groupQuery.error instanceof ApiError && groupQuery.error.status === 404;
+  // `&& !group` for the same reason every other screen has it: a failed
+  // *refresh* must leave the form — and whatever has been typed into it — alone.
+  const loadFailed = groupQuery.isError && !group;
   // Back unmounts the form and the refusal it is the only renderer of, so it
   // reads the write the form declares (#259). The form holds the hardware back
   // and the swipe itself.
@@ -51,7 +60,14 @@ export default function EditGroupScreen() {
         <Text style={styles.title}>Edit group</Text>
         <View style={styles.spacer} />
       </View>
-      {group ? (
+      {notFound ? (
+        <View style={styles.centre}>
+          <Text style={styles.emptyTitle}>This group isn’t available.</Text>
+          <Text style={styles.emptyBody}>
+            It may have been deleted, or you may no longer be a member.
+          </Text>
+        </View>
+      ) : group ? (
         <KeyboardAwareScroll style={styles.fill} keyboardShouldPersistTaps="handled">
           <WriteHoldProvider hold={hold}>
             <GroupForm
@@ -65,6 +81,25 @@ export default function EditGroupScreen() {
             />
           </WriteHoldProvider>
         </KeyboardAwareScroll>
+      ) : loadFailed ? (
+        // Not a false empty state — the same missing branch, reaching the same
+        // dead end (#317). `groupQuery.isError` was read nowhere, so an admin
+        // who tapped ⋯ → Edit group on bad signal got a spinner that never
+        // resolved, never explained itself and offered no way to ask again.
+        // `members.tsx` next door has had this branch all along.
+        <View style={styles.centre}>
+          <Text style={styles.emptyTitle}>Couldn’t load this group</Text>
+          <Text style={styles.emptyBody}>
+            {serverMessage(groupQuery.error, WENT_WRONG)}
+          </Text>
+          <Pressable
+            onPress={() => groupQuery.refetch()}
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+          >
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
+        </View>
       ) : (
         <ActivityIndicator color={colors.accent} style={styles.spinner} />
       )}
@@ -90,4 +125,29 @@ const styles = StyleSheet.create({
   title: { flex: 1, textAlign: 'center', fontSize: fontSize.base, fontWeight: '700', color: colors.ink },
   spacer: { width: 48 },
   spinner: { marginTop: spacing.xl },
+  centre: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.xl,
+    gap: spacing.sm,
+  },
+  emptyTitle: { fontSize: fontSize.base, fontWeight: '600', color: colors.ink },
+  emptyBody: {
+    fontSize: fontSize.sm,
+    color: colors.inkSoft,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  // The same outlined button as every other retry in the app.
+  retry: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  retryText: { color: colors.ink, fontWeight: '600' },
+  pressed: { opacity: 0.7 },
 });

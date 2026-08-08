@@ -332,27 +332,80 @@ the server. A guard can't close that one — the write has to ride the request, 
 
 The opposite mistake — reading `isError` *never* rather than too early — is a
 separate family, because an empty state written as a statement of fact reports a
-dropped packet as an answer. Fixed on the app's two worst sites in #312:
+dropped packet as an answer. Fixed on the app's two worst sites in #312 and on
+the rest in #317. **Each names the failure once, up beside its query, and every
+branch reads that name rather than re-deriving it** — usually
+`loadFailed = isError && !data`, and on the invite picker `rosterMissing = !roster`,
+which is stricter because a roster still in flight filters the list no better
+than one that failed. `&& !data` in all of them, so a failed *refresh* still
+keeps what's on screen — the rule above, and the half #309/#311 had backwards:
 
 - **`app/(tabs)/calendar.tsx`** told someone with a group dinner tomorrow that
   they had nothing on. It reads `isError && !data` now, with a *Try again*.
 - **`app/activity.tsx`** said *You're all caught up* — and cleared the badge
   besides; see [notifications.md](notifications.md) for that half. Its error
   branch lives in `ListEmptyComponent`, per the rule above.
+- **`groups/[groupId].tsx`** hangs *four* queries off a page whose header
+  renders from a fifth, and only that fifth had a branch. "No posts here yet —
+  say something to the group" on a group with two years of history reads as a
+  brand-new one, and the natural response to that sentence is to post into it
+  again. The calendar tab said "No dated events yet" for a group with a wedding
+  in it on Saturday. Past-event recaps vanished out of the middle of a timeline
+  that still looked complete. And a failed *upcoming* fetch made the count
+  compute 0, which hid the "↑ N upcoming" region along with the events — so
+  nothing on screen distinguished "nothing is planned" from "we couldn't ask".
+  That last one needs a line of its own for exactly that reason; the other three
+  are an error state, a footnote, and a footnote.
+- **`u/[userId].tsx`** said "*Ada* hasn't posted yet", naming a person, under a
+  header that had loaded perfectly because it is a different query — and on your
+  **own** profile, where `userQuery` is disabled entirely, said it about your own
+  timeline.
+- **`components/settings/NotificationPreferencesSection.tsx`** rendered only
+  `mutation.isError`, never the query's, so a failed load left the heading and
+  its blurb over zero toggles: "there are no settings" rather than "we couldn't
+  load them", with no retry.
 
-Other sites in this family are still open (#317): the group timeline, the group
-calendar, the profile timeline, notification preferences, and the invite
-picker's member roster (which reaches a *write*, not just a display).
+Two of them are not a wrong sentence:
+
+- **`groups/[groupId]/invite.tsx` reaches past the display, and turned a failed
+  read into a wrong write.** The roster is what filters the picker, so
+  `(membersQuery.data ?? [])` made "we couldn't ask who's in this group" into
+  "this group has nobody in it" — and the picker then offered people who were
+  already members, took three ticks, and came back "Invited 0 of 3". The roster
+  is named once now, the list and the write read the same value, and **Invite
+  refuses and refetches** rather than firing at a list it couldn't filter. Not
+  `disabled`: a control that goes dead with no explanation is its own dead end,
+  and the picker looks entirely normal in this state. Same shape as the web's
+  "Start a chat" (#314).
+
+  **The refusal is only half of it**, and the half that's easy to stop at. What
+  actually goes out is `chosen` — the ticks intersected with the pool they were
+  ticked from, derived on every render. Without that, a roster arriving *late*
+  leaves an already-member ticked and counted after she's gone from the list, and
+  the second press invites her: the wrong write delayed by one tap rather than
+  prevented. Selection state outlives the list it was made against, so it can't
+  be the answer on its own.
+- **`groups/[groupId]/edit.tsx` was a spinner that never resolved.** It reaches
+  no write — it's the same missing branch reaching the same dead end, for an
+  admin who tapped ⋯ → Edit group on bad signal. It takes the 404 branch too, for
+  the same reason the group page and the profile do: a retry against a request
+  that will 404 forever is one dead end swapped for another.
 
 **The web finished its half first (#314)** — eleven sites, including the two
-that reach past the display: the activity centre's seen-write now waits on the
-list landing, and the group page's "Start a chat" refuses rather than building a
-chat from an empty roster. The app's twins of both are the ones still listed
-above, so [`feed-and-posts.md`](feed-and-posts.md) § *The mirror image: no error
-branch at all — the web's sites* is the shape to port, not to re-derive. It also
+that reach past the display: the activity centre's seen-write waits on the list
+landing, and the group page's "Start a chat" refuses rather than building a chat
+from an empty roster. [`feed-and-posts.md`](feed-and-posts.md) § *The mirror
+image: no error branch at all — the web's sites* holds that half. It also
 records the **badge-shaped counts** decision — deliberately left reading zero on
 a failed poll, on both clients, *except* the app-icon badge in
-`useBadgeCount.ts`, which re-asserts a known count on purpose.
+`useBadgeCount.ts`, which re-asserts a known count on purpose. The app's
+instances of that decision are `(tabs)/_layout.tsx`'s three tab pips,
+`components/ActivityBell.tsx`, `(tabs)/people.tsx`'s Requests count and
+`(tabs)/groups.tsx`'s invites count, all `data?.count ?? 0`. **Swept in #317 and
+deliberately left alone**, for the reason recorded there: a badge is an
+*absence*, there is no sensible error affordance on a tab pip, and a count frozen
+at a stale value is worse than none. Don't "fix" these to match
+`useBadgeCount.ts`, or it to match them.
 
 ⚠️ **One part of the web's shape does *not* port yet, and will the day someone
 wires `onlineManager`.** The web gates its waiting branch on `!data` rather than

@@ -59,7 +59,23 @@ export default function GroupInviteScreen() {
     queryKey: ['groupMembers', id],
     queryFn: () => api.getGroupMembers(id),
   });
-  const memberIds = new Set((membersQuery.data ?? []).map((m) => m.user.id));
+  /**
+   * **The roster is what filters this picker, so not having it is a wrong list,
+   * not a short one** (#317).
+   *
+   * `(membersQuery.data ?? [])` turns "we couldn't ask who's in this group" into
+   * "this group has nobody in it", and the `.filter` below then offers people
+   * who are **already members**. Tick three, tap Invite, and the `allSettled`
+   * tally comes back "Invited 0 of 3" — a failed read rendered as fact and then
+   * acted on. So the roster is named here, once, and both the list and the write
+   * read the same value rather than each deciding for itself.
+   *
+   * `connectionsQuery` one query up already had its half of this (#248); this is
+   * the same answer the web's `GroupPage` gave its "Start a chat" in #314.
+   */
+  const roster = membersQuery.data;
+  const rosterMissing = !roster;
+  const memberIds = new Set((roster ?? []).map((m) => m.user.id));
 
   const connections = dedupeById(
     connectionsQuery.data?.pages.flatMap((p) => p.results) ?? []
@@ -68,6 +84,26 @@ export default function GroupInviteScreen() {
   const filtered = needle
     ? connections.filter((p) => p.display_name.toLowerCase().includes(needle))
     : connections;
+
+  /**
+   * Who is actually going to be invited: the ticks, **intersected with the pool
+   * they were ticked from**.
+   *
+   * `selected` is raw user input and outlives the list it was made against, so
+   * it can't be the answer on its own. The case that matters is the roster
+   * arriving *late*: the picker offers Ada while the roster is missing, Ada gets
+   * ticked, the roster lands and takes her out of the list — and a `selected`
+   * read directly would still carry her, so Invite would fire at a member and
+   * come back "Invited 2 of 3". That is the bug this screen was fixed for,
+   * delayed by one tap rather than prevented.
+   *
+   * Derived rather than pruned in an effect: the pool is already a value on
+   * every render, and an effect racing the roster's arrival is the same class of
+   * mistake one layer down. Against `connections`, not `filtered` — typing in
+   * the search box must not untick anyone.
+   */
+  const pool = new Set(connections.map((person) => person.id));
+  const chosen = [...selected].filter((uid) => pool.has(uid));
 
   function toggle(uid: number) {
     setSelected((prev) => {
@@ -85,7 +121,7 @@ export default function GroupInviteScreen() {
     // that succeeded. We tally the outcomes and report them, rather than failing
     // the whole batch on the first rejection.
     mutationFn: async () => {
-      const ids = [...selected];
+      const ids = chosen;
       const results = await Promise.allSettled(
         ids.map((uid) => api.inviteToGroup(id, uid))
       );
@@ -121,6 +157,31 @@ export default function GroupInviteScreen() {
         error instanceof Error ? error.message : 'Something went wrong.'
       ),
   });
+
+  /**
+   * The write refuses on a roster it doesn't have, rather than proceeding.
+   *
+   * Not `disabled` on the button: a control that goes dead with no explanation
+   * is its own dead end, and this is the case where the picker looks entirely
+   * normal — the names are real connections, they're just not filtered. Saying
+   * why and asking again is what the web's "Start a chat" does (#314).
+   *
+   * `rosterMissing` rather than the query's error flag, so the still-loading
+   * case is refused too: the list is equally unfiltered while the request is
+   * out, and there is nothing on screen to say so.
+   */
+  function sendInvites() {
+    if (rosterMissing) {
+      Alert.alert(
+        'Couldn’t check who’s already in this group',
+        'Some of the people listed may already be members, so those invites ' +
+          'would bounce. Trying again — give it a moment.'
+      );
+      void membersQuery.refetch();
+      return;
+    }
+    invite.mutate();
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -172,48 +233,64 @@ export default function GroupInviteScreen() {
             );
           }}
           ListHeaderComponent={
-            // Above the rows, not in the empty state, because the case this
-            // exists for is the list that *isn't* empty: page one landed and
-            // page two didn't, so the names on screen look like all the names
-            // there are (#248).
-            connectionsQuery.isError ? (
-              <Text style={styles.banner}>
-                Couldn’t load your connections.
-              </Text>
-            ) : null
+            // Above the rows, not in the empty state, because the case both of
+            // these exist for is the list that *isn't* empty: names are on
+            // screen, and what's wrong with them can't be seen by looking.
+            <>
+              {/* Page one landed and page two didn't, so the names on screen
+                  look like all the names there are (#248). */}
+              {connectionsQuery.isError ? (
+                <Text style={styles.banner}>
+                  Couldn’t load your connections.
+                </Text>
+              ) : null}
+              {/* And the mirror: the roster is what takes existing members
+                  *out* of the list, so without it the list has too many rather
+                  than too few (#317). Said before the tick, not after the
+                  "Invited 0 of 3". */}
+              {membersQuery.isError && rosterMissing ? (
+                <Text style={styles.banner}>
+                  Couldn’t check who’s already in this group, so some of these
+                  people may be members already.
+                </Text>
+              ) : null}
+            </>
           }
           ListEmptyComponent={
             connectionsQuery.isLoading || membersQuery.isLoading ? (
               <Text style={styles.message}>Loading…</Text>
-            ) : connectionsQuery.isError ? (
-              // The header already says it, and says it whether the list came
-              // back empty or merely short. What must not happen here is the
-              // line below: with nothing loaded, "everyone is already in this
-              // group" is the same lie in stronger terms — the truth is that we
-              // failed to ask.
+            ) : connections.length > 0 ? (
+              // The pool isn't empty, so this is a search miss and nothing else
+              // — true whatever the roster did, and said whatever it did.
+              <Text style={styles.message}>No connections match “{term}”.</Text>
+            ) : connectionsQuery.isError || rosterMissing ? (
+              // An *empty pool*, on the other hand, is a claim about the server's
+              // answer. The header already says what went wrong, and says it
+              // whether the list came back empty or merely short. What must not
+              // happen here is the line below: with nothing loaded, "everyone is
+              // already in this group" is the same lie in stronger terms — the
+              // truth is that we failed to ask.
               null
-            ) : connections.length === 0 ? (
+            ) : (
               <Text style={styles.message}>
                 Everyone you’re connected with is already in this group.
               </Text>
-            ) : (
-              <Text style={styles.message}>No connections match “{term}”.</Text>
             )
           }
         />
 
         <View style={[styles.footer, { paddingBottom: FOOTER_PAD + insets.bottom }]}>
           <Text style={styles.count}>
-            {selected.size === 0 ? 'Select who to invite' : `${selected.size} selected`}
+            {chosen.length === 0 ? 'Select who to invite' : `${chosen.length} selected`}
           </Text>
           <Pressable
-            onPress={() => invite.mutate()}
-            disabled={selected.size === 0 || invite.isPending}
+            onPress={sendInvites}
+            disabled={chosen.length === 0 || invite.isPending}
             accessibilityRole="button"
             accessibilityLabel="Invite"
             style={({ pressed }) => [
               styles.inviteBtn,
-              (selected.size === 0 || invite.isPending) && styles.disabled,
+              (chosen.length === 0 || invite.isPending) && styles.disabled,
               pressed && styles.pressed,
             ]}
           >
