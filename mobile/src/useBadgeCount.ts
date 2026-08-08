@@ -45,12 +45,20 @@ export function useBadgeCount(): void {
   //
   // `dataUpdatedAt` is taken alongside the data because the badge has to be
   // **level-triggered, not edge-triggered** (#232). See the effect below.
-  const { data: messages, dataUpdatedAt: messagesAt } = useQuery({
+  const {
+    data: messages,
+    dataUpdatedAt: messagesAt,
+    isError: messagesFailed,
+  } = useQuery({
     queryKey: ['unreadMessages'],
     queryFn: api.getUnreadMessageCount,
     enabled: signedIn,
   });
-  const { data: activity, dataUpdatedAt: activityAt } = useQuery({
+  const {
+    data: activity,
+    dataUpdatedAt: activityAt,
+    isError: activityFailed,
+  } = useQuery({
     queryKey: ['notificationsUnread'],
     queryFn: api.getUnreadNotificationCount,
     enabled: signedIn,
@@ -77,12 +85,40 @@ export function useBadgeCount(): void {
   // `dataUpdatedAt` changes on every *successful* fetch — mount, foreground
   // refetch, any invalidation — whether or not the number did, so putting it in
   // the deps turns "write when our count changes" into "re-assert whatever we
-  // believe, whenever we've just confirmed it". `setBadgeCountAsync` with the
-  // number already showing is a no-op, so the extra writes cost nothing.
+  // believe, whenever we've just confirmed it".
   //
-  // A *failed* fetch deliberately writes nothing: `dataUpdatedAt` doesn't move
-  // on an error, and the last number the server pushed is a better guess than
-  // a stale one of ours. That is now a decision rather than an accident.
+  // **Half a confirmation is not a confirmation**, which is why the two error
+  // flags are in here too. A failed fetch keeps its last good `data`, so one
+  // count failing while the other succeeds would still advance *its* stamp, run
+  // the effect, and write a sum built half from a number nobody has checked in
+  // a while. That isn't hypothetical: the server pushes 3, the phone comes back
+  // on bad signal, the messages count fails and the activity count returns the
+  // 0 it returned before — and we'd clear an icon that was right. Refusing to
+  // write unless both halves are currently good is what keeps #179's rule
+  // ("never write a number we haven't earned") true of a *partial* failure and
+  // not just of a cold start.
+  //
+  // Leaving the icon alone on a failed fetch is a decision rather than an
+  // accident: the last number the server pushed is a better guess than a stale
+  // one of ours.
+  //
+  // **What this costs**, since the honest answer isn't "nothing":
+  // `['unreadMessages']` and `['notificationsUnread']` are each polled every 12s
+  // while the app is foregrounded (the tab bar and the activity bell), so their
+  // stamps advance on that cadence whether or not anything happened — about ten
+  // `setBadgeCountAsync` calls a minute, where before there were roughly none.
+  // `BadgeModule.swift` doesn't compare against the current value, so each is a
+  // bridge hop plus a `notificationSettings()` read and a `setBadgeCount()`.
+  // That is real but small beside the two HTTP polls it rides on, and both stop
+  // dead when the app is backgrounded.
+  //
+  // The cheaper shape — remember what we last wrote and skip the call when it
+  // matches, clearing that memory whenever the app leaves the foreground, since
+  // that is the only window in which the server can move the icon — was
+  // considered and not taken. It makes the fix depend on catching every
+  // `AppState` transition, and a badge that quietly stops re-asserting itself is
+  // the exact bug being fixed here. Cheap and load-bearing beats cheaper and
+  // conditional.
   useEffect(() => {
     // Signed out — including a session that expired out from under us. The
     // count belonged to whoever was signed in, and it must not sit on the icon
@@ -94,8 +130,17 @@ export function useBadgeCount(): void {
       return;
     }
     if (total === null) return;
+    // Either half's *last* fetch having failed makes the sum part guess.
+    if (messagesFailed || activityFailed) return;
     void setAppBadge(total);
     // `messagesAt`/`activityAt` are unused in the body on purpose: they are the
     // level trigger, not an input to the number.
-  }, [status, total, messagesAt, activityAt]);
+  }, [
+    status,
+    total,
+    messagesAt,
+    activityAt,
+    messagesFailed,
+    activityFailed,
+  ]);
 }

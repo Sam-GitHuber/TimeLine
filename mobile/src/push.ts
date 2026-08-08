@@ -136,11 +136,25 @@ export function configureNotificationHandler(): void {
  *
  * **Still best-effort, but no longer silent about it (#233).** Resolves to
  * whether the write actually landed: `setBadgeCountAsync` returns a *boolean*,
- * and `false` is not an error — it is the module telling us iOS declined,
- * because badges are switched off for the app, or a Focus filter or Deliver
- * Quietly is in force. Throwing that away made a refused write indistinguishable
- * from a successful one, which is exactly the bit #234's investigation needed
- * and had to go and read the module's Swift source to guess at.
+ * and `false` is not an error — it is the module telling us iOS declined.
+ * Throwing that away made a refused write indistinguishable from a successful
+ * one, which is exactly the bit #234's investigation needed and had to go and
+ * read the module's Swift source to guess at.
+ *
+ * **`false` means one specific thing**, and it's worth naming precisely rather
+ * than listing everything that feels like it might suppress a badge:
+ * `BadgeModule.swift` returns `false` when `settings.badgeSetting != .enabled`
+ * and at no other time — that is the app's badge *authorisation*, the Badges
+ * switch under Settings → Notifications → TimeLine. A Focus mode changes how
+ * notifications are delivered, not that setting, so a phone in Focus still
+ * resolves `true`. Sending the next investigation to check Focus first would
+ * cost it the same afternoon #234 cost this one.
+ *
+ * A **throw** is a third outcome and is kept distinct in the warning, because
+ * it's the one carrying real diagnostic text: `setBadgeCount()` can throw on
+ * iOS 16+, and an unlinked module raises `UnavailabilityError`. Both resolve
+ * `false` to the caller — no badge was set either way — but the developer sees
+ * what actually happened rather than a confident guess about a setting.
  *
  * What it deliberately does *not* do is change what the user sees. A refused
  * write stays a no-op: it never throws, never blocks a render, never retries.
@@ -149,38 +163,71 @@ export function configureNotificationHandler(): void {
  * #179 existed. The return value exists so a caller *could* act, and so the
  * next investigation can answer this on-device in seconds.
  *
- * Resolves `false` on Android too, for the same reading: no badge was set.
+ * **`null` on Android**, which is not the same answer as `false`: there the app
+ * never attempts a write at all, so "was it refused?" has no answer. A caller
+ * that acted on `false` would otherwise treat every Android launch as a refusal.
  */
-export async function setAppBadge(count: number): Promise<boolean> {
-  if (Platform.OS !== 'ios') return false;
-  // Negative would be a bug upstream, but it's a native call — clamp rather
-  // than hand UIKit something it has no defined behaviour for.
-  const accepted = await Notifications.setBadgeCountAsync(
-    Math.max(0, count),
-  ).catch(() => false);
-  warnOnceIfRefused(accepted);
-  return accepted;
+export async function setAppBadge(count: number): Promise<boolean | null> {
+  if (Platform.OS !== 'ios') return null;
+  const attempt = ++badgeWrites;
+  try {
+    // Negative would be a bug upstream, but it's a native call — clamp rather
+    // than hand UIKit something it has no defined behaviour for.
+    const accepted = await Notifications.setBadgeCountAsync(Math.max(0, count));
+    reportBadgeWrite(attempt, accepted, null);
+    return accepted;
+  } catch (error) {
+    reportBadgeWrite(attempt, false, error);
+    return false;
+  }
 }
 
 /**
- * The last thing we knew about whether iOS is accepting badge writes, so the
- * `__DEV__` warning fires on the **transition** rather than on every write.
+ * How many badge writes have been *issued*, and the outcome the warning below
+ * currently reflects.
  *
- * It has to: since #232 the badge is re-asserted on every successful count
- * fetch, so a phone with badges switched off would otherwise log on every
- * foreground and every mark-read, and a warning that prints constantly is one
- * nobody reads. `null` is "we haven't written yet".
+ * Callers `void` these, so two can be in flight at once — a `signedOut` clear
+ * racing a count that has just landed — and the native side doesn't run them on
+ * a serial queue, so they can resolve out of order. Ranking by issue order means
+ * the latch ends up holding the fate of the *last write made* rather than the
+ * last one to come back, which is the thing a developer reading the warning
+ * assumes it means.
  */
+let badgeWrites = 0;
+let reportedWrite = 0;
+/** What we last knew about whether iOS accepts these; `null` before any write. */
 let badgeWritesAccepted: boolean | null = null;
 
-function warnOnceIfRefused(accepted: boolean): void {
+/**
+ * Warn — in development only — when badge writes *start* being refused.
+ *
+ * On the transition rather than on every write, because since #232 the badge is
+ * re-asserted on every successful count fetch: on a phone with badges switched
+ * off that would be a line on every foreground and every mark-read, and a
+ * warning that prints constantly is one nobody reads.
+ */
+function reportBadgeWrite(
+  attempt: number,
+  accepted: boolean,
+  error: unknown
+): void {
+  // Production keeps no state here: nothing reads it, and a latch nobody
+  // consults is just a way to be wrong later.
+  if (!__DEV__) return;
+  if (attempt < reportedWrite) return;
+  reportedWrite = attempt;
+
   const changed = badgeWritesAccepted !== accepted;
   badgeWritesAccepted = accepted;
-  if (__DEV__ && changed && !accepted) {
+  if (accepted || !changed) return;
+
+  if (error) {
+    console.warn('[push] the app-icon badge write failed (#233):', error);
+  } else {
     console.warn(
-      '[push] iOS refused the app-icon badge write — badges are off for this ' +
-        'app, or a Focus filter or Deliver Quietly is in force. The icon will ' +
-        'keep whatever number the last push put there (#233).',
+      '[push] iOS refused the app-icon badge write: badges are not enabled ' +
+        'for this app (Settings → Notifications → TimeLine → Badges). The ' +
+        'icon will keep whatever number the last push put there (#233).'
     );
   }
 }

@@ -342,22 +342,22 @@ describe('setAppBadge', () => {
     jest.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  iosOnly('puts the count on the icon', () => {
-    setAppBadge(3);
+  iosOnly('puts the count on the icon', async () => {
+    await setAppBadge(3);
 
     expect(mockNotifications.setBadgeCountAsync).toHaveBeenCalledWith(3);
   });
 
-  iosOnly('clears the icon with zero', () => {
+  iosOnly('clears the icon with zero', async () => {
     // The count that matters most: the one that takes the badge away. It has to
     // go through the same call, which is why this isn't guarded against zero.
-    setAppBadge(0);
+    await setAppBadge(0);
 
     expect(mockNotifications.setBadgeCountAsync).toHaveBeenCalledWith(0);
   });
 
-  iosOnly('never hands the native side a negative count', () => {
-    setAppBadge(-1);
+  iosOnly('never hands the native side a negative count', async () => {
+    await setAppBadge(-1);
 
     expect(mockNotifications.setBadgeCountAsync).toHaveBeenCalledWith(0);
   });
@@ -369,10 +369,22 @@ describe('setAppBadge', () => {
     // app has posted. A well-meaning "clear the badge on foreground" would
     // silently wipe the shade, in the release right after #178 taught this app
     // to dismiss notifications only once they've genuinely been dealt with.
-    setAppBadge(0);
-    setAppBadge(5);
+    await setAppBadge(0);
+    await setAppBadge(5);
 
     expect(mockNotifications.setBadgeCountAsync).not.toHaveBeenCalled();
+  });
+
+  androidOnly('answers null on Android, which is not the same as refused', async () => {
+    // `false` means "attempted and declined". Android never attempts, so a
+    // caller that acted on `false` — surfacing it, retrying it — would treat
+    // every Android launch as a refusal. Only `setAppBadge` knows the platform
+    // rule, so only `setAppBadge` can tell the two apart.
+    await expect(setAppBadge(2)).resolves.toBeNull();
+
+    // And the early return has to come *before* the warning, or every launch
+    // reports a refusal for a write we deliberately never make.
+    expect(console.warn).not.toHaveBeenCalled();
   });
 
   iosOnly('survives a badge the OS refuses to set', async () => {
@@ -390,15 +402,65 @@ describe('setAppBadge', () => {
   iosOnly('says whether the write actually landed', async () => {
     // #233. `setBadgeCountAsync` resolves to a **boolean**, and `false` is not
     // an error — it is the module reporting that iOS declined, because badges
-    // are switched off for the app or a Focus filter is in force. Discarding it
-    // made a refused write indistinguishable from a successful one, which is
-    // precisely the bit #234's stuck-badge investigation needed and had to fall
-    // back on reading the module's Swift source to guess at.
+    // are not enabled for the app. Discarding it made a refused write
+    // indistinguishable from a successful one, which is precisely the bit
+    // #234's stuck-badge investigation needed and had to fall back on reading
+    // the module's Swift source to guess at.
     await expect(setAppBadge(3)).resolves.toBe(true);
 
     mockNotifications.setBadgeCountAsync.mockResolvedValue(false as never);
 
     await expect(setAppBadge(3)).resolves.toBe(false);
+  });
+
+  iosOnly('keeps what a thrown write said, rather than guessing at a setting', async () => {
+    // A throw and a `false` are different answers. `setBadgeCount()` can throw
+    // on iOS 16+, and an unlinked module raises `UnavailabilityError` — the one
+    // branch carrying real diagnostic text. Reporting it as "badges are off in
+    // Settings" would send the next investigation to a Settings screen with the
+    // actual error already discarded, which is the failure #233 exists to stop.
+    const boom = new Error('ExpoNotifications is not available');
+    // A landed write first, so the failure below is a transition whatever ran
+    // before this — see the latch note in the refusal test.
+    await setAppBadge(0);
+    mockNotifications.setBadgeCountAsync.mockRejectedValue(boom as never);
+
+    await setAppBadge(1);
+
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('failed'),
+      boom
+    );
+  });
+
+  iosOnly('latches on the last write made, not the last one to come back', async () => {
+    // Callers `void` these, so two can be in flight at once, and the native
+    // side doesn't serialise them. If an older write resolving late got the
+    // last word, the latch would hold an outcome that isn't the icon's — and
+    // the next genuine transition into refusal would go unreported.
+    const warn = console.warn as jest.Mock;
+    await setAppBadge(0);
+
+    let settleFirst!: (accepted: boolean) => void;
+    mockNotifications.setBadgeCountAsync.mockReturnValueOnce(
+      new Promise<boolean>((resolve) => {
+        settleFirst = resolve;
+      }) as never
+    );
+    const first = setAppBadge(1);
+    mockNotifications.setBadgeCountAsync.mockResolvedValue(false as never);
+
+    // The second write is issued later and comes back first, refused.
+    await setAppBadge(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // Now the older one lands, accepted. It must not overwrite the newer
+    // outcome, or the next refusal reads as a fresh transition and warns again.
+    settleFirst(true);
+    await first;
+    await setAppBadge(3);
+
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   iosOnly('warns once when writes start being refused, not on every write', async () => {
@@ -428,13 +490,6 @@ describe('setAppBadge', () => {
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
-  androidOnly('stays quiet on Android, where it never writes at all', async () => {
-    // The early return has to come *before* the warning, or every Android
-    // launch would report a refusal for a write we deliberately never make.
-    await expect(setAppBadge(2)).resolves.toBe(false);
-
-    expect(console.warn).not.toHaveBeenCalled();
-  });
 });
 
 describe('conversationIdFromUrl', () => {

@@ -817,10 +817,33 @@ disagree about what's waiting.
   `useQuery` results is in the effect's deps for exactly this: it advances on
   every *successful* fetch whether or not the number did, which turns "write
   when our count changes" into "re-assert what we believe, whenever we've just
-  confirmed it". `setBadgeCountAsync` with the number already showing is a
-  no-op, so the extra writes cost nothing. A *failed* fetch deliberately writes
-  nothing — `dataUpdatedAt` doesn't move on an error, and the last number the
-  server pushed is a better guess than a stale one of ours.
+  confirmed it".
+
+  **Both halves have to be currently good, not just one of them.** A failed
+  fetch keeps its last successful `data`, so one count failing while the other
+  succeeds still advances the survivor's stamp — and an ungated effect would
+  write a sum half of which nobody has checked in a while. The server pushes 3,
+  the phone comes back on bad signal, the messages count fails and the activity
+  count returns the same 0 as before, and the icon that was *right* gets
+  cleared. So both queries' `isError` are in the deps and gate the write, which
+  is what keeps "never write a number we haven't earned" true of a partial
+  failure and not merely of a cold start. Leaving the icon alone on a failed
+  fetch is the decision: the last number the server pushed beats a stale one of
+  ours.
+
+  **What the re-assert costs**, since "nothing" would be the wrong answer: both
+  keys are polled every 12s while the app is foregrounded (the tab bar and the
+  bell), so their stamps advance on that cadence whether or not anything
+  happened — roughly ten `setBadgeCountAsync` calls a minute, where before there
+  were close to none. `BadgeModule.swift` doesn't compare against the current
+  value, so each is a bridge hop plus a `notificationSettings()` read and a
+  `setBadgeCount()`. Small beside the two HTTP polls it rides on, and both stop
+  dead when the app is backgrounded. The cheaper shape — remember the last
+  number written and skip the call when it matches, forgetting it whenever the
+  app leaves the foreground, since that's the only window in which the server
+  can move the icon — was considered and rejected: it makes the fix depend on
+  catching every `AppState` transition, and a badge that quietly stops
+  re-asserting itself is the bug being fixed.
 
 **Which means the icon and the in-app badges are the same numbers**, not two
 counts that agree by convention: `badge_count_for` is `unread_message_total` +
@@ -888,11 +911,23 @@ web-side read produces, so the icon stayed wrong indefinitely. It now holds.
 
 **A refused write is reported rather than discarded** (#233). `setBadgeCountAsync`
 resolves to a **boolean**, and `false` is not an error: it is the module saying
-iOS declined, because badges are off for the app in Settings, or a Focus filter
-or Deliver Quietly is in force. `setAppBadge` returns that instead of throwing it
-away, and warns in `__DEV__` on the *transition* into refusal — deduped, because
-level-triggering means a phone with badges off would otherwise log on every
-foreground and every mark-read.
+iOS declined. `setAppBadge` returns that instead of throwing it away, and warns
+in `__DEV__` on the *transition* into refusal — deduped, because level-triggering
+means a phone with badges off would otherwise log on every foreground and every
+mark-read.
+
+Worth being precise about what `false` means, because a plausible-sounding list
+would cost the next investigation an afternoon: `BadgeModule.swift` returns it
+when `settings.badgeSetting != .enabled` **and at no other time**. That is the
+app's badge *authorisation* — Settings → Notifications → TimeLine → Badges. A
+Focus mode changes how notifications are delivered, not that setting, so a phone
+in Focus still resolves `true`. A **throw** is a third outcome and is warned
+about separately, since it's the one carrying real diagnostic text
+(`setBadgeCount()` can throw on iOS 16+; an unlinked module raises
+`UnavailabilityError`); it resolves `false` to the caller, because no badge was
+set either way. Android resolves **`null`**, which is deliberately not `false`:
+there the app never attempts a write, so "was it refused?" has no answer, and a
+caller acting on `false` would otherwise read every Android launch as a refusal.
 
 What it deliberately does **not** do is change what the user sees: a refused
 write stays a silent no-op, never a retry, a throw, or a nag. It's their phone
