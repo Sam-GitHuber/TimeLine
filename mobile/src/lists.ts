@@ -43,22 +43,27 @@ export function dedupeById<T extends { id: number }>(items: T[]): T[] {
  * (TanStack v5 removed the old `refetchPage` option; trimming the cache first is
  * the documented replacement.)
  *
- * Returns the input unchanged when there's nothing to trim, so the cache entry
- * keeps its identity and no needless re-render is triggered.
+ * **Returns `undefined` when there's nothing to trim, which is how you decline to
+ * write** — not merely how you keep the cache entry's identity. `setQueryData`
+ * stops only on `undefined`; handing back the identical object dispatches a
+ * success, which resets `isInvalidated`, so "no change" quietly cancels an
+ * invalidation someone else just made. That's the trap that cost `postCache.ts` a
+ * bug (#307), and this is the app's only other no-op updater, so it follows the
+ * same rule rather than resting on an argument about its callers.
  *
- * **Unchanged is still a write, and that's checked rather than assumed here.**
- * `setQueryData` declines only on `undefined`; handing back the identical object
- * dispatches a success, which resets `isInvalidated` — the trap that cost
- * `postCache.ts` a bug (#307). It's harmless at every call site of this one: the
- * three pull-to-refresh handlers `await refetch()` immediately after, and
- * `activity.tsx` trims on unmount, where the query has no observer left and
- * refetches on its next mount at `staleTime` 0. Anything that trims *without* a
- * fetch to follow it needs `undefined` here instead.
+ * (The argument would have held — the three pull-to-refresh handlers `await
+ * refetch()` immediately after, and `activity.tsx` trims on unmount where
+ * nothing is observing — but it rests on `staleTime: 0` everywhere, which is the
+ * crutch `postCache.ts` says can't be leaned on. Declining costs nothing: none
+ * of the four callers wants a write when there is nothing to trim.)
+ *
+ * This is therefore an **updater, not a general-purpose function**: it answers
+ * "what should this cache entry become?", where `undefined` means "leave it".
  */
 export function trimToFirstPage<T>(
   data: InfiniteData<Paginated<T>, string> | undefined
 ): InfiniteData<Paginated<T>, string> | undefined {
-  if (!data || data.pages.length <= 1) return data;
+  if (!data || data.pages.length <= 1) return undefined;
   return {
     pages: data.pages.slice(0, 1),
     pageParams: data.pageParams.slice(0, 1),

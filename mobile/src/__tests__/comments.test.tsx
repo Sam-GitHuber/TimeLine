@@ -125,10 +125,10 @@ function postList(newCommentCount: number) {
  * why a stale count sat there in the first place (#273). A seeded, unobserved
  * cache entry doesn't reproduce that: with `staleTime` at 0 an unmounted screen
  * refetches on its next mount whatever we do here, so it would pass against the
- * broken build. Asserting on refetches also side-steps a race — the
- * seen-marking effect writes to these same queries a tick after the thread
- * refetches, and a `setQueryData` clears `isInvalidated`, so the flag is not a
- * dependable thing to wait on.
+ * broken build. Asserting on refetches also side-steps a race — the seen-marking
+ * write resolves with the thread's own refetch and lands on these same queries,
+ * and a `setQueryData` that changes something clears `isInvalidated`, so the flag
+ * is not a dependable thing to wait on.
  */
 async function renderThreadOverTimelines() {
   const queryClient = makeClient();
@@ -589,8 +589,15 @@ describe('the “· N new” badge follows the request, not the render', () => {
     mockFetch.mockResolvedValue(jsonResponse([]));
 
     await openThread();
+    // Waited for on screen, not on the cache. The write happens inside the
+    // `queryFn` *before* it resolves, so the thread having rendered is proof the
+    // write landed — and waiting on the render is what keeps React's update
+    // inside `act`, where a `waitFor` on cache data alone leaves it outside and
+    // warns. (The warning is worth keeping quiet: it's also how a real ordering
+    // flake would announce itself.)
+    await screen.findByText('No comments yet. Start the conversation.');
 
-    await waitFor(() => expect(newCount(queryClient)).toBe(0));
+    expect(newCount(queryClient)).toBe(0);
   });
 
   /**
@@ -619,7 +626,9 @@ describe('the “· N new” badge follows the request, not the render', () => {
     await waitFor(() => expect(badge()).toBe(2));
     mockFetch.mockResolvedValue(jsonResponse([]));
 
-    view.rerender(
+    // Awaited, like the post one above: `rerender` is a Promise here, and the
+    // thread's mount and its cache write land outside `act` without it.
+    await view.rerender(
       <QueryClientProvider client={queryClient}>
         <TimelineScreen queryKey={['groupEvents', 5, 'upcoming']} queryFn={events} />
         <CommentThread target={{ eventId: 9, groupId: 5 }} />

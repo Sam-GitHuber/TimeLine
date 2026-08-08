@@ -405,10 +405,20 @@ counts exclude your own messages.
   keeps that survivable today — and the app is where it can least be relied on,
   since a tab navigator keeps screens mounted. Both clients' four updaters
   decline with `undefined` (web #306, app #307, which also covers the event
-  twin). The same shape lives in `mobile/src/lists.ts`'s `trimToFirstPage`, where
-  it's safe because every caller either refetches immediately after or trims on
-  unmount; the comment there says so, so the next reader doesn't have to work it
-  out twice.
+  twin), and so does the app's only other no-op updater,
+  `trimToFirstPage` in `mobile/src/lists.ts`. **That one was safe on an argument
+  rather than a rule** — its four callers either `await refetch()` straight after
+  or trim on unmount — and the argument rested on `staleTime: 0`, which is the
+  crutch this bullet says can't be leaned on, so it now follows the rule instead.
+  Declining costs it nothing; no caller wants a write when there's nothing to
+  trim.
+- **What that closes and what it doesn't.** The bail-outs decline, but a write
+  that *does* have something to clear still resets `isInvalidated` on that one
+  list. Closing that would mean re-invalidating the post lists immediately after
+  — a refetch of every timeline on every thread open, which is the round trip the
+  mirror exists to avoid — so the residue is deliberate and bounded: it needs a
+  list holding this post with a live count at the moment the tree's refetch
+  lands. It becomes visible the day a post list gets a `staleTime`.
 - **`CommentThread` branches on the tree, not on the query flags.** Three states
   — we have a tree, we're never getting one, we're still waiting — and only the
   first can be rendered, so the tree decides and the flags only pick which way of
@@ -433,6 +443,15 @@ counts exclude your own messages.
     `mobile/src/app/_layout.tsx` for the long list of things wiring it would
     break), so an offline GET rejects rather than pausing. Wiring it is a
     one-liner, and the failure here would be a spinner that never stops.
+  - **The same rule has to hold one level up, or the thread's care is undone from
+    above.** `mobile/src/app/post/[postId].tsx` returned on its own query's
+    `error` before it looked at the post it had, so a failed refetch of
+    `['post', id]` replaced the card, the thread *and* the half-typed reply — and
+    that refetch is routine, since `invalidateComments` invalidates that very key
+    on every comment write. It renders the post it has; a **404** still outranks
+    the cached copy, because that's an answer about now (deleted, or out of
+    reach), not a failure to ask. Three more app screens and three web views have
+    the same defect and are *not* fixed: #309 and #310.
 - **That cache write matches on the first key segment, not the whole key** —
   `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
   clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post

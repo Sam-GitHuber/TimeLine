@@ -182,6 +182,63 @@ it('leaves the badge alone when the comments never loaded', async () => {
   expect(cached?.new_comment_count).toBe(2);
 });
 
+/**
+ * A failed *refresh* of the post must not take the screen off the screen (#307).
+ *
+ * `query-core`'s error action keeps the data it has and flips `status` to
+ * 'error', and this screen's refetch is routine: posting a comment invalidates
+ * `['post', id]` through `invalidateComments`, and so does every foreground. With
+ * the error branch ahead of the post, a comment that went through on a patchy
+ * connection was followed a second later by the card, the thread and a half-typed
+ * reply being replaced by an error panel — undoing, from one level up, exactly
+ * what `CommentThread` was taught to survive.
+ */
+describe('a refresh that fails', () => {
+  /** The post request fails from here on; comments keep working. */
+  function breakThePost(status: number, detail: string) {
+    mockFetch.mockImplementation(async (url: string) =>
+      url.includes('/comments/')
+        ? jsonResponse([])
+        : jsonResponse({ detail }, status)
+    );
+  }
+
+  it('keeps the post and its thread', async () => {
+    serve({ post: jsonResponse(makePost()) });
+    const { client } = await renderScreen();
+    await screen.findByText('A day on the hills');
+    breakThePost(503, 'Service unavailable.');
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['post', '7'] });
+    });
+
+    await waitFor(() =>
+      expect(client.getQueryState(['post', '7'])?.status).toBe('error')
+    );
+    expect(screen.getByText('A day on the hills')).toBeTruthy();
+    // The thread and the box you were typing in, which is the costly half.
+    expect(screen.getByLabelText('Write a comment…')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load this post')).toBeNull();
+  });
+
+  it('still says the post has gone on a 404, even holding a copy of it', async () => {
+    // The one error that outranks the cached copy: a 404 is an answer about
+    // *now* — deleted, or put out of reach — not a failure to ask.
+    serve({ post: jsonResponse(makePost()) });
+    const { client } = await renderScreen();
+    await screen.findByText('A day on the hills');
+    breakThePost(404, 'Not found.');
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['post', '7'] });
+    });
+
+    expect(await screen.findByText('Post not available')).toBeTruthy();
+    expect(screen.queryByText('A day on the hills')).toBeNull();
+  });
+});
+
 it('opens a deep-linked reply even when it is nested inside collapsed parents', async () => {
   params.comment = '3';
   serve({

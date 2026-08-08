@@ -330,13 +330,17 @@ export function CommentThread({
   if (!comments) {
     if (isError) {
       return (
-        <Text style={styles.error}>
+        <Text style={[styles.status, styles.error]}>
           {error instanceof Error ? error.message : 'Couldn’t load comments.'}
         </Text>
       );
     }
     if (isPaused) {
-      return <Text style={styles.waiting}>Waiting for a connection…</Text>;
+      return (
+        <Text style={[styles.status, styles.waiting]}>
+          Waiting for a connection…
+        </Text>
+      );
     }
     return <ActivityIndicator color={colors.accent} style={styles.loading} />;
   }
@@ -1194,4 +1198,10 @@ const styles = StyleSheet.create({
   // Not an error — nothing has failed yet, so it reads as quietly as the empty
   // state rather than as red text.
   waiting: { fontSize: fontSize.sm, color: colors.inkFaint },
+  // **The two ways of having no thread line up with the third.** These render
+  // *instead of* `styles.thread`, so without its offsets they sat hard against
+  // the screen edge while "No comments yet" — the same slot, one state over —
+  // sat a step and a half in. Same two paddings, spelled out here because
+  // there's no wrapper to inherit them from.
+  status: { marginLeft: THREAD_LEFT + THREAD_INDENT, marginVertical: spacing.sm },
 });

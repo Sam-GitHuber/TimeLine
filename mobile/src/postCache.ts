@@ -75,6 +75,15 @@ function seen(post: Post, postId: number): Post {
  * navigator keeps screens mounted (#273/#275/#277), so the first `staleTime` or
  * `refetchOnMount: false` added anywhere would make it visible. The web's twin
  * carries the same rule (`frontend/src/postCache.js`).
+ *
+ * **What this narrows and does not close:** when there *is* something to clear,
+ * the write happens and still resets `isInvalidated` on that one list. Closing
+ * that would mean re-invalidating the post lists straight afterwards — a refetch
+ * of every timeline on every thread open, which is the exact round trip this
+ * whole file exists to avoid. So the residue is deliberate, and it's bounded to
+ * a list that holds this post with a live count at the moment the tree's refetch
+ * lands. If a `staleTime` is ever added to a post list, that's the case to
+ * re-examine, not this comment.
  */
 export function markPostCommentsSeen(
   queryClient: QueryClient,
@@ -93,10 +102,15 @@ export function markPostCommentsSeen(
       if (!hit) return undefined;
       return {
         ...data,
-        pages: data.pages.map((page) => ({
-          ...page,
-          results: page.results.map((p) => seen(p, postId)),
-        })),
+        // As guarded as the hit-check above, which is not belt-and-braces: the
+        // two ran on different assumptions, so one page without `results`
+        // alongside one holding the post threw. That throw *used* to spoil a
+        // render; now this runs inside the thread's `queryFn`, it would reject a
+        // GET that had already succeeded and already stamped `last_seen_at`
+        // server-side — an un-clearable badge over comments you'd read.
+        pages: data.pages.map((page) =>
+          page?.results ? { ...page, results: page.results.map((p) => seen(p, postId)) } : page
+        ),
       };
     }
   );
