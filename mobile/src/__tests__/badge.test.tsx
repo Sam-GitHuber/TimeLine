@@ -50,9 +50,19 @@ function Harness() {
   return null;
 }
 
-/** One turn of the event loop, for effects and the fetches behind them. */
-function tick() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * One turn of the event loop, for effects and the fetches behind them.
+ *
+ * `tick(5)` where a *later millisecond* is needed: the re-assert rides
+ * `dataUpdatedAt`, which React Query sets from `Date.now()` on every successful
+ * fetch, so two fetches inside the same millisecond carry the same stamp and
+ * the effect doesn't re-run. Irrelevant in the app, where the trigger is a
+ * foreground or a mark-read seconds apart, but a real source of flake in a test
+ * that refetches immediately. `setTimeout` fires no *earlier* than its delay,
+ * which makes the gap a certainty rather than a likelihood.
+ */
+function tick(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 let client: QueryClient;
@@ -164,6 +174,98 @@ it('follows the counts down as things are read', async () => {
   });
 
   expect(badge()).toBe(1);
+});
+
+/**
+ * Refetch one count and let everything settle. Returns how many badge writes
+ * that produced.
+ *
+ * **One key at a time, deliberately.** A blanket `invalidateQueries()` refetches
+ * both, so either stamp alone re-running the effect would satisfy the assertion
+ * — and the half of the level trigger that wasn't wired could regress in
+ * silence. Read on the web, the two counts drop on different keys: a message
+ * moves `unreadMessages`, a reaction or a reply moves `notificationsUnread`.
+ */
+async function refetch(...queryKeys: string[][]) {
+  const before = mockSetAppBadge.mock.calls.length;
+  // A later millisecond, so a fresh `dataUpdatedAt` is certain — see `tick`.
+  await tick(5);
+  await act(async () => {
+    // One call per key: a single `queryKey` array is a *prefix*, so passing
+    // both names together would match neither query.
+    await Promise.all(
+      queryKeys.map((queryKey) => client.invalidateQueries({ queryKey }))
+    );
+    await tick(20);
+  });
+  return mockSetAppBadge.mock.calls.length - before;
+}
+
+it('re-asserts the number when the message count confirms what we believed', async () => {
+  // **#232, and the reason the badge is level-triggered rather than
+  // edge-triggered.** The icon has two writers, and only one of them is us: a
+  // push sets it while the app is backgrounded, and it can then stop being true
+  // without the app observing anything — the messages get read on the web, or
+  // the post behind a notification is deleted. On foreground our counts refetch
+  // and land on the number already in the cache. Keyed on the count alone, the
+  // effect never runs, and the server's stale number stands. That is how a
+  // tester's icon sat on 2 with nothing at all waiting, unclearable by anything
+  // she did in the app, because her counts were already right.
+  counts({ messages: 0, activity: 0 });
+  await openApp();
+  expect(badge()).toBe(0);
+
+  expect(await refetch(['unreadMessages'])).toBeGreaterThan(0);
+  expect(badge()).toBe(0);
+});
+
+it('re-asserts the number when the activity count confirms what we believed', async () => {
+  // The other half of the same trigger, pinned separately for the reason
+  // `refetch` explains: one dep is enough to make a both-keys test pass.
+  counts({ messages: 0, activity: 0 });
+  await openApp();
+  expect(badge()).toBe(0);
+
+  expect(await refetch(['notificationsUnread'])).toBeGreaterThan(0);
+  expect(badge()).toBe(0);
+});
+
+it('writes nothing when a count fails, even if the other one confirms', async () => {
+  // **The trap in level-triggering, and the one way it could be worse than the
+  // bug it fixes.** A failed fetch keeps its last good `data`, so one count
+  // failing while the other succeeds still advances the survivor's stamp — and
+  // an ungated effect would then write a sum half of which nobody has checked
+  // in a while. Concretely: the server pushes 3, the phone comes back on bad
+  // signal, the messages count fails, the activity count returns the same 0 as
+  // before, and we clear an icon that was right. #179's rule is that we never
+  // write a number we haven't earned, and half a confirmation isn't one.
+  counts({ messages: 2, activity: 1 });
+  await openApp();
+  expect(badge()).toBe(3);
+
+  jest
+    .spyOn(api, 'getUnreadMessageCount')
+    .mockRejectedValue(new Error('offline') as never);
+
+  expect(await refetch(['unreadMessages'], ['notificationsUnread'])).toBe(0);
+});
+
+it('writes nothing when both counts fail', async () => {
+  // The simple half of the same rule. Leaving the icon showing the last number
+  // the server pushed is the decision here — it beats a stale one of ours.
+  counts({ messages: 2, activity: 1 });
+  await openApp();
+  expect(badge()).toBe(3);
+
+  jest
+    .spyOn(api, 'getUnreadMessageCount')
+    .mockRejectedValue(new Error('offline') as never);
+  jest
+    .spyOn(api, 'getUnreadNotificationCount')
+    .mockRejectedValue(new Error('offline') as never);
+
+  expect(await refetch(['unreadMessages'])).toBe(0);
+  expect(await refetch(['notificationsUnread'])).toBe(0);
 });
 
 it('clears the icon on the way out', async () => {
