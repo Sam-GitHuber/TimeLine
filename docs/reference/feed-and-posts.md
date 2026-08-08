@@ -563,15 +563,17 @@ Two consequences worth knowing:
   phrasing of the same question is how the two halves of a file drift apart.
   `markConversationRead` carries a `.catch()` besides, since the old guard was
   what used to keep the write off a failing connection. The app made the first
-  half of this correction in #311 and still guards on its own `detailLoaded`;
-  the 404 half is open for it.
+  half of this correction in #311 and the 404 half in #315, declaring the same
+  three flags in one block so no site re-derives the answer — see *Ask "is it on
+  screen" once, not twice* in [`mobile-app.md`](mobile-app.md).
 - **A failed refresh stays silent** while stale content is up, on both clients —
   see the app's doc for why a banner was weighed and declined.
 
 The **mirror-image** mistake — screens with *no* error branch at all, where an
 empty state states as fact what was really a failed request — is a separate
-family, tracked apart: #312 for the app, and the web's sites are in its own
-issue. Sites that already get this right and shouldn't be "fixed": `FeedPage`,
+family, tracked apart: the app fixed its two worst sites in #312 (see
+[`mobile-app.md`](mobile-app.md)), and the web's eleven are #314, still open.
+Sites that already get this right and shouldn't be "fixed": `FeedPage`,
 `GroupsDrawer`, `NewChatPicker`, `ConversationListView`, `ReactorsPopover`,
 `PostPage`, `GroupInvitesPage`, `MessageStrandPanel`, `GroupInvitePicker`, and
 `components/events/EventPhotos.jsx` (the best example in the repo — a cold-load

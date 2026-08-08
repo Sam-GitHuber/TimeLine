@@ -1005,6 +1005,77 @@ describe('calendar tab', () => {
 
     expect(await screen.findByText(/Nothing on the calendar/)).toBeTruthy();
   });
+
+  /**
+   * A failed load is not an empty calendar (#312).
+   *
+   * The screen read no error flag at all: `data` came back undefined, `events`
+   * fell to `[]`, and someone with a group dinner tomorrow was told they were
+   * free — with no hint the app couldn't ask, and no way to make it try again.
+   */
+  describe('when the load fails', () => {
+    function failCalendar(status = 503, detail = 'Service unavailable.') {
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+        if (url.includes('/api/calendar/')) return jsonResponse({ detail }, status);
+        return jsonResponse(null, 404);
+      });
+    }
+
+    it('says so rather than that nothing is scheduled', async () => {
+      failCalendar();
+
+      await renderWith(<CalendarScreen />);
+
+      expect(await screen.findByText(/Couldn’t load your calendar/)).toBeTruthy();
+      // The server's own sentence, not a synthesized one.
+      expect(screen.getByText('Service unavailable.')).toBeTruthy();
+      expect(screen.queryByText(/Nothing on the calendar/)).toBeNull();
+    });
+
+    it('loads the calendar when Try again works', async () => {
+      failCalendar();
+      await renderWith(<CalendarScreen />);
+      await screen.findByText(/Couldn’t load your calendar/);
+
+      const scheduled = makeEvent({ id: 12, title: 'Book club', status: 'scheduled' });
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+        if (url.includes('/api/calendar/')) return jsonResponse([scheduled]);
+        return jsonResponse(null, 404);
+      });
+
+      await fireEvent.press(screen.getByText('Try again'));
+
+      expect(await screen.findByText('Book club')).toBeTruthy();
+    });
+
+    it('keeps the events it has when a refresh fails', async () => {
+      // `isError && !data`, not a bare `isError` — the same way round as every
+      // other screen. A failed refetch keeps what loaded rather than replacing
+      // a full calendar with an apology.
+      const scheduled = makeEvent({ id: 12, title: 'Book club', status: 'scheduled' });
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+        if (url.includes('/api/calendar/')) return jsonResponse([scheduled]);
+        return jsonResponse(null, 404);
+      });
+      const { client } = await renderWith(<CalendarScreen />);
+      await screen.findByText('Book club');
+
+      failCalendar();
+      await act(async () => {
+        await client.invalidateQueries({ queryKey: ['personalCalendar'] });
+      });
+      // The cache flips to 'error' a render before the screen does — React
+      // Query notifies on a macrotask — so without this flush the assertions
+      // below read the pre-error tree and pass with the bug still in place.
+      await settle(2);
+
+      expect(screen.getByText('Book club')).toBeTruthy();
+      expect(screen.queryByText(/Couldn’t load your calendar/)).toBeNull();
+    });
+  });
 });
 
 // --- The group page's event surfaces ---------------------------------------

@@ -4228,3 +4228,63 @@ it('marks the thread read even when the detail refresh has failed', async () => 
 
   await waitFor(() => expect(readPosts()).toBeGreaterThan(before));
 });
+
+/**
+ * The other half of that guard (#315): a **404** takes the thread off the
+ * screen, and the mark-read effect has to notice.
+ *
+ * `!!detail` was what shipped in #311, and it is wrong here in the opposite
+ * direction — nothing clears a query's `data`, a 404 least of all, so the cached
+ * detail stays truthy while every render branch has switched to *This
+ * conversation isn't available*. The effect went on POSTing `mark_read` for a
+ * conversation showing nothing, on the detail poll's schedule, for as long as
+ * the screen stayed open. The effect reads `showingThread` now, derived in the
+ * same block as the `loadError` the render branches read, so neither half
+ * re-derives the answer for itself.
+ */
+it('stops marking read once a 404 has taken the thread off the screen', async () => {
+  const transcript = [message({ id: 1, text: 'See you at six' })];
+  serve({ conversation: detail({ unread_count: 1 }), messages: transcript });
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  await renderScreen(client);
+  await screen.findByText('See you at six');
+
+  const readPosts = () =>
+    mockFetch.mock.calls.filter(
+      ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
+    ).length;
+
+  // Removed from the chat, or it was deleted: the detail 404s from here on. The
+  // transcript endpoint keeps answering, which is what keeps `messageCount`
+  // moving and re-runs the effect.
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      if (/\/api\/conversations\/5\/(\?|$)/.test(url)) {
+        return jsonResponse({ detail: 'Not found.' }, 404);
+      }
+      return base(url, init);
+    }
+  );
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['conversation', 5] });
+  });
+  expect(
+    await screen.findByText('This conversation isn’t available.')
+  ).toBeTruthy();
+  const afterGone = readPosts();
+
+  // A message lands underneath the card. Nothing is on screen to have read.
+  transcript.push(message({ id: 2, text: 'Running late' }));
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['messages', 5] });
+  });
+  await settle(2);
+
+  expect(readPosts()).toBe(afterGone);
+});

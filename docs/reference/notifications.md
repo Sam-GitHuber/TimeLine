@@ -80,6 +80,18 @@ Notification:
 
 - **Opening the centre** marks all currently-unread items **seen** (`POST
   /notifications/seen/`) → the badge clears, but every item stays in the list.
+  ⚠️ **On the app that write waits for the list to arrive** (#312). It used to
+  fire from a mount effect, unconditionally, and the two came apart in the case
+  that matters: open the bell with no signal, the fetch fails, and the screen —
+  which had no error branch at all — said *You're all caught up* while the POST
+  cleared every unread server-side. The badge that would have brought the reader
+  back was gone, and the screen had just told them there was nothing to come
+  back for. It is gated on `listLoaded` (the same value the empty/error branches
+  read) rather than `isSuccess`, because a warm list whose *refetch* failed is
+  still a screen full of notifications someone is looking at. That is the
+  #307/#308 rule on a second surface: a write that mirrors what the reader has
+  *seen* rides the read that showed it to them, not a render that happened
+  anyway. The web's copy is still ungated — see #314.
 - **Acting on an item** marks it **addressed**. Two ways in:
   1. **Click-through** in the dropdown (`POST /notifications/<id>/addressed/`),
      which also implies seen.

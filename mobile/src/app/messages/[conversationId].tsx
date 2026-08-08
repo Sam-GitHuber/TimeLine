@@ -453,6 +453,34 @@ export default function ThreadScreen() {
     refetchInterval: CONVERSATION_DETAIL_POLL_MS,
   });
   const detail = convoQuery.data;
+
+  /**
+   * **The transcript we have beats an error about refreshing it.** `loadError`
+   * used to be a bare `convoQuery.isError`, and that is true of a *failed
+   * refetch* too: query-core's error action sets `status: 'error'` while keeping
+   * the data the query already holds. `staleTime` is 0, `focusManager` is wired
+   * to `AppState`, and the detail is re-polled every
+   * `CONVERSATION_DETAIL_POLL_MS` — so backgrounding the app and coming back on
+   * patchy signal reliably failed a refetch of a fully-loaded chat, and the
+   * header, the transcript and the composer (with whatever was half-typed in it)
+   * were replaced by an error card. Nothing had been lost server-side; the
+   * screen simply stopped showing what it had.
+   *
+   * A **404** is the exception and still outranks the cached copy: the thread
+   * being deleted or out of reach is a real answer about *now*, not a failure to
+   * ask. Same rule as `post/[postId].tsx` and `CommentThread` (#307/#308).
+   *
+   * Declared up here, next to the data they read, rather than beside the JSX
+   * that uses them — because the mark-read effect below has to ask the same
+   * question, and asking it a second way is how the two answers drift apart
+   * (#315).
+   */
+  const notAvailable =
+    convoQuery.error instanceof ApiError && convoQuery.error.status === 404;
+  const loadError = notAvailable || (convoQuery.isError && !detail);
+  /** Is any of this conversation actually on screen? */
+  const showingThread = !loadError && !!detail;
+
   const isGroup = detail?.kind === 'group';
   // A pending member can't read or send — the messages endpoint 403s — so the
   // thread is replaced by PendingChatPanel below rather than fetching a list it
@@ -784,19 +812,24 @@ export default function ThreadScreen() {
    * viewer marking a thread read they can't see a line of, which was harmless
    * but never intended.
    *
-   * **`detailLoaded` is the whole guard now, and `convoQuery.isError` is gone
+   * **`showingThread` is the whole guard now, and `convoQuery.isError` is gone
    * from it (#309).** The two used to mean the same thing here — an error meant
    * the screen was an error card with no transcript on it, so not marking read
    * was right. That stopped being true the moment a failed *refetch* started
    * keeping the thread on screen: the reader is looking at the messages, and
    * skipping the write left the lock-screen notification and the tab badge
-   * claiming unread mail they'd just read, until the detail poll next
-   * succeeded. "Is anything shown" is the question, and `detailLoaded` is what
-   * answers it — the same move as the render branches below.
+   * claiming unread mail they'd just read, until the detail poll next succeeded.
+   *
+   * **`!!detail` on its own isn't the replacement (#315),** tempting as it looks
+   * — and it was what shipped here in #311. A *404* on a refetch never clears
+   * the cached detail either, so `detail` stays truthy while every render branch
+   * has switched to "This conversation isn't available", and this went on firing
+   * a doomed write, on the detail poll's schedule, for a conversation showing
+   * nothing. `showingThread` is the one value both halves of the file read, so
+   * they can't drift.
    */
-  const detailLoaded = !!detail;
   useEffect(() => {
-    if (isPending || !detailLoaded) return;
+    if (isPending || !showingThread) return;
     // Take back this thread's notifications from the phone's notification
     // centre (#178). Reading a thread in the app is the commonest way a
     // notification goes stale, and until this landed nothing ever removed one:
@@ -821,10 +854,10 @@ export default function ThreadScreen() {
       // uncaught rejection is a redbox in development and a warning in
       // production, for a write whose failure is genuinely uninteresting.
       .catch(() => {});
-    // `detailLoaded` rather than `detail`: the payload is re-fetched every
+    // `showingThread` rather than `detail`: the payload is re-fetched every
     // `CONVERSATION_DETAIL_POLL_MS`, so depending on the object itself would
     // turn this into a mark-read poll of its own. A boolean flips once.
-  }, [id, messageCount, isPending, detailLoaded, queryClient]);
+  }, [id, messageCount, isPending, showingThread, queryClient]);
 
   /**
    * Tell the notification handler this thread is the one on screen (#178), so a
@@ -1472,26 +1505,6 @@ export default function ThreadScreen() {
   }
 
   const other = detail?.other;
-  const notAvailable =
-    convoQuery.error instanceof ApiError && convoQuery.error.status === 404;
-
-  /**
-   * **The transcript we have beats an error about refreshing it.** This used to
-   * be a bare `convoQuery.isError`, and that is true of a *failed refetch* too:
-   * query-core's error action sets `status: 'error'` while keeping the data the
-   * query already holds. `staleTime` is 0, `focusManager` is wired to
-   * `AppState`, and the detail is re-polled every
-   * `CONVERSATION_DETAIL_POLL_MS` — so backgrounding the app and coming back on
-   * patchy signal reliably failed a refetch of a fully-loaded chat, and the
-   * header, the transcript and the composer (with whatever was half-typed in
-   * it) were replaced by an error card. Nothing had been lost server-side; the
-   * screen simply stopped showing what it had.
-   *
-   * A 404 is the exception and still outranks the cached copy: the thread being
-   * deleted or out of reach is a real answer about *now*, not a failure to ask.
-   * Same rule as `post/[postId].tsx` and `CommentThread` (#307/#308).
-   */
-  const loadError = notAvailable || (convoQuery.isError && !detail);
 
   /** Whether every ticked message is one you could delete — Delete is offered
    * only then. A bulk action that silently did *part* of what it says (yours,
@@ -1570,7 +1583,7 @@ export default function ThreadScreen() {
             info screen now, where they have room to say what they do; this is
             the door to it, and the muted state still shows here because a
             silenced chat has to say so somewhere you'll see it. */}
-        {!loadError && !isPending && detail ? (
+        {showingThread && !isPending ? (
           <Pressable
             onPress={() => router.push(`/messages/${id}/info`)}
             accessibilityRole="button"

@@ -297,6 +297,53 @@ note on why), and every list screen whose error branch lives in
 `ListEmptyComponent` — which only renders when the list is empty, so it is the
 data check, structurally.
 
+#### Ask "is it on screen" once, not twice
+
+The rule has a second half, and it is the one that bit twice. A **404 on a
+refetch doesn't clear the cached data either** — the error action writes
+`status`, `error` and `isInvalidated` and touches nothing else — so `!!data`
+stays true while every render branch has correctly switched to a *gone* card.
+Any effect beside them guarding on `!!data` is then firing writes for something
+showing nothing.
+
+`messages/[conversationId].tsx` had exactly that (#315): the mark-read effect
+guarded on `detailLoaded` while the render decided from
+`notAvailable || (isError && !detail)`, so a conversation you'd been removed from
+went on POSTing `mark_read` for as long as the screen stayed open, on the detail
+poll's schedule. `notAvailable`, `loadError` and the `showingThread` derived from
+them are now declared **once, up beside the data**, in one block: the mark-read
+effect and the `⋯` menu gate read `showingThread`, the header and body branches
+read `loadError` and `notAvailable`, and every one of them is the same three
+lines rather than a fresh phrasing at each site. That is the property that
+matters — not that one identifier appears everywhere, but that no site
+re-derives the answer for itself, which is how the two halves of a file drift
+apart.
+`markConversationRead` carries a `.catch()` besides, since the old error flag in
+the guard was what used to keep the write off a failing connection.
+
+Still open, same shape, different fix: `post/[postId].tsx` and
+`events/[eventId].tsx` dismiss a post's/event's pushes from an effect gated on
+`!!data`, and a **warm cache** hands that data back synchronously on the first
+render, so the dismissal lands before the mount refetch has been anywhere near
+the server. A guard can't close that one — the write has to ride the request, as
+`CommentThread`'s did in #308. Tracked as #318.
+
+#### The mirror image: no error branch at all
+
+The opposite mistake — reading `isError` *never* rather than too early — is a
+separate family, because an empty state written as a statement of fact reports a
+dropped packet as an answer. Fixed on the app's two worst sites in #312:
+
+- **`app/(tabs)/calendar.tsx`** told someone with a group dinner tomorrow that
+  they had nothing on. It reads `isError && !data` now, with a *Try again*.
+- **`app/activity.tsx`** said *You're all caught up* — and cleared the badge
+  besides; see [notifications.md](notifications.md) for that half. Its error
+  branch lives in `ListEmptyComponent`, per the rule above.
+
+Other sites in this family are still open (#317): the group timeline, the group
+calendar, the profile timeline, notification preferences, and the invite
+picker's member roster (which reaches a *write*, not just a display).
+
 ### Taking a photo: camera or library
 
 Every place that adds a photo — a post, a chat message, a profile or group
