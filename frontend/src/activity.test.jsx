@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { onlineManager } from "@tanstack/react-query";
 import { useLocation } from "react-router-dom";
 import ActivityCenter from "./components/ActivityCenter.jsx";
 import NotificationPreferencesSection from "./components/NotificationPreferencesSection.jsx";
-import { renderWithAuth } from "./test-utils.jsx";
+import {
+  renderWithAuth,
+  failRefetch,
+  unauthoredError,
+} from "./test-utils.jsx";
 import { api } from "./api.js";
 
 // The activity centre (Phase 8): a nav bell + dropdown, three read-states, and
@@ -93,6 +98,113 @@ describe("ActivityCenter", () => {
     renderWithAuth(<ActivityCenter />);
     await user.click(await screen.findByRole("button", { name: /Activity/ }));
     expect(await screen.findByText(/all caught up/i)).toBeInTheDocument();
+  });
+
+  // #314. The panel had no error branch at all: a failed fetch left `data`
+  // undefined, `items` fell back to `[]`, and "You're all caught up" — a flat
+  // statement of fact — rendered on the strength of a request that never
+  // arrived. It could contradict itself out loud, too, since the badge is a
+  // separate query that may well have succeeded.
+  it("says the load failed instead of claiming you're all caught up", async () => {
+    const user = userEvent.setup();
+    api.getUnreadNotificationCount.mockResolvedValue({ count: 5 });
+    api.getNotifications.mockRejectedValue(unauthoredError(500));
+    renderWithAuth(<ActivityCenter />);
+
+    await user.click(await screen.findByRole("button", { name: /Activity/ }));
+
+    expect(
+      await screen.findByText("Couldn’t load your activity.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).toBeNull();
+    // The bell still says 5 unread — which is exactly the contradiction the
+    // old empty state produced, and why the panel must not claim otherwise.
+    expect(
+      screen.getByRole("button", { name: /Activity, 5 unread/ })
+    ).toBeInTheDocument();
+  });
+
+  // The paused state, and the worst instance of it: offline the list request is
+  // never sent, so `isLoading` is false with no data — and "You're all caught
+  // up" rendered under a bell that may well still read "5 unread" from a count
+  // fetched before the signal went (#306's trap).
+  it("says it's waiting rather than that you're all caught up", async () => {
+    const user = userEvent.setup();
+    api.getUnreadNotificationCount.mockResolvedValue({ count: 5 });
+    api.getNotifications.mockResolvedValue(page([]));
+    renderWithAuth(<ActivityCenter />);
+    const bell = await screen.findByRole("button", { name: /Activity, 5 unread/ });
+
+    onlineManager.setOnline(false);
+    try {
+      await user.click(bell);
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/all caught up/i)).toBeNull();
+      // And nothing was marked seen, so the badge that brings you back survives.
+      expect(api.markNotificationsSeen).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  // The write half, and the more serious one. Marking seen used to fire on the
+  // *open transition*, so a failed open both said "all caught up" and cleared
+  // every unread server-side — the badge that would have brought you back was
+  // gone, and the screen had just told you there was nothing to come back for.
+  // Same rule as #307/#308, and the same turn the app took in #312.
+  it("doesn't mark everything seen when the list never arrived", async () => {
+    const user = userEvent.setup();
+    api.getUnreadNotificationCount.mockResolvedValue({ count: 5 });
+    api.getNotifications.mockRejectedValue(unauthoredError(500));
+    renderWithAuth(<ActivityCenter />);
+
+    await user.click(await screen.findByRole("button", { name: /Activity/ }));
+    await screen.findByText("Couldn’t load your activity.");
+
+    expect(api.markNotificationsSeen).not.toHaveBeenCalled();
+  });
+
+  // …and it must still fire once the list does land, including on a retry.
+  it("marks everything seen once the list arrives on a retry", async () => {
+    const user = userEvent.setup();
+    api.getUnreadNotificationCount.mockResolvedValue({ count: 1 });
+    api.getNotifications.mockRejectedValue(unauthoredError(500));
+    renderWithAuth(<ActivityCenter />);
+
+    await user.click(await screen.findByRole("button", { name: /Activity/ }));
+    await screen.findByText("Couldn’t load your activity.");
+
+    api.getNotifications.mockResolvedValue(page([note()]));
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByText("Priya replied to your post")
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.markNotificationsSeen).toHaveBeenCalledTimes(1)
+    );
+  });
+
+  // A failed *refresh* keeps the rows already up — and, since those rows are
+  // still being read, the seen-write is still right to have fired.
+  it("keeps the rows it has when a refetch fails", async () => {
+    const user = userEvent.setup();
+    api.getUnreadNotificationCount.mockResolvedValue({ count: 1 });
+    api.getNotifications.mockResolvedValue(page([note()]));
+    const { queryClient } = renderWithAuth(<ActivityCenter />);
+
+    await user.click(await screen.findByRole("button", { name: /Activity/ }));
+    await screen.findByText("Priya replied to your post");
+
+    api.getNotifications.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["notifications"]);
+
+    expect(
+      screen.getByText("Priya replied to your post")
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load your activity.")).toBeNull();
   });
 
   it("loads older notifications behind the paginator's next (#134)", async () => {
@@ -256,5 +368,31 @@ describe("NotificationPreferencesSection", () => {
     expect(api.updateNotificationPreferences).toHaveBeenCalledWith({
       reaction: false,
     });
+  });
+
+  // #314. Only `mutation.isError` was ever rendered, so a failed *load* left
+  // the "Notifications" heading and its blurb standing over zero toggles —
+  // "there are no settings", not "we couldn't load them" — with no retry.
+  it("says the settings failed instead of showing an empty section", async () => {
+    api.getNotificationPreferences.mockRejectedValue(unauthoredError(500));
+    renderWithAuth(<NotificationPreferencesSection />);
+
+    expect(
+      await screen.findByText("Couldn’t load your notification settings.")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("keeps the toggles it has when a refetch fails", async () => {
+    const { queryClient } = renderWithAuth(<NotificationPreferencesSection />);
+    await screen.findByLabelText("Replies to your posts");
+
+    api.getNotificationPreferences.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["notificationPreferences"]);
+
+    expect(screen.getByLabelText("Replies to your posts")).toBeChecked();
+    expect(
+      screen.queryByText("Couldn’t load your notification settings.")
+    ).toBeNull();
   });
 });

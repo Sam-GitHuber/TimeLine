@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, NOTIFICATIONS_POLL_MS } from "../api.js";
 import { useInfiniteList, trimToFirstPage } from "../hooks.js";
+import { serverMessage, waitingMessage } from "../errors.js";
 import { formatRelativeTime } from "../utils.js";
 import Avatar from "./Avatar.jsx";
 import LoadMoreButton from "./LoadMoreButton.jsx";
@@ -45,25 +46,78 @@ export default function ActivityCenter() {
     api.getNotifications,
     { enabled: open }
   );
-  const { items: notifications, isLoading } = notificationsQuery;
+  const { items: notifications } = notificationsQuery;
 
-  // Opening the panel marks everything currently unread as *seen* — the badge
-  // clears, but every item stays in the list (that's the whole point). Fire it
-  // once per open, then refresh the badge + list so the UI reflects it.
+  /**
+   * **Is the list itself on screen?** (#314) This panel had no error branch at
+   * all: a failed fetch leaves `data` undefined, `items` falls back to `[]`,
+   * and "You're all caught up" — a flat statement of fact — rendered on the
+   * strength of a request that never arrived. It could even contradict itself
+   * out loud, since the badge is a *separate* query: the bell reading
+   * "Activity, 5 unread" directly above a panel saying there was nothing there.
+   *
+   * `data !== undefined` rather than a bare `isError`, the same way round as
+   * every other surface (*Branch on the data, not the query flags*): a failed
+   * *refetch*, or a failed page two, keeps the pages already loaded.
+   *
+   * Declared here, next to the data, because the seen-write below has to ask
+   * the same question — asking it a second way is how the two halves of a file
+   * drift apart.
+   */
+  const listLoaded = notificationsQuery.data !== undefined;
+  const loadFailed = notificationsQuery.isError && !listLoaded;
+
+  /**
+   * Opening the panel marks everything currently unread as *seen* — the badge
+   * clears, but every item stays in the list (that's the whole point). Fire it
+   * once per open, then refresh the badge + list so the UI reflects it.
+   *
+   * **It waits for the list now (#314), where it used to fire on the open
+   * transition.** The two came apart in the case that matters: open the bell
+   * with no signal, the fetch fails, and this cleared every unread server-side
+   * while the panel said "You're all caught up" — so the badge that would have
+   * brought you back was gone, and the screen had just told you there was
+   * nothing to come back for. That is the #307/#308 rule reaching another
+   * surface: a write that mirrors what the reader has *seen* has to ride the
+   * read that showed it to them, not a render that happened anyway. The app
+   * took the same turn for its activity screen in #312.
+   *
+   * `listLoaded`, not `isSuccess`: a warm cache whose refetch failed is still a
+   * panel full of notifications the reader is looking at, and those have been
+   * seen. It's the same value the branches below read.
+   */
+  const seenSentRef = useRef(false);
+  const openRef = useRef(false);
   useEffect(() => {
-    if (!open || unread === 0) return;
-    let cancelled = false;
-    api.markNotificationsSeen().then(() => {
-      if (cancelled) return;
-      queryClient.invalidateQueries({ queryKey: ["notificationsUnread"] });
-      queryClient.invalidateQueries({ queryKey: ["notifications"] });
-    });
-    return () => {
-      cancelled = true;
-    };
-    // Only when the panel transitions to open; unread is read at that moment.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    openRef.current = open;
+    // A fresh open gets a fresh attempt — including one whose fetch failed
+    // last time, which is the whole point of gating it.
+    if (!open) seenSentRef.current = false;
   }, [open]);
+
+  useEffect(() => {
+    if (!open || seenSentRef.current || !listLoaded || unread === 0) return;
+    // Once per open, not once per render: `listLoaded` and `unread` both move
+    // while the panel is up (paging, the badge poll), and each POST would
+    // otherwise be sent again. The ref is checked and set together so a
+    // re-render mid-flight can't slip a second one past it.
+    seenSentRef.current = true;
+    api
+      .markNotificationsSeen()
+      .then(() => {
+        // Closed in the meantime: the list query is `enabled: open`, so there's
+        // nothing mounted to refresh, and the badge poll will catch up anyway.
+        if (!openRef.current) return;
+        queryClient.invalidateQueries({ queryKey: ["notificationsUnread"] });
+        queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      })
+      .catch(() => {
+        // Nothing to show and nothing to undo — the badge simply stays up,
+        // which is the honest answer, and the next open tries again. Caught
+        // rather than left to reject: an unhandled rejection is noise in the
+        // console exactly when something else is already going wrong.
+      });
+  }, [open, listLoaded, unread, queryClient]);
 
   // Closing the panel drops back to a single page, so a reopen doesn't refetch
   // pages nobody is looking at (notifications.md; the app trims on unmount).
@@ -147,9 +201,25 @@ export default function ActivityCenter() {
             <p className="text-sm font-semibold text-ink">Activity</p>
           </div>
           <div className="max-h-[70vh] overflow-y-auto">
-            {isLoading ? (
+            {loadFailed ? (
+              <div className="px-4 py-8 text-center">
+                <p className="text-sm text-red-600">
+                  {serverMessage(
+                    notificationsQuery.error,
+                    "Couldn’t load your activity."
+                  )}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => notificationsQuery.refetch()}
+                  className="btn btn-ghost btn-sm mt-3"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : !listLoaded ? (
               <p className="px-4 py-6 text-center text-sm text-ink-faint">
-                Loading…
+                {waitingMessage(notificationsQuery)}
               </p>
             ) : notifications.length === 0 ? (
               <p className="px-4 py-8 text-center text-sm text-ink-faint">

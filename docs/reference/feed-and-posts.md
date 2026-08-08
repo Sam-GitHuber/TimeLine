@@ -569,10 +569,80 @@ Two consequences worth knowing:
 - **A failed refresh stays silent** while stale content is up, on both clients —
   see the app's doc for why a banner was weighed and declined.
 
-The **mirror-image** mistake — screens with *no* error branch at all, where an
-empty state states as fact what was really a failed request — is a separate
-family, tracked apart: the app fixed its two worst sites in #312 (see
-[`mobile-app.md`](mobile-app.md)), and the web's eleven are #314, still open.
+### The mirror image: no error branch at all — the web's sites
+
+The other half of the same family, and the one that reads worse. Where the
+sites above threw *away* content they had, these state as **fact** something
+they never heard back about: the query fails, `data` is undefined, the derived
+array defaults to `[]`, and an empty state written as a flat sentence renders.
+Fixed for the web in #314 (the app's two worst sites went in #312; the rest are
+#317).
+
+**Offline it paints instantly, with no spinner.** `main.jsx` builds a bare
+`new QueryClient()`, so `networkMode` is the default `'online'` and an offline
+query sits **paused** — `status` stays `pending`, `fetchStatus` goes to `paused`,
+the request is never *sent*, and `isLoading` (`isPending && isFetching`) is false
+with no data behind it. So `!isLoading && !isError` is *not* enough on its own,
+which is #306's lesson; a branch that only handles "loading" and "errored"
+leaves the empty state as the fall-through for "we haven't asked yet".
+
+**Which is why the waiting branch is gated on `!data`, not on `isLoading`.** The
+first cut of #314 got the error branch right and left the loading branch reading
+`isLoading`, so the paused case still fell through to the empty state — the exact
+bug, on the exact screens, with the fix already in the file. Caught in review.
+The full shape, and the order matters:
+
+```jsx
+loadFailed ? <error + retry/>            // isError && !data
+  : !data ? <p>{waitingMessage(q)}</p>   // pending *or* paused
+  : items.length === 0 ? <empty/>        // an answer, and it was none
+  : <content/>
+```
+
+`waitingMessage()` (`errors.js`) is the shared wording: "Loading…" while a
+request is genuinely out, "Waiting for a connection…" when it hasn't been sent
+and won't be until the signal returns. Two sentences because they ask two
+different things of the reader, and because a spinner that never resolves and
+never explains is its own dead end. `CommentThread.jsx` is the original, written
+inline there for #306.
+
+Eleven sites, plus the photo gallery found in the same sweep, all fixed by
+naming `loadFailed = isError && !data` next to the query and branching on it
+before the empty state — `!data`, never a bare `isError`, or it becomes the
+mistake above. Retries where the surface has room: `CalendarPage` (an *empty
+month grid* is the most confident possible lie about a calendar), `GroupPage`'s
+posts, upcoming, past events and calendar, `ProfilePage`'s posts (which named a
+person: "*Ada* hasn't posted yet"), `ActivityCenter`, `GroupMembersPanel`,
+`NotificationPreferencesSection`, `ConversationThreadView`'s transcript ("No
+messages yet — say hello." in a thread with years of history), and
+`ConversationInfoView` — where one `!detail` branch was doing two jobs and told
+you a chat you were actively in wasn't available.
+
+Two of them reached past the display, and both took the #307/#308 answer:
+
+- **`ActivityCenter` also marks everything seen**, and the badge is a *separate*
+  query. If the count poll succeeded and the list fetch failed, the bell read
+  "Activity, 5 unread" over a panel saying you were all caught up — and the
+  effect cleared every unread server-side anyway, so the badge that would have
+  brought you back was gone and the screen had just told you there was nothing
+  to come back for. The write now waits on the list landing (`listLoaded`, the
+  same value the render branches read), fires once per open, and carries a
+  `.catch()`. Same turn the app's activity screen took in #312.
+- **`GroupPage`'s "Start a chat" turned a failed read into a wrong write.**
+  `memberIds: (membersQuery.data ?? []).map(…)` made "we couldn't ask who's in
+  this group" into "this group has nobody in it", so the chat was created with
+  an empty member list. It refuses and says so now. (The app's twin, on
+  `groups/[groupId]/invite.tsx`, is in #317.)
+
+**Badge-shaped counts are deliberately left alone** — `Layout.jsx` (nav unread),
+`GroupsDrawer.jsx` (the invite banner) and `PeoplePage.jsx` (the Requests count)
+are all `data?.count ?? 0`, so a failed poll reads as zero. Decided rather than
+missed: a badge is an *absence*, there's no sensible error affordance on a nav
+pip, and a count frozen at a stale value is worse than none. Note the app's
+`useBadgeCount.ts` makes the **opposite** call for the *app-icon* badge, with a
+"Not `?? 0`" comment saying why — that one is the OS's own surface and re-asserts
+a known count rather than clearing it. Don't "fix" either to match the other.
+
 Sites that already get this right and shouldn't be "fixed": `FeedPage`,
 `GroupsDrawer`, `NewChatPicker`, `ConversationListView`, `ReactorsPopover`,
 `PostPage`, `GroupInvitesPage`, `MessageStrandPanel`, `GroupInvitePicker`, and

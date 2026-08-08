@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useQuery } from "@tanstack/react-query";
+import { onlineManager, useQuery } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
 import DimensionEditor from "./components/events/DimensionEditor.jsx";
 import EventPage from "./pages/EventPage.jsx";
@@ -1235,6 +1235,86 @@ describe("CalendarPage", () => {
     renderWithAuth(<CalendarPage />);
     expect(await screen.findByText("Picnic")).toBeInTheDocument();
     expect(screen.getByText("Fam")).toBeInTheDocument();
+  });
+
+  // #314. A failed load left `data` undefined, `events` fell back to `[]`, and
+  // this page told someone with a group dinner tomorrow that they were free.
+  it("says the load failed instead of claiming the calendar is empty", async () => {
+    api.getPersonalCalendar.mockRejectedValue(offlineError());
+    renderWithAuth(<CalendarPage />);
+    expect(
+      await screen.findByText("Couldn’t load your calendar.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing on the calendar/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  // The Month view is the worse half: a fully drawn empty grid reads as a
+  // *verified* empty month, not as an empty state.
+  it("doesn't draw an empty month grid for a failed load", async () => {
+    const user = userEvent.setup();
+    api.getPersonalCalendar.mockRejectedValue(offlineError());
+    renderWithAuth(<CalendarPage />);
+    await screen.findByText("Couldn’t load your calendar.");
+    await user.click(screen.getByRole("button", { name: "Month" }));
+    // The grid names its weekdays; none of them are on screen.
+    expect(screen.queryByText("Mon")).toBeNull();
+    expect(screen.getByText("Couldn’t load your calendar.")).toBeInTheDocument();
+  });
+
+  // The other half of the rule (#310/#313): a failed *refresh* keeps what's up.
+  it("keeps the events it has when a refetch fails", async () => {
+    api.getPersonalCalendar.mockResolvedValue([
+      makeEvent({ event_date: "2026-08-01", status: "scheduled", polls: [] }),
+    ]);
+    const { queryClient } = renderWithAuth(<CalendarPage />);
+    await screen.findByText("Picnic");
+
+    api.getPersonalCalendar.mockRejectedValue(offlineError());
+    await failRefetch(queryClient, ["personalCalendar"]);
+
+    expect(screen.getByText("Picnic")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t load your calendar.")).toBeNull();
+  });
+
+  /**
+   * The state that is neither loading nor errored, and the one the first cut of
+   * this fix missed. With `networkMode: 'online'` (a bare `new QueryClient()`)
+   * a query on an offline browser is **paused**: `status` stays `pending`,
+   * `fetchStatus` goes to `paused`, the request is never sent, and `isLoading`
+   * — `isPending && isFetching` — is *false* with no data behind it. Gating the
+   * empty state on `!isLoading` therefore let it render anyway. #306 hit this
+   * in `CommentThread`; the branch every screen owes this state is `!data`.
+   */
+  it("says it's waiting for a connection, not that the calendar is empty", async () => {
+    api.getPersonalCalendar.mockResolvedValue([]);
+    onlineManager.setOnline(false);
+    try {
+      renderWithAuth(<CalendarPage />);
+      expect(
+        await screen.findByText("Waiting for a connection…")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Nothing on the calendar/)).toBeNull();
+      // The request was never sent — this is not a failure, it's a pause.
+      expect(api.getPersonalCalendar).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  // Retrying has to actually ask again.
+  it("refetches when Try again is pressed", async () => {
+    const user = userEvent.setup();
+    api.getPersonalCalendar.mockRejectedValue(offlineError());
+    renderWithAuth(<CalendarPage />);
+    await screen.findByText("Couldn’t load your calendar.");
+
+    api.getPersonalCalendar.mockResolvedValue([
+      makeEvent({ event_date: "2026-08-01", status: "scheduled", polls: [] }),
+    ]);
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Picnic")).toBeInTheDocument();
   });
 });
 
