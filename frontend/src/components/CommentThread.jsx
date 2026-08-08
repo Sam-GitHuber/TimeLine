@@ -9,7 +9,11 @@ import { ReportModal } from "./ReportModal.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { serverMessage } from "../errors.js";
-import { commentsQueryKey, invalidateComments } from "../postCache.js";
+import {
+  commentsQueryKey,
+  invalidateComments,
+  markPostCommentsSeen,
+} from "../postCache.js";
 import { formatRelativeTime, formatAbsoluteTime } from "../utils.js";
 
 // The set of comment ids that are *ancestors* of `targetId` — the nodes whose
@@ -71,10 +75,31 @@ const DEEP_FROM = 4;
 // scrolled into view, and it pulses briefly so the eye lands on it — the point
 // of a "someone replied" link.
 export default function CommentThread({ target, highlightCommentId = null }) {
+  const queryClient = useQueryClient();
   const { data: comments, isLoading, isError, error } = useQuery({
     queryKey: commentsQueryKey(target),
     queryFn: () => api.getComments(target),
   });
+
+  // Mirror the server's "seen" stamp into the cached post lists — but only once
+  // the GET that *does* the stamping has come back.
+  //
+  // It lives here, and not on the card that opens the thread, for exactly that
+  // reason (#230): the stamp is a side effect of this request, so anything
+  // keying off the click instead runs ahead of it with nothing to roll back.
+  // A card read "Comments · 12 · 3 new", you clicked, the badge went, the
+  // request failed — and the card then claimed you'd read three comments the
+  // server still had unseen, with no trace of them once you collapsed it again.
+  // Same rule, and the same placement, as the app
+  // (`mobile/src/components/CommentThread.tsx`).
+  //
+  // Only a post carries a "N new" badge the web mirrors; an event's lives on
+  // `groupEvents` / `personalCalendar`, which are only ever rendered by a screen
+  // you have to navigate back to — and that refetches on mount at staleTime 0.
+  useEffect(() => {
+    if (!comments || target.postId == null) return;
+    markPostCommentsSeen(queryClient, target.postId);
+  }, [comments, target.postId, queryClient]);
 
   // Which comment to visually highlight; cleared after a moment so the pulse
   // fades. Initialised from the prop — the parent remounts this thread with a

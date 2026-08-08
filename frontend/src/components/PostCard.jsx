@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Avatar from "./Avatar.jsx";
@@ -9,7 +9,6 @@ import ReactionBar from "./ReactionBar.jsx";
 import PostMenu from "./PostMenu.jsx";
 import { api } from "../api.js";
 import { serverMessage } from "../errors.js";
-import { markPostCommentsSeen } from "../postCache.js";
 import { formatClockTime, formatAbsoluteTime } from "../utils.js";
 
 // A single post as an entry on the timeline: a node on the line, its clock time
@@ -34,18 +33,14 @@ export default function PostCard({
   const [lightboxIndex, setLightboxIndex] = useState(null);
   // Whether the post text is flipped into its inline editor (issue #62).
   const [editing, setEditing] = useState(false);
-  const queryClient = useQueryClient();
 
-  // Opening the thread marks its comments seen server-side (the GET), so mirror
-  // that into the cached feed/profile/group/permalink data straight away — the
-  // "N new" badge then follows the (fresh, server-shaped) count and clears,
-  // instead of waiting for the next refetch. A permalink opens already-expanded,
-  // so mark it on mount too.
-  const openComments = () => markPostCommentsSeen(queryClient, post.id);
-  useEffect(() => {
-    if (defaultCommentsOpen) openComments();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultCommentsOpen, post.id]);
+  // Nothing here marks the comments seen. The server stamps `last_seen_at` as a
+  // side effect of the comments GET, so the cache write that mirrors it belongs
+  // with that request — it lives in `CommentThread`, fired once the tree is
+  // actually in (#230). Doing it from this click cleared the badge before the
+  // GET had even been issued, and a failed one then left the card claiming
+  // you'd read comments the server still had unseen. A permalink needs no
+  // special case either: it opens expanded, so it goes through the same query.
 
   // Defensive: if a post ever arrives without an author, don't crash the feed.
   if (!author) return null;
@@ -55,8 +50,8 @@ export default function PostCard({
   const commentCount = post.comment_count ?? 0;
   const newCount = post.new_comment_count ?? 0;
   // Driven purely by the server-shaped count (kept fresh via markPostCommentsSeen
-  // on open), so genuinely-new comments re-badge later. Hidden while the thread
-  // is open — you're already looking at them.
+  // once the thread loads), so genuinely-new comments re-badge later. Hidden
+  // while the thread is open — you're already looking at them.
   const showNew = newCount > 0 && !showComments;
 
   return (
@@ -168,10 +163,7 @@ export default function PostCard({
         <div className="mt-3 -ml-2 flex items-center gap-3">
           <button
             type="button"
-            onClick={() => {
-              if (!showComments) openComments();
-              setShowComments((v) => !v);
-            }}
+            onClick={() => setShowComments((v) => !v)}
             aria-expanded={showComments}
             className="rounded-lg px-2 py-1 text-sm font-medium text-ink-faint transition hover:bg-accent-tint hover:text-accent-deep"
           >

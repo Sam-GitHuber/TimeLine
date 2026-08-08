@@ -2,7 +2,8 @@ import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { renderWithAuth, fakeUser } from "./test-utils.jsx";
+import { useQuery } from "@tanstack/react-query";
+import { renderWithAuth, fakeUser, offlineError } from "./test-utils.jsx";
 import PostCard from "./components/PostCard.jsx";
 import CommentThread from "./components/CommentThread.jsx";
 import { api } from "./api.js";
@@ -108,6 +109,95 @@ describe("PostCard comment counts", () => {
 
     await user.click(screen.getByRole("button", { name: "refetch" }));
     expect(screen.getByText(/1 new/)).toBeInTheDocument();
+  });
+});
+
+// **When** the badge clears (issue #230). The server stamps `last_seen_at` as a
+// side effect of the comments GET, so the cache write that mirrors it has to
+// wait for that request — not fire on the click that will eventually make it.
+// The card used to zero the count in `onClick`, with nothing to roll back, so a
+// failed GET left it claiming you'd read comments the server still had unseen.
+//
+// These go through a mounted feed query rather than a static prop, because the
+// prop is exactly what the bug can't be seen in: `markPostCommentsSeen` writes
+// to the *cache*, and it's the feed handing the card a fresh post that turns
+// that into a badge going out.
+describe("the 'N new' badge follows the request, not the click", () => {
+  function FeedHarness({ children = null }) {
+    const { data } = useQuery({
+      queryKey: ["feed", { includeGroups: false }],
+      queryFn: async () => ({
+        pages: [
+          {
+            results: [makePost({ comment_count: 12, new_comment_count: 3 })],
+            next: null,
+          },
+        ],
+        pageParams: [undefined],
+      }),
+      // The card's re-render must come from the seen-write, not from a refetch
+      // that would repaint the badge either way.
+      staleTime: Infinity,
+    });
+    const post = data?.pages[0]?.results[0];
+    return (
+      <>
+        {post && <PostCard post={post} />}
+        {children}
+      </>
+    );
+  }
+
+  function cachedNewCount(queryClient) {
+    return queryClient.getQueryData(["feed", { includeGroups: false }])
+      ?.pages[0].results[0].new_comment_count;
+  }
+
+  it("keeps the badge when the comments request fails", async () => {
+    api.getComments.mockRejectedValue(offlineError());
+    const user = userEvent.setup();
+    const { queryClient } = renderWithAuth(<FeedHarness />);
+    expect(await screen.findByText(/3 new/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Comments/ }));
+    expect(
+      await screen.findByText(/Couldn't load comments/),
+    ).toBeInTheDocument();
+
+    // Collapsing is the ordinary thing to do next, and it's where the lie used
+    // to show: three comments still unread server-side, and nothing saying so.
+    await user.click(screen.getByRole("button", { name: /Hide comments/ }));
+    expect(screen.getByText(/3 new/)).toBeInTheDocument();
+    expect(cachedNewCount(queryClient)).toBe(3);
+  });
+
+  it("clears the badge once the thread has actually loaded", async () => {
+    api.getComments.mockResolvedValue([]);
+    const user = userEvent.setup();
+    const { queryClient } = renderWithAuth(<FeedHarness />);
+    expect(await screen.findByText(/3 new/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Comments/ }));
+    await waitFor(() => expect(cachedNewCount(queryClient)).toBe(0));
+
+    await user.click(screen.getByRole("button", { name: /Hide comments/ }));
+    expect(screen.queryByText(/3 new/)).not.toBeInTheDocument();
+  });
+
+  it("marks seen on a permalink, which opens without a click", async () => {
+    // /p/:id mounts the thread already expanded, so there's no open-comments
+    // action to hang the write on — the loaded tree is the only signal there is.
+    api.getComments.mockResolvedValue([]);
+    const { queryClient } = renderWithAuth(
+      <FeedHarness>
+        <PostCard
+          post={makePost({ comment_count: 12, new_comment_count: 3 })}
+          defaultCommentsOpen
+        />
+      </FeedHarness>,
+    );
+
+    await waitFor(() => expect(cachedNewCount(queryClient)).toBe(0));
   });
 });
 

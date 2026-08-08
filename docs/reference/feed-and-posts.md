@@ -367,13 +367,25 @@ counts exclude your own messages.
   opening a conversation clears its unread badge. The upsert is wrapped to
   survive a concurrent-open race (two tabs both INSERT ⇒ one falls back to an
   UPDATE, not a 500).
-- **Frontend keeps the badge honest via the cache, not a flag.** On open, the
-  client zeroes `new_comment_count` for that post in the cached feed / profile /
-  group / permalink queries (`markPostCommentsSeen`), mirroring the server's
-  reset without a refetch. The badge is then driven purely by that server-shaped
-  count — so it clears on open **and** genuinely-new later comments re-badge once
-  a refetch legitimately raises the count. (A per-card "already opened" flag
-  would suppress those later comments until the card remounted.)
+- **Frontend keeps the badge honest via the cache, not a flag.** Once the tree
+  has loaded, the client zeroes `new_comment_count` for that post in the cached
+  feed / profile / group / permalink queries (`markPostCommentsSeen`), mirroring
+  the server's reset without a refetch. The badge is then driven purely by that
+  server-shaped count — so it clears on open **and** genuinely-new later comments
+  re-badge once a refetch legitimately raises the count. (A per-card "already
+  opened" flag would suppress those later comments until the card remounted.)
+- **That write belongs to the request, not to the click** — on both clients it
+  lives in `CommentThread`, in an effect gated on the tree's `data` arriving, and
+  never on the card that opens the thread. The stamp is a *side effect of the
+  GET*, so anything hung off the tap runs ahead of it with nothing to roll back.
+  Both clients shipped that way and both were wrong in their own shape: mobile
+  cleared the badge when the *post* loaded (#195-era), the web cleared it in the
+  toggle's `onClick` (#230) — click a card reading *· 3 new* with no signal and
+  the badge went while the thread underneath read "Couldn't load comments.",
+  leaving the card claiming three comments were read that the server still had
+  unseen until the next feed refetch. Placing it on the query also removes the
+  permalink's special case: `/p/:id` opens expanded, so the loaded tree is the
+  one signal that covers both entry points.
 - **That cache write matches on the first key segment, not the whole key** —
   `setQueriesData` with a predicate over `{feed, userPosts, groupPosts}`, on both
   clients (`frontend/src/postCache.js`, `mobile/src/postCache.ts`). Every post

@@ -271,8 +271,13 @@ export function CommentThread({
    * step. Clearing the badge when the *post* loaded meant a failed comments
    * request left the feed showing nothing new while the server still had the
    * thread unseen — the comments were then invisible until something else
-   * refetched. Same rule as the web, which marks seen on the open-comments
-   * action rather than on the post render (frontend/src/components/PostCard.jsx).
+   * refetched. The web now does the same thing in the same place
+   * (`frontend/src/components/CommentThread.jsx`, this file's twin). It used to
+   * mark on the
+   * *open-comments action*, and this comment used to call that the same rule —
+   * it isn't. The action still runs ahead of the request, so the web had the
+   * failure above in its own form (#230): badge cleared on the click, thread
+   * below reading "Couldn't load comments."
    */
   useEffect(() => {
     if (!comments) return;
