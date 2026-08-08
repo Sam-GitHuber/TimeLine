@@ -755,6 +755,56 @@ describe("Messages drawer — thread", () => {
     );
   });
 
+  /**
+   * The other half of that guard, and the reason it isn't just `!!detail`.
+   *
+   * A **404** on a refetch doesn't clear the cached detail either — nothing
+   * clears `data` — so `detail` stays truthy while every render branch has
+   * switched to "This conversation isn't available". Marking read there would be
+   * a doomed write for a conversation showing nothing. `showingThread` is the
+   * single value both the render branches and this effect read, so the two
+   * halves of the file can't drift apart on what "on screen" means.
+   */
+  it("stops marking read once a refresh says the conversation is gone", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    const first = {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hey there",
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+    };
+    api.getMessages.mockResolvedValue(page([first]));
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Open conversation with Priya/,
+      })
+    );
+    await screen.findByText("hey there");
+    await waitFor(() =>
+      expect(api.markConversationRead).toHaveBeenCalledWith(7)
+    );
+    const before = api.markConversationRead.mock.calls.length;
+
+    api.getConversation.mockRejectedValue(apiError("Not found.", 404));
+    await failRefetch(queryClient, ["conversation", 7]);
+    await screen.findByText(/This conversation isn’t available/);
+
+    // The message poll carries on — `enabled` still sees a cached detail — so
+    // the effect's other dependency moves underneath the "gone" card.
+    api.getMessages.mockResolvedValue(page([{ ...first, id: 2 }, first]));
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["messages", 7] });
+    });
+    await settle(3);
+
+    expect(api.markConversationRead.mock.calls.length).toBe(before);
+  });
+
   it("sends a message from the composer", async () => {
     const user = userEvent.setup();
     api.getConversations.mockResolvedValue(page([convoRow()]));

@@ -229,6 +229,32 @@ export default function ConversationThreadView() {
   });
 
   const detail = convoQuery.data;
+
+  /**
+   * **Whether a failed fetch is allowed to take the thread off screen.**
+   *
+   * `query-core`'s error action writes `status`, `error` and `isInvalidated` and
+   * never touches `data`, so `isError` goes true on a failed *refetch* of a
+   * query that is rendering a perfectly good transcript. This view refetches
+   * constantly — `staleTime` is 0, `refetchOnWindowFocus` is on, and the detail
+   * polls on `CONVERSATION_DETAIL_POLL_MS` besides — so reading the flag before
+   * the data replaced the transcript, the header identity *and* the composer
+   * with a half-typed reply in it the moment one request lost a packet, having
+   * lost nothing server-side.
+   *
+   * A 404 is the exception and still outranks the cached copy: deleted, left, or
+   * out of reach is a real answer about *now*. Everything else only gets a say
+   * when there is nothing cached to keep showing.
+   *
+   * Declared up here, next to the data they read, rather than beside the JSX
+   * that uses them — because the mark-read effect below has to ask the same
+   * question, and asking it a second way is how the two answers drift apart.
+   */
+  const gone = convoQuery.error?.status === 404;
+  const loadFailed = convoQuery.isError && !detail;
+  /** Is any of this conversation actually on screen? */
+  const showingThread = !gone && !loadFailed && !!detail;
+
   const isGroup = detail?.kind === "group";
   // A pending group member (someone invited who hasn't connected with the
   // whole clique yet) can't read or send here — the backend 403s the messages
@@ -474,17 +500,23 @@ export default function ConversationThreadView() {
    * zeroes it, so running before the detail lands makes the two race, with the
    * divider missing whenever the write wins.
    */
-  const detailLoaded = !!detail;
   useEffect(() => {
-    // `convoQuery.isError` used to be in this guard, back when it meant the same
-    // thing as "nothing is on screen" — an error was an error card with no
-    // transcript, so not marking read was right. This commit is exactly what
-    // stops that being true: a failed refetch now keeps the thread up, and the
-    // reader is looking at the messages while this returns early, with the tab
-    // badge and the conversation list going on claiming unread mail they have
-    // just read. `detailLoaded` beside it is now the condition that means "is
-    // anything shown", so the flag comes out of the guard and out of the deps.
-    if (isPending || !detailLoaded) return;
+    // **This asks the same question the render branches ask, through the same
+    // value.** `convoQuery.isError` used to be the guard here, back when it
+    // meant the same thing as "nothing is on screen" — an error was an error
+    // card with no transcript, so not marking read was right. This commit is
+    // exactly what stops that being true: a failed refetch now keeps the thread
+    // up, and the reader is looking at the messages while this returns early,
+    // with the tab badge and the conversation list going on claiming unread
+    // mail they have just read.
+    //
+    // `!!detail` on its own isn't the replacement, tempting as it looks. A
+    // *404* on a refetch never clears the cached detail either, so `detail`
+    // stays truthy while every render branch has switched to "This conversation
+    // isn't available" — and this would fire a doomed write for a conversation
+    // that is showing nothing. `showingThread` is the one value both halves of
+    // the file read, so they can't drift.
+    if (isPending || !showingThread) return;
     // The unread count has already been latched during render, above — this is
     // the write it has to survive.
     //
@@ -500,7 +532,7 @@ export default function ConversationThreadView() {
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
       })
       .catch(() => {});
-  }, [conversationId, messageCount, isPending, detailLoaded, queryClient]);
+  }, [conversationId, messageCount, isPending, showingThread, queryClient]);
 
   /**
    * Keep the draft store in step with the composer.
@@ -1013,25 +1045,6 @@ export default function ConversationThreadView() {
     queueSend(value, { photo: attachment ?? undefined, mentionIds });
   }
 
-  /**
-   * **Whether a failed fetch is allowed to take the thread off screen.**
-   *
-   * `query-core`'s error action writes `status`, `error` and `isInvalidated` and
-   * never touches `data`, so `isError` goes true on a failed *refetch* of a
-   * query that is rendering a perfectly good transcript. This view refetches
-   * constantly — `staleTime` is 0, `refetchOnWindowFocus` is on, and the detail
-   * polls on `CONVERSATION_DETAIL_POLL_MS` besides — so reading the flag before
-   * the data replaced the transcript, the header identity *and* the composer
-   * with a half-typed reply in it the moment one request lost a packet, having
-   * lost nothing server-side.
-   *
-   * A 404 is the exception and still outranks the cached copy: deleted, left, or
-   * out of reach is a real answer about *now*. Everything else only gets a say
-   * when there is nothing cached to keep showing.
-   */
-  const gone = convoQuery.error?.status === 404;
-  const loadFailed = convoQuery.isError && !detail;
-
   const other = detail?.other;
   // Memoised, not a bare `?? []`: the detail is re-fetched every
   // `CONVERSATION_DETAIL_POLL_MS` now, and a fresh empty array each time would
@@ -1311,10 +1324,8 @@ export default function ConversationThreadView() {
               Cancel
             </button>
           ) : (
-            !gone &&
-            !loadFailed &&
-            !isPending &&
-            detail && (
+            showingThread &&
+            !isPending && (
               <DrawerMenu getActions={headerActions} label="Conversation options" />
             )
           )

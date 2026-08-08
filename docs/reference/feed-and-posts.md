@@ -548,14 +548,23 @@ unreachable one are different answers:
 
 Two consequences worth knowing:
 
-- **The mark-read guard had to change with it.** `convoQuery.isError` in
-  `ConversationThreadView`'s mark-read effect used to mean the same thing as
-  "nothing is on screen". Once a failed refetch keeps the thread up, it doesn't
-  — the reader is looking at the messages while the effect returns early, and
-  the tab badge goes on claiming unread mail they have just read. `detailLoaded`
-  is now the condition that means "is anything shown", and
-  `markConversationRead` carries a `.catch()`, since that guard was what used to
-  keep the write off a failing connection. Same correction the app made in #311.
+- **The mark-read guard had to change with it, and `!!detail` is not the
+  replacement.** `convoQuery.isError` in `ConversationThreadView`'s mark-read
+  effect used to mean the same thing as "nothing is on screen". Once a failed
+  refetch keeps the thread up, it doesn't — the reader is looking at the
+  messages while the effect returns early, and the tab badge goes on claiming
+  unread mail they have just read. But swapping in a bare "have we got a detail"
+  check is wrong in the other direction: a **404** doesn't clear the cached
+  detail either, so it stays truthy while the render branches have all switched
+  to *This conversation isn't available*, and the effect would fire a doomed
+  write for a conversation showing nothing. `gone`, `loadFailed` and the
+  `showingThread` derived from them are declared once, up beside the data, and
+  the effect and the render branches both read that same value — a second
+  phrasing of the same question is how the two halves of a file drift apart.
+  `markConversationRead` carries a `.catch()` besides, since the old guard was
+  what used to keep the write off a failing connection. The app made the first
+  half of this correction in #311 and still guards on its own `detailLoaded`;
+  the 404 half is open for it.
 - **A failed refresh stays silent** while stale content is up, on both clients —
   see the app's doc for why a banner was weighed and declined.
 
