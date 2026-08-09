@@ -131,6 +131,56 @@ ADMIN = GroupMembership.Role.ADMIN
 MEMBER = GroupMembership.Role.MEMBER
 
 
+def _int_id(raw, field):
+    """One id out of a request body, coerced to an ``int``, or a 400 (#205).
+
+    An id in a JSON body is whatever the client put there. Handed straight to
+    the ORM, a non-numeric one raises ``ValueError`` — which DRF has no handler
+    for, so it surfaces as a 500 with a stack trace in the log instead of the
+    "that isn't an id" the caller should have got. That's the difference between
+    a client bug that reads as a client bug and one that reads as the server
+    falling over, and anyone can generate it in a loop.
+
+    **Only an int or a string of digits.** ``True`` is an int to Python
+    (``int(True) == 1`` — i.e. "user 1"), and ``4.7`` would silently truncate to
+    a different row's id, so both are refused rather than guessed at.
+
+    **Range-checked, not merely parsed.** Python ints are unbounded but the
+    column is a bigint, so a long enough run of digits parses fine and then
+    reaches Postgres as an out-of-range value — a 500 by another route.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ValidationError({field: "A valid integer is required."})
+    try:
+        value = int(raw)
+    except ValueError:
+        # ``from None``: the parse error is noise. The caller sent something
+        # that isn't an id, and chaining a ValueError tells them nothing they
+        # didn't type themselves.
+        raise ValidationError({field: "A valid integer is required."}) from None
+    if not -(2**63) <= value < 2**63:
+        raise ValidationError({field: "A valid integer is required."})
+    return value
+
+
+def _int_ids(raw, field):
+    """A list of ids out of a request body, or a 400 — :func:`_int_id` for the
+    endpoints that take several at once.
+
+    ``filter(id__in=[...])`` raises on the *first* non-numeric element, so a
+    list is exactly as capable of producing a 500 as a single value is; and a
+    body field that should be a list arriving as a string would otherwise be
+    iterated character by character. Missing is an empty list, matching what
+    every caller already does with an absent field — "asked for nothing" is not
+    an error here, only "asked for nonsense" is.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValidationError({field: "Expected a list of ids."})
+    return [_int_id(item, field) for item in raw]
+
+
 def connected_user_ids(user):
     """The set of user ids ``user`` is connected with (accepted, either way).
 
@@ -1522,6 +1572,7 @@ class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
         group = None
         group_id = request.data.get("group")
         if group_id:
+            group_id = _int_id(group_id, "group")
             # 404 (not 403) for both an unknown group and one you're not a member
             # of, so posting can't be used to probe which private groups exist —
             # the same non-member-gets-404 discipline as every other group
@@ -2802,7 +2853,7 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         user_id = request.data.get("user_id")
         if user_id is None:
             raise ValidationError({"user_id": "This field is required."})
-        other = get_object_or_404(User, pk=user_id, is_active=True)
+        other = get_object_or_404(User, pk=_int_id(user_id, "user_id"), is_active=True)
         if other == request.user:
             raise ValidationError(
                 {"user_id": "You can't message yourself."}
@@ -2848,13 +2899,17 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         ids = request.data.get("participant_ids") or []
         if not isinstance(ids, list) or not ids:
             raise ValidationError({"participant_ids": "Pick at least one connection."})
-        title = (request.data.get("title") or "").strip()[
-            :CONVERSATION_TITLE_MAX_LENGTH
-        ]
+        ids = _int_ids(ids, "participant_ids")
+        raw_title = request.data.get("title") or ""
+        if not isinstance(raw_title, str):
+            # Same defect as the ids above, one field over: ``.strip()`` on a
+            # list is an AttributeError, and an unhandled one is a 500.
+            raise ValidationError({"title": "Expected a title."})
+        title = raw_title.strip()[:CONVERSATION_TITLE_MAX_LENGTH]
         group_id = request.data.get("group_id")
         group = None
         if group_id is not None:
-            group = get_object_or_404(Group, pk=group_id)
+            group = get_object_or_404(Group, pk=_int_id(group_id, "group_id"))
             if not is_group_member(request.user, group.id):
                 raise NotFound()
 
@@ -2935,7 +2990,7 @@ class ConversationParticipantsView(APIView):
         ).first()
         if me is None:
             raise PermissionDenied("Only an active member can add people.")
-        ids = request.data.get("user_ids") or []
+        ids = _int_ids(request.data.get("user_ids"), "user_ids")
         invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
         for invitee in invitees:
             if not can_add_to_group(request.user, invitee):
@@ -3122,22 +3177,18 @@ MESSAGE_IDS_MAX = 50
 def _message_id_param(raw, field):
     """One id from a query parameter, or a 400.
 
-    **Range-checked, not merely parsed.** Python ints are unbounded but the
-    column is a bigint, so a long enough run of digits reaches Postgres as an
-    out-of-range value and comes back a 500 instead of the "you can't see that"
-    the caller should get. Shared by ``?thread_root=`` and ``?ids=`` so the two
-    can't drift into answering differently.
+    Parsing and range-checking are :func:`_int_id`'s — one definition of what an
+    id is, so a query parameter and a body field can't drift into answering
+    differently. All this adds is the wording: these two parameters name a
+    *message*, and saying so beats a bare "a valid integer is required" when the
+    caller has pasted the wrong kind of id. Shared by ``?thread_root=`` and
+    ``?ids=``.
     """
     try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        # ``from None``: the parse error is noise. The caller sent something
-        # that isn't an id, and chaining a ValueError tells them nothing they
-        # didn't type themselves.
+        return _int_id(raw, field)
+    except ValidationError:
+        # ``from None``: the inner error is the same fact in duller words.
         raise ValidationError(f"{field} must be a message id.") from None
-    if not -(2**63) <= value < 2**63:
-        raise ValidationError(f"{field} must be a message id.")
-    return value
 
 
 def _thread_for_viewer(pk, user):
@@ -3997,7 +4048,9 @@ class GroupMembersView(APIView):
         user_id = request.data.get("user_id")
         if not user_id:
             raise ValidationError({"user_id": "This field is required."})
-        invitee = get_object_or_404(User, pk=user_id, is_active=True)
+        invitee = get_object_or_404(
+            User, pk=_int_id(user_id, "user_id"), is_active=True
+        )
         if invitee == request.user:
             raise ValidationError({"user_id": "You're already in this group."})
 
@@ -4266,9 +4319,7 @@ class NotificationSeenView(APIView):
         )
         ids = request.data.get("ids")
         if ids is not None:
-            if not isinstance(ids, list):
-                raise ValidationError({"ids": "Expected a list of ids."})
-            qs = qs.filter(id__in=ids)
+            qs = qs.filter(id__in=_int_ids(ids, "ids"))
         updated = qs.update(seen_at=timezone.now())
         return Response({"updated": updated})
 
@@ -5439,9 +5490,7 @@ class PollVoteView(APIView):
             raise PermissionDenied("This poll is closed.")
         if poll.closes_at is not None and poll.closes_at < timezone.now():
             raise PermissionDenied("Voting has closed for this poll.")
-        option_ids = request.data.get("option_ids", [])
-        if not isinstance(option_ids, list):
-            raise ValidationError({"option_ids": "Expected a list of option ids."})
+        option_ids = _int_ids(request.data.get("option_ids"), "option_ids")
         valid_ids = set(
             poll.options.values_list("id", flat=True)
         )

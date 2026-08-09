@@ -605,6 +605,17 @@ This is the layer holding real credentials, so:
   `DEBUG` on it falls back to a dev key). Regression-tested.
 - **Author/sender is never trusted from the client** — every create endpoint sets
   it from `request.user`, ignoring any value in the body.
+- **A malformed id in a request body is a 400, never a 500** (#205). Most bodies
+  go through a serializer, which coerces for you; the handful of endpoints that
+  read `request.data` by hand run every id through `_int_id` / `_int_ids`
+  (`api/views.py`) first. Handed to the ORM raw, a non-numeric id raises
+  `ValueError` — which DRF has no handler for, so the caller gets a 500 and the
+  log gets a stack trace that anyone can generate in a loop. The helper also
+  **range-checks** (a long enough run of digits overflows the bigint column —
+  the same 500 by another route) and **refuses booleans** (`int(True) == 1`, so
+  `{"ids": [true]}` would silently mean row 1 — a wrong row, not a missing one).
+  `_message_id_param` defers to it, so `?thread_root=`/`?ids=` and a body field
+  can't drift into different answers about what an id is.
 
 ### The auth URL surface
 

@@ -7563,6 +7563,24 @@ class PollLifecycleTests(EventsBase):
             PollVote.objects.filter(option_id=o1, voter=self.me).count(), 1
         )
 
+    def test_vote_rejects_option_ids_that_arent_numbers(self):
+        """#205, the poll's version of it. The membership test against the
+        poll's own option ids screens out an id from another poll, but it
+        assumed the id was *hashable*: a nested list raised ``TypeError`` on the
+        way into the set, and a string of letters that got past a single-choice
+        poll would have gone on to the ORM. Both are 400s, not 500s."""
+        poll, _d1, _d2 = self._open_date_poll()
+        self.client.force_authenticate(self.me)
+        for bad in (["abc"], [["nested"]], "not-a-list"):
+            with self.subTest(option_ids=bad):
+                resp = self.client.put(
+                    poll_vote_url_by_id(poll["id"]),
+                    {"option_ids": bad},
+                    format="json",
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(PollVote.objects.filter(voter=self.me).exists())
+
     def test_custom_finalise_pins_option(self):
         poll = self.client.post(
             event_polls_url(self.event),
@@ -11189,3 +11207,132 @@ class CreateReviewAccountTests(APITestCase):
             Post.objects.filter(author__email__in=[self.REVIEW, self.BUDDY]).count(),
             2,
         )
+
+
+# --- Malformed ids in a request body (#205) ---------------------------------
+
+
+class MalformedRequestBodyTests(APITestCase):
+    """The endpoints that read a field straight out of the JSON body rather
+    than through a serializer, which is why the coercion never happened.
+
+    A non-numeric id used to reach the ORM untouched: ``get_object_or_404(User,
+    pk="abc")`` and ``filter(id__in=["abc"])`` both raise ``ValueError``, which
+    DRF has no handler for — so the caller got a 500 and the log got a stack
+    trace, when the honest answer is a 400. One test per endpoint, because the
+    endpoints don't share a code path and this is exactly the sort of thing that
+    regresses invisibly one site at a time.
+    """
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        self.group = make_group(self.me, name="Malformed")
+        self.client.force_authenticate(self.me)
+        self.convo_id = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": [self.friend.id]}, format="json"
+        ).data["id"]
+
+    def test_posting_into_a_group_rejects_a_non_numeric_group_id(self):
+        resp = self.client.post(
+            POSTS_URL, {"text": "hello", "group": "abc"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Post.objects.exists())
+
+    def test_starting_a_direct_chat_rejects_a_non_numeric_user_id(self):
+        resp = self.client.post(CONVERSATIONS_URL, {"user_id": "abc"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_starting_a_group_chat_rejects_a_non_numeric_participant_id(self):
+        resp = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": ["abc"]}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_starting_a_group_chat_rejects_a_title_that_isnt_text(self):
+        """Not an id, but the same defect one field over in the same body:
+        ``(x or "").strip()`` is an AttributeError for anything that isn't a
+        string, and an unhandled AttributeError is a 500."""
+        resp = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.friend.id], "title": ["Book club"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_starting_a_group_chat_rejects_a_non_numeric_group_id(self):
+        resp = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.friend.id], "group_id": "abc"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_adding_participants_rejects_a_non_numeric_user_id(self):
+        resp = self.client.post(
+            f"/api/conversations/{self.convo_id}/participants/",
+            {"user_ids": ["abc"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_adding_participants_rejects_a_user_ids_that_isnt_a_list(self):
+        """A bare string is iterable, so ``filter(id__in="12")`` would look up
+        the ids ``"1"`` and ``"2"`` character by character rather than 12."""
+        resp = self.client.post(
+            f"/api/conversations/{self.convo_id}/participants/",
+            {"user_ids": str(self.friend.id)},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_inviting_to_a_group_rejects_a_non_numeric_user_id(self):
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": "abc"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_marking_notifications_seen_rejects_a_non_numeric_id(self):
+        resp = self.client.post(NOTIF_SEEN_URL, {"ids": ["abc"]}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_marking_notifications_seen_rejects_ids_that_isnt_a_list(self):
+        resp = self.client.post(NOTIF_SEEN_URL, {"ids": "12"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_id_too_big_for_the_column_is_a_400_not_a_500(self):
+        """Python ints are unbounded, the column is a bigint. Parsing alone
+        isn't enough: a long enough run of digits reaches Postgres as an
+        out-of-range value, which is the same 500 by another route."""
+        resp = self.client.post(
+            CONVERSATIONS_URL, {"user_id": 2**64}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_boolean_is_not_read_as_the_id_it_casts_to(self):
+        """``True`` is an int to Python and to the ORM, so ``{"ids": [true]}``
+        used to quietly mean "id 1" — the one failure here that isn't a 500 but
+        a *wrong row*, which is worse for being silent. Asserted on the
+        notification path because it's the one where the mistaken row is
+        observable: it gets marked seen."""
+        post = Post.objects.create(author=self.friend, text="hi")
+        notification = Notification.objects.create(
+            recipient=self.me,
+            actor=self.friend,
+            kind=Notification.Kind.POST_REPLY,
+            post=post,
+        )
+        resp = self.client.post(NOTIF_SEEN_URL, {"ids": [True]}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        notification.refresh_from_db()
+        self.assertIsNone(notification.seen_at)
+
+    def test_an_id_sent_as_a_string_of_digits_still_works(self):
+        """The coercion tightened, so pin the other side of it: form bodies and
+        some clients send ids as strings, and those are ordinary valid ids."""
+        resp = self.client.post(
+            CONVERSATIONS_URL, {"user_id": str(self.friend.id)}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
