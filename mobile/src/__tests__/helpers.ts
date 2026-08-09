@@ -17,6 +17,7 @@
  */
 
 import { act, fireEvent, screen, waitFor } from '@testing-library/react-native';
+import * as Notifications from 'expo-notifications';
 import { ActionSheetIOS, Alert, BackHandler, Platform } from 'react-native';
 
 /**
@@ -427,4 +428,55 @@ export async function settle(turns = 20): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
+}
+
+// --- The notification tray --------------------------------------------------
+
+/**
+ * Drive the phone's notification tray, for the screens that take a delivered
+ * push back once the server has said it's been seen (#178, #318).
+ *
+ * `jest.setup.js` stubs `expo-notifications` module-wide with an empty tray, and
+ * these three keep a suite honest about it: `trayHolds` replaces the stub for
+ * one test, `trayDismissed` reads what was taken out, and `resetTray` puts the
+ * empty default back. **`resetTray` belongs in an `afterEach`, not only a
+ * `beforeEach`** — jest.config sets no `restoreMocks`, so a suite that seeds the
+ * tray mid-file otherwise leaves every later test running against a non-empty
+ * tray and an accumulating call log, and the failure lands on whichever test
+ * next asserts on either.
+ */
+export function trayHolds(
+  ...entries: { identifier: string; url: string | null }[]
+): void {
+  (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue(
+    entries.map(({ identifier, url }) => ({
+      request: { identifier, content: { data: { url } } },
+    }))
+  );
+}
+
+/**
+ * The identifiers taken out of the tray: **unique**, and sorted so order can't
+ * flake.
+ *
+ * Unique because more than one thing legitimately sweeps for the same push — a
+ * post screen and the comment thread on it both mirror the same server-side
+ * seen-stamp, since both their GETs make it — and dismissing an identifier
+ * twice is a no-op on the device. What a test has any business asserting is
+ * *which* notifications were taken, never how many sweeps ran.
+ */
+export function trayDismissed(): string[] {
+  return [
+    ...new Set(
+      (Notifications.dismissNotificationAsync as jest.Mock).mock.calls.map(
+        ([identifier]) => identifier as string
+      )
+    ),
+  ].sort();
+}
+
+/** Back to `jest.setup.js`'s empty tray, with the call log cleared. */
+export function resetTray(): void {
+  (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue([]);
+  (Notifications.dismissNotificationAsync as jest.Mock).mockClear();
 }
