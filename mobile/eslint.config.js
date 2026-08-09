@@ -56,6 +56,29 @@ module.exports = defineConfig([
           "JSXAttribute[name.name='behavior'] ConditionalExpression MemberExpression[object.name='Platform']",
         message:
           "Don't make keyboard `behavior` platform-conditional — that ternary is the Android keyboard bug (see components/KeyboardAvoider.tsx). `KeyboardAvoider` handles both platforms.",
+      }, {
+        /**
+         * Keep the offline-message leak from being written a thirty-sixth time.
+         *
+         * `err instanceof Error ? err.message : 'our sentence'` was the spelling
+         * ~35 screens used, and the fallback in every one of them was
+         * unreachable: a lost connection rejects as a `TypeError`, which *is* an
+         * `Error` and *has* a `message`, so the authored sentence never showed
+         * and React Native's `Network request failed` did (#243). Same reasoning
+         * as the rule above — a "don't write this" whose failure is invisible at
+         * the call site, and which has already recurred once (#240 on the web,
+         * then here).
+         *
+         * Narrow on purpose: only `instanceof Error` in a *condition*, which is
+         * the shape that leaks. `instanceof ApiError` is not caught, because
+         * `err.status === 404` checks legitimately need it — the trap there is
+         * documented in `docs/reference/mobile-app.md` instead, since a status
+         * check and a message check are indistinguishable to a selector.
+         */
+        selector:
+          "ConditionalExpression > BinaryExpression[operator='instanceof'][right.name='Error']",
+        message:
+          "Don't gate an error message on `instanceof Error` — a lost connection is one too, so the fallback after the `:` can never be reached. Use `serverMessage(err, fallback)` from '@/api', which reads `fromServer` (see docs/reference/mobile-app.md § Show the server's words).",
       }],
     },
   },

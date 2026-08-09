@@ -156,10 +156,7 @@ export default function GroupInviteScreen() {
       }
     },
     onError: (error) =>
-      Alert.alert(
-        'Couldn’t invite everyone',
-        serverMessage(error, WENT_WRONG)
-      ),
+      Alert.alert('Couldn’t invite everyone', serverMessage(error, WENT_WRONG)),
   });
 
   /**

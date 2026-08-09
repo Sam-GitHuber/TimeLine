@@ -44,10 +44,16 @@ export default function LoginScreen() {
     } catch (err) {
       // The *server's* message is the useful one: it distinguishes a wrong
       // password from an unverified email from an account still awaiting
-      // approval, all of which a real tester will hit. `serverMessage` is what
-      // keeps that to the server's own words — a login attempted with no signal
-      // has no such answer, and saying "check your connection" is the only
-      // honest thing to say about it (#243).
+      // approval, all of which a real tester will hit. `serverMessage` keeps it
+      // to the server's own words — a login attempted with no signal has no such
+      // answer, and used to render React Native's `Network request failed` as
+      // though the server had said it (#243).
+      //
+      // Note what that means here: offline you get the sentence below, which
+      // doesn't mention the connection. That's `serverMessage`'s contract on
+      // both clients — the caller's copy wins over our stand-in — and the app
+      // has no offline indicator to pair it with while `onlineManager` is
+      // unwired (`_layout.tsx`). Worth revisiting together, not here.
       setError(serverMessage(err, 'Couldn’t sign you in. Please try again.'));
       setSubmitting(false);
     }

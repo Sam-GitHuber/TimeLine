@@ -58,10 +58,7 @@ export function PostMenu({
       }
     },
     onError: (err) => {
-      Alert.alert(
-        'Couldn’t delete',
-        serverMessage(err, WENT_WRONG)
-      );
+      Alert.alert('Couldn’t delete', serverMessage(err, WENT_WRONG));
     },
   });
 

@@ -177,6 +177,33 @@ describe('serverMessage', () => {
     );
   });
 
+  it('falls back when the server authored an empty sentence', async () => {
+    // `fromServer` says the server wrote the words, not that it wrote any. A
+    // serializer raising `ValidationError('')` is server-authored and blank, and
+    // without the truthiness check every call site renders a blank red line —
+    // or an `Alert` with a title and no body. Worse than the fallback it
+    // displaced, and silent. `frontend/src/errors.js` has always checked this.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ detail: '' }, 400));
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect(serverMessage(err, 'Couldn’t save your profile.')).toBe(
+      'Couldn’t save your profile.'
+    );
+  });
+
+  it('never shows the literal word "undefined" as the server’s diagnosis', async () => {
+    // `String(value[0])` on an empty list yields `'undefined'`, which the old
+    // `firstErrorMessage` then flagged `fromServer: true` — the runtime's words
+    // wearing the server's badge, which is the whole thing #243 is about.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ non_field_errors: [] }, 400));
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect((err as ApiError).fromServer).toBe(false);
+    expect(serverMessage(err, 'Couldn’t save your profile.')).toBe(
+      'Couldn’t save your profile.'
+    );
+  });
+
   it('takes a null fallback, for a caller that picks its wording later', async () => {
     // `groups/[groupId]/invite.tsx` needs "the server's words, or nothing" so it
     // can choose between a per-invite reason and its own batch sentence.

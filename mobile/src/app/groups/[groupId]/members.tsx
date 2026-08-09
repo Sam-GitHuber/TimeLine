@@ -117,10 +117,7 @@ export default function GroupMembersScreen() {
       queryClient.invalidateQueries({ queryKey: ['groups'] });
     },
     onError: (error) =>
-      Alert.alert(
-        'Couldn’t do that',
-        serverMessage(error, WENT_WRONG)
-      ),
+      Alert.alert('Couldn’t do that', serverMessage(error, WENT_WRONG)),
   });
 
   const { openMenu, menu } = useActionMenu();

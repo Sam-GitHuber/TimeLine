@@ -136,10 +136,7 @@ export default function MessagesScreen() {
       queryClient.invalidateQueries({ queryKey: ['conversation'] });
     },
     onError: (error) =>
-      Alert.alert(
-        'Couldn’t do that',
-        serverMessage(error, WENT_WRONG)
-      ),
+      Alert.alert('Couldn’t do that', serverMessage(error, WENT_WRONG)),
   });
 
   const onRefresh = useCallback(async () => {

@@ -165,7 +165,20 @@ it('lets you take the group photo with the camera', async () => {
  * which is how you end up with two.
  */
 it('says its own sentence when the create never reaches the server', async () => {
-  createGroup.mockRejectedValue(new TypeError('Network request failed'));
+  // The shape `request` produces for a lost connection, not the bare `TypeError`
+  // it started as: this suite spies on `api.createGroup`, so a raw `TypeError`
+  // here would exercise a rejection production can no longer emit — and would
+  // stay green with `api.ts`'s guard deleted. The guard itself is pinned in
+  // `api.test.ts` and, end to end through `fetch`, in `settings.test.tsx`; what
+  // this pins is the call site.
+  createGroup.mockRejectedValue(
+    new ApiError(
+      'Couldn’t reach the server — check your connection and try again.',
+      0,
+      null,
+      false
+    )
+  );
   await renderForm();
 
   await fireEvent.changeText(screen.getByLabelText('Group name'), 'Book Club');

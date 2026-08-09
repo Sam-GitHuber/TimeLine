@@ -174,10 +174,7 @@ export function ComposeBox({
     onError: (error) => {
       // Keep the text and photos on failure — losing what someone just typed
       // because the network blipped is unforgivable on a phone.
-      Alert.alert(
-        'Couldn’t post',
-        serverMessage(error, WENT_WRONG)
-      );
+      Alert.alert('Couldn’t post', serverMessage(error, WENT_WRONG));
     },
   });
 

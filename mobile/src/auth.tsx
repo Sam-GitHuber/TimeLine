@@ -110,8 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         void registerForPush();
       } catch (err) {
         // **Only discard the tokens when the server actually rejected them.**
-        // `fetch` throws a plain TypeError when the phone has no connection,
-        // and treating that like a rejection would wipe a perfectly good
+        // A phone with no connection would otherwise wipe a perfectly good
         // 90-day refresh token — so opening the app once on the Underground
         // would silently end the session and, with it, push notifications.
         // That's the exact failure this phase exists to avoid.
@@ -119,6 +118,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // A real 401 here means the token is genuinely dead (revoked, or the
         // account was deleted — see PR #96); refresh has already been tried and
         // failed by this point, so there's nothing left to keep.
+        //
+        // ⚠️ **`status`, not the class.** Since #243 `api.ts` re-raises a lost
+        // connection as an `ApiError` too — that's how it stopped being React
+        // Native's `Network request failed` — so `err instanceof ApiError` is
+        // now true offline and would clear the tokens on its own. What separates
+        // the two is the status a lost connection carries: `0`, meaning we never
+        // asked. Never loosen this to the class (#245).
         const rejected = err instanceof ApiError && err.status === 401;
         if (rejected) await clearTokens();
         if (cancelled) return;

@@ -47,10 +47,7 @@ export function useGroupActions(groupId: number) {
   };
 
   const onError = (error: unknown) => {
-    Alert.alert(
-      'Couldn’t do that',
-      serverMessage(error, WENT_WRONG)
-    );
+    Alert.alert('Couldn’t do that', serverMessage(error, WENT_WRONG));
   };
 
   const leaveMutation = useMutation({
