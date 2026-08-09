@@ -634,6 +634,26 @@ Two of them reached past the display, and both took the #307/#308 answer:
   an empty member list. It refuses and says so now. (The app's twin, on
   `groups/[groupId]/invite.tsx`, is in #317.)
 
+**#319 missed two sites in the messaging panels, and #324 finished them** — same
+root cause, found in the sweep behind the app's #323:
+
+- **`ConversationInfoView`'s Block control** was gated on `otherQuery.data` with
+  that query's `isError` read nowhere in the file, so a failed profile fetch
+  removed the control with no explanation — the omission variant again, and the
+  worst one to date, because the person reaching for it is reaching for a safety
+  control. It stays absent as a *button* (see
+  [`messaging.md`](messaging.md#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e)
+  for why a `BlockButton` without `is_blocked` is worse than none) and says it
+  couldn't check instead.
+- **`ConversationThreadView`'s mark-read write** was gated on `showingThread`,
+  which answers for the *conversation*, not the transcript it claims has been
+  read — so the POST went out under a "Couldn't load these messages" card. The
+  guard is `showingThread && !!pages`, and **`!!pages`, not the failure flag**,
+  is the load-bearing part: gating on `!messagesLoadFailed` still fires while the
+  request is in flight, before anyone knows it failed. That's the same trap the
+  app's post and event screens record (#318), and it's why a guard there wasn't
+  enough either.
+
 **Badge-shaped counts are deliberately left alone** — `Layout.jsx` (nav unread),
 `GroupsDrawer.jsx` (the invite banner) and `PeoplePage.jsx` (the Requests count)
 are all `data?.count ?? 0`, so a failed poll reads as zero. Decided rather than

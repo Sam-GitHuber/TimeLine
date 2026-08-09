@@ -1863,13 +1863,46 @@ transcript and the gallery each answer for their own query:
 - **The gallery's silence was a claim too.** The section only appears once a
   photo has been sent, so rendering nothing on a *failed* fetch said "this chat
   has no photos". That's the one case where it now shows a heading and a line.
+- **And so was the Block control's** (#324, the twin of the app's #321 and the
+  one site in this file #319 walked past). It was gated on `otherQuery.data`,
+  with `otherQuery.isError` read nowhere, so a failed `GET /users/<id>` — cold
+  whenever you haven't opened that person's profile this session — ended the
+  panel at *Leave chat*. Someone who came to Details specifically to block a
+  harasser found no such control and no reason why. `otherLoadFailed` names it,
+  and it stays absent as a **button** deliberately: `BlockButton` takes
+  `is_blocked` and uses it for both the label and the direction of the write
+  (`isBlocked ? unblock : block`), so one drawn without it would offer *Block* to
+  someone who has already blocked them — the false-safety belief
+  [#236 exists to prevent](#blocking) — or silently unblock. A line saying we
+  couldn't check, plus the retry that finds out, takes its place. The section
+  around it stays *conditional* rather than becoming unconditional: a `Section`
+  draws a rule across the panel, so an always-drawn one leaves a stray line under
+  a 1:1 while the profile is still loading. The gate takes in the failed case
+  instead.
 
-All three read `!data` rather than a bare `isError`, so a failed refresh keeps
-what's on screen (#310/#313), and all three treat "no data, no error" as still
+All four read `!data` rather than a bare `isError`, so a failed refresh keeps
+what's on screen (#310/#313), and all of them treat "no data, no error" as still
 waiting — offline a query is **paused**, not loading, so `isLoading` is false
 with nothing behind it. `waitingMessage()` in `errors.js` is the shared wording
 for that state; see *The mirror image: no error branch at all — the web's sites*
 in [`feed-and-posts.md`](feed-and-posts.md) for the whole rule.
+
+**The mark-read write beside the transcript asks the same question** (#324, the
+web half of what #323 fixed on the phone). It was gated on `showingThread`, which
+answers for the *conversation* — header, participants, mute state, all from
+`convoQuery` and all fine while `messagesQuery` is errored — so the transcript
+said *Couldn't load these messages* while the effect next to it POSTed `read`,
+zeroing the nav badge and the conversation-list pill for messages the reader had
+just been told we couldn't load. Nothing on the page still said there was unread
+mail. It reads `readingMessages = showingThread && !!pages` now, and `!!pages`
+rather than `!messagesLoadFailed` is the difference between a fix and a guard
+that looks like one: gating on the failure alone still fires on the first commit
+after the detail lands, while the transcript request is in flight and neither
+errored nor loaded, so the write has already happened by the time we find out it
+failed. A failed *poll* must still mark read — `pages` survives it and the reader
+is looking at the messages. Less damaging than the app's version, which also
+cleared that thread's pushes out of the notification tray; the browser has no
+tray, so this half is the badge alone.
 
 **The thread header is now identity + `⋯`** — Details · Mute · Add people ·
 Leave — for the reason the app's is: three icon buttons were crowding the name of
@@ -2228,8 +2261,9 @@ promising a feature that doesn't exist is worse than its absence. See
 
 **Two of this screen's sections used to make a claim by simply not being there**
 (#321), each answering for a query whose `isError` was read nowhere. Only the
-first has a web precedent — **the web's Block gate still has this bug**, filed as
-#324; #319 touched only the gallery in that file:
+first had a web precedent at the time; the web's Block gate had the same bug
+untouched by #319, and went the same way in
+[#324](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e):
 
 - **The gallery's silence was a claim.** The section only appears once a photo
   has been sent, so rendering nothing on a *failed* fetch said "this chat has no

@@ -84,6 +84,28 @@ export default function ConversationInfoView() {
     queryFn: () => api.getUser(other.id),
     enabled: !!other?.id,
   });
+  /**
+   * **The Block control's absence was a claim too** (#324, the web twin of the
+   * app's #321). The gate below used to be `!isGroup && other &&
+   * otherQuery.data`, and `otherQuery.isError` was read nowhere in this file —
+   * so a failed `GET /users/<id>` (cold here whenever you haven't visited that
+   * person's profile this session) simply removed the control. Someone who
+   * opened Details specifically to block a harasser found the panel ending at
+   * *Leave chat*, with no reason why.
+   *
+   * It stays absent as a *button*, though, and that is deliberate rather than
+   * lazy: `BlockButton` takes `is_blocked` and uses it for both the label and
+   * the direction of the write (`isBlocked ? unblock : block`). Rendering one
+   * without knowing would offer *Block* to someone who has already blocked them
+   * — the false-safety belief #236 exists to prevent — or silently unblock. So
+   * the honest answer is to say we couldn't check, and offer the retry. Same
+   * answer as the app's, so the two clients read the same.
+   *
+   * `!otherQuery.data` rather than a bare `isError`, the same way round as
+   * `loadFailed` above: a failed *refresh* of a profile we already have keeps
+   * the button we can still label correctly (#309/#313).
+   */
+  const otherLoadFailed = !!other && otherQuery.isError && !otherQuery.data;
 
   const renameMutation = useMutation({
     mutationFn: (title) => api.renameConversation(conversationId, title),
@@ -384,8 +406,10 @@ export default function ConversationInfoView() {
           {/* Rendered only when it has something in it. A `Section` draws a rule
               across the panel, so an unconditional one left a stray line under a
               1:1 for as long as the profile behind the Block control was still
-              loading. */}
-          {(isGroup || (other && otherQuery.data)) && (
+              loading — which is why this can't simply become `true`. It has to
+              take in the failed case as well, or the line explaining the failure
+              has no section to be in. */}
+          {(isGroup || (other && (otherQuery.data || otherLoadFailed))) && (
           <Section>
             {isGroup && (
               /* Leaving unmounts this panel and so would drop a rename still in
@@ -432,7 +456,7 @@ export default function ConversationInfoView() {
                 hides the thread from both of you and bars re-connecting. The
                 shared control owns the warning modal, so this panel doesn't hold
                 a second copy of what blocking costs. */}
-            {!isGroup && other && otherQuery.data && (
+            {!isGroup && other && otherQuery.data ? (
               <div className="px-5 py-2.5">
                 <BlockButton
                   userId={other.id}
@@ -440,7 +464,21 @@ export default function ConversationInfoView() {
                   isBlocked={otherQuery.data.is_blocked}
                 />
               </div>
-            )}
+            ) : otherLoadFailed ? (
+              // Not a disabled button: a control that goes dead explains nothing
+              // and offers no way on. See `otherLoadFailed` above for why the
+              // button itself can't be drawn without `is_blocked`.
+              <p role="alert" className="px-5 py-2.5 text-sm text-red-600">
+                Couldn’t check whether you’ve blocked {other.display_name}.{" "}
+                <button
+                  type="button"
+                  onClick={() => otherQuery.refetch()}
+                  className="font-medium underline"
+                >
+                  Try again
+                </button>
+              </p>
+            ) : null}
           </Section>
           )}
         </div>

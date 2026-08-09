@@ -826,6 +826,83 @@ describe("Messages drawer — thread", () => {
     expect(screen.queryByText(/No messages yet/)).toBeNull();
   });
 
+  /**
+   * #324. The write beside that card was gated on `showingThread`, which answers
+   * for the *conversation* — header, participants, mute state, all from
+   * `convoQuery` and all fine while the transcript is errored. So the screen
+   * said "Couldn't load these messages" and this POSTed `read` anyway, zeroing
+   * the nav badge and the conversation-list pill for messages the reader had
+   * just been told we couldn't load, leaving nothing still saying there is
+   * unread mail.
+   */
+  it("doesn’t mark read when the transcript failed to load", async () => {
+    api.getConversation.mockResolvedValue(convoDetail({ unread_count: 3 }));
+    api.getMessages.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+
+    await screen.findByText("Couldn’t load these messages.");
+    await settle(3);
+
+    expect(api.markConversationRead).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The half that's easy to get wrong, and the reason the guard is `!!pages`
+   * rather than `!messagesLoadFailed`: gating on the *failure* still fires on
+   * the first commit after the detail lands, while the request is in flight and
+   * neither errored nor loaded — so the write has already happened by the time
+   * we find out it failed (#318's trap, on the web).
+   */
+  it("waits for the transcript rather than marking read while it's in flight", async () => {
+    api.getConversation.mockResolvedValue(convoDetail({ unread_count: 3 }));
+    api.getMessages.mockReturnValue(new Promise(() => {}));
+
+    renderAt("/messages/7");
+
+    // The detail has landed — the header is up — and the transcript hasn't.
+    await screen.findByText("Priya");
+    await settle(3);
+
+    expect(api.markConversationRead).not.toHaveBeenCalled();
+  });
+
+  // And a failed *poll* still marks read: `pages` survives it, so the reader is
+  // looking at the messages (#310/#313).
+  it("still marks read when a message poll fails under a live transcript", async () => {
+    api.getConversation.mockResolvedValue(convoDetail());
+    const first = {
+      id: 1,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: "hey there",
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+    };
+    api.getMessages.mockResolvedValue(page([first]));
+
+    const { queryClient } = renderAt("/messages/7");
+    await screen.findByText("hey there");
+    await waitFor(() =>
+      expect(api.markConversationRead).toHaveBeenCalledWith(7)
+    );
+    const before = api.markConversationRead.mock.calls.length;
+
+    api.getMessages.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["messages", 7]);
+
+    // A message lands once the connection comes back — the effect's other
+    // dependency moves, and the transcript never left the screen.
+    api.getMessages.mockResolvedValue(page([{ ...first, id: 2 }, first]));
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["messages", 7] });
+    });
+    await screen.findByText("hey there");
+
+    await waitFor(() =>
+      expect(api.markConversationRead.mock.calls.length).toBeGreaterThan(before)
+    );
+  });
+
   it("keeps the transcript when a message poll fails", async () => {
     api.getConversation.mockResolvedValue(convoDetail());
     api.getMessages.mockResolvedValue(
@@ -3454,6 +3531,130 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
       await screen.findByText(/This conversation isn’t available/)
     ).toBeInTheDocument();
     expect(screen.queryByText("Couldn’t load these details.")).toBeNull();
+  });
+
+  /**
+   * #324 — the web twin of #321's Block gate, and the quieter kind of claim:
+   * one made by **omission**. The control was gated on `otherQuery.data` with
+   * `otherQuery.isError` read nowhere in the file, so a failed profile fetch
+   * just took it away. Someone who opened Details specifically to block a
+   * harasser found the panel ending at *Leave chat*, with no reason why.
+   *
+   * It stays absent as a *button* deliberately: `BlockButton` reads `is_blocked`
+   * for both its label and the direction of its write, so one drawn without it
+   * would offer *Block* to someone who has already blocked them (#236) or
+   * silently unblock. What replaces it is a line saying we couldn't check.
+   */
+  it("says it couldn’t check the block state rather than dropping the control", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.getUser.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+    await screen.findByText("In this chat");
+
+    expect(
+      await screen.findByText(/Couldn’t check whether you’ve blocked Priya/)
+    ).toBeInTheDocument();
+    // Not a *Block* button we can't label, and not a dead disabled one.
+    expect(screen.queryByRole("button", { name: "Block" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Unblock" })).toBeNull();
+  });
+
+  it("finds out on Try again", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.getUser.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+    await screen.findByText(/Couldn’t check whether you’ve blocked Priya/);
+
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: true,
+      bio: "",
+    });
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    // And the label is the one the answer justifies — this person *had* blocked
+    // them already, which is exactly what a guessed button would have got wrong.
+    expect(
+      await screen.findByRole("button", { name: "Unblock" })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Couldn’t check whether you’ve blocked/)
+    ).toBeNull();
+  });
+
+  /**
+   * `!otherQuery.data`, not a bare `isError` — the same way round as every other
+   * failure in this file (#309/#313). A failed *refresh* of a profile we already
+   * have leaves a button we can still label correctly.
+   */
+  it("keeps the Block control when a profile refresh fails", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: false,
+      bio: "",
+    });
+
+    const { queryClient } = renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+    await screen.findByRole("button", { name: "Block" });
+
+    api.getUser.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["user", 2]);
+
+    expect(screen.getByRole("button", { name: "Block" })).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Couldn’t check whether you’ve blocked/)
+    ).toBeNull();
+  });
+
+  // The section this line lives in draws a rule across the panel, so it stays
+  // conditional — an unconditional one leaves a stray line under a 1:1 for as
+  // long as the profile is still *loading*, which is why the gate takes in the
+  // failed case rather than becoming `true`.
+  it("draws no stray rule while the profile is still loading", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.getUser.mockReturnValue(new Promise(() => {}));
+
+    const { container } = renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+    await screen.findByText("In this chat");
+    await settle(3);
+
+    expect(screen.queryByRole("button", { name: "Block" })).toBeNull();
+    expect(
+      screen.queryByText(/Couldn’t check whether you’ve blocked/)
+    ).toBeNull();
+    // Every rule on the panel belongs to a section that has something in it —
+    // asserted that way round rather than by counting them, so this doesn't
+    // break the next time the panel grows a row.
+    const rules = [...container.querySelectorAll(".border-t.border-line")];
+    expect(rules.length).toBeGreaterThan(0);
+    expect(rules.filter((rule) => rule.textContent.trim() === "")).toEqual([]);
   });
 });
 
