@@ -5,6 +5,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import * as Notifications from 'expo-notifications';
 import { ScrollView } from 'react-native';
 
 import PostScreen from '@/app/post/[postId]';
@@ -445,25 +446,87 @@ describe('scrolling to a deep-linked comment', () => {
   });
 });
 
-it('refreshes the unread notification count once the post lands (seen-on-view)', async () => {
-  // Fetching the post marks its notifications seen server-side, so the screen
-  // must invalidate the count the icon badge watches — otherwise the badge
-  // holds its stale number until the bell's next poll or the next foreground.
-  serve({ post: jsonResponse(makePost()) });
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { gcTime: 0 } },
+/**
+ * Viewing is seeing — and the mirror of it rides the GET (#318).
+ *
+ * The fetch marks this post's notifications seen server-side, so the screen
+ * mirrors that locally: it drops the count the icon badge watches, and takes
+ * the delivered pushes back out of the tray. Both hang off the resolution of
+ * the request, not off a render — see the note on the `queryFn`.
+ */
+describe('seen-on-view', () => {
+  /** What's sitting in the notification tray. */
+  function tray(...entries: { identifier: string; url: string | null }[]) {
+    (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue(
+      entries.map(({ identifier, url }) => ({
+        request: { identifier, content: { data: { url } } },
+      }))
+    );
+  }
+
+  /** The identifiers taken out of the tray, in any order. */
+  const dismissed = () =>
+    (Notifications.dismissNotificationAsync as jest.Mock).mock.calls
+      .map(([identifier]) => identifier)
+      .sort();
+
+  beforeEach(() => {
+    (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue([]);
+    (Notifications.dismissNotificationAsync as jest.Mock).mockClear();
   });
-  // A spy rather than reading query state back: with `gcTime: 0` and no
-  // observer mounted here, the count query would be collected the moment it's
-  // touched, leaving nothing to inspect.
-  const invalidate = jest.spyOn(client, 'invalidateQueries');
 
-  await renderScreen(client);
-  await screen.findByText('A day on the hills');
+  it('refreshes the unread count and clears the tray once the post lands', async () => {
+    // Otherwise the badge holds its stale number until the bell's next poll or
+    // the next foreground, and the push stays on the lock screen for a post
+    // that's open in front of you.
+    serve({ post: jsonResponse(makePost()) });
+    tray(
+      { identifier: 'mine', url: '/p/7?comment=3' },
+      { identifier: 'someone-else', url: '/p/8' }
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { gcTime: 0 } },
+    });
+    // A spy rather than reading query state back: with `gcTime: 0` and no
+    // observer mounted here, the count query would be collected the moment it's
+    // touched, leaving nothing to inspect.
+    const invalidate = jest.spyOn(client, 'invalidateQueries');
 
-  await waitFor(() =>
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] })
-  );
+    await renderScreen(client);
+    await screen.findByText('A day on the hills');
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] })
+    );
+    await waitFor(() => expect(dismissed()).toEqual(['mine']));
+  });
+
+  it('keeps the notification when a warm-cache reopen turns out to be a 404', async () => {
+    // #318. `useQuery` hands back a cached post *synchronously*, so while the
+    // mirror lived in an effect gated on `!!post` it fired on the first commit
+    // — before the mount refetch had been anywhere near the server. Read a
+    // post, back out, get a reply push, tap it within `gcTime`, and if the
+    // refetch 404s (deleted, or the author has since disconnected) the screen
+    // says the post is gone *and* the notification that would have brought you
+    // back has already been dismissed. A guard can't close it: `notFound` is
+    // false on that commit, because a cached entry carries no error yet.
+    serve({ post: jsonResponse({ detail: 'Not found.' }, 404) });
+    tray({ identifier: 'mine', url: '/p/7' });
+    // `gcTime: Infinity`, unlike the tests above: a seeded entry with nothing
+    // observing it is collected before the render on the default here — and a
+    // warm cache is the whole scenario.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity }, mutations: { gcTime: 0 } },
+    });
+    client.setQueryData(['post', '7'], makePost());
+    const invalidate = jest.spyOn(client, 'invalidateQueries');
+
+    await renderScreen(client);
+
+    expect(await screen.findByText('Post not available')).toBeTruthy();
+    expect(dismissed()).toEqual([]);
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] });
+  });
 });
 
 /**

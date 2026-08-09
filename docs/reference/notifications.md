@@ -718,7 +718,7 @@ payload field and no backend change.
 | A **Reply** typed into a notification *lands* | that conversation's notifications | `usePushTaps.ts` |
 | A message arrives for the thread already on screen | that one, as it arrives | `push.ts` |
 | The app opens, and each time it returns to the foreground | conversations the payload now reports as `unread_count: 0` | `usePushDismissals.ts` |
-| The post / event screen loads (its GET marked the notifications seen — viewing is seeing, above) | that post's (`/p/<id>`, `?comment=` included) / that event's | `post/[postId].tsx`, `events/[eventId].tsx` via `dismissPostNotifications` / `dismissEventNotifications` |
+| The post / event **GET resolves** (that GET marked the notifications seen — viewing is seeing, above) | that post's (`/p/<id>`, `?comment=` included) / that event's | `post/[postId].tsx`, `events/[eventId].tsx` — inside the `queryFn`, via `dismissPostNotifications` / `dismissEventNotifications` |
 
 Both mark-read paths are listed on purpose: dealing with a thread from the list
 is the same act as reading it, and covering only the thread screen left the badge
@@ -731,8 +731,24 @@ are fine while the messages are errored, so it used to clear the tray for a
 thread whose messages the reader was being told we couldn't load — told there is
 nothing there, and robbed of the one signal that would bring them back. The guard
 is `!!pages`, not "the messages query hasn't errored": the latter still fires on
-the commit *before* the request fails, which is the same trap #318 records for
-the post and event screens.
+the commit *before* the request fails, which was the same trap the post and event
+screens fell into.
+
+**On those two, no guard was sufficient and the dismissal moved into the
+`queryFn` (#318).** `useQuery` returns a cached post/event *synchronously*, so an
+effect gated on `!!data` fired on the first commit of a warm reopen — before the
+mount refetch had asked the server anything. Tap a reply push within `gcTime`,
+have the refetch 404 (deleted post; cancelled-then-deleted event), and the screen
+said the thing was gone while the notification and the badge that would have
+explained it were already cleared. A `!notFound && !!data` guard reads as the fix
+but isn't: a cached entry carries no error yet on that commit. Dismissing after
+the `await` instead means a 404 rejects first and a cached render never dismisses
+at all — the same move `CommentThread` made in #307/#308 for its seen-stamp
+mirror. It now runs on each successful fetch rather than once per mount, which is
+deliberate: a reply landing while the screen is open is marked seen by that
+refetch, so its push should go with it. Nothing in that block may throw — the
+server has already stamped by then, and a throw would reject a GET that succeeded
+(see `postCache.ts`'s note in the same position).
 
 The same guard governs **`setOnScreenConversation`**, which is a suppression
 rather than a dismissal and so easier to overlook. Claiming the thread makes the

@@ -321,12 +321,38 @@ apart.
 `markConversationRead` carries a `.catch()` besides, since the old error flag in
 the guard was what used to keep the write off a failing connection.
 
-Still open, same shape, different fix: `post/[postId].tsx` and
-`events/[eventId].tsx` dismiss a post's/event's pushes from an effect gated on
-`!!data`, and a **warm cache** hands that data back synchronously on the first
-render, so the dismissal lands before the mount refetch has been anywhere near
-the server. A guard can't close that one — the write has to ride the request, as
-`CommentThread`'s did in #308. Tracked as #318.
+**Same shape, different fix, and a guard was the wrong tool (#318).**
+`post/[postId].tsx` and `events/[eventId].tsx` dismissed a post's/event's pushes
+from an effect gated on `!!data`, and a **warm cache** hands that data back
+synchronously on the first render — so the dismissal landed before the mount
+refetch had been anywhere near the server, and a refetch that then 404'd left the
+screen saying the thing was gone with the notification and badge that would have
+brought you back already cleared. Deriving `showingPost = !notFound && !!post`
+would have looked like a fix and not been one: on that first commit `notFound` is
+false, because a cached entry carries no error yet.
+
+So the mirror **rides the request**, exactly as `CommentThread`'s did in #308 —
+both screens' `queryFn` is now `async`, dismissing and invalidating
+`['notificationsUnread']` after the `await`. A 404 rejects before reaching it; a
+cached render never runs it. Two consequences worth knowing:
+
+- It runs on **every** successful fetch rather than once per mount, which is the
+  intent — a reply arriving while the post is open is marked seen by that very
+  refetch, so its push and the badge should follow. Same "mop up on each fetch"
+  reasoning `[conversationId].tsx` gives for its own dismissal.
+- Nothing in there may **throw**. It runs after the server has already stamped,
+  so a throw would reject a GET that succeeded and leave the badge un-clearable
+  — the trap `postCache.ts` records in the same position.
+
+`useQueryClient()` moved above the `useQuery` in `post/[postId].tsx` for it.
+
+Still open, same family, **not** the same edit: the mark-read + tray dismissal on
+`messages/[conversationId].tsx` (and the web's `ConversationThreadView.jsx`) is
+gated on `readingMessages`, which a warm cache also satisfies synchronously — so
+a reopen whose transcript refetch fails can mark read, and dismiss, a message
+that arrived while you were away and isn't in the cached pages. Moving it is a
+larger change than these two were: the transcript is an infinite query, and the
+write deliberately re-runs as messages land rather than once per fetch.
 
 #### The mirror image: no error branch at all
 

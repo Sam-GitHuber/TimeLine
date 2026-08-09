@@ -54,28 +54,60 @@ export default function PostScreen() {
   const pendingY = useRef<number | null>(null);
   const scrolled = useRef(false);
 
+  // Declared above the query because the query's own `queryFn` uses it — see
+  // the seen-mirror note there.
+  const queryClient = useQueryClient();
+
   const {
     data: post,
     isLoading,
     error,
   } = useQuery({
     queryKey: ['post', String(id)],
-    queryFn: () => api.getPost(id),
+    /**
+     * **The seen-mirror is bolted to the request, not to a render (#318).**
+     *
+     * This GET marks every unread notification pointing at this post — or at
+     * any comment on it — seen server-side (viewing is seeing,
+     * notifications.md). So the local mirror of that stamp has to be the
+     * resolution of *this* GET: refresh the count the icon badge watches, and
+     * take the delivered pushes back out of the tray.
+     *
+     * It lived in an effect gated on `!!post` until #318, and an effect on
+     * `data` is not the same thing — the mistake `CommentThread` had made one
+     * level down and fixed in #308. `useQuery` hands back a cached post
+     * *synchronously*, and the default `gcTime` is five minutes, so tapping a
+     * push for a post you read a moment ago fired the effect on that stale copy
+     * before the mount refetch had been anywhere near the server. If the
+     * refetch then 404'd — the post deleted, or its author since disconnected
+     * — the screen said *Post not available* **and** the notification that
+     * would have brought you back, plus the badge behind it, were already gone.
+     * A guard couldn't close it: on that first commit `notFound` is false,
+     * because a cached entry carries no error yet.
+     *
+     * Here, a 404 rejects before reaching the mirror and a cached render never
+     * runs it at all. The trade is that this runs on **every** successful fetch
+     * rather than once per mount, which is the right way round: a reply landing
+     * while the post is open is marked seen by that very refetch, so its push
+     * and the badge should follow it — the same "mop up on each fetch"
+     * reasoning `messages/[conversationId].tsx` gives for its own dismissal.
+     *
+     * Neither call may throw: this runs *after* the server has already stamped,
+     * so a throw here would reject a GET that succeeded and leave the badge
+     * un-clearable (the trap `postCache.ts` records). `dismissDelivered`
+     * swallows its own errors, and an invalidation's refetch reports failure
+     * through query state rather than rejecting.
+     */
+    queryFn: async () => {
+      const fetched = await api.getPost(id);
+      void dismissPostNotifications(fetched.id);
+      void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+      return fetched;
+    },
     // A 404 here is a real answer ("you can't see this"), not a blip worth
     // retrying — and retrying would just delay the message.
     retry: false,
   });
-
-  // The fetch marked this post's notifications seen server-side (viewing is
-  // seeing — notifications.md), so mirror it locally: refresh the count the
-  // icon badge watches, and take the delivered pushes out of the tray.
-  const queryClient = useQueryClient();
-  const loadedPostId = post?.id;
-  useEffect(() => {
-    if (loadedPostId == null) return;
-    void dismissPostNotifications(loadedPostId);
-    void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
-  }, [loadedPostId, queryClient]);
 
   /**
    * Scroll a deep-linked comment into view, once.

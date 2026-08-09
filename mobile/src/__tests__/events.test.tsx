@@ -11,6 +11,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 
 import { api, ApiError } from '@/api';
@@ -365,6 +366,85 @@ describe('event detail', () => {
     await renderWith(<EventScreen />);
 
     expect(await screen.findByText('Event not available')).toBeTruthy();
+  });
+
+  /**
+   * Viewing is seeing, mirrored on the request rather than on a render (#318) —
+   * the post screen's twin, and it moves with it.
+   */
+  describe('seen-on-view', () => {
+    /** What's sitting in the notification tray. */
+    function tray(...entries: { identifier: string; url: string }[]) {
+      (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue(
+        entries.map(({ identifier, url }) => ({
+          request: { identifier, content: { data: { url } } },
+        }))
+      );
+    }
+
+    /** The identifiers taken out of the tray, in any order. */
+    const dismissed = () =>
+      (Notifications.dismissNotificationAsync as jest.Mock).mock.calls
+        .map(([identifier]) => identifier)
+        .sort();
+
+    beforeEach(() => {
+      (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue([]);
+      (Notifications.dismissNotificationAsync as jest.Mock).mockClear();
+    });
+
+    it('refreshes the unread count and clears the tray once the event lands', async () => {
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+        if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
+        return jsonResponse(null, 404);
+      });
+      tray(
+        { identifier: 'mine', url: '/g/7/events/9?comment=3' },
+        { identifier: 'someone-else', url: '/g/7/events/10' }
+      );
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { gcTime: 0 } },
+      });
+      const invalidate = jest.spyOn(client, 'invalidateQueries');
+
+      await renderWith(<EventScreen />, client);
+      await screen.findByText('Summer camping weekend');
+
+      await waitFor(() =>
+        expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] })
+      );
+      await waitFor(() => expect(dismissed()).toEqual(['mine']));
+    });
+
+    it('keeps the notification when a warm-cache reopen turns out to be a 404', async () => {
+      // #318, and the event's version of it is the sharper one: a cancelled
+      // event that someone then deletes is exactly the case where the push is
+      // the only thing that would explain where it went. `useQuery` returns the
+      // cached event synchronously, so the old effect fired before the mount
+      // refetch had asked the server anything, and the 404 that followed left
+      // the screen saying the event "may have been cancelled" with the
+      // notification already gone from the tray.
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+        return jsonResponse(null, 404);
+      });
+      tray({ identifier: 'mine', url: '/g/7/events/9' });
+      // `gcTime: Infinity`: a seeded entry with nothing observing it is
+      // collected before the render on the default here, and a warm cache is
+      // the whole scenario.
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: Infinity }, mutations: { gcTime: 0 } },
+      });
+      client.setQueryData(['event', 9], makeEvent());
+      const invalidate = jest.spyOn(client, 'invalidateQueries');
+
+      await renderWith(<EventScreen />, client);
+
+      expect(await screen.findByText('Event not available')).toBeTruthy();
+      expect(dismissed()).toEqual([]);
+      expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] });
+    });
   });
 
   it('upserts your RSVP when you choose a response', async () => {
