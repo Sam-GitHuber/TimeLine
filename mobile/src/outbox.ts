@@ -19,8 +19,9 @@
  * message but the transcript cache is empty because its own fetch failed, there
  * is nowhere to hand the message over to, so the entry stays in the `sent` state
  * below rather than being dropped onto a screen that would then show nothing
- * (#325). That is the one entry the two sides have to agree about, and
- * `sentId` is what they agree on.
+ * (#325). It is handed over as soon as there is a cached transcript to hand it
+ * to — the screen owns that moment, since only it knows whether the fetch ever
+ * got through.
  *
  * It lives in its own module because the transcript and the focused thread view
  * both render from it — a reply is an ordinary message, so one that fails on its
@@ -66,13 +67,6 @@ export type Outgoing = {
    * the transcript loads and its own copy arrives.
    */
   status: 'sending' | 'failed' | 'sent';
-  /**
-   * The server's id for this message. Set **only** with `status: 'sent'`, and
-   * the whole reason that state can end: it's how the screen recognises the
-   * server's own copy landing in the transcript and lets go of this one, rather
-   * than rendering the message twice.
-   */
-  sentId?: number;
   /**
    * A photo being sent with it (Phase 9b M7), already prepared for upload.
    *

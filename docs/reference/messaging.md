@@ -463,15 +463,25 @@ message was thrown away*, in a messenger, and invites sending it again. It had
 in fact sent, and the other person had it — only that screen had lost it.
 
 So `onSuccess` asks whether the message is in the cache *afterwards*, and if it
-isn't, holds the entry as `sent` with the server's id on it. It renders as an
-ordinary delivered bubble — `SendState` already has a `sent` tick, so this is a
-third outbox state and not a fourth kind of bubble — beside the "couldn't load
-the rest of this conversation" note that explains the missing history. It gets
-**no Retry**, which without a server id to deduplicate on would send the text a
-second time, and no Discard, which would hide a message the recipient can read.
-The screen lets go of it when the transcript finally loads and its own copy of
-that id arrives; until then the message stays visible, which is the only honest
-thing to show.
+isn't, holds the entry as `sent`. It renders as an ordinary delivered bubble —
+`SendState` already has a `sent` tick, so this is a third outbox state and not a
+fourth kind of bubble — beside the "couldn't load the rest of this conversation"
+note that explains the missing history. It gets **no Retry**, which for want of
+an idempotency key (see the gap below) would send the text a second time, and no
+Discard, which would hide a message the recipient can read. With read receipts
+switched off it draws with no tick at all, like every other delivered message
+there: the tick column disappearing is the point of that setting, and a held
+entry wears its tick for as long as the visit rather than passing like a clock.
+
+**The hold ends when there is a cached transcript, not when that message
+appears in it.** The tempting key is the id — let go once the server's own copy
+is on screen — and it's wrong, because the transcript pages lazily from the
+newest end: return to a busy thread and page one need not contain the held
+message at all, so the entry would never be released, and the bubble would sit
+at the bottom of the chat wearing the device clock as if it were the newest
+thing said. A message deleted in the meantime would hold it forever. The entry
+exists because there was nowhere to put the message; once there is somewhere,
+the server's history is on screen and is the better account of it.
 
 The obvious alternative — have `insertMessage` synthesise a page — was rejected
 rather than deferred. It would put the query into `success` with a one-message
