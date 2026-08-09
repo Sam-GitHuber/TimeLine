@@ -51,6 +51,24 @@ export default function GroupMembersScreen() {
 
   const groupQuery = useQuery({ queryKey: ['group', id], queryFn: () => api.getGroup(id) });
   const isAdmin = groupQuery.data?.your_role === 'admin';
+  /**
+   * **A roster whose rows are inert, saying nothing about why** (#321).
+   *
+   * Your role comes from a *different* query than the roster does, and only the
+   * roster's `isError` was ever read. So a failed group fetch beside a
+   * succeeding members fetch drew a complete, healthy-looking list — correct
+   * names, correct Admin badges — in which nothing was pressable: an admin taps
+   * a row to remove a spammer and gets no menu, no alert, nothing at all. The
+   * screen stated by omission "you are not an admin of this group", which is a
+   * claim about the server's answer made on the strength of a dropped packet.
+   *
+   * The rows stay inert, deliberately — every control behind them would 403 if
+   * we guessed wrong, and guessing *up* means offering an admin action to a
+   * member. What changes is that the screen says so, and offers the retry.
+   *
+   * `!data`, never a bare `isError`: a failed refresh keeps the role it knows.
+   */
+  const roleUnknown = groupQuery.isError && !groupQuery.data;
 
   const membersQuery = useQuery({
     queryKey: ['groupMembers', id],
@@ -153,6 +171,28 @@ export default function GroupMembersScreen() {
         data={members}
         keyExtractor={(m) => String(m.user.id)}
         contentContainerStyle={styles.listContent}
+        // Above the roster rather than in `ListEmptyComponent`: the case this
+        // exists for is precisely the one where the members *did* load, so the
+        // empty slot never gets its turn.
+        ListHeaderComponent={
+          roleUnknown ? (
+            <View style={styles.notice}>
+              <Text style={styles.inlineError}>
+                Couldn’t check whether you manage this group, so the member
+                actions aren’t available.
+              </Text>
+              <Pressable
+                onPress={() => groupQuery.refetch()}
+                accessibilityRole="button"
+                accessibilityLabel="Try checking again"
+                hitSlop={8}
+                style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
+              >
+                <Text style={styles.retryText}>Try again</Text>
+              </Pressable>
+            </View>
+          ) : null
+        }
         renderItem={({ item }) => {
           const isSelf = item.user.id === me?.pk;
           return (
@@ -241,4 +281,13 @@ const styles = StyleSheet.create({
     borderColor: colors.lineStrong,
   },
   retryText: { color: colors.ink, fontWeight: '600' },
+  notice: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  inlineError: { fontSize: fontSize.sm, color: colors.danger, lineHeight: 20 },
+  inlineRetry: { alignSelf: 'flex-start', paddingVertical: spacing.xs },
+  pressed: { opacity: 0.7 },
 });

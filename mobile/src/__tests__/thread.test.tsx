@@ -4288,3 +4288,192 @@ it('stops marking read once a 404 has taken the thread off the screen', async ()
 
   expect(readPosts()).toBe(afterGone);
 });
+
+// --- A transcript that fails to load (#321) ---------------------------------
+
+/**
+ * The mirror image of the block above: this file read `convoQuery.isError` and
+ * never `messagesQuery`'s.
+ *
+ * The header, the participants and the mute state all come from the *other*
+ * query, so they render perfectly while the transcript's fetch is errored — and
+ * what filled the space where the messages should be was "No messages yet — say
+ * hello.", in a thread with years of history, under the name of the person whose
+ * messages had just gone missing. The natural response to that sentence is to
+ * start the conversation again.
+ */
+describe('a transcript that fails to load', () => {
+  /** The messages endpoint fails from here on; everything else keeps working. */
+  function breakTheMessages(reason = 'Server error.') {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        // The transcript's own GET: not the strand (`thread_root=`), not the
+        // quote resolver (`ids=`), and not a send/edit/delete, all of which
+        // hang off the same path and would be testing something else.
+        const transcriptGet =
+          String(url).includes('/messages/') &&
+          !String(url).includes('thread_root=') &&
+          !String(url).includes('ids=') &&
+          (init?.method ?? 'GET') === 'GET';
+        if (!transcriptGet) return base(url, init);
+        // A macrotask late, as a real request is — an instant rejection settles
+        // inside the render's own batch and doesn't behave like one.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: reason }, 500);
+      }
+    );
+  }
+
+  it('doesn’t say a thread is empty when we couldn’t ask', async () => {
+    serve({ conversation: detail({}), messages: [] });
+    breakTheMessages();
+    await renderScreen();
+
+    expect(await screen.findByText('Couldn’t load these messages')).toBeTruthy();
+    expect(screen.queryByText('No messages yet — say hello.')).toBeNull();
+    // The header still loaded, which is exactly why the empty state was
+    // convincing: nothing else on screen looked wrong.
+    expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+  });
+
+  it('offers a retry that reloads the transcript', async () => {
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1, text: 'See you at six' })],
+    });
+    breakTheMessages();
+    await renderScreen();
+    await screen.findByText('Couldn’t load these messages');
+
+    // The server comes back.
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1, text: 'See you at six' })],
+    });
+    await fireEvent.press(
+      screen.getByLabelText('Try loading the messages again')
+    );
+
+    expect(await screen.findByText('See you at six')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load these messages')).toBeNull();
+  });
+
+  it('keeps the messages on screen when a poll of them fails', async () => {
+    // `isError && !pages`, never a bare `isError` (#309/#311). This query polls
+    // on `MESSAGE_POLL_MS` and pages backwards into history, so a failure of
+    // either must not take the transcript away.
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1, text: 'See you at six' })],
+    });
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    await renderScreen(client);
+    await screen.findByText('See you at six');
+    breakTheMessages();
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['messages', 5] });
+    });
+    await settle(2);
+
+    expect(screen.getByText('See you at six')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load these messages')).toBeNull();
+  });
+
+  it('doesn’t claim the thread is empty while the detail is still in flight', async () => {
+    // The transcript query is `enabled: !!detail`, and a *disabled* query is
+    // neither loading nor errored — `isLoading` is false with nothing behind
+    // it. Gated on `isLoading`, the empty state painted "No messages yet" in
+    // the gap before the messages had even been asked for. `!pages` is the
+    // branch that state is owed.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/auth/user/')) return jsonResponse(ME);
+      // The detail never answers, so `messagesQuery` never becomes enabled.
+      if (/\/api\/conversations\/5\/(\?|$)/.test(String(url))) {
+        return new Promise(() => {});
+      }
+      return jsonResponse(null, 404);
+    });
+    await renderScreen();
+    await settle(2);
+
+    expect(screen.queryByText('No messages yet — say hello.')).toBeNull();
+    expect(screen.queryByText('Couldn’t load these messages')).toBeNull();
+  });
+});
+
+/**
+ * The write beside that screen has to agree with it (#315's rule, #321's cause).
+ *
+ * `showingThread` answers for the *conversation* — header, participants,
+ * composer — and all of those render from `convoQuery` while the transcript is
+ * errored. So the mark-read effect went on firing: it dismissed this thread's
+ * delivered pushes from the tray and POSTed `read`, for messages the reader was
+ * being told we couldn't load. They are informed there is nothing there **and**
+ * the only signal that would have brought them back is gone — #318's outcome,
+ * reached from here.
+ */
+describe('marking read when the transcript failed', () => {
+  function breakTheMessages() {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        const transcriptGet =
+          String(url).includes('/messages/') &&
+          !String(url).includes('thread_root=') &&
+          !String(url).includes('ids=') &&
+          (init?.method ?? 'GET') === 'GET';
+        if (!transcriptGet) return base(url, init);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: 'Server error.' }, 500);
+      }
+    );
+  }
+
+  const readPosts = () =>
+    mockFetch.mock.calls.filter(
+      ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
+    ).length;
+
+  it('doesn’t mark read, and leaves the notification in the tray', async () => {
+    serve({ conversation: detail({ unread_count: 3 }), messages: [] });
+    mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
+      { request: { identifier: 'this-thread', content: { data: { url: '/messages/5' } } } },
+    ] as never);
+    breakTheMessages();
+    await renderScreen();
+    await screen.findByText('Couldn’t load these messages');
+    await settle(2);
+
+    expect(readPosts()).toBe(0);
+    expect(mockNotifications.dismissNotificationAsync).not.toHaveBeenCalled();
+  });
+
+  it('marks read as soon as the retry lands', async () => {
+    // Recovery must not need a fresh mount: nothing else would ever clear the
+    // badge for a thread whose first fetch happened to fail. The effect re-runs
+    // when the transcript arrives, which is what `!!pages` in its guard buys.
+    serve({ conversation: detail({ unread_count: 3 }), messages: [] });
+    breakTheMessages();
+    await renderScreen();
+    await screen.findByText('Couldn’t load these messages');
+    expect(readPosts()).toBe(0);
+
+    serve({
+      conversation: detail({ unread_count: 3 }),
+      messages: [message({ id: 1, text: 'See you at six' })],
+    });
+    await fireEvent.press(
+      screen.getByLabelText('Try loading the messages again')
+    );
+    await screen.findByText('See you at six');
+
+    await waitFor(() => expect(readPosts()).toBeGreaterThan(0));
+  });
+});

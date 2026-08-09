@@ -228,7 +228,15 @@ timelines to refresh on success — see
 [feed-and-posts](feed-and-posts.md#posts)). The group
 actions live behind a **⋯ menu** (ActionSheetIOS): Invite, Members, Leave, and —
 for admins — Edit, Delete. Members is its own roster screen (admin controls via a
-per-row action sheet; the last-admin guardrail surfaces the server's 400); invite
+per-row action sheet; the last-admin guardrail surfaces the server's 400).
+**Your role there comes from a different query than the roster does** (#321):
+`isAdmin` reads `['group', id]` while the list reads `['groupMembers', id]`, and
+only the list's error was ever branched on — so a failed group fetch beside a
+succeeding members fetch drew a complete, correct-looking roster in which nothing
+was pressable, stating by omission "you are not an admin of this group". The rows
+stay inert in that state (every control behind them would 403 if we guessed
+wrong, and guessing *up* offers an admin action to a member), but a notice above
+the list says the role couldn't be checked and offers the retry. Invite
 and create/edit are pushed screens reusing the connection-picker and the profile
 editor's round avatar cropper. **The invite screen's Invite refuses when the
 member roster hasn't loaded** (#317) — the roster is what filters existing

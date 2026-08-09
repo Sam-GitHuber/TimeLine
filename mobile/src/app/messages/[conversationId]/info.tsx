@@ -96,6 +96,22 @@ export default function ConversationInfoScreen() {
     queryFn: () => api.getUser(other!.id),
     enabled: !!other?.id,
   });
+  /**
+   * **The Block control's absence was a claim too** (#321). The gate used to be
+   * `!isGroup && other && otherQuery.data`, and `otherQuery.isError` was read
+   * nowhere — so a failed profile fetch (cold here whenever you haven't visited
+   * that person's profile this session) simply removed the control. Someone who
+   * opened Details specifically to block a harasser found the screen ending at
+   * *Leave chat*, with no reason why.
+   *
+   * It stays absent as a *button*, though, and that is deliberate rather than
+   * lazy: `BlockButton` takes `is_blocked` and uses it for both the label and
+   * the direction of the write (`isBlocked ? unblock : block`). Rendering one
+   * without knowing would offer "Block" to someone who has already blocked them
+   * — the false-safety belief #236 exists to prevent — or silently unblock. So
+   * the honest answer is to say we couldn't check, and offer the retry.
+   */
+  const otherLoadFailed = !!other && otherQuery.isError && !otherQuery.data;
 
   const renameMutation = useMutation({
     mutationFn: (title: string) => api.renameConversation(id, title),
@@ -391,6 +407,24 @@ export default function ConversationInfoScreen() {
                   isBlocked={otherQuery.data.is_blocked}
                 />
               </View>
+            ) : otherLoadFailed ? (
+              // Not a disabled button: a control that goes dead explains
+              // nothing and offers no way on. See `otherLoadFailed` above for
+              // why the button itself can't be drawn without `is_blocked`.
+              <View style={styles.blockRow}>
+                <Text style={styles.inlineError}>
+                  Couldn’t check whether you’ve blocked {other.display_name}.
+                </Text>
+                <Pressable
+                  onPress={() => otherQuery.refetch()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Try checking again"
+                  hitSlop={8}
+                  style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
+                >
+                  <Text style={styles.retryText}>Try again</Text>
+                </Pressable>
+              </View>
             ) : null}
           </View>
         </KeyboardAwareScroll>
@@ -406,6 +440,11 @@ export default function ConversationInfoScreen() {
  * state — a heading over a blank square is a feature announcing that it has
  * nothing for you. A chat that has never carried a picture simply doesn't have
  * this section, and it appears the first time one is sent.
+ *
+ * The one exception, and the reason it is one: when the fetch *failed* we have
+ * no idea whether there are photos, and "no section" is this component's way of
+ * saying there are none. So a failed load gets the heading and a line — an
+ * absence is a claim too (#321; the web's twin took the same answer in #319).
  *
  * 🔒 It reads the *messages* endpoint with a `media=1` filter, not a gallery
  * endpoint of its own, so the photos here are the same interval-clipped set the
@@ -432,7 +471,35 @@ function MediaGallery({ conversationId }: { conversationId: number }) {
     (message) => message.attachments ?? []
   );
 
-  if (photos.length === 0) return null;
+  // **The section's absence is itself a claim** (#321). It only appears once a
+  // photo has been sent, so "not there" reads as "this chat has no photos" —
+  // which a failed fetch then says on the strength of a request that never
+  // arrived, and the component's own docstring above says so out loud. Quieter
+  // than the other sites because it's an omission rather than a sentence, so the
+  // answer is a line rather than a whole state: say we couldn't ask, and leave
+  // the grid out. `!data`, so a failed *refresh* keeps the photos it has.
+  if (photos.length === 0) {
+    if (!(mediaQuery.isError && !mediaQuery.data)) return null;
+    return (
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Photos</Text>
+        <View style={styles.galleryError}>
+          <Text style={styles.inlineError}>
+            Couldn’t load the photos in this chat.
+          </Text>
+          <Pressable
+            onPress={() => mediaQuery.refetch()}
+            accessibilityRole="button"
+            accessibilityLabel="Try loading the photos again"
+            hitSlop={8}
+            style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
+          >
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
 
   /**
    * How many photos the chat holds, which is **not** how many are drawn below.
@@ -645,6 +712,12 @@ const styles = StyleSheet.create({
   actionState: { fontSize: fontSize.sm, color: colors.inkFaint, fontWeight: '600' },
   danger: { color: colors.danger },
   blockRow: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
+  // The quieter shape (#321): a line under content that *did* load, rather than
+  // the centred card a whole failed screen gets. Same wording colour as the
+  // group page's and the profile's.
+  galleryError: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
+  inlineError: { fontSize: fontSize.sm, color: colors.danger, lineHeight: 20 },
+  inlineRetry: { alignSelf: 'flex-start', paddingVertical: spacing.xs },
   pressed: { opacity: 0.7 },
   // A wrapping grid rather than a fixed column count: percentage widths would
   // have to be recomputed against the gap, and a flexible tile size means the

@@ -365,6 +365,50 @@ keeps what's on screen — the rule above, and the half #309/#311 had backwards:
   its blurb over zero toggles: "there are no settings" rather than "we couldn't
   load them", with no retry.
 
+**#321 finished the family off** with the four the sweep behind #320 had left —
+three of them in messaging, which is its own subsystem with its own reference
+doc, and one on a screen that reaches no empty state at all:
+
+- **`messages/[conversationId].tsx`** said *"No messages yet — say hello."* in a
+  thread with years of history. The loudest instance in the app, and the exact
+  twin of the web's `ConversationThreadView`. Its two waiting states are worth
+  keeping straight: the transcript query is `enabled` only once the detail has
+  landed, and a **disabled** query is neither loading nor errored — so the branch
+  it needs is **`!pages`**, not `isLoading`, or the empty state paints in the gap
+  before the messages have even been asked for. (That is the same shape the
+  paused-query warning below describes, reached without `onlineManager`.)
+- **`messages/[conversationId]/info.tsx` twice, both by omission.** The media
+  gallery renders `null` with no photos on purpose — a heading over a blank
+  square is a feature announcing it has nothing for you — so a *failed* fetch
+  said "this chat has never carried a picture". That one case gets the heading
+  and a line. The **Block** control was gated on `otherQuery.data` and simply
+  wasn't drawn: someone who opened Details to block a harasser found the screen
+  ending at *Leave chat*. It stays undrawn as a **button** — `BlockButton` takes
+  `is_blocked` and uses it for both the label and the direction of the write, so
+  one rendered without it could unblock someone you meant to block (#236) — and
+  what replaces it is a line saying we couldn't check, with the retry.
+- **`groups/[groupId]/members.tsx`** drew a complete, healthy-looking roster
+  whose rows were **inert**. `isAdmin` comes from `['group', id]`; only
+  `['groupMembers', id]`'s error was ever read. An admin taps a row to remove a
+  spammer, nothing happens at all, and the screen has stated by omission "you are
+  not an admin of this group". The rows stay inert — every control behind them
+  would 403 if we guessed wrong, and guessing *up* offers an admin action to a
+  member — but a notice above the list says so and offers the retry.
+
+**And one write, folded in with them.** The thread's mark-read effect was gated
+on `showingThread`, which answers for the *conversation*: its header, its
+participants, its composer, all from `convoQuery` and all fine while the
+transcript is errored. So the screen said "Couldn't load these messages" while
+the effect beside it dismissed that thread's delivered pushes and POSTed `read`.
+The reader is told there is nothing there **and** the only signal that would
+bring them back is gone — #318's outcome reached from #321's cause. It reads
+`readingMessages = showingThread && !!pages` now, and **`!!pages` rather than
+`!messagesLoadFailed` is the whole fix**: gating on the failure alone still fires
+on the first commit after the detail lands, while the transcript request is in
+flight and neither errored nor loaded, so the dismissal has already happened by
+the time we find out. A failed *poll* still marks read, because `pages` survives
+it and the reader is looking at the messages (#309).
+
 Two of them are not a wrong sentence:
 
 - **`groups/[groupId]/invite.tsx` reaches past the display, and turned a failed

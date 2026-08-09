@@ -2221,9 +2221,34 @@ screen) is the natural home for "the picture someone sent last week": a grid of
 the chat's photos, newest first, tapping into the shared `PhotoLightbox` as a
 swipeable gallery. It reads the *messages* endpoint with `?media=1`, so it can
 never show a photo the transcript wouldn't, and it renders nothing at all in a
-chat with no photos. M6 shipped this screen without it deliberately — there were
-no photo messages until M7, and an empty grid promising a feature that doesn't
-exist is worse than its absence. See [Photo messages](#photo-messages).
+chat with no photos — with one exception, below. M6 shipped this screen without
+it deliberately — there were no photo messages until M7, and an empty grid
+promising a feature that doesn't exist is worse than its absence. See
+[Photo messages](#photo-messages).
+
+**Two of this screen's sections used to make a claim by simply not being there**
+(#321), each answering for a query whose `isError` was read nowhere. Both take
+the answer the web's panel took in #319:
+
+- **The gallery's silence was a claim.** The section only appears once a photo
+  has been sent, so rendering nothing on a *failed* fetch said "this chat has no
+  photos" — which is what the component's own docstring says its absence means.
+  That one case gets the heading and a line. Quieter than a whole state because
+  it's an omission rather than a sentence.
+- **The Block control silently wasn't there.** Gated on `otherQuery.data`, so a
+  failed profile fetch — cold whenever you haven't opened that person's profile
+  this session — ended the screen at *Leave chat*. Someone who came to Details
+  specifically to block a harasser found no such control and no reason why. It
+  stays absent as a **button** and that is deliberate: `BlockButton` takes
+  `is_blocked` and uses it for both the label and the direction of the write
+  (`isBlocked ? unblock : block`), so one drawn without it would offer *Block* to
+  someone who has already blocked them — the false-safety belief [#236 exists to
+  prevent](#blocking) — or silently unblock. What replaces it is a line saying we
+  couldn't check, and the retry that finds out.
+
+Both read `!data` rather than a bare `isError`, so a failed refresh keeps what's
+on screen (#309/#311). The whole rule, and the app's other sites, are in
+[`mobile-app.md`](mobile-app.md#the-mirror-image-no-error-branch-at-all).
 
 ### The long-press action menu (Phase 9b M1)
 
@@ -2464,6 +2489,35 @@ a message arriving mid-scroll shifts the window and a page can re-send what the
 previous one showed. `toThreadRows` de-duplicates by id — two rows sharing a key
 makes React warn and lets `FlatList` recycle the wrong one — and the four-second
 poll refetches every loaded page, so any gap at a boundary heals itself.
+
+**The transcript is a second query, and it fails separately** (#321) — the app's
+copy of the web's #319. The header, the participants and the mute state come from
+`convoQuery`, so they render perfectly while `messagesQuery` is errored, and
+*"No messages yet — say hello."* appeared in threads with years of history, under
+the name of the person whose messages had just gone missing. `messagesQuery.isError`
+was read nowhere in the file. Three branches now, in this order:
+
+- `messagesLoadFailed` (`isError && !pages`) — say so, with a retry. `!pages`, so
+  a failed poll or a failed page of *older* messages never takes the transcript
+  off screen.
+- `!pages` — still waiting. **Not `isLoading`:** this query is `enabled` only once
+  the detail has landed, and a *disabled* query is neither loading nor errored, so
+  the empty state used to paint in the gap before the messages were even asked for.
+- otherwise the genuine empty state. Reached through `ListEmptyComponent`, which
+  keys off `rows` rather than `loaded` — an unsent message waiting in the outbox
+  is still something on screen, and replacing it with an apology would look like
+  it had been thrown away.
+
+**The mark-read write moved with it.** It was gated on `showingThread`, which
+answers for the conversation rather than the transcript — so on a cold transcript
+failure the screen said "Couldn't load these messages" while the effect beside it
+dismissed that thread's delivered pushes from the tray and POSTed `read`. It waits
+on `readingMessages = showingThread && !!pages` now; `!!pages` and not
+`!messagesLoadFailed`, because gating on the failure alone still fires on the
+commit before we know the request failed. See
+[`notifications.md`](notifications.md#push-notifications) for the dismissal half
+and [`mobile-app.md`](mobile-app.md#the-mirror-image-no-error-branch-at-all) for
+the rule.
 
 **Reading a transcript, rather than a list of bubbles.** Day separators
 ("Today" / "Yesterday" / "12 March", re-derived at local midnight by
