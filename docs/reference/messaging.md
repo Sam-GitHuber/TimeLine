@@ -1874,11 +1874,25 @@ transcript and the gallery each answer for their own query:
   (`isBlocked ? unblock : block`), so one drawn without it would offer *Block* to
   someone who has already blocked them — the false-safety belief
   [#236 exists to prevent](#blocking) — or silently unblock. A line saying we
-  couldn't check, plus the retry that finds out, takes its place. The section
-  around it stays *conditional* rather than becoming unconditional: a `Section`
-  draws a rule across the panel, so an always-drawn one leaves a stray line under
-  a 1:1 while the profile is still loading. The gate takes in the failed case
-  instead.
+  couldn't check, plus the retry that finds out, takes its place.
+
+  **It has four states, and the last two were found in review.** The row is
+  `gone → couldn't-ask → the control → still-waiting`, failure-first, which is
+  the order every site in the app uses and the only order in which the `!data` in
+  `otherLoadFailed` means anything. *Still-waiting* is the branch an **offline**
+  reader lands in — the request is paused, never sent, so no error branch catches
+  it and an error-only fix left the control exactly as absent as before, in the
+  state someone reaching for Block is likeliest to be in. *Gone* is a **404**,
+  which is permanent here (`UserDetailView` filters `is_active`), so it says the
+  account is no longer available and offers no retry that could never work. With
+  all four covered, the `Section` around the row is gated on nothing more than
+  "there is an `other`" — one condition, not two kept in step by hand, and no
+  stray rule, because the row always has something in it. The retry is
+  `aria-label`led *Try checking again* against the gallery's *Try loading the
+  photos again*: on a dead connection both are on screen, and two buttons named
+  "Try again" tell a screen-reader user nothing. Focus moves to `BlockButton`
+  when the retry lands, because the pressed button unmounts and focus would
+  otherwise fall to `<body>`, outside a drawer that isn't a focus trap.
 
 All four read `!data` rather than a bare `isError`, so a failed refresh keeps
 what's on screen (#310/#313), and all of them treat "no data, no error" as still

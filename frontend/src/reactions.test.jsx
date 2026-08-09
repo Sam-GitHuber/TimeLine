@@ -4,10 +4,12 @@ import userEvent from "@testing-library/user-event";
 import {
   renderWithAuth,
   apiError,
+  failRefetch,
   offlineError,
   unauthoredError,
 } from "./test-utils.jsx";
 import ReactionBar from "./components/ReactionBar.jsx";
+import { reactorsQueryKey } from "./components/ReactorsPopover.jsx";
 import PostCard from "./components/PostCard.jsx";
 import { api } from "./api.js";
 
@@ -122,6 +124,50 @@ describe("ReactionBar", () => {
       messageId: null,
       eventId: null,
     });
+  });
+
+  /**
+   * #324's root cause, found in the sweep behind it. This cache outlives the
+   * popover and `refetchOnWindowFocus` is on by default, so a failed refetch on
+   * returning to the tab put "Couldn't load reactions." above a list of reactors
+   * that was still fully drawn — including your own tap-to-remove row.
+   */
+  it("keeps the reactor list when a refetch fails", async () => {
+    api.getReactors.mockResolvedValue([
+      { emoji: "👍", count: 1, users: [{ id: 2, display_name: "Alice" }] },
+    ]);
+    const { queryClient } = renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 1, reacted: false }]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /who reacted/i }));
+    await screen.findByText("Alice");
+
+    api.getReactors.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, reactorsQueryKey({ postId: 7 }));
+
+    expect(screen.getByText("Alice")).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load reactions/)).toBeNull();
+  });
+
+  // Cold, it still says so.
+  it("says the reactor list failed when nothing loaded", async () => {
+    api.getReactors.mockRejectedValue(unauthoredError(500));
+    renderWithAuth(
+      <ReactionBar
+        postId={7}
+        reactions={[{ emoji: "👍", count: 1, reacted: false }]}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /who reacted/i }));
+
+    expect(
+      await screen.findByText(/Couldn't load reactions/)
+    ).toBeInTheDocument();
   });
 
   it("offers no 'who reacted' control when there are no reactions", () => {

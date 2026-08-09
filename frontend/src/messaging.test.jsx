@@ -230,6 +230,19 @@ beforeEach(() => {
   api.getThread.mockResolvedValue(page([]));
   api.getConversation.mockResolvedValue(convoDetail());
   api.markConversationRead.mockResolvedValue({ detail: "Marked read." });
+  // The info panel fetches the other person's profile for the Block control, so
+  // this is reached from the drawer as well as from a profile route. Defaulted
+  // here for the reason every other leaky mock is: `vi.clearAllMocks()` clears
+  // *calls*, not implementations, so one test's `mockReturnValue(new
+  // Promise(() => {}))` would otherwise hang every later test that opens a
+  // panel without setting its own.
+  api.getUser.mockResolvedValue({
+    id: 2,
+    display_name: "Priya",
+    connection_status: "connected",
+    is_blocked: false,
+    bio: "",
+  });
 });
 
 describe("Messages drawer — list", () => {
@@ -867,39 +880,65 @@ describe("Messages drawer — thread", () => {
     expect(api.markConversationRead).not.toHaveBeenCalled();
   });
 
-  // And a failed *poll* still marks read: `pages` survives it, so the reader is
-  // looking at the messages (#310/#313).
-  it("still marks read when a message poll fails under a live transcript", async () => {
+  /**
+   * And a failed *poll* still marks read: `pages` survives it, so the reader is
+   * looking at the messages (#310/#313).
+   *
+   * **Re-opened while the query is still errored**, which is the case that tells
+   * this apart from a guard that latches off on any failure. Anything that
+   * *changes* the transcript clears the error on its way in — a successful
+   * refetch and `setQueryData` alike — so a test that fails a poll and then
+   * lands a message proves nothing: by the time it asserts, `isError` is false
+   * either way. Leaving the chat and coming back is the real sequence (the
+   * connection drops, you check the list, you go back in), and on that second
+   * mount the cache hands over a full transcript with `status: 'error'` still on
+   * it. The reader is looking at the messages; the badge has to clear.
+   */
+  it("still marks read on a thread re-opened while its transcript is errored", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
     api.getConversation.mockResolvedValue(convoDetail());
-    const first = {
-      id: 1,
-      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
-      text: "hey there",
-      is_deleted: false,
-      created_at: new Date().toISOString(),
-    };
-    api.getMessages.mockResolvedValue(page([first]));
+    api.getMessages.mockResolvedValue(
+      page([
+        {
+          id: 1,
+          sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+          text: "hey there",
+          is_deleted: false,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    );
 
-    const { queryClient } = renderAt("/messages/7");
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Open conversation with Priya/,
+      })
+    );
     await screen.findByText("hey there");
     await waitFor(() =>
       expect(api.markConversationRead).toHaveBeenCalledWith(7)
     );
-    const before = api.markConversationRead.mock.calls.length;
 
     api.getMessages.mockRejectedValue(unauthoredError(500));
     await failRefetch(queryClient, ["messages", 7]);
+    expect(screen.getByText("hey there")).toBeInTheDocument();
 
-    // A message lands once the connection comes back — the effect's other
-    // dependency moves, and the transcript never left the screen.
-    api.getMessages.mockResolvedValue(page([{ ...first, id: 2 }, first]));
-    await act(async () => {
-      await queryClient.invalidateQueries({ queryKey: ["messages", 7] });
-    });
-    await screen.findByText("hey there");
+    // Out to the list and back in, with the transcript still failing.
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("button", { name: /Open conversation with Priya/ });
+    api.markConversationRead.mockClear();
+    await user.click(
+      screen.getByRole("button", { name: /Open conversation with Priya/ })
+    );
 
+    // The cached transcript is on screen from the first commit…
+    expect(await screen.findByText("hey there")).toBeInTheDocument();
+    // …so it is read, error state on the query or not.
     await waitFor(() =>
-      expect(api.markConversationRead.mock.calls.length).toBeGreaterThan(before)
+      expect(api.markConversationRead).toHaveBeenCalledWith(7)
     );
   });
 
@@ -2156,10 +2195,36 @@ describe("Messages drawer — reply threads (Phase 9b M9d)", () => {
     // What did load stays readable — the strand keeps its root.
     expect(await within(strand()).findByText("dinner?")).toBeInTheDocument();
 
+    // …and is not told to throw it away (#324, in the sweep behind it). A bare
+    // `isError` put "Close and try again" directly above replies that were all
+    // on screen — and there is no retry in here, so closing loses your place and
+    // any half-typed reply with it.
+    expect(screen.queryByText(/Couldn’t load this thread/)).toBeNull();
+
     // #214, the other half: this panel polls, so a loop here runs for as long as
     // the strand is open, against a server that just failed.
     await settle();
     expect(api.getPage).toHaveBeenCalledTimes(1);
+  });
+
+  // A genuinely cold strand failure still says so — `!data`, not never.
+  it("says the strand failed when nothing loaded at all", async () => {
+    const user = userEvent.setup();
+    api.getMessages.mockResolvedValue(page([msg({ id: 5, text: "dinner?" })]));
+    api.getThread.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+    await openMenu(user, "dinner?");
+    await user.click(screen.getByRole("button", { name: "Reply" }));
+
+    expect(
+      await screen.findByText(/Couldn’t load this thread/)
+    ).toBeInTheDocument();
+    // And not the clipped-root line, which is a claim about *permission* and a
+    // different thing to tell someone.
+    expect(
+      screen.queryByText(/The start of this thread isn’t available/)
+    ).toBeNull();
   });
 
   it("lands a reply-to-a-reply in the same strand, quoting who you answered", async () => {
@@ -3100,6 +3165,49 @@ describe("Messages drawer — list search and row actions (Phase 9b M9e)", () =>
     ]);
   }
 
+  /**
+   * #324's root cause, found in the sweep behind it: this list polls, and a bare
+   * `isError` painted a failure over a list that was still entirely on screen.
+   * The two empty-state lines were gated on `!isError` besides, so a failed poll
+   * also swallowed "No conversations match …" mid-search — a claim about the
+   * search replaced by a claim about the request.
+   */
+  it("keeps the list, and its search line, when a poll fails", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(manyConversations());
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+    const search = screen.getByRole("searchbox", {
+      name: "Search conversations",
+    });
+    await user.type(search, "zzz");
+    await screen.findByText(/No conversations match/);
+
+    api.getConversations.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["conversations"]);
+
+    expect(screen.getByText(/No conversations match/)).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load your messages/)).toBeNull();
+    await user.clear(search);
+    expect(screen.getByText("Priya")).toBeInTheDocument();
+  });
+
+  // And a genuinely cold failure still says so.
+  it("says the list failed when there's nothing to show", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/");
+    await openDrawer(user);
+
+    expect(
+      await screen.findByText(/Couldn't load your messages/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No conversations yet/)).toBeNull();
+  });
+
   it("offers search once the list is long enough, matching names and group members", async () => {
     const user = userEvent.setup();
     api.getConversations.mockResolvedValue(manyConversations());
@@ -3584,7 +3692,9 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
       is_blocked: true,
       bio: "",
     });
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(
+      screen.getByRole("button", { name: "Try checking again" })
+    );
 
     // And the label is the one the answer justifies — this person *had* blocked
     // them already, which is exactly what a guessed button would have got wrong.
@@ -3628,11 +3738,14 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
     ).toBeNull();
   });
 
-  // The section this line lives in draws a rule across the panel, so it stays
-  // conditional — an unconditional one leaves a stray line under a 1:1 for as
-  // long as the profile is still *loading*, which is why the gate takes in the
-  // failed case rather than becoming `true`.
-  it("draws no stray rule while the profile is still loading", async () => {
+  /**
+   * **The branch a paused query lands in**, and the one the first cut of #324
+   * left out. Offline, `networkMode: 'online'` means the request is never *sent*
+   * — `isError` is false and `data` is undefined — so an error branch alone left
+   * the control exactly as absent as before, in the state someone reaching for
+   * Block is likeliest to be in.
+   */
+  it("says it's still checking rather than showing nothing", async () => {
     const user = userEvent.setup();
     api.getConversation.mockResolvedValue(convoDetail());
     api.getMessages.mockResolvedValue(page([]));
@@ -3645,16 +3758,104 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
     await screen.findByText("In this chat");
     await settle(3);
 
+    expect(await screen.findByText("Loading…")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Block" })).toBeNull();
     expect(
       screen.queryByText(/Couldn’t check whether you’ve blocked/)
     ).toBeNull();
-    // Every rule on the panel belongs to a section that has something in it —
-    // asserted that way round rather than by counting them, so this doesn't
+    // And the section it sits in has something in it. A `Section` draws a rule
+    // across the panel, so one gated open over nothing is a stray line —
+    // asserted that way round rather than by counting rules, so this doesn't
     // break the next time the panel grows a row.
     const rules = [...container.querySelectorAll(".border-t.border-line")];
     expect(rules.length).toBeGreaterThan(0);
     expect(rules.filter((rule) => rule.textContent.trim() === "")).toEqual([]);
+  });
+
+  /**
+   * A 404 from `GET /users/<id>` is a *permanent* answer — `UserDetailView`
+   * filters `is_active`, so the account has gone — and the same rule that makes
+   * a 404 outrank the cached conversation applies here: offering a *Try again*
+   * that can never succeed is a button that only wastes presses.
+   */
+  it("says the account is gone, with no retry, on a 404", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.getUser.mockRejectedValue(apiError("Not found.", 404));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+
+    expect(
+      await screen.findByText(/Priya’s account is no longer available/)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Try checking again" })
+    ).toBeNull();
+    expect(
+      screen.queryByText(/Couldn’t check whether you’ve blocked/)
+    ).toBeNull();
+  });
+
+  /**
+   * Two failures at once is the ordinary case on a dead connection, and the two
+   * retries do completely different things. "Try again, button" twice over tells
+   * a screen-reader user nothing about which is which — the app names them apart
+   * (`accessibilityLabel`) for exactly this reason.
+   */
+  it("names the two retries apart when the profile and the photos both fail", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockRejectedValue(unauthoredError(500));
+    api.getUser.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+
+    expect(
+      await screen.findByRole("button", { name: "Try checking again" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try loading the photos again" })
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * Focus survives the retry that works. The pressed button is replaced by
+   * `BlockButton`, and focus on an unmounted element falls to `<body>` — which
+   * restarts Tab at the top of the page, outside a drawer that deliberately
+   * isn't a focus trap.
+   */
+  it("hands focus to the Block control when the retry lands", async () => {
+    const user = userEvent.setup();
+    api.getConversation.mockResolvedValue(convoDetail());
+    api.getMessages.mockResolvedValue(page([]));
+    api.getConversationMedia.mockResolvedValue(page([]));
+    api.getUser.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/messages/7");
+    await screen.findByPlaceholderText(/write a message/i);
+    await openInfo(user);
+    await screen.findByText(/Couldn’t check whether you’ve blocked Priya/);
+
+    api.getUser.mockResolvedValue({
+      id: 2,
+      display_name: "Priya",
+      connection_status: "connected",
+      is_blocked: false,
+      bio: "",
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Try checking again" })
+    );
+
+    const block = await screen.findByRole("button", { name: "Block" });
+    await waitFor(() => expect(block).toHaveFocus());
   });
 });
 

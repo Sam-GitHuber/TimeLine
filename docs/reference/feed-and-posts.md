@@ -654,6 +654,29 @@ root cause, found in the sweep behind the app's #323:
   app's post and event screens record (#318), and it's why a guard there wasn't
   enough either.
 
+**And three more sites came out of #324's review**, all the same bare `isError`
+over content that was still on screen — the *other* half of this family, where a
+failed refresh doesn't invent an empty state but paints a failure over a working
+one:
+
+- **`ConversationListView`** polls, so one dropped packet put "Couldn't load your
+  messages." above every conversation row, which was still there and still
+  openable — and its two empty-state lines were gated on `!isError`, so the same
+  failed poll swallowed "No conversations match …" while you were typing in the
+  search box.
+- **`MessageStrandPanel`** polls *and* walks its pages, so a failed page four
+  told the reader to "Close and try again" over replies that were all on screen.
+  There's no retry in that panel: closing loses your place and any half-typed
+  reply with it.
+- **`ReactorsPopover`** keeps its cache after unmount and refetches on window
+  focus, so coming back to the tab on a flaky connection drew "Couldn't load
+  reactions." above a reactor list that was fully rendered — including the
+  tap-to-remove row for your own.
+
+The list above of *sites that already get this right* was written before these
+three; `ConversationListView` and `ReactorsPopover` were on it, wrongly, because
+the sweep behind #314 only looked for the missing-error-branch shape.
+
 **Badge-shaped counts are deliberately left alone** — `Layout.jsx` (nav unread),
 `GroupsDrawer.jsx` (the invite banner) and `PeoplePage.jsx` (the Requests count)
 are all `data?.count ?? 0`, so a failed poll reads as zero. Decided rather than
@@ -663,8 +686,9 @@ pip, and a count frozen at a stale value is worse than none. Note the app's
 "Not `?? 0`" comment saying why — that one is the OS's own surface and re-asserts
 a known count rather than clearing it. Don't "fix" either to match the other.
 
-Sites that already get this right and shouldn't be "fixed": `FeedPage`,
-`GroupsDrawer`, `NewChatPicker`, `ConversationListView`, `ReactorsPopover`,
+Sites that already get this right and shouldn't be "fixed" (the three above have
+since joined them): `FeedPage`, `GroupsDrawer`, `NewChatPicker`,
+`ConversationListView`, `ReactorsPopover`,
 `PostPage`, `GroupInvitesPage`, `MessageStrandPanel`, `GroupInvitePicker`, and
 `components/events/EventPhotos.jsx` (the best example in the repo — a cold-load
 error branch *and* a separate "couldn't load all the photos" line under a

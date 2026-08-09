@@ -142,6 +142,19 @@ export default function MessageStrandPanel({
 
   const loaded =
     threadQuery.data?.pages.flatMap((page) => page.results) ?? [];
+  /**
+   * **"Close and try again" over a strand that's still there** (#324, in the
+   * sweep behind it). This query polls on `MESSAGE_POLL_MS` and
+   * `useFetchAllPages` walks its pages, so a bare `isError` — one dropped poll,
+   * or a failed page four — told the reader to close a panel whose replies were
+   * all on screen, and there is no retry in here: closing loses their place and
+   * any half-typed reply with it.
+   *
+   * `!data`, so a genuinely cold failure still says so (#310/#313). The
+   * clipped-root line above reads the same value for the same reason — it must
+   * not disappear because a poll under it failed.
+   */
+  const threadLoadFailed = threadQuery.isError && !threadQuery.data;
   // Unsent replies go last: one the server hasn't accepted is by definition
   // newer than every reply that has.
   const messages = [...loaded, ...outgoing];
@@ -240,7 +253,7 @@ export default function MessageStrandPanel({
                 "Original message unavailable" on purpose: on a whole strand that
                 phrasing reads as an error, and these are two different things to
                 tell someone. */}
-            {!root && !threadQuery.isError && (
+            {!root && !threadLoadFailed && (
               <p className="mb-2 text-center text-xs italic text-ink-faint">
                 The start of this thread isn’t available to you
               </p>
@@ -249,7 +262,7 @@ export default function MessageStrandPanel({
                 failed fetch is a different thing entirely, and telling someone
                 they aren't entitled to a message when the network merely dropped
                 devalues the message where it's true. */}
-            {threadQuery.isError && (
+            {threadLoadFailed && (
               <p className="py-8 text-center text-sm text-ink-faint">
                 Couldn’t load this thread. Close and try again.
               </p>

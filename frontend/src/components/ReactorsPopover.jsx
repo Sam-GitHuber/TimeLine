@@ -99,7 +99,12 @@ export default function ReactorsPopover({
       className="max-h-72 w-64 overflow-y-auto rounded-2xl border border-line bg-raised p-3 shadow-lg"
     >
       {isLoading && <p className="text-sm text-ink-faint">Loading…</p>}
-      {isError && (
+      {/* `!data`, not a bare `isError` (#324, in the sweep behind it). This
+          cache outlives the popover and `refetchOnWindowFocus` is on by default,
+          so a failed refetch on returning to the tab used to put "Couldn't load
+          reactions." above a list of reactors that was still fully drawn —
+          including the tap-to-remove row for your own. */}
+      {isError && !data && (
         <p className="text-sm text-red-600">Couldn't load reactions.</p>
       )}
       {data && data.length === 0 && (
