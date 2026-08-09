@@ -25,7 +25,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from '@/components/ActionMenu';
 import { Avatar } from '@/components/Avatar';
@@ -119,7 +119,7 @@ export default function GroupMembersScreen() {
     onError: (error) =>
       Alert.alert(
         'Couldn’t do that',
-        error instanceof Error ? error.message : 'Something went wrong.'
+        serverMessage(error, WENT_WRONG)
       ),
   });
 

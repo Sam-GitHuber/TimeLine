@@ -15,7 +15,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
 import { Alert } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { invalidateGroupMembership } from '@/groupCache';
 
@@ -49,7 +49,7 @@ export function useGroupActions(groupId: number) {
   const onError = (error: unknown) => {
     Alert.alert(
       'Couldn’t do that',
-      error instanceof Error ? error.message : 'Something went wrong.'
+      serverMessage(error, WENT_WRONG)
     );
   };
 

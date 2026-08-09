@@ -6,7 +6,7 @@
  * failure that would stop push notifications arriving (the point of Phase 9).
  */
 
-import { api, ApiError, setSessionExpiredHandler } from '@/api';
+import { api, ApiError, serverMessage, setSessionExpiredHandler } from '@/api';
 import { clearTokens, getAccessToken, getRefreshToken, saveTokens } from '@/tokens';
 
 const BASE = 'https://your-timeline.net';
@@ -64,6 +64,126 @@ describe('authenticated requests', () => {
     );
 
     await expect(api.getCurrentUser()).rejects.toThrow('Not found.');
+  });
+});
+
+/**
+ * The ordinary request path's own network guard (#243).
+ *
+ * The refresh path got this in #245; `request` itself did not, so every one of
+ * the ~35 screens rendering a rejection got React Native's `Network request
+ * failed` — an `Error` with a `message`, which sailed straight through the
+ * `err instanceof Error ? err.message : 'our sentence'` those screens were
+ * written with, and made the authored sentence unreachable by construction.
+ */
+describe('a request that never reaches the server', () => {
+  it('re-raises the bare TypeError as an ApiError, keeping the cause', async () => {
+    const cause = new TypeError('Network request failed');
+    mockFetch.mockRejectedValueOnce(cause);
+
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).message).toBe(
+      'Couldn’t reach the server — check your connection and try again.'
+    );
+    // `status: 0` — no response arrived, so there is no HTTP status to report.
+    expect((err as ApiError).status).toBe(0);
+    // The flag the whole fix rests on: the sentence above is ours, so a call
+    // site with its own more specific copy still gets to use it.
+    expect((err as ApiError).fromServer).toBe(false);
+    expect((err as ApiError).cause).toBe(cause);
+  });
+
+  it('does the same for a write, not just a read', async () => {
+    // Writes are the half that matters: a failed GET shows a "couldn't load"
+    // card, but a failed POST is where someone has to decide whether to press
+    // the button again.
+    mockFetch.mockRejectedValueOnce(new TypeError('Network request failed'));
+
+    await expect(api.changePassword('old', 'new', 'new')).rejects.toMatchObject({
+      status: 0,
+      fromServer: false,
+    });
+  });
+
+  it('covers a connection that dies while the body is being read', async () => {
+    // The second place it can happen: the headers arrived, the rest didn't.
+    // `response.text()` rejects as a bare TypeError exactly as `fetch` does.
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      text: async () => {
+        throw new TypeError('Network request failed');
+      },
+    });
+
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).fromServer).toBe(false);
+    // The status survives: the server did answer, and a screen asking
+    // `err.status === 404` is entitled to a true answer.
+    expect((err as ApiError).status).toBe(404);
+  });
+
+  it('lets a bad request body throw as itself, not as a lost connection', async () => {
+    // #244's lesson, and the reason the body is serialized above the `try`: a
+    // `JSON.stringify` that throws is a bug in our code. Dressed up as a
+    // connection problem it would send someone to check their signal over a
+    // mistake at the call site.
+    // A BigInt is the cheapest thing `JSON.stringify` refuses outright.
+    const err = await api
+      .changePassword(1n as never, 'new-pw', 'new-pw')
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err).not.toBeInstanceOf(ApiError);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('serverMessage', () => {
+  it('prefers the caller’s sentence over a lost connection', async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError('Network request failed'));
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect(serverMessage(err, 'Couldn’t save your profile.')).toBe(
+      'Couldn’t save your profile.'
+    );
+  });
+
+  it('prefers the caller’s sentence over our "Request failed (500)" stand-in', async () => {
+    // The second leak: a 500 rendered as a Django HTML page has no DRF body, so
+    // `request` synthesizes a status-shaped string. It is an `ApiError` *and*
+    // has a `message`, so only `fromServer` keeps it off the screen.
+    mockFetch.mockResolvedValueOnce(jsonResponse('<html>500</html>', 500));
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect((err as ApiError).message).toBe('Request failed (500)');
+    expect(serverMessage(err, 'Couldn’t save your profile.')).toBe(
+      'Couldn’t save your profile.'
+    );
+  });
+
+  it('shows the server’s own words when the server wrote some', async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ detail: 'Your old password was entered incorrectly.' }, 400)
+    );
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect(serverMessage(err, 'Couldn’t change your password.')).toBe(
+      'Your old password was entered incorrectly.'
+    );
+  });
+
+  it('takes a null fallback, for a caller that picks its wording later', async () => {
+    // `groups/[groupId]/invite.tsx` needs "the server's words, or nothing" so it
+    // can choose between a per-invite reason and its own batch sentence.
+    mockFetch.mockRejectedValueOnce(new TypeError('Network request failed'));
+    const err = await api.getCurrentUser().catch((e: unknown) => e);
+
+    expect(serverMessage(err, null)).toBeNull();
   });
 });
 
@@ -209,9 +329,9 @@ describe('silent refresh', () => {
 
   it('does not tell a screen the session expired when it was the server that failed', async () => {
     // This one *reaches* a call site, unlike the refusal message `request`
-    // replaces — and until #243 lands ~25 of them render `.message` whatever
-    // `fromServer` says. "Session expired" during a deploy would be a lie told
-    // to every phone at once, on the screen the user was already looking at.
+    // replaces. "Session expired" during a deploy would be a lie told to every
+    // phone at once, on the screen the user was already looking at — and
+    // `fromServer: false` is what keeps it there rather than on screen.
     await saveTokens({ access: 'stale', refresh: 'refresh-1' });
     mockFetch
       .mockResolvedValueOnce(jsonResponse(null, 401))

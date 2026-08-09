@@ -31,7 +31,7 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 
-import { api, type CommentTarget } from '@/api';
+import { api, serverMessage, WENT_WRONG, type CommentTarget } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from './ActionMenu';
 import { Avatar } from './Avatar';
@@ -331,7 +331,7 @@ export function CommentThread({
     if (isError) {
       return (
         <Text style={[styles.status, styles.error]}>
-          {error instanceof Error ? error.message : 'Couldn’t load comments.'}
+          {serverMessage(error, 'Couldn’t load comments.')}
         </Text>
       );
     }
@@ -450,7 +450,7 @@ function CommentNode({
     onError: (err) => {
       Alert.alert(
         'Couldn’t delete',
-        err instanceof Error ? err.message : 'Something went wrong.'
+        serverMessage(err, WENT_WRONG)
       );
     },
   });
@@ -919,7 +919,7 @@ function CommentEditor({
 
       {error ? (
         <Text style={styles.error} accessibilityRole="alert">
-          {error instanceof Error ? error.message : 'Couldn’t save. Try again.'}
+          {serverMessage(error, 'Couldn’t save. Try again.')}
         </Text>
       ) : null}
 
@@ -1019,7 +1019,7 @@ function CommentComposer({
 
       {error ? (
         <Text style={styles.error}>
-          {error instanceof Error ? error.message : 'Couldn’t post. Try again.'}
+          {serverMessage(error, 'Couldn’t post. Try again.')}
         </Text>
       ) : null}
 

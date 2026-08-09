@@ -25,7 +25,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { CommentThread } from '@/components/CommentThread';
 import {
   KeyboardAwareScroll,
@@ -221,7 +221,7 @@ export default function PostScreen() {
           <View style={styles.centre}>
             <Text style={styles.emptyTitle}>Couldn’t load this post</Text>
             <Text style={styles.emptyBody}>
-              {error instanceof Error ? error.message : 'Something went wrong.'}
+              {serverMessage(error, WENT_WRONG)}
             </Text>
           </View>
         ) : isLoading ? (

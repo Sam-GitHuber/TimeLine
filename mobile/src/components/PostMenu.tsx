@@ -18,7 +18,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Alert, Pressable, StyleSheet } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from './ActionMenu';
 import { KebabIcon } from './icons';
@@ -60,7 +60,7 @@ export function PostMenu({
     onError: (err) => {
       Alert.alert(
         'Couldn’t delete',
-        err instanceof Error ? err.message : 'Something went wrong.'
+        serverMessage(err, WENT_WRONG)
       );
     },
   });

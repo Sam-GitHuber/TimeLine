@@ -23,7 +23,7 @@ import {
   View,
 } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { useAuth } from '@/auth';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -81,7 +81,14 @@ function ConfirmDeleteModal({ onCancel }: { onCancel: () => void }) {
       // the auth gate routes to /login for a clean logged-out boot.
       await signOut();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Couldn’t delete your account.');
+      // `serverMessage`, not `err.message`: this is the one irreversible action
+      // in the app, and the sentence here is what someone reads to decide
+      // whether the account still exists. A request that never left the phone
+      // used to surface React Native's `Network request failed`, which is
+      // indistinguishable from the server having refused the password — so the
+      // fallback written for exactly this case has to be the one that shows
+      // (#243).
+      setError(serverMessage(err, 'Couldn’t delete your account.'));
       setDeleting(false);
     }
   }

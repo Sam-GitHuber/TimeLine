@@ -562,8 +562,10 @@ The gate needs a *present* organiser. Two paths:
   (see [connections.md](connections.md#reporting-a-refused-write)): it used to be
   a numeric-`status` sniff, which #240 retired when it made `api.js` re-raise a
   network failure as an `ApiError` carrying `status: 0` — a status check stopped
-  separating anything the moment offline had one. Mobile still sniffs an
-  `ApiError` instance, and has the same unguarded `fetch` the web did (#243).
+  separating anything the moment offline had one. Mobile sniffed an `ApiError`
+  *instance* instead, which #243 retired for the same reason one step later:
+  once the app guarded its own `fetch`, offline became an `ApiError` too, and
+  both copies now read `fromServer` through `serverMessage`.
 - **Every organiser write on this page reports its own rejection, beside the
   control that was pressed** (#237). The two bullets above gave the RSVP and the
   vote a rejection path as each was reported; the organiser's other five —

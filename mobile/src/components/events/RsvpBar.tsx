@@ -20,7 +20,7 @@ import {
 } from 'react-native';
 
 import { Avatar } from '../Avatar';
-import { ApiError } from '@/api';
+import { serverMessage } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Author, Event } from '@/types';
 
@@ -114,14 +114,16 @@ export function RsvpBar({
       // had saved, and the count simply not moving reads as "nobody else has
       // RSVP'd yet" rather than "your change was rejected". Only the server's
       // own words are fit to show — an `ApiError` carries DRF's `detail`,
-      // written for a person; everything else is a runtime string (offline,
-      // React Native rejects with `TypeError: Network request failed`), and
+      // written for a person; everything else is a stand-in of ours, and
       // offline is the case this exists for.
+      //
+      // `serverMessage`, not a bare `instanceof ApiError`: since #243 a lost
+      // connection is re-raised as an `ApiError` as well, so the class alone no
+      // longer tells the two apart — `fromServer` does.
       setFailed({
         saved: rsvpKey(body),
         from: serverKey,
-        message:
-          err instanceof ApiError ? err.message : 'Your RSVP didn’t save — try again.',
+        message: serverMessage(err, 'Your RSVP didn’t save — try again.'),
       });
     }
   }

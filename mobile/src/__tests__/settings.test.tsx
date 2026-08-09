@@ -323,6 +323,53 @@ describe('ChangePasswordSection', () => {
   });
 
   /**
+   * Offline, the sentence written for offline is the one that shows (#243).
+   *
+   * This is the sharpest instance of that bug in the app. The fields don't clear
+   * (only the success path clears them), and the red line used to read `Network
+   * request failed` — indistinguishable from the server having rejected the
+   * change. Which password the account now has becomes a guess, and the next
+   * login is where you find out.
+   */
+  it('says its own sentence when the request never left the phone', async () => {
+    mockFetch.mockRejectedValue(new TypeError('Network request failed'));
+    await openForm();
+
+    await fireEvent.changeText(screen.getByLabelText('Current password'), 'old-pw');
+    await fireEvent.changeText(screen.getByLabelText('New password'), 'new-pw-123');
+    await fireEvent.changeText(
+      screen.getByLabelText('Confirm new password'),
+      'new-pw-123'
+    );
+    await fireEvent.press(screen.getByRole('button', { name: 'Change password' }));
+
+    expect(await screen.findByText('Couldn’t change your password.')).toBeTruthy();
+    expect(screen.queryByText('Network request failed')).toBeNull();
+  });
+
+  it('still shows the server’s own words when the server answered', async () => {
+    // The other half of the guard: `serverMessage` must not flatten a real
+    // refusal into the generic line. "Your old password was entered
+    // incorrectly" is the whole diagnosis, and only the server can give it.
+    mockFetch.mockResolvedValue(
+      jsonResponse({ old_password: ['Your old password was entered incorrectly.'] }, 400)
+    );
+    await openForm();
+
+    await fireEvent.changeText(screen.getByLabelText('Current password'), 'wrong');
+    await fireEvent.changeText(screen.getByLabelText('New password'), 'new-pw-123');
+    await fireEvent.changeText(
+      screen.getByLabelText('Confirm new password'),
+      'new-pw-123'
+    );
+    await fireEvent.press(screen.getByRole('button', { name: 'Change password' }));
+
+    expect(
+      await screen.findByText('Your old password was entered incorrectly.')
+    ).toBeTruthy();
+  });
+
+  /**
    * Nothing collapses the form while the POST is out (#256).
    *
    * This is the sharpest case in that family, because it leaves you wrong about
@@ -510,6 +557,22 @@ describe('DeleteAccountSection', () => {
     await fireEvent.press(screen.getByText('Delete forever'));
 
     expect(await screen.findByText('Incorrect password.')).toBeTruthy();
+    expect(mockSignOut).not.toHaveBeenCalled();
+  });
+
+  // #243, on the one irreversible action in the app. Offline the modal used to
+  // read `Network request failed`, which says nothing about whether the account
+  // still exists — and this sentence is the only thing someone has to go on
+  // before deciding whether to press Delete forever again.
+  it('says its own sentence when the request never left the phone', async () => {
+    mockFetch.mockRejectedValue(new TypeError('Network request failed'));
+    await openModal();
+
+    await fireEvent.changeText(screen.getByLabelText('Password'), 'my-pw');
+    await fireEvent.press(screen.getByText('Delete forever'));
+
+    expect(await screen.findByText('Couldn’t delete your account.')).toBeTruthy();
+    expect(screen.queryByText('Network request failed')).toBeNull();
     expect(mockSignOut).not.toHaveBeenCalled();
   });
 

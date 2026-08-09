@@ -1184,7 +1184,7 @@ export default function ThreadScreen() {
     onError: (error) =>
       Alert.alert(
         'Couldn’t react',
-        error instanceof Error ? error.message : 'Something went wrong.'
+        serverMessage(error, WENT_WRONG)
       ),
   });
 
@@ -2166,9 +2166,7 @@ export default function ThreadScreen() {
                 say so rather than silently leaving edit mode on. */}
             {editMutation.isError && (
               <Text style={styles.sendError}>
-                {editMutation.error instanceof Error
-                  ? editMutation.error.message
-                  : "Couldn't save the edit. Try again."}
+                {serverMessage(editMutation.error, "Couldn't save the edit. Try again.")}
               </Text>
             )}
           </View>

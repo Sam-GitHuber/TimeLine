@@ -15,7 +15,7 @@ import * as ImagePicker from 'expo-image-picker';
 
 import { router } from 'expo-router';
 
-import { api } from '@/api';
+import { api, ApiError } from '@/api';
 import NewGroupScreen from '@/app/groups/new';
 import { GroupForm } from '@/components/GroupForm';
 
@@ -157,6 +157,26 @@ it('lets you take the group photo with the camera', async () => {
 });
 
 /**
+ * Offline, the form says so in its own words (#243).
+ *
+ * `onSuccess` never navigates, so the screen is all anyone has to go on — and it
+ * used to read React Native's `Network request failed`. Nothing in that says
+ * whether the group exists, so the reasonable move is to press Create again,
+ * which is how you end up with two.
+ */
+it('says its own sentence when the create never reaches the server', async () => {
+  createGroup.mockRejectedValue(new TypeError('Network request failed'));
+  await renderForm();
+
+  await fireEvent.changeText(screen.getByLabelText('Group name'), 'Book Club');
+  await fireEvent.press(screen.getByRole('button', { name: 'Create group' }));
+
+  expect(await screen.findByText('Couldn’t save the group.')).toBeTruthy();
+  expect(screen.queryByText('Network request failed')).toBeNull();
+  expect(router.replace).not.toHaveBeenCalled();
+});
+
+/**
  * Nothing leaves the screen while the write is out (#259).
  *
  * This form has **no Cancel** — the ways out are the screen's "← Back",
@@ -177,7 +197,12 @@ describe('holding the group form open until the server answers', () => {
     return {
       refuse: async (message: string) => {
         await act(async () => {
-          refuse(new Error(message));
+          // An `ApiError` carrying DRF's `detail`, which is what `request()`
+          // raises for a 400 — and what the form has to be handed for the
+          // server's own sentence to reach the screen. A bare `Error` is the
+          // shape of a *lost connection*, and since #243 that deliberately
+          // shows our fallback instead.
+          refuse(new ApiError(message, 400, { detail: message }));
           await new Promise((resolve) => setTimeout(resolve, 0));
         });
       },

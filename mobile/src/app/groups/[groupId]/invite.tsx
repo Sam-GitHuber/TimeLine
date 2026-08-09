@@ -22,7 +22,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { dedupeById, useFetchAllPages } from '@/lists';
@@ -128,8 +128,12 @@ export default function GroupInviteScreen() {
       const rejected = results.filter(
         (r): r is PromiseRejectedResult => r.status === 'rejected'
       );
-      const firstError =
-        rejected[0]?.reason instanceof Error ? rejected[0].reason.message : null;
+      // Only the *server's* own words are worth quoting to explain a rejection.
+      // A batch that failed because the phone had no signal rejects carrying our
+      // stand-in sentence, and quoting that here would shadow the authored line
+      // below — which is the one written for exactly this case (#243). `null`
+      // fallback, so that line stays reachable.
+      const firstError = serverMessage(rejected[0]?.reason, null);
       return { total: ids.length, failed: rejected.length, firstError };
     },
     onSuccess: ({ total, failed, firstError }) => {
@@ -154,7 +158,7 @@ export default function GroupInviteScreen() {
     onError: (error) =>
       Alert.alert(
         'Couldn’t invite everyone',
-        error instanceof Error ? error.message : 'Something went wrong.'
+        serverMessage(error, WENT_WRONG)
       ),
   });
 

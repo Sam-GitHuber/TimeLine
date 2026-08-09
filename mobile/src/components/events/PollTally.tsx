@@ -28,7 +28,7 @@ import {
   type OptionRow,
   type PollDimension,
 } from './pollOptions';
-import { ApiError } from '@/api';
+import { serverMessage } from '@/api';
 import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 import type { Poll, PollOptionPayload, PollResultOption } from '@/types';
@@ -140,12 +140,14 @@ export function PollTally({
       setSelected((current) => (current === next ? before : current));
       // Only the server's own words are fit to show: an `ApiError` carries DRF's
       // `detail`, written for a person ("This poll is closed."). Everything else
-      // is a runtime string — offline, React Native rejects with
-      // `TypeError: Network request failed` — and offline is the very case this
-      // rollback exists for, so it's the message a tester will hit first.
-      setVoteError(
-        err instanceof ApiError ? err.message : 'Your vote didn’t go through — try again.'
-      );
+      // is a runtime string, and offline is the very case this rollback exists
+      // for, so it's the message a tester will hit first.
+      //
+      // `serverMessage`, not a bare `instanceof ApiError`: since #243 a lost
+      // connection *is* an `ApiError` too — that's how it stopped being React
+      // Native's `Network request failed` — so the class no longer separates the
+      // server's words from our own stand-ins. The `fromServer` flag does.
+      setVoteError(serverMessage(err, 'Your vote didn’t go through — try again.'));
     }
   }
 
@@ -320,7 +322,7 @@ function PollEditForm({
       });
       onDone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Couldn’t save your changes.');
+      setError(serverMessage(err, 'Couldn’t save your changes.'));
       setSaving(false);
     }
   }

@@ -214,6 +214,35 @@ it('keeps the picker open when no invite succeeds', async () => {
   expect(router.back).not.toHaveBeenCalled();
 });
 
+/**
+ * The batch sentence, written for exactly this case and then unreachable (#243).
+ *
+ * `firstError` was `rejected[0]?.reason instanceof Error ? …message : null`, and
+ * the `??` below it could only be reached when a rejection wasn't an `Error` —
+ * which never happened. Offline, every invite rejected as React Native's
+ * `TypeError`, so the alert read "Couldn't invite anyone / Network request
+ * failed" and the line saying what to do was dead code.
+ */
+it('says none of them went through when the phone had no signal', async () => {
+  serve();
+  await renderScreen();
+
+  await fireEvent.press(await screen.findByLabelText('Ada Lovelace'));
+  await fireEvent.press(screen.getByLabelText('Bob Newman'));
+  // Offline from here on: the roster and the connections list have already
+  // landed, and it's the invites themselves that never leave.
+  mockFetch.mockRejectedValue(new TypeError('Network request failed'));
+  await fireEvent.press(screen.getByLabelText('Invite'));
+
+  await waitFor(() =>
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Couldn’t invite anyone',
+      'None of the invites went through. Please try again.'
+    )
+  );
+  expect(router.back).not.toHaveBeenCalled();
+});
+
 // --- A roster we don't have (#317) ------------------------------------------
 
 /**

@@ -126,7 +126,7 @@ export default function ConversationInfoScreen() {
     onError: (error) =>
       Alert.alert(
         'Couldn’t rename this chat',
-        error instanceof Error ? error.message : 'Something went wrong.'
+        serverMessage(error, WENT_WRONG)
       ),
   });
 

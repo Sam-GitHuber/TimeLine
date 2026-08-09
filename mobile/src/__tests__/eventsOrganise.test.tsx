@@ -263,7 +263,9 @@ describe('PlanEventForm', () => {
         create,
         refuse: async (message: string) => {
           await act(async () => {
-            refuse(new Error(message));
+            // DRF's shape for a 400 — see the note in `groupForm.test.tsx`:
+            // only a `fromServer` rejection puts the server's words on screen.
+            refuse(new ApiError(message, 400, { detail: message }));
             await new Promise((resolve) => setTimeout(resolve, 0));
           });
         },
