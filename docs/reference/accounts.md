@@ -615,7 +615,19 @@ This is the layer holding real credentials, so:
   the same 500 by another route) and **refuses booleans** (`int(True) == 1`, so
   `{"ids": [true]}` would silently mean row 1 — a wrong row, not a missing one).
   `_message_id_param` defers to it, so `?thread_root=`/`?ids=` and a body field
-  can't drift into different answers about what an id is.
+  can't drift into different answers about what an id is. Id *lists* are capped
+  at `BODY_IDS_MAX` — one bind parameter per id, and the driver refuses a
+  statement with more than 65535 of them.
+- **A request body doesn't have to be an object.** `[]` is valid JSON and DRF
+  passes it through, so a hand-read body called `.get` on a list and raised
+  `AttributeError` — the same 500 one level up. `_body(request)` is the guard;
+  endpoints that hand the whole body to a serializer don't need it, because DRF
+  checks the shape for them. The endpoints applying both rules are listed in
+  [messaging](messaging.md#api),
+  [groups](groups.md#api),
+  [notifications](notifications.md#api),
+  [events](events.md) and
+  [feed-and-posts](feed-and-posts.md#posts).
 
 ### The auth URL surface
 

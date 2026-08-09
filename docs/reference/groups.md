@@ -217,6 +217,11 @@ the server explicitly moves them.
 
 ## API
 
+The `user_id` on an invite and the `group` on a post are read straight from the
+body rather than through a serializer, so they run through the shared id
+coercion first — see
+[accounts.md § Security posture](accounts.md#security-posture).
+
 - `POST /api/groups/` — create (creator written as `active` `admin`).
 - `GET /api/groups/` — groups you're an active member of (name, `avatar_thumb`,
   `member_count`, `your_role`).

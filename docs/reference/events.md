@@ -277,6 +277,12 @@ endpoints (non-member → 404); each **individual event is connection-gated to i
 organiser** (`can_view_event`; a 404 if you're not connected). Managing an event is
 the organiser's; cancel/hard-delete is the organiser **or a group admin**.
 
+A poll vote reads `option_ids` straight from the body, so it goes through the
+shared id coercion — see
+[accounts.md § Security posture](accounts.md#security-posture). **Omitting
+`option_ids` clears your vote; sending it as `null` is a 400**, so a client whose
+field came back empty can't delete a vote you cast and be told it worked.
+
 **Events** — `GET/POST /api/groups/<gid>/events/?window=upcoming|past|all`
 (list you-can-see / create, any member); `GET/PATCH/DELETE /api/events/<id>/`
 (detail / edit non-scheduling fields / hard-delete); `POST /api/events/<id>/cancel/`

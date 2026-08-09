@@ -1117,6 +1117,12 @@ chat is untouched.
 
 ## API
 
+The create and add-people endpoints read `user_id` / `participant_ids` /
+`user_ids` / `group_id` / `title` straight from the body rather than through a
+serializer, so each runs through the shared id coercion first (a malformed id is
+a 400, never a 500) — see
+[accounts.md § Security posture](accounts.md#security-posture).
+
 Direct and group chats share the endpoints:
 
 - `GET /api/conversations/` — direct + group chats: `kind`, derived name /

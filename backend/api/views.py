@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import defaultdict
 from datetime import timedelta
 
@@ -131,6 +132,40 @@ ADMIN = GroupMembership.Role.ADMIN
 MEMBER = GroupMembership.Role.MEMBER
 
 
+def _body(request):
+    """``request.data`` as an object, or a 400 (#205).
+
+    A JSON body doesn't have to be an object: ``[]`` and ``"x"`` and ``3`` are
+    all valid JSON, and DRF hands them straight through. Every endpoint that
+    reads its body by hand then calls ``.get`` on whatever arrived, and a list
+    has no ``.get`` — an ``AttributeError``, which is the same unhandled 500 as
+    a malformed id, one level up. Endpoints that hand the whole body to a
+    serializer don't need this: DRF checks the shape for them ("Invalid data.
+    Expected a dictionary").
+    """
+    data = request.data
+    if not hasattr(data, "get"):
+        raise ValidationError({"detail": "Expected an object."})
+    return data
+
+
+# How many ids one body field may carry. A guard rail, not a product limit:
+# ``filter(id__in=[...])`` becomes one bind parameter per id, and psycopg refuses
+# a statement with more than 65535 of them — so an unbounded list is a 500 anyone
+# can post. Real callers send a handful. (The *product* question of how many
+# people one invite may name is #212's, and would cap tighter than this.) Mirrors
+# ``MESSAGE_IDS_MAX``, which guards the query-parameter half of the same thing.
+BODY_IDS_MAX = 1000
+
+# What an id may look like when it arrives as a string. ``[0-9]`` rather than
+# ``\d``, which matches every Unicode decimal digit. **Bounded at 19 digits** —
+# that's a bigint's width, so anything longer is out of range whatever it says,
+# and letting it reach ``int()`` unbounded would raise in its own right (Python
+# refuses to parse a string of more than 4300 digits) — a 500 for a body this
+# function exists to answer with a 400.
+_DIGITS = re.compile(r"-?[0-9]{1,19}")
+
+
 def _int_id(raw, field):
     """One id out of a request body, coerced to an ``int``, or a 400 (#205).
 
@@ -141,9 +176,13 @@ def _int_id(raw, field):
     a client bug that reads as a client bug and one that reads as the server
     falling over, and anyone can generate it in a loop.
 
-    **Only an int or a string of digits.** ``True`` is an int to Python
-    (``int(True) == 1`` — i.e. "user 1"), and ``4.7`` would silently truncate to
-    a different row's id, so both are refused rather than guessed at.
+    **Only an int, or a string of ASCII digits.** ``int()`` alone is looser than
+    this reads: it takes ``True`` (``int(True) == 1`` — i.e. "user 1"), floats
+    (``4.7`` truncating to a *different* row), surrounding whitespace, a leading
+    sign, PEP-515 underscores (``"1_0"`` is ten), and non-ASCII decimal digits.
+    None of those is an id anyone meant to send, and this function is the single
+    definition of what an id is, so the check is the spelling rather than
+    whatever ``int()`` will swallow.
 
     **Range-checked, not merely parsed.** Python ints are unbounded but the
     column is a bigint, so a long enough run of digits parses fine and then
@@ -151,13 +190,9 @@ def _int_id(raw, field):
     """
     if isinstance(raw, bool) or not isinstance(raw, (int, str)):
         raise ValidationError({field: "A valid integer is required."})
-    try:
-        value = int(raw)
-    except ValueError:
-        # ``from None``: the parse error is noise. The caller sent something
-        # that isn't an id, and chaining a ValueError tells them nothing they
-        # didn't type themselves.
-        raise ValidationError({field: "A valid integer is required."}) from None
+    if isinstance(raw, str) and not _DIGITS.fullmatch(raw):
+        raise ValidationError({field: "A valid integer is required."})
+    value = int(raw)
     if not -(2**63) <= value < 2**63:
         raise ValidationError({field: "A valid integer is required."})
     return value
@@ -170,14 +205,18 @@ def _int_ids(raw, field):
     ``filter(id__in=[...])`` raises on the *first* non-numeric element, so a
     list is exactly as capable of producing a 500 as a single value is; and a
     body field that should be a list arriving as a string would otherwise be
-    iterated character by character. Missing is an empty list, matching what
-    every caller already does with an absent field — "asked for nothing" is not
-    an error here, only "asked for nonsense" is.
+    iterated character by character.
+
+    **A missing field is the caller's decision, not this function's**, so
+    ``None`` is rejected here like any other non-list. An absent ``ids`` means
+    "all" on one endpoint and "none" on another, and a helper that quietly
+    picked one for everybody is how a null body field ends up deleting your
+    poll vote.
     """
-    if raw is None:
-        return []
     if not isinstance(raw, list):
         raise ValidationError({field: "Expected a list of ids."})
+    if len(raw) > BODY_IDS_MAX:
+        raise ValidationError({field: f"At most {BODY_IDS_MAX} ids."})
     return [_int_id(item, field) for item in raw]
 
 
@@ -1571,7 +1610,11 @@ class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
         # Optional group target: you can only post into a group you belong to.
         group = None
         group_id = request.data.get("group")
-        if group_id:
+        # `""` is how a multipart form spells "no group" (a blank select), so it
+        # means absent rather than malformed. Anything else present is an id and
+        # is held to being one: letting a falsy-but-present value fall through
+        # would post into the connections feed something meant for a group.
+        if group_id not in (None, ""):
             group_id = _int_id(group_id, "group")
             # 404 (not 403) for both an unknown group and one you're not a member
             # of, so posting can't be used to probe which private groups exist —
@@ -2426,7 +2469,7 @@ def _toggle_reaction(request, target_kwargs, visible_ids, allow_add=True):
     rather than a check in the view because only the toggle knows which half of
     the toggle it's about to do.
     """
-    raw = request.data.get("emoji", "")
+    raw = _body(request).get("emoji", "")
     try:
         emoji = normalise_emoji(raw)
     except InvalidEmoji as exc:
@@ -2845,7 +2888,7 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
-        if "participant_ids" in request.data:
+        if "participant_ids" in _body(request):
             return self._create_group(request)
         return self._create_direct(request)
 
@@ -2896,16 +2939,17 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         validation error on the invite list, not a permission error, since the
         caller *can* message them, just not into this group).
         """
-        ids = request.data.get("participant_ids") or []
-        if not isinstance(ids, list) or not ids:
+        ids = _int_ids(request.data.get("participant_ids") or [], "participant_ids")
+        if not ids:
             raise ValidationError({"participant_ids": "Pick at least one connection."})
-        ids = _int_ids(ids, "participant_ids")
-        raw_title = request.data.get("title") or ""
-        if not isinstance(raw_title, str):
+        raw_title = request.data.get("title")
+        if raw_title is not None and not isinstance(raw_title, str):
             # Same defect as the ids above, one field over: ``.strip()`` on a
-            # list is an AttributeError, and an unhandled one is a 500.
+            # list is an AttributeError, and an unhandled one is a 500. Checked
+            # before the `or ""` below, or an *empty* list would coerce to "" and
+            # quietly make an untitled chat while `["x"]` 400s.
             raise ValidationError({"title": "Expected a title."})
-        title = raw_title.strip()[:CONVERSATION_TITLE_MAX_LENGTH]
+        title = (raw_title or "").strip()[:CONVERSATION_TITLE_MAX_LENGTH]
         group_id = request.data.get("group_id")
         group = None
         if group_id is not None:
@@ -2990,7 +3034,7 @@ class ConversationParticipantsView(APIView):
         ).first()
         if me is None:
             raise PermissionDenied("Only an active member can add people.")
-        ids = _int_ids(request.data.get("user_ids"), "user_ids")
+        ids = _int_ids(_body(request).get("user_ids") or [], "user_ids")
         invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
         for invitee in invitees:
             if not can_add_to_group(request.user, invitee):
@@ -4045,8 +4089,12 @@ class GroupMembersView(APIView):
         if not is_group_member(request.user, group.id):
             raise NotFound()
 
-        user_id = request.data.get("user_id")
-        if not user_id:
+        user_id = _body(request).get("user_id")
+        if user_id is None:
+            # `is None`, not falsy: a `user_id` of `false` or `0` was *sent*, so
+            # "this field is required" would be the wrong answer — and `false`
+            # has to reach `_int_id` to be refused as an id rather than read as
+            # user 1. Matches `_create_direct`.
             raise ValidationError({"user_id": "This field is required."})
         invitee = get_object_or_404(
             User, pk=_int_id(user_id, "user_id"), is_active=True
@@ -4170,7 +4218,7 @@ class GroupMemberRoleView(APIView):
         if my_role != ADMIN:
             raise PermissionDenied("Only an admin can change roles.")
 
-        role = request.data.get("role")
+        role = _body(request).get("role")
         if role not in (ADMIN, MEMBER):
             raise ValidationError({"role": 'Must be "admin" or "member".'})
 
@@ -4317,9 +4365,13 @@ class NotificationSeenView(APIView):
         qs = Notification.objects.filter(
             recipient=request.user, seen_at__isnull=True
         )
-        ids = request.data.get("ids")
-        if ids is not None:
-            qs = qs.filter(id__in=_int_ids(ids, "ids"))
+        body = _body(request)
+        # `in`, not `.get() is not None`: an absent `ids` means "all my unread",
+        # and a client that sent `{"ids": null}` because its array came back
+        # undefined asked for something else entirely. Silently marking the whole
+        # activity centre seen is the wrong way to read that.
+        if "ids" in body:
+            qs = qs.filter(id__in=_int_ids(body["ids"], "ids"))
         updated = qs.update(seen_at=timezone.now())
         return Response({"updated": updated})
 
@@ -4650,7 +4702,7 @@ class DeleteAccountView(APIView):
     throttle_scope = "account_delete"
 
     def post(self, request):
-        password = request.data.get("password", "")
+        password = _body(request).get("password", "")
         if not request.user.check_password(password):
             raise ValidationError(
                 {"password": ["Password is incorrect."]}
@@ -5490,7 +5542,10 @@ class PollVoteView(APIView):
             raise PermissionDenied("This poll is closed.")
         if poll.closes_at is not None and poll.closes_at < timezone.now():
             raise PermissionDenied("Voting has closed for this poll.")
-        option_ids = _int_ids(request.data.get("option_ids"), "option_ids")
+        # Absent is an empty selection (which clears your vote); an explicit
+        # `null` is not — it reaches `_int_ids` as a non-list and 400s, rather
+        # than deleting the votes of a client whose field came back null.
+        option_ids = _int_ids(_body(request).get("option_ids", []), "option_ids")
         valid_ids = set(
             poll.options.values_list("id", flat=True)
         )
