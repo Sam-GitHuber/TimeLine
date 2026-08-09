@@ -8,8 +8,8 @@ import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
 import { renderWithAuth, apiError, unauthoredError } from "./test-utils.jsx";
 import { api } from "./api.js";
 
-// What each write to **your own** group membership *refreshes*, not just what it
-// calls (issue #281 — the web half of #277).
+// What each write to a group's membership *refreshes*, not just what it calls
+// (issue #281 — the web half of #277 — and #290 for the roster's half).
 //
 // Membership gates the home feed and the personal calendar as well as the groups
 // list (`groupCache.js`), so a leave that refreshes only `["groups"]` leaves the
@@ -39,6 +39,7 @@ vi.mock("./api.js", () => ({
     acceptGroupInvite: vi.fn(),
     rejectGroupInvite: vi.fn(),
     removeGroupMember: vi.fn(),
+    setGroupMemberRole: vi.fn(),
     deleteGroup: vi.fn(),
     getComments: vi.fn(),
   },
@@ -50,25 +51,36 @@ const emptyPage = { results: [], next: null };
 // fetcher so "loaded once" and "refetched" are distinguishable.
 let loads;
 
-function GatedSurfaces() {
-  // `{ includeGroups: true }` is the include-groups-in-feed preference turned
-  // on — the setting that puts a group's posts on the home feed in the first
-  // place. The key carries the same suffix FeedPage uses, so a fix that
-  // invalidated `["feed"]` as an *exact* key wouldn't pass here.
-  useQuery({ queryKey: ["feed", { includeGroups: true }], queryFn: loads.feed });
-  useQuery({ queryKey: ["personalCalendar"], queryFn: loads.calendar });
-  useQuery({ queryKey: ["groups"], queryFn: loads.groups });
+/** One observed query, so an invalidation that reaches it shows up as a refetch. */
+function Surface({ queryKey, queryFn }) {
+  useQuery({ queryKey, queryFn });
   return null;
+}
+
+function GatedSurfaces() {
+  return Object.entries(loads).map(([name, surface]) => (
+    <Surface key={name} queryKey={surface.key} queryFn={surface.fn} />
+  ));
 }
 
 /** How many times each surface has loaded, keyed by name for a readable diff. */
 function loadCounts() {
   return Object.fromEntries(
-    Object.entries(loads).map(([name, fn]) => [name, fn.mock.calls.length])
+    Object.entries(loads).map(([name, s]) => [name, s.fn.mock.calls.length])
   );
 }
 
-async function renderOverGatedSurfaces(ui, route) {
+/**
+ * `alsoMounted` is a name → queryKey map of extra surfaces this case needs
+ * observing; they join `loads`, so `loadCounts()` covers them for that test
+ * only. Names must be fresh — silently replacing a base surface would delete a
+ * negative assertion while leaving the suite green.
+ */
+async function renderOverGatedSurfaces(ui, route, alsoMounted = {}) {
+  for (const [name, key] of Object.entries(alsoMounted)) {
+    if (name in loads) throw new Error(`alsoMounted would shadow "${name}"`);
+    loads[name] = { key, fn: vi.fn(async () => []) };
+  }
   const utils = renderWithAuth(
     <>
       <GatedSurfaces />
@@ -80,9 +92,10 @@ async function renderOverGatedSurfaces(ui, route) {
     { route }
   );
   // Their first load, so a later call is unambiguously a refetch.
-  await waitFor(() =>
-    expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 })
+  const firstLoad = Object.fromEntries(
+    Object.keys(loads).map((name) => [name, 1])
   );
+  await waitFor(() => expect(loadCounts()).toEqual(firstLoad));
   return utils;
 }
 
@@ -98,10 +111,17 @@ async function openGroupMenu() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `{ includeGroups: true }` is the include-groups-in-feed preference turned
+  // on — the setting that puts a group's posts on the home feed in the first
+  // place. The key carries the same suffix FeedPage uses, so a fix that
+  // invalidated `["feed"]` as an *exact* key wouldn't pass here.
   loads = {
-    feed: vi.fn(async () => emptyPage),
-    calendar: vi.fn(async () => []),
-    groups: vi.fn(async () => emptyPage),
+    feed: {
+      key: ["feed", { includeGroups: true }],
+      fn: vi.fn(async () => emptyPage),
+    },
+    calendar: { key: ["personalCalendar"], fn: vi.fn(async () => []) },
+    groups: { key: ["groups"], fn: vi.fn(async () => emptyPage) },
   };
   api.getGroup.mockResolvedValue({
     id: 7,
@@ -128,6 +148,7 @@ beforeEach(() => {
     next: null,
   });
   api.removeGroupMember.mockResolvedValue({});
+  api.setGroupMemberRole.mockResolvedValue({});
   api.deleteGroup.mockResolvedValue({});
   api.acceptGroupInvite.mockResolvedValue({});
   api.rejectGroupInvite.mockResolvedValue({});
@@ -206,6 +227,120 @@ describe("leaving or deleting a group", () => {
     // rather than being sent to a list of groups you're still in.
     expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 });
     expect(screen.queryByText("Groups list")).toBeNull();
+  });
+});
+
+/**
+ * Issue #290 — **the roster and the events it silently cancels.**
+ *
+ * `GroupMemberDetailView.delete` ends with `cancel_events_on_departure`: an
+ * event's visibility gate hangs off a *present* organiser, so removing someone
+ * soft-cancels every event they organise in that group, in the same
+ * transaction. The panel refreshed only its own two keys, so the group's
+ * upcoming spine — rendered by the very page the panel sits on — went on
+ * offering the removed member's plans as live ones, along with the "N upcoming
+ * events" cue counting them and the personal calendar listing them.
+ *
+ * The group's event queries are observed by `GroupPage` itself, so they're
+ * counted through `api.getGroupEvents` rather than the mounted surfaces above.
+ *
+ * The two *negative* assertions are the point as much as the positive ones:
+ * `feed` and `getGroupPosts` must not move. #290 was filed believing a removal
+ * drops the member's posts from the group timeline, and the server doesn't do
+ * that — `visible_posts(user, group=pk)` gates on the author being you or a
+ * connection and still *active*, never on their membership, and `can_view_post`
+ * only asks whether the **viewer** is a member. Their posts stay, and stay
+ * clickable.
+ */
+describe("managing another member from the roster", () => {
+  const roster = [
+    { user: { id: 1, display_name: "You" }, role: "admin" },
+    { user: { id: 2, display_name: "Ada" }, role: "member" },
+  ];
+
+  /**
+   * The three keys `GroupPage` doesn't observe. A cancelled event keeps its
+   * detail page and its album (the tombstone is the point — see `groupCache.js`),
+   * so `["event", id]` would otherwise still render Ada's picnic as a live plan
+   * with an RSVP bar; and the removal drops her from the group's chats, which
+   * `["conversation", id]` shows and nothing polls.
+   */
+  const offPageKeys = {
+    event: ["event", 12],
+    eventPhotos: ["eventPhotos", 12],
+    conversation: ["conversation", 5],
+  };
+  const untouched = { event: 1, eventPhotos: 1, conversation: 1 };
+  const refreshed = { event: 2, eventPhotos: 2, conversation: 2 };
+
+  async function openMembersPanel() {
+    api.getGroupMembers.mockResolvedValue(roster);
+    await renderOverGatedSurfaces(groupPageRoute, "/g/7", offPageKeys);
+    await openGroupMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Members" }));
+    // The upcoming and past lists, both loaded once — so a later call is
+    // unambiguously a refetch.
+    await waitFor(() => expect(api.getGroupEvents).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Ada")).toBeInTheDocument();
+  }
+
+  it("refreshes the events a removal cancels", async () => {
+    await openMembersPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => expect(api.removeGroupMember).toHaveBeenCalledWith(7, 2));
+    // The regression: Ada's picnic is cancelled on the server the moment her
+    // membership row goes, and it was still on the spine beside this panel.
+    await waitFor(() => expect(api.getGroupEvents).toHaveBeenCalledTimes(4));
+    // The personal calendar merges the same events under a group label, and
+    // `["groups"]` counts members. The feed does neither.
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({
+        feed: 1,
+        calendar: 2,
+        groups: 2,
+        ...refreshed,
+      })
+    );
+    expect(api.getGroupPosts).toHaveBeenCalledTimes(1);
+  });
+
+  // The Month grid is the second surface the fix names, and it's the one
+  // `GroupPage` only asks for on demand (`enabled: view === "month"`), so it
+  // needs the toggle flipped to be under test at all. The panel renders above
+  // both views, so removing a member with Calendar showing is a real path.
+  it("refreshes the month grid a removal cancels an event off", async () => {
+    await openMembersPanel();
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    await waitFor(() => expect(api.getGroupCalendar).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => expect(api.removeGroupMember).toHaveBeenCalledWith(7, 2));
+    await waitFor(() => expect(api.getGroupCalendar).toHaveBeenCalledTimes(2));
+  });
+
+  it("leaves the events alone when you only change a role", async () => {
+    await openMembersPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Make admin" }));
+
+    await waitFor(() =>
+      expect(api.setGroupMemberRole).toHaveBeenCalledWith(7, 2, "admin")
+    );
+    // A role change cancels nothing and moves no visibility boundary — only the
+    // roster and the badge on it. `groups: 2` is the tell that the success
+    // handler ran, so the untouched counts beside it are a real negative.
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({
+        feed: 1,
+        calendar: 1,
+        groups: 2,
+        ...untouched,
+      })
+    );
+    expect(api.getGroupEvents).toHaveBeenCalledTimes(2);
   });
 });
 

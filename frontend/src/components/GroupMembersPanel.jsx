@@ -4,6 +4,10 @@ import Avatar from "./Avatar.jsx";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { serverMessage, waitingMessage } from "../errors.js";
+import {
+  invalidateGroupRoster,
+  invalidateMemberRemoved,
+} from "../groupCache.js";
 
 // The members of a group, each with their role. If the viewer is an admin, each
 // other member gets promote/demote + remove controls. The backend enforces the
@@ -18,20 +22,21 @@ export default function GroupMembersPanel({ groupId, isAdmin }) {
     queryFn: () => api.getGroupMembers(groupId),
   });
 
-  const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ["groupMembers", groupId] });
-    queryClient.invalidateQueries({ queryKey: ["group", groupId] });
-  };
-
+  // The two writes refresh different sets, because they change different
+  // things — see `groupCache.js`. A role change moves the roster and the member
+  // count; a removal additionally soft-cancels every event the departing member
+  // organises here and drops them from the group's chats, none of which the
+  // panel used to tell the cache about (#290). The controls below only render on
+  // **someone else's** row, so neither of these is ever a leave.
   const setRole = useMutation({
     mutationFn: ({ userId, role }) =>
       api.setGroupMemberRole(groupId, userId, role),
-    onSuccess: refresh,
+    onSuccess: () => invalidateGroupRoster(queryClient, groupId),
   });
 
   const remove = useMutation({
     mutationFn: (userId) => api.removeGroupMember(groupId, userId),
-    onSuccess: refresh,
+    onSuccess: () => invalidateMemberRemoved(queryClient, groupId),
   });
 
   const members = membersQuery.data ?? [];
