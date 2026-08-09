@@ -712,7 +712,7 @@ payload field and no backend change.
 
 | When | What it clears | Where |
 |---|---|---|
-| The thread screen marks itself read (on open, and as messages land) | every notification whose `url` is `/messages/<this id>` | `[conversationId].tsx` |
+| The thread screen marks itself read (on open, and as messages land) — **only once the transcript has actually loaded** (#321) | every notification whose `url` is `/messages/<this id>` | `[conversationId].tsx` |
 | **Mark read** swiped on a row in the conversation list | the same | `(tabs)/messages.tsx` |
 | The activity centre marks everything seen (on open) | every notification carrying a `notificationId` | `activity.tsx` |
 | A **Reply** typed into a notification *lands* | that conversation's notifications | `usePushTaps.ts` |
@@ -723,6 +723,24 @@ payload field and no backend change.
 Both mark-read paths are listed on purpose: dealing with a thread from the list
 is the same act as reading it, and covering only the thread screen left the badge
 clearing while the lock screen kept its notification.
+
+⚠️ **A dismissal is not undoable, so the thing that triggers it has to be sure.**
+The thread screen's row above waits for the *transcript*, not merely for the
+conversation (#321): its header and composer render from a different query and
+are fine while the messages are errored, so it used to clear the tray for a
+thread whose messages the reader was being told we couldn't load — told there is
+nothing there, and robbed of the one signal that would bring them back. The guard
+is `!!pages`, not "the messages query hasn't errored": the latter still fires on
+the commit *before* the request fails, which is the same trap #318 records for
+the post and event screens.
+
+The same guard governs **`setOnScreenConversation`**, which is a suppression
+rather than a dismissal and so easier to overlook. Claiming the thread makes the
+foreground handler return `shouldShowList: false` for its pushes (the row above,
+and *Show notifications that arrive while the app is foregrounded* in `push.ts`)
+— so while the transcript was an error card, a message arriving for that chat
+bannered once and was never filed here at all. It claims the thread only while
+it can actually show it.
 
 Notifications are matched on the push's own `url`, parsed with the same
 `conversationIdFromUrl` the deep link uses — one shape on the wire, with no

@@ -516,6 +516,46 @@ export default function ThreadScreen() {
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const pages = messagesQuery.data;
+  /**
+   * **The transcript is a second query, and it fails separately** (#321). The
+   * header, the participants and the mute state all come from `convoQuery`, so
+   * they render perfectly while this one is errored — and *"No messages yet —
+   * say hello."* then appeared in a thread with years of history, under the name
+   * of the person whose messages had just gone missing. `messagesQuery.isError`
+   * was read nowhere in this file; only `convoQuery`'s was. The same mistake the
+   * web's `ConversationThreadView` had, fixed there in #319.
+   *
+   * `!pages` rather than a bare `isError`, the same way round as `loadError`
+   * above: this query polls on `MESSAGE_POLL_MS` and pages backwards into
+   * history, so a failed poll or a failed page of older messages must not take
+   * the transcript off screen (#309/#311).
+   */
+  const messagesLoadFailed = messagesQuery.isError && !pages;
+  /**
+   * Is the **transcript** on screen — which is a different question from
+   * `showingThread`, and the one the mark-read write below actually asks.
+   *
+   * `showingThread` answers for the conversation: its header, its participants,
+   * its composer. All of those come from `convoQuery` and render perfectly while
+   * `messagesQuery` is errored — so on a cold transcript failure the screen said
+   * *"Couldn't load these messages"* and the effect beside it dismissed this
+   * thread's notifications and marked it read anyway. The reader is told there's
+   * nothing there **and** the only signal that would bring them back is gone,
+   * which is #318's shape reached from #321's cause.
+   *
+   * **`!!pages`, not `!messagesLoadFailed`** — the wait counts, and that is the
+   * whole difference between a guard and a fix. Gating on the failure alone
+   * still fires on the first commit after the detail lands, while the transcript
+   * request is in flight and neither errored nor loaded: the dismissal has
+   * already happened by the time we find out it failed, which is precisely the
+   * trap #318 describes. Waiting is also what the effect already does for the
+   * detail (M5), and for the same reason.
+   *
+   * A *failed poll* still marks read, because `pages` survives it — the reader
+   * is looking at the messages, and skipping the write would leave the badge
+   * claiming mail they'd just read (#309).
+   */
+  const readingMessages = showingThread && !!pages;
   const loaded = useMemo(
     () => pages?.pages.flatMap((page) => page.results) ?? [],
     [pages]
@@ -827,9 +867,14 @@ export default function ThreadScreen() {
    * a doomed write, on the detail poll's schedule, for a conversation showing
    * nothing. `showingThread` is the one value both halves of the file read, so
    * they can't drift.
+   *
+   * **`readingMessages`, not `showingThread` (#321).** The two came apart the
+   * moment the transcript got an error branch of its own: the conversation can
+   * be fully on screen while its messages are not. See `readingMessages` above
+   * — it waits for the transcript exactly as this used to wait for the detail.
    */
   useEffect(() => {
-    if (isPending || !showingThread) return;
+    if (isPending || !readingMessages) return;
     // Take back this thread's notifications from the phone's notification
     // centre (#178). Reading a thread in the app is the commonest way a
     // notification goes stale, and until this landed nothing ever removed one:
@@ -854,10 +899,10 @@ export default function ThreadScreen() {
       // uncaught rejection is a redbox in development and a warning in
       // production, for a write whose failure is genuinely uninteresting.
       .catch(() => {});
-    // `showingThread` rather than `detail`: the payload is re-fetched every
+    // A boolean rather than `detail`: the payload is re-fetched every
     // `CONVERSATION_DETAIL_POLL_MS`, so depending on the object itself would
     // turn this into a mark-read poll of its own. A boolean flips once.
-  }, [id, messageCount, isPending, showingThread, queryClient]);
+  }, [id, messageCount, isPending, readingMessages, queryClient]);
 
   /**
    * Tell the notification handler this thread is the one on screen (#178), so a
@@ -867,12 +912,23 @@ export default function ThreadScreen() {
    * On focus rather than mount: this screen stays mounted underneath its own
    * info screen, and a thread the user has navigated away from must stop
    * claiming its pushes.
+   *
+   * **`readingMessages` gates it too (#321)**, for the same reason the
+   * mark-read effect above does — this is the other half of "the writes beside
+   * the screen agree with it", and the easier one to miss because it destroys
+   * nothing itself. Claiming the thread makes `configureNotificationHandler`
+   * return `shouldShowList: false` for its pushes, so while the transcript is
+   * an error card a message arriving for this chat banners once and is never
+   * filed in the notification centre. The reader is looking at "Couldn't load
+   * these messages" and the one thing that would bring them back is dropped on
+   * the floor — #318's outcome again, by omission rather than by a write.
    */
   useFocusEffect(
     useCallback(() => {
+      if (!readingMessages) return;
       setOnScreenConversation(id);
       return () => setOnScreenConversation(null);
-    }, [id])
+    }, [id, readingMessages])
   );
 
   /**
@@ -1678,10 +1734,38 @@ export default function ThreadScreen() {
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
               // Renders at the *top* on an inverted list — which is where the
-              // older messages being fetched are about to appear.
+              // older messages being fetched are about to appear, and where a
+              // note about the history that *didn't* belongs.
               ListFooterComponent={
                 isFetchingNextPage ? (
                   <ActivityIndicator color={colors.accent} style={styles.spinner} />
+                ) : messagesLoadFailed && rows.length > 0 ? (
+                  // **`ListEmptyComponent` can't answer for this one.** An
+                  // unsent message in the outbox survives the screen, so a cold
+                  // transcript failure with one queued leaves `rows` non-empty
+                  // — the empty slot never gets its turn, and the card below
+                  // (with the only retry) never renders. What's on screen is
+                  // then a chat holding one bubble, years of history missing,
+                  // and nothing saying why: the same claim by omission this
+                  // whole change exists to remove. The line goes *beside* the
+                  // bubble rather than over it, because replacing an unsent
+                  // message with an apology reads as it having been thrown
+                  // away. Same shape as the group timeline's and the profile's
+                  // partial notes (#320).
+                  <View style={styles.partial}>
+                    <Text style={styles.inlineError}>
+                      Couldn’t load the rest of this conversation.
+                    </Text>
+                    <Pressable
+                      onPress={() => messagesQuery.refetch()}
+                      accessibilityRole="button"
+                      accessibilityLabel="Try loading the messages again"
+                      hitSlop={8}
+                      style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.inlineRetryText}>Try again</Text>
+                    </Pressable>
+                  </View>
                 ) : null
               }
               renderItem={({ item }) => {
@@ -1790,8 +1874,33 @@ export default function ThreadScreen() {
                   />
                 );
               }}
+              /* Reached only when `rows` is empty, which is the right gate
+                 rather than `loaded`: an unsent message waiting in the outbox is
+                 still something on screen, and replacing it with an apology
+                 would look like it had been thrown away. */
               ListEmptyComponent={
-                messagesQuery.isLoading ? (
+                messagesLoadFailed ? (
+                  <View style={styles.centre}>
+                    <Text style={styles.emptyTitle}>Couldn’t load these messages</Text>
+                    <Text style={styles.emptyBody}>
+                      {serverMessage(messagesQuery.error, WENT_WRONG)}
+                    </Text>
+                    <Pressable
+                      onPress={() => messagesQuery.refetch()}
+                      accessibilityRole="button"
+                      accessibilityLabel="Try loading the messages again"
+                      style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.retryText}>Try again</Text>
+                    </Pressable>
+                  </View>
+                ) : !pages ? (
+                  // `!pages`, not `isLoading`. This query is `enabled` only once
+                  // the detail has landed, and a *disabled* query is neither
+                  // loading nor errored — so on a cold open the empty state used
+                  // to paint "No messages yet" in the gap before the transcript
+                  // was even asked for. (It would cover the paused state too, if
+                  // `onlineManager` were ever wired — see `mobile-app.md`.)
                   <ActivityIndicator color={colors.accent} style={styles.spinner} />
                 ) : (
                   <Text style={styles.emptyThread}>No messages yet — say hello.</Text>
@@ -2423,6 +2532,21 @@ const styles = StyleSheet.create({
     color: colors.ink,
     textAlign: 'center',
   },
+  emptyBody: { fontSize: fontSize.sm, color: colors.inkSoft, textAlign: 'center' },
+  // The quieter shape: a line beside content that *did* render, rather than the
+  // centred card a wholly-empty transcript gets. Its retry is **accent-coloured
+  // text, not `retryText`** — that style is only legible as a button inside the
+  // bordered `retry` pill, and bare it renders as bold body copy, which is a
+  // retry nobody recognises as tappable.
+  partial: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: 2 },
+  inlineError: {
+    fontSize: fontSize.sm,
+    color: colors.danger,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  inlineRetry: { alignSelf: 'center', paddingVertical: spacing.xs },
+  inlineRetryText: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '700' },
   retry: {
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.sm,

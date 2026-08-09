@@ -121,7 +121,9 @@ async function renderScreen() {
   // after render, and this settle step (which never touches `screen` itself)
   // is what lets the subsequent `findBy*` queries resolve.
   await waitFor(() => expect(mockFetch.mock.calls.length).toBeGreaterThan(0));
-  return { invalidate };
+  // The client comes back too, so a test can drive a *refetch* — the half of the
+  // error rule that says a failed refresh keeps what's on screen (#321).
+  return { invalidate, client: queryClient };
 }
 
 
@@ -368,4 +370,153 @@ it('is read-only for a non-admin (no action sheet)', async () => {
   fireEvent.press(row);
 
   expect(menuWasShown()).toBe(false);
+});
+
+// --- An admin gate that couldn't be checked (#321) ---------------------------
+
+/**
+ * Your role comes from a **different query** than the roster does, and only the
+ * roster's `isError` was ever read.
+ *
+ * So a failed group fetch beside a succeeding members fetch drew a complete,
+ * healthy-looking list — right names, right Admin badges — in which nothing was
+ * pressable. An admin taps a row to remove a spammer and gets no menu, no alert,
+ * nothing at all: indistinguishable from having been quietly demoted. The screen
+ * stated by omission "you are not an admin of this group", on the strength of a
+ * dropped packet.
+ */
+describe('a roster whose group fetch failed', () => {
+  /** The group detail fails; the members list keeps answering. */
+  function breakTheGroup(members = MEMBERS) {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/groups/7/members/')) return jsonResponse(members);
+      if (url.includes('/api/groups/7/')) {
+        // A macrotask late, as a real request is.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: 'Server error.' }, 500);
+      }
+      return jsonResponse(null, 204);
+    });
+  }
+
+  it('says the role couldn’t be checked, rather than acting as if you’re not an admin', async () => {
+    breakTheGroup();
+    await renderScreen();
+
+    expect(
+      await screen.findByText(
+        'Couldn’t check whether you manage this group, so the member actions aren’t available.'
+      )
+    ).toBeTruthy();
+    // The roster itself loaded fine, which is what made the silence convincing.
+    expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+    expect(screen.getByLabelText('Try checking again')).toBeTruthy();
+  });
+
+  it('offers a retry that brings the member actions back', async () => {
+    breakTheGroup();
+    await renderScreen();
+    await screen.findByLabelText('Try checking again');
+
+    serve();
+    await fireEvent.press(screen.getByLabelText('Try checking again'));
+
+    await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+    expect(menuOptions()).toContain('Remove from group');
+  });
+
+  it('says nothing when a *refresh* of the group fails', async () => {
+    // `isError && !data`, never a bare `isError` (#309/#311): the role we
+    // already know survives a failed poll, and the notice must not appear over
+    // a roster that is still fully manageable.
+    serve();
+    const { client } = await renderScreen();
+    await screen.findByLabelText('Manage Ada Lovelace');
+    breakTheGroup();
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['group', 7] });
+    });
+    await waitFor(() =>
+      expect(client.getQueryState(['group', 7])?.status).toBe('error')
+    );
+
+    expect(
+      screen.queryByText(
+        'Couldn’t check whether you manage this group, so the member actions aren’t available.'
+      )
+    ).toBeNull();
+    expect(screen.getByLabelText('Manage Ada Lovelace')).toBeTruthy();
+  });
+
+  it('doesn’t show the notice to a member whose group fetch worked', async () => {
+    serve({ role: 'member' });
+    await renderScreen();
+
+    await screen.findByLabelText('Ada Lovelace');
+    expect(
+      screen.queryByText(
+        'Couldn’t check whether you manage this group, so the member actions aren’t available.'
+      )
+    ).toBeNull();
+  });
+});
+
+/**
+ * Review findings on the above: one outage must not produce two error messages,
+ * and a 404 has to outrank the cached role.
+ */
+describe('a roster whose group fetch failed — the other two states', () => {
+  it('says nothing about the role when the roster didn’t load either', async () => {
+    // The commonest outage — one box, one restart — takes both queries down.
+    // The role notice is about rows that look manageable and aren't; with no
+    // rows there is no such claim to correct, and stacking it over the members
+    // card offers two Try-agains for one failure.
+    mockFetch.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return jsonResponse({ detail: 'Server error.' }, 500);
+    });
+    await renderScreen();
+
+    expect(await screen.findByText('Couldn’t load members.')).toBeTruthy();
+    expect(
+      screen.queryByText(
+        'Couldn’t check whether you manage this group, so the member actions aren’t available.'
+      )
+    ).toBeNull();
+  });
+
+  it('stops offering admin actions once a 404 says you’ve been removed', async () => {
+    // Nothing clears a query's `data`, a 404 least of all — so the cached group
+    // went on saying `your_role: 'admin'` after you'd been removed, leaving
+    // every row live behind a full admin menu whose write comes back a 403.
+    serve();
+    const { client } = await renderScreen();
+    await screen.findByLabelText('Manage Ada Lovelace');
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/groups/7/members/')) return jsonResponse(MEMBERS);
+      if (url.includes('/api/groups/7/')) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return jsonResponse({ detail: 'Not found.' }, 404);
+      }
+      return jsonResponse(null, 204);
+    });
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['group', 7] });
+    });
+    await waitFor(() =>
+      expect(client.getQueryState(['group', 7])?.status).toBe('error')
+    );
+
+    expect(
+      await screen.findByText('You’re no longer a member of this group.')
+    ).toBeTruthy();
+    // No retry: a request that will 404 forever is one dead end swapped for
+    // another (`edit.tsx`'s lesson in #320).
+    expect(screen.queryByLabelText('Try checking again')).toBeNull();
+    // And the rows are inert, rather than a menu whose every action 403s.
+    fireEvent.press(screen.getByLabelText('Ada Lovelace'));
+    expect(menuWasShown()).toBe(false);
+  });
 });

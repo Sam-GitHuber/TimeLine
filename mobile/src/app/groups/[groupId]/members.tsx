@@ -25,7 +25,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, ApiError } from '@/api';
 import { useAuth } from '@/auth';
 import { useActionMenu } from '@/components/ActionMenu';
 import { Avatar } from '@/components/Avatar';
@@ -50,7 +50,43 @@ export default function GroupMembersScreen() {
   const queryClient = useQueryClient();
 
   const groupQuery = useQuery({ queryKey: ['group', id], queryFn: () => api.getGroup(id) });
-  const isAdmin = groupQuery.data?.your_role === 'admin';
+  /**
+   * **A 404 outranks the cached role** — the half of the rule `roleUnknown`
+   * below can't cover. Nothing ever clears a query's `data`, a 404 least of
+   * all, so if you're removed from the group while standing on its roster the
+   * cached payload goes on saying `your_role: 'admin'`: every row stays live,
+   * with a full admin menu behind it, and the write it fires comes back a 403.
+   * A 404 is an answer about *now*, not a failure to ask — the same reason the
+   * thread and the info screen keep `notAvailable` ahead of their cached copies
+   * (#309), and the branch this screen never had.
+   */
+  const groupGone =
+    groupQuery.error instanceof ApiError && groupQuery.error.status === 404;
+  const isAdmin = !groupGone && groupQuery.data?.your_role === 'admin';
+  /**
+   * **A roster whose rows are inert, saying nothing about why** (#321).
+   *
+   * Your role comes from a *different* query than the roster does, and only the
+   * roster's `isError` was ever read. So a failed group fetch beside a
+   * succeeding members fetch drew a complete, healthy-looking list — correct
+   * names, correct Admin badges — in which nothing was pressable: an admin taps
+   * a row to remove a spammer and gets no menu, no alert, nothing at all. The
+   * screen stated by omission "you are not an admin of this group", which is a
+   * claim about the server's answer made on the strength of a dropped packet.
+   *
+   * The rows stay inert, deliberately — every control behind them would 403 if
+   * we guessed wrong, and guessing *up* means offering an admin action to a
+   * member. What changes is that the screen says so, and offers the retry.
+   *
+   * `!data`, never a bare `isError`: a failed refresh keeps the role it knows.
+   *
+   * **Only over a roster that loaded.** The notice's whole job is "these rows
+   * look manageable and aren't" — with no rows there is no such claim to
+   * correct, and the commonest outage takes both queries down at once (one box,
+   * one restart), which would stack this above the members card's own error and
+   * offer two retries for one failure.
+   */
+  const roleUnknown = groupQuery.isError && !groupQuery.data;
 
   const membersQuery = useQuery({
     queryKey: ['groupMembers', id],
@@ -149,6 +185,39 @@ export default function GroupMembersScreen() {
         </Pressable>
       </View>
 
+      {/* **Outside the list, not a `ListHeaderComponent`.** A header scrolls
+          away with the rows, and on a forty-member family group the sentence
+          explaining why nothing is pressable is off screen by the time anyone
+          taps a row — which is exactly the silence this exists to break. Fixed
+          between the bar and the roster, it stays attached to what it explains.
+
+          `groupGone` first: a retry against a request that will 404 forever is
+          one dead end swapped for another (the lesson `edit.tsx` took in #320),
+          so that branch states the answer and offers no button. */}
+      {groupGone ? (
+        <View style={styles.notice}>
+          <Text style={styles.inlineError}>
+            You’re no longer a member of this group.
+          </Text>
+        </View>
+      ) : roleUnknown && membersQuery.data ? (
+        <View style={styles.notice}>
+          <Text style={styles.inlineError}>
+            Couldn’t check whether you manage this group, so the member actions
+            aren’t available.
+          </Text>
+          <Pressable
+            onPress={() => groupQuery.refetch()}
+            accessibilityRole="button"
+            accessibilityLabel="Try checking again"
+            hitSlop={8}
+            style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
+          >
+            <Text style={styles.inlineRetryText}>Try again</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       <FlatList
         data={members}
         keyExtractor={(m) => String(m.user.id)}
@@ -241,4 +310,17 @@ const styles = StyleSheet.create({
     borderColor: colors.lineStrong,
   },
   retryText: { color: colors.ink, fontWeight: '600' },
+  notice: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  inlineError: { fontSize: fontSize.sm, color: colors.danger, lineHeight: 20 },
+  inlineRetry: { alignSelf: 'flex-start', paddingVertical: spacing.xs },
+  // **Not `retryText`.** That style only reads as a button inside the bordered
+  // `retry` pill; bare on a line it is indistinguishable from bold body copy,
+  // which is a retry nobody taps.
+  inlineRetryText: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '700' },
+  pressed: { opacity: 0.7 },
 });

@@ -20,13 +20,15 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { Alert } from 'react-native';
 
 import ConversationInfoScreen from '@/app/messages/[conversationId]/info';
 import { AuthProvider } from '@/auth';
 import { saveTokens } from '@/tokens';
 import type { Conversation } from '@/types';
+
+import { settle } from './helpers';
 
 const mockPush = jest.fn();
 const mockDismissTo = jest.fn();
@@ -152,13 +154,16 @@ async function renderScreen() {
       mutations: { gcTime: 0 },
     },
   });
-  return render(
+  const result = await render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <ConversationInfoScreen />
       </AuthProvider>
     </QueryClientProvider>
   );
+  // The client comes back too, so a test can drive a *refetch* — the half of
+  // the error rule that says a failed refresh keeps what's on screen (#321).
+  return { ...result, client: queryClient };
 }
 
 beforeEach(() => {
@@ -522,5 +527,146 @@ describe('a details screen that can’t reach the conversation', () => {
       await screen.findByText('This conversation isn’t available.')
     ).toBeTruthy();
     expect(screen.queryByText('Couldn’t load this conversation.')).toBeNull();
+  });
+});
+
+// --- Claims made by omission (#321) -----------------------------------------
+
+/**
+ * Two of this screen's sections say something by simply not being there, and
+ * neither read the `isError` of the query it depends on.
+ *
+ * The gallery only appears once a photo has been sent, so its absence means
+ * "this chat has never carried a picture" — the component's own docstring says
+ * so. The Block control's absence means nothing at all, which is worse: someone
+ * who opened Details specifically to block a harasser finds the screen ending at
+ * *Leave chat*, with no reason why.
+ */
+describe('a details screen whose side queries fail', () => {
+  /** The gallery's `?media=1` fetch fails; the conversation keeps working. */
+  function breakTheMedia() {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (!String(url).includes('/messages/')) return base(url, init);
+      // A macrotask late, as a real request is — an instant rejection settles
+      // inside the render's own batch and doesn't behave like one.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return jsonResponse({ detail: 'Server error.' }, 500);
+    });
+  }
+
+  /** The other person's profile fetch fails; the conversation keeps working. */
+  function breakTheProfile() {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (!String(url).includes('/api/users/')) return base(url, init);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return jsonResponse({ detail: 'Server error.' }, 500);
+    });
+  }
+
+  it('says so rather than silently having no gallery', async () => {
+    serve(detail({}), undefined, [{ id: 30, attachments: [photo(9)] }]);
+    breakTheMedia();
+    await renderScreen();
+    await screen.findByText('In this chat');
+
+    expect(
+      await screen.findByText('Couldn’t load the photos in this chat.')
+    ).toBeTruthy();
+    expect(screen.getByLabelText('Try loading the photos again')).toBeTruthy();
+  });
+
+  it('still renders no gallery at all when the chat really has no photos', async () => {
+    // The exception is the *failure*, not the empty answer. A heading over a
+    // blank square is still a feature announcing it has nothing for you.
+    serve(detail({}));
+    await renderScreen();
+    await screen.findByText('In this chat');
+
+    expect(screen.queryByText(/photos?$/)).toBeNull();
+    // Explicitly, because `/photos?$/` is case-sensitive and so can't see the
+    // heading the *error* branch renders — without this the surrounding claim
+    // ("no heading over a blank square") is one the test can't actually check.
+    expect(screen.queryByText('Photos')).toBeNull();
+    expect(screen.queryByText('Couldn’t load the photos in this chat.')).toBeNull();
+  });
+
+  it('keeps the photos on screen when a refresh of them fails', async () => {
+    // `isError && !data`, never a bare `isError` (#309/#311).
+    serve(detail({}), undefined, [{ id: 30, attachments: [photo(9)] }]);
+    const { client } = await renderScreen();
+    await screen.findByText('1 photo');
+    breakTheMedia();
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['conversation-media', 5] });
+    });
+    // The cache flips to 'error' a render before the screen does — React Query
+    // notifies on a macrotask. Without this the assertions read the pre-error
+    // tree and pass with the bug still in place.
+    await settle(2);
+
+    expect(screen.getByText('1 photo')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load the photos in this chat.')).toBeNull();
+  });
+
+  it('says why Block isn’t there, instead of just not being there', async () => {
+    serve(detail({}));
+    breakTheProfile();
+    await renderScreen();
+    await screen.findByText('Ada Lovelace');
+
+    expect(
+      await screen.findByText('Couldn’t check whether you’ve blocked Ada Lovelace.')
+    ).toBeTruthy();
+    // Not a dead control: `is_blocked` drives both the label and the direction
+    // of the write, so a button drawn without it could unblock someone you meant
+    // to block (#236). What's offered instead is the way to find out.
+    expect(screen.queryByText('Block')).toBeNull();
+    expect(screen.getByLabelText('Try checking again')).toBeTruthy();
+  });
+
+  it('offers a retry that brings Block back', async () => {
+    serve(detail({}));
+    breakTheProfile();
+    await renderScreen();
+    await screen.findByText('Couldn’t check whether you’ve blocked Ada Lovelace.');
+
+    serve(detail({}));
+    await fireEvent.press(screen.getByLabelText('Try checking again'));
+
+    expect(await screen.findByText('Block')).toBeTruthy();
+    expect(
+      screen.queryByText('Couldn’t check whether you’ve blocked Ada Lovelace.')
+    ).toBeNull();
+  });
+
+  it('keeps Block on screen when a refresh of the profile fails', async () => {
+    serve(detail({}));
+    const { client } = await renderScreen();
+    await screen.findByText('Block');
+    breakTheProfile();
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['user', 2] });
+    });
+    await settle(2);
+
+    expect(screen.getByText('Block')).toBeTruthy();
+    expect(
+      screen.queryByText('Couldn’t check whether you’ve blocked Ada Lovelace.')
+    ).toBeNull();
+  });
+
+  it('says nothing about Block on a group chat', async () => {
+    // There is no one person to block, so the profile query never runs — and
+    // the line must not appear on the strength of a query that was disabled.
+    serve(group());
+    breakTheProfile();
+    await renderScreen();
+    await screen.findByText('Weekend plans');
+
+    expect(screen.queryByText(/Couldn’t check whether you’ve blocked/)).toBeNull();
   });
 });

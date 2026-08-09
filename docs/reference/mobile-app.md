@@ -365,6 +365,77 @@ keeps what's on screen — the rule above, and the half #309/#311 had backwards:
   its blurb over zero toggles: "there are no settings" rather than "we couldn't
   load them", with no retry.
 
+**#321 finished the family off** with the four the sweep behind #320 had left —
+three of them in messaging, which is its own subsystem with its own reference
+doc, and one on a screen that reaches no empty state at all:
+
+- **`messages/[conversationId].tsx`** said *"No messages yet — say hello."* in a
+  thread with years of history. The loudest instance in the app, and the exact
+  twin of the web's `ConversationThreadView`. Its two waiting states are worth
+  keeping straight: the transcript query is `enabled` only once the detail has
+  landed, and a **disabled** query is neither loading nor errored — so the branch
+  it needs is **`!pages`**, not `isLoading`, or the empty state paints in the gap
+  before the messages have even been asked for. (That is the same shape the
+  paused-query warning below describes, reached without `onlineManager`.)
+
+  ⚠️ **`ListEmptyComponent` is not enough on its own, on any screen with an
+  outbox or a second source of rows.** It doesn't render while `rows` is
+  non-empty, so a cold failure with one unsent message queued leaves the card —
+  and the only retry — undrawn. The transcript keeps the bubble and puts a
+  *line* in `ListFooterComponent` (the top, inverted) instead, which is the same
+  answer the group timeline reached in #320 when recaps loaded beside failed
+  posts. Whenever a list can hold rows from somewhere other than the query that
+  failed, the error needs a home outside the empty slot.
+- **`messages/[conversationId]/info.tsx` twice, both by omission.** The media
+  gallery renders `null` with no photos on purpose — a heading over a blank
+  square is a feature announcing it has nothing for you — so a *failed* fetch
+  said "this chat has never carried a picture". That one case gets the heading
+  and a line. The **Block** control was gated on `otherQuery.data` and simply
+  wasn't drawn: someone who opened Details to block a harasser found the screen
+  ending at *Leave chat*. It stays undrawn as a **button** — `BlockButton` takes
+  `is_blocked` and uses it for both the label and the direction of the write, so
+  one rendered without it could unblock someone you meant to block (#236) — and
+  what replaces it is a line saying we couldn't check, with the retry.
+- **`groups/[groupId]/members.tsx`** drew a complete, healthy-looking roster
+  whose rows were **inert**. `isAdmin` comes from `['group', id]`; only
+  `['groupMembers', id]`'s error was ever read. An admin taps a row to remove a
+  spammer, nothing happens at all, and the screen has stated by omission "you are
+  not an admin of this group". The rows stay inert — every control behind them
+  would 403 if we guessed wrong, and guessing *up* offers an admin action to a
+  member — but a notice says so and offers the retry.
+
+  Three things about that notice, each of which was wrong first: it sits
+  **outside the `FlatList`**, because a `ListHeaderComponent` scrolls away and
+  the explanation for why nothing is pressable has to still be on screen when
+  someone taps a row forty rows down; it renders **only over a roster that
+  loaded**, since with no rows there is no false claim to correct and the
+  commonest outage fails both queries and would stack two retries for one
+  failure; and a **404 takes precedence**, saying you're no longer a member and
+  offering *no* retry, because nothing clears a query's `data` and the cached
+  `your_role: 'admin'` otherwise kept every row live after you'd been removed.
+
+**And one write, folded in with them.** The thread's mark-read effect was gated
+on `showingThread`, which answers for the *conversation*: its header, its
+participants, its composer, all from `convoQuery` and all fine while the
+transcript is errored. So the screen said "Couldn't load these messages" while
+the effect beside it dismissed that thread's delivered pushes and POSTed `read`.
+The reader is told there is nothing there **and** the only signal that would
+bring them back is gone — #318's outcome reached from #321's cause. It reads
+`readingMessages = showingThread && !!pages` now, and **`!!pages` rather than
+`!messagesLoadFailed` is the whole fix**: gating on the failure alone still fires
+on the first commit after the detail lands, while the transcript request is in
+flight and neither errored nor loaded, so the dismissal has already happened by
+the time we find out. A failed *poll* still marks read, because `pages` survives
+it and the reader is looking at the messages (#309).
+
+**`setOnScreenConversation` needed the same guard**, and is the easier one to
+miss because it destroys nothing itself: claiming the thread on focus makes
+`configureNotificationHandler` return `shouldShowList: false` for its pushes, so
+a message arriving while the error card was up bannered once and was never filed
+in the notification centre. Every write *and* every claim beside a screen has to
+agree with what the screen is actually showing — that is the whole of #315, and
+"claim" is the half that reads as nothing at all.
+
 Two of them are not a wrong sentence:
 
 - **`groups/[groupId]/invite.tsx` reaches past the display, and turned a failed
