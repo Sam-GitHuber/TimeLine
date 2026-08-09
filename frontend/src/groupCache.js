@@ -47,14 +47,18 @@ export function invalidateGroupMembership(queryClient) {
 // Refetch what a change to **someone else's** row on the roster invalidates.
 //
 // The narrow half, shared by both roster writes: the list itself, the group
-// payload (whose `member_count` and `your_role` both move) and the groups list,
-// which counts members too. `["groups"]` is the drift #290 also names — the
-// app's roster had it and the web's didn't, for no reason either could state.
+// payload (whose `member_count` and `your_role` both move) and the groups list.
+// `["groups"]` is the drift #290 also names — the app's roster had it and the
+// web's didn't, for no reason either could state. It earns its place on a
+// *removal* (the list carries `member_count`) and on the app's **self**-demote
+// (it carries `your_role` too); on a web role change, where the controls only
+// ever render on someone else's row, it's a cheap refetch of an unchanged list,
+// kept so the two clients state one rule rather than two.
 //
 // Deliberately **not** the wider `invalidateGroupMembership` set: promoting,
 // demoting or removing *someone else* changes no membership of yours, so the
-// home feed and the personal calendar are still right. (The self-remove branch
-// is a leave and calls that one instead; see the rosters.)
+// home feed is still right. (The self-remove branch is a leave and calls that
+// one instead; see the rosters.)
 
 export function invalidateGroupRoster(queryClient, groupId) {
   for (const queryKey of [
@@ -68,20 +72,34 @@ export function invalidateGroupRoster(queryClient, groupId) {
 
 // Refetch what **removing someone else from a group** invalidates (#290).
 //
-// The roster's own keys, plus the three an event cancellation moves — because
-// that's what a removal is, server-side. `GroupMemberDetailView.delete` ends
-// with `cancel_events_on_departure` (`backend/api/views.py`): an event's
-// visibility gate hangs off a *present* organiser, so every event the departing
-// member organises in this group is soft-cancelled in the same transaction.
-// That's the same set `EventPage`'s own cancel handler invalidates, for the
-// identical reason, and neither roster named one of them.
+// A removal is not only a membership write, and that's the whole bug.
+// `GroupMemberDetailView.delete` does two more things in the same transaction:
 //
-// What that looks like: an admin opens a group where Ada has a picnic planned,
-// opens the members panel and removes her. Her row goes and the count drops —
-// and the picnic stays on the spine directly above, in the "N upcoming events"
-// count and on the Month grid, until you navigate away and back. On the app
-// it's the sticky version: `/calendar` is a tab, mounted for the life of the
-// session, so a cancelled plan sits there as a live one until a pull-to-refresh.
+// 1. **It soft-cancels the departing member's events in this group**
+//    (`cancel_events_on_departure`). Nothing in `visible_events` or
+//    `can_view_event` checks the organiser's *membership* — they gate on the
+//    viewer being a member and the organiser being active and connected — which
+//    is precisely why the server has to cancel them by hand, rather than their
+//    falling out of the query on their own.
+// 2. **It drops them from every chat scoped to the group** — participant
+//    deactivated, `left_at` stamped, `promote_participants` re-run for the rest.
+//
+// So this names the same five keys as an event write (`EventPage`'s
+// `invalidate`, and events.md's rule that every event write moves all five),
+// plus `["conversation"]`. `["event"]` / `["eventPhotos"]` / `["conversation"]`
+// go in **bare**: invalidation prefix-matches, and we can't enumerate which
+// events or which chats the server touched — the same reason and the same shape
+// as `connectionCache.js`, which reaches for those keys for its own severing.
+//
+// **A cancellation is a status change, not a disappearance.** Cancelled events
+// stay visible on purpose, so anyone who RSVP'd gets the tombstone rather than a
+// plan that silently evaporates. They drop off the *upcoming* spine (which
+// filters `status !== "cancelled"`) and out of its "N upcoming events" count,
+// and everywhere else they stay put wearing a Cancelled tag. Both are wrong
+// until something refetches: an admin removes Ada and her picnic sits on the
+// spine above the panel, still counted, still openable as a live plan from the
+// cached `["event", id]` — and on the app it's the sticky version, because
+// `/calendar` is a tab mounted for the life of the session.
 //
 // **`["groupPosts"]` is not in here, and that's the point.** #290 was filed
 // saying a removal drops the member's posts from the group timeline. It
@@ -91,13 +109,22 @@ export function invalidateGroupRoster(queryClient, groupId) {
 // member's posts stay visible to the co-members who could already see them, and
 // clicking one still opens it. Invalidating that key would be a refetch we
 // can't justify, on the strength of a rule the server doesn't have.
+//
+// `["conversations"]` / `["unreadMessages"]` stay out for the reason at the top
+// of this file: both are polled, so they heal within a cycle. `["conversation"]`
+// is the one that isn't — the info panel says so in as many words, and on the
+// web the messages drawer is a companion of `Layout` rather than a route, so it
+// can be open over the very group page doing the removal.
 
 export function invalidateMemberRemoved(queryClient, groupId) {
   invalidateGroupRoster(queryClient, groupId);
   for (const queryKey of [
+    ["event"],
+    ["eventPhotos"],
     ["groupEvents", groupId],
     ["groupCalendar", groupId],
     ["personalCalendar"],
+    ["conversation"],
   ]) {
     queryClient.invalidateQueries({ queryKey });
   }

@@ -51,25 +51,36 @@ const emptyPage = { results: [], next: null };
 // fetcher so "loaded once" and "refetched" are distinguishable.
 let loads;
 
-function GatedSurfaces() {
-  // `{ includeGroups: true }` is the include-groups-in-feed preference turned
-  // on — the setting that puts a group's posts on the home feed in the first
-  // place. The key carries the same suffix FeedPage uses, so a fix that
-  // invalidated `["feed"]` as an *exact* key wouldn't pass here.
-  useQuery({ queryKey: ["feed", { includeGroups: true }], queryFn: loads.feed });
-  useQuery({ queryKey: ["personalCalendar"], queryFn: loads.calendar });
-  useQuery({ queryKey: ["groups"], queryFn: loads.groups });
+/** One observed query, so an invalidation that reaches it shows up as a refetch. */
+function Surface({ queryKey, queryFn }) {
+  useQuery({ queryKey, queryFn });
   return null;
+}
+
+function GatedSurfaces() {
+  return Object.entries(loads).map(([name, surface]) => (
+    <Surface key={name} queryKey={surface.key} queryFn={surface.fn} />
+  ));
 }
 
 /** How many times each surface has loaded, keyed by name for a readable diff. */
 function loadCounts() {
   return Object.fromEntries(
-    Object.entries(loads).map(([name, fn]) => [name, fn.mock.calls.length])
+    Object.entries(loads).map(([name, s]) => [name, s.fn.mock.calls.length])
   );
 }
 
-async function renderOverGatedSurfaces(ui, route) {
+/**
+ * `alsoMounted` is a name → queryKey map of extra surfaces this case needs
+ * observing; they join `loads`, so `loadCounts()` covers them for that test
+ * only. Names must be fresh — silently replacing a base surface would delete a
+ * negative assertion while leaving the suite green.
+ */
+async function renderOverGatedSurfaces(ui, route, alsoMounted = {}) {
+  for (const [name, key] of Object.entries(alsoMounted)) {
+    if (name in loads) throw new Error(`alsoMounted would shadow "${name}"`);
+    loads[name] = { key, fn: vi.fn(async () => []) };
+  }
   const utils = renderWithAuth(
     <>
       <GatedSurfaces />
@@ -81,9 +92,10 @@ async function renderOverGatedSurfaces(ui, route) {
     { route }
   );
   // Their first load, so a later call is unambiguously a refetch.
-  await waitFor(() =>
-    expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 })
+  const firstLoad = Object.fromEntries(
+    Object.keys(loads).map((name) => [name, 1])
   );
+  await waitFor(() => expect(loadCounts()).toEqual(firstLoad));
   return utils;
 }
 
@@ -99,10 +111,17 @@ async function openGroupMenu() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `{ includeGroups: true }` is the include-groups-in-feed preference turned
+  // on — the setting that puts a group's posts on the home feed in the first
+  // place. The key carries the same suffix FeedPage uses, so a fix that
+  // invalidated `["feed"]` as an *exact* key wouldn't pass here.
   loads = {
-    feed: vi.fn(async () => emptyPage),
-    calendar: vi.fn(async () => []),
-    groups: vi.fn(async () => emptyPage),
+    feed: {
+      key: ["feed", { includeGroups: true }],
+      fn: vi.fn(async () => emptyPage),
+    },
+    calendar: { key: ["personalCalendar"], fn: vi.fn(async () => []) },
+    groups: { key: ["groups"], fn: vi.fn(async () => emptyPage) },
   };
   api.getGroup.mockResolvedValue({
     id: 7,
@@ -239,9 +258,24 @@ describe("managing another member from the roster", () => {
     { user: { id: 2, display_name: "Ada" }, role: "member" },
   ];
 
+  /**
+   * The three keys `GroupPage` doesn't observe. A cancelled event keeps its
+   * detail page and its album (the tombstone is the point — see `groupCache.js`),
+   * so `["event", id]` would otherwise still render Ada's picnic as a live plan
+   * with an RSVP bar; and the removal drops her from the group's chats, which
+   * `["conversation", id]` shows and nothing polls.
+   */
+  const offPageKeys = {
+    event: ["event", 12],
+    eventPhotos: ["eventPhotos", 12],
+    conversation: ["conversation", 5],
+  };
+  const untouched = { event: 1, eventPhotos: 1, conversation: 1 };
+  const refreshed = { event: 2, eventPhotos: 2, conversation: 2 };
+
   async function openMembersPanel() {
     api.getGroupMembers.mockResolvedValue(roster);
-    await renderOverGatedSurfaces(groupPageRoute, "/g/7");
+    await renderOverGatedSurfaces(groupPageRoute, "/g/7", offPageKeys);
     await openGroupMenu();
     await userEvent.click(screen.getByRole("menuitem", { name: "Members" }));
     // The upcoming and past lists, both loaded once — so a later call is
@@ -262,9 +296,29 @@ describe("managing another member from the roster", () => {
     // The personal calendar merges the same events under a group label, and
     // `["groups"]` counts members. The feed does neither.
     await waitFor(() =>
-      expect(loadCounts()).toEqual({ feed: 1, calendar: 2, groups: 2 })
+      expect(loadCounts()).toEqual({
+        feed: 1,
+        calendar: 2,
+        groups: 2,
+        ...refreshed,
+      })
     );
     expect(api.getGroupPosts).toHaveBeenCalledTimes(1);
+  });
+
+  // The Month grid is the second surface the fix names, and it's the one
+  // `GroupPage` only asks for on demand (`enabled: view === "month"`), so it
+  // needs the toggle flipped to be under test at all. The panel renders above
+  // both views, so removing a member with Calendar showing is a real path.
+  it("refreshes the month grid a removal cancels an event off", async () => {
+    await openMembersPanel();
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    await waitFor(() => expect(api.getGroupCalendar).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => expect(api.removeGroupMember).toHaveBeenCalledWith(7, 2));
+    await waitFor(() => expect(api.getGroupCalendar).toHaveBeenCalledTimes(2));
   });
 
   it("leaves the events alone when you only change a role", async () => {
@@ -279,7 +333,12 @@ describe("managing another member from the roster", () => {
     // roster and the badge on it. `groups: 2` is the tell that the success
     // handler ran, so the untouched counts beside it are a real negative.
     await waitFor(() =>
-      expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 2 })
+      expect(loadCounts()).toEqual({
+        feed: 1,
+        calendar: 1,
+        groups: 2,
+        ...untouched,
+      })
     );
     expect(api.getGroupEvents).toHaveBeenCalledTimes(2);
   });

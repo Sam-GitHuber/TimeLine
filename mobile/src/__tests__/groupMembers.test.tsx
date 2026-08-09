@@ -155,11 +155,21 @@ const GROUP_SCREEN_KEYS: Record<string, unknown[]> = {
   pastEvents: ['groupEvents', 7, 'past'],
   groupCalendar: ['groupCalendar', 7],
   groupPosts: ['groupPosts', 7],
+  // Not the group screen's, but the same idea one screen further out. A
+  // cancelled event keeps its detail page and its album — the tombstone is the
+  // point (`groupCache.ts`) — so `['event', id]` would otherwise still render
+  // Ada's picnic as a live plan with an RSVP bar. And the removal drops her from
+  // the group's chats, which `['conversation', id]` shows and nothing polls.
+  event: ['event', 12],
+  eventPhotos: ['eventPhotos', 12],
+  conversation: ['conversation', 5],
 };
 
 /**
  * The roster, with the membership-gated tabs mounted behind it — and optionally
- * whatever else the case needs observing (`alsoMounted`).
+ * whatever else the case needs observing (`alsoMounted`). Names there must be
+ * fresh: silently replacing a base surface would delete a negative assertion
+ * while leaving the suite green.
  *
  * `['feed', true]` carries the include-groups-in-feed suffix the real Home tab
  * uses, so a fix that invalidated the bare key as an *exact* key wouldn't pass.
@@ -182,6 +192,7 @@ async function renderScreenOverTabs({
     groups: { key: ['groups'], fn: jest.fn(async () => null) },
   };
   for (const [name, key] of Object.entries(alsoMounted)) {
+    if (name in tabs) throw new Error(`alsoMounted would shadow "${name}"`);
     tabs[name] = { key, fn: jest.fn(async () => []) };
   }
   render(
@@ -343,11 +354,17 @@ it('refreshes the events a removal cancels, and nothing it doesn’t', async () 
       // Your own membership didn't change, and neither did who wrote what.
       feed: 1,
       groupPosts: 1,
-      // Everything a cancellation moves.
+      // Everything a cancellation moves — all five keys of an event write, not
+      // the three the lists happen to sit on.
       calendar: 2,
       upcoming: 2,
       pastEvents: 2,
       groupCalendar: 2,
+      event: 2,
+      eventPhotos: 2,
+      // She's dropped from the group's chats in the same transaction, and this
+      // is the one messaging key nothing polls.
+      conversation: 2,
       // The roster's own set — `['groups']` counts a member.
       groups: 2,
     })
@@ -376,6 +393,9 @@ it('leaves the group’s events alone when you only change a role', async () => 
     pastEvents: 1,
     groupCalendar: 1,
     groupPosts: 1,
+    event: 1,
+    eventPhotos: 1,
+    conversation: 1,
   });
   expect(mockReplace).not.toHaveBeenCalled();
 });

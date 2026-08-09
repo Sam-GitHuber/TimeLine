@@ -118,10 +118,10 @@ export default function GroupMembersScreen() {
       }
       // Your own role or the member count can change (demoting yourself,
       // removing someone), so the group and the groups list ride with the
-      // roster. A **removal** goes further: the server soft-cancels every event
-      // the departing member organises here in the same transaction, so the
-      // group's upcoming/past strips, its Month grid and the personal calendar
-      // tab are all stating a cancelled plan as a live one (#290; `groupCache.ts`).
+      // roster. A **removal** goes further: in the same transaction the server
+      // soft-cancels every event the departing member organises here *and* drops
+      // them from the group's chats, so the event surfaces, both calendars and
+      // the thread payload are all stale (#290; `groupCache.ts`).
       if (action.kind === 'remove') invalidateMemberRemoved(queryClient, id);
       else invalidateGroupRoster(queryClient, id);
     },

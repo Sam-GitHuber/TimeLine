@@ -165,28 +165,46 @@ calendar are the two that never do.
 ### Removing someone else cancels their events, so the roster refreshes those
 
 The roster's *other* write has its own set, and it isn't a subset of the one
-above. `GroupMemberDetailView.delete` ends with `cancel_events_on_departure`: an
-event's visibility gate hangs off a **present** organiser, so removing a member
-soft-cancels every event they organise in that group, in the same transaction.
-That is a change to the group's events made by a *membership* endpoint, and
-neither roster knew about it (#290) — so both stopped at their own two or three
-keys and left the group's upcoming spine, its Month grid and the personal
-calendar stating a cancelled plan as a live one.
+above — because a removal is not only a membership write.
+`GroupMemberDetailView.delete` does two more things in the same transaction:
 
-Both clients now fork the roster's success handler three ways, in
+1. **It soft-cancels every event the departing member organises in this group**
+   (`cancel_events_on_departure`). Note the direction of the causality: nothing
+   in `visible_events` or `can_view_event` checks the *organiser's* membership —
+   they gate on the viewer being a member and the organiser being active and
+   connected — which is exactly why the server has to cancel these by hand.
+   Left alone they'd linger as live, RSVP-able plans anchored to a non-member.
+2. **It drops them from every chat scoped to the group** — participant
+   deactivated, `left_at` stamped, `promote_participants` re-run for the rest.
+
+Neither roster knew about either (#290), so both stopped at their own two or
+three keys. Both clients now fork the success handler three ways, in
 `invalidateGroupRoster` / `invalidateMemberRemoved` beside the membership helper:
 
 | Roster action | Refreshes |
 |---|---|
 | promote / demote | `['groupMembers', id]`, `['group', id]`, `['groups']` |
-| remove someone else | the above **+** `['groupEvents', id]`, `['groupCalendar', id]`, `['personalCalendar']` |
+| remove someone else | the above **+** the five keys of an event write — `['event']`, `['eventPhotos']`, `['groupEvents', id]`, `['groupCalendar', id]`, `['personalCalendar']` — **+** `['conversation']` |
 | remove your own row (mobile only — a leave) | `invalidateGroupMembership` — see above |
 
-The three added keys are exactly what the event page's own cancel handler
-invalidates ([events.md](events.md)), for the identical reason. On the web the
-staleness is visible without navigating at all, because `GroupMembersPanel` and
-the upcoming events are on the same mounted `GroupPage`; on the app the Calendar
-tab never remounts, so it sticks until a pull-to-refresh.
+Those five are the set [events.md](events.md) requires of *every* event write,
+and a removal is one; naming only the three the group's own lists sit on is how
+the event page and its album would have kept the un-cancelled copy. `['event']`,
+`['eventPhotos']` and `['conversation']` go in **bare**, since the client can't
+enumerate which events or chats the server touched — the same shape
+`connectionCache` uses for its own severing. `['conversations']` /
+`['unreadMessages']` stay out as polled; `['conversation', id]` is the one that
+isn't, and on the web the messages drawer is a companion of `Layout` rather than
+a route, so it can be open over the group page doing the removal.
+
+**A cancellation is a status change, not a disappearance.** Cancelled events stay
+visible on purpose, so anyone who RSVP'd gets the tombstone. They drop off the
+*upcoming* spine (which filters `status !== 'cancelled'`) and out of its "N
+upcoming events" count, and elsewhere they stay put wearing a Cancelled tag —
+both wrong until something refetches. On the web that's visible without
+navigating at all, because `GroupMembersPanel` and the upcoming events are on the
+same mounted `GroupPage`; on the app the Calendar tab never remounts, so it
+sticks until a pull-to-refresh.
 
 **`['groupPosts']` is deliberately not in that set**, and #290 was filed
 believing it should be. Removing someone does *not* remove their posts from the
@@ -194,8 +212,8 @@ group timeline: `visible_posts(user, group=pk)` gates on the author being you or
 one of your connections and still **active** — it never asks whether the author
 is still a member — and `can_view_post` only requires that the **viewer** is one.
 A removed member's posts stay visible to the co-members who could already see
-them, and stay openable. Only their *events* go, because only events carry the
-present-organiser rule.
+them, and stay openable. Their *events* are the ones that move, and only because
+the server explicitly moves them.
 
 ## API
 

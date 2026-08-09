@@ -25,9 +25,9 @@ export default function GroupMembersPanel({ groupId, isAdmin }) {
   // The two writes refresh different sets, because they change different
   // things — see `groupCache.js`. A role change moves the roster and the member
   // count; a removal additionally soft-cancels every event the departing member
-  // organises here, which is what the group's upcoming spine, its Month grid and
-  // your personal calendar are all still showing (#290). The controls below only
-  // render on **someone else's** row, so neither of these is ever a leave.
+  // organises here and drops them from the group's chats, none of which the
+  // panel used to tell the cache about (#290). The controls below only render on
+  // **someone else's** row, so neither of these is ever a leave.
   const setRole = useMutation({
     mutationFn: ({ userId, role }) =>
       api.setGroupMemberRole(groupId, userId, role),
