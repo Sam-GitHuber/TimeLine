@@ -4538,3 +4538,113 @@ describe('a failed transcript with something already on screen', () => {
     expect(behaviour).toMatchObject({ shouldShowList: false });
   });
 });
+
+/**
+ * A send that *succeeds* while the transcript is errored (#325).
+ *
+ * The failure above's mirror image, and the worse one. `insertMessage` writes
+ * into a cached list, and on a cold transcript failure there is no list — so the
+ * accepted message went nowhere, and `onSuccess` dropped the outbox entry
+ * regardless. The bubble you had just watched send vanished, the "couldn't load"
+ * card came back in its place, and the message was on the server the whole time:
+ * it reads unmistakably as *your message was thrown away*, in a messenger, and
+ * the obvious response is to type it again.
+ */
+describe('a send that succeeds while the transcript is errored', () => {
+  /** Take the send, echoing back what was typed so the bubble is identifiable. */
+  function acceptTheSend(id = 999) {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        if (String(url).includes('/messages/') && init?.method === 'POST') {
+          return jsonResponse(
+            message({ id, sender: MINE, text: JSON.parse(init.body ?? '{}').text })
+          );
+        }
+        return base(url, init);
+      }
+    );
+  }
+
+  /** The state the bug needs: transcript errored cold, composer live. */
+  async function sendIntoABrokenTranscript(text: string) {
+    serve({ conversation: detail({}), messages: [] });
+    acceptTheSend();
+    breakTheMessages();
+    await renderScreen();
+    await screen.findByText('Couldn’t load these messages');
+
+    await fireEvent.changeText(await screen.findByLabelText('Message'), text);
+    await fireEvent.press(screen.getByLabelText('Send'));
+  }
+
+  it('keeps the message on screen, as sent', async () => {
+    await sendIntoABrokenTranscript('on my way');
+
+    // The tick, not a clock and not "Not sent": the server took it.
+    expect(await screen.findByLabelText('Sent')).toBeTruthy();
+    expect(screen.getByText('on my way')).toBeTruthy();
+    // And the note beside it still says why the history isn't there, so the one
+    // bubble doesn't read as the whole conversation.
+    expect(
+      screen.getByText('Couldn’t load the rest of this conversation.')
+    ).toBeTruthy();
+  });
+
+  it('offers no Retry on it, which would send the text twice', async () => {
+    await sendIntoABrokenTranscript('on my way');
+    await screen.findByLabelText('Sent');
+
+    expect(screen.queryByText('Not sent')).toBeNull();
+    expect(screen.queryByLabelText('Try sending again')).toBeNull();
+    // Nor Discard: hiding it would hide a message the other person can read.
+    expect(screen.queryByLabelText('Discard this message')).toBeNull();
+  });
+
+  it('hands over to the server’s own copy when the transcript loads', async () => {
+    await sendIntoABrokenTranscript('on my way');
+    await screen.findByLabelText('Sent');
+
+    // The transcript comes back, carrying the message that was accepted.
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 999, sender: MINE, text: 'on my way' })],
+    });
+    await fireEvent.press(
+      screen.getByLabelText('Try loading the messages again')
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Couldn’t load the rest of this conversation.')
+      ).toBeNull()
+    );
+    // Once, never twice — the entry and the server's copy are the same message,
+    // and both being on screen for even one frame reads as having sent it again.
+    expect(screen.getAllByText('on my way')).toHaveLength(1);
+  });
+
+  it('lets go of it, rather than holding it for the next visit', async () => {
+    await sendIntoABrokenTranscript('on my way');
+    await screen.findByLabelText('Sent');
+
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 999, sender: MINE, text: 'on my way' })],
+    });
+    await fireEvent.press(
+      screen.getByLabelText('Try loading the messages again')
+    );
+    await screen.findByText('on my way');
+
+    // Open the thread again with the transcript broken. The outbox outlives the
+    // screen by design, so anything still in it would be drawn here — and a
+    // message the server has confirmed is not the outbox's to keep.
+    serve({ conversation: detail({}), messages: [] });
+    breakTheMessages();
+    await renderScreen();
+
+    expect(await screen.findByText('Couldn’t load these messages')).toBeTruthy();
+    expect(screen.queryByText('on my way')).toBeNull();
+  });
+});

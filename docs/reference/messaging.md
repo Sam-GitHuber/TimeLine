@@ -452,6 +452,34 @@ mutation's options when it starts and runs them whether or not the screen is
 still mounted — otherwise you'd come back to the message twice, once from the
 server and once wearing a clock that never stops.
 
+**A third state, `sent`, for a message with nowhere to land** (#325, the app —
+the web's port of this still releases the entry unconditionally). The entry is
+normally released the instant the server's copy is written into
+`['messages', id]` — but `insertMessage` writes *into a cached list*, and on a
+cold transcript failure there is no list. The write went nowhere while the entry
+was dropped anyway, so the bubble you had just watched send vanished and the
+"couldn't load these messages" card came back in its place: it reads as *your
+message was thrown away*, in a messenger, and invites sending it again. It had
+in fact sent, and the other person had it — only that screen had lost it.
+
+So `onSuccess` asks whether the message is in the cache *afterwards*, and if it
+isn't, holds the entry as `sent` with the server's id on it. It renders as an
+ordinary delivered bubble — `SendState` already has a `sent` tick, so this is a
+third outbox state and not a fourth kind of bubble — beside the "couldn't load
+the rest of this conversation" note that explains the missing history. It gets
+**no Retry**, which without a server id to deduplicate on would send the text a
+second time, and no Discard, which would hide a message the recipient can read.
+The screen lets go of it when the transcript finally loads and its own copy of
+that id arrives; until then the message stays visible, which is the only honest
+thing to show.
+
+The obvious alternative — have `insertMessage` synthesise a page — was rejected
+rather than deferred. It would put the query into `success` with a one-message
+transcript, which un-renders the "couldn't load" note (the screen would then
+claim the chat *is* that one message) and flips `readingMessages`, marking read
+and dismissing the thread's pushes over history it can't show. That is #320's
+claim-by-omission and #318's trap, bought back for a smaller diff.
+
 **One honest gap: Retry can duplicate.** There's no idempotency key, so a POST
 the server committed but whose response never reached the phone — a timeout, a
 tunnel — lands as `failed`, and retrying it sends the text a second time. Two

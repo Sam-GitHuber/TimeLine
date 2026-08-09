@@ -331,10 +331,14 @@ export function MessageThreadView({
                 const status = statusFor?.(item);
                 // Retry and Discard belong to a reply the server hasn't taken
                 // yet, and the status says so — `sending` and `failed` are the
-                // outbox's two states, where anything loaded is `sent`, `read`
-                // or nothing at all. Asking the status beats testing the id's
-                // sign: the negative temp id is the outbox's own business, and
-                // this view doesn't own the outbox.
+                // two the outbox holds for that, where anything loaded is
+                // `sent`, `read` or nothing at all. Asking the status beats
+                // testing the id's sign: the negative temp id is the outbox's
+                // own business, and this view doesn't own the outbox. It also
+                // means the outbox's *third* state falls out correctly with no
+                // change here: a `sent` entry is one the server took while the
+                // transcript had nowhere to put it (#325), and offering Retry
+                // on it would duplicate the message.
                 const unsent = status === 'sending' || status === 'failed';
                 return (
                   // No onLongPress and no onOpenThread: see the file docblock.

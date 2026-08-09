@@ -11,9 +11,16 @@
  * message it mattered most to keep.
  *
  * Keeping unsent messages outside the server-truth cache is what makes "we never
- * drop text you typed" hold, and it means the two never have to be reconciled:
- * the cache holds exactly what the server said, the outbox exactly what it
- * hasn't accepted.
+ * drop text you typed" hold, and it means the two mostly never have to be
+ * reconciled: the cache holds exactly what the server said, the outbox exactly
+ * what it hasn't accepted.
+ *
+ * *Mostly* — there is one seam, and it's deliberate. When the server accepts a
+ * message but the transcript cache is empty because its own fetch failed, there
+ * is nowhere to hand the message over to, so the entry stays in the `sent` state
+ * below rather than being dropped onto a screen that would then show nothing
+ * (#325). That is the one entry the two sides have to agree about, and
+ * `sentId` is what they agree on.
  *
  * It lives in its own module because the transcript and the focused thread view
  * both render from it — a reply is an ordinary message, so one that fails on its
@@ -46,7 +53,26 @@ export type Outgoing = {
   /** Which strand it belongs to, so the focused view can render it too. */
   rootId?: number;
   createdAt: string;
-  status: 'sending' | 'failed';
+  /**
+   * Where this message has got to.
+   *
+   * `sending` and `failed` are the two the outbox was built for. **`sent` is the
+   * third and it is a holding state** (#325): the server accepted the message,
+   * but the transcript cache had nowhere to put it — `['messages', id]` failed
+   * its cold fetch, so there are no pages to insert into — and dropping the
+   * entry there would take the bubble off the screen for a message that
+   * genuinely sent. It stays, rendered as an ordinary delivered message (see
+   * `SendState` in `readReceipts.ts`, whose `sent` this deliberately is), until
+   * the transcript loads and its own copy arrives.
+   */
+  status: 'sending' | 'failed' | 'sent';
+  /**
+   * The server's id for this message. Set **only** with `status: 'sent'`, and
+   * the whole reason that state can end: it's how the screen recognises the
+   * server's own copy landing in the transcript and lets go of this one, rather
+   * than rendering the message twice.
+   */
+  sentId?: number;
   /**
    * A photo being sent with it (Phase 9b M7), already prepared for upload.
    *
