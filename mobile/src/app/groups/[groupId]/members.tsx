@@ -16,8 +16,10 @@
  * membership gates the home feed and the personal calendar, #282), and navigates
  * back to the Groups tab rather than leaving you on the roster of a group you're
  * no longer in. Removing *someone else* changes no membership of yours, so it
- * stays on the narrow set. The choice is a **flag in the mutation variables**
- * rather than an opaque function, so the success handler can tell the two apart.
+ * stays off the feed — but it does cancel that member's events in this group,
+ * which is its own set (#290; `groupCache.ts`). The choice is a **flag in the
+ * mutation variables** rather than an opaque function, so the success handler
+ * can tell the three apart.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -30,7 +32,11 @@ import { useAuth } from '@/auth';
 import { useActionMenu } from '@/components/ActionMenu';
 import { Avatar } from '@/components/Avatar';
 import { LEAVE_GROUP_CONFIRM } from '@/components/useGroupActions';
-import { invalidateGroupMembership } from '@/groupCache';
+import {
+  invalidateGroupMembership,
+  invalidateGroupRoster,
+  invalidateMemberRemoved,
+} from '@/groupCache';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { GroupMember } from '@/types';
 
@@ -110,11 +116,14 @@ export default function GroupMembersScreen() {
         router.replace('/groups');
         return;
       }
-      queryClient.invalidateQueries({ queryKey: ['groupMembers', id] });
-      // Your own role or the member count can change (demoting yourself, removing
-      // someone), so refresh the group and the list too.
-      queryClient.invalidateQueries({ queryKey: ['group', id] });
-      queryClient.invalidateQueries({ queryKey: ['groups'] });
+      // Your own role or the member count can change (demoting yourself,
+      // removing someone), so the group and the groups list ride with the
+      // roster. A **removal** goes further: the server soft-cancels every event
+      // the departing member organises here in the same transaction, so the
+      // group's upcoming/past strips, its Month grid and the personal calendar
+      // tab are all stating a cancelled plan as a live one (#290; `groupCache.ts`).
+      if (action.kind === 'remove') invalidateMemberRemoved(queryClient, id);
+      else invalidateGroupRoster(queryClient, id);
     },
     onError: (error) =>
       Alert.alert('Couldn’t do that', serverMessage(error, WENT_WRONG)),

@@ -8,8 +8,8 @@ import GroupInvitesPage from "./pages/GroupInvitesPage.jsx";
 import { renderWithAuth, apiError, unauthoredError } from "./test-utils.jsx";
 import { api } from "./api.js";
 
-// What each write to **your own** group membership *refreshes*, not just what it
-// calls (issue #281 — the web half of #277).
+// What each write to a group's membership *refreshes*, not just what it calls
+// (issue #281 — the web half of #277 — and #290 for the roster's half).
 //
 // Membership gates the home feed and the personal calendar as well as the groups
 // list (`groupCache.js`), so a leave that refreshes only `["groups"]` leaves the
@@ -39,6 +39,7 @@ vi.mock("./api.js", () => ({
     acceptGroupInvite: vi.fn(),
     rejectGroupInvite: vi.fn(),
     removeGroupMember: vi.fn(),
+    setGroupMemberRole: vi.fn(),
     deleteGroup: vi.fn(),
     getComments: vi.fn(),
   },
@@ -128,6 +129,7 @@ beforeEach(() => {
     next: null,
   });
   api.removeGroupMember.mockResolvedValue({});
+  api.setGroupMemberRole.mockResolvedValue({});
   api.deleteGroup.mockResolvedValue({});
   api.acceptGroupInvite.mockResolvedValue({});
   api.rejectGroupInvite.mockResolvedValue({});
@@ -206,6 +208,80 @@ describe("leaving or deleting a group", () => {
     // rather than being sent to a list of groups you're still in.
     expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 1 });
     expect(screen.queryByText("Groups list")).toBeNull();
+  });
+});
+
+/**
+ * Issue #290 — **the roster and the events it silently cancels.**
+ *
+ * `GroupMemberDetailView.delete` ends with `cancel_events_on_departure`: an
+ * event's visibility gate hangs off a *present* organiser, so removing someone
+ * soft-cancels every event they organise in that group, in the same
+ * transaction. The panel refreshed only its own two keys, so the group's
+ * upcoming spine — rendered by the very page the panel sits on — went on
+ * offering the removed member's plans as live ones, along with the "N upcoming
+ * events" cue counting them and the personal calendar listing them.
+ *
+ * The group's event queries are observed by `GroupPage` itself, so they're
+ * counted through `api.getGroupEvents` rather than the mounted surfaces above.
+ *
+ * The two *negative* assertions are the point as much as the positive ones:
+ * `feed` and `getGroupPosts` must not move. #290 was filed believing a removal
+ * drops the member's posts from the group timeline, and the server doesn't do
+ * that — `visible_posts(user, group=pk)` gates on the author being you or a
+ * connection and still *active*, never on their membership, and `can_view_post`
+ * only asks whether the **viewer** is a member. Their posts stay, and stay
+ * clickable.
+ */
+describe("managing another member from the roster", () => {
+  const roster = [
+    { user: { id: 1, display_name: "You" }, role: "admin" },
+    { user: { id: 2, display_name: "Ada" }, role: "member" },
+  ];
+
+  async function openMembersPanel() {
+    api.getGroupMembers.mockResolvedValue(roster);
+    await renderOverGatedSurfaces(groupPageRoute, "/g/7");
+    await openGroupMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Members" }));
+    // The upcoming and past lists, both loaded once — so a later call is
+    // unambiguously a refetch.
+    await waitFor(() => expect(api.getGroupEvents).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Ada")).toBeInTheDocument();
+  }
+
+  it("refreshes the events a removal cancels", async () => {
+    await openMembersPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => expect(api.removeGroupMember).toHaveBeenCalledWith(7, 2));
+    // The regression: Ada's picnic is cancelled on the server the moment her
+    // membership row goes, and it was still on the spine beside this panel.
+    await waitFor(() => expect(api.getGroupEvents).toHaveBeenCalledTimes(4));
+    // The personal calendar merges the same events under a group label, and
+    // `["groups"]` counts members. The feed does neither.
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ feed: 1, calendar: 2, groups: 2 })
+    );
+    expect(api.getGroupPosts).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the events alone when you only change a role", async () => {
+    await openMembersPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Make admin" }));
+
+    await waitFor(() =>
+      expect(api.setGroupMemberRole).toHaveBeenCalledWith(7, 2, "admin")
+    );
+    // A role change cancels nothing and moves no visibility boundary — only the
+    // roster and the badge on it. `groups: 2` is the tell that the success
+    // handler ran, so the untouched counts beside it are a real negative.
+    await waitFor(() =>
+      expect(loadCounts()).toEqual({ feed: 1, calendar: 1, groups: 2 })
+    );
+    expect(api.getGroupEvents).toHaveBeenCalledTimes(2);
   });
 });
 

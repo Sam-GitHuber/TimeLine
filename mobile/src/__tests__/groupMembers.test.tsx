@@ -9,14 +9,18 @@
  *
  * It also pins the **self-remove fork** (#282). Removing your own row is the same
  * server call as the ⋯ menu's Leave, so it has to refresh what leaving refreshes
- * — membership gates the home feed and the personal calendar (`groupCache.ts`) —
- * and removing *someone else* must not, since your own membership didn't change.
- * Those two gated surfaces are **mounted alongside** the roster rather than
- * seeded into the cache, because that's the situation the bug lives in: the tabs
- * stay mounted for the life of the session, so their queries keep a live observer
- * and never remount. A seeded but unobserved entry refetches on its next mount
- * whatever we do, and would pass against the broken build. Same reasoning as
- * `groupActions.test.tsx`.
+ * — membership gates the home feed (`groupCache.ts`) — and removing *someone
+ * else* must not, since your own membership didn't change. And the **third**
+ * branch (#290): removing someone else still cancels their events in this group
+ * server-side, so the group's own event queries and the personal calendar move
+ * even though the feed doesn't.
+ *
+ * Every gated surface is **mounted alongside** the roster rather than seeded into
+ * the cache, because that's the situation the bug lives in: the tabs stay mounted
+ * for the life of the session, so their queries keep a live observer and never
+ * remount, and the group screen sits on the stack right behind this one. A seeded
+ * but unobserved entry refetches on its next mount whatever we do, and would pass
+ * against the broken build. Same reasoning as `groupActions.test.tsx`.
  *
  * The menu and the confirm dialog are captured, not driven natively: the shared
  * `./helpers` seam hands us the menu to pick an option from — an action sheet on
@@ -140,12 +144,30 @@ function MountedTab({
 }
 
 /**
- * The roster, with the two membership-gated tabs mounted behind it.
+ * The four queries the **group screen** holds while the roster sits on top of it
+ * — expo-router keeps it mounted underneath, so every one of them has a live
+ * observer throughout. `['groupEvents', 7, …]` carries the window suffix the real
+ * screen uses, so a fix that invalidated the bare key as an *exact* key wouldn't
+ * pass. `groupPosts` is here to be asserted **unchanged** (see #290 below).
+ */
+const GROUP_SCREEN_KEYS: Record<string, unknown[]> = {
+  upcoming: ['groupEvents', 7, 'upcoming'],
+  pastEvents: ['groupEvents', 7, 'past'],
+  groupCalendar: ['groupCalendar', 7],
+  groupPosts: ['groupPosts', 7],
+};
+
+/**
+ * The roster, with the membership-gated tabs mounted behind it — and optionally
+ * whatever else the case needs observing (`alsoMounted`).
  *
  * `['feed', true]` carries the include-groups-in-feed suffix the real Home tab
  * uses, so a fix that invalidated the bare key as an *exact* key wouldn't pass.
  */
-async function renderScreenOverTabs({ members = MEMBERS } = {}) {
+async function renderScreenOverTabs({
+  members = MEMBERS,
+  alsoMounted = {} as Record<string, unknown[]>,
+} = {}) {
   serve({ members });
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -154,11 +176,14 @@ async function renderScreenOverTabs({ members = MEMBERS } = {}) {
     },
   });
   const invalidate = jest.spyOn(queryClient, 'invalidateQueries');
-  const tabs = {
+  const tabs: Record<string, { key: unknown[]; fn: jest.Mock }> = {
     feed: { key: ['feed', true], fn: jest.fn(async () => null) },
     calendar: { key: ['personalCalendar'], fn: jest.fn(async () => []) },
     groups: { key: ['groups'], fn: jest.fn(async () => null) },
   };
+  for (const [name, key] of Object.entries(alsoMounted)) {
+    tabs[name] = { key, fn: jest.fn(async () => []) };
+  }
   render(
     <QueryClientProvider client={queryClient}>
       {Object.entries(tabs).map(([name, tab]) => (
@@ -168,7 +193,8 @@ async function renderScreenOverTabs({ members = MEMBERS } = {}) {
     </QueryClientProvider>
   );
   // Their first load, so a later call is unambiguously a refetch.
-  await waitFor(() => expect(loadCounts(tabs)).toEqual({ feed: 1, calendar: 1, groups: 1 }));
+  const firstLoad = Object.fromEntries(Object.keys(tabs).map((name) => [name, 1]));
+  await waitFor(() => expect(loadCounts(tabs)).toEqual(firstLoad));
   return { invalidate, tabs };
 }
 
@@ -281,8 +307,28 @@ it('refreshes the feed and the calendar when an admin removes their own row', as
   expect(mockReplace).toHaveBeenCalledWith('/groups');
 });
 
-it('leaves the feed and the calendar alone when removing someone else', async () => {
-  const { invalidate, tabs } = await renderScreenOverTabs();
+/**
+ * #290 — **the roster and the events it silently cancels.**
+ *
+ * `GroupMemberDetailView.delete` ends with `cancel_events_on_departure`: an
+ * event's visibility gate hangs off a *present* organiser, so removing someone
+ * soft-cancels every event they organise in that group, in the same transaction.
+ * The roster refreshed only its own three keys, so the group screen behind it
+ * kept Ada's picnic on its upcoming spine and its Month grid, and the Calendar
+ * tab kept listing it — permanently, since neither ever remounts. Only a
+ * pull-to-refresh healed it.
+ *
+ * The `feed` and `groupPosts` counts are assertions in their own right, not
+ * bookkeeping. #290 was filed believing a removal drops the member's *posts*
+ * from the group timeline; the server doesn't do that.
+ * `visible_posts(user, group=pk)` gates on the author being you or a connection
+ * and still *active*, never on their membership, and `can_view_post` only asks
+ * whether the **viewer** is a member. Ada's posts stay, and stay tappable.
+ */
+it('refreshes the events a removal cancels, and nothing it doesn’t', async () => {
+  const { invalidate, tabs } = await renderScreenOverTabs({
+    alsoMounted: GROUP_SCREEN_KEYS,
+  });
 
   await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
   pickMenuAction(1); // "Remove from group"
@@ -292,10 +338,45 @@ it('leaves the feed and the calendar alone when removing someone else', async ()
   await waitFor(() =>
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['groupMembers', 7] })
   );
-  // Your own membership didn't change, so the two gated surfaces are still
-  // right — only the roster's own keys move. `['groups']` counts a member.
+  await waitFor(() =>
+    expect(loadCounts(tabs)).toEqual({
+      // Your own membership didn't change, and neither did who wrote what.
+      feed: 1,
+      groupPosts: 1,
+      // Everything a cancellation moves.
+      calendar: 2,
+      upcoming: 2,
+      pastEvents: 2,
+      groupCalendar: 2,
+      // The roster's own set — `['groups']` counts a member.
+      groups: 2,
+    })
+  );
+  expect(mockReplace).not.toHaveBeenCalled();
+});
+
+it('leaves the group’s events alone when you only change a role', async () => {
+  const { tabs } = await renderScreenOverTabs({ alsoMounted: GROUP_SCREEN_KEYS });
+
+  await fireEvent.press(await screen.findByLabelText('Manage Ada Lovelace'));
+  pickMenuAction(0); // "Make admin"
+
+  // A role change cancels nothing and moves no visibility boundary — only the
+  // roster and the badge on it. `groups: 2` is the tell that the success handler
+  // ran, so the untouched counts beside it are a real negative.
+  await waitFor(() =>
+    expect(madeRequest(/\/api\/groups\/7\/members\/2\/role\/$/, 'POST')).toBe(true)
+  );
   await turnEventLoop();
-  expect(loadCounts(tabs)).toEqual({ feed: 1, calendar: 1, groups: 2 });
+  expect(loadCounts(tabs)).toEqual({
+    feed: 1,
+    calendar: 1,
+    groups: 2,
+    upcoming: 1,
+    pastEvents: 1,
+    groupCalendar: 1,
+    groupPosts: 1,
+  });
   expect(mockReplace).not.toHaveBeenCalled();
 });
 
