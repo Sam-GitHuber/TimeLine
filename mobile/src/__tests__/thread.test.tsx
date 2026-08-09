@@ -41,6 +41,7 @@ import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
 import { clearDrafts } from '@/drafts';
 import { clearOutbox } from '@/outbox';
+import { configureNotificationHandler, setOnScreenConversation } from '@/push';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
 
@@ -430,6 +431,40 @@ function serve({
 }
 
 /**
+ * The transcript endpoint fails from here on; everything else keeps working.
+ *
+ * Anchored on the **conversation's** messages route, not a bare `/messages/`:
+ * the reactors endpoint is `/api/messages/<id>/reactions/`, which a looser
+ * predicate breaks too — and a helper whose docblock and behaviour disagree is
+ * how a later assertion fails for a reason nobody can find. The strand
+ * (`thread_root=`), the quote resolver (`ids=`) and every send/edit/delete hang
+ * off this same path and are deliberately left alone.
+ */
+function breakTheMessages(reason = 'Server error.') {
+  const base = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      const transcriptGet =
+        /\/api\/conversations\/\d+\/messages\//.test(String(url)) &&
+        !String(url).includes('thread_root=') &&
+        !String(url).includes('ids=') &&
+        (init?.method ?? 'GET') === 'GET';
+      if (!transcriptGet) return base(url, init);
+      // A macrotask late, as a real request is — an instant rejection settles
+      // inside the render's own batch and doesn't behave like one.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return jsonResponse({ detail: reason }, 500);
+    }
+  );
+}
+
+/** How many `mark read` POSTs have gone out. */
+const readPosts = () =>
+  mockFetch.mock.calls.filter(
+    ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
+  ).length;
+
+/**
  * A client whose cache survives an unmount, which one test needs — see
  * `renderScreen`. `gcTime` has to be non-zero for that: the default here drops a
  * query the moment its last observer goes.
@@ -497,6 +532,11 @@ beforeEach(() => {
   // it's emptied here. Drafts (M5) are the same shape for the same reason.
   clearOutbox();
   clearDrafts();
+  // Which thread the push handler thinks is on screen is module state too, and
+  // the screen sets it on focus — so a test that renders one leaves it set for
+  // the next unless it's cleared (#321's `readingMessages` guard is asserted
+  // through this).
+  setOnScreenConversation(null);
   // Dropped with the tree it closes over, so a swipe test that forgot to
   // render fails on the missing screen rather than redrawing a dead one.
   redrawScreen = null;
@@ -4196,10 +4236,6 @@ it('marks the thread read even when the detail refresh has failed', async () => 
   await renderScreen(client);
   await screen.findByText('See you at six');
 
-  const readPosts = () =>
-    mockFetch.mock.calls.filter(
-      ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
-    ).length;
   const before = readPosts();
 
   // The detail fails from here on; the transcript keeps working, which is the
@@ -4254,11 +4290,6 @@ it('stops marking read once a 404 has taken the thread off the screen', async ()
   await renderScreen(client);
   await screen.findByText('See you at six');
 
-  const readPosts = () =>
-    mockFetch.mock.calls.filter(
-      ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
-    ).length;
-
   // Removed from the chat, or it was deleted: the detail 404s from here on. The
   // transcript endpoint keeps answering, which is what keeps `messageCount`
   // moving and re-runs the effect.
@@ -4303,28 +4334,6 @@ it('stops marking read once a 404 has taken the thread off the screen', async ()
  * start the conversation again.
  */
 describe('a transcript that fails to load', () => {
-  /** The messages endpoint fails from here on; everything else keeps working. */
-  function breakTheMessages(reason = 'Server error.') {
-    const base = mockFetch.getMockImplementation()!;
-    mockFetch.mockImplementation(
-      async (url: string, init?: { method?: string; body?: string }) => {
-        // The transcript's own GET: not the strand (`thread_root=`), not the
-        // quote resolver (`ids=`), and not a send/edit/delete, all of which
-        // hang off the same path and would be testing something else.
-        const transcriptGet =
-          String(url).includes('/messages/') &&
-          !String(url).includes('thread_root=') &&
-          !String(url).includes('ids=') &&
-          (init?.method ?? 'GET') === 'GET';
-        if (!transcriptGet) return base(url, init);
-        // A macrotask late, as a real request is — an instant rejection settles
-        // inside the render's own batch and doesn't behave like one.
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        return jsonResponse({ detail: reason }, 500);
-      }
-    );
-  }
-
   it('doesn’t say a thread is empty when we couldn’t ask', async () => {
     serve({ conversation: detail({}), messages: [] });
     breakTheMessages();
@@ -4420,27 +4429,6 @@ describe('a transcript that fails to load', () => {
  * reached from here.
  */
 describe('marking read when the transcript failed', () => {
-  function breakTheMessages() {
-    const base = mockFetch.getMockImplementation()!;
-    mockFetch.mockImplementation(
-      async (url: string, init?: { method?: string; body?: string }) => {
-        const transcriptGet =
-          String(url).includes('/messages/') &&
-          !String(url).includes('thread_root=') &&
-          !String(url).includes('ids=') &&
-          (init?.method ?? 'GET') === 'GET';
-        if (!transcriptGet) return base(url, init);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        return jsonResponse({ detail: 'Server error.' }, 500);
-      }
-    );
-  }
-
-  const readPosts = () =>
-    mockFetch.mock.calls.filter(
-      ([url, init]) => String(url).includes('/read/') && init?.method === 'POST'
-    ).length;
-
   it('doesn’t mark read, and leaves the notification in the tray', async () => {
     serve({ conversation: detail({ unread_count: 3 }), messages: [] });
     mockNotifications.getPresentedNotificationsAsync.mockResolvedValue([
@@ -4475,5 +4463,78 @@ describe('marking read when the transcript failed', () => {
     await screen.findByText('See you at six');
 
     await waitFor(() => expect(readPosts()).toBeGreaterThan(0));
+  });
+});
+
+/**
+ * Review findings on the above: the notice has to survive an outbox entry, and
+ * the *other* write beside the screen needed the same guard as mark-read.
+ */
+describe('a failed transcript with something already on screen', () => {
+  it('still says the history is missing when the outbox holds a bubble', async () => {
+    // `ListEmptyComponent` can't answer for this: an unsent message survives the
+    // screen (`outbox.ts`), so `rows` is non-empty and the empty slot — where
+    // the card and its only retry live — never gets its turn. What was left was
+    // a chat holding one bubble, years of history absent, nothing saying why.
+    serve({ conversation: detail({}), messages: [] });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (String(url).includes('/messages/') && init?.method === 'POST') {
+        return jsonResponse({ detail: 'Nope.' }, 500);
+      }
+      return base(url, init);
+    });
+    breakTheMessages();
+    await renderScreen();
+    await screen.findByText('Couldn’t load these messages');
+
+    await fireEvent.changeText(await screen.findByLabelText('Message'), 'lost?');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    expect(await screen.findByText('Not sent')).toBeTruthy();
+
+    // The bubble is kept — replacing an unsent message with an apology reads as
+    // it having been thrown away — and the failure gets a line beside it.
+    expect(screen.getByText('lost?')).toBeTruthy();
+    expect(
+      screen.getByText('Couldn’t load the rest of this conversation.')
+    ).toBeTruthy();
+    expect(screen.getByLabelText('Try loading the messages again')).toBeTruthy();
+  });
+
+  it('doesn’t claim the thread’s pushes while it can’t show them', async () => {
+    // The quieter twin of the mark-read guard. Claiming the thread makes the
+    // foreground handler return `shouldShowList: false` for its pushes — so a
+    // message arriving while the error card is up banners once and is never
+    // filed in the notification centre. Told there is nothing there, and the
+    // one signal that would bring them back is dropped.
+    serve({ conversation: detail({}), messages: [] });
+    breakTheMessages();
+    await renderScreen();
+    await screen.findByText('Couldn’t load these messages');
+
+    configureNotificationHandler();
+    const [handler] = mockNotifications.setNotificationHandler.mock.calls.at(-1)!;
+    const behaviour = await handler!.handleNotification!({
+      request: { content: { data: { url: '/messages/5' } } },
+    } as never);
+
+    expect(behaviour).toMatchObject({ shouldShowList: true });
+  });
+
+  it('claims them again once the transcript is up', async () => {
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1, text: 'See you at six' })],
+    });
+    await renderScreen();
+    await screen.findByText('See you at six');
+
+    configureNotificationHandler();
+    const [handler] = mockNotifications.setNotificationHandler.mock.calls.at(-1)!;
+    const behaviour = await handler!.handleNotification!({
+      request: { content: { data: { url: '/messages/5' } } },
+    } as never);
+
+    expect(behaviour).toMatchObject({ shouldShowList: false });
   });
 });

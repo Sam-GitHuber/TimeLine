@@ -912,12 +912,23 @@ export default function ThreadScreen() {
    * On focus rather than mount: this screen stays mounted underneath its own
    * info screen, and a thread the user has navigated away from must stop
    * claiming its pushes.
+   *
+   * **`readingMessages` gates it too (#321)**, for the same reason the
+   * mark-read effect above does — this is the other half of "the writes beside
+   * the screen agree with it", and the easier one to miss because it destroys
+   * nothing itself. Claiming the thread makes `configureNotificationHandler`
+   * return `shouldShowList: false` for its pushes, so while the transcript is
+   * an error card a message arriving for this chat banners once and is never
+   * filed in the notification centre. The reader is looking at "Couldn't load
+   * these messages" and the one thing that would bring them back is dropped on
+   * the floor — #318's outcome again, by omission rather than by a write.
    */
   useFocusEffect(
     useCallback(() => {
+      if (!readingMessages) return;
       setOnScreenConversation(id);
       return () => setOnScreenConversation(null);
-    }, [id])
+    }, [id, readingMessages])
   );
 
   /**
@@ -1723,10 +1734,38 @@ export default function ThreadScreen() {
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
               // Renders at the *top* on an inverted list — which is where the
-              // older messages being fetched are about to appear.
+              // older messages being fetched are about to appear, and where a
+              // note about the history that *didn't* belongs.
               ListFooterComponent={
                 isFetchingNextPage ? (
                   <ActivityIndicator color={colors.accent} style={styles.spinner} />
+                ) : messagesLoadFailed && rows.length > 0 ? (
+                  // **`ListEmptyComponent` can't answer for this one.** An
+                  // unsent message in the outbox survives the screen, so a cold
+                  // transcript failure with one queued leaves `rows` non-empty
+                  // — the empty slot never gets its turn, and the card below
+                  // (with the only retry) never renders. What's on screen is
+                  // then a chat holding one bubble, years of history missing,
+                  // and nothing saying why: the same claim by omission this
+                  // whole change exists to remove. The line goes *beside* the
+                  // bubble rather than over it, because replacing an unsent
+                  // message with an apology reads as it having been thrown
+                  // away. Same shape as the group timeline's and the profile's
+                  // partial notes (#320).
+                  <View style={styles.partial}>
+                    <Text style={styles.inlineError}>
+                      Couldn’t load the rest of this conversation.
+                    </Text>
+                    <Pressable
+                      onPress={() => messagesQuery.refetch()}
+                      accessibilityRole="button"
+                      accessibilityLabel="Try loading the messages again"
+                      hitSlop={8}
+                      style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.inlineRetryText}>Try again</Text>
+                    </Pressable>
+                  </View>
                 ) : null
               }
               renderItem={({ item }) => {
@@ -2494,6 +2533,20 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   emptyBody: { fontSize: fontSize.sm, color: colors.inkSoft, textAlign: 'center' },
+  // The quieter shape: a line beside content that *did* render, rather than the
+  // centred card a wholly-empty transcript gets. Its retry is **accent-coloured
+  // text, not `retryText`** — that style is only legible as a button inside the
+  // bordered `retry` pill, and bare it renders as bold body copy, which is a
+  // retry nobody recognises as tappable.
+  partial: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: 2 },
+  inlineError: {
+    fontSize: fontSize.sm,
+    color: colors.danger,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  inlineRetry: { alignSelf: 'center', paddingVertical: spacing.xs },
+  inlineRetryText: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '700' },
   retry: {
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.sm,

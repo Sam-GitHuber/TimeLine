@@ -2227,8 +2227,9 @@ promising a feature that doesn't exist is worse than its absence. See
 [Photo messages](#photo-messages).
 
 **Two of this screen's sections used to make a claim by simply not being there**
-(#321), each answering for a query whose `isError` was read nowhere. Both take
-the answer the web's panel took in #319:
+(#321), each answering for a query whose `isError` was read nowhere. Only the
+first has a web precedent — **the web's Block gate still has this bug**, filed as
+#324; #319 touched only the gallery in that file:
 
 - **The gallery's silence was a claim.** The section only appears once a photo
   has been sent, so rendering nothing on a *failed* fetch said "this chat has no
@@ -2503,10 +2504,17 @@ was read nowhere in the file. Three branches now, in this order:
 - `!pages` — still waiting. **Not `isLoading`:** this query is `enabled` only once
   the detail has landed, and a *disabled* query is neither loading nor errored, so
   the empty state used to paint in the gap before the messages were even asked for.
-- otherwise the genuine empty state. Reached through `ListEmptyComponent`, which
-  keys off `rows` rather than `loaded` — an unsent message waiting in the outbox
-  is still something on screen, and replacing it with an apology would look like
-  it had been thrown away.
+- otherwise the genuine empty state.
+
+**It takes two shapes, and the second is easy to miss.** Those three branches
+live in `ListEmptyComponent`, which never renders while `rows` is non-empty —
+and an unsent message in the outbox **survives the screen** (`outbox.ts`), so a
+cold transcript failure with one queued leaves the card, and the only retry with
+it, unrendered. The bubble is deliberately *not* replaced (an apology in place of
+an unsent message reads as it having been thrown away), so the failure gets a
+**line beside it** instead, in `ListFooterComponent` — the top of an inverted
+list, where the missing history would have been. Same partial-note shape as the
+group timeline's and the profile's (#320).
 
 **The mark-read write moved with it.** It was gated on `showingThread`, which
 answers for the conversation rather than the transcript — so on a cold transcript
@@ -2514,10 +2522,17 @@ failure the screen said "Couldn't load these messages" while the effect beside i
 dismissed that thread's delivered pushes from the tray and POSTed `read`. It waits
 on `readingMessages = showingThread && !!pages` now; `!!pages` and not
 `!messagesLoadFailed`, because gating on the failure alone still fires on the
-commit before we know the request failed. See
-[`notifications.md`](notifications.md#push-notifications) for the dismissal half
-and [`mobile-app.md`](mobile-app.md#the-mirror-image-no-error-branch-at-all) for
-the rule.
+commit before we know the request failed.
+
+**And so did the quieter write next to it.** `setOnScreenConversation(id)` on
+focus makes the foreground handler return `shouldShowList: false` for this
+thread's pushes, so while the transcript was an error card a message arriving for
+this chat bannered once and was never filed in the notification centre — the same
+signal thrown away, by omission rather than by a write. Both now hang off
+`readingMessages`. See
+[`notifications.md`](notifications.md#push-notifications) for that half and
+[`mobile-app.md`](mobile-app.md#the-mirror-image-no-error-branch-at-all) for the
+rule.
 
 **Reading a transcript, rather than a list of bubbles.** Day separators
 ("Today" / "Yesterday" / "12 March", re-derived at local midnight by

@@ -734,6 +734,14 @@ is `!!pages`, not "the messages query hasn't errored": the latter still fires on
 the commit *before* the request fails, which is the same trap #318 records for
 the post and event screens.
 
+The same guard governs **`setOnScreenConversation`**, which is a suppression
+rather than a dismissal and so easier to overlook. Claiming the thread makes the
+foreground handler return `shouldShowList: false` for its pushes (the row above,
+and *Show notifications that arrive while the app is foregrounded* in `push.ts`)
+— so while the transcript was an error card, a message arriving for that chat
+bannered once and was never filed here at all. It claims the thread only while
+it can actually show it.
+
 Notifications are matched on the push's own `url`, parsed with the same
 `conversationIdFromUrl` the deep link uses — one shape on the wire, with no
 second conversation field to fall out of step with it. The activity centre's

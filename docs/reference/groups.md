@@ -235,8 +235,16 @@ only the list's error was ever branched on — so a failed group fetch beside a
 succeeding members fetch drew a complete, correct-looking roster in which nothing
 was pressable, stating by omission "you are not an admin of this group". The rows
 stay inert in that state (every control behind them would 403 if we guessed
-wrong, and guessing *up* offers an admin action to a member), but a notice above
-the list says the role couldn't be checked and offers the retry. Invite
+wrong, and guessing *up* offers an admin action to a member), but a notice says
+the role couldn't be checked and offers the retry — **outside** the `FlatList`,
+since a `ListHeaderComponent` scrolls away and the explanation has to still be
+there when someone taps a row forty rows down, and **only over a roster that
+loaded**, since with no rows there is no false claim to correct and one outage
+would otherwise stack two error lines and two retries. A **404 takes precedence
+over both**: nothing clears a query's `data`, so after you're removed the cached
+`your_role: 'admin'` kept every row live behind a menu whose every write 403s —
+that branch says you're no longer a member and offers no retry, since a request
+that will 404 forever is one dead end swapped for another. Invite
 and create/edit are pushed screens reusing the connection-picker and the profile
 editor's round avatar cropper. **The invite screen's Invite refuses when the
 member roster hasn't loaded** (#317) — the roster is what filters existing

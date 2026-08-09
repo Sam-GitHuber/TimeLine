@@ -585,6 +585,10 @@ describe('a details screen whose side queries fail', () => {
     await screen.findByText('In this chat');
 
     expect(screen.queryByText(/photos?$/)).toBeNull();
+    // Explicitly, because `/photos?$/` is case-sensitive and so can't see the
+    // heading the *error* branch renders — without this the surrounding claim
+    // ("no heading over a blank square") is one the test can't actually check.
+    expect(screen.queryByText('Photos')).toBeNull();
     expect(screen.queryByText('Couldn’t load the photos in this chat.')).toBeNull();
   });
 

@@ -422,7 +422,7 @@ export default function ConversationInfoScreen() {
                   hitSlop={8}
                   style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
                 >
-                  <Text style={styles.retryText}>Try again</Text>
+                  <Text style={styles.inlineRetryText}>Try again</Text>
                 </Pressable>
               </View>
             ) : null}
@@ -470,6 +470,10 @@ function MediaGallery({ conversationId }: { conversationId: number }) {
   const photos: MessageAttachment[] = (mediaQuery.data?.results ?? []).flatMap(
     (message) => message.attachments ?? []
   );
+  /** Named beside its query like every other site in this family, rather than
+   * inlined as a double negative inside the length check below — that is where
+   * the next edit inverts the rule by accident. */
+  const mediaLoadFailed = mediaQuery.isError && !mediaQuery.data;
 
   // **The section's absence is itself a claim** (#321). It only appears once a
   // photo has been sent, so "not there" reads as "this chat has no photos" —
@@ -479,7 +483,7 @@ function MediaGallery({ conversationId }: { conversationId: number }) {
   // answer is a line rather than a whole state: say we couldn't ask, and leave
   // the grid out. `!data`, so a failed *refresh* keeps the photos it has.
   if (photos.length === 0) {
-    if (!(mediaQuery.isError && !mediaQuery.data)) return null;
+    if (!mediaLoadFailed) return null;
     return (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Photos</Text>
@@ -494,7 +498,7 @@ function MediaGallery({ conversationId }: { conversationId: number }) {
             hitSlop={8}
             style={({ pressed }) => [styles.inlineRetry, pressed && styles.pressed]}
           >
-            <Text style={styles.retryText}>Try again</Text>
+            <Text style={styles.inlineRetryText}>Try again</Text>
           </Pressable>
         </View>
       </View>
@@ -718,6 +722,10 @@ const styles = StyleSheet.create({
   galleryError: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
   inlineError: { fontSize: fontSize.sm, color: colors.danger, lineHeight: 20 },
   inlineRetry: { alignSelf: 'flex-start', paddingVertical: spacing.xs },
+  // **Not `retryText`.** That style only reads as a button inside the bordered
+  // `retry` pill; bare on a line it is indistinguishable from bold body copy,
+  // which is a retry nobody taps. Accent, like every other inline link here.
+  inlineRetryText: { fontSize: fontSize.sm, color: colors.accent, fontWeight: '700' },
   pressed: { opacity: 0.7 },
   // A wrapping grid rather than a fixed column count: percentage widths would
   // have to be recomputed against the gap, and a flexible tile size means the
