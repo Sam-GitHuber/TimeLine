@@ -39,7 +39,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { dedupeById, useFetchAllPages } from '@/lists';
@@ -150,12 +150,10 @@ export default function NewChatScreen() {
   const holding = create.isPending;
   useHoldScreen(holding);
 
-  const errorMessage =
-    create.error instanceof Error
-      ? create.error.message
-      : addToId
-        ? 'Couldn’t add them to this chat.'
-        : 'Couldn’t start that chat.';
+  const errorMessage = serverMessage(
+    create.error,
+    addToId ? 'Couldn’t add them to this chat.' : 'Couldn’t start that chat.'
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>

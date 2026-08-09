@@ -95,8 +95,11 @@ surfaces in the same family (#237–#240):
   rendering `actionError.message` bare, so one had to be written. The rule now
   reads in one line: *the server's own words when it wrote any, ours otherwise,
   the browser's never.* Pinned in `frontend/src/offline-writes.test.jsx` and
-  `api.test.js`. The mobile client has the same unguarded `fetch` at ~25 sites —
-  tracked separately in #243. Its *second* unguarded `fetch`, on the token
+  `api.test.js`. The mobile client had the same unguarded `fetch` behind ~35
+  sites, closed by #243 — see
+  [mobile-app.md](mobile-app.md#show-the-servers-words-or-your-own--never-the-runtimes),
+  which also records the trap in the *fix*: once offline is an `ApiError` too, an
+  `instanceof ApiError` guard stops separating anything. Its *second* unguarded `fetch`, on the token
   refresh path, is guarded as of #245, where the same root cause signed the user
   out rather than mis-wording a message — see
   [accounts.md](accounts.md#only-the-server-may-end-a-session-245).
@@ -176,9 +179,10 @@ same one-line remedy:
   gone); the alert is what makes delivery unconditional.
 
 All seven go through **`serverMessage(err, WENT_WRONG)`**, not the
-`err instanceof Error ? err.message` spelling most of the app still uses — that
-spelling is #243's ~25 sites, and adding seven more to a list someone has to work
-through later would be a strange way to fix a reporting bug. `WENT_WRONG` moved
+`err instanceof Error ? err.message` spelling most of the app used at the time —
+that spelling was #243's ~35 sites, and adding seven more to a list someone has
+to work through later would have been a strange way to fix a reporting bug. #243
+has since converted the rest. `WENT_WRONG` moved
 from a `const` in the event screen into `mobile/src/api.ts` beside
 `serverMessage` when the second file needed it. Pinned in `threadInfo.test.tsx`,
 `thread.test.tsx`, `people.test.tsx` and `groups.test.tsx`.

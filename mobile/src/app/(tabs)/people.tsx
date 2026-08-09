@@ -256,8 +256,7 @@ function DirectoryList({
   const { refreshing, onRefresh } = usePullToRefresh(queryKey, query.refetch);
 
   const people = dedupeById(query.data?.pages.flatMap((page) => page.results) ?? []);
-  const errorMessage =
-    query.error instanceof Error ? query.error.message : errorText;
+  const errorMessage = serverMessage(query.error, errorText);
 
   // The FlatList renders in every state (not just when populated) so pull-to-
   // refresh works from the empty and error states too — loading/error/empty go
@@ -519,11 +518,7 @@ function RequestsList() {
           <ListMessage>Loading…</ListMessage>
         ) : query.isError ? (
           <ListError
-            message={
-              query.error instanceof Error
-                ? query.error.message
-                : 'Couldn’t load requests.'
-            }
+            message={serverMessage(query.error, 'Couldn’t load requests.')}
             onRetry={query.refetch}
           />
         ) : (

@@ -27,7 +27,7 @@ import {
   View,
 } from 'react-native';
 
-import { api, type PhotoUpload } from '@/api';
+import { api, serverMessage, type PhotoUpload } from '@/api';
 import { useAuth } from '@/auth';
 import { usePhotoPicker } from '@/photoSource';
 import { AvatarCropModal } from './AvatarCropModal';
@@ -214,9 +214,7 @@ export function ProfileEditForm({ onDone }: { onDone: () => void }) {
 
       {mutation.isError ? (
         <Text style={styles.error} accessibilityRole="alert">
-          {mutation.error instanceof Error
-            ? mutation.error.message
-            : 'Couldn’t save your profile.'}
+          {serverMessage(mutation.error, 'Couldn’t save your profile.')}
         </Text>
       ) : null}
 

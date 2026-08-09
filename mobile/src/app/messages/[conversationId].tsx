@@ -1083,10 +1083,7 @@ export default function ThreadScreen() {
     // not registering, so the natural response is to delete it again, against a
     // server that may have succeeded the first time.
     onError: (error) =>
-      Alert.alert(
-        'Couldn’t delete that message',
-        serverMessage(error, WENT_WRONG)
-      ),
+      Alert.alert('Couldn’t delete that message', serverMessage(error, WENT_WRONG)),
   });
 
   /**
@@ -1182,10 +1179,7 @@ export default function ThreadScreen() {
     // can reject one (the per-target cap, emoji validation, a closed thread), so
     // its message is what gets shown — same as the feed's ReactionBar.
     onError: (error) =>
-      Alert.alert(
-        'Couldn’t react',
-        error instanceof Error ? error.message : 'Something went wrong.'
-      ),
+      Alert.alert('Couldn’t react', serverMessage(error, WENT_WRONG)),
   });
 
   /**
@@ -2166,9 +2160,7 @@ export default function ThreadScreen() {
                 say so rather than silently leaving edit mode on. */}
             {editMutation.isError && (
               <Text style={styles.sendError}>
-                {editMutation.error instanceof Error
-                  ? editMutation.error.message
-                  : "Couldn't save the edit. Try again."}
+                {serverMessage(editMutation.error, "Couldn't save the edit. Try again.")}
               </Text>
             )}
           </View>

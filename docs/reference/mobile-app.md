@@ -492,6 +492,70 @@ and `CommentThread.tsx` already carry for the *write* side; it applies to reads
 too, and the web's `waitingMessage()` (`errors.js`) is the shape to port when it
 happens.
 
+### Show the server's words, or your own — never the runtime's
+
+The sibling rule to the one above, and the one this client was slowest to learn.
+Having decided *whether* to show an error, a screen has to decide *what text*.
+There are three kinds of rejection and only one of them is fit to read:
+
+| Rejection | Message it carries | Fit to show? |
+|---|---|---|
+| The server refused, with a DRF body | `"Your old password was entered incorrectly."` | **Yes** — it's the diagnosis |
+| The server answered with nothing showable (a 500 as an HTML page) | `"Request failed (500)"`, synthesized by `request()` | No |
+| The request never reached the server | ours, since #243 — it used to be React Native's `"Network request failed"` | No |
+
+Every rejection **`request()` raises** is an `ApiError`, and the one bit that
+separates the first row from the other two is **`fromServer`**. Reading it is
+`serverMessage(err, fallback)`'s whole job, so **every screen that renders a
+rejection goes through `serverMessage`** — enforced by a `no-restricted-syntax`
+rule in `eslint.config.js` — and none reach for `.message`.
+
+`fromServer` is necessary and not sufficient: `serverMessage` also checks the
+message is non-empty, because a serializer raising `ValidationError('')` is
+server-authored and blank, and a blank red line is worse than the fallback it
+displaced. `firstErrorMessage` refuses empty strings and empty lists for the
+same reason — `String(value[0])` on `{"non_field_errors": []}` is how the word
+`undefined` ends up on screen wearing the server's badge.
+
+⚠️ **A few things still escape `request` unconverted**, so don't write a guard
+that assumes otherwise: a `JSON.stringify` on a body we built wrong (deliberate
+— see below), a Keychain read failing above the guard, `toFilePart` on a missing
+file, and the `throw new Error` path-builders. `ApiError` is what a *rejected
+request* looks like, not what every throw in the module looks like.
+
+Two ways to get this wrong, both of which were live:
+
+- **`err instanceof Error ? err.message : 'our sentence'`** — the spelling ~35
+  screens were written with, and the reason #243 existed. A `TypeError` *is* an
+  `Error` and *has* a `message`, so the ternary never reached the authored
+  sentence: it was unreachable by construction, in every file that had one. What
+  a user got instead was `Network request failed` — on Change password and
+  Delete account, where "did the server refuse me, or did my train go into a
+  tunnel?" is the entire question.
+- **`err instanceof ApiError ? err.message : 'our sentence'`** — the *fix* for
+  the first one, and still wrong, which is what makes it worth naming. Once a
+  lost connection is re-raised as an `ApiError` (which is how it stops being
+  React Native's words), the class stops separating anything. `PollTally` and
+  `RsvpBar` were written this way and were held up in #240 as the two files that
+  "got it right"; they were the two that would have broken *quietest*.
+
+`api.ts` guards both places a connection can die — the `fetch`, and the body read
+after it — and re-raises with `status: 0` (no answer arrived) or the real status
+(headers did), `fromServer: false`, and a sentence of ours. The JSON body is
+serialized *above* that `try` on purpose: a `JSON.stringify` that throws is our
+bug, and dressing it as a connection problem sends someone to check their signal
+over a mistake at the call site (#244).
+
+`WENT_WRONG` beside `serverMessage` is the default fallback, so a dozen screens
+don't each write a slightly different version of the same sentence — but a
+screen that can say something more specific should. `frontend/src/errors.js` is
+the web's mirror of all of this, and took the fix first (#240).
+
+**When you write a test that refuses a write, reject with an `ApiError` carrying
+a `detail`, not a bare `new Error(msg)`.** A bare `Error` is now the shape of a
+*lost connection*, so a test that uses one is asserting the fallback, not the
+server's words — five tests were passing on exactly that confusion before #243.
+
 ### Taking a photo: camera or library
 
 Every place that adds a photo — a post, a chat message, a profile or group

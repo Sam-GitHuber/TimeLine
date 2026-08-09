@@ -116,9 +116,7 @@ export function PendingChatPanel({
 
       {connectMutation.isError && (
         <Text style={styles.error}>
-          {connectMutation.error instanceof Error
-            ? connectMutation.error.message
-            : "Couldn't send that request."}
+          {serverMessage(connectMutation.error, "Couldn't send that request.")}
         </Text>
       )}
 

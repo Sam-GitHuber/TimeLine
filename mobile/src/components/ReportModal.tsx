@@ -29,7 +29,7 @@ import {
   View,
 } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
 
@@ -68,7 +68,7 @@ export function ReportModal({
       setSubmitting(false);
       setDone(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Couldn’t send the report.');
+      setError(serverMessage(err, 'Couldn’t send the report.'));
       setSubmitting(false);
     }
   }

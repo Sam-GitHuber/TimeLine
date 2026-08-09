@@ -196,11 +196,7 @@ function GroupsList() {
           <ListMessage>Loading…</ListMessage>
         ) : query.isError ? (
           <ListError
-            message={
-              query.error instanceof Error
-                ? query.error.message
-                : 'Couldn’t load your groups.'
-            }
+            message={serverMessage(query.error, 'Couldn’t load your groups.')}
             onRetry={query.refetch}
           />
         ) : (
@@ -332,9 +328,7 @@ function InvitesList() {
           <ListMessage>Loading…</ListMessage>
         ) : query.isError ? (
           <ListError
-            message={
-              query.error instanceof Error ? query.error.message : 'Couldn’t load invites.'
-            }
+            message={serverMessage(query.error, 'Couldn’t load invites.')}
             onRetry={query.refetch}
           />
         ) : (

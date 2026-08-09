@@ -124,10 +124,7 @@ export default function ConversationInfoScreen() {
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
     onError: (error) =>
-      Alert.alert(
-        'Couldn’t rename this chat',
-        error instanceof Error ? error.message : 'Something went wrong.'
-      ),
+      Alert.alert('Couldn’t rename this chat', serverMessage(error, WENT_WRONG)),
   });
 
   const muteMutation = useMutation({

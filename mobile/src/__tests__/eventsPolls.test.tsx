@@ -526,7 +526,13 @@ describe('poll lifecycle', () => {
     expect(screen.getByText('Saving…')).toBeTruthy();
 
     await act(async () => {
-      refuse(new Error('Voting has already started on this poll.'));
+      // An `ApiError`, not a bare `Error`: only the server's own words reach
+      // the screen (#243), and a 400 with a `detail` is what the server sends.
+      refuse(
+        new ApiError('Voting has already started on this poll.', 400, {
+          detail: 'Voting has already started on this poll.',
+        })
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 

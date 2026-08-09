@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { serverMessage } from '@/api';
 import { useAuth } from '@/auth';
 import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
@@ -41,10 +42,19 @@ export default function LoginScreen() {
       // No navigation here — AuthGate redirects when status flips to signedIn,
       // so there's exactly one place that decides where a logged-in user goes.
     } catch (err) {
-      // The API's message is the useful one: it distinguishes a wrong password
-      // from an unverified email from an account still awaiting approval, all of
-      // which a real tester will hit.
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      // The *server's* message is the useful one: it distinguishes a wrong
+      // password from an unverified email from an account still awaiting
+      // approval, all of which a real tester will hit. `serverMessage` keeps it
+      // to the server's own words — a login attempted with no signal has no such
+      // answer, and used to render React Native's `Network request failed` as
+      // though the server had said it (#243).
+      //
+      // Note what that means here: offline you get the sentence below, which
+      // doesn't mention the connection. That's `serverMessage`'s contract on
+      // both clients — the caller's copy wins over our stand-in — and the app
+      // has no offline indicator to pair it with while `onlineManager` is
+      // unwired (`_layout.tsx`). Worth revisiting together, not here.
+      setError(serverMessage(err, 'Couldn’t sign you in. Please try again.'));
       setSubmitting(false);
     }
   }

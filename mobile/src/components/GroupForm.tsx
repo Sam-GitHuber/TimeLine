@@ -12,7 +12,7 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { api, type PhotoUpload } from '@/api';
+import { api, serverMessage, type PhotoUpload } from '@/api';
 import { usePhotoPicker } from '@/photoSource';
 import { AvatarCropModal } from './AvatarCropModal';
 import { Avatar } from './Avatar';
@@ -161,9 +161,7 @@ export function GroupForm({
 
       {mutation.isError ? (
         <Text style={styles.error} accessibilityRole="alert">
-          {mutation.error instanceof Error
-            ? mutation.error.message
-            : 'Couldn’t save the group.'}
+          {serverMessage(mutation.error, 'Couldn’t save the group.')}
         </Text>
       ) : null}
 

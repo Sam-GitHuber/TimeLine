@@ -12,7 +12,7 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import { useHoldOpen, useHoldScreen } from '@/writeHold';
 
@@ -80,7 +80,7 @@ export function PlanEventForm({ groupId }: { groupId: number }) {
 
       {create.isError ? (
         <Text style={styles.error} accessibilityRole="alert">
-          {create.error instanceof Error ? create.error.message : 'Couldn’t create the event.'}
+          {serverMessage(create.error, 'Couldn’t create the event.')}
         </Text>
       ) : null}
 

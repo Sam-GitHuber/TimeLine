@@ -2084,8 +2084,8 @@ renderer" and the fix for "absent renderer" turned out to be the same line. The
 line under the composer stays: it persists beside the text you're still editing,
 where a dismissed dialog is gone. See
 [connections.md](connections.md#reporting-a-refused-write) for both halves side
-by side, and for why these six go through `serverMessage` rather than the
-`err.message` spelling #243 still owns elsewhere.
+by side. All six go through `serverMessage` — as, since #243, does every other
+renderer of a rejection in the app.
 
 ### Mentions, formatting and multi-select on the web (Phase 9b M9f)
 

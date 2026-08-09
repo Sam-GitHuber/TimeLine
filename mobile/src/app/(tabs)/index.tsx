@@ -25,7 +25,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api } from '@/api';
+import { api, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { ActivityBell } from '@/components/ActivityBell';
 import { Avatar } from '@/components/Avatar';
@@ -172,7 +172,7 @@ export default function FeedScreen() {
             <View style={styles.centre}>
               <Text style={styles.emptyTitle}>Couldn&rsquo;t load your feed</Text>
               <Text style={styles.emptyBody}>
-                {error instanceof Error ? error.message : 'Something went wrong.'}
+                {serverMessage(error, WENT_WRONG)}
               </Text>
               <Pressable style={styles.retry} onPress={() => refetch()}>
                 <Text style={styles.retryText}>Try again</Text>

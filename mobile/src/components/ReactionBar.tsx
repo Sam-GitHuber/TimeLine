@@ -18,7 +18,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 
-import { api } from "@/api";
+import { api, serverMessage, WENT_WRONG } from "@/api";
 import { ReactionTray, type Anchor } from "./ReactionTray";
 import { ReactorsSheet } from "./ReactorsSheet";
 import { colors, fontSize, radius, spacing } from "@/theme";
@@ -166,7 +166,7 @@ export function ReactionBar({
     onError: (error) =>
       Alert.alert(
         "Couldn’t react",
-        error instanceof Error ? error.message : "Something went wrong.",
+        serverMessage(error, WENT_WRONG),
       ),
   });
 

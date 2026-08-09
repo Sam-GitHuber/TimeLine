@@ -27,7 +27,7 @@ import {
   View,
 } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
 
@@ -136,9 +136,7 @@ export function PostEditModal({
             <Text style={styles.note}>Edited posts are marked “edited”.</Text>
             {mutation.isError ? (
               <Text style={styles.error} accessibilityRole="alert">
-                {mutation.error instanceof Error && mutation.error.message
-                  ? mutation.error.message
-                  : 'Couldn’t save your changes.'}
+                {serverMessage(mutation.error, 'Couldn’t save your changes.')}
               </Text>
             ) : null}
             <View style={styles.actions}>

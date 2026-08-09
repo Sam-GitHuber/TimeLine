@@ -30,7 +30,7 @@ import {
   View,
 } from 'react-native';
 
-import { api, type ReactionTarget } from '@/api';
+import { api, serverMessage, type ReactionTarget } from '@/api';
 import { Avatar } from './Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
 
@@ -134,7 +134,7 @@ export function ReactorsSheet({
                  time the reopen's refresh missed. */
             error && !data ? (
             <Text style={styles.error}>
-              {error instanceof Error ? error.message : 'Couldn’t load that.'}
+              {serverMessage(error, 'Couldn’t load that.')}
             </Text>
           ) : (
             <ScrollView style={styles.list}>

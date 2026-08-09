@@ -37,7 +37,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, CONVERSATION_LIST_POLL_MS } from '@/api';
+import { api, CONVERSATION_LIST_POLL_MS, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
@@ -136,10 +136,7 @@ export default function MessagesScreen() {
       queryClient.invalidateQueries({ queryKey: ['conversation'] });
     },
     onError: (error) =>
-      Alert.alert(
-        'Couldn’t do that',
-        error instanceof Error ? error.message : 'Something went wrong.'
-      ),
+      Alert.alert('Couldn’t do that', serverMessage(error, WENT_WRONG)),
   });
 
   const onRefresh = useCallback(async () => {
@@ -151,10 +148,7 @@ export default function MessagesScreen() {
     }
   }, [query]);
 
-  const errorMessage =
-    query.error instanceof Error
-      ? query.error.message
-      : "Couldn't load your messages.";
+  const errorMessage = serverMessage(query.error, "Couldn't load your messages.");
 
   /**
    * Swipe **right** — the read/unread toggle, where iOS puts it.

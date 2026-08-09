@@ -25,7 +25,7 @@ import {
   View,
 } from 'react-native';
 
-import { api, type PhotoUpload } from '@/api';
+import { api, serverMessage, WENT_WRONG, type PhotoUpload } from '@/api';
 import { usePhotoPicker } from '@/photoSource';
 import { Avatar } from './Avatar';
 import { NowNode } from './NowNode';
@@ -174,10 +174,7 @@ export function ComposeBox({
     onError: (error) => {
       // Keep the text and photos on failure — losing what someone just typed
       // because the network blipped is unforgivable on a phone.
-      Alert.alert(
-        'Couldn’t post',
-        error instanceof Error ? error.message : 'Something went wrong.'
-      );
+      Alert.alert('Couldn’t post', serverMessage(error, WENT_WRONG));
     },
   });
 

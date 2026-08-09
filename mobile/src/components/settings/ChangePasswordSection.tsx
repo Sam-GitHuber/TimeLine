@@ -18,7 +18,7 @@ import {
   View,
 } from 'react-native';
 
-import { api } from '@/api';
+import { api, serverMessage } from '@/api';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import { useAndroidBack } from '@/useAndroidBack';
 import { useHoldOpen, useWriteHold, WriteHoldProvider } from '@/writeHold';
@@ -106,7 +106,12 @@ function ChangePasswordForm({ onDone }: { onDone: () => void }) {
       setNext('');
       setConfirm('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Couldn’t change your password.');
+      // The server's own words matter here — "Your old password was entered
+      // incorrectly" is the whole diagnosis — but only when the server actually
+      // spoke. Offline, `err.message` was React Native's `Network request
+      // failed`, which reads exactly like a rejection and leaves you unable to
+      // tell which password the account now has (#243).
+      setError(serverMessage(err, 'Couldn’t change your password.'));
     } finally {
       setSaving(false);
     }

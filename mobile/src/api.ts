@@ -218,11 +218,41 @@ const NETWORK_ERROR_MESSAGE =
   'Couldn’t reach the server — check your connection and try again.';
 
 /**
+ * A request that died on the wire, in the shape every other rejection has.
+ *
+ * There are three places in this file where a `fetch` — or the body read after
+ * it — can reject with a bare `TypeError`, and all three must produce the same
+ * thing or the guarantee `serverMessage` rests on has a hole in it. Written once
+ * here so the fourth is a one-liner rather than a fourth chance to get the flags
+ * wrong (#243).
+ *
+ * `fromServer: false` because the sentence is ours, not the server's — that flag
+ * is what keeps `serverMessage` honest, and the whole reason a caller can still
+ * choose its own more specific copy. `status` is `0` when no response arrived at
+ * all, and the real status when the headers did: a screen asking
+ * `err.status === 404` is entitled to a true answer either way.
+ *
+ * ⚠️ **Not everything caught here is connectivity.** Expo's "winter" runtime
+ * serializes a multipart body *inside* `fetch`, so a malformed `FormData` part
+ * throws here too (`toFilePart` above records that failure). Telling someone to
+ * check their signal over our bug is #244's mistake in a new place — but the two
+ * are indistinguishable at this point (both bare `TypeError`s), and the
+ * alternative is letting an unrecognised throw escape as the runtime's words,
+ * which is the bug this exists to close. The original travels as `cause`, which
+ * is where to look when "check your connection" appears on a full-signal device.
+ */
+function networkError(cause: unknown, status = 0): ApiError {
+  return new ApiError(NETWORK_ERROR_MESSAGE, status, null, false, { cause });
+}
+
+/**
  * What we say when the server answered but couldn't do the job — a 5xx from the
  * refresh endpoint, which is the box redeploying or Django down behind Caddy.
- * Deliberately not "your session has expired": it hasn't, and until #243 lands
- * ~25 call sites render `.message` whatever `fromServer` says, so a wrong
- * sentence here is a wrong sentence on a real screen.
+ * Deliberately not "your session has expired": it hasn't, and this rejection
+ * *reaches* a call site (unlike the refusal message, which `request` replaces).
+ * Since #243 every screen reads it through `serverMessage`, so `fromServer:
+ * false` keeps it off the screen in favour of the caller's own sentence — but a
+ * wrong sentence here would still be the one a debugger reads.
  */
 const SERVER_ERROR_MESSAGE =
   'Something went wrong on the server — please try again in a moment.';
@@ -238,10 +268,27 @@ const SERVER_ERROR_MESSAGE =
  * "Request failed (500)" — which has a status and a message, and would sail
  * through a bare `instanceof ApiError` check straight onto the screen.
  *
- * Mirrors `frontend/src/errors.js`.
+ * Mirrors `frontend/src/errors.js`, **including its truthiness check on the
+ * message**. `fromServer` says the server wrote the words; it doesn't say it
+ * wrote any. A serializer raising `ValidationError('')` produces
+ * `{"detail": ""}`, which is server-authored and empty, and without the check
+ * every one of these call sites renders a blank line — a red gap under the
+ * composer, or an `Alert` with a title and no body. Worse than the fallback it
+ * displaced, and silent.
+ *
+ * Generic in the fallback so `null` is a legal one: `groups/[groupId]/invite.tsx`
+ * wants "the server's own sentence, or nothing" and picks its own wording after,
+ * from a count only it knows. Constrained to `string | null` rather than left
+ * open — an unconstrained `F` would type-check `serverMessage(err, 0)` and put a
+ * literal "0" on screen, or an object, which throws in a `<Text>`.
  */
-export function serverMessage(err: unknown, fallback: string): string {
-  return err instanceof ApiError && err.fromServer ? err.message : fallback;
+export function serverMessage<F extends string | null>(
+  err: unknown,
+  fallback: F
+): string | F {
+  return err instanceof ApiError && err.fromServer && err.message
+    ? err.message
+    : fallback;
 }
 
 /**
@@ -265,15 +312,25 @@ export const WENT_WRONG = 'Something went wrong — try again in a moment.';
  * DRF returns validation errors as `{ field: ["msg", ...] }` or
  * `{ detail: "msg" }` / `{ non_field_errors: [...] }`. Pull out something
  * showable. Mirrors the web app's helper of the same name.
+ *
+ * "Showable" is doing work: it must return `null` rather than a string nobody
+ * wrote. `String(value[0])` on an **empty** list — `{"non_field_errors": []}` —
+ * yields the literal word `"undefined"`, and the caller then flags it
+ * `fromServer: true` and puts it on screen as the server's diagnosis. That is
+ * the runtime's words wearing the server's badge, which is the whole thing #243
+ * exists to stop. The web dodges it by returning `value[0]` unstringified (falsy
+ * → falls through); this returns `null` explicitly, which reads as the intent
+ * rather than as a lucky coercion.
  */
 function firstErrorMessage(data: unknown): string | null {
   if (!data || typeof data !== 'object') return null;
   const record = data as Record<string, unknown>;
-  if (typeof record.detail === 'string') return record.detail;
+  if (typeof record.detail === 'string') return record.detail || null;
   const firstKey = Object.keys(record)[0];
   if (!firstKey) return null;
   const value = record[firstKey];
-  return Array.isArray(value) ? String(value[0]) : String(value);
+  const first = Array.isArray(value) ? value[0] : value;
+  return typeof first === 'string' && first ? first : null;
 }
 
 /**
@@ -335,7 +392,7 @@ async function refreshAccessToken(): Promise<string> {
         body: payload,
       });
     } catch (err) {
-      throw new ApiError(NETWORK_ERROR_MESSAGE, 0, null, false, { cause: err });
+      throw networkError(err);
     }
 
     if (!response.ok) {
@@ -368,7 +425,7 @@ async function refreshAccessToken(): Promise<string> {
     // refused token at the catch below — the same sign-out by a different door.
     const pair = (await response.json().catch(() => null)) as RefreshResponse | null;
     if (!pair?.access || !pair?.refresh) {
-      throw new ApiError(NETWORK_ERROR_MESSAGE, 0, null, false);
+      throw networkError(null);
     }
     await saveTokens({ access: pair.access, refresh: pair.refresh });
     return pair.access;
@@ -437,16 +494,34 @@ async function request<T>(
   const access = getCachedAccessToken() ?? (await getAccessToken());
   if (access) headers.Authorization = `Bearer ${access}`;
 
-  const response = await fetch(BASE_URL + path, {
-    method,
-    headers,
-    body:
-      body === undefined
-        ? undefined
-        : isFormData
-          ? (body as FormData)
-          : JSON.stringify(body),
-  });
+  // Serialized *before* the try below, the same lesson `refreshAccessToken`
+  // above already encodes (#244): `JSON.stringify` throws on a body we built
+  // wrong — a circular reference, a BigInt — and that's a bug in our code rather
+  // than a connectivity problem. Left inside the `try` it would be caught and
+  // dressed up as a lost connection, sending someone to check their signal over
+  // a mistake at the call site.
+  const payload =
+    body === undefined ? undefined : isFormData ? (body as FormData) : JSON.stringify(body);
+
+  // A network-level failure — offline, DNS, the connection dropped mid-request —
+  // rejects out of `fetch` itself as a bare `TypeError` carrying React Native's
+  // words, `Network request failed`. Left alone it propagates out of here
+  // untouched, and because it *is* an `Error` with a `message` it defeats every
+  // `err instanceof Error ? err.message : 'our sentence'` at a call site: the
+  // sentence written for exactly this case becomes the one that never shows
+  // (#243). `networkError` above converts it at the source into the shape every
+  // other rejection has. Mirrors `frontend/src/api.js`, which took this fix
+  // first (#240).
+  let response;
+  try {
+    response = await fetch(BASE_URL + path, {
+      method,
+      headers,
+      body: payload,
+    });
+  } catch (err) {
+    throw networkError(err);
+  }
 
   // A 401 on an authenticated request means the access token has expired. Get a
   // fresh one and replay exactly once — `retry: false` on the replay is what
@@ -476,8 +551,20 @@ async function request<T>(
   }
 
   // 204 No Content (and empty bodies) have nothing to parse.
+  //
+  // Reading the body is the *second* place a connection can die — headers
+  // arrived, the rest didn't — and it rejects the same way `fetch` does, as a
+  // bare `TypeError`. Guarded for the same reason, passing the status through
+  // since the server did answer. (`JSON.parse` below is a different matter and
+  // already has its own `catch`: a body that isn't JSON is the server's problem,
+  // not the connection's.) `frontend/src/api.js` still has this gap open.
   let data: unknown = null;
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (err) {
+    throw networkError(err, response.status);
+  }
   if (text) {
     try {
       data = JSON.parse(text);

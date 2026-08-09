@@ -295,9 +295,7 @@ export default function ProfileScreen() {
           <View style={styles.centre}>
             <Text style={styles.emptyTitle}>Couldn’t load this profile</Text>
             <Text style={styles.emptyBody}>
-              {userQuery.error instanceof Error
-                ? userQuery.error.message
-                : 'Something went wrong.'}
+              {serverMessage(userQuery.error, WENT_WRONG)}
             </Text>
             <Pressable style={styles.retry} onPress={() => userQuery.refetch()}>
               <Text style={styles.retryText}>Try again</Text>

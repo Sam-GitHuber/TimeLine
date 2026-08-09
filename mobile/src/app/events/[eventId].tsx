@@ -310,9 +310,7 @@ export default function EventScreen() {
           <View style={styles.centre}>
             <Text style={styles.emptyTitle}>Couldn’t load this event</Text>
             <Text style={styles.emptyBody}>
-              {eventQuery.error instanceof Error
-                ? eventQuery.error.message
-                : 'Something went wrong.'}
+              {serverMessage(eventQuery.error, WENT_WRONG)}
             </Text>
             <Pressable style={styles.retry} onPress={() => eventQuery.refetch()}>
               <Text style={styles.retryText}>Try again</Text>
