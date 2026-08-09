@@ -301,6 +301,26 @@ export default function ConversationThreadView() {
    * of older messages must not take the transcript off screen.
    */
   const messagesLoadFailed = messagesQuery.isError && !pages;
+  /**
+   * **Is the reader actually looking at the messages?** — the question the
+   * mark-read write below has to ask, and the one it used to get wrong (#324).
+   *
+   * It was gated on `showingThread`, which answers for the *conversation*: the
+   * header, the participants and the mute state, all from `convoQuery` and all
+   * fine while this query is errored. So the transcript said "Couldn't load
+   * these messages" and the effect beside it POSTed `read` anyway, zeroing the
+   * nav badge and the conversation-list pill for messages the reader had just
+   * been told we couldn't load — leaving nothing on the page still saying there
+   * is unread mail.
+   *
+   * `!!pages`, **not** `!messagesLoadFailed`, and the difference is the whole
+   * fix: gating on the failure alone still fires on the first commit after the
+   * detail lands, while the request is in flight and neither errored nor loaded,
+   * so the write has already happened by the time we find out it failed (#318's
+   * trap). A failed *poll* must still mark read — `pages` survives it and the
+   * reader is looking at the messages (#310/#313).
+   */
+  const readingMessages = showingThread && !!pages;
   /** What the server has accepted, newest-first. The outbox sits in front of it
    * when the rows are built, below. */
   const loaded = useMemo(
@@ -529,7 +549,12 @@ export default function ConversationThreadView() {
     // isn't available" — and this would fire a doomed write for a conversation
     // that is showing nothing. `showingThread` is the one value both halves of
     // the file read, so they can't drift.
-    if (isPending || !showingThread) return;
+    //
+    // And `showingThread` alone isn't the whole of it either (#324): it answers
+    // for the *detail*, not for the transcript this write claims to have been
+    // read. `readingMessages` is that value — see its comment for why it's
+    // `!!pages` and not `!messagesLoadFailed`.
+    if (isPending || !readingMessages) return;
     // The unread count has already been latched during render, above — this is
     // the write it has to survive.
     //
@@ -545,7 +570,7 @@ export default function ConversationThreadView() {
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
       })
       .catch(() => {});
-  }, [conversationId, messageCount, isPending, showingThread, queryClient]);
+  }, [conversationId, messageCount, isPending, readingMessages, queryClient]);
 
   /**
    * Keep the draft store in step with the composer.

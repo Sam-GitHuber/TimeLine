@@ -1863,13 +1863,60 @@ transcript and the gallery each answer for their own query:
 - **The gallery's silence was a claim too.** The section only appears once a
   photo has been sent, so rendering nothing on a *failed* fetch said "this chat
   has no photos". That's the one case where it now shows a heading and a line.
+- **And so was the Block control's** (#324, the twin of the app's #321 and the
+  one site in this file #319 walked past). It was gated on `otherQuery.data`,
+  with `otherQuery.isError` read nowhere, so a failed `GET /users/<id>` — cold
+  whenever you haven't opened that person's profile this session — ended the
+  panel at *Leave chat*. Someone who came to Details specifically to block a
+  harasser found no such control and no reason why. `otherLoadFailed` names it,
+  and it stays absent as a **button** deliberately: `BlockButton` takes
+  `is_blocked` and uses it for both the label and the direction of the write
+  (`isBlocked ? unblock : block`), so one drawn without it would offer *Block* to
+  someone who has already blocked them — the false-safety belief
+  [#236 exists to prevent](#blocking) — or silently unblock. A line saying we
+  couldn't check, plus the retry that finds out, takes its place.
 
-All three read `!data` rather than a bare `isError`, so a failed refresh keeps
-what's on screen (#310/#313), and all three treat "no data, no error" as still
+  **It has four states, and the last two were found in review.** The row is
+  `gone → couldn't-ask → the control → still-waiting`, failure-first, which is
+  the order every site in the app uses and the only order in which the `!data` in
+  `otherLoadFailed` means anything. *Still-waiting* is the branch an **offline**
+  reader lands in — the request is paused, never sent, so no error branch catches
+  it and an error-only fix left the control exactly as absent as before, in the
+  state someone reaching for Block is likeliest to be in. *Gone* is a **404**,
+  which is permanent here (`UserDetailView` filters `is_active`), so it says the
+  account is no longer available and offers no retry that could never work. With
+  all four covered, the `Section` around the row is gated on nothing more than
+  "there is an `other`" — one condition, not two kept in step by hand, and no
+  stray rule, because the row always has something in it. The retry is
+  `aria-label`led *Try checking again* against the gallery's *Try loading the
+  photos again*: on a dead connection both are on screen, and two buttons named
+  "Try again" tell a screen-reader user nothing. Focus moves to `BlockButton`
+  when the retry lands, because the pressed button unmounts and focus would
+  otherwise fall to `<body>`, outside a drawer that isn't a focus trap.
+
+All four read `!data` rather than a bare `isError`, so a failed refresh keeps
+what's on screen (#310/#313), and all of them treat "no data, no error" as still
 waiting — offline a query is **paused**, not loading, so `isLoading` is false
 with nothing behind it. `waitingMessage()` in `errors.js` is the shared wording
 for that state; see *The mirror image: no error branch at all — the web's sites*
 in [`feed-and-posts.md`](feed-and-posts.md) for the whole rule.
+
+**The mark-read write beside the transcript asks the same question** (#324, the
+web half of what #323 fixed on the phone). It was gated on `showingThread`, which
+answers for the *conversation* — header, participants, mute state, all from
+`convoQuery` and all fine while `messagesQuery` is errored — so the transcript
+said *Couldn't load these messages* while the effect next to it POSTed `read`,
+zeroing the nav badge and the conversation-list pill for messages the reader had
+just been told we couldn't load. Nothing on the page still said there was unread
+mail. It reads `readingMessages = showingThread && !!pages` now, and `!!pages`
+rather than `!messagesLoadFailed` is the difference between a fix and a guard
+that looks like one: gating on the failure alone still fires on the first commit
+after the detail lands, while the transcript request is in flight and neither
+errored nor loaded, so the write has already happened by the time we find out it
+failed. A failed *poll* must still mark read — `pages` survives it and the reader
+is looking at the messages. Less damaging than the app's version, which also
+cleared that thread's pushes out of the notification tray; the browser has no
+tray, so this half is the badge alone.
 
 **The thread header is now identity + `⋯`** — Details · Mute · Add people ·
 Leave — for the reason the app's is: three icon buttons were crowding the name of
@@ -2228,8 +2275,9 @@ promising a feature that doesn't exist is worse than its absence. See
 
 **Two of this screen's sections used to make a claim by simply not being there**
 (#321), each answering for a query whose `isError` was read nowhere. Only the
-first has a web precedent — **the web's Block gate still has this bug**, filed as
-#324; #319 touched only the gallery in that file:
+first had a web precedent at the time; the web's Block gate had the same bug
+untouched by #319, and went the same way in
+[#324](#photos-the-list-and-the-info-panel-on-the-web-phase-9b-m9e):
 
 - **The gallery's silence was a claim.** The section only appears once a photo
   has been sent, so rendering nothing on a *failed* fetch said "this chat has no

@@ -62,6 +62,19 @@ export default function ConversationListView() {
     refetchInterval: CONVERSATION_LIST_POLL_MS,
   });
   const all = useMemo(() => data?.results ?? [], [data]);
+  /**
+   * **A failed *poll* is not a reason to paint a failure over a working list**
+   * (#324, in the sweep behind it — same root cause as the two sites that issue
+   * names). This list polls on `CONVERSATION_LIST_POLL_MS`, and a bare `isError`
+   * meant one dropped packet put "Couldn't load your messages." in red *above*
+   * every row, which was still there and still openable. Worse, the two
+   * empty-state lines below were gated on `!isError`, so a failed poll also
+   * swallowed "No conversations match …" while you were typing in the search
+   * box — a claim about the search replaced by a claim about the request.
+   *
+   * `!data`, so it still says so when there's nothing to show (#310/#313).
+   */
+  const loadFailed = isError && !data;
   const needle = search.trim().toLowerCase();
   const conversations = useMemo(
     () =>
@@ -202,7 +215,7 @@ export default function ConversationListView() {
         {isLoading && (
           <p className="px-5 py-10 text-center text-ink-faint">Loading…</p>
         )}
-        {isError && (
+        {loadFailed && (
           <p className="px-5 py-10 text-center text-red-600">
             {serverMessage(error, "Couldn't load your messages.")}
           </p>
@@ -212,7 +225,7 @@ export default function ConversationListView() {
             {serverMessage(rowAction.error, "Couldn’t do that.")}
           </p>
         )}
-        {!isLoading && !isError && all.length === 0 && (
+        {!isLoading && !loadFailed && all.length === 0 && (
           <div className="px-6 py-14 text-center text-ink-faint">
             <p className="font-medium text-ink">No conversations yet</p>
             <p className="mt-1 text-sm">
@@ -227,7 +240,7 @@ export default function ConversationListView() {
             </button>
           </div>
         )}
-        {!isLoading && !isError && all.length > 0 && conversations.length === 0 && (
+        {!isLoading && !loadFailed && all.length > 0 && conversations.length === 0 && (
           <p className="px-5 py-10 text-center text-ink-faint">
             No conversations match “{search.trim()}”.
           </p>

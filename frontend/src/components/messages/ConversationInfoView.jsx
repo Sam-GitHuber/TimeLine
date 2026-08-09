@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Avatar from "../Avatar.jsx";
@@ -84,6 +84,54 @@ export default function ConversationInfoView() {
     queryFn: () => api.getUser(other.id),
     enabled: !!other?.id,
   });
+  /**
+   * **The Block control's absence was a claim too** (#324, the web twin of the
+   * app's #321). The gate below used to be `!isGroup && other &&
+   * otherQuery.data`, and `otherQuery.isError` was read nowhere in this file —
+   * so a failed `GET /users/<id>` (cold here whenever you haven't visited that
+   * person's profile this session) simply removed the control. Someone who
+   * opened Details specifically to block a harasser found the panel ending at
+   * *Leave chat*, with no reason why.
+   *
+   * It stays absent as a *button*, though, and that is deliberate rather than
+   * lazy: `BlockButton` takes `is_blocked` and uses it for both the label and
+   * the direction of the write (`isBlocked ? unblock : block`). Rendering one
+   * without knowing would offer *Block* to someone who has already blocked them
+   * — the false-safety belief #236 exists to prevent — or silently unblock. So
+   * the honest answer is to say we couldn't check, and offer the retry. Same
+   * answer as the app's, so the two clients read the same.
+   *
+   * `!otherQuery.data` rather than a bare `isError`, the same way round as
+   * `loadFailed` above: a failed *refresh* of a profile we already have keeps
+   * the button we can still label correctly (#309/#313). It's load-bearing only
+   * because the branches below are ordered failure-first, which is the order
+   * every other site in the app uses.
+   *
+   * `otherGone` is the same 404-outranks-the-cache rule the conversation query
+   * gets, and for the same reason: `UserDetailView` filters `is_active`, so a
+   * 404 here is a *permanent* answer — the account is gone — and a *Try again*
+   * for it is a button that can never work.
+   */
+  const otherLoadFailed = !!other && otherQuery.isError && !otherQuery.data;
+  const otherGone = !!other && otherQuery.error?.status === 404;
+
+  /**
+   * Where keyboard focus goes when the Block retry succeeds.
+   *
+   * The button that was pressed is replaced by `BlockButton`, and focus on an
+   * unmounted element falls to `<body>` — so the next Tab restarts at the top of
+   * the *page*, outside a drawer that deliberately isn't a focus trap. The same
+   * thing the thread does when a strand closes. Only after a *press*: a
+   * background refetch landing must not take focus off whatever the reader is
+   * actually doing.
+   */
+  const blockRowRef = useRef(null);
+  const retryingBlockRef = useRef(false);
+  useEffect(() => {
+    if (!retryingBlockRef.current || !otherQuery.data) return;
+    retryingBlockRef.current = false;
+    blockRowRef.current?.querySelector("button")?.focus();
+  }, [otherQuery.data]);
 
   const renameMutation = useMutation({
     mutationFn: (title) => api.renameConversation(conversationId, title),
@@ -382,10 +430,14 @@ export default function ConversationInfoView() {
           </Section>
 
           {/* Rendered only when it has something in it. A `Section` draws a rule
-              across the panel, so an unconditional one left a stray line under a
-              1:1 for as long as the profile behind the Block control was still
-              loading. */}
-          {(isGroup || (other && otherQuery.data)) && (
+              across the panel, so an unconditional one leaves a stray line under
+              a 1:1 with nothing beneath it. It used to be gated on the profile
+              *landing*, which is what made the stray rule possible in the first
+              place — the block row below now renders in all four of its states,
+              so "there is an `other`" is the whole condition, read here and
+              nowhere else rather than being two conditions kept in step by
+              hand. */}
+          {(isGroup || !!other) && (
           <Section>
             {isGroup && (
               /* Leaving unmounts this panel and so would drop a rename still in
@@ -432,13 +484,74 @@ export default function ConversationInfoView() {
                 hides the thread from both of you and bars re-connecting. The
                 shared control owns the warning modal, so this panel doesn't hold
                 a second copy of what blocking costs. */}
-            {!isGroup && other && otherQuery.data && (
-              <div className="px-5 py-2.5">
-                <BlockButton
-                  userId={other.id}
-                  displayName={other.display_name}
-                  isBlocked={otherQuery.data.is_blocked}
-                />
+            {!isGroup && other && (
+              // The shared four-branch shape, in the shared order (`errors.js`,
+              // and *The mirror image* in `feed-and-posts.md`): a real answer
+              // about *now* first, then couldn't-ask, then the control, then
+              // still-waiting. Putting the control first would make the `!data`
+              // in `otherLoadFailed` unreachable, and so meaningless.
+              //
+              // No `role="alert"` on any of them: the three write rejections on
+              // this panel carry one because they follow something the reader
+              // just did, and a query failure that is already on screen at first
+              // paint isn't announced by one anyway. The two sibling load
+              // failures in this file are plain for the same reason.
+              <div className="px-5 py-2.5" ref={blockRowRef}>
+                {otherGone ? (
+                  // No retry: this 404 is permanent (see `otherGone`), and there
+                  // is nobody left to block either.
+                  <p className="text-sm text-ink-faint">
+                    {other.display_name}’s account is no longer available.
+                  </p>
+                ) : otherLoadFailed ? (
+                  // Not a disabled button: a control that goes dead explains
+                  // nothing and offers no way on. See `otherLoadFailed` above
+                  // for why the button itself can't be drawn without
+                  // `is_blocked`.
+                  <p className="text-sm text-red-600">
+                    Couldn’t check whether you’ve blocked {other.display_name}.{" "}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        retryingBlockRef.current = true;
+                        otherQuery.refetch();
+                      }}
+                      /* Named apart from the gallery's retry lower down: on a
+                         dead connection both are on screen at once, and "Try
+                         again, button" twice over tells a screen-reader user
+                         nothing about which is which. Named rather than
+                         reworded, because each already reads clearly inside its
+                         own sentence — and these are the labels the app gives
+                         the same two controls. */
+                      aria-label="Try checking again"
+                      className="font-medium underline"
+                    >
+                      Try again
+                    </button>
+                  </p>
+                ) : otherQuery.data ? (
+                  /* Block is the strong, explicit cut — it severs the
+                     connection, hides the thread from both of you and bars
+                     re-connecting. The shared control owns the warning modal, so
+                     this panel doesn't hold a second copy of what blocking
+                     costs. */
+                  <BlockButton
+                    userId={other.id}
+                    displayName={other.display_name}
+                    isBlocked={otherQuery.data.is_blocked}
+                  />
+                ) : (
+                  // **Offline, this is the branch that runs**, and the first cut
+                  // of #324 left it out. With `networkMode: 'online'` the
+                  // profile request is never *sent*, so `isError` is false and
+                  // `data` is undefined: no error branch catches it, and without
+                  // this the control was still silently absent — in exactly the
+                  // state someone reaching for Block is likeliest to be in.
+                  // `waitingMessage` says which of the two waits it is.
+                  <p className="text-sm text-ink-faint">
+                    {waitingMessage(otherQuery)}
+                  </p>
+                )}
               </div>
             )}
           </Section>
@@ -549,6 +662,7 @@ function MediaGallery({ conversationId }) {
           <button
             type="button"
             onClick={() => mediaQuery.refetch()}
+            aria-label="Try loading the photos again"
             className="font-medium underline"
           >
             Try again
