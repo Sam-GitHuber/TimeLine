@@ -40,7 +40,7 @@ import { RsvpBar } from '@/components/events/RsvpBar';
 import { CommentThread } from '@/components/CommentThread';
 import { ReactionBar } from '@/components/ReactionBar';
 import { formatEventWhen } from '@/eventFormat';
-import { dismissEventNotifications } from '@/push';
+import { mirrorEventSeen } from '@/seenMirror';
 import { useAndroidBack } from '@/useAndroidBack';
 import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
@@ -88,21 +88,17 @@ export default function EventScreen() {
     /**
      * Same viewing-is-seeing mirror as `post/[postId].tsx`, for the event's
      * notifications — and **on the request, not on a render (#318)**, for the
-     * reason written out in full over there. In short: `useQuery` returns a
-     * cached event synchronously, so an effect gated on `!!event` fired before
-     * the mount refetch had asked the server anything, and a refetch that then
-     * 404'd left this screen saying the event "may have been cancelled" with
-     * the push that would have brought you back already pulled from the tray.
-     * A cancelled-then-deleted event is exactly the case that reaches it.
-     *
-     * Runs on every successful fetch rather than once per mount, deliberately;
-     * neither call may throw, since the server has already stamped by the time
-     * we get here.
+     * reason written out in full over there and in `seenMirror.ts`. In short:
+     * `useQuery` returns a cached event synchronously, so an effect gated on
+     * `!!event` fired before the mount refetch had asked the server anything,
+     * and a refetch that then 404'd left this screen saying the event "may have
+     * been cancelled" with the push that would have brought you back already
+     * pulled from the tray. A cancelled-then-deleted event is exactly the case
+     * that reaches it.
      */
     queryFn: async () => {
       const fetched = await api.getEvent(id);
-      void dismissEventNotifications(fetched.id);
-      void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+      mirrorEventSeen(queryClient, id);
       return fetched;
     },
     retry: false,

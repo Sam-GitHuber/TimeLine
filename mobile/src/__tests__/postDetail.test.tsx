@@ -5,13 +5,19 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import * as Notifications from 'expo-notifications';
 import { ScrollView } from 'react-native';
 
 import PostScreen from '@/app/post/[postId]';
 import type { Post } from '@/types';
 
-import { holdRequest, pickMenuOption, resetMenuSpies } from './helpers';
+import {
+  holdRequest,
+  pickMenuOption,
+  resetMenuSpies,
+  resetTray,
+  trayDismissed,
+  trayHolds,
+} from './helpers';
 
 const params: { postId: string; comment?: string } = { postId: '7' };
 
@@ -455,32 +461,28 @@ describe('scrolling to a deep-linked comment', () => {
  * the request, not off a render — see the note on the `queryFn`.
  */
 describe('seen-on-view', () => {
-  /** What's sitting in the notification tray. */
-  function tray(...entries: { identifier: string; url: string | null }[]) {
-    (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue(
-      entries.map(({ identifier, url }) => ({
-        request: { identifier, content: { data: { url } } },
-      }))
-    );
+  /** A client whose seeded cache survives to the first render — see below. */
+  function warmClient() {
+    return new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { gcTime: 0 },
+      },
+    });
   }
 
-  /** The identifiers taken out of the tray, in any order. */
-  const dismissed = () =>
-    (Notifications.dismissNotificationAsync as jest.Mock).mock.calls
-      .map(([identifier]) => identifier)
-      .sort();
-
-  beforeEach(() => {
-    (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue([]);
-    (Notifications.dismissNotificationAsync as jest.Mock).mockClear();
-  });
+  beforeEach(resetTray);
+  // Not only `beforeEach`: jest.config sets no `restoreMocks`, so without this
+  // the last tray seeded here would still be in place for every test after this
+  // describe — see `resetTray`.
+  afterEach(resetTray);
 
   it('refreshes the unread count and clears the tray once the post lands', async () => {
     // Otherwise the badge holds its stale number until the bell's next poll or
     // the next foreground, and the push stays on the lock screen for a post
     // that's open in front of you.
     serve({ post: jsonResponse(makePost()) });
-    tray(
+    trayHolds(
       { identifier: 'mine', url: '/p/7?comment=3' },
       { identifier: 'someone-else', url: '/p/8' }
     );
@@ -498,34 +500,96 @@ describe('seen-on-view', () => {
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] })
     );
-    await waitFor(() => expect(dismissed()).toEqual(['mine']));
+    await waitFor(() => expect(trayDismissed()).toEqual(['mine']));
   });
 
-  it('keeps the notification when a warm-cache reopen turns out to be a 404', async () => {
-    // #318. `useQuery` hands back a cached post *synchronously*, so while the
-    // mirror lived in an effect gated on `!!post` it fired on the first commit
-    // — before the mount refetch had been anywhere near the server. Read a
-    // post, back out, get a reply push, tap it within `gcTime`, and if the
-    // refetch 404s (deleted, or the author has since disconnected) the screen
-    // says the post is gone *and* the notification that would have brought you
-    // back has already been dismissed. A guard can't close it: `notFound` is
-    // false on that commit, because a cached entry carries no error yet.
-    serve({ post: jsonResponse({ detail: 'Not found.' }, 404) });
-    tray({ identifier: 'mine', url: '/p/7' });
-    // `gcTime: Infinity`, unlike the tests above: a seeded entry with nothing
-    // observing it is collected before the render on the default here — and a
-    // warm cache is the whole scenario.
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false, gcTime: Infinity }, mutations: { gcTime: 0 } },
+  it('sweeps the tray again on a later fetch, not only on the first', async () => {
+    // The half that makes this a mirror rather than a mount hook: the *server*
+    // stamps seen on every one of these GETs, so a reply arriving while the
+    // post is open — and swept up by the refetch that posting a comment or
+    // foregrounding triggers — has to leave the tray with it. Once-per-mount
+    // left the app's own tray lagging its backend.
+    serve({ post: jsonResponse(makePost()) });
+    const client = warmClient();
+
+    await renderScreen(client);
+    await screen.findByText('A day on the hills');
+    await waitFor(() => expect(trayDismissed()).toEqual([]));
+
+    // The push lands while the screen is up, then something refetches the post.
+    trayHolds({ identifier: 'arrived-later', url: '/p/7' });
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['post', '7'] });
     });
+
+    await waitFor(() => expect(trayDismissed()).toEqual(['arrived-later']));
+  });
+
+  /**
+   * #318: `useQuery` hands back a cached post *synchronously*, so while the
+   * mirror lived in an effect gated on `!!post` it fired on the first commit —
+   * before the mount refetch had been anywhere near the server. Read a post,
+   * back out, get a reply push, tap it within `gcTime`, and if the refetch
+   * fails the screen says there's nothing there *and* the notification that
+   * would have brought you back has already been dismissed. A guard can't close
+   * it: on that commit `notFound` is false, because a cached entry carries no
+   * error yet.
+   *
+   * Both ways the refetch can fail are covered, because they reach the same
+   * outcome down different render branches — and only the server's 404 is
+   * entitled to say the post is gone.
+   */
+  it.each([
+    [404, 'Not found.', 'Post not available'],
+    // A 500 or a dropped packet says nothing about whether the post exists, so
+    // the screen keeps the copy it has — but the dismissal is just as wrong,
+    // because the server never stamped.
+    [503, 'Service unavailable.', 'A day on the hills'],
+  ])(
+    'keeps the notification when a warm-cache reopen fails with a %i',
+    async (status, detail, expected) => {
+      // The comments endpoint fails with it: `_get_target_or_404` gates both, so
+      // a post you can't fetch is not one whose thread answers 200. It matters
+      // here rather than being mere fidelity — that GET stamps *seen* too, and
+      // `CommentThread` mirrors it.
+      serve({ post: jsonResponse({ detail }, status), commentsStatus: status });
+      trayHolds({ identifier: 'mine', url: '/p/7' });
+      // `gcTime: Infinity`: a seeded entry with nothing observing it is
+      // collected before the render on this file's default, and a warm cache is
+      // the whole scenario.
+      const client = warmClient();
+      client.setQueryData(['post', '7'], makePost());
+      const invalidate = jest.spyOn(client, 'invalidateQueries');
+
+      await renderScreen(client);
+
+      expect(await screen.findByText(expected)).toBeTruthy();
+      expect(trayDismissed()).toEqual([]);
+      expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] });
+    }
+  );
+
+  it('mirrors the seen-stamp the comments GET makes, even if the post fetch fails', async () => {
+    // `PostCommentsView.get` calls `_see_notifications` beside its own
+    // `PostCommentRead` upsert, so the thread's GET marks the post's
+    // notifications seen exactly as the post's own does. Until #318's review,
+    // only the `· N new` half of that was mirrored — so a warm reopen whose
+    // post fetch failed while its comments fetch succeeded left a notification
+    // in the tray and a number on the badge that nothing would ever clear.
+    //
+    // Not a state the server can actually produce (the previous test is the
+    // real one), but it isolates the comments GET as the *only* thing that
+    // stamped, which is exactly what the assertion is about.
+    serve({ post: jsonResponse({ detail: 'Service unavailable.' }, 503), comments: [] });
+    trayHolds({ identifier: 'mine', url: '/p/7' });
+    const client = warmClient();
     client.setQueryData(['post', '7'], makePost());
     const invalidate = jest.spyOn(client, 'invalidateQueries');
 
     await renderScreen(client);
 
-    expect(await screen.findByText('Post not available')).toBeTruthy();
-    expect(dismissed()).toEqual([]);
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] });
+    await waitFor(() => expect(trayDismissed()).toEqual(['mine']));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] });
   });
 });
 

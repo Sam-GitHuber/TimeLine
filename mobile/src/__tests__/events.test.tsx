@@ -11,7 +11,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import * as ImagePicker from 'expo-image-picker';
-import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 
 import { api, ApiError } from '@/api';
@@ -34,7 +33,10 @@ import {
   pressAlertButton,
   pressBack,
   resetMenuSpies,
+  resetTray,
   settle,
+  trayDismissed,
+  trayHolds,
 } from './helpers';
 
 // The album's "Add photos" goes through the shared picker, which opens the
@@ -373,25 +375,21 @@ describe('event detail', () => {
    * the post screen's twin, and it moves with it.
    */
   describe('seen-on-view', () => {
-    /** What's sitting in the notification tray. */
-    function tray(...entries: { identifier: string; url: string }[]) {
-      (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue(
-        entries.map(({ identifier, url }) => ({
-          request: { identifier, content: { data: { url } } },
-        }))
-      );
+    /** A client whose seeded cache survives to the first render — see below. */
+    function warmClient() {
+      return new QueryClient({
+        defaultOptions: {
+          queries: { retry: false, gcTime: Infinity },
+          mutations: { gcTime: 0 },
+        },
+      });
     }
 
-    /** The identifiers taken out of the tray, in any order. */
-    const dismissed = () =>
-      (Notifications.dismissNotificationAsync as jest.Mock).mock.calls
-        .map(([identifier]) => identifier)
-        .sort();
-
-    beforeEach(() => {
-      (Notifications.getPresentedNotificationsAsync as jest.Mock).mockResolvedValue([]);
-      (Notifications.dismissNotificationAsync as jest.Mock).mockClear();
-    });
+    beforeEach(resetTray);
+    // Not only `beforeEach`: jest.config sets no `restoreMocks`, and this
+    // describe sits mid-file with fifty `EventScreen` tests after it, every one
+    // of which would otherwise run against the last tray seeded here.
+    afterEach(resetTray);
 
     it('refreshes the unread count and clears the tray once the event lands', async () => {
       mockFetch.mockImplementation(async (url: string) => {
@@ -399,7 +397,7 @@ describe('event detail', () => {
         if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
         return jsonResponse(null, 404);
       });
-      tray(
+      trayHolds(
         { identifier: 'mine', url: '/g/7/events/9?comment=3' },
         { identifier: 'someone-else', url: '/g/7/events/10' }
       );
@@ -414,37 +412,69 @@ describe('event detail', () => {
       await waitFor(() =>
         expect(invalidate).toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] })
       );
-      await waitFor(() => expect(dismissed()).toEqual(['mine']));
+      await waitFor(() => expect(trayDismissed()).toEqual(['mine']));
     });
 
-    it('keeps the notification when a warm-cache reopen turns out to be a 404', async () => {
-      // #318, and the event's version of it is the sharper one: a cancelled
-      // event that someone then deletes is exactly the case where the push is
-      // the only thing that would explain where it went. `useQuery` returns the
-      // cached event synchronously, so the old effect fired before the mount
-      // refetch had asked the server anything, and the 404 that followed left
-      // the screen saying the event "may have been cancelled" with the
-      // notification already gone from the tray.
+    it('sweeps the tray again on a later fetch, not only on the first', async () => {
+      // The server stamps seen on every one of these GETs, so a push that
+      // arrives while the event is open must leave the tray with the refetch
+      // that an RSVP, a vote or a foreground triggers. Once-per-mount left the
+      // app's tray lagging its own backend.
       mockFetch.mockImplementation(async (url: string) => {
         if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+        if (url.includes('/api/events/9/')) return jsonResponse(makeEvent());
         return jsonResponse(null, 404);
       });
-      tray({ identifier: 'mine', url: '/g/7/events/9' });
-      // `gcTime: Infinity`: a seeded entry with nothing observing it is
-      // collected before the render on the default here, and a warm cache is
-      // the whole scenario.
-      const client = new QueryClient({
-        defaultOptions: { queries: { retry: false, gcTime: Infinity }, mutations: { gcTime: 0 } },
-      });
-      client.setQueryData(['event', 9], makeEvent());
-      const invalidate = jest.spyOn(client, 'invalidateQueries');
+      const client = warmClient();
 
       await renderWith(<EventScreen />, client);
+      await screen.findByText('Summer camping weekend');
+      await waitFor(() => expect(trayDismissed()).toEqual([]));
 
-      expect(await screen.findByText('Event not available')).toBeTruthy();
-      expect(dismissed()).toEqual([]);
-      expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] });
+      trayHolds({ identifier: 'arrived-later', url: '/g/7/events/9' });
+      await act(async () => {
+        await client.invalidateQueries({ queryKey: ['event', 9] });
+      });
+
+      await waitFor(() => expect(trayDismissed()).toEqual(['arrived-later']));
     });
+
+    /**
+     * #318, and the event's version is the sharper one: a cancelled event that
+     * someone then deletes is exactly the case where the push is the only thing
+     * that would explain where it went. `useQuery` returns the cached event
+     * synchronously, so the old effect fired before the mount refetch had asked
+     * the server anything, and the failure that followed left the screen
+     * claiming the event was gone with the notification already dismissed.
+     */
+    it.each([
+      [404, 'Event not available'],
+      // A 503 says nothing about whether the event exists, so the screen keeps
+      // the copy it has — but the dismissal is just as wrong, because the
+      // server never stamped.
+      [503, 'Summer camping weekend'],
+    ])(
+      'keeps the notification when a warm-cache reopen fails with a %i',
+      async (status, expected) => {
+        mockFetch.mockImplementation(async (url: string) => {
+          if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+          return jsonResponse(null, status);
+        });
+        trayHolds({ identifier: 'mine', url: '/g/7/events/9' });
+        // `gcTime: Infinity`: a seeded entry with nothing observing it is
+        // collected before the render on this file's default, and a warm cache
+        // is the whole scenario.
+        const client = warmClient();
+        client.setQueryData(['event', 9], makeEvent());
+        const invalidate = jest.spyOn(client, 'invalidateQueries');
+
+        await renderWith(<EventScreen />, client);
+
+        expect(await screen.findByText(expected)).toBeTruthy();
+        expect(trayDismissed()).toEqual([]);
+        expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['notificationsUnread'] });
+      }
+    );
   });
 
   it('upserts your RSVP when you choose a response', async () => {

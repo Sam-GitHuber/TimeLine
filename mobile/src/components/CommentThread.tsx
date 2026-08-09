@@ -45,6 +45,7 @@ import {
   markEventCommentsSeen,
   markPostCommentsSeen,
 } from '@/postCache';
+import { mirrorEventSeen, mirrorPostSeen } from '@/seenMirror';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Comment } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
@@ -284,13 +285,26 @@ export function CommentThread({
      * both are mirrored rather than refetched — see the two helpers for why an
      * event's is not simply the post one with a different id (the web needs
      * only the post half).
+     *
+     * **`mirrorPostSeen`/`mirrorEventSeen` beside them, because this GET stamps
+     * *two* things (#318's review).** `PostCommentsView.get` calls
+     * `_see_notifications` as well as its `PostCommentRead` upsert, so opening
+     * a thread marks the post's/event's notifications seen exactly as fetching
+     * the post itself does — and until this landed, only the `· N new` half was
+     * mirrored. A warm reopen whose *post* fetch failed while its *comments*
+     * fetch succeeded therefore left a notification in the tray and a count on
+     * the badge that nothing would ever clear, the server having already
+     * decided both were read. Only the count half is mobile-specific; the
+     * notification half is what `seenMirror.ts` exists to keep in one place.
      */
     queryFn: async () => {
       const tree = await api.getComments(target);
       if (target.postId != null) {
         markPostCommentsSeen(queryClient, Number(target.postId));
+        mirrorPostSeen(queryClient, Number(target.postId));
       } else if (target.eventId != null) {
         markEventCommentsSeen(queryClient, Number(target.eventId));
+        mirrorEventSeen(queryClient, Number(target.eventId));
       }
       return tree;
     },

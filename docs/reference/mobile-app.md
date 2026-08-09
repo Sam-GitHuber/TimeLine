@@ -332,17 +332,27 @@ would have looked like a fix and not been one: on that first commit `notFound` i
 false, because a cached entry carries no error yet.
 
 So the mirror **rides the request**, exactly as `CommentThread`'s did in #308 —
-both screens' `queryFn` is now `async`, dismissing and invalidating
-`['notificationsUnread']` after the `await`. A 404 rejects before reaching it; a
-cached render never runs it. Two consequences worth knowing:
+both screens' `queryFn` is now `async` and calls `mirrorPostSeen` /
+`mirrorEventSeen` after the `await`. A 404 rejects before reaching it; a cached
+render never runs it. Three consequences worth knowing:
 
 - It runs on **every** successful fetch rather than once per mount, which is the
-  intent — a reply arriving while the post is open is marked seen by that very
-  refetch, so its push and the badge should follow. Same "mop up on each fetch"
-  reasoning `[conversationId].tsx` gives for its own dismissal.
+  point rather than a side effect: the *server* stamps on every one of those
+  GETs too, so mirroring once per mount left the app's tray and badge lagging
+  its own backend.
 - Nothing in there may **throw**. It runs after the server has already stamped,
   so a throw would reject a GET that succeeded and leave the badge un-clearable
-  — the trap `postCache.ts` records in the same position.
+  — the trap `postCache.ts` records in the same position. That's also why the
+  screens pass `id` rather than `fetched.id`: they're equal by construction, and
+  a property read is the only thing in that block that could throw.
+- **The comment tree stamps too**, and mirroring only the two screens left a
+  hole (found in #318's review): `PostCommentsView.get` calls
+  `_see_notifications` beside its `PostCommentRead` upsert, so a warm reopen
+  whose detail fetch failed while its comments fetch succeeded left a push and a
+  badge count nothing would clear. `CommentThread`'s `queryFn` calls the same two
+  functions now. That means two sweeps of the tray on a normal load; a dismissal
+  is idempotent, and `seenMirror.ts` is the one place that decides what a
+  seen-stamp implies.
 
 `useQueryClient()` moved above the `useQuery` in `post/[postId].tsx` for it.
 

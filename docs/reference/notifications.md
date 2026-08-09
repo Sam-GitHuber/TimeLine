@@ -745,10 +745,24 @@ but isn't: a cached entry carries no error yet on that commit. Dismissing after
 the `await` instead means a 404 rejects first and a cached render never dismisses
 at all — the same move `CommentThread` made in #307/#308 for its seen-stamp
 mirror. It now runs on each successful fetch rather than once per mount, which is
-deliberate: a reply landing while the screen is open is marked seen by that
-refetch, so its push should go with it. Nothing in that block may throw — the
+deliberate and is the point rather than a side effect: **the server stamps on
+every one of those GETs too**, so mirroring once per mount left the app's own
+tray and badge lagging its backend. Nothing in that block may throw — the
 server has already stamped by then, and a throw would reject a GET that succeeded
 (see `postCache.ts`'s note in the same position).
+
+**Three GETs stamp, so three mirror.** The third is the comment tree, and it is
+the one that hides: `PostCommentsView.get` calls `_see_notifications` beside its
+own `PostCommentRead` upsert, so opening a thread marks the post's/event's
+notifications seen exactly as fetching the post does — but until #318's review
+`CommentThread` mirrored only the `· N new` count. A warm reopen whose *detail*
+fetch failed while its *comments* fetch succeeded therefore left a push in the
+tray and a number on the badge that nothing would clear, the server having
+already decided both were read. All three call `mirrorPostSeen` /
+`mirrorEventSeen` (`mobile/src/seenMirror.ts`), which is the single place that
+answers "what does a seen-stamp imply locally" — the count half stays out of it,
+because only the comments GET stamps `PostCommentRead` and clearing that from a
+detail fetch would hide comments nobody has been shown.
 
 The same guard governs **`setOnScreenConversation`**, which is a suppression
 rather than a dismissal and so easier to overlook. Claiming the thread makes the
@@ -919,12 +933,16 @@ the property the badge depends on**, so it's worth listing:
 | Click a row in the activity centre | `notificationsUnread` | `activity.tsx`'s `handlePress` |
 | **Tap a push** | `notificationsUnread` | `usePushTaps.ts` — addressed implies *seen* (`NotificationAddressedView` sets `seen_at` too), so this drops the count and has to say so |
 | **Reply from the lock screen** | `unreadMessages` | `usePushTaps.ts`'s `sendReply`, success path only |
-| **Open a post** | `notificationsUnread` | `post/[postId].tsx` — its GET marked the post's notifications seen (viewing is seeing, above) |
-| **Open an event** | `notificationsUnread` | `events/[eventId].tsx` — same |
+| **Any successful fetch of a post** | `notificationsUnread` | `post/[postId].tsx`'s `queryFn` → `mirrorPostSeen` — that GET marked the post's notifications seen (viewing is seeing, above) |
+| **Any successful fetch of an event** | `notificationsUnread` | `events/[eventId].tsx`'s `queryFn` → `mirrorEventSeen` — same |
+| **Any successful fetch of a comment tree** | `notificationsUnread` | `CommentThread.tsx`'s `queryFn` → the same two — `PostCommentsView.get` stamps seen as well as `PostCommentRead` |
 
-The last two are #179's doing. Both previously relied on "the app refetches on
-foreground", which was a fine answer while nothing outside the app showed a
-count. The lock-screen reply is the sharper of the pair: it is the one path that
+**Reply from the lock screen** and the three content-fetch rows are #179's doing
+(the third of those, and the "any successful fetch" wording on all three, came
+with #318 — see the dismissal section above for why the mirror rides the request
+and why the comment tree is one of them). They all previously relied on "the app
+refetches on foreground", which was a fine answer while nothing outside the app
+showed a count. The lock-screen reply is the sharpest of them: it is the one path that
 deals with a message while the app is deliberately *not* in front of anyone, so
 the next thing the user sees is the home screen — an icon still claiming the
 message they just answered is the most visible possible version of this being

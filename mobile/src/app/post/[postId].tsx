@@ -32,7 +32,7 @@ import {
   type KeyboardAwareScrollRef,
 } from '@/components/KeyboardAvoider';
 import { PostCard } from '@/components/PostCard';
-import { dismissPostNotifications } from '@/push';
+import { mirrorPostSeen } from '@/seenMirror';
 import { colors, fontSize, spacing } from '@/theme';
 import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 
@@ -68,10 +68,11 @@ export default function PostScreen() {
      * **The seen-mirror is bolted to the request, not to a render (#318).**
      *
      * This GET marks every unread notification pointing at this post — or at
-     * any comment on it — seen server-side (viewing is seeing,
-     * notifications.md). So the local mirror of that stamp has to be the
-     * resolution of *this* GET: refresh the count the icon badge watches, and
-     * take the delivered pushes back out of the tray.
+     * any comment on it — seen server-side (viewing is seeing), so the local
+     * mirror of that stamp has to be the resolution of *this* GET. What it
+     * mirrors, and why it may not throw, is written up in `seenMirror.ts`;
+     * `CommentThread`'s own fetch calls the same function, because the comments
+     * GET stamps too.
      *
      * It lived in an effect gated on `!!post` until #318, and an effect on
      * `data` is not the same thing — the mistake `CommentThread` had made one
@@ -87,21 +88,17 @@ export default function PostScreen() {
      *
      * Here, a 404 rejects before reaching the mirror and a cached render never
      * runs it at all. The trade is that this runs on **every** successful fetch
-     * rather than once per mount, which is the right way round: a reply landing
-     * while the post is open is marked seen by that very refetch, so its push
-     * and the badge should follow it — the same "mop up on each fetch"
-     * reasoning `messages/[conversationId].tsx` gives for its own dismissal.
+     * rather than once per mount, which is the right way round: the *server*
+     * stamps on every one of those fetches too, so mirroring once per mount
+     * left the app's tray and badge lagging its own backend.
      *
-     * Neither call may throw: this runs *after* the server has already stamped,
-     * so a throw here would reject a GET that succeeded and leave the badge
-     * un-clearable (the trap `postCache.ts` records). `dismissDelivered`
-     * swallows its own errors, and an invalidation's refetch reports failure
-     * through query state rather than rejecting.
+     * `id`, not `post.id`: they are equal by construction — `id` is what the
+     * key and the request are built from — and a property read is the one thing
+     * in here that could throw.
      */
     queryFn: async () => {
       const fetched = await api.getPost(id);
-      void dismissPostNotifications(fetched.id);
-      void queryClient.invalidateQueries({ queryKey: ['notificationsUnread'] });
+      mirrorPostSeen(queryClient, id);
       return fetched;
     },
     // A 404 here is a real answer ("you can't see this"), not a blip worth
