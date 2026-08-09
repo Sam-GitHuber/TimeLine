@@ -252,6 +252,12 @@ preference.
 
 All endpoints are `IsAuthenticated` and **scoped to `request.user`** as recipient
 — you can only ever see/mutate your own notifications (someone else's is a 404).
+`POST /notifications/seen/` reads its body by hand, so its `ids` go through the
+shared id coercion — see
+[accounts.md § Security posture](accounts.md#security-posture) for the rule.
+**An absent `ids` marks everything unread as seen; an explicit `null` is a 400**,
+because a client whose array came back undefined hasn't asked to clear the whole
+centre.
 
 - `GET /api/notifications/` — your notifications, newest-first, paginated (standard
   DRF paginator). Each item is the push-ready payload below.

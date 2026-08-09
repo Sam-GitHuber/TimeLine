@@ -21,6 +21,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from PIL import Image
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
 from api import imaging, notifications
@@ -40,9 +41,11 @@ from api.serializers import (
     NotificationSerializer,
 )
 from api.views import (
+    BODY_IDS_MAX,
     EVENT_PHOTO_PREVIEW_COUNT,
     MESSAGE_EDIT_WINDOW,
     MESSAGE_IDS_MAX,
+    _int_id,
     activate,
     active_participant_ids,
     badge_count_for,
@@ -7563,6 +7566,57 @@ class PollLifecycleTests(EventsBase):
             PollVote.objects.filter(option_id=o1, voter=self.me).count(), 1
         )
 
+    def test_vote_rejects_option_ids_that_arent_numbers(self):
+        """#205, the poll's version of it. A *string* of letters was already
+        refused — it simply isn't in the set of this poll's option ids — but the
+        membership test assumed the id was **hashable**, and hashing `["x"]` to
+        look it up raised ``TypeError``: an unhandled 500 for a malformed body.
+        A string in place of the whole list was a 400 already; it's pinned here
+        so the coercion can't quietly drop that."""
+        poll, _d1, _d2 = self._open_date_poll()
+        self.client.force_authenticate(self.me)
+        for bad in (["abc"], [["nested"]], "not-a-list"):
+            with self.subTest(option_ids=bad):
+                resp = self.client.put(
+                    poll_vote_url_by_id(poll["id"]),
+                    {"option_ids": bad},
+                    format="json",
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(PollVote.objects.filter(voter=self.me).exists())
+
+    def test_a_null_option_ids_does_not_clear_your_vote(self):
+        """An absent `option_ids` means "no selection", which clears your vote —
+        deliberate. An explicit `null` is a client whose field came back empty,
+        and answering that by deleting the vote they cast is data loss reported
+        as success."""
+        poll, _d1, _d2 = self._open_date_poll()
+        opt = poll["options"][0]["id"]
+        self.client.force_authenticate(self.me)
+        self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [opt]}, format="json"
+        )
+        self.assertEqual(PollVote.objects.filter(voter=self.me).count(), 1)
+
+        resp = self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": None}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(PollVote.objects.filter(voter=self.me).count(), 1)
+
+    def test_an_omitted_option_ids_still_clears_your_vote(self):
+        """The other side of the line above: omitting the field is how you take
+        your vote back, and that still works."""
+        poll, _d1, _d2 = self._open_date_poll()
+        opt = poll["options"][0]["id"]
+        self.client.force_authenticate(self.me)
+        self.client.put(
+            poll_vote_url_by_id(poll["id"]), {"option_ids": [opt]}, format="json"
+        )
+        resp = self.client.put(poll_vote_url_by_id(poll["id"]), {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertFalse(PollVote.objects.filter(voter=self.me).exists())
+
     def test_custom_finalise_pins_option(self):
         poll = self.client.post(
             event_polls_url(self.event),
@@ -11189,3 +11243,249 @@ class CreateReviewAccountTests(APITestCase):
             Post.objects.filter(author__email__in=[self.REVIEW, self.BUDDY]).count(),
             2,
         )
+
+
+# --- Malformed ids in a request body (#205) ---------------------------------
+
+
+class MalformedRequestBodyTests(APITestCase):
+    """The endpoints that read a field straight out of the JSON body rather
+    than through a serializer, which is why the coercion never happened.
+
+    A non-numeric id used to reach the ORM untouched: ``get_object_or_404(User,
+    pk="abc")`` and ``filter(id__in=["abc"])`` both raise ``ValueError``, which
+    DRF has no handler for — so the caller got a 500 and the log got a stack
+    trace, when the honest answer is a 400. One test per endpoint, because the
+    endpoints don't share a code path and this is exactly the sort of thing that
+    regresses invisibly one site at a time.
+    """
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        self.group = make_group(self.me, name="Malformed")
+        self.client.force_authenticate(self.me)
+        self.convo_id = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": [self.friend.id]}, format="json"
+        ).data["id"]
+
+    def test_posting_into_a_group_rejects_a_non_numeric_group_id(self):
+        resp = self.client.post(
+            POSTS_URL, {"text": "hello", "group": "abc"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Post.objects.exists())
+
+    def test_starting_a_direct_chat_rejects_a_non_numeric_user_id(self):
+        resp = self.client.post(CONVERSATIONS_URL, {"user_id": "abc"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_starting_a_group_chat_rejects_a_non_numeric_participant_id(self):
+        resp = self.client.post(
+            CONVERSATIONS_URL, {"participant_ids": ["abc"]}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_starting_a_group_chat_rejects_a_title_that_isnt_text(self):
+        """Not an id, but the same defect one field over in the same body:
+        ``(x or "").strip()`` is an AttributeError for anything that isn't a
+        string, and an unhandled AttributeError is a 500."""
+        resp = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.friend.id], "title": ["Book club"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_starting_a_group_chat_rejects_a_non_numeric_group_id(self):
+        resp = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.friend.id], "group_id": "abc"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_adding_participants_rejects_a_non_numeric_user_id(self):
+        resp = self.client.post(
+            f"/api/conversations/{self.convo_id}/participants/",
+            {"user_ids": ["abc"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_adding_participants_rejects_a_user_ids_that_isnt_a_list(self):
+        """A bare string is iterable, so ``filter(id__in="12")`` would look up
+        the ids ``"1"`` and ``"2"`` character by character rather than 12."""
+        resp = self.client.post(
+            f"/api/conversations/{self.convo_id}/participants/",
+            {"user_ids": str(self.friend.id)},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_inviting_to_a_group_rejects_a_non_numeric_user_id(self):
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": "abc"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_marking_notifications_seen_rejects_a_non_numeric_id(self):
+        resp = self.client.post(NOTIF_SEEN_URL, {"ids": ["abc"]}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_marking_notifications_seen_rejects_ids_that_isnt_a_list(self):
+        resp = self.client.post(NOTIF_SEEN_URL, {"ids": "12"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_id_too_big_for_the_column_is_a_400_not_a_500(self):
+        """Python ints are unbounded, the column is a bigint. Parsing alone
+        isn't enough: a long enough run of digits reaches Postgres as an
+        out-of-range value, which is the same 500 by another route."""
+        resp = self.client.post(
+            CONVERSATIONS_URL, {"user_id": 2**64}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_boolean_is_not_read_as_the_id_it_casts_to(self):
+        """``True`` is an int to Python and to the ORM, so ``{"ids": [true]}``
+        used to quietly mean "id 1" — the one failure here that isn't a 500 but
+        a *wrong row*, which is worse for being silent. Asserted on the
+        notification path because it's the one where the mistaken row is
+        observable: it gets marked seen."""
+        post = Post.objects.create(author=self.friend, text="hi")
+        notification = Notification.objects.create(
+            recipient=self.me,
+            actor=self.friend,
+            kind=Notification.Kind.POST_REPLY,
+            post=post,
+        )
+        resp = self.client.post(NOTIF_SEEN_URL, {"ids": [True]}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        notification.refresh_from_db()
+        self.assertIsNone(notification.seen_at)
+
+    def test_an_id_sent_as_a_string_of_digits_still_works(self):
+        """The coercion tightened, so pin the other side of it: form bodies and
+        some clients send ids as strings, and those are ordinary valid ids."""
+        resp = self.client.post(
+            CONVERSATIONS_URL, {"user_id": str(self.friend.id)}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_a_group_id_that_is_falsy_but_present_is_not_read_as_no_group(self):
+        """`{"group": 0}` names no group anyone has, so the post must fail —
+        not quietly become a *personal* post, published to every connection,
+        when the author meant it for one group. `""` is different: that's how a
+        multipart form spells an empty select, and it does mean "no group"."""
+        resp = self.client.post(
+            POSTS_URL, {"text": "private plans", "group": 0}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Post.objects.exists())
+
+        ok = self.client.post(POSTS_URL, {"text": "public", "group": ""})
+        self.assertEqual(ok.status_code, status.HTTP_201_CREATED, ok.content)
+        self.assertIsNone(Post.objects.get().group)
+
+    def test_a_group_invite_reports_a_false_user_id_as_a_bad_id(self):
+        """`false` was *sent*, so "this field is required" is the wrong answer —
+        and it has to reach the coercion to be refused as an id rather than read
+        as `int(False) == 0`."""
+        resp = self.client.post(
+            group_members_url(self.group), {"user_id": False}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotIn("This field is required", str(resp.data))
+
+    def test_marking_notifications_seen_rejects_an_explicit_null_ids(self):
+        """Omitting `ids` means "all my unread" — an explicit `null` is a client
+        whose array came back undefined, and reading that as "mark everything
+        seen" clears the whole activity centre on a client bug."""
+        post = Post.objects.create(author=self.friend, text="hi")
+        notification = Notification.objects.create(
+            recipient=self.me,
+            actor=self.friend,
+            kind=Notification.Kind.POST_REPLY,
+            post=post,
+        )
+        resp = self.client.post(NOTIF_SEEN_URL, {"ids": None}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        notification.refresh_from_db()
+        self.assertIsNone(notification.seen_at)
+
+        # The other side of the line: omitting it still marks everything seen.
+        allseen = self.client.post(NOTIF_SEEN_URL, {}, format="json")
+        self.assertEqual(allseen.status_code, status.HTTP_200_OK)
+        notification.refresh_from_db()
+        self.assertIsNotNone(notification.seen_at)
+
+    def test_an_id_list_longer_than_the_cap_is_refused(self):
+        """Each id becomes a bind parameter, and the driver refuses a statement
+        with more than 65535 of them — so an unbounded list is a 500 any
+        authenticated caller can post. A guard rail well above real use."""
+        resp = self.client.post(
+            NOTIF_SEEN_URL,
+            {"ids": list(range(1, BODY_IDS_MAX + 2))},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_body_that_isnt_an_object_is_a_400_not_a_500(self):
+        """`[]` is valid JSON and DRF passes it straight through, so every
+        endpoint that reads its body by hand called `.get` on a list — an
+        AttributeError, which is the same unhandled 500 as a malformed id, one
+        level up."""
+        post = Post.objects.create(author=self.friend, text="hi")
+        cases = [
+            ("post", CONVERSATIONS_URL),
+            ("post", f"/api/conversations/{self.convo_id}/participants/"),
+            ("post", group_members_url(self.group)),
+            ("post", NOTIF_SEEN_URL),
+            ("post", f"/api/posts/{post.pk}/react/"),
+            ("post", "/api/account/delete/"),
+        ]
+        for method, url in cases:
+            with self.subTest(url=url):
+                resp = getattr(self.client, method)(url, [], format="json")
+                self.assertEqual(
+                    resp.status_code, status.HTTP_400_BAD_REQUEST, url
+                )
+
+
+class IntIdCoercionTests(SimpleTestCase):
+    """`_int_id` direct, for the edges an endpoint test can't reach cleanly.
+
+    It's the single definition of what an id is — for request bodies and for
+    `?thread_root=`/`?ids=` alike — so its boundaries are worth pinning rather
+    than inferring from a value two doublings clear of them.
+    """
+
+    def test_accepts_ints_and_strings_of_digits(self):
+        for raw, expected in ((12, 12), ("12", 12), (-3, -3), ("-3", -3), (0, 0)):
+            with self.subTest(raw=raw):
+                self.assertEqual(_int_id(raw, "f"), expected)
+
+    def test_accepts_the_bigint_boundary_but_not_past_it(self):
+        self.assertEqual(_int_id(2**63 - 1, "f"), 2**63 - 1)
+        self.assertEqual(_int_id(-(2**63), "f"), -(2**63))
+        for raw in (2**63, -(2**63) - 1, 2**64):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValidationError):
+                    _int_id(raw, "f")
+
+    def test_refuses_what_int_would_have_swallowed(self):
+        """`int()` is looser than "a number": these all parse, and none of them
+        is an id anyone meant to send."""
+        for raw in (True, False, 4.7, 4.0, "1_0", "١٢", " 12 ", "+12",
+                    "0x1f", "", None, ["12"]):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValidationError):
+                    _int_id(raw, "f")
+
+    def test_refuses_a_string_too_long_to_parse_at_all(self):
+        """Python won't convert a string of more than 4300 digits, so an
+        unbounded parse is itself a way to raise out of a function whose whole
+        job is answering 400. Bounded at a bigint's 19 digits instead."""
+        with self.assertRaises(ValidationError):
+            _int_id("9" * 5000, "f")

@@ -108,6 +108,12 @@ groups, profiles, and the message transcript's `loadOlder`.
   by both the feed and profile views so they can't drift; it filters
   `author__is_active` (a deactivated/banned member's posts drop out everywhere).
 - Posts are created via multipart `POST /api/posts/` (text and/or photos).
+- **The `group` field is read straight from the body**, so it goes through the
+  shared id coercion — see
+  [accounts.md § Security posture](accounts.md#security-posture). An empty
+  `group` means "no group" (that's what a blank select posts); any other value
+  is held to being a real group id you're a member of, so a post meant for a
+  group can't quietly become a personal one visible to every connection.
 - **TanStack Query** drives the frontend; mutations invalidate `["feed"]` /
   `["users"]` / `["user", id]` so posting or connecting refreshes the affected
   views immediately.
