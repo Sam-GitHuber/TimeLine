@@ -452,6 +452,44 @@ mutation's options when it starts and runs them whether or not the screen is
 still mounted — otherwise you'd come back to the message twice, once from the
 server and once wearing a clock that never stops.
 
+**A third state, `sent`, for a message with nowhere to land** (#325, the app —
+the web's port of this still releases the entry unconditionally). The entry is
+normally released the instant the server's copy is written into
+`['messages', id]` — but `insertMessage` writes *into a cached list*, and on a
+cold transcript failure there is no list. The write went nowhere while the entry
+was dropped anyway, so the bubble you had just watched send vanished and the
+"couldn't load these messages" card came back in its place: it reads as *your
+message was thrown away*, in a messenger, and invites sending it again. It had
+in fact sent, and the other person had it — only that screen had lost it.
+
+So `onSuccess` asks whether the message is in the cache *afterwards*, and if it
+isn't, holds the entry as `sent`. It renders as an ordinary delivered bubble —
+`SendState` already has a `sent` tick, so this is a third outbox state and not a
+fourth kind of bubble — beside the "couldn't load the rest of this conversation"
+note that explains the missing history. It gets **no Retry**, which for want of
+an idempotency key (see the gap below) would send the text a second time, and no
+Discard, which would hide a message the recipient can read. With read receipts
+switched off it draws with no tick at all, like every other delivered message
+there: the tick column disappearing is the point of that setting, and a held
+entry wears its tick for as long as the visit rather than passing like a clock.
+
+**The hold ends when there is a cached transcript, not when that message
+appears in it.** The tempting key is the id — let go once the server's own copy
+is on screen — and it's wrong, because the transcript pages lazily from the
+newest end: return to a busy thread and page one need not contain the held
+message at all, so the entry would never be released, and the bubble would sit
+at the bottom of the chat wearing the device clock as if it were the newest
+thing said. A message deleted in the meantime would hold it forever. The entry
+exists because there was nowhere to put the message; once there is somewhere,
+the server's history is on screen and is the better account of it.
+
+The obvious alternative — have `insertMessage` synthesise a page — was rejected
+rather than deferred. It would put the query into `success` with a one-message
+transcript, which un-renders the "couldn't load" note (the screen would then
+claim the chat *is* that one message) and flips `readingMessages`, marking read
+and dismissing the thread's pushes over history it can't show. That is #320's
+claim-by-omission and #318's trap, bought back for a smaller diff.
+
 **One honest gap: Retry can duplicate.** There's no idempotency key, so a POST
 the server committed but whose response never reached the phone — a timeout, a
 tunnel — lands as `failed`, and retrying it sends the text a second time. Two

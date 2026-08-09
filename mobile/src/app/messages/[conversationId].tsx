@@ -202,6 +202,25 @@ type SendVars = {
 };
 
 /**
+ * Is this message already in a cached list?
+ *
+ * Asked in two places for two reasons — before inserting, so a poll that landed
+ * between the response and the write doesn't produce the message twice; and
+ * after inserting, so `onSuccess` can tell whether the write actually landed
+ * anywhere before it lets go of the outbox entry (#325).
+ *
+ * Indifferent to the page-param type, since it only ever reads results — which
+ * is what lets the query's own `data` and a `setQueryData` return value, typed
+ * differently, both be asked the same question.
+ */
+function hasMessage(
+  data: InfiniteData<Paginated<Message>, unknown> | undefined,
+  messageId: number
+) {
+  return !!data?.pages.some((page) => page.results.some((m) => m.id === messageId));
+}
+
+/**
  * Put an accepted message into a cached list, if it isn't there already.
  *
  * Bridges the gap between "the POST returned" and "the refetch has landed": for
@@ -216,6 +235,10 @@ type SendVars = {
  *
  * The guard matters — a poll can land *between* the response and this write, so
  * the message may already be present, and inserting blind would show it twice.
+ *
+ * **It can decline to write**, and the caller has to care. With no pages there
+ * is no list to insert into, so the message goes nowhere — see `onSuccess`,
+ * which asks afterwards rather than assuming (#325).
  */
 function insertMessage(
   data: InfiniteData<Paginated<Message>, string> | undefined,
@@ -223,9 +246,7 @@ function insertMessage(
   { newestFirst }: { newestFirst: boolean }
 ) {
   if (!data?.pages.length) return data;
-  if (data.pages.some((page) => page.results.some((m) => m.id === message.id))) {
-    return data;
-  }
+  if (hasMessage(data, message.id)) return data;
   const target = newestFirst ? 0 : data.pages.length - 1;
   const pages = data.pages.map((page, index) =>
     index === target
@@ -562,6 +583,61 @@ export default function ThreadScreen() {
   );
   const messageCount = loaded.length;
 
+  /**
+   * Is there a transcript to have written into — the exact inverse of the guard
+   * `insertMessage` declines on, and so the exact condition that ends a `sent`
+   * hold (#325).
+   *
+   * **Not "is that message in the loaded pages".** The transcript pages lazily
+   * from the newest end, so a message can be in the server's history and not in
+   * the window we hold: come back to a busy thread and page one is the newest
+   * twenty, which need not include the one being held. Keyed on the id, the hold
+   * would then never end — the bubble would sit at the bottom of the chat
+   * wearing the device clock as though it were the newest thing said, and
+   * duplicate the moment paging reached it. Keyed on a message that was
+   * *deleted* in the meantime, it would never end at all.
+   *
+   * The entry is held because there was nowhere to put the message. Once there
+   * is somewhere, the server's own history is on screen and is the better
+   * account of it, whether or not this particular screenful shows it.
+   */
+  const transcriptCached = !!pages?.pages.length;
+
+  /**
+   * The outbox minus anything the transcript has taken over (#325).
+   *
+   * Only ever drops a `sent` entry. When the transcript loads, its own copy of
+   * that message is in the history, and for one committed render both would be
+   * on screen: the entry's bubble and the server's. Filtering here rather than
+   * waiting for the effect below means the duplicate is never painted at all —
+   * the effect runs after the commit, which is a frame too late to be invisible.
+   *
+   * Everything that renders the outbox reads *this*, not `outbox`, so the views
+   * and the id lookup can't disagree about what's still outstanding.
+   */
+  const outstanding = useMemo(
+    () => outbox.filter((entry) => !(entry.status === 'sent' && transcriptCached)),
+    [outbox, transcriptCached]
+  );
+
+  /**
+   * And then actually let go of it, so the store doesn't quietly accumulate
+   * messages the server has confirmed. Separate from the filter above because
+   * they answer different questions — that one is "what should be on screen
+   * this render", this one is "what is the outbox still holding" — and the
+   * store outlives the screen, so leaving them in it would leak into the next
+   * visit to the thread.
+   *
+   * Guarded on there being something to drop: `updateOutbox` notifies its
+   * subscribers on every call, and this effect re-runs on every four-second
+   * poll.
+   */
+  useEffect(() => {
+    if (!transcriptCached) return;
+    if (outstanding.length === outbox.length) return;
+    setOutbox((entries) => entries.filter((entry) => entry.status !== 'sent'));
+  }, [transcriptCached, outstanding.length, outbox.length, setOutbox]);
+
   /** You, as a message sender — what an outbox entry is dressed in. */
   const meAsAuthor: Author = useMemo(
     () => ({
@@ -571,7 +647,7 @@ export default function ThreadScreen() {
     }),
     [me?.pk, me?.display_name, me?.avatar_thumb]
   );
-  const outboxById = new Map(outbox.map((entry) => [entry.tempId, entry]));
+  const outboxById = new Map(outstanding.map((entry) => [entry.tempId, entry]));
 
   /**
    * How many messages were waiting when you opened the thread (M5) — captured
@@ -646,14 +722,14 @@ export default function ThreadScreen() {
         messages: [
           // Reversed on the way in: the outbox holds entries oldest-first, and
           // everything downstream of here is newest-first.
-          ...outbox.map((entry) => asMessage(entry, meAsAuthor)).reverse(),
+          ...outstanding.map((entry) => asMessage(entry, meAsAuthor)).reverse(),
           ...loaded,
         ],
         meId: me?.pk,
         unread,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see `today` above
-    [loaded, outbox, meAsAuthor, me?.pk, unread, today]
+    [loaded, outstanding, meAsAuthor, me?.pk, unread, today]
   );
 
   /**
@@ -825,20 +901,49 @@ export default function ThreadScreen() {
   function statusFor(message: Message): SendState | undefined {
     if (message.sender.id !== me?.pk) return undefined;
     const pending = outboxById.get(message.id);
-    if (pending) return pending.status;
+    // `sending` and `failed` report on the send itself, which is your own
+    // business and nothing to do with who has read what — they show either way.
+    // **`sent` is the tick the setting turns off**, though (#325), and it isn't
+    // a passing clock: a held entry wears it until the transcript loads, which
+    // may be the whole visit. That's the "permanent single tick" the note above
+    // says reads as *nobody is ever reading these*, on the one bubble that has
+    // one. With receipts off it draws like every other delivered message here,
+    // which is the honest thing and the consistent one.
+    if (pending) {
+      if (pending.status !== 'sent') return pending.status;
+      return showReceipts ? 'sent' : undefined;
+    }
     if (!showReceipts) return undefined;
     return readStateFor(message, participants, me?.pk);
   }
 
-  /** Give up on a failed send. The only way outbox text is ever thrown away. */
+  /**
+   * Give up on a failed send. The only way outbox text *the server never took*
+   * is thrown away — an accepted one leaves by the reaping effect above, which
+   * is a different thing entirely: that message still exists, just elsewhere.
+   *
+   * Which is why it refuses a `sent` entry, exactly as `retryMessage` does. The
+   * bubble already withholds Discard on one, but that is a decision made in two
+   * other files (here for the transcript, `MessageThreadView` for the strand),
+   * and what it costs if they ever drift is a bubble deleted out from under a
+   * message the recipient can read — #325's symptom, by the other route.
+   */
   function discardSend(message: Message) {
+    const entry = outboxById.get(message.id);
+    if (!entry || entry.status === 'sent') return;
     setOutbox((entries) => entries.filter((e) => e.tempId !== message.id));
   }
 
-  /** Send a failed message again, from either the transcript or a strand. */
+  /**
+   * Send a failed message again, from either the transcript or a strand.
+   *
+   * Refuses a `sent` entry (#325) even though nothing offers Retry on one: the
+   * bubble decides what to draw and this decides what to send, and the cost of
+   * those two drifting apart is the same text delivered twice.
+   */
   function retryMessage(message: Message) {
     const entry = outboxById.get(message.id);
-    if (entry) retrySend(entry);
+    if (entry && entry.status !== 'sent') retrySend(entry);
   }
 
   /**
@@ -962,9 +1067,10 @@ export default function ThreadScreen() {
       // entry, so the bubble is never absent for the frame between the two.
       // React batches both, but the ordering is what makes that true rather
       // than incidental.
-      queryClient.setQueryData<InfiniteData<Paginated<Message>, string>>(
-        ['messages', id],
-        (cached) => insertMessage(cached, message, { newestFirst: true })
+      const transcript = queryClient.setQueryData<
+        InfiniteData<Paginated<Message>, string>
+      >(['messages', id], (cached) =>
+        insertMessage(cached, message, { newestFirst: true })
       );
       // And into the strand it belongs to, if it's a reply. The focused view
       // reads its own query, so without this a reply sent from in there blinks
@@ -982,7 +1088,34 @@ export default function ThreadScreen() {
           (cached) => insertMessage(cached, message, { newestFirst: false })
         );
       }
-      setOutbox((entries) => entries.filter((e) => e.tempId !== tempId));
+      // **Only let go of the entry if the transcript actually took the message**
+      // (#325). The comment above is true whenever there's a list to write into
+      // and false when there isn't: on a cold transcript failure `['messages',
+      // id]` has no pages, `insertMessage` writes nowhere, and dropping the
+      // entry anyway took a bubble off the screen for a message the server had
+      // just accepted — which reads as *your message was thrown away*, and
+      // invites sending it again. It went, and the other person has it; only
+      // this screen lost it.
+      //
+      // So the entry stays, as `sent`: an ordinary delivered bubble beside the
+      // "couldn't load the rest of this conversation" note, with no Retry to
+      // press (a retry here would be a genuine duplicate — there's no
+      // idempotency key). It is let go of the moment there is a cached
+      // transcript to let go of it *to* — see `transcriptCached` above.
+      //
+      // Asking `hasMessage` of what came back beats testing the return for
+      // `undefined`: `setQueryData` returns nothing when the updater does, but
+      // an updater can also hand back data it declined to change, and the
+      // question that matters is only ever "is the message in there now".
+      if (hasMessage(transcript, message.id)) {
+        setOutbox((entries) => entries.filter((e) => e.tempId !== tempId));
+      } else {
+        setOutbox((entries) =>
+          entries.map((e) =>
+            e.tempId === tempId ? { ...e, status: 'sent' as const } : e
+          )
+        );
+      }
       // **The composer is not touched here** — it was cleared the moment the
       // message went into the outbox. Clearing on the response was right when
       // the response was the first sign anything had happened; now it would
@@ -1797,8 +1930,21 @@ export default function ThreadScreen() {
                     // local thumbnail standing in for it, so "open full size"
                     // has nothing to open until the upload lands.
                     onPhotoPress={pending ? undefined : setLightbox}
-                    onRetry={pending ? () => retryMessage(message) : undefined}
-                    onDiscard={pending ? () => discardSend(message) : undefined}
+                    // Retry and Discard belong to a message the server hasn't
+                    // taken. A `sent` entry is one it *has* (#325), waiting only
+                    // for a transcript to appear in — so it gets neither: Retry
+                    // would send the text a second time, and Discard would hide
+                    // a message the other person can already read.
+                    onRetry={
+                      pending && pending.status !== 'sent'
+                        ? () => retryMessage(message)
+                        : undefined
+                    }
+                    onDiscard={
+                      pending && pending.status !== 'sent'
+                        ? () => discardSend(message)
+                        : undefined
+                    }
                     onShowReactors={() => setReactorsFor(message.id)}
                     // Browsing into the strand rather than replying to a
                     // particular message, so the composer aims at the root. The
@@ -2185,8 +2331,15 @@ export default function ThreadScreen() {
           // The strand's own unsent replies, so a reply appears the moment you
           // send it and a failed one is recoverable *here* rather than only in
           // the transcript behind the blur.
-          outgoing={outbox
-            .filter((entry) => entry.rootId === thread.rootId)
+          // A `sent` entry is left out (#325). It is held against the
+          // *transcript's* cache, and the strand has one of its own: the send
+          // writes into both, so a reply can land in the strand while the
+          // transcript has no pages to take it — and then the strand would
+          // render the server's copy and this one side by side, reading as
+          // having sent the reply twice. The transcript behind the blur still
+          // holds it, which is where the hold is for.
+          outgoing={outstanding
+            .filter((entry) => entry.status !== 'sent' && entry.rootId === thread.rootId)
             .map((entry) => asMessage(entry, meAsAuthor))}
           statusFor={statusFor}
           onRetry={retryMessage}

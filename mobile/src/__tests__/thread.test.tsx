@@ -4538,3 +4538,192 @@ describe('a failed transcript with something already on screen', () => {
     expect(behaviour).toMatchObject({ shouldShowList: false });
   });
 });
+
+/**
+ * A send that *succeeds* while the transcript is errored (#325).
+ *
+ * The failure above's mirror image, and the worse one. `insertMessage` writes
+ * into a cached list, and on a cold transcript failure there is no list — so the
+ * accepted message went nowhere, and `onSuccess` dropped the outbox entry
+ * regardless. The bubble you had just watched send vanished, the "couldn't load"
+ * card came back in its place, and the message was on the server the whole time:
+ * it reads unmistakably as *your message was thrown away*, in a messenger, and
+ * the obvious response is to type it again.
+ */
+describe('a send that succeeds while the transcript is errored', () => {
+  /** Take the send, echoing back what was typed so the bubble is identifiable. */
+  function acceptTheSend(id = 999) {
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(
+      async (url: string, init?: { method?: string; body?: string }) => {
+        if (String(url).includes('/messages/') && init?.method === 'POST') {
+          return jsonResponse(
+            message({ id, sender: MINE, text: JSON.parse(init.body ?? '{}').text })
+          );
+        }
+        return base(url, init);
+      }
+    );
+  }
+
+  /**
+   * Participants who report read markers, so the tick column is on at all —
+   * `receiptsVisible` is what decides that, and an empty list means it's off.
+   */
+  const WITH_RECEIPTS = [
+    {
+      id: ME.pk,
+      display_name: ME.display_name,
+      avatar_thumb: null,
+      status: 'active' as const,
+      active_since: '2026-07-01T00:00:00Z',
+      last_read_at: '2026-07-22T11:00:00Z',
+    },
+    {
+      ...ADA,
+      status: 'active' as const,
+      active_since: '2026-07-01T00:00:00Z',
+      last_read_at: '2026-07-22T11:00:00Z',
+    },
+  ];
+
+  /** The state the bug needs: transcript errored cold, composer live. */
+  async function sendIntoABrokenTranscript(
+    text: string,
+    participants = WITH_RECEIPTS
+  ) {
+    serve({ conversation: detail({ participants }), messages: [] });
+    acceptTheSend();
+    breakTheMessages();
+    const rendered = await renderScreen();
+    await screen.findByText('Couldn’t load these messages');
+
+    await fireEvent.changeText(await screen.findByLabelText('Message'), text);
+    await fireEvent.press(screen.getByLabelText('Send'));
+    return rendered;
+  }
+
+  it('keeps the message on screen, as sent', async () => {
+    await sendIntoABrokenTranscript('on my way');
+
+    // The tick, not a clock and not "Not sent": the server took it.
+    expect(await screen.findByLabelText('Sent')).toBeTruthy();
+    expect(screen.getByText('on my way')).toBeTruthy();
+    // And the note beside it still says why the history isn't there, so the one
+    // bubble doesn't read as the whole conversation.
+    expect(
+      screen.getByText('Couldn’t load the rest of this conversation.')
+    ).toBeTruthy();
+  });
+
+  it('offers no Retry on it, which would send the text twice', async () => {
+    await sendIntoABrokenTranscript('on my way');
+    await screen.findByLabelText('Sent');
+
+    expect(screen.queryByText('Not sent')).toBeNull();
+    expect(screen.queryByLabelText('Try sending again')).toBeNull();
+    // Nor Discard: hiding it would hide a message the other person can read.
+    expect(screen.queryByLabelText('Discard this message')).toBeNull();
+  });
+
+  it('draws no tick at all when read receipts are off', async () => {
+    // The tick column disappearing is the whole point of that setting, and a
+    // held entry wears its tick for as long as the visit rather than passing
+    // like a clock — so it would be the one permanent tick in a thread that
+    // deliberately has none. The message still stays, which is what matters.
+    await sendIntoABrokenTranscript('on my way', []);
+
+    expect(
+      await screen.findByText('Couldn’t load the rest of this conversation.')
+    ).toBeTruthy();
+    expect(screen.getByText('on my way')).toBeTruthy();
+    expect(screen.queryByLabelText('Sent')).toBeNull();
+    expect(screen.queryByLabelText('Sending')).toBeNull();
+  });
+
+  it('hands over to the server’s own copy when the transcript loads', async () => {
+    await sendIntoABrokenTranscript('on my way');
+    await screen.findByLabelText('Sent');
+
+    // The transcript comes back, carrying the message that was accepted.
+    serve({
+      conversation: detail({ participants: WITH_RECEIPTS }),
+      messages: [message({ id: 999, sender: MINE, text: 'on my way' })],
+    });
+    await fireEvent.press(
+      screen.getByLabelText('Try loading the messages again')
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Couldn’t load the rest of this conversation.')
+      ).toBeNull()
+    );
+    // Once, never twice — the entry and the server's copy are the same message,
+    // and both being on screen for even one frame reads as having sent it again.
+    expect(screen.getAllByText('on my way')).toHaveLength(1);
+  });
+
+  it('lets go once there is a transcript, even if that page doesn’t hold it', async () => {
+    // The hold ends on there being a cached list, **not** on the held id
+    // appearing in it. The transcript pages lazily from the newest end, so
+    // coming back to a busy thread loads the newest twenty — which need not
+    // include the message being held. Keyed on the id, the entry would never be
+    // released: the bubble would sit at the bottom of the chat wearing the
+    // device clock as though it were the newest thing said, and duplicate as
+    // soon as paging back reached the real one.
+    await sendIntoABrokenTranscript('on my way');
+    await screen.findByLabelText('Sent');
+
+    // The thread has moved on: a screenful of newer messages, none of them ours.
+    serve({
+      conversation: detail({ participants: WITH_RECEIPTS }),
+      messages: Array.from({ length: PAGE_SIZE }, (_, i) =>
+        message({ id: 1000 + i, text: `Later ${i}` })
+      ),
+    });
+    await fireEvent.press(
+      screen.getByLabelText('Try loading the messages again')
+    );
+
+    expect(await screen.findByText('Later 19')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText('on my way')).toBeNull());
+  });
+
+  it('lets go of it, rather than holding it for the next visit', async () => {
+    const first = await sendIntoABrokenTranscript('on my way');
+    await screen.findByLabelText('Sent');
+
+    serve({
+      conversation: detail({ participants: WITH_RECEIPTS }),
+      messages: [message({ id: 999, sender: MINE, text: 'on my way' })],
+    });
+    await fireEvent.press(
+      screen.getByLabelText('Try loading the messages again')
+    );
+    // Wait for the *transcript*, not for the text: the held bubble already says
+    // "on my way", so a `findByText` on it resolves before the refetch has
+    // landed and would unmount the screen before it could let go of anything.
+    // The note going is the signal that `['messages', 5]` finally has pages.
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Couldn’t load the rest of this conversation.')
+      ).toBeNull()
+    );
+    // Unmounted before the second render, like every other two-visit test here:
+    // the outbox is module state and this is asserting on it, so a second live
+    // subscriber still writing to it would be the whole point of the test left
+    // running in the background.
+    first.unmount();
+
+    // Open the thread again with the transcript broken. The outbox outlives the
+    // screen by design, so anything still in it would be drawn here — and a
+    // message the server has confirmed is not the outbox's to keep.
+    serve({ conversation: detail({ participants: WITH_RECEIPTS }), messages: [] });
+    breakTheMessages();
+    await renderScreen();
+
+    expect(await screen.findByText('Couldn’t load these messages')).toBeTruthy();
+    expect(screen.queryByText('on my way')).toBeNull();
+  });
+});
