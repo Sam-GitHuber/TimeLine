@@ -325,21 +325,41 @@ the web is simpler only because it has fewer ways to end a session.
 - **The module stores** — outbox and drafts (`outbox.js`, `drafts.js`) — are
   cleared by `logout` itself, as on the phone.
 
-There is **no session-expiry path** on the web: `api.js` has no 401 handler, so
-`user` only becomes null via `logout` or a cold load. That's why there's no
-sign-in-side `pk` comparison here — the phone needs one because an expiry
-deliberately keeps its stores, and the web has no expiry to keep them through.
+**And the same guard at sign-in**, for the same reason the phone has one: a
+sign-in doesn't have to follow a sign-out, so "the session ended" can't be the
+only trigger. Two tabs open as Ada, she logs out in one, and the other still
+holds her user, her cache and her drafts — `/login` is public, and the sign-up,
+verify-email and reset-password pages all link to it, so the next person reaches
+the form without anything in that tab ever going null. `login` therefore compares
+the pk it just fetched against the one this browser last held (a ref, since
+nothing renders from it) and empties cache and stores when they differ. Same pk
+is the same person back again, and their own unsent words are theirs to keep.
+Clearing *is* safe from inside `login`, unlike `logout`: the route in that moment
+is a public one, so there are no live observers to send refetching.
 
-Both halves run from a `finally`, which is the other half of #194. `api.logout`
+There is **no session-expiry path** on the web — `api.js` has no 401 handler, so
+`user` only becomes null via `logout` or a cold load. If one is ever added,
+pointing it at `setUser(null)` gets the cache cleared by the hook for free; what
+it must decide for itself is the stores, since the phone deliberately *keeps*
+those across an expiry (unsent words surviving a token failure is the point of an
+outbox) and leans on the sign-in guard to catch the different-person case.
+
+The teardown runs from a `finally`, which is the other half of #194. `api.logout`
 is an ordinary `request()` and *rejects* on a network blink or an already-dead
-session — where the app's equivalents (`api.logout`, `unregisterPush`) are
-best-effort and never reject. So a failed POST used to skip `setUser(null)` and
+session — where the app's equivalents (`api.logout`, `unregisterPush`) swallow
+their own failures by design. So a failed POST used to skip `setUser(null)` and
 both clears, while `NavUserMenu` navigated to `/login` regardless ("clicking
 logout should never leave you seemingly still logged in"): you landed on the
 login form with the whole previous session still in memory, and the next person
-to log in on that browser inherited it. What no client can undo is the auth
-cookie itself — it's httpOnly, so only that POST clears it, and a logout whose
-request never landed leaves a session a page reload would pick back up.
+to log in on that browser inherited it. The rejection is now swallowed around
+that one call — a throw from the teardown itself is a bug of ours and stays loud.
+
+**What no client can fix** is the auth cookie: it's httpOnly, so only that POST
+clears it. A logout whose request never landed therefore leaves a live session
+that a page reload picks straight back up, while the UI says logged-out — the
+worst-placed remnant of the shared-computer threat model, and untouched by #194.
+Closing it needs a retry, or a re-check that tells the person their logout didn't
+land; both are product decisions, not cleanups.
 
 ### Push device registration
 
