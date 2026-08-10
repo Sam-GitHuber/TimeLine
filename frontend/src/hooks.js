@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -101,15 +102,25 @@ export function useInfiniteList(queryKey, fetchFirstPage, options = {}) {
   // dropped rather than de-duplicated by position, so the server's order —
   // the product's one non-negotiable guarantee on the feed — is untouched.
   // Written up in feed-and-posts.md; the app's twin is `dedupeById`.
-  const seen = new Set();
-  const items = [];
-  for (const page of query.data?.pages ?? []) {
-    for (const item of page.results) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      items.push(item);
+  //
+  // Memoised on the pages themselves, so `items` keeps its identity between
+  // renders that didn't change the data. Without it every caller's own
+  // `useMemo(..., [items])` is dead on arrival — a fresh array each render is a
+  // fresh dependency — and each of them hands its list a new identity on every
+  // keystroke and every poll tick, re-rendering every row.
+  const items = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const page of query.data?.pages ?? []) {
+      for (const item of page.results) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        out.push(item);
+      }
     }
-  }
+    return out;
+  }, [query.data]);
+
   return { ...query, items };
 }
 
@@ -131,19 +142,52 @@ export function trimToFirstPage(data) {
   };
 }
 
+// Put a paged list away: cancel whatever it has in flight, then drop every page
+// but the first.
+//
+// The cancel has to come first and the trim has to wait on it — an in-flight
+// "Load more" would otherwise land its page back into the cache after the trim,
+// and the cancel's own revert would undo a trim that ran ahead of it. That
+// ordering is subtle enough that the second caller is the point at which it
+// stops being copied: the activity centre does this when its panel closes
+// (#134), the conversation drawer when its view goes away or a search is
+// cleared (#213).
+//
+// Rejections are swallowed on purpose. There is nothing to show and nothing to
+// undo — the worst case is a cache entry keeping pages it didn't need — and an
+// unhandled rejection is noise in the console at exactly the moment something
+// else is already going wrong. The app's `push.ts` does the same for its own
+// fire-and-forget calls.
+export function trimQueryToFirstPage(queryClient, queryKey) {
+  return queryClient
+    .cancelQueries({ queryKey })
+    .then(() => queryClient.setQueryData(queryKey, trimToFirstPage))
+    .catch(() => {});
+}
+
 // Walk an infinite query to the end, pulling each remaining page as soon as the
 // one before it lands. For the handful of lists that are bounded by something
 // real (your connections; the replies to one message) and so are wanted whole,
 // as opposed to the unbounded ones that page on scroll behind a LoadMoreButton.
 //
-// **`isError` is load-bearing, not defensive.** Without it a *failed* page fetch
-// re-arms this effect the instant it fails: `hasNextPage` stays true, because
-// the server never said there was no more, while `isFetchingNextPage` flips back
-// to false — which is exactly the condition below. So a 500 or a dropped
-// connection on page 2 doesn't stop the walk, it restarts it, as fast as the
-// browser will go, with TanStack's own retries stacked on each attempt. That
+// **The error guard is load-bearing, not defensive.** Without it a *failed* page
+// fetch re-arms this effect the instant it fails: `hasNextPage` stays true,
+// because the server never said there was no more, while `isFetchingNextPage`
+// flips back to false — which is exactly the condition below. So a 500 or a
+// dropped connection on page 2 doesn't stop the walk, it restarts it, as fast as
+// the browser will go, with TanStack's own retries stacked on each attempt. That
 // hammers an endpoint that is by definition already unhealthy, and flattens the
 // battery of the phone doing it.
+//
+// ⚠️ It's **`isFetchNextPageError`, not the query-wide `isError`**, and the
+// difference only shows on a list that *polls* (the conversation drawer, #213).
+// A failed background refetch of page one sets `status: 'error'` while the data
+// stays put — the whole reason surfaces branch on `isError && !data` rather than
+// on `isError` — so the broad flag stopped a perfectly healthy walk because some
+// unrelated poll dropped a packet, and left it stopped until a later poll
+// happened to succeed. The narrow flag says the one thing this guard is about:
+// *the page fetch we just asked for came back an error*. It stops the loop it
+// was written to stop and nothing else.
 //
 // Stopping instead leaves a partial list and hands the transient case to the
 // query's own retry/backoff. Recovery is automatic: any later fetch that
@@ -164,12 +208,28 @@ export function trimToFirstPage(data) {
 //
 // One place, so the next list that wants every page can't reintroduce the loop.
 export function useFetchAllPages(query, enabled = true) {
-  const { hasNextPage, isFetchingNextPage, isError, fetchNextPage } = query;
+  const {
+    hasNextPage,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    fetchNextPage,
+  } = query;
   useEffect(() => {
-    if (enabled && hasNextPage && !isFetchingNextPage && !isError) {
+    if (
+      enabled &&
+      hasNextPage &&
+      !isFetchingNextPage &&
+      !isFetchNextPageError
+    ) {
       fetchNextPage();
     }
-  }, [enabled, hasNextPage, isFetchingNextPage, isError, fetchNextPage]);
+  }, [
+    enabled,
+    hasNextPage,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    fetchNextPage,
+  ]);
 }
 
 // The viewer's accepted connections, for the "pick someone you already know"

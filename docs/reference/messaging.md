@@ -1875,6 +1875,64 @@ nest a button, and the version that tried it opened the chat on every menu click
 The mark-unread gate is the app's, and
 [narrower than the server's](#marking-a-thread-unread) for the same reason.
 
+**The web list pages, and a search pulls the rest of it in** (#213). `GET
+/api/conversations/` is paginated like every other list endpoint, and the drawer
+used to render page one as though it were the whole thing — so past twenty chats
+the least-recently-active ones weren't in the UI, and since the search filtered
+only the rows in hand, looking for one of them answered "No conversations match",
+which reads as *that chat is gone*. It's the [activity centre's
+#134](notifications.md) one surface over, and it gets that fix: `useInfiniteList`
+plus the shared `LoadMoreButton`. The search half needs more, because filtering a
+partial list is misleading however many pages are loaded and there is no
+server-side search to lean on — so **typing in the box walks the remaining pages**
+through `useFetchAllPages`, exactly as the connection pickers do, and only while
+you're searching, since the drawer's ordinary use is reading the top of a
+most-recent-first list and this endpoint carries the most work per row of
+anything in the app (`decorate_conversations`). While the walk is out, the panel says
+*Searching your other chats…* rather than claiming no match — "nothing matches" is
+a claim about the whole list — and a walk that has *stopped* short says so with a
+retry, because a list that stopped short looks exactly like a list that ended.
+**Stopped short covers two states, not one**: a page that came back an error, and
+a page TanStack has *paused* because the browser is offline (its default
+`networkMode` pauses rather than fails, so there is no error to read). Miss the
+second and the panel sits on "Searching…" indefinitely with no retry and the
+no-match line suppressed — the failure this whole change exists to remove, through
+the commonest fault there is.
+
+⚠️ **The error flag has to be the walk's own, not the query's.** `isError` on a
+*polled* list is set by any dropped background refetch while the data stays put —
+the same distinction the `#324` rule makes for `loadFailed` — so reading it
+stopped a healthy walk and painted a failure under it because an unrelated poll
+lost a packet. `useFetchAllPages` gates on `isFetchNextPageError` now (all four
+callers), which TanStack derives as *errored* ∧ *last fetch went forward*; since
+that still attributes a poll failure to a page already in flight, the panel
+additionally requires the walk to be **idle** before calling it stopped. That also
+makes the retry unpressable twice — pressing it flips the line back to
+"Searching…" — which is why it needs no `disabled` guard of its own.
+
+Two more consequences worth knowing. A refetch of an infinite query refetches
+**all** its loaded pages, so the list trims back to one page both when a search is
+cleared and when the view unmounts (the activity centre does the same on close;
+the cancel-then-trim ordering they share lives in `trimQueryToFirstPage`) — without
+the first of those, one search leaves the drawer re-polling every walked page for
+as long as it stays open, and refetching them on every row action too. And the
+search field's six-thread threshold reads the paginator's `count`, not the number
+of rows fetched, since that was the same mistake one layer down.
+
+**Two known limits, both inherent to page-number pagination rather than to this
+change.** A conversation that leaves the set mid-walk shifts everything after it
+up one, so a row can move onto a page already fetched and be missed — the mirror
+of the duplicate case `useInfiniteList` dedupes, and not something a client can
+close. And the walk costs `ceil(N/20)` requests against an endpoint that rebuilds
+the whole visible list each time. **The real answer to both is a `?q=` filter on
+`ConversationListCreateView`**, which would make a search one cheap, consistent
+request and delete the walk on both clients. The client-side walk is what's
+affordable today, not the end state.
+
+⚠️ **The app's list still reads one page** (`(tabs)/messages.tsx` — a plain
+`useQuery` over `data.results`, line-for-line the web's old shape). Same defect,
+other surface, not yet fixed.
+
 **The info panel is a fourth drawer *view*, not a route** (`messaging.jsx` is a
 view machine). The app pushes a screen because a phone has a navigation stack;
 giving the drawer one would mean the browser's Back button closed a panel that
