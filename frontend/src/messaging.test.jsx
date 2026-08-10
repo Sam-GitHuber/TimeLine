@@ -3386,6 +3386,235 @@ describe("Messages drawer — list search and row actions (Phase 9b M9e)", () =>
   });
 });
 
+/**
+ * #213 — the drawer read one page of a paginated endpoint and rendered it as
+ * the whole list. Past twenty chats the dormant ones didn't exist in the UI,
+ * and because search filtered only what was loaded, looking for one of them
+ * came back "No conversations match" — which reads as "that chat is gone".
+ */
+describe("Messages drawer — conversation list paging (#213)", () => {
+  /**
+   * A page of a list longer than itself. `page()` reports `count` as the number
+   * of rows in hand, which is precisely the assumption under test, so the total
+   * is passed explicitly here.
+   */
+  function pageOf(results, { next = null, count }) {
+    return { results, count, next };
+  }
+
+  function named(id, displayName) {
+    return convoRow({
+      id,
+      other: { id: id + 20, display_name: displayName, avatar_thumb: null },
+    });
+  }
+
+  const PAGE_TWO_URL = "http://testserver/api/conversations/?page=2";
+
+  it("pages the rest of the list in behind Load more", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf([named(1, "Priya"), named(2, "Sanjay")], {
+        next: PAGE_TWO_URL,
+        count: 3,
+      })
+    );
+    api.getPage.mockResolvedValue(
+      pageOf([named(3, "Yusuf")], { count: 3 })
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    // Before: the third chat is simply absent, with nothing saying so.
+    expect(screen.queryByText("Yusuf")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+
+    expect(await screen.findByText("Yusuf")).toBeInTheDocument();
+    expect(api.getPage).toHaveBeenCalledWith(PAGE_TWO_URL);
+    // And the button retires once the server says there's no next page.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Load more" })).toBeNull()
+    );
+  });
+
+  it("searches chats that haven't been paged in yet", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf(
+        [
+          named(1, "Priya"),
+          named(2, "Sanjay"),
+          named(3, "Amara"),
+          named(4, "Nadia"),
+          named(5, "Tom"),
+          named(6, "Rosa"),
+        ],
+        { next: PAGE_TWO_URL, count: 7 }
+      )
+    );
+    api.getPage.mockResolvedValue(
+      pageOf([named(7, "Yusuf")], { count: 7 })
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+    expect(api.getPage).not.toHaveBeenCalled();
+
+    // Yusuf is on page two — the chat you haven't touched in months, which is
+    // exactly the one you'd use the search box to find.
+    await user.type(
+      screen.getByRole("searchbox", { name: "Search conversations" }),
+      "yusuf"
+    );
+
+    expect(await screen.findByText("Yusuf")).toBeInTheDocument();
+    // Never "No conversations match" — not even for a beat while the walk is
+    // out, because that sentence is a claim about the whole list.
+    expect(screen.queryByText(/No conversations match/)).toBeNull();
+  });
+
+  it("still says so when nothing in the whole list matches", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf(
+        [
+          named(1, "Priya"),
+          named(2, "Sanjay"),
+          named(3, "Amara"),
+          named(4, "Nadia"),
+          named(5, "Tom"),
+          named(6, "Rosa"),
+        ],
+        { next: PAGE_TWO_URL, count: 7 }
+      )
+    );
+    api.getPage.mockResolvedValue(
+      pageOf([named(7, "Yusuf")], { count: 7 })
+    );
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await user.type(
+      screen.getByRole("searchbox", { name: "Search conversations" }),
+      "zzz"
+    );
+
+    // Once every page is in, the claim is true and gets made.
+    expect(
+      await screen.findByText(/No conversations match/)
+    ).toBeInTheDocument();
+    expect(api.getPage).toHaveBeenCalledWith(PAGE_TWO_URL);
+  });
+
+  it("owns up when a search can't reach the rest of the list", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf(
+        [
+          named(1, "Priya"),
+          named(2, "Sanjay"),
+          named(3, "Amara"),
+          named(4, "Nadia"),
+          named(5, "Tom"),
+          named(6, "Rosa"),
+        ],
+        { next: PAGE_TWO_URL, count: 7 }
+      )
+    );
+    api.getPage.mockRejectedValue(unauthoredError(500));
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await user.type(
+      screen.getByRole("searchbox", { name: "Search conversations" }),
+      "zzz"
+    );
+
+    // A list that stopped short looks exactly like a list that ended, so the
+    // partial answer is labelled rather than stated as fact.
+    expect(
+      await screen.findByText(/Couldn’t search all your chats/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No conversations match/)).toBeNull();
+
+    // The walk stops rather than hammering a server that's already unhealthy
+    // (`useFetchAllPages`), so the retry is offered rather than taken.
+    await settle();
+    const calls = api.getPage.mock.calls.length;
+    expect(calls).toBeLessThan(5);
+
+    api.getPage.mockResolvedValue(
+      pageOf([named(7, "Yusuf")], { count: 7 })
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Try searching the rest of your chats again",
+      })
+    );
+
+    expect(
+      await screen.findByText(/No conversations match/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn’t search all your chats/)).toBeNull();
+  });
+
+  it("offers search on a long list even when only one page is loaded", async () => {
+    const user = userEvent.setup();
+    // Three rows in hand, forty chats on the account: the field is a fact about
+    // the account, not about how many rows a page happens to hold.
+    api.getConversations.mockResolvedValue(
+      pageOf([named(1, "Priya"), named(2, "Sanjay"), named(3, "Amara")], {
+        next: PAGE_TWO_URL,
+        count: 40,
+      })
+    );
+    api.getPage.mockResolvedValue(pageOf([], { count: 40 }));
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    expect(
+      screen.getByRole("searchbox", { name: "Search conversations" })
+    ).toBeInTheDocument();
+  });
+
+  it("drops back to one page when the list is put away", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf([named(1, "Priya")], { next: PAGE_TWO_URL, count: 2 })
+    );
+    api.getPage.mockResolvedValue(pageOf([named(2, "Yusuf")], { count: 2 }));
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Yusuf");
+
+    // Opening a thread unmounts the list. Left alone, every poll of the drawer's
+    // most expensive endpoint would refetch both pages for as long as the cache
+    // entry lived — for rows nobody is looking at, since reopening the drawer
+    // remounts this view from scratch.
+    await user.click(screen.getByText("Priya"));
+    await screen.findByPlaceholderText(/write a message/i);
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(["conversations"])?.pages
+      ).toHaveLength(1)
+    );
+  });
+});
+
 describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
   async function openInfo(user) {
     await openHeaderMenu(user);

@@ -1875,6 +1875,33 @@ nest a button, and the version that tried it opened the chat on every menu click
 The mark-unread gate is the app's, and
 [narrower than the server's](#marking-a-thread-unread) for the same reason.
 
+**The web list pages, and a search pulls the rest of it in** (#213). `GET
+/api/conversations/` is paginated like every other list endpoint, and the drawer
+used to render page one as though it were the whole thing — so past twenty chats
+the least-recently-active ones weren't in the UI, and since the search filtered
+only the rows in hand, looking for one of them answered "No conversations match",
+which reads as *that chat is gone*. It's the [activity centre's
+#134](notifications.md) one surface over, and it gets that fix: `useInfiniteList`
+plus the shared `LoadMoreButton`. The search half needs more, because filtering a
+partial list is misleading however many pages are loaded and there is no
+server-side search to lean on — so **typing in the box walks the remaining pages**
+through `useFetchAllPages`, exactly as the connection pickers do, and only while
+you're searching, since the drawer's ordinary use is reading the top of a
+most-recent-first list and this endpoint carries the most work per row of
+anything in the app (`decorate_conversations`). While the walk is out, the panel says
+*Searching your other chats…* rather than claiming no match — "nothing matches" is
+a claim about the whole list — and a walk stopped short by a failed page says so
+with a retry, because a list that stopped short looks exactly like a list that
+ended. Two consequences worth knowing: a refetch of an infinite query refetches
+**all** its loaded pages, so the list trims back to one page when the view
+unmounts (the activity centre does the same on close); and the search field's
+six-thread threshold reads the paginator's `count`, not the number of rows
+fetched, since that was the same mistake one layer down.
+
+⚠️ **The app's list still reads one page** (`(tabs)/messages.tsx` — a plain
+`useQuery` over `data.results`, line-for-line the web's old shape). Same defect,
+other surface, not yet fixed.
+
 **The info panel is a fourth drawer *view*, not a route** (`messaging.jsx` is a
 view machine). The app pushes a screen because a phone has a navigation stack;
 giving the drawer one would mean the browser's Back button closed a panel that

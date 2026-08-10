@@ -1,10 +1,16 @@
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { SpineMark, StrokeIcon, IconButton, PanelHeader } from "../drawer-chrome.jsx";
 import ConversationRow from "./ConversationRow.jsx";
+import LoadMoreButton from "../LoadMoreButton.jsx";
 import { api, CONVERSATION_LIST_POLL_MS } from "../../api.js";
 import { useAuth } from "../../auth.jsx";
 import { serverMessage } from "../../errors.js";
+import {
+  useFetchAllPages,
+  useInfiniteList,
+  trimToFirstPage,
+} from "../../hooks.js";
 import { useMessaging } from "../../messaging.jsx";
 
 /**
@@ -56,12 +62,27 @@ export default function ConversationListView() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
 
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["conversations"],
-    queryFn: api.getConversations,
+  /**
+   * **Every chat, not the first twenty** (#213).
+   *
+   * `/api/conversations/` is `PageNumberPagination`'d at `PAGE_SIZE` like every
+   * other list endpoint, and this read used to be a plain `useQuery` rendering
+   * `data.results` — so once you passed twenty chats the least-recently-active
+   * ones simply weren't in the UI, with nothing on screen saying so. The list is
+   * ordered by most recent activity, so the ones that fell off the end were
+   * exactly the dormant ones you'd go looking for. Same defect as #134 on the
+   * activity centre, so it gets #134's answer: `useInfiniteList` + the shared
+   * `LoadMoreButton`, which is the one place paging behaviour lives.
+   *
+   * The poll rides along in `options` (the hook won't let a caller change how it
+   * pages, only what surrounds it). ⚠️ A refetch of an infinite query refetches
+   * **all** its loaded pages, so a poll costs one request per page you've asked
+   * for — which is why the effect below drops back to one page on the way out.
+   */
+  const query = useInfiniteList(["conversations"], api.getConversations, {
     refetchInterval: CONVERSATION_LIST_POLL_MS,
   });
-  const all = useMemo(() => data?.results ?? [], [data]);
+  const { items: all, data, isLoading, isError, error } = query;
   /**
    * **A failed *poll* is not a reason to paint a failure over a working list**
    * (#324, in the sweep behind it — same root cause as the two sites that issue
@@ -76,12 +97,80 @@ export default function ConversationListView() {
    */
   const loadFailed = isError && !data;
   const needle = search.trim().toLowerCase();
+  const searching = needle !== "";
+
+  /**
+   * **Searching pulls the rest of the list in** (#213, the half that made the
+   * truncation into a lie rather than an omission).
+   *
+   * The filter below runs over the rows in hand, which is fine when that's every
+   * row and misleading when it isn't: type a name you haven't messaged since the
+   * spring, get "No conversations match", and the sentence you've just been told
+   * is that the chat is gone. There's no server-side search on this endpoint, so
+   * covering the whole list means having the whole list — `useFetchAllPages`,
+   * exactly as `useConnections` does for the two pickers.
+   *
+   * Only *while* you're searching, the way `EventPhotos` walks its album only
+   * when it must: the drawer's ordinary use is reading the top of a
+   * most-recent-first list, and this endpoint is the app's most expensive one
+   * per row (#206). Clearing the box stops the walk and leaves the pages already
+   * fetched.
+   */
+  useFetchAllPages(query, searching);
+
+  /**
+   * The `isError` branch that hook says its callers owe the viewer.
+   *
+   * `useFetchAllPages` stops on a failed page rather than looping — deliberately
+   * — so a dropped connection halfway through leaves a *partial* list. Filtering
+   * that and printing "No conversations match" would be the original bug again,
+   * one layer down: a list that stopped short looks exactly like a list that
+   * ended. `hasNextPage && isError` is the hook's own stopping condition, read
+   * back out.
+   */
+  const searchStalled = searching && query.hasNextPage && isError;
+  // Still walking: matches so far are real, but "no match" isn't a fact yet.
+  const searchWalking = searching && query.hasNextPage && !isError;
+
   const conversations = useMemo(
     () =>
       needle
         ? all.filter((convo) => matchesSearch(convo, needle, me?.pk))
         : all,
     [all, needle, me?.pk]
+  );
+
+  /**
+   * How many chats you have, which is **not** how many are loaded.
+   *
+   * The search field appears at a threshold, and answering "how long is this
+   * list?" with the number of rows *fetched* is the same mistake the list itself
+   * was making. It happens to give the same answer today — a page is 20 and the
+   * threshold is 6, so any account past the threshold has a first page past it
+   * too — but only because `PAGE_SIZE > SEARCH_FROM`, which nothing enforces and
+   * neither number knows about the other. `count` is the fact about the account;
+   * `all.length` covers the cold render before any page has landed.
+   */
+  const total = data?.pages?.[0]?.count ?? all.length;
+
+  /**
+   * On the way out, drop back to a single page (ActivityCenter does the same on
+   * close; the app trims on unmount). Without it, a search that walked five
+   * pages leaves five to refetch on every poll of an endpoint that costs 6–8
+   * queries a row — for pages nobody is looking at, since the drawer remounts
+   * this view from scratch each time it opens. Cancel first and trim once that
+   * settles: an in-flight page would otherwise put itself back, and its cancel's
+   * revert would undo a trim that ran ahead of it.
+   */
+  useEffect(
+    () => () => {
+      queryClient
+        .cancelQueries({ queryKey: ["conversations"] })
+        .then(() =>
+          queryClient.setQueryData(["conversations"], trimToFirstPage)
+        );
+    },
+    [queryClient]
   );
 
   /**
@@ -197,9 +286,10 @@ export default function ConversationListView() {
       <div className="flex-1 overflow-y-auto">
         {/* Inside the scroller, not pinned above it: the field scrolls away with
             the list rather than permanently narrowing the thing you came here to
-            read. Keyed off the *unfiltered* count, so filtering down to one
-            result doesn't pull the field out from under what you just typed. */}
-        {all.length >= SEARCH_FROM && (
+            read. Keyed off the server's *unfiltered* total, so filtering down to
+            one result doesn't pull the field out from under what you just typed
+            — and so it doesn't hinge on how many pages happen to be loaded. */}
+        {total >= SEARCH_FROM && (
           <div className="border-b border-line px-4 py-2.5">
             <input
               type="search"
@@ -240,11 +330,38 @@ export default function ConversationListView() {
             </button>
           </div>
         )}
-        {!isLoading && !loadFailed && all.length > 0 && conversations.length === 0 && (
-          <p className="px-5 py-10 text-center text-ink-faint">
-            No conversations match “{search.trim()}”.
+        {/* "Nothing matches" is a claim about your whole list, so it waits until
+            the walk has one to make (#213). Until then the matches found so far
+            are on screen with this line under them, which is the honest state:
+            we're still looking. */}
+        {!isLoading && !loadFailed && searchWalking && (
+          <p className="px-5 py-2 text-center text-sm text-ink-faint">
+            Searching your other chats…
           </p>
         )}
+        {!isLoading && !loadFailed && searchStalled && (
+          <p role="status" className="px-5 py-2 text-center text-sm text-red-600">
+            Couldn’t search all your chats — this is only the ones loaded.{" "}
+            <button
+              type="button"
+              onClick={() => query.fetchNextPage()}
+              aria-label="Try searching the rest of your chats again"
+              className="font-medium underline"
+            >
+              Try again
+            </button>
+          </p>
+        )}
+        {!isLoading &&
+          !loadFailed &&
+          !searchWalking &&
+          !searchStalled &&
+          all.length > 0 &&
+          conversations.length === 0 && (
+            <p className="px-5 py-10 text-center text-ink-faint">
+              No conversations match “{search.trim()}”.
+            </p>
+          )}
 
         {conversations.map((convo) => (
           <ConversationRow
@@ -255,6 +372,11 @@ export default function ConversationListView() {
             getActions={() => rowActions(convo)}
           />
         ))}
+
+        {/* Only when you're not searching: a search walks itself to the end, and
+            a button offering to do what's already happening is one more thing to
+            reason about mid-type. The stalled case gets its own retry above. */}
+        {!searching && <LoadMoreButton query={query} />}
       </div>
     </>
   );
