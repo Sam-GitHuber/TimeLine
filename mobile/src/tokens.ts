@@ -41,12 +41,53 @@ export type TokenPair = {
  */
 let cachedAccess: string | null = null;
 
-export async function saveTokens({ access, refresh }: TokenPair): Promise<void> {
+/**
+ * Which session the tokens on this device belong to. Bumped by `clearTokens`,
+ * so it changes exactly when a session ends.
+ *
+ * It exists because **a write can outlive the session that started it**, and
+ * the write here is the credential itself. `refreshAccessToken` rotates on the
+ * wire and stores the new pair when the response lands; logging out in that gap
+ * used to wipe the Keychain and then have the refresh write a *live* refresh
+ * token straight back into it — one the logout blacklist had missed, because
+ * the rotation superseded the token it blacklisted. The next launch found a
+ * good token and signed the previous user back in with no password, which on a
+ * handed-on phone hands over the account. Same shape as the push-registration
+ * race in `push.ts` (#219), one layer down and with more at stake.
+ *
+ * Never persisted: a process death ends every session anyway.
+ */
+let session = 0;
+
+/** The session a write should be tagged with. Capture it *before* the await. */
+export function tokenSession(): number {
+  return session;
+}
+
+/**
+ * Store a token pair, unless the session it belongs to has since ended.
+ *
+ * Returns whether the tokens were actually stored. Pass the `forSession` you
+ * captured before whatever round trip produced them; the default is "right
+ * now", which is what a fresh login wants.
+ */
+export async function saveTokens(
+  { access, refresh }: TokenPair,
+  forSession: number = session
+): Promise<boolean> {
+  if (forSession !== session) return false;
   cachedAccess = access;
   await Promise.all([
     SecureStore.setItemAsync(ACCESS_KEY, access),
     SecureStore.setItemAsync(REFRESH_KEY, refresh),
   ]);
+  // Re-checked, because the two writes above are awaits like any other: a
+  // teardown starting midway through them would have deleted the keys *before*
+  // we wrote them, and left the pair behind. Undoing beats leaving a live
+  // credential on a device nobody is signed in on.
+  if (forSession === session) return true;
+  await clearTokens();
+  return false;
 }
 
 export async function getAccessToken(): Promise<string | null> {
@@ -73,6 +114,9 @@ export async function getRefreshToken(): Promise<string | null> {
 }
 
 export async function clearTokens(): Promise<void> {
+  // Bumped synchronously, before the first await, so that a `saveTokens` from
+  // the session being torn down can never slip past the check above.
+  session += 1;
   cachedAccess = null;
   await Promise.all([
     SecureStore.deleteItemAsync(ACCESS_KEY),

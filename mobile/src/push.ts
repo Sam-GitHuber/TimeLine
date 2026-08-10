@@ -433,21 +433,14 @@ let sessionEpoch = 0;
 
 /**
  * Close the door on registrations belonging to the session that is ending
- * (#219). Called by both teardown paths before they touch the stored token.
- *
- * Awaiting a committed attempt is what makes the sequencing work: by the time
- * `unregisterPush` reads `SecureStore`, a registration that got as far as the
- * network has *finished* writing, so there is a token to find and a server row
- * to delete. Uncommitted attempts need no wait — the epoch bump above has
- * already stopped them.
+ * (#219), and hand back the one still running so a caller can decide whether to
+ * wait for it. Synchronous, so no session can start between the two halves.
  */
-async function endRegistrationsForSession(): Promise<void> {
+function endRegistrationsForSession(): typeof pendingRegistration {
   sessionEpoch += 1;
   const pending = pendingRegistration;
   pendingRegistration = null;
-  // Safe to await: `runRegistration` swallows its own failures and never
-  // rejects, so this can't turn a teardown into a throw.
-  if (pending?.attempt.committed) await pending.promise;
+  return pending;
 }
 
 /**
@@ -522,7 +515,10 @@ export async function unregisterPush(): Promise<void> {
   // re-arm the phone for the user who just left (#219). Either it hasn't
   // written anything yet and now never will, or it has and we wait for it —
   // so the read below sees the token it stored and deletes the row it made.
-  await endRegistrationsForSession();
+  // Safe to await: `runRegistration` swallows its own failures and never
+  // rejects, so this can't turn a sign-out into a throw.
+  const pending = endRegistrationsForSession();
+  if (pending?.attempt.committed) await pending.promise;
   try {
     const token = await SecureStore.getItemAsync(PUSH_TOKEN_KEY);
     if (!token) return;
@@ -555,12 +551,23 @@ export async function unregisterPush(): Promise<void> {
  * next. What we must not do is keep a stale token locally, or the next
  * registration would have two ideas of this device.
  *
- * Which is exactly why this waits on an in-flight registration too (#219): a
- * cold-start registration still running when the stored token turns out to be
- * dead would otherwise write the token back moments after this deleted it.
+ * It closes the door on an in-flight registration (#219) but — unlike
+ * `unregisterPush` — deliberately **does not wait** for one that has already
+ * committed, and the asymmetry is the point. Waiting here would be waiting on
+ * the login screen, which this path lands on immediately: a registration stuck
+ * on a slow POST could still be running when the next person signs in, and the
+ * delete below would then land on *their* freshly stored token, leaving a
+ * server row with no local token to unregister it with — the very leak this
+ * whole change exists to close, arrived at from the other side.
+ *
+ * Not waiting costs nothing, because a committed registration writing its token
+ * back after this is *consistent* rather than stale: it has just created the
+ * matching server row, and the row surviving an expiry is the documented
+ * behaviour above. What we must not have is a local token with no row, or a row
+ * with no local token — and neither is reachable from here.
  */
 export async function forgetLocalPushToken(): Promise<void> {
-  await endRegistrationsForSession();
+  endRegistrationsForSession();
   await SecureStore.deleteItemAsync(PUSH_TOKEN_KEY);
 }
 

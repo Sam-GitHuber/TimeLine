@@ -27,6 +27,7 @@ import {
   getCachedAccessToken,
   getRefreshToken,
   saveTokens,
+  tokenSession,
 } from './tokens';
 import type {
   Comment,
@@ -361,11 +362,21 @@ export function setSessionExpiredHandler(handler: SessionExpiredHandler): void {
  * it.
  */
 let refreshInFlight: Promise<string> | null = null;
+/**
+ * The token session `refreshInFlight` belongs to.
+ *
+ * A refresh is only shareable with requests from the *same* session: joining
+ * one started before a sign-out would hand a new session a token pair minted
+ * for the old one. Cheap to get right, and the alternative is the subtlest
+ * possible auth bug.
+ */
+let refreshSession = -1;
 
 async function refreshAccessToken(): Promise<string> {
-  if (refreshInFlight) return refreshInFlight;
+  const forSession = tokenSession();
+  if (refreshInFlight && refreshSession === forSession) return refreshInFlight;
 
-  refreshInFlight = (async () => {
+  const pending = (async () => {
     const refresh = await getRefreshToken();
     if (!refresh) throw new ApiError('No refresh token', 401, null);
 
@@ -427,16 +438,40 @@ async function refreshAccessToken(): Promise<string> {
     if (!pair?.access || !pair?.refresh) {
       throw networkError(null);
     }
-    await saveTokens({ access: pair.access, refresh: pair.refresh });
+    // Tagged with the session this refresh started in, so a sign-out that
+    // happened while it was on the wire wins. Without that, `logout` wiped the
+    // Keychain and this wrote a live pair straight back into it — and the
+    // rotation means the token `logout` blacklisted is not the one being
+    // stored, so nothing on the server has ended the session either. The next
+    // launch found a good token and signed the previous user back in with no
+    // password.
+    const stored = await saveTokens(
+      { access: pair.access, refresh: pair.refresh },
+      forSession
+    );
+    if (!stored) {
+      // `status: 0` deliberately, so `isTokenRejection` reads this as "we never
+      // got an answer about a token" rather than "the server refused one". The
+      // difference matters: a *rejection* tears the session down, and by now the
+      // live session may be somebody else's — the caller must fail this one
+      // request and touch nothing (#245's rule, applied to a session that ended
+      // rather than a request that didn't land).
+      throw new ApiError('Session ended', 0, null, false);
+    }
     return pair.access;
   })();
 
+  refreshInFlight = pending;
+  refreshSession = forSession;
+
   try {
-    return await refreshInFlight;
+    return await pending;
   } finally {
     // Clear unconditionally, success or failure, so a failed refresh doesn't
-    // wedge every future request behind a permanently rejected promise.
-    refreshInFlight = null;
+    // wedge every future request behind a permanently rejected promise — but
+    // only if it's still *ours*: a newer session's refresh must not be dropped
+    // on the floor by an older one finishing.
+    if (refreshInFlight === pending) refreshInFlight = null;
   }
 }
 

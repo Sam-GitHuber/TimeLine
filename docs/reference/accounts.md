@@ -196,6 +196,23 @@ On the device the tokens live in **`expo-secure-store`** (Keychain-backed), neve
 JS, so: never log them, never put them in an error report, never append them to a
 URL query string.
 
+**A rotation can outlive the session that started it, and mustn't (#219).** The
+refresh runs on a shared in-flight promise and stores the rotated pair when the
+response lands, which is a whole round trip after it began — long enough for the
+user to sign out in the middle. Signing out then wiped the Keychain and the
+refresh wrote a live pair straight back into it; worse, rotation means the token
+`logout` blacklisted is *not* the one being stored, so nothing on the server had
+ended the session either. The next launch found a good token and signed the
+previous user back in without a password — on a handed-on phone, handing over
+the account. `tokens.ts` now carries a **session counter** that `clearTokens`
+bumps, `saveTokens` takes the session its pair belongs to and refuses a write
+from one that has ended (re-checking after the write, since the Keychain writes
+are awaits like any other), and a refresh is only shared with requests from the
+same session. A refused write fails its own request with `status: 0` — "we never
+got an answer" — precisely so it does *not* trigger the session-expired
+teardown, which by then might tear down somebody else's session. Same shape as
+the push-registration race below, one layer down.
+
 ### Only the server may end a session (#245)
 
 The silent refresh in `mobile/src/api.ts` is the one place the app destroys
@@ -274,11 +291,13 @@ and the registration landing afterwards to recreate the server row and rewrite
 the local token. The phone went on receiving the previous user's notifications,
 message content included. Since #219 `push.ts` sequences them with a session
 epoch: a registration that has not yet reached the network abandons itself when
-the epoch moves, and one that has is awaited by the teardown, so unregister
-always has a token to find and a row to delete. The split is deliberate — a
-teardown never waits behind the OS permission prompt, only behind writes that
-are already in flight. See the docblocks on `pendingRegistration` and
-`endRegistrationsForSession`.
+the epoch moves, and one that has is awaited by **`signOut`**, so unregister
+always has a token to find and a row to delete. Two deliberate asymmetries:
+sign-out never waits behind the OS permission prompt, only behind writes already
+in flight; and the *expiry* path (`forgetLocalPushToken`) doesn't wait at all,
+because it lands on the login screen, where waiting would risk deleting the
+token the **next** person's registration had since stored. See the docblocks on
+`pendingRegistration` and `forgetLocalPushToken`.
 
 The web (`frontend/src/auth.jsx`) clears its drafts/outbox on logout but does
 **not** yet clear its query cache — the same gap #191 closed on mobile,

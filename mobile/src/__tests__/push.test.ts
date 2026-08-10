@@ -275,9 +275,32 @@ describe('a session ending while a registration is in flight (#219)', () => {
     expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
   });
 
-  it('does not let a registration rewrite the local token after an expiry', async () => {
+  it('abandons a registration when the session expires instead', async () => {
     // The cold-start path registers on every launch, so an expiry landing on
     // that launch's registration is the same race one door along.
+    const minting = deferred<{ data: string }>();
+    mockNotifications.getExpoPushTokenAsync.mockReturnValue(
+      minting.promise as never
+    );
+
+    const registration = registerForPush();
+    await flush();
+
+    await forgetLocalPushToken();
+
+    minting.resolve({ data: TOKEN });
+
+    expect(await registration).toBeNull();
+    expect(api.registerPushToken).not.toHaveBeenCalled();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+
+  it('does not hold the expiry path open behind a committed registration', async () => {
+    // Deliberately *unlike* sign-out. This path lands on the login screen
+    // immediately, so a wait here is a wait during which someone else can sign
+    // in — and the delete would then take out the token their registration had
+    // just stored, leaving a server row nothing local can unregister. That is
+    // the same leak arrived at from the other side.
     const landing = deferred<void>();
     jest
       .spyOn(api, 'registerPushToken')
@@ -286,15 +309,12 @@ describe('a session ending while a registration is in flight (#219)', () => {
     const registration = registerForPush();
     await flush();
 
-    const forgetting = forgetLocalPushToken();
+    // Resolves without the POST having come back at all.
+    await forgetLocalPushToken();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+
     landing.resolve();
     await registration;
-    await forgetting;
-
-    // The *server* row surviving an expiry is by design (see
-    // forgetLocalPushToken); a local copy surviving is what would leave the
-    // next registration with two ideas of this device.
-    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
   });
 });
 

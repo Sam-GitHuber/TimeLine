@@ -639,6 +639,14 @@ indefinitely and which nothing could cancel anyway. By the time
 `unregisterPush` reads SecureStore, then, either nothing was written or
 everything was.
 
+The **expiry** path closes the same door but deliberately doesn't wait, because
+it lands on the login screen: a registration stuck on a slow POST could still be
+running when the next person signs in, and the delete would then take out
+*their* token, leaving a server row nothing local can unregister. Not waiting is
+free there — the row surviving an expiry is the documented behaviour below, so a
+committed registration writing its token back leaves the two agreeing rather
+than stale.
+
 **A session that *expires* can't unregister at all**, and doesn't try: the
 endpoint needs auth, and an expired session is precisely the absence of it —
 calling it would 401, trigger a refresh, fail, and re-enter the session-expired

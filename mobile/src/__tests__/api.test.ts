@@ -536,6 +536,104 @@ describe('logout', () => {
   });
 });
 
+describe('a session that ends while a refresh is on the wire', () => {
+  /** One macrotask, so an unawaited request has reached `fetch`. */
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /**
+   * A refresh held open, with the rest of the auth endpoints answering
+   * normally. Returns the lever that lets the rotated pair come back.
+   */
+  function refreshHeldOpen(): { land: () => void } {
+    let release!: (response: unknown) => void;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    mockFetch.mockImplementation(
+      async (url: string, init: { headers: Record<string, string> }) => {
+        if (url.endsWith('/api/auth/mobile/refresh/')) return held;
+        if (url.endsWith('/api/auth/mobile/logout/')) return jsonResponse(null, 200);
+        if (url.endsWith('/api/auth/mobile/login/')) {
+          return jsonResponse({
+            access: 'b-access',
+            refresh: 'b-refresh',
+            user: { pk: 2 },
+          });
+        }
+        if (init.headers.Authorization === 'Bearer stale') {
+          return jsonResponse(null, 401);
+        }
+        return jsonResponse({ pk: 1 });
+      }
+    );
+    return {
+      land: () =>
+        release(jsonResponse({ access: 'access-2', refresh: 'refresh-2' })),
+    };
+  }
+
+  it('does not let the rotated pair land back on a signed-out device', async () => {
+    // The whole reason logout talks to the server: a refresh token left on the
+    // device is a live session. Rotation makes it worse than a stale copy —
+    // the pair landing here is one the logout blacklist never saw, because it
+    // blacklisted the token this rotation replaced.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    refresh.land();
+    await pending;
+
+    expect(await getAccessToken()).toBeNull();
+    expect(await getRefreshToken()).toBeNull();
+    // And no session-expired signal: nothing expired, the user signed out. The
+    // handler would tear down whatever session is live by then, which on a
+    // shared phone need not be the one this refresh belonged to.
+    expect(onExpired).not.toHaveBeenCalled();
+  });
+
+  it('does not overwrite the next person’s tokens with the last person’s', async () => {
+    // The same write, one door along: sign out, hand the phone over, and the
+    // old session's refresh lands while the new one is using the app.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    await api.login('b@example.com', 'pw');
+    refresh.land();
+    await pending;
+
+    expect(await getAccessToken()).toBe('b-access');
+    expect(await getRefreshToken()).toBe('b-refresh');
+  });
+
+  it('fails the request that triggered it rather than ending the live session', async () => {
+    // A background poll from the old session is what usually triggers this.
+    // Its rejection must read as "we never got an answer" — a *rejection*
+    // shape would take the new session down with it.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    refresh.land();
+
+    const err = await pending;
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(0);
+  });
+});
+
 describe('createPost multipart body', () => {
   /**
    * A stand-in for `FormData` that keeps what was appended — name, value, and
