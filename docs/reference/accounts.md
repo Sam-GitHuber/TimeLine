@@ -431,38 +431,79 @@ re-auth, like a bank transfer). `delete_account()` does the teardown a naive
 `user.delete()` gets wrong:
 
 1. Deletes the user's media **files** off storage (a row cascade alone leaves
-   orphaned JPEGs on disk). That means avatars, their posts' images, **and their
-   chat attachments** — the last of these was missed originally, so every photo a
-   leaver had ever sent in a chat stayed on disk and stayed *fetchable* at its
-   `/media/messages/<uuid>.jpg` URL by any member who still had the link, since
-   `media_auth` gates on being signed in rather than on owning the file. Chat
-   photos are gathered from two cascades, not one: the user's own messages
-   (`Message.sender`), and *every* message in their 1:1 conversations — deleting
-   the user drops those conversations via `user_a`/`user_b`, which takes the other
-   person's messages in them too. **Event album photos** need two cascades for
-   the same reason: `EventPhoto.uploader` catches their own photos in anybody's
-   album, and `Event.organiser` catches the rest — an event's organiser is
-   `CASCADE` (the visibility gate needs a *living* organiser, see
-   [events.md](events.md)), so deleting the account deletes the events they
-   organised and that takes **other people's** photos on those events with it.
-   Their photo on someone else's surviving event is covered by the first clause;
-   that album lives on, one photo lighter. Files are swept `on_commit`, so a
-   rolled-back delete can never destroy files whose rows survived.
+   orphaned JPEGs on disk) — avatars, their posts' images, their event album
+   photos and their chat attachments. See **Media file cleanup** below; this
+   used to be a hand-written gather here, and the hard part was that several
+   cascades reach *other people's* files.
 2. **Last-admin guardrail:** a group whose only admin is leaving hands admin to
    the longest-standing remaining member (`Group.creator` is `SET_NULL`, so a
    group outlives its creator).
 3. A group the user was the *sole* member of is deleted outright rather than left
    as dead space.
 
-The same file-sweep rule applies to the *ordinary* delete paths, which originally
-had none: deleting a post now removes its photos, deleting an event removes its
-**whole album** (everyone's photos, not just the organiser's — the album dies
-with the event), removing a single album photo removes its pair of files, and
-deleting a group removes its avatar, its posts' photos, its events' album photos
-and its chats' attachments. `_stored_files`, `_group_files` and
-`delete_files_on_commit` in `api/views.py` keep that in one place — **any new
-delete path has to use them**, because an orphaned file stays retrievable by URL,
-so "delete the post I regret" otherwise doesn't.
+Deleting a member from the **Django admin** runs the same `delete_account()`
+(`UserAdmin.delete_model`/`delete_queryset`), single or bulk. A bare cascade
+there skipped points 2 and 3, so the maintainer removing an abusive account could
+leave a group with no admin in it or a memberless group as dead space — a
+moderation action shouldn't mean less than the member doing it themselves.
+
+### Media file cleanup
+
+Deleting a row does **not** delete the file it points at, and an orphaned file
+stays *fetchable* by anyone holding its URL, because `media_auth` gates on being
+signed in rather than on owning the file (see
+[feed-and-posts.md](feed-and-posts.md)). So "delete the post I regret" has to
+mean the photo too, and a maintainer's takedown has to mean it most of all.
+
+**One mechanism does it: a `post_delete` receiver on every model with a file
+field**, wired up in `ApiConfig.ready` — see `api/media_cleanup.py`, which
+carries the full reasoning. The set is **derived** from our own apps' models
+rather than hand-listed, because a registry someone has to remember to update is
+the same failure as a call site someone has to remember to write. Today it comes
+out as five models: `User.avatar`/`avatar_thumb`, `Group.avatar`/`avatar_thumb`,
+`PostImage.image`/`thumbnail`, `EventPhoto.image`/`thumbnail`,
+`MessageAttachment.file`/`thumbnail`. `api.tests.MediaFileFieldRegistryTests`
+pins that, so a new file field trips a test asking you to confirm the sweep suits
+it — not to go and add it somewhere.
+
+Why a signal rather than a call in each delete path, which is what this was:
+
+- **Cascades come free, and they were the hard part.** Deleting an account
+  reaches other people's files through `Event.organiser` (deleting the organiser
+  destroys albums full of members' photos) and through `Conversation.user_a`/
+  `user_b` (which takes the other party's messages in those 1:1 threads). Each
+  needed its own hand-written query, and getting the set wrong was silent.
+- **Everything that isn't a view is covered.** The Django admin — which *is* the
+  documented moderation/takedown path — and the management commands
+  (`seed_demo`, `create_review_account`) delete rows without going near a view,
+  and so left every file behind. Registering a `post_delete` listener disables
+  Django's fast-delete optimisation, which is precisely why the signal then fires
+  for cascaded and bulk `queryset.delete()` rows too.
+- **The ordering is right by construction.** `Collector.delete` runs inside its
+  own transaction, so the sweep is registered `on_commit` and is discarded if the
+  delete rolls back — a crash can leave an orphaned file (recoverable, invisible
+  in the app), never a live row pointing at nothing.
+
+The one case a receiver can't cover is **replacing** a file, since no row is
+deleted: `imaging.save_avatar`/`clear_avatar` call `delete_files_on_commit`
+directly, and **their callers must have a transaction open** (`ATOMIC_REQUESTS`
+is off, so `on_commit` outside one runs immediately). Both do. Getting that wrong
+is worse than an orphan, and it's the reason this is spelled out: the row rolls
+back still pointing at a file that's already gone, which is a broken avatar
+forever — the old image can't be re-derived and the row won't take a repair
+without a re-upload.
+
+That replacement case is also why **a file field must never be editable in the
+Django admin**, which `UserAdmin` and `GroupAdmin` both enforce with
+`readonly_fields`. Django's file widget carries a "Clear" checkbox that blanks
+the column *without deleting a row*, so no receiver fires and the file is
+orphaned; and an upload through the admin skips `imaging.process_avatar`
+altogether, storing a client's file with its EXIF — including the GPS the app
+strips from every other photo — intact. Avatars change through the API or not at
+all. `MediaFileFieldRegistryTests` asserts this for every file field, so a new
+one can't quietly arrive editable.
+
+None of this narrows *who can fetch a file that still exists* — see issue #223.
 
 **Deactivation is not deletion**, and it's worth being exact about which is
 which. Setting `is_active=False` — the admin-approval flag doubling as the

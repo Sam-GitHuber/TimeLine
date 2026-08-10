@@ -14,6 +14,7 @@ from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
+from django.db import DatabaseError
 from django.test import override_settings
 from django.urls import Resolver404, resolve
 from django.utils import timezone
@@ -758,6 +759,95 @@ class ProfileEditTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.user.refresh_from_db()
         self.assertFalse(self.user.avatar)
+
+
+@override_settings(MEDIA_ROOT=_AVATAR_MEDIA_ROOT)
+class AvatarReplacementTests(APITestCase):
+    """🔒 Replacing your avatar destroys the *old* files, and that has to wait for
+    the commit like every other file destruction (issue #224).
+
+    ``save_avatar``/``clear_avatar`` dropped them inline, before the row was
+    saved, so a failure anywhere after the call rolled the row back still
+    pointing at an ``avatar/<old-uuid>.jpg`` that no longer existed — a broken
+    avatar with no way to re-derive it, since the old image is gone and the row
+    won't accept a repair without a re-upload. The same helper serves group
+    avatars; ``api.tests.GroupAvatarReplacementTests`` covers that caller.
+    """
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_AVATAR_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="swapper@example.com", password=PASSWORD, is_active=True
+        )
+        self.client.force_authenticate(self.user)
+
+    def _set_avatar(self, name="one.jpg"):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                USER_URL, {"avatar": make_avatar_upload(name)}, format="multipart"
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        return self.user.avatar.storage, [
+            self.user.avatar.name,
+            self.user.avatar_thumb.name,
+        ]
+
+    def test_replacing_sweeps_the_old_files_and_keeps_the_new(self):
+        storage, old = self._set_avatar("one.jpg")
+        storage, new = self._set_avatar("two.jpg")
+
+        self.assertNotEqual(old, new)
+        for name in old:
+            self.assertFalse(storage.exists(name), f"{name} survived the replace")
+        for name in new:
+            self.assertTrue(storage.exists(name), f"{name} was swept by mistake")
+
+    def test_clearing_sweeps_the_files(self):
+        storage, old = self._set_avatar()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                USER_URL, {"remove_avatar": "true"}, format="multipart"
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for name in old:
+            self.assertFalse(storage.exists(name), f"{name} survived the removal")
+
+    def test_a_save_that_fails_leaves_the_old_avatar_whole(self):
+        """The half a happy-path test can't see. ``ATOMIC_REQUESTS`` is off, so
+        in production there's no transaction here unless the serializer opens
+        one, and an ``on_commit`` callback without one runs *inline* — an
+        immediate delete wearing a deferral's clothes. This asserts on the
+        callbacks themselves, so it fails if the atomic goes."""
+        storage, old = self._set_avatar()
+
+        real_save = User.save
+
+        def fail_on_avatar_save(instance, *args, **kwargs):
+            if "avatar" in (kwargs.get("update_fields") or ()):
+                raise DatabaseError("save failed")
+            return real_save(instance, *args, **kwargs)
+
+        with mock.patch.object(User, "save", fail_on_avatar_save):
+            with self.captureOnCommitCallbacks(execute=True) as callbacks:
+                with self.assertRaises(DatabaseError):
+                    self.client.patch(
+                        USER_URL,
+                        {"avatar": make_avatar_upload("two.jpg")},
+                        format="multipart",
+                    )
+
+        self.assertEqual(callbacks, [])
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.avatar.name, old[0])
+        for name in old:
+            self.assertTrue(storage.exists(name), f"{name} destroyed by a failed save")
 
 
 VERIFY_URL = "/api/auth/verify-email/"
