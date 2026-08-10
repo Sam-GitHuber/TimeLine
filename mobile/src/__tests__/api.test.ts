@@ -6,8 +6,16 @@
  * failure that would stop push notifications arriving (the point of Phase 9).
  */
 
+import * as SecureStore from 'expo-secure-store';
+
 import { api, ApiError, serverMessage, setSessionExpiredHandler } from '@/api';
-import { clearTokens, getAccessToken, getRefreshToken, saveTokens } from '@/tokens';
+import {
+  clearTokens,
+  getAccessToken,
+  getCachedAccessToken,
+  getRefreshToken,
+  saveTokens,
+} from '@/tokens';
 
 const BASE = 'https://your-timeline.net';
 
@@ -533,6 +541,218 @@ describe('logout', () => {
 
     expect(await getAccessToken()).toBeNull();
     expect(await getRefreshToken()).toBeNull();
+  });
+});
+
+describe('a session that ends while a refresh is on the wire', () => {
+  /** One macrotask, so an unawaited request has reached `fetch`. */
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /**
+   * A refresh held open, with the rest of the auth endpoints answering
+   * normally. Returns the lever that lets the rotated pair come back.
+   */
+  function refreshHeldOpen(): { land: () => void; refuse: () => void } {
+    let release!: (response: unknown) => void;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    mockFetch.mockImplementation(
+      async (url: string, init: { headers: Record<string, string> }) => {
+        if (url.endsWith('/api/auth/mobile/refresh/')) return held;
+        if (url.endsWith('/api/auth/mobile/logout/')) return jsonResponse(null, 200);
+        if (url.endsWith('/api/auth/mobile/login/')) {
+          return jsonResponse({
+            access: 'b-access',
+            refresh: 'b-refresh',
+            user: { pk: 2 },
+          });
+        }
+        if (init.headers.Authorization === 'Bearer stale') {
+          return jsonResponse(null, 401);
+        }
+        return jsonResponse({ pk: 1 });
+      }
+    );
+    return {
+      land: () =>
+        release(jsonResponse({ access: 'access-2', refresh: 'refresh-2' })),
+      // The likelier landing of the two, and the one worth pinning hardest:
+      // `logout` blacklists the exact token this refresh is carrying, so by the
+      // time the server answers it has every reason to refuse it.
+      refuse: () => release(jsonResponse({ detail: 'blacklisted' }, 401)),
+    };
+  }
+
+  it('does not let the rotated pair land back on a signed-out device', async () => {
+    // The whole reason logout talks to the server: a refresh token left on the
+    // device is a live session. Rotation makes it worse than a stale copy —
+    // the pair landing here is one the logout blacklist never saw, because it
+    // blacklisted the token this rotation replaced.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    refresh.land();
+    await pending;
+
+    expect(await getAccessToken()).toBeNull();
+    expect(await getRefreshToken()).toBeNull();
+    // And no session-expired signal: nothing expired, the user signed out. The
+    // handler would tear down whatever session is live by then, which on a
+    // shared phone need not be the one this refresh belonged to.
+    expect(onExpired).not.toHaveBeenCalled();
+  });
+
+  it('does not overwrite the next person’s tokens with the last person’s', async () => {
+    // The same write, one door along: sign out, hand the phone over, and the
+    // old session's refresh lands while the new one is using the app.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    await api.login('b@example.com', 'pw');
+    refresh.land();
+    await pending;
+
+    expect(await getAccessToken()).toBe('b-access');
+    expect(await getRefreshToken()).toBe('b-refresh');
+  });
+
+  it('does not sign the next person out when the refused refresh lands', async () => {
+    // The dominant real case. A refusal routes through the session-teardown
+    // branch, so without a session check the previous user's dead refresh takes
+    // down the person who is signed in by the time it answers.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    await api.login('b@example.com', 'pw');
+    refresh.refuse();
+    await pending;
+
+    expect(onExpired).not.toHaveBeenCalled();
+    expect(await getAccessToken()).toBe('b-access');
+    expect(await getRefreshToken()).toBe('b-refresh');
+  });
+
+  it('still ends the session when the refresh is refused and nothing else changed', async () => {
+    // The guard above must not swallow the ordinary case it sits next to: a
+    // refusal with no sign-out in between is a dead session, and the user has
+    // to be told.
+    await saveTokens({ access: 'stale', refresh: 'dead' });
+    const refresh = refreshHeldOpen();
+    const onExpired = jest.fn();
+    setSessionExpiredHandler(onExpired);
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    refresh.refuse();
+    await pending;
+
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(await getAccessToken()).toBeNull();
+  });
+
+  it('blacklists a rotated pair it refuses to store', async () => {
+    // Rotation means logout blacklisted the token this one replaced, so the
+    // pair arriving here is live on the server for 90 days. We discard it
+    // locally either way; ending it server-side is what logout is *for*.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    refresh.land();
+    await pending;
+
+    const blacklisted = mockFetch.mock.calls
+      .filter(([url]: [string]) => url.endsWith('/api/auth/mobile/logout/'))
+      .map(([, init]: [string, { body: string }]) => JSON.parse(init.body).refresh);
+    // Both the token logout knew about and the one the rotation produced.
+    expect(blacklisted).toEqual(['refresh-1', 'refresh-2']);
+  });
+
+  it('fails the request that triggered it rather than ending the live session', async () => {
+    // A background poll from the old session is what usually triggers this.
+    // Its rejection must read as "we never got an answer" — a *rejection*
+    // shape would take the new session down with it.
+    await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+    const refresh = refreshHeldOpen();
+
+    const pending = api.getCurrentUser().catch((err) => err);
+    await flush();
+
+    await api.logout();
+    refresh.land();
+
+    const err = await pending;
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(0);
+  });
+
+  it('fails a login whose write a teardown lands in the middle of', async () => {
+    // Otherwise the app reports success with nothing stored: `signIn` sets
+    // `signedIn`, every request goes out unauthenticated, and `request` skips
+    // its refresh branch when there's no access token — so nothing ever says
+    // the session is dead and the user is wedged until they force-quit.
+    mockFetch.mockResolvedValue(
+      jsonResponse({ access: 'a', refresh: 'r', user: { pk: 1 } })
+    );
+    // A one-shot implementation on the module-wide mock rather than a spy: a
+    // spy has to be restored, and a restore that doesn't put the setup's own
+    // stand-in back leaves every later test reading `undefined` from the
+    // Keychain. `helpers.ts` seeds the notification tray the same way.
+    let release!: () => void;
+    (SecureStore.setItemAsync as jest.Mock).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (release = resolve))
+    );
+
+    const pending = api.login('a@example.com', 'pw').catch((err) => err);
+    await flush();
+    await clearTokens();
+    release();
+
+    const err = await pending;
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(await getAccessToken()).toBeNull();
+    expect(await getRefreshToken()).toBeNull();
+  });
+
+  it('does not let a Keychain read in flight restore a token after sign-out', async () => {
+    // `getAccessToken` primes the in-memory cache every request falls back to.
+    // A read that started before the sign-out and resolves after it would put
+    // the previous user's token back in memory, and the app would go on making
+    // authenticated requests as them until the process died.
+    await saveTokens({ access: 'access-1', refresh: 'refresh-1' });
+    let release!: (value: string | null) => void;
+    (SecureStore.getItemAsync as jest.Mock).mockImplementationOnce(
+      () => new Promise<string | null>((resolve) => (release = resolve))
+    );
+
+    const reading = getAccessToken();
+    await clearTokens();
+    release('access-1');
+
+    expect(await reading).toBeNull();
+    expect(getCachedAccessToken()).toBeNull();
   });
 });
 

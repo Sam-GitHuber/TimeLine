@@ -17,6 +17,7 @@ import {
   conversationIdFromUrl,
   configureNotificationCategories,
   configureNotificationChannels,
+  forgetLocalPushToken,
   MESSAGE_CATEGORY,
   registerForPush,
   REPLY_ACTION,
@@ -198,6 +199,161 @@ describe('unregisterPush', () => {
 
     await expect(unregisterPush()).resolves.toBeUndefined();
     expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+});
+
+describe('a session ending while a registration is in flight (#219)', () => {
+  /**
+   * One turn of the event loop as a **macrotask**, so every microtask an
+   * unawaited registration is sitting on has drained by the time it returns —
+   * which is what lets these tests say "it got exactly this far" rather than
+   * hoping.
+   */
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /** A promise a test resolves by hand, to hold a call open. */
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  beforeEach(async () => {
+    await SecureStore.deleteItemAsync(STORAGE_KEY);
+  });
+
+  it('waits for a registration that has already reached the server, then undoes it', async () => {
+    // Sign in, then sign out before the POST comes back. Without the wait,
+    // unregister finds no stored token, no-ops, and the registration lands
+    // afterwards — leaving this phone armed for the user who just left.
+    const landing = deferred<void>();
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockReturnValue(landing.promise as never);
+
+    const registration = registerForPush();
+    await flush();
+    expect(api.registerPushToken).toHaveBeenCalledWith(TOKEN);
+
+    let signedOut = false;
+    const teardown = unregisterPush().then(() => {
+      signedOut = true;
+    });
+    await flush();
+    expect(signedOut).toBe(false);
+
+    landing.resolve();
+    await registration;
+    await teardown;
+
+    // Only now is there a row to delete and a token to delete it with.
+    expect(api.unregisterPushToken).toHaveBeenCalledWith(TOKEN);
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+
+  it('abandons a registration that had not reached the server yet', async () => {
+    const minting = deferred<{ data: string }>();
+    mockNotifications.getExpoPushTokenAsync.mockReturnValue(
+      minting.promise as never
+    );
+
+    const registration = registerForPush();
+    await flush();
+
+    // Nothing has been written yet, so there is nothing to wait for — and
+    // sign-out must *not* wait, or it would hang behind a permission prompt
+    // the user can leave sitting on screen indefinitely. If this ever starts
+    // waiting, the test times out rather than failing quietly.
+    await unregisterPush();
+
+    minting.resolve({ data: TOKEN });
+
+    expect(await registration).toBeNull();
+    expect(api.registerPushToken).not.toHaveBeenCalled();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+
+  it('abandons a registration when the session expires instead', async () => {
+    // The cold-start path registers on every launch, so an expiry landing on
+    // that launch's registration is the same race one door along.
+    const minting = deferred<{ data: string }>();
+    mockNotifications.getExpoPushTokenAsync.mockReturnValue(
+      minting.promise as never
+    );
+
+    const registration = registerForPush();
+    await flush();
+
+    await forgetLocalPushToken();
+
+    minting.resolve({ data: TOKEN });
+
+    expect(await registration).toBeNull();
+    expect(api.registerPushToken).not.toHaveBeenCalled();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+
+  it('can still unregister when the POST landed but its response did not', async () => {
+    // The row is created server-side and the response is lost — a timeout, a
+    // dropped connection. With the local write after the POST that left no
+    // token at all, so sign-out found nothing, returned early, and the row
+    // survived: #219's leak wearing a network blip's clothes.
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockRejectedValue(new Error('response lost'));
+
+    expect(await registerForPush()).toBeNull();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBe(TOKEN);
+
+    await unregisterPush();
+
+    expect(api.unregisterPushToken).toHaveBeenCalledWith(TOKEN);
+  });
+
+  it('joins an in-flight registration rather than starting a second', async () => {
+    // Only the newest attempt fits in the slot a teardown consults, so a second
+    // one starting mid-flight would leave the first untracked — and sign-out,
+    // seeing the newer uncommitted attempt, wouldn't wait for the older
+    // committed one. It would land afterwards and re-arm the phone.
+    const landing = deferred<void>();
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockReturnValue(landing.promise as never);
+
+    const first = registerForPush();
+    await flush();
+    const second = registerForPush();
+
+    expect(second).toBe(first);
+
+    landing.resolve();
+    await first;
+
+    expect(api.registerPushToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hold the expiry path open behind a committed registration', async () => {
+    // Deliberately *unlike* sign-out. This path lands on the login screen
+    // immediately, so a wait here is a wait during which someone else can sign
+    // in — and the delete would then take out the token their registration had
+    // just stored, leaving a server row nothing local can unregister. That is
+    // the same leak arrived at from the other side.
+    const landing = deferred<void>();
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockReturnValue(landing.promise as never);
+
+    const registration = registerForPush();
+    await flush();
+
+    // Resolves without the POST having come back at all.
+    await forgetLocalPushToken();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+
+    landing.resolve();
+    await registration;
   });
 });
 

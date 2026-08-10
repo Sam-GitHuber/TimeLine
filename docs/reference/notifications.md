@@ -623,6 +623,33 @@ notifications. The Expo token is kept in SecureStore precisely so logout can
 name *this* device without re-deriving it, which would fail exactly when the
 network is flaky. This is the other half of the upsert-on-token rule above.
 
+**Registering and unregistering are sequenced against each other (#219).**
+Fire-and-forget registration plus an awaited unregister is a race: sign in and
+immediately sign out, and unregister finds no stored token yet, no-ops, and the
+registration lands *after* the session ended — recreating the server row and
+rewriting the local token, so the phone keeps delivering the previous user's
+notifications, message content included. `push.ts` holds the in-flight
+registration in a module-level record alongside a **session epoch** that every
+teardown bumps. A registration checks the epoch immediately before its first
+write and abandons itself if it has moved; the flag saying it got past that
+check is set in the *same synchronous step*, so a teardown can tell with
+certainty whether it must wait. It waits only for a registration already past
+that point — never for the permission prompt, which the user can leave on screen
+indefinitely and which nothing could cancel anyway. Two supporting rules make
+that enough: only one registration runs at a time (a second joins the first,
+since only the newest could be tracked in a single slot), and **the local token
+is stored before the POST, not after** — a POST that creates the row and then
+loses its response would otherwise leave no token for `unregisterPush` to name
+the row with, which is the same leak by way of a network blip.
+
+The **expiry** path closes the same door but deliberately doesn't wait, because
+it lands on the login screen: a registration stuck on a slow POST could still be
+running when the next person signs in, and the delete would then take out
+*their* token, leaving a server row nothing local can unregister. Not waiting is
+free there — the row surviving an expiry is the documented behaviour below, so a
+committed registration writing its token back leaves the two agreeing rather
+than stale.
+
 **A session that *expires* can't unregister at all**, and doesn't try: the
 endpoint needs auth, and an expired session is precisely the absence of it —
 calling it would 401, trigger a refresh, fail, and re-enter the session-expired

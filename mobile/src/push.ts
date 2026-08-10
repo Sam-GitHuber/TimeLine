@@ -394,13 +394,90 @@ function projectId(): string | undefined {
 }
 
 /**
+ * The registration currently in flight, and whether it has passed the point of
+ * no return (#219).
+ *
+ * Registration is deliberately fire-and-forget — `auth.tsx` `void`s it at
+ * sign-in and on every cold start, because asking for the OS permission and
+ * minting a token with Expo takes seconds and must not hold up landing on the
+ * feed. That left it able to *outlive the session that started it*: sign in,
+ * immediately sign out, and `unregisterPush` found no stored token, no-oped,
+ * and the registration then landed — recreating the server row for the account
+ * that had just left and rewriting the local token unregister had just deleted.
+ * The phone went on receiving the previous user's notifications, message
+ * content included, which is the exact case a shared or handed-on phone makes
+ * real.
+ *
+ * `committed` is the whole trick. It's set **synchronously with the epoch
+ * check** below, so once `endRegistrationsForSession` has bumped the epoch, an
+ * attempt that hasn't already committed can never become committed. That means
+ * a teardown only ever waits on writes that are genuinely already going — never
+ * behind the permission prompt, which is a modal the user might leave sitting
+ * there and which nothing could cancel anyway.
+ */
+let pendingRegistration: {
+  promise: Promise<string | null>;
+  /** Shared with the running `runRegistration`, which is what sets the flag. */
+  attempt: { committed: boolean };
+} | null = null;
+
+/**
+ * Which session the in-flight registration belongs to (#219).
+ *
+ * A counter rather than a read of auth state, deliberately: `auth.tsx` imports
+ * this module, so reaching back the other way would be a cycle. Every path that
+ * ends a session bumps it, and a registration that finds it changed abandons
+ * itself rather than writing for a user who has gone.
+ */
+let sessionEpoch = 0;
+
+/**
+ * Close the door on registrations belonging to the session that is ending
+ * (#219), and hand back the one still running so a caller can decide whether to
+ * wait for it. Synchronous, so no session can start between the two halves.
+ */
+function endRegistrationsForSession(): typeof pendingRegistration {
+  sessionEpoch += 1;
+  const pending = pendingRegistration;
+  pendingRegistration = null;
+  return pending;
+}
+
+/**
  * Ask for permission, get an Expo push token, and register it with the backend.
  *
  * Returns the token, or `null` when push isn't available (simulator, permission
- * refused, or no project id). **Never throws** — it's called on the login path,
- * and no push-related failure may ever stop someone signing in.
+ * refused, or no project id) — or when the session it was registering for ended
+ * while it was still asking (#219). **Never throws** — it's called on the login
+ * path, and no push-related failure may ever stop someone signing in.
  */
-export async function registerForPush(): Promise<string | null> {
+export function registerForPush(): Promise<string | null> {
+  // One at a time. Only the *latest* attempt can be tracked in the single slot
+  // below, so a second one starting while the first is in flight would leave
+  // the first untracked — and a teardown looking at the newer, uncommitted
+  // attempt would decline to wait, while the older committed one landed after
+  // sign-out and re-armed the phone. That is #219 again, through the very field
+  // added to close it. Joining is also just better behaviour: two prompts and
+  // two POSTs for one device is nobody's intent. A teardown always clears the
+  // slot, so this can never join an attempt from a session that has ended.
+  if (pendingRegistration) return pendingRegistration.promise;
+
+  const attempt = { committed: false };
+  const promise = runRegistration(sessionEpoch, attempt);
+  const pending = { promise, attempt };
+  pendingRegistration = pending;
+  void promise.then(() => {
+    // Only clear it if nothing has started since — a stale entry here would
+    // make the next teardown wait on a registration that finished long ago.
+    if (pendingRegistration === pending) pendingRegistration = null;
+  });
+  return promise;
+}
+
+async function runRegistration(
+  epoch: number,
+  attempt: { committed: boolean }
+): Promise<string | null> {
   try {
     if (!canRegisterForPush()) return null;
 
@@ -421,8 +498,27 @@ export async function registerForPush(): Promise<string | null> {
       projectId: id,
     });
 
-    await api.registerPushToken(token);
+    // The session ended while we were asking, so there is nobody to register
+    // for: registering now would arm this phone for whoever just left (#219).
+    // This check and the flag below must stay adjacent and unawaited — that
+    // they happen in one synchronous step is what lets a teardown decide, with
+    // certainty, whether it has to wait for us.
+    if (epoch !== sessionEpoch) return null;
+    attempt.committed = true;
+
+    // **Stored before the POST, not after.** The POST can create the server row
+    // and then lose its response — a timeout, a dropped connection, the app
+    // killed between the two — which with the writes the other way round left
+    // no local token at all: `unregisterPush` would find nothing, return early,
+    // and the row would survive sign-out. That is exactly the leak this file is
+    // about, arriving by a route that looks like a network blip.
+    //
+    // The other order is strictly safer. A local token whose POST failed names
+    // a row that may not exist, and unregistering it is a DELETE that finds
+    // nothing — which `unregisterPush` already swallows, because a failed
+    // DELETE is recoverable and a missing one isn't.
     await SecureStore.setItemAsync(PUSH_TOKEN_KEY, token);
+    await api.registerPushToken(token);
     return token;
   } catch {
     // Deliberately swallowed: see above. The user is logged in either way.
@@ -436,6 +532,14 @@ export async function registerForPush(): Promise<string | null> {
  * would survive, leaving this phone receiving the previous user's pushes.
  */
 export async function unregisterPush(): Promise<void> {
+  // A registration racing this sign-out would otherwise land *after* it and
+  // re-arm the phone for the user who just left (#219). Either it hasn't
+  // written anything yet and now never will, or it has and we wait for it —
+  // so the read below sees the token it stored and deletes the row it made.
+  // Safe to await: `runRegistration` swallows its own failures and never
+  // rejects, so this can't turn a sign-out into a throw.
+  const pending = endRegistrationsForSession();
+  if (pending?.attempt.committed) await pending.promise;
   try {
     const token = await SecureStore.getItemAsync(PUSH_TOKEN_KEY);
     if (!token) return;
@@ -467,8 +571,31 @@ export async function unregisterPush(): Promise<void> {
  * end, by the backend's upsert-on-token rule moving the row to whoever logs in
  * next. What we must not do is keep a stale token locally, or the next
  * registration would have two ideas of this device.
+ *
+ * It closes the door on an in-flight registration (#219) but — unlike
+ * `unregisterPush` — deliberately **does not wait** for one that has already
+ * committed, and the asymmetry is the point. Waiting here would be waiting on
+ * the login screen, which this path lands on immediately: a registration stuck
+ * on a slow POST could still be running when the next person signs in, and the
+ * delete below would then land on *their* freshly stored token, leaving a
+ * server row with no local token to unregister it with — the very leak this
+ * whole change exists to close, arrived at from the other side.
+ *
+ * Not waiting costs nothing, because a committed registration writing its token
+ * back after this is *consistent* rather than stale: it has just created the
+ * matching server row, and the row surviving an expiry is the documented
+ * behaviour above.
+ *
+ * ⚠️ One window stays open, and it is this function's own delete rather than
+ * anything above: `auth.tsx` fires this unawaited, so if the delete is still
+ * queued when the next person signs in *and* their registration has already
+ * stored a token, this removes theirs. It needs a sign-in to complete inside a
+ * single native delete, so it is far narrower than the wait it replaced — but
+ * it is the same defect class, and the honest thing is to write it down rather
+ * than claim the state is unreachable.
  */
 export async function forgetLocalPushToken(): Promise<void> {
+  endRegistrationsForSession();
   await SecureStore.deleteItemAsync(PUSH_TOKEN_KEY);
 }
 

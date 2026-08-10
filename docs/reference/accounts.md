@@ -196,6 +196,41 @@ On the device the tokens live in **`expo-secure-store`** (Keychain-backed), neve
 JS, so: never log them, never put them in an error report, never append them to a
 URL query string.
 
+**A rotation can outlive the session that started it, and mustn't (#219).** The
+refresh runs on a shared in-flight promise and stores the rotated pair when the
+response lands, which is a whole round trip after it began — long enough for the
+user to sign out in the middle. Signing out then wiped the Keychain and the
+refresh wrote a live pair straight back into it; worse, rotation means the token
+`logout` blacklisted is *not* the one being stored, so nothing on the server had
+ended the session either. The next launch found a good token and signed the
+previous user back in without a password — on a handed-on phone, handing over
+the account. `tokens.ts` now carries a **session counter** that `clearTokens`
+bumps, `saveTokens` takes the session its pair belongs to and refuses a write
+from one that has ended (re-checking after the write, since the Keychain writes
+are awaits like any other, and undoing by compare-and-delete so it can only ever
+remove what it wrote), `getAccessToken` won't prime its in-memory cache from a
+read that started before a sign-out, and a refresh is only shared with requests
+from the same session.
+
+Three consequences worth knowing, because each was a bug in the first draft of
+that fix:
+
+- **A refused write fails its own request with `status: 0`** — "we never got an
+  answer" — precisely so it does *not* trigger the session-expired teardown. The
+  same check guards the *refusal* path in `request`, which is the likelier
+  landing: `logout` blacklists the exact token an in-flight refresh is carrying,
+  so the server refuses it moments later, and tearing the session down on that
+  would sign out whoever is on the phone by then.
+- **A rotated pair we refuse to store is blacklisted server-side** before it's
+  discarded. Nobody else holds it, but "nobody holds it" isn't "it can't be
+  used", and ending the session on the server is what logout is *for*.
+- **A login whose write is refused fails the login.** Reporting success would
+  leave the app `signedIn` with no credentials, and since `request` skips its
+  refresh branch when there's no access token, nothing would ever say so.
+
+Same shape as the push-registration race in
+[notifications.md](notifications.md), one layer down and with more at stake.
+
 ### Only the server may end a session (#245)
 
 The silent refresh in `mobile/src/api.ts` is the one place the app destroys
@@ -264,6 +299,14 @@ each with its own rule:
   `signIn` compares the new `pk` against the last session's and clears all
   three stores when they differ, so the same person gets their words back and
   anyone else gets nothing.
+
+A third thing leaves with the session, and it is the one with a *race* in it
+rather than a rule: the **device's push registration**. `signOut` awaits
+`unregisterPush()`, but registration is fire-and-forget, so the two could
+interleave and leave the phone receiving the previous user's notifications
+(#219). How they're sequenced now lives with push itself, in
+[notifications.md](notifications.md) § *App side* — one copy, because the two
+docs disagreeing about it is how the next change breaks it.
 
 The web (`frontend/src/auth.jsx`) clears its drafts/outbox on logout but does
 **not** yet clear its query cache — the same gap #191 closed on mobile,
