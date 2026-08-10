@@ -17,6 +17,7 @@ import {
   conversationIdFromUrl,
   configureNotificationCategories,
   configureNotificationChannels,
+  forgetLocalPushToken,
   MESSAGE_CATEGORY,
   registerForPush,
   REPLY_ACTION,
@@ -197,6 +198,102 @@ describe('unregisterPush', () => {
       .mockRejectedValue(new Error('offline'));
 
     await expect(unregisterPush()).resolves.toBeUndefined();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+});
+
+describe('a session ending while a registration is in flight (#219)', () => {
+  /**
+   * One turn of the event loop as a **macrotask**, so every microtask an
+   * unawaited registration is sitting on has drained by the time it returns —
+   * which is what lets these tests say "it got exactly this far" rather than
+   * hoping.
+   */
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /** A promise a test resolves by hand, to hold a call open. */
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  beforeEach(async () => {
+    await SecureStore.deleteItemAsync(STORAGE_KEY);
+  });
+
+  it('waits for a registration that has already reached the server, then undoes it', async () => {
+    // Sign in, then sign out before the POST comes back. Without the wait,
+    // unregister finds no stored token, no-ops, and the registration lands
+    // afterwards — leaving this phone armed for the user who just left.
+    const landing = deferred<void>();
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockReturnValue(landing.promise as never);
+
+    const registration = registerForPush();
+    await flush();
+    expect(api.registerPushToken).toHaveBeenCalledWith(TOKEN);
+
+    let signedOut = false;
+    const teardown = unregisterPush().then(() => {
+      signedOut = true;
+    });
+    await flush();
+    expect(signedOut).toBe(false);
+
+    landing.resolve();
+    await registration;
+    await teardown;
+
+    // Only now is there a row to delete and a token to delete it with.
+    expect(api.unregisterPushToken).toHaveBeenCalledWith(TOKEN);
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+
+  it('abandons a registration that had not reached the server yet', async () => {
+    const minting = deferred<{ data: string }>();
+    mockNotifications.getExpoPushTokenAsync.mockReturnValue(
+      minting.promise as never
+    );
+
+    const registration = registerForPush();
+    await flush();
+
+    // Nothing has been written yet, so there is nothing to wait for — and
+    // sign-out must *not* wait, or it would hang behind a permission prompt
+    // the user can leave sitting on screen indefinitely. If this ever starts
+    // waiting, the test times out rather than failing quietly.
+    await unregisterPush();
+
+    minting.resolve({ data: TOKEN });
+
+    expect(await registration).toBeNull();
+    expect(api.registerPushToken).not.toHaveBeenCalled();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
+  });
+
+  it('does not let a registration rewrite the local token after an expiry', async () => {
+    // The cold-start path registers on every launch, so an expiry landing on
+    // that launch's registration is the same race one door along.
+    const landing = deferred<void>();
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockReturnValue(landing.promise as never);
+
+    const registration = registerForPush();
+    await flush();
+
+    const forgetting = forgetLocalPushToken();
+    landing.resolve();
+    await registration;
+    await forgetting;
+
+    // The *server* row surviving an expiry is by design (see
+    // forgetLocalPushToken); a local copy surviving is what would leave the
+    // next registration with two ideas of this device.
     expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
   });
 });

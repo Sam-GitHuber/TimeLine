@@ -265,6 +265,21 @@ each with its own rule:
   three stores when they differ, so the same person gets their words back and
   anyone else gets nothing.
 
+There is a third thing that leaves with the session, and it is the one with a
+*race* in it rather than a rule: the **device's push registration**. `signOut`
+awaits `unregisterPush()` before `api.logout()`, but registration itself is
+fire-and-forget (`void registerForPush()` at sign-in and on every cold start),
+so the two could interleave — unregister finding no stored token yet, no-oping,
+and the registration landing afterwards to recreate the server row and rewrite
+the local token. The phone went on receiving the previous user's notifications,
+message content included. Since #219 `push.ts` sequences them with a session
+epoch: a registration that has not yet reached the network abandons itself when
+the epoch moves, and one that has is awaited by the teardown, so unregister
+always has a token to find and a row to delete. The split is deliberate — a
+teardown never waits behind the OS permission prompt, only behind writes that
+are already in flight. See the docblocks on `pendingRegistration` and
+`endRegistrationsForSession`.
+
 The web (`frontend/src/auth.jsx`) clears its drafts/outbox on logout but does
 **not** yet clear its query cache — the same gap #191 closed on mobile,
 tracked as #194.

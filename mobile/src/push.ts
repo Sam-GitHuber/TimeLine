@@ -394,13 +394,87 @@ function projectId(): string | undefined {
 }
 
 /**
+ * The registration currently in flight, and whether it has passed the point of
+ * no return (#219).
+ *
+ * Registration is deliberately fire-and-forget — `auth.tsx` `void`s it at
+ * sign-in and on every cold start, because asking for the OS permission and
+ * minting a token with Expo takes seconds and must not hold up landing on the
+ * feed. That left it able to *outlive the session that started it*: sign in,
+ * immediately sign out, and `unregisterPush` found no stored token, no-oped,
+ * and the registration then landed — recreating the server row for the account
+ * that had just left and rewriting the local token unregister had just deleted.
+ * The phone went on receiving the previous user's notifications, message
+ * content included, which is the exact case a shared or handed-on phone makes
+ * real.
+ *
+ * `committed` is the whole trick. It's set **synchronously with the epoch
+ * check** below, so once `endRegistrationsForSession` has bumped the epoch, an
+ * attempt that hasn't already committed can never become committed. That means
+ * a teardown only ever waits on writes that are genuinely already going — never
+ * behind the permission prompt, which is a modal the user might leave sitting
+ * there and which nothing could cancel anyway.
+ */
+let pendingRegistration: {
+  promise: Promise<string | null>;
+  /** Shared with the running `runRegistration`, which is what sets the flag. */
+  attempt: { committed: boolean };
+} | null = null;
+
+/**
+ * Which session the in-flight registration belongs to (#219).
+ *
+ * A counter rather than a read of auth state, deliberately: `auth.tsx` imports
+ * this module, so reaching back the other way would be a cycle. Every path that
+ * ends a session bumps it, and a registration that finds it changed abandons
+ * itself rather than writing for a user who has gone.
+ */
+let sessionEpoch = 0;
+
+/**
+ * Close the door on registrations belonging to the session that is ending
+ * (#219). Called by both teardown paths before they touch the stored token.
+ *
+ * Awaiting a committed attempt is what makes the sequencing work: by the time
+ * `unregisterPush` reads `SecureStore`, a registration that got as far as the
+ * network has *finished* writing, so there is a token to find and a server row
+ * to delete. Uncommitted attempts need no wait — the epoch bump above has
+ * already stopped them.
+ */
+async function endRegistrationsForSession(): Promise<void> {
+  sessionEpoch += 1;
+  const pending = pendingRegistration;
+  pendingRegistration = null;
+  // Safe to await: `runRegistration` swallows its own failures and never
+  // rejects, so this can't turn a teardown into a throw.
+  if (pending?.attempt.committed) await pending.promise;
+}
+
+/**
  * Ask for permission, get an Expo push token, and register it with the backend.
  *
  * Returns the token, or `null` when push isn't available (simulator, permission
- * refused, or no project id). **Never throws** — it's called on the login path,
- * and no push-related failure may ever stop someone signing in.
+ * refused, or no project id) — or when the session it was registering for ended
+ * while it was still asking (#219). **Never throws** — it's called on the login
+ * path, and no push-related failure may ever stop someone signing in.
  */
-export async function registerForPush(): Promise<string | null> {
+export function registerForPush(): Promise<string | null> {
+  const attempt = { committed: false };
+  const promise = runRegistration(sessionEpoch, attempt);
+  const pending = { promise, attempt };
+  pendingRegistration = pending;
+  void promise.then(() => {
+    // Only clear it if nothing has started since — a stale entry here would
+    // make the next teardown wait on a registration that finished long ago.
+    if (pendingRegistration === pending) pendingRegistration = null;
+  });
+  return promise;
+}
+
+async function runRegistration(
+  epoch: number,
+  attempt: { committed: boolean }
+): Promise<string | null> {
   try {
     if (!canRegisterForPush()) return null;
 
@@ -421,6 +495,14 @@ export async function registerForPush(): Promise<string | null> {
       projectId: id,
     });
 
+    // The session ended while we were asking, so there is nobody to register
+    // for: registering now would arm this phone for whoever just left (#219).
+    // This check and the flag below must stay adjacent and unawaited — that
+    // they happen in one synchronous step is what lets a teardown decide, with
+    // certainty, whether it has to wait for us.
+    if (epoch !== sessionEpoch) return null;
+    attempt.committed = true;
+
     await api.registerPushToken(token);
     await SecureStore.setItemAsync(PUSH_TOKEN_KEY, token);
     return token;
@@ -436,6 +518,11 @@ export async function registerForPush(): Promise<string | null> {
  * would survive, leaving this phone receiving the previous user's pushes.
  */
 export async function unregisterPush(): Promise<void> {
+  // A registration racing this sign-out would otherwise land *after* it and
+  // re-arm the phone for the user who just left (#219). Either it hasn't
+  // written anything yet and now never will, or it has and we wait for it —
+  // so the read below sees the token it stored and deletes the row it made.
+  await endRegistrationsForSession();
   try {
     const token = await SecureStore.getItemAsync(PUSH_TOKEN_KEY);
     if (!token) return;
@@ -467,8 +554,13 @@ export async function unregisterPush(): Promise<void> {
  * end, by the backend's upsert-on-token rule moving the row to whoever logs in
  * next. What we must not do is keep a stale token locally, or the next
  * registration would have two ideas of this device.
+ *
+ * Which is exactly why this waits on an in-flight registration too (#219): a
+ * cold-start registration still running when the stored token turns out to be
+ * dead would otherwise write the token back moments after this deleted it.
  */
 export async function forgetLocalPushToken(): Promise<void> {
+  await endRegistrationsForSession();
   await SecureStore.deleteItemAsync(PUSH_TOKEN_KEY);
 }
 
