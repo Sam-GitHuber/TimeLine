@@ -86,13 +86,50 @@ export async function saveTokens(
   // we wrote them, and left the pair behind. Undoing beats leaving a live
   // credential on a device nobody is signed in on.
   if (forSession === session) return true;
-  await clearTokens();
+  await undoWrite(access, refresh);
   return false;
 }
 
+/**
+ * Take back a pair that was written after its session ended — **only** if it's
+ * still the pair that's stored.
+ *
+ * Deliberately not `clearTokens()`. That deletes whatever is there *now* and
+ * bumps the counter again, so an undo could wipe a newer session's credentials
+ * and, by moving the counter, push that session's own in-flight `saveTokens`
+ * down this same path. A compare-and-delete can only ever remove what it wrote.
+ */
+async function undoWrite(access: string, refresh: string): Promise<void> {
+  const [storedAccess, storedRefresh] = await Promise.all([
+    SecureStore.getItemAsync(ACCESS_KEY),
+    SecureStore.getItemAsync(REFRESH_KEY),
+  ]);
+  if (cachedAccess === access) cachedAccess = null;
+  await Promise.all([
+    storedAccess === access
+      ? SecureStore.deleteItemAsync(ACCESS_KEY)
+      : Promise.resolve(),
+    storedRefresh === refresh
+      ? SecureStore.deleteItemAsync(REFRESH_KEY)
+      : Promise.resolve(),
+  ]);
+}
+
+/**
+ * Read the access token from the Keychain, priming the in-memory cache.
+ *
+ * The cache write is guarded for the same reason `saveTokens` is: the read is
+ * an await, and a sign-out landing during it would otherwise have its
+ * `cachedAccess = null` undone by a value read *before* the delete — leaving a
+ * signed-out app quietly holding a live token that every `getCachedAccessToken`
+ * hands out.
+ */
 export async function getAccessToken(): Promise<string | null> {
-  cachedAccess = await SecureStore.getItemAsync(ACCESS_KEY);
-  return cachedAccess;
+  const forSession = session;
+  const stored = await SecureStore.getItemAsync(ACCESS_KEY);
+  if (forSession !== session) return null;
+  cachedAccess = stored;
+  return stored;
 }
 
 /**

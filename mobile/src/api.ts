@@ -247,6 +247,53 @@ function networkError(cause: unknown, status = 0): ApiError {
 }
 
 /**
+ * Blacklist a refresh token server-side, swallowing failures.
+ *
+ * **`retry: false` matters here, and is not just an optimisation.** The
+ * blacklist endpoint takes the refresh token in the *body*, so if the access
+ * token happened to be expired, the normal retry path would refresh first —
+ * rotating this very token and blacklisting it — and then replay the request
+ * with the now-stale token in the body. The server would reject the replay,
+ * we'd swallow the error, and the freshly-issued refresh token would be left
+ * **live on the server** while we wiped it from the device: precisely the "copy
+ * lifted from a backup still works" case the blacklist exists to close.
+ *
+ * Best-effort by design. A network failure must never trap someone in a
+ * logged-in app, and a session we couldn't end server-side is the situation we
+ * were in before the call was made.
+ */
+async function blacklistRefreshToken(refresh: string): Promise<void> {
+  try {
+    await request('/api/auth/mobile/logout/', {
+      method: 'POST',
+      body: { refresh },
+      retry: false,
+    });
+  } catch {
+    // See above.
+  }
+}
+
+/**
+ * A request abandoned because **the session it belonged to ended underneath
+ * it** — signed out, or expired — while it was on the wire (#219).
+ *
+ * `status: 0` deliberately, so `isTokenRejection` reads it the way it reads a
+ * lost connection: *we never got an answer about a token*. That is what keeps
+ * it out of the session-teardown branch in `request`, and the distinction is
+ * load-bearing rather than tidy — by the time one of these is thrown, the live
+ * session may belong to somebody else on the same phone, and tearing it down
+ * would sign out the wrong person. Written here beside `networkError` so the
+ * three sites that raise it can't drift on the flags (#243's lesson).
+ *
+ * `fromServer: false`, so `serverMessage` keeps the caller's own sentence: the
+ * only reader of this message is a developer.
+ */
+function sessionEndedError(): ApiError {
+  return new ApiError('The session ended before this finished', 0, null, false);
+}
+
+/**
  * What we say when the server answered but couldn't do the job — a 5xx from the
  * refresh endpoint, which is the box redeploying or Django down behind Caddy.
  * Deliberately not "your session has expired": it hasn't, and this rejection
@@ -450,13 +497,16 @@ async function refreshAccessToken(): Promise<string> {
       forSession
     );
     if (!stored) {
-      // `status: 0` deliberately, so `isTokenRejection` reads this as "we never
-      // got an answer about a token" rather than "the server refused one". The
-      // difference matters: a *rejection* tears the session down, and by now the
-      // live session may be somebody else's — the caller must fail this one
-      // request and touch nothing (#245's rule, applied to a session that ended
-      // rather than a request that didn't land).
-      throw new ApiError('Session ended', 0, null, false);
+      // The pair is discarded locally — but the server rotated, so `refresh` is
+      // a *live* 90-day credential that the `logout` blacklist necessarily
+      // missed: it blacklisted the token this one replaced. Nobody else holds
+      // it (it came back over TLS and goes no further than this scope), but
+      // "nobody holds it" isn't the same as "it can't be used", and ending the
+      // session server-side is the whole reason logout makes a network call at
+      // all. Best-effort, exactly like `logout`'s own blacklist: a failure here
+      // leaves us no worse off than before this branch existed.
+      await blacklistRefreshToken(pair.refresh);
+      throw sessionEndedError();
     }
     return pair.access;
   })();
@@ -562,9 +612,21 @@ async function request<T>(
   // fresh one and replay exactly once — `retry: false` on the replay is what
   // stops a server that 401s unconditionally from looping forever.
   if (response.status === 401 && retry && access) {
+    // Captured before the refresh, because the teardown below is only ours to
+    // do if the session we started with is still the live one (#219).
+    const forSession = tokenSession();
     try {
       await refreshAccessToken();
     } catch (err) {
+      // **The session ended while we were asking.** Signing out is the common
+      // way in, and it makes a *refusal* the likeliest landing rather than an
+      // edge case: `logout` blacklists the exact token this refresh is
+      // carrying, so the server refuses it a moment later. Tearing the session
+      // down on that would clear the tokens and fire the expiry handler against
+      // whoever is signed in *now* — which on a shared phone is the next person,
+      // booted to the login screen by a request belonging to the last one. This
+      // request simply fails; the session that ended needed nothing from us.
+      if (tokenSession() !== forSession) throw sessionEndedError();
       if (!isTokenRejection(err)) {
         // We never got an answer — the request didn't land, or the server is
         // having a bad minute. It has said nothing about this token, so we
@@ -1894,7 +1956,20 @@ export const api = {
       method: 'POST',
       body: { email, password },
     });
-    await saveTokens({ access: data.access, refresh: data.refresh });
+    // A login's write is refused only if a teardown from the *previous* session
+    // landed midway through it — a background request from a session that just
+    // expired reaching its 401 while these two Keychain writes are in flight.
+    // Reporting success there would be the worst of both: `signIn` sets
+    // `signedIn`, every request goes out with no `Authorization`, and because
+    // `request` skips its refresh branch when there's no access token, nothing
+    // ever signals the session is dead. The user sits in a signed-in shell where
+    // everything fails until they force-quit. Failing the login instead costs
+    // one retry, and the retry works.
+    const stored = await saveTokens({
+      access: data.access,
+      refresh: data.refresh,
+    });
+    if (!stored) throw sessionEndedError();
     return data.user;
   },
 
@@ -1909,26 +1984,7 @@ export const api = {
    */
   logout: async (): Promise<void> => {
     const refresh = await getRefreshToken();
-    if (refresh) {
-      try {
-        // `retry: false` matters here, and is not just an optimisation. The
-        // blacklist endpoint takes the refresh token in the *body*, so if the
-        // access token happened to be expired, the normal retry path would
-        // refresh first — rotating this very token and blacklisting it — and
-        // then replay the request with the now-stale token in the body. The
-        // server would reject the replay, we'd swallow the error, and the
-        // freshly-issued refresh token would be left **live on the server**
-        // while we wiped it from the device: precisely the "copy lifted from a
-        // backup still works" case the server-side blacklist exists to close.
-        await request('/api/auth/mobile/logout/', {
-          method: 'POST',
-          body: { refresh },
-          retry: false,
-        });
-      } catch {
-        // Best-effort; see above.
-      }
-    }
+    if (refresh) await blacklistRefreshToken(refresh);
     await clearTokens();
   },
 };

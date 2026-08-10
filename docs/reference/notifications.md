@@ -635,9 +635,12 @@ write and abandons itself if it has moved; the flag saying it got past that
 check is set in the *same synchronous step*, so a teardown can tell with
 certainty whether it must wait. It waits only for a registration already past
 that point — never for the permission prompt, which the user can leave on screen
-indefinitely and which nothing could cancel anyway. By the time
-`unregisterPush` reads SecureStore, then, either nothing was written or
-everything was.
+indefinitely and which nothing could cancel anyway. Two supporting rules make
+that enough: only one registration runs at a time (a second joins the first,
+since only the newest could be tracked in a single slot), and **the local token
+is stored before the POST, not after** — a POST that creates the row and then
+loses its response would otherwise leave no token for `unregisterPush` to name
+the row with, which is the same leak by way of a network blip.
 
 The **expiry** path closes the same door but deliberately doesn't wait, because
 it lands on the login screen: a registration stuck on a slow POST could still be

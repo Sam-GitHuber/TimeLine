@@ -295,6 +295,45 @@ describe('a session ending while a registration is in flight (#219)', () => {
     expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBeNull();
   });
 
+  it('can still unregister when the POST landed but its response did not', async () => {
+    // The row is created server-side and the response is lost — a timeout, a
+    // dropped connection. With the local write after the POST that left no
+    // token at all, so sign-out found nothing, returned early, and the row
+    // survived: #219's leak wearing a network blip's clothes.
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockRejectedValue(new Error('response lost'));
+
+    expect(await registerForPush()).toBeNull();
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBe(TOKEN);
+
+    await unregisterPush();
+
+    expect(api.unregisterPushToken).toHaveBeenCalledWith(TOKEN);
+  });
+
+  it('joins an in-flight registration rather than starting a second', async () => {
+    // Only the newest attempt fits in the slot a teardown consults, so a second
+    // one starting mid-flight would leave the first untracked — and sign-out,
+    // seeing the newer uncommitted attempt, wouldn't wait for the older
+    // committed one. It would land afterwards and re-arm the phone.
+    const landing = deferred<void>();
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockReturnValue(landing.promise as never);
+
+    const first = registerForPush();
+    await flush();
+    const second = registerForPush();
+
+    expect(second).toBe(first);
+
+    landing.resolve();
+    await first;
+
+    expect(api.registerPushToken).toHaveBeenCalledTimes(1);
+  });
+
   it('does not hold the expiry path open behind a committed registration', async () => {
     // Deliberately *unlike* sign-out. This path lands on the login screen
     // immediately, so a wait here is a wait during which someone else can sign

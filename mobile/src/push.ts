@@ -452,6 +452,16 @@ function endRegistrationsForSession(): typeof pendingRegistration {
  * path, and no push-related failure may ever stop someone signing in.
  */
 export function registerForPush(): Promise<string | null> {
+  // One at a time. Only the *latest* attempt can be tracked in the single slot
+  // below, so a second one starting while the first is in flight would leave
+  // the first untracked — and a teardown looking at the newer, uncommitted
+  // attempt would decline to wait, while the older committed one landed after
+  // sign-out and re-armed the phone. That is #219 again, through the very field
+  // added to close it. Joining is also just better behaviour: two prompts and
+  // two POSTs for one device is nobody's intent. A teardown always clears the
+  // slot, so this can never join an attempt from a session that has ended.
+  if (pendingRegistration) return pendingRegistration.promise;
+
   const attempt = { committed: false };
   const promise = runRegistration(sessionEpoch, attempt);
   const pending = { promise, attempt };
@@ -496,8 +506,19 @@ async function runRegistration(
     if (epoch !== sessionEpoch) return null;
     attempt.committed = true;
 
-    await api.registerPushToken(token);
+    // **Stored before the POST, not after.** The POST can create the server row
+    // and then lose its response — a timeout, a dropped connection, the app
+    // killed between the two — which with the writes the other way round left
+    // no local token at all: `unregisterPush` would find nothing, return early,
+    // and the row would survive sign-out. That is exactly the leak this file is
+    // about, arriving by a route that looks like a network blip.
+    //
+    // The other order is strictly safer. A local token whose POST failed names
+    // a row that may not exist, and unregistering it is a DELETE that finds
+    // nothing — which `unregisterPush` already swallows, because a failed
+    // DELETE is recoverable and a missing one isn't.
     await SecureStore.setItemAsync(PUSH_TOKEN_KEY, token);
+    await api.registerPushToken(token);
     return token;
   } catch {
     // Deliberately swallowed: see above. The user is logged in either way.
@@ -563,8 +584,15 @@ export async function unregisterPush(): Promise<void> {
  * Not waiting costs nothing, because a committed registration writing its token
  * back after this is *consistent* rather than stale: it has just created the
  * matching server row, and the row surviving an expiry is the documented
- * behaviour above. What we must not have is a local token with no row, or a row
- * with no local token — and neither is reachable from here.
+ * behaviour above.
+ *
+ * ⚠️ One window stays open, and it is this function's own delete rather than
+ * anything above: `auth.tsx` fires this unawaited, so if the delete is still
+ * queued when the next person signs in *and* their registration has already
+ * stored a token, this removes theirs. It needs a sign-in to complete inside a
+ * single native delete, so it is far narrower than the wait it replaced — but
+ * it is the same defect class, and the honest thing is to write it down rather
+ * than claim the state is unreachable.
  */
 export async function forgetLocalPushToken(): Promise<void> {
   endRegistrationsForSession();
