@@ -519,11 +519,14 @@ export default function ConversationInfoView() {
                       /* Named apart from the gallery's retry lower down: on a
                          dead connection both are on screen at once, and "Try
                          again, button" twice over tells a screen-reader user
-                         nothing about which is which. Named rather than
-                         reworded, because each already reads clearly inside its
-                         own sentence — and these are the labels the app gives
-                         the same two controls. */
-                      aria-label="Try checking again"
+                         nothing about which is which.
+                         ⚠️ The name has to **start with the visible words**
+                         (#213's review): an accessible name that doesn't contain
+                         the label you can read is one voice control can't act on
+                         — "click Try again" hits nothing (WCAG 2.5.3, Label in
+                         Name). Disambiguate by extending the visible text, never
+                         by replacing it. */
+                      aria-label="Try again — check whether you’ve blocked them"
                       className="font-medium underline"
                     >
                       Try again
@@ -662,7 +665,7 @@ function MediaGallery({ conversationId }) {
           <button
             type="button"
             onClick={() => mediaQuery.refetch()}
-            aria-label="Try loading the photos again"
+            aria-label="Try again — load the photos in this chat"
             className="font-medium underline"
           >
             Try again

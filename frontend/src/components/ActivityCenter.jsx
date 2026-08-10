@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, NOTIFICATIONS_POLL_MS } from "../api.js";
-import { useInfiniteList, trimToFirstPage } from "../hooks.js";
+import { useInfiniteList, trimQueryToFirstPage } from "../hooks.js";
 import { serverMessage, waitingMessage } from "../errors.js";
 import { formatRelativeTime } from "../utils.js";
 import Avatar from "./Avatar.jsx";
@@ -121,16 +121,11 @@ export default function ActivityCenter() {
 
   // Closing the panel drops back to a single page, so a reopen doesn't refetch
   // pages nobody is looking at (notifications.md; the app trims on unmount).
-  // Cancel first, trim once that settles — an in-flight "Load more" would
-  // otherwise put its page back, and the cancel's revert would undo a trim that
-  // ran ahead of it.
+  // The cancel-then-trim ordering lives in `trimQueryToFirstPage` now that the
+  // conversation drawer needs it too (#213).
   useEffect(() => {
     if (open) return;
-    queryClient
-      .cancelQueries({ queryKey: ["notifications"] })
-      .then(() =>
-        queryClient.setQueryData(["notifications"], trimToFirstPage)
-      );
+    trimQueryToFirstPage(queryClient, ["notifications"]);
   }, [open, queryClient]);
 
   // Close on outside click / Escape — the two things any dropdown owes the user.

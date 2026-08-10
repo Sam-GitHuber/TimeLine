@@ -10,6 +10,10 @@ import {
   failRefetch,
 } from "./test-utils.jsx";
 import { api } from "./api.js";
+// The real online manager, not a mock: it's what TanStack itself consults to
+// decide whether to pause a fetch, so flipping it is the only honest way to
+// reach the paused state from a test.
+import { onlineManager } from "@tanstack/react-query";
 import { MessagingProvider } from "./messaging.jsx";
 import { clearDrafts } from "./drafts.js";
 import { clearOutbox } from "./outbox.js";
@@ -3546,17 +3550,18 @@ describe("Messages drawer — conversation list paging (#213)", () => {
     expect(screen.queryByText(/No conversations match/)).toBeNull();
 
     // The walk stops rather than hammering a server that's already unhealthy
-    // (`useFetchAllPages`), so the retry is offered rather than taken.
+    // (`useFetchAllPages`), so the retry is offered rather than taken. Exactly
+    // one attempt: the test client sets `retry: false`, so anything above this
+    // is the #214 hot loop back again, just slower.
     await settle();
-    const calls = api.getPage.mock.calls.length;
-    expect(calls).toBeLessThan(5);
+    expect(api.getPage).toHaveBeenCalledTimes(1);
 
     api.getPage.mockResolvedValue(
       pageOf([named(7, "Yusuf")], { count: 7 })
     );
     await user.click(
       screen.getByRole("button", {
-        name: "Try searching the rest of your chats again",
+        name: "Try again — search the rest of your chats",
       })
     );
 
@@ -3564,6 +3569,193 @@ describe("Messages drawer — conversation list paging (#213)", () => {
       await screen.findByText(/No conversations match/)
     ).toBeInTheDocument();
     expect(screen.queryByText(/Couldn’t search all your chats/)).toBeNull();
+  });
+
+  /**
+   * A dropped *poll* is not a stalled search. `useFetchAllPages` used to stop on
+   * the query-wide `isError`, which on this polled list is set by any failed
+   * background refetch — so a packet lost on some unrelated 12s tick halted a
+   * perfectly healthy walk and put a red line under it. `isFetchNextPageError`
+   * is the flag that means what the guard is about.
+   */
+  it("keeps searching through a failed poll of the first page", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf(
+        [
+          named(1, "Priya"),
+          named(2, "Sanjay"),
+          named(3, "Amara"),
+          named(4, "Nadia"),
+          named(5, "Tom"),
+          named(6, "Rosa"),
+        ],
+        { next: PAGE_TWO_URL, count: 7 }
+      )
+    );
+    // Page two hasn't been asked for yet, and won't be until the poll has failed.
+    let releasePageTwo;
+    api.getPage.mockReturnValue(
+      new Promise((resolve) => {
+        releasePageTwo = () => resolve(pageOf([named(7, "Yusuf")], { count: 7 }));
+      })
+    );
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    await user.type(
+      screen.getByRole("searchbox", { name: "Search conversations" }),
+      "yusuf"
+    );
+    expect(await screen.findByText(/Searching your other chats/)).toBeInTheDocument();
+
+    // The poll of page one drops. The walk has nothing to do with it.
+    api.getConversations.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["conversations"]);
+
+    expect(screen.queryByText(/Couldn’t search all your chats/)).toBeNull();
+    expect(screen.getByText(/Searching your other chats/)).toBeInTheDocument();
+
+    await act(async () => {
+      releasePageTwo();
+    });
+    expect(await screen.findByText("Yusuf")).toBeInTheDocument();
+  });
+
+  /**
+   * The same root cause with the events the other way round, and this is the
+   * ordering that pins `useFetchAllPages`' guard rather than the panel's copy:
+   * a query left in the error state by a dropped poll must not stop a walk that
+   * hasn't started yet.
+   */
+  it("searches the whole list after an earlier poll failed", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf(
+        [
+          named(1, "Priya"),
+          named(2, "Sanjay"),
+          named(3, "Amara"),
+          named(4, "Nadia"),
+          named(5, "Tom"),
+          named(6, "Rosa"),
+        ],
+        { next: PAGE_TWO_URL, count: 7 }
+      )
+    );
+    api.getPage.mockResolvedValue(pageOf([named(7, "Yusuf")], { count: 7 }));
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    // A poll drops. Nothing is being walked, so nothing about the search is
+    // broken — but the query's `status` is now `error` with its data intact.
+    api.getConversations.mockRejectedValue(unauthoredError(500));
+    await failRefetch(queryClient, ["conversations"]);
+    expect(screen.getByText("Priya")).toBeInTheDocument();
+
+    await user.type(
+      screen.getByRole("searchbox", { name: "Search conversations" }),
+      "yusuf"
+    );
+
+    expect(await screen.findByText("Yusuf")).toBeInTheDocument();
+  });
+
+  /**
+   * Offline, TanStack *pauses* a fetch rather than failing it — no error, and
+   * `isFetchingNextPage` false. Read only for errors, that's a panel stuck on
+   * "Searching…" with no retry and the no-match line suppressed for as long as
+   * the connection is down: the one state this whole change exists to remove.
+   */
+  it("says it's offline rather than searching forever", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf(
+        [
+          named(1, "Priya"),
+          named(2, "Sanjay"),
+          named(3, "Amara"),
+          named(4, "Nadia"),
+          named(5, "Tom"),
+          named(6, "Rosa"),
+        ],
+        { next: PAGE_TWO_URL, count: 7 }
+      )
+    );
+    api.getPage.mockResolvedValue(pageOf([named(7, "Yusuf")], { count: 7 }));
+
+    renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    onlineManager.setOnline(false);
+    try {
+      await user.type(
+        screen.getByRole("searchbox", { name: "Search conversations" }),
+        "yusuf"
+      );
+
+      expect(
+        await screen.findByText(/You’re offline — this is only the chats already loaded/)
+      ).toBeInTheDocument();
+      // Not the confident answer, and not a silent spinner either.
+      expect(screen.queryByText(/No conversations match/)).toBeNull();
+      expect(screen.queryByText(/Searching your other chats/)).toBeNull();
+      expect(api.getPage).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+
+    // Back online, the paused page resumes on its own.
+    expect(await screen.findByText("Yusuf")).toBeInTheDocument();
+  });
+
+  /**
+   * Clearing the box has to put the walked pages back, or the drawer spends the
+   * rest of its open life re-polling every one of them — plus a full refetch on
+   * each row action's invalidation — for rows nothing is filtering any more.
+   */
+  it("drops the walked pages when the search is cleared", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(
+      pageOf(
+        [
+          named(1, "Priya"),
+          named(2, "Sanjay"),
+          named(3, "Amara"),
+          named(4, "Nadia"),
+          named(5, "Tom"),
+          named(6, "Rosa"),
+        ],
+        { next: PAGE_TWO_URL, count: 7 }
+      )
+    );
+    api.getPage.mockResolvedValue(pageOf([named(7, "Yusuf")], { count: 7 }));
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await screen.findByText("Priya");
+
+    const box = screen.getByRole("searchbox", { name: "Search conversations" });
+    await user.type(box, "yusuf");
+    await screen.findByText("Yusuf");
+    expect(queryClient.getQueryData(["conversations"])?.pages).toHaveLength(2);
+
+    await user.clear(box);
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(["conversations"])?.pages
+      ).toHaveLength(1)
+    );
+    // And the way back to them is the button that was always there.
+    expect(
+      screen.getByRole("button", { name: "Load more" })
+    ).toBeInTheDocument();
   });
 
   it("offers search on a long list even when only one page is loaded", async () => {
@@ -3922,7 +4114,9 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
       bio: "",
     });
     await user.click(
-      screen.getByRole("button", { name: "Try checking again" })
+      screen.getByRole("button", {
+        name: "Try again — check whether you’ve blocked them",
+      })
     );
 
     // And the label is the one the answer justifies — this person *had* blocked
@@ -4022,7 +4216,9 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
       await screen.findByText(/Priya’s account is no longer available/)
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Try checking again" })
+      screen.queryByRole("button", {
+        name: "Try again — check whether you’ve blocked them",
+      })
     ).toBeNull();
     expect(
       screen.queryByText(/Couldn’t check whether you’ve blocked/)
@@ -4047,10 +4243,14 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
     await openInfo(user);
 
     expect(
-      await screen.findByRole("button", { name: "Try checking again" })
+      await screen.findByRole("button", {
+        name: "Try again — check whether you’ve blocked them",
+      })
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Try loading the photos again" })
+      screen.getByRole("button", {
+        name: "Try again — load the photos in this chat",
+      })
     ).toBeInTheDocument();
   });
 
@@ -4080,7 +4280,9 @@ describe("Messages drawer — the info panel (Phase 9b M9e)", () => {
       bio: "",
     });
     await user.click(
-      screen.getByRole("button", { name: "Try checking again" })
+      screen.getByRole("button", {
+        name: "Try again — check whether you’ve blocked them",
+      })
     );
 
     const block = await screen.findByRole("button", { name: "Block" });
