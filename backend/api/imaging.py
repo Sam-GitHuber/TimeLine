@@ -27,6 +27,8 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 from rest_framework import serializers
 
+from .media_cleanup import delete_files_on_commit
+
 # Teach Pillow to decode HEIC/HEIF — the default photo format on iPhones, and so
 # the format most of this app's actual users' photos arrive in (issue #41).
 #
@@ -319,11 +321,30 @@ def process_avatar(upload):
     )
 
 
+# Replacing or clearing an avatar destroys the *previous* files, and that has to
+# wait for the commit like every other file destruction in the app (issue #224).
+# Doing it inline — as both of these did — means a handler that fails after the
+# call (a validation error further down, a DB error on the follow-up ``save()``,
+# ``ATOMIC_REQUESTS`` if it's ever switched on) rolls the row back to a
+# ``avatar/<old-uuid>.jpg`` whose file no longer exists: a permanently broken
+# avatar with no way to re-derive it, since the old image is gone.
+#
+# A row delete is handled by the ``post_delete`` receiver in ``media_cleanup``;
+# this is the one case it can't cover, because no row is deleted. Note that both
+# callers must have a transaction open for the deferral to mean anything —
+# ``ATOMIC_REQUESTS`` is off, so ``on_commit`` outside one runs immediately.
+
+
 def save_avatar(instance, processed):
     """Write a ``process_avatar`` result onto ``instance``'s avatar fields,
-    dropping any old files first. Does not save the instance."""
-    instance.avatar.delete(save=False)
-    instance.avatar_thumb.delete(save=False)
+    dropping any old files once the transaction commits. Does not save the
+    instance."""
+    # Registered *before* the reassignment below, which is safe only because
+    # ``delete_files_on_commit`` snapshots each file's storage + name on the way
+    # in: ``instance.avatar`` is a live view onto the field, so ``.save()`` below
+    # mutates the very object handed over, and holding it would sweep the new
+    # avatar instead of the old one.
+    delete_files_on_commit([instance.avatar, instance.avatar_thumb])
     instance.avatar.save(
         f"avatar{processed['ext']}", processed["image"], save=False
     )
@@ -333,9 +354,8 @@ def save_avatar(instance, processed):
 
 
 def clear_avatar(instance):
-    """Remove ``instance``'s avatar + thumbnail (files and fields). Does not save
-    the instance."""
-    instance.avatar.delete(save=False)
-    instance.avatar_thumb.delete(save=False)
+    """Remove ``instance``'s avatar + thumbnail (fields now, files on commit).
+    Does not save the instance."""
+    delete_files_on_commit([instance.avatar, instance.avatar_thumb])
     instance.avatar = None
     instance.avatar_thumb = None

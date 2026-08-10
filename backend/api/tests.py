@@ -79,6 +79,7 @@ from .models import (
     PollVote,
     Post,
     PostCommentRead,
+    PostImage,
     PushOutbox,
     PushReceipt,
     Reaction,
@@ -5712,6 +5713,275 @@ class DeletedContentLeavesNoFilesTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         for name in expected_gone:
             self.assertFalse(storage.exists(name), f"{name} survived the delete")
+
+
+_ADMIN_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-admin-media-")
+
+
+@override_settings(MEDIA_ROOT=_ADMIN_MEDIA_ROOT)
+class DeletesOutsideTheApiSweepMediaTests(APITestCase):
+    """🔒 Every delete takes its files, not just the ones that go through a view
+    (issue #222).
+
+    The sweep used to be a call-site convention — each view gathered the files by
+    hand — so anything that deleted rows another way silently left the JPEGs on
+    disk, and an orphaned file stays *fetchable* by anyone holding its URL
+    (``media_auth`` gates on being signed in, not on owning the file). The two
+    paths that skipped it are the two that matter most:
+
+    - **The Django admin**, which is the documented moderation/takedown path. A
+      member reports an abusive photo, the maintainer deletes the post here, and
+      the exact URL the reporter flagged went on serving the picture.
+    - **Management commands** (``seed_demo``, ``create_review_account``), which
+      bulk-``delete()`` whole querysets of users and groups.
+
+    Both are covered now because the sweep hangs off ``post_delete`` instead —
+    which also means the cascade and the bulk action are covered, not just the
+    single delete somebody remembered to write code for.
+    """
+
+    def setUp(self):
+        self.me = make_user("member@example.com")
+        self.staff = User.objects.create_superuser(
+            email="root@example.com", password=PASSWORD
+        )
+
+    def tearDown(self):
+        shutil.rmtree(_ADMIN_MEDIA_ROOT, ignore_errors=True)
+
+    def _post_with_photo(self, author=None):
+        self.client.force_authenticate(author or self.me)
+        self.client.post(
+            POSTS_URL,
+            {"text": "with a photo", "images": [make_image_upload()]},
+            format="multipart",
+        )
+        image = Post.objects.get(author=author or self.me).images.get()
+        return image.post, image.image.storage, [image.image.name, image.thumbnail.name]
+
+    def _avatar_on(self, user):
+        user.avatar = make_image_upload("me.jpg")
+        user.avatar_thumb = make_image_upload("me-t.jpg")
+        user.save(update_fields=["avatar", "avatar_thumb"])
+        return [user.avatar.name, user.avatar_thumb.name]
+
+    def assertSwept(self, storage, names):
+        for name in names:
+            self.assertFalse(storage.exists(name), f"{name} survived the delete")
+
+    def test_deleting_a_post_in_the_admin_takes_its_photos(self):
+        post, storage, names = self._post_with_photo()
+        for name in names:
+            self.assertTrue(storage.exists(name), f"{name} missing before delete")
+
+        self.client.force_login(self.staff)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/admin/api/post/{post.pk}/delete/", {"post": "yes"}
+            )
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(Post.objects.filter(pk=post.pk).exists())
+        self.assertSwept(storage, names)
+
+    def test_the_admins_bulk_delete_action_takes_them_too(self):
+        """"Delete selected" is a different code path from the single delete
+        (``delete_queryset``, not ``delete_model``) — and the one a maintainer
+        clearing a backlog of reports actually reaches for."""
+        post, storage, names = self._post_with_photo()
+
+        self.client.force_login(self.staff)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                "/admin/api/post/",
+                {
+                    "action": "delete_selected",
+                    "_selected_action": [str(post.pk)],
+                    "post": "yes",
+                    "index": "0",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(Post.objects.filter(pk=post.pk).exists())
+        self.assertSwept(storage, names)
+
+    def test_removing_one_photo_from_a_post_takes_its_file(self):
+        """``PostImageInline`` exists so the maintainer can take down a single
+        image without the post — the deliberately narrowest takedown there is,
+        and the one whose file was most obviously left behind."""
+        post, storage, names = self._post_with_photo()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            PostImage.objects.filter(post=post).delete()
+
+        self.assertTrue(Post.objects.filter(pk=post.pk).exists())
+        self.assertSwept(storage, names)
+
+    def test_a_bulk_user_delete_takes_avatars_and_photos(self):
+        """The shape ``seed_demo`` and ``create_review_account`` use to reset:
+        ``User.objects.filter(...).delete()``. Nothing gathers files there, and
+        nothing ever will — the receiver has to."""
+        post, storage, names = self._post_with_photo()
+        names += self._avatar_on(self.me)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            User.objects.filter(email="member@example.com").delete()
+
+        self.assertSwept(storage, names)
+
+    def test_deleting_a_member_in_the_admin_runs_the_real_account_deletion(self):
+        """🔒 Deleting a member here has to mean what "delete my account" means
+        in the app. A bare cascade left three things undone: the files on disk,
+        a group with no admin left in it, and a memberless group sitting there
+        as dead space."""
+        post, storage, names = self._post_with_photo()
+        names += self._avatar_on(self.me)
+
+        # A group they run with someone else in it, and one they're alone in.
+        shared = make_group(self.me)
+        heir = make_user("heir@example.com")
+        add_member(shared, heir)
+        alone = make_group(self.me, name="Just me")
+
+        self.client.force_login(self.staff)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/admin/accounts/user/{self.me.pk}/delete/", {"post": "yes"}
+            )
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(User.objects.filter(pk=self.me.pk).exists())
+        self.assertSwept(storage, names)
+        # The shared group survives and stays governable…
+        self.assertEqual(
+            GroupMembership.objects.get(group=shared, user=heir).role, ADMIN_ROLE
+        )
+        # …and the one nobody is left in is gone rather than orphaned.
+        self.assertFalse(Group.objects.filter(pk=alone.pk).exists())
+
+    def test_the_bulk_member_delete_handles_each_one_in_turn(self):
+        """Two members of the same group removed in one "Delete selected". The
+        handover has to be reconsidered *after* each goes, not decided once
+        against the original roster — otherwise the second delete can hand the
+        group to somebody who is being deleted in the same action."""
+        second = make_user("second@example.com")
+        third = make_user("third@example.com")
+        group = make_group(self.me)
+        add_member(group, second)
+        add_member(group, third)
+
+        self.client.force_login(self.staff)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                "/admin/accounts/user/",
+                {
+                    "action": "delete_selected",
+                    "_selected_action": [str(self.me.pk), str(second.pk)],
+                    "post": "yes",
+                    "index": "0",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(User.objects.filter(pk=second.pk).exists())
+        # `third` is the only one left, and the group is still theirs to run.
+        self.assertEqual(
+            GroupMembership.objects.get(group=group, user=third).role, ADMIN_ROLE
+        )
+
+
+@override_settings(MEDIA_ROOT=_ADMIN_MEDIA_ROOT)
+class GroupAvatarReplacementTests(APITestCase):
+    """🔒 Replacing a group avatar destroys the *old* files, and that has to wait
+    for the commit like every other file destruction (issue #224).
+
+    ``save_avatar``/``clear_avatar`` dropped them inline, before the row was
+    saved. If anything failed afterwards — a validation error further down the
+    handler, a DB error on the follow-up ``save()``, ``ATOMIC_REQUESTS`` if it's
+    ever switched on — the row rolled back still pointing at ``avatar/<old>.jpg``
+    and that file was gone. Every member then saw a broken avatar, permanently:
+    the old image no longer exists and the row won't accept a repair without a
+    re-upload. Unlike an orphaned file, that one is visible and unrecoverable.
+    """
+
+    def setUp(self):
+        self.me = make_user("admin@example.com")
+        self.client.force_authenticate(self.me)
+        self.group = make_group(self.me)
+
+    def tearDown(self):
+        shutil.rmtree(_ADMIN_MEDIA_ROOT, ignore_errors=True)
+
+    def _set_avatar(self, name="one.jpg"):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/groups/{self.group.pk}/",
+                {"avatar": make_image_upload(name)},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.group.refresh_from_db()
+        return self.group.avatar.storage, [
+            self.group.avatar.name,
+            self.group.avatar_thumb.name,
+        ]
+
+    def test_replacing_an_avatar_sweeps_the_old_files_and_keeps_the_new(self):
+        storage, old = self._set_avatar("one.jpg")
+        storage, new = self._set_avatar("two.jpg")
+
+        self.assertNotEqual(old, new)
+        for name in old:
+            self.assertFalse(storage.exists(name), f"{name} survived the replace")
+        for name in new:
+            self.assertTrue(storage.exists(name), f"{name} was swept by mistake")
+
+    def test_removing_an_avatar_sweeps_its_files(self):
+        storage, old = self._set_avatar()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/groups/{self.group.pk}/",
+                {"remove_avatar": "true"},
+                format="multipart",
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.group.refresh_from_db()
+        self.assertFalse(self.group.avatar)
+        for name in old:
+            self.assertFalse(storage.exists(name), f"{name} survived the removal")
+
+    def test_a_save_that_fails_leaves_the_old_avatar_whole(self):
+        """The half that ``test_replacing_…`` can't see. ``ATOMIC_REQUESTS`` is
+        off, so in production there's no transaction here unless the handler
+        opens one, and an ``on_commit`` callback without one runs *inline* —
+        which is just an immediate delete wearing a deferral's clothes. This
+        asserts on the callbacks themselves, so it fails if the atomic goes."""
+        storage, old = self._set_avatar()
+
+        real_save = Group.save
+
+        def fail_on_avatar_save(instance, *args, **kwargs):
+            if "avatar" in (kwargs.get("update_fields") or ()):
+                raise DatabaseError("save failed")
+            return real_save(instance, *args, **kwargs)
+
+        with mock.patch.object(Group, "save", fail_on_avatar_save):
+            with self.captureOnCommitCallbacks(execute=True) as callbacks:
+                with self.assertRaises(DatabaseError):
+                    self.client.patch(
+                        f"/api/groups/{self.group.pk}/",
+                        {"avatar": make_image_upload("two.jpg")},
+                        format="multipart",
+                    )
+
+        self.assertEqual(callbacks, [])
+        self.group.refresh_from_db()
+        self.assertEqual(self.group.avatar.name, old[0])
+        for name in old:
+            self.assertTrue(storage.exists(name), f"{name} destroyed by a failed save")
 
 
 @override_settings(

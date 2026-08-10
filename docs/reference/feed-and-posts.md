@@ -202,8 +202,9 @@ Both edit and delete share the permalink route — `PostDetailView` is a
   CASCADE relations take the post's images, comments (and replies), reactions,
   reports and notifications with it. The image **files** are swept off storage
   too (on commit, so a rolled-back delete can't strand a live row without its
-  file) — as with group deletion. See `docs/reference/accounts.md`, "Account
-  deletion", for the shared helpers any new delete path must use.
+  file) — as with group deletion, and by the same `post_delete` receiver, so it
+  holds for a delete from the Django admin as much as from here. See
+  `docs/reference/accounts.md`, "Media file cleanup".
 - **Permission shape mirrors `GroupDetailView`:** a post you can't see is a
   **404** (existence stays hidden); a post you can see but don't own is a **403**.
   The **author path bypasses the visibility gate** — you can always edit/delete

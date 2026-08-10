@@ -6,6 +6,7 @@ from dj_rest_auth.serializers import (
     UserDetailsSerializer as BaseUserDetailsSerializer,
 )
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -192,14 +193,21 @@ class UserDetailsSerializer(BaseUserDetailsSerializer):
         avatar_file = validated_data.pop("avatar", None)
         remove_avatar = validated_data.pop("remove_avatar", False)
 
-        # first_name / last_name / bio via the base implementation.
-        instance = super().update(instance, validated_data)
+        # Atomic because replacing or clearing an avatar destroys the *old*
+        # files, and that sweep is deferred to the commit (issue #224).
+        # ``ATOMIC_REQUESTS`` is off, so with no transaction open the sweep runs
+        # immediately — and a failure in the ``save()`` below would then leave
+        # the row pointing at a JPEG that's already gone, which shows as a
+        # broken avatar forever and can't be repaired without a re-upload.
+        with transaction.atomic():
+            # first_name / last_name / bio via the base implementation.
+            instance = super().update(instance, validated_data)
 
-        if avatar_file is not None:
-            save_avatar(instance, process_avatar(avatar_file))
-            instance.save(update_fields=["avatar", "avatar_thumb"])
-        elif remove_avatar:
-            clear_avatar(instance)
-            instance.save(update_fields=["avatar", "avatar_thumb"])
+            if avatar_file is not None:
+                save_avatar(instance, process_avatar(avatar_file))
+                instance.save(update_fields=["avatar", "avatar_thumb"])
+            elif remove_avatar:
+                clear_avatar(instance)
+                instance.save(update_fields=["avatar", "avatar_thumb"])
 
         return instance

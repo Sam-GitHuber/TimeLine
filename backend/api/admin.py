@@ -19,7 +19,12 @@ from .models import (
     Report,
 )
 from .serializers import MESSAGE_THUMBNAIL_MAX_BYTES
-from .views import delete_files_on_commit
+
+# Deleting anything here — a post, a group, an event photo, a whole account —
+# takes its files off storage as well as its rows, because the sweep hangs off a
+# ``post_delete`` receiver rather than off each call site (``api/media_cleanup``).
+# That matters most on *this* page: the admin is the documented takedown path,
+# and a takedown that leaves the JPEG fetchable at its old URL isn't one.
 
 # NOTE: ``Message`` is deliberately **not** imported or registered here, and
 # neither is ``MessageAttachment`` — a browsable list of chat photos is the same
@@ -263,22 +268,11 @@ class EventPhotoAdmin(admin.ModelAdmin):
     def has_add_permission(self, request):
         return False
 
-    # A takedown that leaves the JPEG on disk isn't a takedown, and a database
-    # delete never touches storage — so both delete paths gather the files first
-    # and sweep them, exactly as every API path that destroys an album does.
-    # ``delete_model`` runs inside the admin's transaction, so the sweep waits
-    # for the commit; the bulk action may not, in which case the callback fires
-    # inline — after the rows are already gone, which is the safe order either
-    # way (see ``delete_files_on_commit``).
-    def delete_model(self, request, obj):
-        files = [obj.image, obj.thumbnail]
-        super().delete_model(request, obj)
-        delete_files_on_commit(files)
-
-    def delete_queryset(self, request, queryset):
-        files = [f for photo in queryset for f in (photo.image, photo.thumbnail)]
-        super().delete_queryset(request, queryset)
-        delete_files_on_commit(files)
+    # No ``delete_model``/``delete_queryset`` override for the file sweep: this
+    # class used to carry one, and it was the only admin page that did — which
+    # was exactly the problem (issue #222). The sweep now hangs off
+    # ``post_delete``, so it covers the single delete, the bulk action, and the
+    # cascades from deleting an event or a group, without any page opting in.
 
 
 @admin.register(Report)
