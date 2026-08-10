@@ -308,9 +308,58 @@ interleave and leave the phone receiving the previous user's notifications
 [notifications.md](notifications.md) § *App side* — one copy, because the two
 docs disagreeing about it is how the next change breaks it.
 
-The web (`frontend/src/auth.jsx`) clears its drafts/outbox on logout but does
-**not** yet clear its query cache — the same gap #191 closed on mobile,
-tracked as #194.
+### What leaves the browser with the session (#194)
+
+Same threat model on a **shared computer**, and since #194 the same two rules —
+the web is simpler only because it has fewer ways to end a session.
+
+- **The TanStack Query cache** is emptied by `useSessionReset`
+  (`frontend/src/useSessionReset.js`), mounted in `App.jsx` because that is the
+  one component still rendered on both sides of the logged-in boundary. It
+  watches `user` going null rather than being called from `logout`, and the
+  reason is timing rather than taste: at the moment `logout` runs, the feed, the
+  nav's unread counts and any open drawer are still mounted, so clearing there
+  pulls queries out from under live observers and they immediately refetch —
+  carrying a cookie the server has just invalidated — a render before the
+  redirect unmounts them anyway.
+- **The module stores** — outbox and drafts (`outbox.js`, `drafts.js`) — are
+  cleared by `logout` itself, as on the phone.
+
+**And the same guard at sign-in**, for the same reason the phone has one: a
+sign-in doesn't have to follow a sign-out, so "the session ended" can't be the
+only trigger. Two tabs open as Ada, she logs out in one, and the other still
+holds her user, her cache and her drafts — `/login` is public, and the sign-up,
+verify-email and reset-password pages all link to it, so the next person reaches
+the form without anything in that tab ever going null. `login` therefore compares
+the pk it just fetched against the one this browser last held (a ref, since
+nothing renders from it) and empties cache and stores when they differ. Same pk
+is the same person back again, and their own unsent words are theirs to keep.
+Clearing *is* safe from inside `login`, unlike `logout`: the route in that moment
+is a public one, so there are no live observers to send refetching.
+
+There is **no session-expiry path** on the web — `api.js` has no 401 handler, so
+`user` only becomes null via `logout` or a cold load. If one is ever added,
+pointing it at `setUser(null)` gets the cache cleared by the hook for free; what
+it must decide for itself is the stores, since the phone deliberately *keeps*
+those across an expiry (unsent words surviving a token failure is the point of an
+outbox) and leans on the sign-in guard to catch the different-person case.
+
+The teardown runs from a `finally`, which is the other half of #194. `api.logout`
+is an ordinary `request()` and *rejects* on a network blink or an already-dead
+session — where the app's equivalents (`api.logout`, `unregisterPush`) swallow
+their own failures by design. So a failed POST used to skip `setUser(null)` and
+both clears, while `NavUserMenu` navigated to `/login` regardless ("clicking
+logout should never leave you seemingly still logged in"): you landed on the
+login form with the whole previous session still in memory, and the next person
+to log in on that browser inherited it. The rejection is now swallowed around
+that one call — a throw from the teardown itself is a bug of ours and stays loud.
+
+**What no client can fix** is the auth cookie: it's httpOnly, so only that POST
+clears it. A logout whose request never landed therefore leaves a live session
+that a page reload picks straight back up, while the UI says logged-out — the
+worst-placed remnant of the shared-computer threat model, and untouched by #194.
+Closing it needs a retry, or a re-check that tells the person their logout didn't
+land; both are product decisions, not cleanups.
 
 ### Push device registration
 

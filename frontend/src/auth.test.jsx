@@ -40,20 +40,25 @@ import { apiError } from "./test-utils.jsx";
 import App from "./App.jsx";
 
 // The real provider, exactly as main.jsx wires it, at a given URL — including
-// the QueryClientProvider the app depends on for data fetching.
+// the QueryClientProvider the app depends on for data fetching. The client is
+// returned alongside RTL's result for the tests whose subject is the cache
+// itself (what a session leaves behind).
 function renderApp(route = "/") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[route]}>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>
-    </QueryClientProvider>
-  );
+  return {
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[route]}>
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </MemoryRouter>
+      </QueryClientProvider>
+    ),
+    queryClient,
+  };
 }
 
 beforeEach(() => {
@@ -173,6 +178,101 @@ describe("Login flow", () => {
 
     await screen.findByRole("button", { name: "Log in" });
     expect(getDraft(7)).toBe("");
+  });
+
+  it("🔒 empties the query cache on the way out", async () => {
+    const user = userEvent.setup();
+    api.getCurrentUser.mockResolvedValue({ pk: 1, email: "sam@example.com" });
+    api.logout.mockResolvedValue({});
+
+    const { queryClient } = renderApp("/");
+    await screen.findByPlaceholderText("What's happening?");
+
+    // Stand in for what a real session leaves in there: the conversation list
+    // carries other people's message text, and TanStack paints cached data
+    // before any refetch — so on a shared computer the next person to log in
+    // reads it (#194).
+    queryClient.setQueryData(["conversations"], {
+      results: [{ id: 3, last_message: { body: "see you at 6" } }],
+    });
+    queryClient.setQueryData(["user", 9], { display_name: "Ada Lovelace" });
+
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Log out" }));
+
+    await screen.findByRole("button", { name: "Log in" });
+    // Two unrelated keys, because the claim is "the cache", not "the one key
+    // this test seeded" — but named keys rather than a count of everything in
+    // there, which would fail the day a public page fetches something.
+    expect(queryClient.getQueryData(["conversations"])).toBeUndefined();
+    expect(queryClient.getQueryData(["user", 9])).toBeUndefined();
+  });
+
+  it("🔒 lets go of the session even when the logout request fails", async () => {
+    const user = userEvent.setup();
+    api.getCurrentUser.mockResolvedValue({ pk: 1, email: "sam@example.com" });
+    // The POST never lands — a blink of network, or a session the server had
+    // already dropped. The menu sends you to the login page either way, so
+    // everything this browser holds has to go with it or the next person to log
+    // in here inherits it.
+    api.logout.mockRejectedValue(apiError("Request failed", 500));
+
+    const { queryClient } = renderApp("/");
+    await screen.findByPlaceholderText("What's happening?");
+    setDraft(7, "something I never sent");
+    queryClient.setQueryData(["conversations"], { results: [{ id: 3 }] });
+
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Log out" }));
+
+    expect(await screen.findByRole("button", { name: "Log in" })).toBeInTheDocument();
+    expect(getDraft(7)).toBe("");
+    expect(queryClient.getQueryData(["conversations"])).toBeUndefined();
+  });
+
+  it("🔒 drops the last person's session when someone else logs in without one", async () => {
+    const user = userEvent.setup();
+    // A tab still holding Ada's session, navigated to the public login page —
+    // she logged out in her *other* tab, or followed the link from sign-up.
+    // Nothing here ever goes null, so `useSessionReset` never fires and the
+    // guard has to be on the sign-in side.
+    api.getCurrentUser.mockResolvedValue({ pk: 1, email: "ada@example.com" });
+
+    const { queryClient } = renderApp("/login");
+    await screen.findByLabelText("Email");
+    setDraft(7, "something Ada never sent");
+    queryClient.setQueryData(["conversations"], { results: [{ id: 3 }] });
+
+    api.login.mockResolvedValue({});
+    api.getCurrentUser.mockResolvedValue({ pk: 2, email: "grace@example.com" });
+
+    await user.type(screen.getByLabelText("Email"), "grace@example.com");
+    await user.type(screen.getByLabelText("Password"), "correcthorse");
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+
+    await screen.findByPlaceholderText("What's happening?");
+    expect(queryClient.getQueryData(["conversations"])).toBeUndefined();
+    expect(getDraft(7)).toBe("");
+  });
+
+  it("keeps your own drafts when you log back in as yourself", async () => {
+    const user = userEvent.setup();
+    api.getCurrentUser.mockResolvedValue({ pk: 1, email: "ada@example.com" });
+
+    renderApp("/login");
+    await screen.findByLabelText("Email");
+    // Same person, same browser — an outbox that survives is the point of
+    // having one, so the guard is "somebody else", not "a sign-in happened".
+    setDraft(7, "something I'll finish in a minute");
+
+    api.login.mockResolvedValue({});
+
+    await user.type(screen.getByLabelText("Email"), "ada@example.com");
+    await user.type(screen.getByLabelText("Password"), "correcthorse");
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+
+    await screen.findByPlaceholderText("What's happening?");
+    expect(getDraft(7)).toBe("something I'll finish in a minute");
   });
 });
 

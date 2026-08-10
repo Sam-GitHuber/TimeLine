@@ -11,6 +11,7 @@ import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import { useMediaQuery } from "./hooks.js";
 import { MessagingProvider, useMessaging } from "./messaging.jsx";
 import { GroupsDrawerProvider, useGroupsDrawer } from "./groups-drawer.jsx";
+import { useSessionReset } from "./useSessionReset.js";
 
 // Below this width the two 400px companion drawers can't sit side-by-side, so
 // opening one closes the other. Kept in sync with Layout.jsx's coordination.
@@ -91,6 +92,12 @@ function GroupsRoute() {
 }
 
 export default function App() {
+  // 🔒 Here rather than inside a route: this is the one component that stays
+  // mounted across the logged-in/logged-out boundary, which is the transition
+  // the cache has to be emptied on (#194). Anything under `ProtectedRoute` has
+  // already unmounted by then.
+  useSessionReset();
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
