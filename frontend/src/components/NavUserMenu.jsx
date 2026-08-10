@@ -22,6 +22,12 @@ export default function NavUserMenu() {
     setOpen(false);
     try {
       await logout();
+    } catch {
+      // The POST didn't land — offline, or a session the server had already
+      // dropped. `logout` empties this browser's half either way (auth.jsx),
+      // and we're leaving for the login page below, so there's no surface left
+      // to show a message on. Swallowed explicitly rather than left to reject
+      // into nothing: an unhandled rejection is how a real error hides.
     } finally {
       // Even if the network call fails, send them to login — clicking logout
       // should never leave you seemingly still logged in.

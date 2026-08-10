@@ -52,17 +52,40 @@ export function AuthProvider({ children }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await api.logout();
-    setUser(null);
-    // 🔒 Drafts and the outbox live outside React (`drafts.js`, `outbox.js`) so
-    // they can survive a component unmounting — which means nothing tears them
-    // down on its own, and they hold one person's unsent words. On a shared
-    // computer the next person to open the drawer isn't this person. The app
-    // does the same on sign-out. (A third store held *other people's* message
-    // text, fetched to fill a reply's quote, until M9g removed quotes from the
-    // client entirely.)
-    clearDrafts();
-    clearOutbox();
+    // 🔒 `finally`, not a plain `await`: a rejected POST — a network blink, or a
+    // session the server had already dropped — used to skip everything below it,
+    // and `NavUserMenu` navigates to /login regardless ("clicking logout should
+    // never leave you seemingly still logged in"). So you landed on the login
+    // form with `user` still set, the cache still full and the drafts still
+    // there, and the next person to log in on that browser inherited the lot —
+    // the same leak by a different door (#194). Whether the *server* honoured
+    // the request is its own question; whether this browser lets go of the
+    // session isn't, and we control that half unconditionally.
+    //
+    // What this can't undo is the auth cookie itself: it's httpOnly, so only
+    // that POST can clear it. A logout whose request never landed therefore
+    // leaves a session a page reload would pick back up — unchanged by this,
+    // and not something the client can fix on its own.
+    try {
+      await api.logout();
+    } finally {
+      setUser(null);
+      // 🔒 Drafts and the outbox live outside React (`drafts.js`, `outbox.js`)
+      // so they can survive a component unmounting — which means nothing tears
+      // them down on its own, and they hold one person's unsent words. On a
+      // shared computer the next person to open the drawer isn't this person.
+      // The app does the same on sign-out. (A third store held *other people's*
+      // message text, fetched to fill a reply's quote, until M9g removed quotes
+      // from the client entirely.)
+      //
+      // The other half of that session — the TanStack query cache, which holds
+      // rather more of it — is emptied by `useSessionReset` off the back of
+      // `user` becoming null, not from here: at this point the feed and the
+      // drawers are still mounted, and clearing under live observers just makes
+      // them refetch with a cookie the server has already thrown away (#194).
+      clearDrafts();
+      clearOutbox();
+    }
   }, []);
 
   // register does NOT log you in — new accounts are pending admin approval.

@@ -308,9 +308,38 @@ interleave and leave the phone receiving the previous user's notifications
 [notifications.md](notifications.md) § *App side* — one copy, because the two
 docs disagreeing about it is how the next change breaks it.
 
-The web (`frontend/src/auth.jsx`) clears its drafts/outbox on logout but does
-**not** yet clear its query cache — the same gap #191 closed on mobile,
-tracked as #194.
+### What leaves the browser with the session (#194)
+
+Same threat model on a **shared computer**, and since #194 the same two rules —
+the web is simpler only because it has fewer ways to end a session.
+
+- **The TanStack Query cache** is emptied by `useSessionReset`
+  (`frontend/src/useSessionReset.js`), mounted in `App.jsx` because that is the
+  one component still rendered on both sides of the logged-in boundary. It
+  watches `user` going null rather than being called from `logout`, and the
+  reason is timing rather than taste: at the moment `logout` runs, the feed, the
+  nav's unread counts and any open drawer are still mounted, so clearing there
+  pulls queries out from under live observers and they immediately refetch —
+  carrying a cookie the server has just invalidated — a render before the
+  redirect unmounts them anyway.
+- **The module stores** — outbox and drafts (`outbox.js`, `drafts.js`) — are
+  cleared by `logout` itself, as on the phone.
+
+There is **no session-expiry path** on the web: `api.js` has no 401 handler, so
+`user` only becomes null via `logout` or a cold load. That's why there's no
+sign-in-side `pk` comparison here — the phone needs one because an expiry
+deliberately keeps its stores, and the web has no expiry to keep them through.
+
+Both halves run from a `finally`, which is the other half of #194. `api.logout`
+is an ordinary `request()` and *rejects* on a network blink or an already-dead
+session — where the app's equivalents (`api.logout`, `unregisterPush`) are
+best-effort and never reject. So a failed POST used to skip `setUser(null)` and
+both clears, while `NavUserMenu` navigated to `/login` regardless ("clicking
+logout should never leave you seemingly still logged in"): you landed on the
+login form with the whole previous session still in memory, and the next person
+to log in on that browser inherited it. What no client can undo is the auth
+cookie itself — it's httpOnly, so only that POST clears it, and a logout whose
+request never landed leaves a session a page reload would pick back up.
 
 ### Push device registration
 
