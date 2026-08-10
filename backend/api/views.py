@@ -1,4 +1,3 @@
-import logging
 import re
 from collections import defaultdict
 from datetime import timedelta
@@ -119,8 +118,6 @@ from .serializers import (
 )
 
 User = get_user_model()
-
-logger = logging.getLogger(__name__)
 
 ACCEPTED = Connection.Status.ACCEPTED
 PENDING = Connection.Status.PENDING

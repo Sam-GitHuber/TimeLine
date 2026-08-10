@@ -212,6 +212,13 @@ class GroupAdmin(admin.ModelAdmin):
     search_fields = ("name", "creator__email")
     ordering = ("name",)
     inlines = (GroupMembershipInline,)
+    # 🔒 Read-only for the same two reasons as ``UserAdmin``'s: the file
+    # widget's "Clear" checkbox blanks the column without deleting a row, so
+    # nothing sweeps the file and it stays fetchable at its URL; and an upload
+    # here would bypass ``imaging.process_avatar``, storing an unvalidated file
+    # with its EXIF/GPS intact. Group avatars are set by an admin through the
+    # API (``PATCH /api/groups/<id>/``), which does both properly.
+    readonly_fields = ("avatar", "avatar_thumb")
 
     @admin.display(description="members")
     def member_count(self, obj):

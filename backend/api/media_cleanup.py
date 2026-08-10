@@ -14,9 +14,9 @@ Every path that didn't — the Django admin, which *is* the documented moderatio
 route, and the management commands — silently left files behind (issue #222). A
 convention that has to be re-followed at each new call site is not a rule.
 
-So the sweep hangs off the model instead: a ``post_delete`` receiver per
-file-bearing model, connected in ``ApiConfig.ready``. Three things fall out of
-that, and they're the reason this beats hand-gathering:
+So the sweep hangs off the model instead: a ``post_delete`` receiver on every
+model that has a file field, connected in ``ApiConfig.ready``. Three things fall
+out of that, and they're the reason this beats hand-gathering:
 
 * **Cascades are covered.** Deleting a group destroys its posts', events' and
   chats' photos through several layers of FK; deleting a user reaches other
@@ -34,38 +34,64 @@ that, and they're the reason this beats hand-gathering:
   receiver waits for that delete to commit — and is discarded if it rolls back.
   Callers don't have to open a transaction to make the sweep safe.
 
+**The set of models is derived, not listed.** Anything else would just move the
+convention from the call sites to a registry someone has to remember to update —
+the same failure with a different address. ``media_file_fields`` reads every
+concrete model in our own apps and picks out its ``FileField``s (``ImageField``
+is one), so a new file field is covered the moment it exists.
+``api.tests.MediaFileFieldRegistryTests`` pins the derived set, so *losing*
+coverage is a test failure rather than a silent regression.
+
 There is deliberately **no** receiver-based answer for *replacing* a file (a new
 avatar over an old one): no row is deleted there, so ``imaging.save_avatar`` and
 ``imaging.clear_avatar`` call ``delete_files_on_commit`` directly. That's the one
-remaining hand-call, and it's on the same mechanism.
+remaining hand-call, and it's on the same mechanism. Because that path exists,
+**a file field must never be editable in the Django admin** — the admin's own
+"Clear" checkbox blanks the column without deleting a row, so no receiver fires
+and the file is orphaned; and an upload through the admin skips
+``imaging.process_image`` entirely, storing a client's file with its EXIF (and
+GPS) intact. Both admins render these fields read-only for those two reasons.
 """
 
 import logging
 
-from django.db import transaction
+from django.db import models, transaction
 from django.db.models.signals import post_delete
 
 logger = logging.getLogger(__name__)
 
 
-# Every file-bearing model in the project and the file fields on it. There are no
-# others — if you add a ``FileField``/``ImageField`` to a model, add it here or
-# its uploads will outlive the rows that own them.
-#
-# ``accounts.User`` is registered from the ``api`` app rather than ``accounts``
-# on purpose: ``api`` already depends on ``accounts`` (every FK points that way),
-# and having ``accounts`` reach into ``api`` for the sweep would invert that for
-# no gain. The receiver only needs the model, not the app it lives in.
-MEDIA_FILE_FIELDS = {
-    ("accounts", "User"): ("avatar", "avatar_thumb"),
-    ("api", "Group"): ("avatar", "avatar_thumb"),
-    ("api", "PostImage"): ("image", "thumbnail"),
-    ("api", "EventPhoto"): ("image", "thumbnail"),
-    ("api", "MessageAttachment"): ("file", "thumbnail"),
-}
+# Only our own apps. A third-party model's files aren't ours to decide the
+# lifecycle of, and none of the ones we install have file fields anyway.
+MEDIA_APP_LABELS = ("accounts", "api")
+
+# Receivers are kept alive here because ``post_delete.connect`` holds its
+# listeners weakly by default, and these are closures with no other reference.
+_receivers = []
 
 
-def delete_files_on_commit(files):
+def media_file_fields(app_registry):
+    """``{model: (file field name, …)}`` for every file-bearing model we own.
+
+    Derived rather than hand-listed, so adding an ``ImageField`` to a model can't
+    quietly opt that model out of the sweep. Proxies are skipped: they'd connect
+    a second receiver against the same table and sweep every file twice.
+    """
+    found = {}
+    for model in app_registry.get_models():
+        if model._meta.app_label not in MEDIA_APP_LABELS or model._meta.proxy:
+            continue
+        names = tuple(
+            field.name
+            for field in model._meta.fields
+            if isinstance(field, models.FileField)
+        )
+        if names:
+            found[model] = names
+    return found
+
+
+def delete_files_on_commit(files, using=None):
     """Remove ``files`` from storage once the current transaction commits.
 
     On-commit rather than inline because file deletion isn't transactional: if
@@ -81,6 +107,12 @@ def delete_files_on_commit(files):
     mutates the very object we were handed, and holding the object would sweep
     the *new* avatar instead of the old one. Snapshotting also means the callback
     can't be affected by anything the caller does to the instance afterwards.
+
+    ``using`` is the database alias the delete ran on, so the callback attaches
+    to *that* connection's commit rather than the default one. Single-database
+    today; getting it wrong on a second one would mean registering against a
+    connection in autocommit, where ``on_commit`` fires immediately — i.e. the
+    inline delete this exists to avoid.
 
     Each file is swept independently. These callbacks run *after* the commit, so
     letting one storage error abort the loop would both strand every remaining
@@ -102,25 +134,41 @@ def delete_files_on_commit(files):
                 # remote-storage blip). Log it for manual cleanup and continue.
                 logger.exception("Could not delete stored file %r", name)
 
-    transaction.on_commit(_remove)
+    transaction.on_commit(_remove, using=using)
 
 
-def sweep_media_after_delete(sender, instance, **kwargs):
-    """``post_delete`` receiver: queue this row's files for removal."""
-    field_names = MEDIA_FILE_FIELDS[(sender._meta.app_label, sender._meta.object_name)]
-    delete_files_on_commit(getattr(instance, name) for name in field_names)
+def _sweeper(field_names):
+    """Build the ``post_delete`` receiver for a model with these file fields.
+
+    The names are bound at connect time rather than looked up per row, so a
+    dispatch can't fail on a missing registry entry inside the delete's own
+    transaction.
+    """
+
+    def sweep_media_after_delete(sender, instance, using=None, **kwargs):
+        # ``getattr`` here assumes the file fields were loaded. A caller that
+        # ``defer()``s or ``only()``s them and then deletes would send Django to
+        # refresh a row that no longer exists — a loud failure that rolls the
+        # delete back, which is the safe direction, but don't defer them.
+        delete_files_on_commit(
+            (getattr(instance, name) for name in field_names), using=using
+        )
+
+    return sweep_media_after_delete
 
 
 def register_media_cleanup(app_registry):
-    """Connect :func:`sweep_media_after_delete` to every file-bearing model.
+    """Connect a file sweep to every file-bearing model. Called from ``ready``.
 
-    Called from ``ApiConfig.ready``. ``dispatch_uid`` keeps a re-imported module
-    (the autoreloader, or a test that reloads apps) from connecting twice and
-    sweeping the same file twice.
+    ``dispatch_uid`` keeps a re-imported module (the autoreloader, or a test that
+    reloads apps) from connecting twice and sweeping the same file twice.
     """
-    for (app_label, model_name), _fields in MEDIA_FILE_FIELDS.items():
+    for model, field_names in media_file_fields(app_registry).items():
+        receiver = _sweeper(field_names)
+        _receivers.append(receiver)
         post_delete.connect(
-            sweep_media_after_delete,
-            sender=app_registry.get_model(app_label, model_name),
-            dispatch_uid=f"media-cleanup:{app_label}.{model_name}",
+            receiver,
+            sender=model,
+            weak=False,
+            dispatch_uid=f"media-cleanup:{model._meta.label}",
         )

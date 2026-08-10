@@ -193,6 +193,12 @@ class UserDetailsSerializer(BaseUserDetailsSerializer):
         avatar_file = validated_data.pop("avatar", None)
         remove_avatar = validated_data.pop("remove_avatar", False)
 
+        # Validate/downscale before opening the transaction: it's the expensive
+        # part (a full Pillow decode + re-encode), and a rejected upload should
+        # 400 without having held a connection open for it. Matches
+        # ``GroupDetailView.patch``.
+        processed = process_avatar(avatar_file) if avatar_file is not None else None
+
         # Atomic because replacing or clearing an avatar destroys the *old*
         # files, and that sweep is deferred to the commit (issue #224).
         # ``ATOMIC_REQUESTS`` is off, so with no transaction open the sweep runs
@@ -203,8 +209,8 @@ class UserDetailsSerializer(BaseUserDetailsSerializer):
             # first_name / last_name / bio via the base implementation.
             instance = super().update(instance, validated_data)
 
-            if avatar_file is not None:
-                save_avatar(instance, process_avatar(avatar_file))
+            if processed is not None:
+                save_avatar(instance, processed)
                 instance.save(update_fields=["avatar", "avatar_thumb"])
             elif remove_avatar:
                 clear_avatar(instance)

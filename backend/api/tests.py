@@ -5715,7 +5715,65 @@ class DeletedContentLeavesNoFilesTests(APITestCase):
             self.assertFalse(storage.exists(name), f"{name} survived the delete")
 
 
+class MediaFileFieldRegistryTests(SimpleTestCase):
+    """The set of models the sweep covers is derived, not listed — this pins it.
+
+    A derived set can't be *forgotten* the way a hand-written registry can, which
+    is the whole point (issue #222). What it can do is quietly change shape, so
+    this asserts the current one. A new file field failing here means "confirm
+    the sweep is what you want for it", not "go and add it to a list".
+    """
+
+    def test_every_file_field_we_own_is_covered(self):
+        from django.apps import apps as app_registry
+
+        from api.media_cleanup import media_file_fields
+
+        derived = {
+            model._meta.label: fields
+            for model, fields in media_file_fields(app_registry).items()
+        }
+        self.assertEqual(
+            derived,
+            {
+                "accounts.User": ("avatar", "avatar_thumb"),
+                "api.Group": ("avatar", "avatar_thumb"),
+                "api.PostImage": ("image", "thumbnail"),
+                "api.EventPhoto": ("image", "thumbnail"),
+                "api.MessageAttachment": ("file", "thumbnail"),
+            },
+        )
+
+    def test_no_file_field_is_editable_in_the_admin(self):
+        """🔒 An editable file field in the admin is a hole in the sweep *and* in
+        the upload pipeline.
+
+        Django's file widget carries a "Clear" checkbox that blanks the column
+        without deleting a row, so no ``post_delete`` fires and the file stays on
+        disk — fetchable by anyone holding its URL. And an upload through the
+        admin skips ``imaging.process_image``, storing a client's file with its
+        EXIF (including GPS) intact. Both are silent.
+        """
+        from django.apps import apps as app_registry
+        from django.contrib import admin as django_admin
+
+        from api.media_cleanup import media_file_fields
+
+        covered = media_file_fields(app_registry)
+        checked = 0
+        for model, model_admin in django_admin.site._registry.items():
+            for name in covered.get(model, ()):
+                checked += 1
+                self.assertIn(
+                    name,
+                    model_admin.get_readonly_fields(None),
+                    f"{model._meta.label}.{name} is editable in the admin",
+                )
+        self.assertGreater(checked, 0)  # the loop really found something
+
+
 _ADMIN_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-admin-media-")
+_AVATAR_SWAP_MEDIA_ROOT = tempfile.mkdtemp(prefix="timeline-test-avatar-swap-")
 
 
 @override_settings(MEDIA_ROOT=_ADMIN_MEDIA_ROOT)
@@ -5740,14 +5798,16 @@ class DeletesOutsideTheApiSweepMediaTests(APITestCase):
     single delete somebody remembered to write code for.
     """
 
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_ADMIN_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
     def setUp(self):
         self.me = make_user("member@example.com")
         self.staff = User.objects.create_superuser(
             email="root@example.com", password=PASSWORD
         )
-
-    def tearDown(self):
-        shutil.rmtree(_ADMIN_MEDIA_ROOT, ignore_errors=True)
 
     def _post_with_photo(self, author=None):
         self.client.force_authenticate(author or self.me)
@@ -5891,7 +5951,7 @@ class DeletesOutsideTheApiSweepMediaTests(APITestCase):
         )
 
 
-@override_settings(MEDIA_ROOT=_ADMIN_MEDIA_ROOT)
+@override_settings(MEDIA_ROOT=_AVATAR_SWAP_MEDIA_ROOT)
 class GroupAvatarReplacementTests(APITestCase):
     """🔒 Replacing a group avatar destroys the *old* files, and that has to wait
     for the commit like every other file destruction (issue #224).
@@ -5905,13 +5965,15 @@ class GroupAvatarReplacementTests(APITestCase):
     re-upload. Unlike an orphaned file, that one is visible and unrecoverable.
     """
 
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_AVATAR_SWAP_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
     def setUp(self):
         self.me = make_user("admin@example.com")
         self.client.force_authenticate(self.me)
         self.group = make_group(self.me)
-
-    def tearDown(self):
-        shutil.rmtree(_ADMIN_MEDIA_ROOT, ignore_errors=True)
 
     def _set_avatar(self, name="one.jpg"):
         with self.captureOnCommitCallbacks(execute=True):

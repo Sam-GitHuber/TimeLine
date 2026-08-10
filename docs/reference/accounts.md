@@ -455,13 +455,16 @@ signed in rather than on owning the file (see
 [feed-and-posts.md](feed-and-posts.md)). So "delete the post I regret" has to
 mean the photo too, and a maintainer's takedown has to mean it most of all.
 
-**One mechanism does it: a `post_delete` receiver per file-bearing model**, wired
-up in `ApiConfig.ready` — see `api/media_cleanup.py`, which carries the full
-reasoning. There are five such models and no others: `User.avatar`/`avatar_thumb`,
-`Group.avatar`/`avatar_thumb`, `PostImage.image`/`thumbnail`,
-`EventPhoto.image`/`thumbnail`, `MessageAttachment.file`/`thumbnail`. **Add a new
-file field to a model and it must be added to `MEDIA_FILE_FIELDS`**, or its
-uploads outlive the rows that own them.
+**One mechanism does it: a `post_delete` receiver on every model with a file
+field**, wired up in `ApiConfig.ready` — see `api/media_cleanup.py`, which
+carries the full reasoning. The set is **derived** from our own apps' models
+rather than hand-listed, because a registry someone has to remember to update is
+the same failure as a call site someone has to remember to write. Today it comes
+out as five models: `User.avatar`/`avatar_thumb`, `Group.avatar`/`avatar_thumb`,
+`PostImage.image`/`thumbnail`, `EventPhoto.image`/`thumbnail`,
+`MessageAttachment.file`/`thumbnail`. `api.tests.MediaFileFieldRegistryTests`
+pins that, so a new file field trips a test asking you to confirm the sweep suits
+it — not to go and add it somewhere.
 
 Why a signal rather than a call in each delete path, which is what this was:
 
@@ -489,6 +492,16 @@ is worse than an orphan, and it's the reason this is spelled out: the row rolls
 back still pointing at a file that's already gone, which is a broken avatar
 forever — the old image can't be re-derived and the row won't take a repair
 without a re-upload.
+
+That replacement case is also why **a file field must never be editable in the
+Django admin**, which `UserAdmin` and `GroupAdmin` both enforce with
+`readonly_fields`. Django's file widget carries a "Clear" checkbox that blanks
+the column *without deleting a row*, so no receiver fires and the file is
+orphaned; and an upload through the admin skips `imaging.process_avatar`
+altogether, storing a client's file with its EXIF — including the GPS the app
+strips from every other photo — intact. Avatars change through the API or not at
+all. `MediaFileFieldRegistryTests` asserts this for every file field, so a new
+one can't quietly arrive editable.
 
 None of this narrows *who can fetch a file that still exists* — see issue #223.
 

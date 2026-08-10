@@ -1,6 +1,7 @@
 from allauth.account.models import EmailAddress
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+from django.db import transaction
 from django.db.models import Exists, OuterRef
 from django.utils.translation import gettext_lazy as _
 
@@ -34,6 +35,19 @@ class UserAdmin(DjangoUserAdmin):
     ordering = ("email",)
     actions = ("approve_users",)
 
+    # 🔒 The avatar fields are visible but **read-only**, for two reasons that
+    # both bite. Django's file widget carries a "Clear" checkbox that blanks the
+    # column *without deleting a row*, so the ``post_delete`` sweep never fires
+    # and the JPEG is left on disk — still fetchable by anyone holding its URL,
+    # which is the exact property ``api/media_cleanup.py`` exists to guarantee.
+    # And an upload here would skip ``imaging.process_avatar`` entirely, storing
+    # a client's file with its EXIF (including the GPS coordinates the app
+    # strips from every other photo) intact and unresized.
+    #
+    # Avatars are changed by their owner through the API, or not at all. Same
+    # rule, same reasoning as ``PostImageInline`` and ``EventPhotoAdmin``.
+    readonly_fields = ("avatar", "avatar_thumb")
+
     def get_queryset(self, request):
         # Annotate verification status in one query (an Exists subquery) so the
         # changelist's email_verified column doesn't fire a query per row (N+1).
@@ -51,6 +65,8 @@ class UserAdmin(DjangoUserAdmin):
     fieldsets = (
         (None, {"fields": ("email", "password")}),
         (_("Personal info"), {"fields": ("first_name", "last_name", "bio", "avatar", "avatar_thumb")}),
+        # ``avatar``/``avatar_thumb`` are shown but **not editable** — see
+        # ``readonly_fields`` below.
         (
             _("Permissions"),
             {
@@ -102,5 +118,12 @@ class UserAdmin(DjangoUserAdmin):
         # One at a time, because the group handover is per-member: deleting two
         # of a group's three members has to reconsider who inherits admin after
         # the first one goes, not decide it once against the original roster.
-        for user in queryset:
-            delete_account(user)
+        #
+        # Wrapped in one transaction so the action stays all-or-nothing, which
+        # is what the plain ``queryset.delete()`` it replaces was. Without it a
+        # failure partway leaves the earlier accounts permanently gone — files
+        # swept and all — while the rest survive and the admin log claims every
+        # one of them was deleted.
+        with transaction.atomic():
+            for user in queryset:
+                delete_account(user)

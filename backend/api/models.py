@@ -1814,9 +1814,10 @@ class EventPhoto(models.Model):
 
     ``uploader`` is CASCADE for the same reason ``Comment.author`` is: a photo
     with no author has nothing for the gate to read, so it goes with the
-    account. Deleting the event takes its photos too — and in both cases the
-    *files* must be swept separately (``delete_files_on_commit``), since a
-    database cascade doesn't touch storage.
+    account. Deleting the event takes its photos too — and in both cases a
+    database cascade doesn't touch storage, so the *files* are swept by the
+    ``post_delete`` receiver in ``api/media_cleanup.py``. Don't hand-gather them
+    at a new delete path; the receiver already has it, cascades included.
     """
 
     event = models.ForeignKey(
