@@ -269,6 +269,26 @@ eas submit --platform android --profile production --latest
   `eas credentials --platform android` can export it — store it with the other
   deploy secrets (see [`backup-restore.md`](backup-restore.md)), never the repo.
 
+**Check the permissions in the merged *release* manifest before the first
+upload**, not the one `expo prebuild` writes. Play flags sensitive permissions at
+review, and two of ours are only *removals* — `RECORD_AUDIO` (from
+`microphonePermission: false`) and `SYSTEM_ALERT_WINDOW` (from
+`android.blockedPermissions`, #220 §3). In `android/app/src/main/AndroidManifest.xml`
+both appear as `<uses-permission … tools:node="remove"/>`, which reads at a glance
+exactly like requesting them. The merged manifest is where they're actually gone:
+
+```bash
+cd mobile/android && ./gradlew :app:processReleaseMainManifest
+grep uses-permission app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml
+```
+
+`SYSTEM_ALERT_WINDOW` ("draw over other apps") is worth knowing about because it
+arrives *by default* — it's in Expo's own manifest template, under a literal
+"OPTIONAL PERMISSIONS, REMOVE WHATEVER YOU DO NOT NEED" comment
+(`@expo/config-plugins`), so it is not attributable to any dependency we chose
+and nothing warns you. **The debug manifest still declares it** and that's fine:
+it comes from React Native's dev overlay and never reaches Play.
+
 **Device verification** gates a *personal* Play account: Google requires the
 **Play Console mobile app on a non-rooted physical Android device** running
 Android 10+, signed in as the account owner. An emulator will not do — this is

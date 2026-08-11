@@ -19,7 +19,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
-import { router, useRootNavigationState } from 'expo-router';
+import { router, useRootNavigationState, useSegments } from 'expo-router';
 import { render, waitFor } from '@testing-library/react-native';
 import { Text } from 'react-native';
 
@@ -32,6 +32,7 @@ import { usePushNotificationTaps } from '@/usePushTaps';
 jest.mock('expo-router', () => ({
   router: { navigate: jest.fn(), push: jest.fn(), replace: jest.fn() },
   useRootNavigationState: jest.fn(),
+  useSegments: jest.fn(),
 }));
 
 jest.mock('@/auth', () => ({ useAuth: jest.fn() }));
@@ -41,6 +42,7 @@ const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
 const mockNavState = useRootNavigationState as jest.MockedFunction<
   typeof useRootNavigationState
 >;
+const mockSegments = useSegments as jest.MockedFunction<typeof useSegments>;
 
 /** A notification response as expo-notifications shapes it. */
 function response({
@@ -107,6 +109,9 @@ beforeEach(() => {
   jest.spyOn(client, 'invalidateQueries');
   mockUseAuth.mockReturnValue({ status: 'signedIn' } as never);
   mockNavState.mockReturnValue({ key: 'root' } as never);
+  // Somewhere in the app rather than on the login screen — the state every test
+  // but the post-login one below is describing.
+  mockSegments.mockReturnValue(['(tabs)'] as never);
   mockNotifications.useLastNotificationResponse.mockReturnValue(null as never);
   jest
     .spyOn(api, 'markNotificationAddressed')
@@ -212,6 +217,57 @@ it('waits for the router to be ready', async () => {
 
   await render(<Probe />);
 
+  expect(router.navigate).not.toHaveBeenCalled();
+});
+
+it('holds a deep link until the login screen has gone (#220 §1)', async () => {
+  // The *warm* half of the cold-start race above, and the one `status` alone
+  // can't see. Tap a push while signed out, land on /login, sign in: the status
+  // flips while /login is still the top screen, so in one render flush this
+  // hook navigated to the target and AuthGate's redirect then replaced it with
+  // the feed. `handled.current` was already set, so the deep link never came
+  // back — you asked for Ada's thread and got the feed.
+  mockSegments.mockReturnValue(['login'] as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({ url: '/messages/12', notificationId: undefined })
+  );
+
+  const view = await render(<Probe />);
+  expect(router.navigate).not.toHaveBeenCalled();
+
+  // AuthGate's post-login `router.replace('/')` has landed; now it's ours.
+  mockSegments.mockReturnValue(['(tabs)'] as never);
+  await view.rerender(<Probe />);
+
+  await waitFor(() =>
+    expect(router.navigate).toHaveBeenCalledWith('/messages/12')
+  );
+  expect(router.navigate).toHaveBeenCalledTimes(1);
+});
+
+it('holds a notification reply until the login screen has gone too', async () => {
+  // Same guard, same reason as the router-readiness one it sits beside: one
+  // definition of "ready to act on this", rather than two that can disagree
+  // about a half-started app. Nothing is dropped — the response is still here
+  // on the next render, and the reply goes out then.
+  const send = jest.spyOn(api, 'sendMessage').mockResolvedValue({} as never);
+  mockSegments.mockReturnValue(['login'] as never);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      notificationId: undefined,
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  const view = await render(<Probe />);
+  expect(send).not.toHaveBeenCalled();
+
+  mockSegments.mockReturnValue(['(tabs)'] as never);
+  await view.rerender(<Probe />);
+
+  await waitFor(() => expect(send).toHaveBeenCalledWith(12, 'on my way'));
   expect(router.navigate).not.toHaveBeenCalled();
 });
 

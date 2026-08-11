@@ -663,10 +663,28 @@ upsert-on-token when the next person logs in.
 cold-start launch *and* a tap while running in one API. The listener-only
 approach (`addNotificationResponseReceivedListener`) misses the cold start —
 the response fires before any listener mounts — which is the classic way this
-ships broken. Two guards: dedupe by notification identifier (the hook keeps
-returning the same response on re-renders), and wait for `signedIn` so a
-cold-start tap doesn't race the auth gate's redirect to `/login`. Tapping marks
-the notification **addressed**, matching the web dropdown's click-through.
+ships broken. Three guards: dedupe by notification identifier (the hook keeps
+returning the same response on re-renders); wait for `signedIn` so a cold-start
+tap doesn't race the auth gate's redirect to `/login`; and wait for the login
+screen itself to go away. Tapping marks the notification **addressed**, matching
+the web dropdown's click-through.
+
+**That third guard is the warm half of the second, and `signedIn` cannot see it**
+(#220 §1). Tap a push while signed out and you land on `/login` with the response
+held. Sign in, and the status flips while `/login` is *still the top screen* — so
+in one render flush `usePushTaps` navigates to the target and then AuthGate's own
+effect, seeing `signedIn && onLoginScreen`, calls `router.replace('/')` over the
+top of it. The dedupe ref is set by then, so the deep link is gone for good: you
+asked for Ada's thread and arrived at the feed with nothing saying why. Holding
+until `useSegments()[0] !== 'login'` means the tap is acted on *after* that
+redirect instead of racing it. The cold-start path never had this problem — the
+Stack isn't mounted during `loading`, so segments never say `login`.
+
+The same guard covers a **Reply**, which navigates nowhere, for the same reason
+the router-readiness guard does: one definition of "ready to act on this" rather
+than two that can disagree about a half-started app. Nothing is dropped by
+waiting — `useLastNotificationResponse` still returns the response on the next
+render, so the reply goes out a render later.
 
 A tap navigates with **`router.navigate`, never `router.push`** (#177). `push`
 appends a screen unconditionally, so a push for the thread you were already

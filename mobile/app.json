@@ -17,6 +17,7 @@
     "android": {
       "package": "net.yourtimeline.app",
       "googleServicesFile": "./google-services.json",
+      "blockedPermissions": ["android.permission.SYSTEM_ALERT_WINDOW"],
       "adaptiveIcon": {
         "backgroundColor": "#fbfaf7",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
