@@ -14,6 +14,7 @@
  * common bug in this pattern.
  */
 
+import { useSegments } from 'expo-router';
 import {
   createContext,
   useCallback,
@@ -207,4 +208,31 @@ export function useAuth(): AuthContextValue {
     throw new Error('useAuth must be used inside an AuthProvider');
   }
   return context;
+}
+
+/**
+ * Is the login screen the thing currently on top?
+ *
+ * Two callers need this and they have to agree, which is why it is one function
+ * and not one `segments[0] === 'login'` each. AuthGate uses it to decide when to
+ * redirect a signed-in user off the login screen; `usePushTaps` uses it to hold
+ * a tapped notification until that redirect has happened, rather than navigating
+ * into it and being replaced (#220 §1). Two copies of the predicate would drift
+ * the moment the route moves — put login in a group, say, and segments become
+ * `['(auth)', 'login']`; whoever moved it fixes AuthGate because AuthGate visibly
+ * breaks, while the push guard silently evaluates false forever and the deep
+ * link is quietly lost again, which is exactly the bug it was added to fix.
+ *
+ * Lives here rather than in `_layout.tsx` because `_layout.tsx` imports
+ * `usePushTaps`, so the dependency has to point this way.
+ *
+ * **A boolean, not the segments array.** `useSegments` is backed by
+ * `useSyncExternalStore` over a cached route-info snapshot, so the array is a
+ * stable reference *between* navigations but a fresh one on every navigation —
+ * meaning an effect that depends on it re-runs each time the user goes anywhere
+ * in the app. The only thing either caller cares about is crossing this one
+ * boundary, so that is what they depend on.
+ */
+export function useOnLoginScreen(): boolean {
+  return useSegments()[0] === 'login';
 }

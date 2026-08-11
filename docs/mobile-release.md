@@ -275,19 +275,45 @@ review, and two of ours are only *removals* — `RECORD_AUDIO` (from
 `microphonePermission: false`) and `SYSTEM_ALERT_WINDOW` (from
 `android.blockedPermissions`, #220 §3). In `android/app/src/main/AndroidManifest.xml`
 both appear as `<uses-permission … tools:node="remove"/>`, which reads at a glance
-exactly like requesting them. The merged manifest is where they're actually gone:
+exactly like requesting them. The merged manifest is where they're actually gone.
+
+`mobile/android` is **gitignored and generated**, so it may not exist — and if
+you normally build through EAS it won't. Nothing here is on `PATH` by default
+either. Full sequence from a clean checkout:
 
 ```bash
-cd mobile/android && ./gradlew :app:processReleaseMainManifest
-grep uses-permission app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml
+cd mobile
+npx expo prebuild --platform android --no-install   # if android/ isn't there
+
+export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+cd android && ./gradlew :app:processReleaseMainManifest
+grep android.permission \
+  app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml
 ```
+
+**Grep for `android.permission`, not `uses-permission`.** AGP pretty-prints the
+merged file and puts `android:name` on its *own line* whenever the element
+carries a second attribute — so `grep uses-permission` prints a bare
+`<uses-permission` for `READ_EXTERNAL_STORAGE` and `WRITE_EXTERNAL_STORAGE` and
+would hide any sensitive permission that arrived with a `maxSdkVersion`,
+`usesPermissionFlags` or `tools:` attribute. A check that can't see the thing it
+exists to catch is worse than no check.
 
 `SYSTEM_ALERT_WINDOW` ("draw over other apps") is worth knowing about because it
 arrives *by default* — it's in Expo's own manifest template, under a literal
 "OPTIONAL PERMISSIONS, REMOVE WHATEVER YOU DO NOT NEED" comment
 (`@expo/config-plugins`), so it is not attributable to any dependency we chose
-and nothing warns you. **The debug manifest still declares it** and that's fine:
-it comes from React Native's dev overlay and never reaches Play.
+and nothing warns you.
+
+**The debug manifest still declares it, and the debug *merged* manifest keeps
+it** — verified with `:app:processDebugMainManifest`, not assumed. The debug
+build-type manifest is higher priority than `main`, so it wins over the removal
+marker. That's the outcome we want: it's React Native's dev overlay (redbox, perf
+monitor) and it never reaches Play. Worth re-checking if the block ever moves
+from `blockedPermissions` to something hand-written in `main`.
 
 **Device verification** gates a *personal* Play account: Google requires the
 **Play Console mobile app on a non-rooted physical Android device** running

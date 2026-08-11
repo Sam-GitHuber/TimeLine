@@ -21,11 +21,11 @@
 
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
-import { router, useRootNavigationState, useSegments } from 'expo-router';
+import { router, useRootNavigationState } from 'expo-router';
 import { useEffect, useRef } from 'react';
 
 import { api } from '@/api';
-import { useAuth } from '@/auth';
+import { useAuth, useOnLoginScreen } from '@/auth';
 import { newOutgoing, updateOutbox } from '@/outbox';
 import {
   conversationIdFromUrl,
@@ -38,10 +38,9 @@ export function usePushNotificationTaps(): void {
   const { status } = useAuth();
   const response = Notifications.useLastNotificationResponse();
   const navigationState = useRootNavigationState();
-  // A boolean, not the array: `useSegments` hands back a fresh array on every
-  // render, and depending on that would re-run the effect for every unrelated
-  // re-render in the app.
-  const onLoginScreen = useSegments()[0] === 'login';
+  // Shared with AuthGate, which is the effect this one has to sequence itself
+  // against — see `useOnLoginScreen` for why it's one definition and not two.
+  const onLoginScreen = useOnLoginScreen();
   const handled = useRef<string | null>(null);
   // Both branches below deal with something that was waiting, so both move a
   // count `useBadgeCount` is watching (#179).
@@ -56,25 +55,36 @@ export function usePushNotificationTaps(): void {
     //  - the router isn't ready, where navigation silently no-ops;
     //  - the login screen is still on top (#220 §1).
     //
-    // That last one is the *warm* half of the same race the sign-in guard
-    // covers, and `status === 'signedIn'` is not enough to see it. Tap a push
-    // while signed out and you land on /login with the response held here.
-    // Sign in, and the status flips while /login is still the top screen — so
-    // in one render flush this effect navigates to the target and then
-    // AuthGate's own effect, seeing `signedIn && onLoginScreen`, calls
-    // `router.replace('/')` over the top of it. `handled.current` is set by
-    // then, so the deep link is gone for good: you asked for Ada's thread and
-    // arrived at the feed, with nothing saying why. Waiting for the login
-    // screen to go away means we act *after* that redirect rather than before
-    // it, and the target survives. (The cold-start path never sees this — the
-    // Stack isn't mounted during `loading`, so segments never say `login`.)
+    // The last one is the *warm* half of the race the sign-in guard covers, and
+    // `status === 'signedIn'` cannot see it. Tap a push while signed out and you
+    // land on /login with the response held here. Sign in, and the status flips
+    // while /login is still the top screen — so in one render flush this effect
+    // navigates to the target and then AuthGate's own effect, seeing
+    // `signedIn && onLoginScreen`, calls `router.replace('/')` over the top of
+    // it. `handled.current` is set by then, so the deep link is gone for good:
+    // you asked for Ada's thread and arrived at the feed, with nothing saying
+    // why. Waiting for the login screen to go away means we act *after* that
+    // redirect rather than in front of it, and the target survives.
     //
-    // The router guard applies to a *reply* too, even though it navigates
-    // nowhere. Waiting costs nothing (the response is still here on the next
-    // render) and it keeps one definition of "the app is ready to act on this",
-    // rather than two that can disagree about a half-started app.
-    if (!response || status !== 'signedIn' || !navigationState?.key) return;
-    if (onLoginScreen) return;
+    // The two guards are a pair, not alternatives. A cold start with no stored
+    // token *does* reach `['login']` — `loading` (Stack unmounted, no segments)
+    // → `signedOut` → Stack mounts → AuthGate redirects to /login — at which
+    // point it simply *is* the warm case above. What makes cold start safe is
+    // that the sign-in guard holds throughout the part where segments are still
+    // empty, and this one takes over from there. Neither covers it alone.
+    //
+    // All four apply to a *reply* too, even though it navigates nowhere.
+    // Waiting costs nothing (the response is still here on the next render) and
+    // it keeps one definition of "the app is ready to act on this", rather than
+    // two that can disagree about a half-started app.
+    if (
+      !response ||
+      status !== 'signedIn' ||
+      !navigationState?.key ||
+      onLoginScreen
+    ) {
+      return;
+    }
 
     const { identifier } = response.notification.request;
     // The hook keeps returning the *same* response on later re-renders, so
