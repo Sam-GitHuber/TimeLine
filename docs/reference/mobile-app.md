@@ -245,6 +245,26 @@ default cruft. **Both** usage strings name posts, chats *and* profiles: Apple
 shows those sentences to the person in the prompt and to App Review, and they're
 the only explanation either gets.
 
+**The second narrowing is `android.blockedPermissions`** in `app.json`, holding
+`SYSTEM_ALERT_WINDOW` — "draw over other apps" (#220 §3). It emits the same
+`tools:node="remove"` as `microphonePermission: false`, so the same "don't fix
+that entry" warning applies to it. Its origin is what makes it easy to miss:
+unlike every other permission here it is not attributable to a dependency we
+chose. It is in **Expo's own default manifest template**
+(`@expo/config-plugins`' `withAndroidBaseMods`, under a literal `OPTIONAL
+PERMISSIONS, REMOVE WHATEVER YOU DO NOT NEED` comment), so no dependency change
+removes it, nothing warns about it, and a permissions pass that reasons from the
+dependency list — as Phase 10's first one did — concludes there is nothing to do.
+
+Two consequences worth carrying forward. `expo config --type introspect` is
+enough for iOS but **not** for an Android permission question: it shows a blocked
+permission as a *removal*, which reads exactly like a request, and it cannot tell
+you what survives the merge. The merged manifest is the only answer, and
+[`mobile-release.md`](../mobile-release.md) has the command as a pre-upload step.
+And the removal is release-only in effect: the debug build-type manifest is
+higher priority, so dev builds keep `SYSTEM_ALERT_WINDOW` and React Native's
+redbox/perf overlay goes on working.
+
 ### Branch on the data, not the query flags
 
 **A failed refresh of something already on screen is not a reason to take it off

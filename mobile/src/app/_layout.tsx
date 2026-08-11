@@ -10,7 +10,7 @@ import {
   QueryClientProvider,
   focusManager,
 } from '@tanstack/react-query';
-import { Stack, router, useRootNavigationState, useSegments } from 'expo-router';
+import { Stack, router, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import {
@@ -23,7 +23,7 @@ import {
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 
-import { AuthProvider, useAuth } from '@/auth';
+import { AuthProvider, useAuth, useOnLoginScreen } from '@/auth';
 import { PreferencesProvider } from '@/preferences';
 import {
   configureNotificationCategories,
@@ -90,7 +90,9 @@ const queryClient = new QueryClient({
  */
 function AuthGate() {
   const { status } = useAuth();
-  const segments = useSegments();
+  // Shared with `usePushTaps`, which has to sequence itself against the redirect
+  // below — one definition of "on the login screen", not two (#220 §1).
+  const onLoginScreen = useOnLoginScreen();
   // All three live here rather than in RootLayout because they read auth state,
   // and so must be inside AuthProvider (the dismissal reconcile and the badge
   // count also need the QueryClientProvider above it).
@@ -111,14 +113,12 @@ function AuthGate() {
     if (!navigationState?.key) return;
     if (status === 'loading') return;
 
-    const onLoginScreen = segments[0] === 'login';
-
     if (status === 'signedOut' && !onLoginScreen) {
       router.replace('/login');
     } else if (status === 'signedIn' && onLoginScreen) {
       router.replace('/');
     }
-  }, [status, segments, navigationState?.key]);
+  }, [status, onLoginScreen, navigationState?.key]);
 
   if (status === 'loading') {
     return (
