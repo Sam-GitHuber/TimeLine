@@ -4,15 +4,15 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "dj-rest-auth>=7.0",
-    "django>=6.0.7,<6.1",
-    "django-allauth>=65.0",
+    "django>=6.1,<6.2",
+    "django-allauth>=65.19.0",
     "django-cors-headers>=4.9.0",
     # django-storages: the storage abstraction behind media files. Local disk
     # now (through the Phase 7 home-server beta); flipping to an S3 bucket at the
     # AWS migration (Phase 7b) is a config change, not a code change. The S3
     # backend's own dependency (boto3) is only pulled in then.
     "django-storages>=1.14",
-    "djangorestframework>=3.17.1",
+    "djangorestframework>=3.18.0",
     "djangorestframework-simplejwt>=5.3",
     # gunicorn: the production WSGI app server (replaces Django's dev `runserver`
     # in the Phase 7 prod stack). Dev still uses runserver via entrypoint.sh.
@@ -48,7 +48,7 @@ dependencies = [
 # production images can skip them with `uv sync --no-dev`.
 [dependency-groups]
 dev = [
-    "ruff>=0.16.1",
+    "ruff>=0.16.2",
     "bandit>=1.9",
 ]
 
