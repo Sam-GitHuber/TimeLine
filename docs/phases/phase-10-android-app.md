@@ -309,13 +309,25 @@ it**. Before the fix the second tap did nothing, permanently.
   derives from constants (`SPINE_COLUMN`, `SPINE_CENTRE`) so it should hold, but
   line heights and the day dividers want eyes on them.
 - **Ripple feedback** — Android users expect `android_ripple` on pressables.
-- **Permissions: checked, nothing to do.** This plan proposed dropping the
-  camera permission; that was wrong. Chat photos can be taken with the camera
-  (Phase 9b M7), so `CAMERA` is a live capability. And `microphonePermission:
-  false` already emits an explicit `tools:node="remove"`, so `RECORD_AUDIO` is
-  stripped at manifest merge rather than merely omitted — it appears in the
-  introspected manifest *as a removal*, which is easy to misread as a leak.
-  `mobile-app.md` corrected, since it still claimed we only open the library.
+- **Permissions: one real narrowing, now done (#220 §3).** This plan proposed
+  dropping the camera permission; that was wrong. Chat photos can be taken with
+  the camera (Phase 9b M7), so `CAMERA` is a live capability. And
+  `microphonePermission: false` already emits an explicit `tools:node="remove"`,
+  so `RECORD_AUDIO` is stripped at manifest merge rather than merely omitted — it
+  appears in the introspected manifest *as a removal*, which is easy to misread
+  as a leak. `mobile-app.md` corrected, since it still claimed we only open the
+  library.
+
+  What that pass missed was `SYSTEM_ALERT_WINDOW` ("draw over other apps"), which
+  was in the merged **release** manifest and would have met the Play reviewer at
+  submission — E is the outstanding milestone, so it would have surfaced as a
+  review delay at the worst moment. It is now blocked via
+  `android.blockedPermissions` in `app.json`. Two things made it easy to miss:
+  it is not attributable to any dependency we chose (it comes from Expo's own
+  manifest template, under a literal "OPTIONAL PERMISSIONS, REMOVE WHATEVER YOU
+  DO NOT NEED" comment in `@expo/config-plugins`), and the source manifest is not
+  where the answer lives — see the merged-manifest check in `mobile-release.md`,
+  which is the one to run before the first upload.
 
 ### Dev-loop gotcha
 

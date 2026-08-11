@@ -24,7 +24,7 @@ import { render, waitFor } from '@testing-library/react-native';
 import { Text } from 'react-native';
 
 import { api } from '@/api';
-import { useAuth } from '@/auth';
+import { useAuth, useOnLoginScreen } from '@/auth';
 import { clearOutbox, outboxFor } from '@/outbox';
 import { REPLY_ACTION } from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
@@ -34,13 +34,28 @@ jest.mock('expo-router', () => ({
   useRootNavigationState: jest.fn(),
 }));
 
-jest.mock('@/auth', () => ({ useAuth: jest.fn() }));
+jest.mock('@/auth', () => ({ useAuth: jest.fn(), useOnLoginScreen: jest.fn() }));
 
 const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
 const mockNavState = useRootNavigationState as jest.MockedFunction<
   typeof useRootNavigationState
 >;
+const mockOnLoginScreen = useOnLoginScreen as jest.MockedFunction<
+  typeof useOnLoginScreen
+>;
+
+/**
+ * Put the app in a given auth state and place, the way a render flush would.
+ *
+ * Both together, always: the two guards under test are a pair, and a helper
+ * that moved only one of them would let either be deleted without a test
+ * noticing — which is exactly what the first pass at these tests did.
+ */
+function appState(status: string, onLoginScreen: boolean) {
+  mockUseAuth.mockReturnValue({ status } as never);
+  mockOnLoginScreen.mockReturnValue(onLoginScreen);
+}
 
 /** A notification response as expo-notifications shapes it. */
 function response({
@@ -105,7 +120,9 @@ beforeEach(() => {
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   jest.spyOn(client, 'invalidateQueries');
-  mockUseAuth.mockReturnValue({ status: 'signedIn' } as never);
+  // Signed in and somewhere in the app — the state every test but the
+  // post-login ones below is describing.
+  appState('signedIn', false);
   mockNavState.mockReturnValue({ key: 'root' } as never);
   mockNotifications.useLastNotificationResponse.mockReturnValue(null as never);
   jest
@@ -212,6 +229,67 @@ it('waits for the router to be ready', async () => {
 
   await render(<Probe />);
 
+  expect(router.navigate).not.toHaveBeenCalled();
+});
+
+it('holds a deep link through the whole sign-in, then honours it (#220 §1)', async () => {
+  // The full three steps, because the guards are a pair and a two-step version
+  // of this passes with either one of them deleted:
+  //
+  //   1. signedOut on /login  — the sign-in guard is what holds it
+  //   2. signedIn  on /login  — the moment the bug lived in: the status has
+  //      flipped but AuthGate hasn't redirected yet, so this hook navigated and
+  //      was immediately replaced by `router.replace('/')`, with the dedupe ref
+  //      already set so nothing retried
+  //   3. signedIn  in the app — the redirect has landed; now it's ours
+  appState('signedOut', true);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({ url: '/messages/12', notificationId: undefined })
+  );
+
+  const view = await render(<Probe />);
+  expect(router.navigate).not.toHaveBeenCalled();
+
+  appState('signedIn', true);
+  await view.rerender(<Probe />);
+  expect(router.navigate).not.toHaveBeenCalled();
+
+  appState('signedIn', false);
+  await view.rerender(<Probe />);
+
+  await waitFor(() =>
+    expect(router.navigate).toHaveBeenCalledWith('/messages/12')
+  );
+  expect(router.navigate).toHaveBeenCalledTimes(1);
+});
+
+it('holds a notification reply through the same sign-in', async () => {
+  // Same guards, same reason as the router-readiness one beside them: one
+  // definition of "ready to act on this", rather than two that can disagree
+  // about a half-started app. Nothing is dropped by waiting — the response is
+  // still here on the next render, and the reply goes out then.
+  const send = jest.spyOn(api, 'sendMessage').mockResolvedValue({} as never);
+  appState('signedOut', true);
+  mockNotifications.useLastNotificationResponse.mockReturnValue(
+    response({
+      url: '/messages/12',
+      notificationId: undefined,
+      actionIdentifier: REPLY_ACTION,
+      userText: 'on my way',
+    })
+  );
+
+  const view = await render(<Probe />);
+  expect(send).not.toHaveBeenCalled();
+
+  appState('signedIn', true);
+  await view.rerender(<Probe />);
+  expect(send).not.toHaveBeenCalled();
+
+  appState('signedIn', false);
+  await view.rerender(<Probe />);
+
+  await waitFor(() => expect(send).toHaveBeenCalledWith(12, 'on my way'));
   expect(router.navigate).not.toHaveBeenCalled();
 });
 

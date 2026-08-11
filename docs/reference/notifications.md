@@ -663,10 +663,41 @@ upsert-on-token when the next person logs in.
 cold-start launch *and* a tap while running in one API. The listener-only
 approach (`addNotificationResponseReceivedListener`) misses the cold start —
 the response fires before any listener mounts — which is the classic way this
-ships broken. Two guards: dedupe by notification identifier (the hook keeps
-returning the same response on re-renders), and wait for `signedIn` so a
-cold-start tap doesn't race the auth gate's redirect to `/login`. Tapping marks
-the notification **addressed**, matching the web dropdown's click-through.
+ships broken. Three guards: dedupe by notification identifier (the hook keeps
+returning the same response on re-renders); wait for `signedIn` so a cold-start
+tap doesn't race the auth gate's redirect to `/login`; and wait for the login
+screen itself to go away. Tapping marks the notification **addressed**, matching
+the web dropdown's click-through.
+
+**That third guard is the warm half of the second, and `signedIn` cannot see it**
+(#220 §1). Tap a push while signed out and you land on `/login` with the response
+held. Sign in, and the status flips while `/login` is *still the top screen* — so
+in one render flush `usePushTaps` navigates to the target and then AuthGate's own
+effect, seeing `signedIn && onLoginScreen`, calls `router.replace('/')` over the
+top of it. The dedupe ref is set by then, so the deep link is gone for good: you
+asked for Ada's thread and arrived at the feed with nothing saying why. Holding
+until the login screen has gone means the tap is acted on *after* that redirect
+instead of racing it.
+
+**The two guards are a pair, not alternatives.** A cold start with no stored
+token *does* reach `['login']` — `loading` (Stack unmounted, no segments) →
+`signedOut` → the Stack mounts → AuthGate redirects to `/login` — at which point
+it simply *is* the warm case. What makes the cold start safe is that the sign-in
+guard holds throughout the stretch where segments are still empty, and the
+login-screen guard takes over from there; neither covers the sequence alone, and
+the mobile tests pin both by deleting each in turn.
+
+"On the login screen" is **one** predicate, `useOnLoginScreen` in `auth.tsx`,
+shared by AuthGate and `usePushTaps`. Deliberately not a copy each: move login
+into a route group and whoever moved it fixes AuthGate, because AuthGate visibly
+breaks — while a second copy in the push guard would silently evaluate false
+forever and lose the deep link again, which is the bug it was added to fix.
+
+The same guard covers a **Reply**, which navigates nowhere, for the same reason
+the router-readiness guard does: one definition of "ready to act on this" rather
+than two that can disagree about a half-started app. Nothing is dropped by
+waiting — `useLastNotificationResponse` still returns the response on the next
+render, so the reply goes out a render later.
 
 A tap navigates with **`router.navigate`, never `router.push`** (#177). `push`
 appends a screen unconditionally, so a push for the thread you were already
