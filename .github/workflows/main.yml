@@ -112,6 +112,9 @@ jobs:
       - name: Test the autodeploy redeploy decision
         run: ./deploy/tests/test_autodeploy.sh
 
+      - name: Test the backup preconditions
+        run: ./deploy/tests/test_backup_guards.sh
+
   # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
   # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't
   # ship. Its own job so a finding here is easy to tell apart from a test
