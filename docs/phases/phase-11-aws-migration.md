@@ -101,63 +101,61 @@ Confirmed acceptable by the user on 2026-08-12. Notes:
 - **Carry over the other timers unchanged:** `backup`, `token-flush`,
   `send-pushes`, `timeline-healthcheck`.
 
-## Open decisions — need the user's call before the relevant milestone
+## Decisions taken (2026-08-12)
 
-### 1. How to reach the Django admin on AWS (needed before M2)
+### 1. Django admin — `manage.py` over SSH; no web admin in production
 
 `deploy/Caddyfile` restricts `/admin/` to `127.0.0.1/8 ::1 10.0.0.0/8
 192.168.0.0/16` and 403s everyone else. **On AWS there is no LAN, so that
-allow-list matches nothing and the admin becomes unreachable from anywhere.**
+allow-list matches nothing.** Rather than widen it, the web admin goes away in
+production: administration happens through `manage.py` over SSH.
 
-Note an SSH tunnel does *not* trivially fix this: host-loopback traffic to a
-published Docker port arrives at Caddy as the bridge gateway `172.18.0.1`
-(observed in the access log on 2026-08-12), which is deliberately excluded.
+This is the most secure option — the highest-value credential in the system
+stops having a login form on the public internet at all — at the cost of
+convenience. The Caddy `/admin/` rule stays exactly as it is, still fail-closed,
+now denying everyone including us. Verify after cutover that `/admin/` 403s from
+the public internet.
 
-Options:
+Rejected: adding `172.18.0.1/32` (the Docker bridge gateway) to the allow-list.
+It converts a deliberately fail-closed design into a fail-open one — if Docker's
+userland proxy ever SNATs published-port traffic, the whole internet arrives as
+that address and the admin login is exposed. The Caddyfile comment calls this
+trap out; don't walk into it. An SSH tunnel *through Caddy* fails for the same
+underlying reason: host-loopback traffic reaches Caddy as `172.18.0.1`, observed
+in the access log on 2026-08-12.
 
-- **(a) Drop the web admin in production; use `manage.py` over SSH.** Most
-  secure — the highest-value credential in the system stops having a login form
-  on the public internet at all. Least convenient. *Recommended.*
-- **(b) SSH tunnel straight to gunicorn**, bypassing Caddy (`ssh -L` to the
-  backend container's port). Keeps the web admin, keeps Caddy's public 403, and
-  SSH key auth becomes the gate. Needs `DJANGO_ALLOWED_HOSTS` to accept
-  `localhost`. *Good middle ground.*
-- **(c) Put the box on a WireGuard/Tailscale network and allow that range.**
-  Reconstitutes a "LAN". Cleanest UX, one more service to run.
-- **(d) Add `172.18.0.1/32` to the allow-list.** **Do not do this.** It converts
-  a deliberately fail-closed design into a fail-open one: if Docker's userland
-  proxy ever SNATs published-port traffic, the whole internet arrives as
-  `172.18.0.1` and the admin login is exposed. The Caddyfile comment calls this
-  exact trap out.
+### 2. Media stays on the instance disk
 
-### 2. Whether media really moves to S3 (needed before M3)
+Media is **not** moving to S3 in this phase, deviating from the original sketch's
+"move once, never again" goal. 39 MB is already backed up encrypted to R2 by
+`deploy/backup.sh` and covered by instance snapshots.
 
-The original definition of done says move media to an S3 bucket so photos "move
-once, never again". Having read the code, **that is a bigger change than it
-looks, and it weakens a security property.**
-
-Today `/media/*` is gated by Caddy `forward_auth` → `/api/media-auth/`: the
-backend authorises **every single request**, so a leaked URL is useless to a
+**Why:** `/media/*` is gated by Caddy `forward_auth` → `/api/media-auth/`, so the
+backend authorises **every single request** — a leaked URL is useless to a
 logged-out stranger and a banned member's saved URLs stop working immediately.
-Switching to S3 with `querystring_auth` signed URLs (already scaffolded in
-`backend/config/settings.py:235`) replaces that with **a signed URL that stays
-valid for its whole lifetime regardless of what happens to the account behind
-it.** It would also change every media URL on every page load, which is likely
-to break client-side image caching on web and in the mobile app.
+S3 with `querystring_auth` signed URLs replaces that with a URL that stays valid
+for its whole lifetime regardless of what happens to the account behind it, and
+changes every media URL on every page load (likely breaking client-side image
+caching on web and mobile). That is a real loss of a privacy property for no
+benefit at 39 MB.
 
-Options:
+**Cost was not the deciding factor** — an earlier draft overweighted S3 egress.
+S3 storage in London is ~$0.024/GB-month and **the first 100 GB/month of internet
+egress is free across the whole AWS account**, so S3 would cost pennies at this
+scale. The security model is the reason, not the bill.
 
-- **(a) Keep media on the instance disk, as now.** 39 MB. Already backed up
-  encrypted to R2 and covered by instance snapshots. Keeps live authorisation
-  and per-request revocation. Zero code change, zero new failure modes.
-  *Recommended — revisit when media passes a few GB.*
-- **(b) Move to S3 with short-lived signed URLs.** Delivers the "never move
-  again" goal; costs the revocation property and needs cache behaviour tested on
-  both clients. If chosen, signed-URL lifetime must be short (~5 min) and M3
-  grows a real client-side testing step.
+**Moving later is cheap, which is what makes deferring safe.** Django stores
+*relative* paths via `upload_to` (see `api/imaging.py`), so the DB holds keys like
+`posts/<uuid>.jpg`, not URLs — copy the tree into a bucket preserving structure,
+set `DJANGO_MEDIA_STORAGE=s3` plus the bucket vars, restart, and existing rows
+just work. **No database rewrite.** The genuinely hard part (the `forward_auth` →
+signed-URL change and client cache testing) is identical whenever it happens, so
+deferring costs nothing but a larger `aws s3 sync`.
 
-Note (b) also reintroduces variable cost (S3 egress is billed per GB), which is
-in tension with the fixed-price rationale for choosing Lightsail.
+**Revisit when:** media approaches a few GB, or the 60 GB instance disk drops
+below comfortable headroom (~12 GB is OS + Docker, leaving ~48 GB). If it does
+move, prefer a fixed-price Lightsail bucket over raw S3 to keep the bill
+predictable, and use a short (~5 min) signed-URL lifetime.
 
 ## Rollback — reworked, because the old plan no longer works
 
@@ -183,9 +181,10 @@ flipping DNS. **CGNAT killed that.** The replacement:
       not Proxied — Caddy needs a direct connection for Let's Encrypt)
 - [ ] Production Postgres running as a container with `deploy/backup.sh` proven
       on AWS
-- [ ] Media decision (open decision 2) implemented and documented
-- [ ] Admin access decision (open decision 1) implemented and documented; `/admin/`
-      verified **403 from the public internet**
+- [ ] Media on the instance volume, with `forward_auth` gating verified to behave
+      identically to the home box (a logged-out request for a media URL 403s)
+- [ ] Django admin reachable **only** via `manage.py` over SSH; `/admin/` verified
+      **403 from the public internet** by a real request from mobile data
 - [ ] **Data migration verified:** row counts match the source for users, posts,
       comments and messages, and **every beta photo loads** on the live site
 - [ ] Domain cut over; HTTPS valid; login, feed, photos, messaging, push all work
@@ -208,12 +207,14 @@ Nothing app-related yet.
 
 **M2 — Empty stack.** Docker + Compose, clone the repo, GHCR pull, bring the
 stack up on a **temporary hostname** with a throwaway DNS record so Let's
-Encrypt works without touching the live domain. Implement the admin decision.
-Prove the deploy shape before any real data moves.
+Encrypt works without touching the live domain. Confirm `/admin/` 403s (it now
+does so for everyone, by design) and that `manage.py` over SSH works in its
+place. Prove the deploy shape before any real data moves.
 
-**M3 — Media.** Implement the media decision. If S3: bucket, `django-storages`
-env vars, upload the 112 files, verify signed URLs on web *and* mobile. If disk:
-confirm the volume and `forward_auth` behave identically on AWS.
+**M3 — Media.** Media stays on disk, so this is verification rather than
+migration: confirm the media volume mounts correctly on AWS and that Caddy's
+`forward_auth` gate behaves identically — a logged-in member loads a photo, a
+logged-out request for the same URL is refused.
 
 **M4 — Migration rehearsal.** Dump the home DB, restore to AWS, sync media,
 compare row counts, click through the app on the temporary hostname. **Then
