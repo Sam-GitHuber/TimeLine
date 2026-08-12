@@ -24,8 +24,8 @@ content was distilled into these files; the phase-by-phase history lives in git.
 - [`../design-system.md`](../design-system.md) — the "living line" design system.
 - [`../mobile-release.md`](../mobile-release.md) — how to build and ship an app
   version (EAS, TestFlight). Read it before any app release.
-- [`../deploy.md`](../deploy.md) — the home-server production runbook **and** the
-  "why it's built this way" for ops (Caddy, DDNS, continuous deploy, security
+- [`../deploy.md`](../deploy.md) — the production runbook (AWS Lightsail) **and**
+  the "why it's built this way" for ops (Caddy, DNS, continuous deploy, security
   hardening, cost).
 - [`../backup-restore.md`](../backup-restore.md) — off-box encrypted backups + the
   tested restore.

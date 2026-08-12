@@ -1,25 +1,33 @@
-# Deploying TimeLine (home-server production)
+# Deploying TimeLine (AWS Lightsail production)
 
-The repeatable runbook for the self-hosted home server, **and** the design
-rationale behind it (see "Why it's built this way" at the bottom). This is where
-the app lives today: a wiped spare PC in the maintainer's house serving a real
-HTTPS URL, so a few close friends/family can log in and use everything. It's
-**not** the final home — it's the cheap, fully reversible way to prove the app is
-worth keeping before paying for cloud (the AWS migration is a later, deferred
-step). Off-box backups (`backup-restore.md`) are what make that migration
-low-risk. When it's time to shut the app down for good, `docs/teardown.md` is the
-reverse of this doc — the checklist for destroying every credential, closing the
-accounts, and deleting the data.
+The repeatable runbook for production, **and** the design rationale behind it
+(see "Why it's built this way" at the bottom). This is where the app lives:
+an AWS Lightsail instance in London serving `https://your-timeline.net`, so
+friends and family can log in and use everything. When it's time to shut the app
+down for good, `docs/teardown.md` is the reverse of this doc — the checklist for
+destroying every credential, closing the accounts, and deleting the data.
 
-**The box:** ASUS PC, hostname `timeline-server`, a dedicated non-root admin user, reached over
-SSH on the LAN (`ssh timeline-server`). OS on the 250 GB SATA SSD; **all app data
-(Postgres + media) on the 1 TB NVMe mounted at `/srv/timeline`**.
+**The box:** AWS Lightsail, region **`eu-west-2` (London)**, instance
+`timeline-prod`, Ubuntu 24.04 LTS, 2 vCPU / 2 GB RAM / 60 GB SSD. Reached with
+`ssh timeline-aws` as user **`ubuntu`** (`sudo` needs no password there). Static
+IP **`13.135.109.0`**, which the `your-timeline.net` A record points at. App data
+(Postgres + media) lives under **`/srv/timeline`** — an ordinary directory on the
+single disk, not a separate volume.
+
+> **History.** Until August 2026 this ran on a wiped PC in the maintainer's house
+> — a deliberately cheap, reversible way to prove the app was worth paying to
+> host. That ended when the home ISP moved the connection behind **CGNAT**, which
+> makes inbound port-forwarding impossible at any price, so the AWS migration
+> (Phase 11) was brought forward and completed on **2026-08-12**. The home-server
+> details are gone from this doc; git history has them if ever needed.
 
 ## One-time server setup
 
-Already done: OS install, hardening (SSH keys, `ufw`, auto-updates), Docker, and
-the NVMe data disk formatted + mounted at `/srv/timeline` with a `docker.service`
-guard (`RequiresMountsFor=/srv/timeline`). What remains for a fresh checkout:
+Provisioning the instance (region, static IP, SSH key, firewall for 22/80/443
+only) is done in the Lightsail console — see "Provisioning a fresh box" at the
+bottom. Ubuntu's Lightsail image already ships `PasswordAuthentication no` and an
+active `unattended-upgrades`, so those need no work. What remains for a fresh
+checkout:
 
 1. **Clone the repo** (read-only deploy key or HTTPS):
 
@@ -40,34 +48,46 @@ guard (`RequiresMountsFor=/srv/timeline`). What remains for a fresh checkout:
 
    `.env.prod` is gitignored and must **never** be committed.
 
-3. **Create the data directories on the NVMe.** The prod compose file bind-mounts
-   Postgres and media to `/srv/timeline/postgres` and `/srv/timeline/media`.
-   Docker's bind driver won't create these — the first bring-up fails with "no
-   such file or directory" if they're missing. Make them once (root-owned; the
-   Postgres and backend containers manage their own contents):
+3. **Create the data directories.** The prod compose file bind-mounts Postgres
+   and media to `/srv/timeline/postgres` and `/srv/timeline/media`. Docker's bind
+   driver won't create these — the first bring-up fails with "no such file or
+   directory" if they're missing. Make them once (root-owned; the Postgres and
+   backend containers manage their own contents):
 
    ```bash
    sudo mkdir -p /srv/timeline/{postgres,media}
    ```
 
-   `deploy/deploy.sh` refuses to run if either is missing.
+   `deploy/deploy.sh` and `deploy/backup.sh` both refuse to run if either is
+   missing.
 
-4. **First bring-up.** Two modes:
+4. **Tell the deploy scripts this is a single-disk host.** `deploy.sh`,
+   `autodeploy.sh` and `backup.sh` all default to requiring `/srv/timeline` to be
+   a real **mount point**, which suited the old two-disk home box. Lightsail has
+   one volume, so that check can only ever fail here — see "Single-disk hosts"
+   below for the `TIMELINE_REQUIRE_DATA_MOUNT=0` setting and where it goes.
 
-   - **LAN test first (recommended)** — plain HTTP on the LAN IP, no domain/TLS
-     yet, so you can confirm the app works before wiring DNS. Set these in
-     `.env.prod` (`DJANGO_ALLOWED_HOSTS` and `DJANGO_CORS_ALLOWED_ORIGINS` must
-     include the LAN IP), then:
+5. **First bring-up.** Once the A record points at the static IP, the deploy
+   script does everything — it defaults to the real domain with automatic HTTPS:
 
-     ```bash
-     SITE_ADDRESS=:80 VITE_API_URL=http://192.168.1.95 \
-       docker compose -f docker-compose.prod.yml up -d --build
-     ```
+   ```bash
+   TIMELINE_REQUIRE_DATA_MOUNT=0 ./deploy/deploy.sh
+   ```
 
-     Visit `http://192.168.1.95` from another device on the LAN.
+   To bring the stack up on a **temporary hostname** first (useful when staging a
+   migration without touching the live record — add a throwaway A record, e.g.
+   `aws.your-timeline.net`, so Let's Encrypt can still issue):
 
-   - **Public HTTPS** — once DNS/DDNS + port-forward are set up, just use the
-     deploy script (below); it defaults to the real domain with automatic HTTPS.
+   ```bash
+   SITE_ADDRESS=staging.your-timeline.net VITE_API_URL=https://staging.your-timeline.net \
+     docker compose -f docker-compose.prod.yml up -d --build
+   ```
+
+   **`VITE_API_URL` must match the hostname you're serving on.** Vite inlines it
+   into the JS bundle at *build* time (`frontend/src/api.js`), so a released GHCR
+   image always points at `https://your-timeline.net` and cannot be tested on any
+   other hostname — for that you must build from source, as above. `SITE_ADDRESS`
+   accepts a comma-separated list if you need Caddy to serve both names at once.
 
 ## Routine deploy (ship a new version)
 
@@ -78,9 +98,11 @@ From inside the repo on the server:
 ```
 
 It pulls the latest code on the current branch, rebuilds, restarts, prunes old
-images, and tails the backend log. It **aborts** if `/srv/timeline` isn't mounted
-or `.env.prod` is missing. Migrations + `collectstatic` run automatically in the
-backend entrypoint.
+images, and tails the backend log. It **aborts** if `.env.prod` is missing, or if
+the data directories aren't there — and, unless `TIMELINE_REQUIRE_DATA_MOUNT=0`,
+if `/srv/timeline` isn't a mount point (see "Single-disk hosts"; on this box you
+need that variable). Migrations + `collectstatic` run automatically in the backend
+entrypoint.
 
 This build-on-box path stays the **fallback** — use it for a hotfix or if GHCR
 is unavailable. The normal path is now the automated one below.
@@ -177,22 +199,8 @@ systemctl status timeline-autodeploy.timer --no-pager
 To pause auto-deploy (e.g. during maintenance): `sudo systemctl stop
 timeline-autodeploy.timer`. Re-enable with `start`.
 
-**On a single-disk host** (e.g. the AWS Lightsail instance, one volume — not
-this home box, which keeps data on a separate NVMe), `deploy.sh` and
-`autodeploy.sh` would both abort: their first guard requires `/srv/timeline` to
-be a real *mount point*, and there it's an ordinary directory. Set
-
-```ini
-# /etc/systemd/system/timeline-autodeploy.service
-Environment=TIMELINE_REQUIRE_DATA_MOUNT=0
-```
-
-and export the same variable when running `deploy.sh` by hand. The guard then
-asserts the two bind-mount targets (`postgres/`, `media/`) **exist** instead —
-which is the part that still catches a real mistake. The mount check itself is
-about not writing to the *wrong disk*, which can't happen when there's only one.
-`TIMELINE_DATA_MOUNT` moves the path if ever needed. Both default to the
-stricter two-disk behaviour, so this box is unaffected.
+The autodeploy unit carries `Environment=TIMELINE_REQUIRE_DATA_MOUNT=0` because
+this is a single-disk host — see "Single-disk hosts" below for why.
 
 **Changing `autodeploy.sh`?** Run its tests first — they cover the redeploy
 decision (including the stall this section describes) with a stubbed `docker`, so
@@ -236,37 +244,41 @@ now recreates drifted containers by itself. To force it immediately:
 ./deploy/autodeploy.sh
 ```
 
-## Going public: dynamic DNS (Cloudflare)
+## DNS
 
-The home connection's public IP changes over time, so a **DDNS updater** keeps the
-Cloudflare A record for `your-timeline.net` pointed at the current IP. The router's
-built-in DDNS doesn't support Cloudflare, so we run a small updater on the box.
+One Cloudflare **A record**: `your-timeline.net` → the Lightsail **static IP**
+(`13.135.109.0`). Set once, by hand. Nothing keeps it updated because nothing
+needs to — a Lightsail static IP doesn't change, and it's free for as long as it
+stays *attached to a running instance*. Detaching it, or deleting the instance
+without releasing the IP, starts a small charge and is the usual cause of "why is
+my idle AWS account billing me".
 
-One-time setup (on the server):
+The record must be **DNS only (grey cloud)**, not Proxied. Caddy needs a direct
+route for its Let's Encrypt HTTP-01 challenge; turning the orange cloud on breaks
+certificate renewal.
 
-```bash
-# 1. Config file with the Cloudflare API token (Edit-zone-DNS, scoped to the zone).
-sudo mkdir -p /etc/timeline
-sudo cp deploy/cloudflare-ddns.env.example /etc/timeline/cloudflare-ddns.env
-sudo nano /etc/timeline/cloudflare-ddns.env      # paste the real token
-sudo chmod 600 /etc/timeline/cloudflare-ddns.env
-
-# 2. Test it once by hand — should create/point the A record at the home IP.
-sudo ~/TimeLine/deploy/cloudflare-ddns.sh
-
-# 3. Install + enable the systemd timer (runs at boot + every 5 min).
-sudo cp deploy/cloudflare-ddns.service deploy/cloudflare-ddns.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now cloudflare-ddns.timer
-
-# 4. Verify.
-systemctl status cloudflare-ddns.timer --no-pager
-journalctl -u cloudflare-ddns.service --no-pager -n 20
-```
-
-The A record must be **DNS only (grey cloud)**, not Proxied — Caddy needs a direct
-route for its Let's Encrypt challenge, and the domain resolves to the home IP
-(accepted trade-off; WHOIS privacy is on).
+> **The DDNS updater is gone — deliberately.** The home server needed one
+> (`deploy/cloudflare-ddns.*`, removed in the Phase 11 cleanup) because its public
+> IP moved. On a static IP it is not merely redundant but *dangerous*: it rewrites
+> the A record to whatever public IP the machine it runs on can see. During the
+> 2026-08-12 cutover the old box's timer was left enabled and dragged the domain
+> back to the dead home connection within minutes, taking the live site down and
+> holding it down every five minutes.
+>
+> **The symptom is deeply misleading:** TCP connects on 443 but the TLS handshake
+> hangs — indistinguishable from the CGNAT black hole, so it reads as "the new
+> server is broken" while that server happily returns 200 on loopback. Before
+> blaming the box, always check where the name actually points:
+>
+> ```bash
+> dig +short your-timeline.net @1.1.1.1                       # where is it now?
+> curl --resolve your-timeline.net:443:13.135.109.0 \
+>      -o /dev/null -w '%{http_code}\n' https://your-timeline.net/api/healthz/
+> ```
+>
+> A 200 from the second command with a wrong answer from the first means DNS, not
+> the server. **When retiring any host, disable its timers before moving DNS, not
+> after.**
 
 ## Outbound email (Resend)
 
@@ -323,7 +335,7 @@ docker compose -f docker-compose.prod.yml exec backend \
 **Fail-loud in production.** With `DEBUG` off, an unset `EMAIL_HOST` makes the
 app refuse to boot — so a misconfigured deploy can't silently start printing
 password-reset links (a plaintext account-takeover token) to the logs. For a
-deliberate LAN test *before* you have a provider, comment out `EMAIL_HOST` and
+deliberate test *before* you have a provider, comment out `EMAIL_HOST` and
 set `EMAIL_CONSOLE_FALLBACK=true`: mail is then printed to the backend logs
 (visible via `docker compose … logs -f backend`) rather than sent. Never enable
 that in real production.
@@ -349,48 +361,46 @@ docker compose -f docker-compose.prod.yml down
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-## Admin access is LAN-only (security hardening)
+## There is no web admin in production — administer over SSH
 
-`/admin/` is **not reachable from the public internet** — Caddy 403s any request
-whose source IP isn't on the home LAN (`192.168.x` / `10.x`) or loopback. The admin
-login is the one high-value credential on the box, so it doesn't face internet
-brute-force traffic. (Verified 2026-07-11: a genuinely off-LAN client gets `403`; a
-LAN device gets in.)
+`/admin/` returns **403 to everybody**, including you. Caddy's allow-list is
+loopback plus the private LAN ranges (`10.0.0.0/8`, `192.168.0.0/16`); on a cloud
+box no client can ever match it. That is the intended end state, not an oversight:
+the Django admin login is the highest-value credential in the system, and on a
+public host the safest thing it can do is not exist.
 
-- **From home:** just open `https://your-timeline.net/admin/` on a device on the
-  LAN — it works. The router's hairpin (NAT loopback) keeps the source address on
-  the LAN, so Caddy sees a `192.168.x` client and allows it.
-- **If a LAN device gets a 403 anyway,** its traffic is leaving the LAN *before* it
-  reaches the box, so it looks like an outside client. The usual culprits, in order
-  of likelihood:
-  - a **VPN** is on (turn it off for this site), or
-  - **iCloud Private Relay** on an iPhone/Mac (Settings → your name → iCloud →
-    Private Relay) — this is separate from the VPN toggle and relays you through a
-    public IP, so it's the common reason a *phone on home Wi-Fi* is still blocked.
+Administer with `manage.py` over SSH instead:
 
-  Rather than fiddle with those, you can force the domain to the box's LAN IP on
-  your admin machine with a one-line hosts entry (`/etc/hosts` on macOS/Linux,
-  `C:\Windows\System32\drivers\etc\hosts` on Windows) — the connection then stays on
-  the LAN regardless of relay/VPN:
+```bash
+ssh timeline-aws
+cd ~/TimeLine
 
-  ```
-  192.168.1.95   your-timeline.net
-  ```
+# approve a pending sign-up
+docker compose -f docker-compose.prod.yml exec -T backend python manage.py shell -c \
+  "from django.contrib.auth import get_user_model as g; g().objects.filter(email='them@example.com').update(is_active=True)"
 
-- **From genuinely away** (mobile data, a café, another house): you'll get `403` —
-  that's the point. SSH into the box and administer there. To approve a pending
-  sign-up without the web UI:
+# anything else
+docker compose -f docker-compose.prod.yml exec -T backend python manage.py <command>
+```
 
-  ```bash
-  docker compose -f docker-compose.prod.yml exec backend python manage.py shell -c \
-    "from django.contrib.auth import get_user_model as g; g().objects.filter(email='them@example.com').update(is_active=True)"
-  ```
+Verify after any deploy that `/admin/` still 403s from the public internet — read
+the response, not the config.
 
-The allow-list deliberately **excludes** Docker's bridge range, so it fails *closed*:
-if it ever blocks *every* device including a plain LAN one, that's the signal that
-Caddy isn't seeing real client IPs (check
-`docker compose -f docker-compose.prod.yml logs web` for `remote_ip`) — fix that
-rather than widening the list to the whole internet.
+**Do not widen the allow-list to make the web admin reachable.** Two tempting
+fixes are both wrong:
+
+- **Adding the Docker bridge (`172.16.0.0/12`, or `172.18.0.1`).** The list
+  excludes it *on purpose*, so the rule fails **closed**. Host-loopback traffic
+  reaches Caddy as the bridge gateway, so an SSH tunnel to the published port
+  looks like `172.18.0.1` — and if Docker's userland proxy ever SNATs
+  published-port traffic, so does *the entire internet*. Allowing that address
+  would turn a fail-closed rule into a fail-open one and put the admin login in
+  front of the world.
+- **Adding your own public IP.** It changes, and you'd be back here.
+
+If you genuinely need the web UI, tunnel **past Caddy** straight to gunicorn so
+SSH key auth is the gate, or put the box on a private network (Tailscale/
+WireGuard) and allow that range. Neither is set up today.
 
 ## Uploaded media is authenticated
 
@@ -407,11 +417,19 @@ step; today any logged-in member can fetch a media file whose URL they already h
 Members can flag content and delete their own accounts (Phase 7 legal gate).
 
 - **Content reports.** A member's “Report” on a post or comment creates a report
-  row. Review them in the Django admin under **Api › Reports** (LAN-only, like the
-  rest of admin). Filter the list to `open`, open the flagged post/comment (both
-  are readable/deletable from their own admin pages), delete the content if it
-  breaks the Terms, then set the report’s **status** to `resolved` (or `dismissed`
-  if there’s nothing to do) to clear the queue.
+  row. There is **no web admin in production** (see above), so review them over
+  SSH. List the open queue:
+
+  ```bash
+  docker compose -f docker-compose.prod.yml exec -T backend python manage.py shell -c \
+    "from api.models import Report; [print(r.id, r.status, r.reason, r.content_object) for r in Report.objects.filter(status='open')]"
+  ```
+
+  Read the flagged post/comment, delete it if it breaks the Terms, then set the
+  report's **status** to `resolved` (or `dismissed` if there's nothing to do) to
+  clear the queue. This is more awkward than the old LAN-only admin UI, and that
+  is the accepted cost of not exposing an admin login on a public host — see the
+  admin section above for the options if it ever becomes a real burden.
 
 - **A reported *message* works differently, on purpose.** You can't open the
   message or its conversation — the admin shows no message text anywhere else
@@ -441,10 +459,37 @@ Members can flag content and delete their own accounts (Phase 7 legal gate).
   need (and no clean way) to surgically scrub a single account from historical
   encrypted backups; they roll over on their own.
 
-## Verifying data really is on the NVMe
+## Single-disk hosts (`TIMELINE_REQUIRE_DATA_MOUNT`)
 
-After the first `up`, confirm Postgres + media resolve onto the data disk, not
-the OS SSD:
+`deploy.sh`, `autodeploy.sh` and `backup.sh` all begin by requiring
+`/srv/timeline` to be a real **mount point**. That guard is right on a two-disk
+machine — the old home box kept data on a separate NVMe, and "not mounted" would
+have meant Postgres silently writing to the OS disk. Lightsail has **one** volume,
+so `/srv/timeline` is an ordinary directory and the check can only ever fail.
+
+Set `TIMELINE_REQUIRE_DATA_MOUNT=0` and the scripts assert the bind targets
+**exist** instead — which is the part that still catches a real mistake, since
+Docker's bind driver won't create them. It lives in the systemd units:
+
+```ini
+# /etc/systemd/system/timeline-autodeploy.service  and  backup.service
+[Service]
+Environment=TIMELINE_REQUIRE_DATA_MOUNT=0
+```
+
+and is passed inline for hand runs (`TIMELINE_REQUIRE_DATA_MOUNT=0
+./deploy/deploy.sh`). `TIMELINE_DATA_MOUNT` moves the path if ever needed. Both
+default to the stricter two-disk behaviour, so nothing changes for anyone
+copying this setup onto a machine with a real data disk.
+
+`backup.sh` additionally refuses to run if `MEDIA_DIR` is missing, **whatever the
+host shape** — media goes off-site by `rclone sync`, so backing up an absent media
+tree would mirror that emptiness and delete the photos the backup exists to
+protect. Covered by `deploy/tests/test_backup_guards.sh`.
+
+## Verifying data really is where it should be
+
+After the first `up`, confirm Postgres + media resolve onto the data path:
 
 ```bash
 docker volume inspect timeline-prod_postgres_data -f '{{ .Options.device }}'  # -> /srv/timeline/postgres
@@ -452,12 +497,21 @@ docker volume inspect timeline-prod_media        -f '{{ .Options.device }}'  # -
 du -sh /srv/timeline/postgres /srv/timeline/media
 ```
 
+A quick end-to-end check that the bind really works — write through the backend
+container and see it land on the host:
+
+```bash
+docker exec timeline-prod-backend-1 sh -c 'echo probe > /app/media/probe.txt'
+sudo ls -l /srv/timeline/media/probe.txt && docker exec timeline-prod-backend-1 rm /app/media/probe.txt
+```
+
 ## Reboot-survival
 
 `restart: unless-stopped` on every service means the stack comes back after a
-reboot. To prove it: `sudo reboot`, wait, then `ssh timeline-server` and check
+reboot. To prove it: `sudo reboot`, wait, then `ssh timeline-aws` and check
 `docker compose -f docker-compose.prod.yml ps` shows everything `Up`, and the
-site loads.
+site loads. Lightsail bills the instance whether it's running or stopped, so
+there's rarely a reason to stop it; the static IP survives a stop/start anyway.
 
 ## Rollback
 
@@ -466,7 +520,7 @@ run the previous one — no rebuild:
 
 ```bash
 sudo systemctl stop timeline-autodeploy.timer   # or the next tick undoes this
-TIMELINE_TAG=v0.14.0 ./deploy/autodeploy.sh     # pins BOTH images to that release
+TIMELINE_TAG=v0.25.0 ./deploy/autodeploy.sh     # pins BOTH images to that release
 ```
 
 `TIMELINE_TAG` is read by the GHCR override *and* by autodeploy's drift check, so
@@ -590,11 +644,15 @@ Postgres are all alive) every 5 minutes and reports the result:
 That trio covers every realistic home outage (power cut, crashed box, crashed
 container, dead DB, dropped internet).
 
-> **Scope:** by default the probe hits the public hostname but pinned to loopback
-> (so it doesn't depend on the router "hairpinning"), which tests the whole local
-> serving stack but *not* the inbound path from the wider internet (port
-> forwarding / public DNS). Those rarely break once set. If you later want to
-> cover them too, add a second monitor on a machine *outside* your house.
+> **Scope:** the probe hits the public hostname pinned to loopback
+> (`--resolve …:127.0.0.1`), which tests the whole local serving stack — Caddy,
+> gunicorn and Postgres — but *not* the inbound path from the internet (public
+> DNS, the Lightsail firewall). That gap is real: the 2026-08-12 DDNS incident
+> took the site down for the outside world while this check stayed green, because
+> locally everything was fine. If you want to cover it, add a monitor that
+> resolves the name normally from somewhere else — healthchecks.io can't, since
+> it only receives pings, so this would be a second service (e.g. an uptime
+> checker that fetches the URL itself).
 
 **One-time setup:**
 
@@ -634,25 +692,63 @@ backend`, wait for the `/fail` alert to land, then `start` it again.
 
 ## Monthly running cost
 
-The point of the home-server beta is to prove the app is worth keeping *before*
-paying for cloud (that's Phase 11 → AWS). So the running cost is deliberately
-close to zero — only the domain is a hard cash cost:
-
 | Item | Cost | Notes |
 |------|------|-------|
-| Domain `your-timeline.net` | ~**£10–15 / year** (~£1 / mo) | The only unavoidable bill. Renews annually. |
-| Cloudflare DNS + DDNS | £0 | Free plan. |
-| Cloudflare R2 (encrypted backups) | £0 | Well within the 10 GB free tier for a small beta — check with `rclone size timeline-crypt:`. |
+| **Lightsail instance** (2 GB / 2 vCPU / 60 GB / 3 TB transfer) | **$12 / mo** | The bill. Fixed price — the reason Lightsail was chosen over raw EC2. |
+| Lightsail automatic snapshots | ~**$0.60 / mo** | Charged on used space (~12 GB), not the 60 GB allocation. |
+| Static IP | £0 | Free **while attached to a running instance**. Detached or orphaned, it starts costing. |
+| Domain `your-timeline.net` | ~**£10–15 / year** (~£1 / mo) | Renews annually. |
+| Cloudflare DNS | £0 | Free plan. One static A record. |
+| Cloudflare R2 (encrypted backups) | £0 | Well within the 10 GB free tier — check with `rclone size timeline-crypt:`. |
 | healthchecks.io (uptime + backup) | £0 | Free tier (up to 20 checks). |
-| Resend (outbound email) | £0 | Free tier (3,000 emails/mo) — a private beta sends a handful. |
+| Resend (outbound email) | £0 | Free tier (3,000 emails/mo). |
 | GitHub Actions + GHCR (CI + image registry) | £0 | Free for a public repo. |
 | Let's Encrypt TLS | £0 | Free, auto-renewed by Caddy. |
-| TLS/hosting/servers | £0 | Runs on the wiped home PC. |
-| **Electricity** | ~**£3–7 / mo** | The one variable cost: an always-on desktop drawing ~30–60 W ≈ 22–43 kWh/mo at ~£0.27/kWh (UK 2026). Depends on the actual box + tariff — measure with a plug meter for a real figure. |
+| Electricity | £0 | No longer our problem. |
 
-**Rough total: ~£4–8 / month**, dominated by electricity, plus the ~£12/yr
-domain. That's the baseline the eventual AWS bill (Phase 11) has to justify
-beating — see `docs/phases/phase-11-aws-migration.md`.
+**Rough total: ~£13 / month inc. VAT**, plus the ~£12/yr domain. AWS bills in USD;
+your card issuer converts.
+
+The 3 TB monthly transfer allowance is thousands of times current usage, and the
+data set is small (a 13 MB database and 39 MB of media at cutover), so nothing
+here is close to a limit. **A budget alert (`timeline-monthly`, $20) is set in AWS
+Billing** — Lightsail is fixed-price, but a stray charge should page you rather
+than appear on a statement.
+
+The predecessor was a home PC costing ~£4–8/month in electricity. This is dearer,
+and buys a machine that is reachable from the internet — which the home
+connection stopped being when the ISP moved it behind CGNAT.
+
+## Provisioning a fresh box
+
+Only needed if rebuilding from nothing. Done once in the Lightsail console
+(`https://lightsail.aws.amazon.com/`):
+
+1. **Region `eu-west-2` (London)** — set it *before* creating anything; an
+   instance can't be moved between regions, and keeping real personal data in the
+   UK is what the privacy policy implies. Any availability zone is fine.
+2. **Linux/Unix → "Linux Operating System" → Ubuntu 24.04 LTS.** Not the
+   "Linux Apps" blueprints — those ship WordPress/LAMP stacks we'd only remove.
+3. **SSH key: upload your existing public key** rather than letting AWS generate
+   one. An AWS-generated `.pem` is offered as a single download; lose it and you
+   lose access.
+4. **Plan: $12/mo (2 GB RAM / 2 vCPU / 60 GB SSD), "Dual-stack".** Don't take the
+   1 GB tier — enough to *run* the app, not to build an image or run a migration
+   without the OOM killer intervening. Don't take IPv6-only; the A record needs
+   IPv4.
+5. **Attach a static IP** and point the `your-timeline.net` A record at it.
+6. **Firewall: TCP 22, 80, 443 only.** Nothing else — never Postgres.
+7. **Set a billing budget alert** in AWS Billing before walking away.
+8. Add **2 GB of swap** — 2 GB of RAM is thin for a Vite build:
+   `sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`,
+   then add it to `/etc/fstab`.
+9. Install Docker from Docker's own apt repository (Ubuntu's package lags), add
+   `ubuntu` to the `docker` group, then follow "One-time server setup" above.
+
+Reading the firewall from outside is easier than it looks: `nc -zv <ip> <port>`
+distinguishes the two failure modes — a **timeout** means a firewall dropped the
+packet, **"connection refused"** means it reached the box and nothing was
+listening.
 
 ## Why it's built this way (design decisions)
 
@@ -666,26 +762,47 @@ so a future change doesn't quietly undo the reasoning.
   matching cookie-domain + trusted-origin config. Miss it and *every*
   authenticated mutation 403s. Caddy also gives tiny-config auto-HTTPS (Let's
   Encrypt via HTTP-01); nginx + certbot is the manual alternative.
-- **Exposure = port-forward + dynamic DNS, not a Cloudflare Tunnel.** Forward
-  **only 80/443** (never SSH/Postgres); admin over SSH on the LAN. Accepted
-  trade-off: the domain resolves to the home's public IP, so WHOIS privacy is on.
-  CGNAT would break inbound port-forwarding (checked — this ISP doesn't use it); a
-  **Cloudflare Tunnel** is the documented fallback that needs no port-forward and
-  hides the home IP. DDNS runs *on the box* (`deploy/cloudflare-ddns.sh` + a
-  systemd timer) because the router has no Cloudflare option; pin the IP lookup to
-  `curl -4` since we publish an A record (a dual-stack box otherwise returns its
-  IPv6). A **router DHCP reservation** pins the box's LAN IP — a lease change
-  otherwise silently breaks inbound access and looks like a crashed box.
-- **Data on the 1 TB NVMe, not the OS disk.** The OS boots off the small SATA SSD
-  (the motherboard firmware can't boot from NVMe — a hardware quirk of this box);
-  Postgres data *and* media live on the NVMe for capacity (family photos dwarf
-  250 GB), to avoid filling the boot disk (a full OS disk takes the box down), and
-  for speed. The catch: Docker named volumes default to `/var/lib/docker/volumes`
-  on the OS disk, so the volumes are explicitly pinned to the NVMe mount, and Docker
-  is guarded by `RequiresMountsFor` so it can't come up writing to the OS disk
-  before the NVMe mounts. Verify with `docker volume inspect` + a reboot test.
+- **Exposure = a cloud box with a static IP.** The Lightsail firewall allows
+  **only 22/80/443**; never Postgres. SSH stays open to any source deliberately —
+  password auth is off, so the key is the gate, and pinning a source address
+  would lock you out from a changing VPN exit or a CGNAT'd home connection.
+  Administration is `manage.py` over SSH; there is no web admin (see above).
+- **Why this isn't the home server any more.** It ran on a wiped home PC until
+  August 2026, on the reasoning that a port-forward plus dynamic DNS is free and
+  fully reversible. That reasoning had one load-bearing assumption — that the ISP
+  gives the house a real public IP — and it stopped being true. The replacement
+  ISP uses **CGNAT**: the connection shares one address with many customers,
+  behind a carrier NAT, so inbound traffic never reaches the router and **no
+  port-forward can work at any price**. Confirmed by `tracepath` showing hop 2 in
+  `100.64.0.0/10` (RFC 6598). Diagnosing this is nastier than it sounds: DNS and
+  the DDNS updater look perfectly healthy, the box serves 200 on loopback, and
+  from outside TCP connects on 443 while the TLS handshake hangs.
+  A **Cloudflare Tunnel** would have worked around it — outbound-only, so CGNAT
+  stops mattering — but it was a day of work that the AWS migration threw away
+  anyway, so the migration was brought forward instead. If a home-hosted setup is
+  ever revisited, **check for CGNAT first**: it decides whether the whole approach
+  is viable.
+- **No dynamic DNS.** A static IP needs none, and a DDNS updater on a retired host
+  is actively dangerous — see the warning in the DNS section above.
+- **Data under `/srv/timeline`, pinned explicitly.** Docker named volumes default
+  to `/var/lib/docker/volumes`; ours are pinned to `/srv/timeline/{postgres,media}`
+  so `docker inspect` reports the real location and the compose file records where
+  data lives. On the home box that path was a separate 1 TB NVMe, which is where
+  the mount-point guard came from; on Lightsail it's a directory on the single
+  60 GB volume, hence `TIMELINE_REQUIRE_DATA_MOUNT=0`. Keep an eye on headroom —
+  roughly 12 GB is OS and Docker, leaving ~48 GB, against 39 MB of media at
+  cutover. If media ever approaches a few GB, revisit object storage.
+- **Media stays on disk rather than S3, on purpose.** `django-storages` is wired
+  up and `DJANGO_MEDIA_STORAGE=s3` would switch it (see `backend/config/settings.py`),
+  but moving would trade Caddy's per-request `forward_auth` gate for **signed URLs
+  that stay valid regardless of what happens to the account behind them** — a
+  banned member's saved links would keep working until expiry, and every image URL
+  would change on every page load, breaking client caching. At this size the
+  privacy property is worth more than the durability. Deferring is cheap: Django
+  stores *relative* paths, so a later move needs no database rewrite.
 - **Continuous deploy is pull-based and release-triggered.** The box forwards only
-  80/443, not SSH, so CD must be **outbound from the house** — GitHub can't SSH in.
+  80/443 and SSH-by-key, and we don't hand CI production credentials, so CD is
+  **outbound from the box** — GitHub never reaches in.
   So: `gh release create vX.Y.Z` → a workflow builds + pushes images to GHCR (using
   the built-in `GITHUB_TOKEN`, no PAT); a systemd timer on the box polls every
   ~5 min, `docker compose pull`s, and redeploys **whenever a container isn't
@@ -698,7 +815,7 @@ so a future change doesn't quietly undo the reasoning.
   Triggering on *release* (not every merge) keeps a deploy a deliberate human
   action with a version/changelog, and fork PRs can't publish releases so untrusted
   code never builds our images. Chosen a systemd timer over Watchtower for
-  consistency with the box's other timers (backups, DDNS) and transparency. Config
+  consistency with the box's other timers (backups, pushes, health) and transparency. Config
   (Caddyfile, compose files) travels via `git pull`; only the heavy image build is
   offloaded to CI, and the box stays on `main` so the manual `deploy.sh`
   build-from-source path still works as a fallback. **Security:** the whole
@@ -708,31 +825,35 @@ so a future change doesn't quietly undo the reasoning.
 - **Backups: encrypted to Cloudflare R2, media mirrored not snapshotted.** See
   `backup-restore.md` for the runbook. R2 was chosen (over B2 / self-managed)
   because it reuses the Cloudflare account, has 10 GB free + zero egress, and is
-  S3-compatible so it doubles as a stepping stone to the Phase 11 S3 migration.
-  `rclone crypt` encrypts before anything leaves the house. Media is *mirrored*
+  S3-compatible.
+  `rclone crypt` encrypts before anything leaves the box, and R2 is deliberately
+  a *different provider* from the host — backups shouldn't share a blast radius
+  with the thing they protect. Media is *mirrored*
   (not snapshotted) so off-site size ≈ live media, with changed/deleted files
   diverted to a dated `media-archive/` (30-day window) so a local wipe can't
   propagate to the backup.
 - **Security hardening (from `/security-review`, no HIGH findings).** Three gaps
   were closed: (1) **uploaded media auth-gated** via Caddy `forward_auth` →
   `/api/media-auth/` (logged-in active members only; see `reference/feed-and-posts.md`);
-  (2) **Django `/admin/` restricted to the LAN** by Caddy `remote_ip` allow-list,
-  deliberately **fail-closed** — it *excludes* Docker's bridge range so a NAT
+  (2) **Django `/admin/` closed off** by a Caddy `remote_ip` allow-list,
+  deliberately **fail-closed** — it *excludes* Docker's bridge range, so a NAT
   misconfig locks admin out (caught instantly) rather than silently opening it to
-  the world; (3) **sign-up enumeration closed** (see `reference/accounts.md`). Note
-  a normal LAN device reaches `/admin/` via the public domain through the router's
-  hairpin; it only 403s if something routes it *out* first (a VPN, or iCloud
-  Private Relay on iOS/macOS) — the usual reason a phone on home Wi-Fi is still
-  blocked.
+  the world; (3) **sign-up enumeration closed** (see `reference/accounts.md`).
+  The allow-list was written for the home LAN. On a cloud host **nothing matches
+  it**, so `/admin/` now 403s universally and administration moved to `manage.py`
+  over SSH — a strengthening, kept on purpose rather than worked around.
 - **Uptime = an on-box active probe + a dead-man's switch.** healthchecks.io is
   *passive* (it waits for pings, it does not probe your URL), so the active half
   lives on our side: a 5-min timer curls `GET /api/healthz/` (public, runs
   `SELECT 1` so "gunicorn up but Postgres down" is caught; 503 on DB error) and
   pings success/`/fail`. The probe hits the public hostname **pinned to loopback**
-  (`curl --resolve …:127.0.0.1`) because many consumer routers can't hairpin a LAN
-  request to their own public IP — this exercises the real cert + routing + DB but
-  not the inbound internet path (static once set; an external check is a deferred
-  nice-to-have). If the box or broadband is down the timer can't run, so the
-  missing ping goes overdue → the dead-man's alert fires. No `Persistent=true` on
+  (`curl --resolve …:127.0.0.1`), which exercises the real certificate, routing
+  and DB without depending on DNS. That last part is the known blind spot: on
+  2026-08-12 a stale DDNS updater pointed the domain at a dead host and this check
+  stayed green throughout, because locally nothing was wrong. **A green uptime
+  check is not proof the site is reachable.** Closing that properly needs a
+  probe that resolves the name normally from somewhere else. If the box is down
+  the timer can't run at all, so the missing ping goes overdue → the dead-man's
+  alert fires. No `Persistent=true` on
   this timer (a catch-up ping would falsely claim the site was up during an
   outage).

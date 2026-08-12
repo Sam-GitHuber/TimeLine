@@ -81,7 +81,7 @@ docker compose up --build        # backend + db + web app
 cd mobile && npx expo start      # Metro → press 'i' for the iOS Simulator
 ```
 
-The app defaults to `https://your-timeline.net` (the home server), which is
+The app defaults to `https://your-timeline.net` (production), which is
 usually what you want to test against. Point `EXPO_PUBLIC_API_URL` in
 `mobile/.env` at a local Django when debugging API work — see `.env.example`.
 

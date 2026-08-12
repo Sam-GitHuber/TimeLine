@@ -23,7 +23,8 @@ secret lives on the server. Work top to bottom in the [checklist](#teardown-chec
 | Service | What it's for | Secret / resource | Where it lives |
 |---------|---------------|-------------------|----------------|
 | **Cloudflare — Registrar** | Owns `your-timeline.net` | The domain registration (at-cost annual renewal) | Cloudflare dashboard → Domain Registration (same account as DNS + R2) |
-| **Cloudflare — DNS** | Public DNS for the domain + DDNS updates | **DDNS API token** (Edit-zone-DNS) | `/etc/timeline/cloudflare-ddns.env` → `CF_API_TOKEN` |
+| **Cloudflare — DNS** | Public DNS for the domain (one static A record) | No token — the record is set by hand; the DDNS updater was retired with the home server | Cloudflare dashboard → DNS |
+| **AWS** | The Lightsail instance the app runs on, its static IP and snapshots | Root account sign-in (MFA); no API keys are used by the app | AWS console → Lightsail (`eu-west-2`) |
 | **Cloudflare — R2** | Off-site encrypted backups | Bucket `timeline-backups` + an **R2 API token** (Access Key ID + Secret) | rclone config: `~/.config/rclone/rclone.conf` |
 | **Cloudflare — Resend link** | Resend's access to auto-manage DNS records | An **authorized app / API connection** granted during Resend domain setup | Cloudflare dashboard (not a file) |
 | **Resend** | Outbound email (password resets, etc.) | Verified domain + **sending API key** (`re_…`) | `~/TimeLine/.env.prod` → `EMAIL_HOST_PASSWORD` |
@@ -71,13 +72,18 @@ the box, revoke tokens *before* you delete the accounts that manage them).
 ### 2. Stop the app on the server
 - [ ] `cd ~/TimeLine && docker compose -f docker-compose.prod.yml down`
 - [ ] Disable the systemd timers so nothing restarts it or runs backups:
-      `sudo systemctl disable --now timeline-deploy.timer cloudflare-ddns.timer timeline-backup.timer timeline-healthcheck.timer`
+      `sudo systemctl disable --now timeline-autodeploy.timer backup.timer timeline-healthcheck.timer send-pushes.timer token-flush.timer`
       (skip any you never installed).
+- [ ] **Delete the Lightsail instance _and release its static IP_.** An instance
+      that is merely *stopped* still bills, and a static IP left detached starts
+      costing on its own — that pair is the usual reason a "shut down" AWS
+      account keeps charging.
 
 ### 3. Revoke every API key / token
 - [ ] **Resend** → API Keys → delete the `timeline-prod` key. Optionally remove
       the domain too.
-- [ ] **Cloudflare → My Profile → API Tokens** → delete the **DDNS** token.
+- [ ] **Cloudflare → My Profile → API Tokens** → delete any leftover **DDNS**
+      token (only exists if the domain predates the AWS migration).
 - [ ] **Cloudflare → R2 → Manage R2 API Tokens** → delete the backup token.
 - [ ] **Cloudflare → Resend authorization** → revoke Resend's access to your DNS
       (Manage Account → the authorized-apps/connections list). Deleting the zone

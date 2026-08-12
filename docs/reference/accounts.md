@@ -468,7 +468,7 @@ The same code machinery backs forgotten-password reset — see
   before login; also linked from an in-app footer). They are the single source of
   truth for the documents.
 - Jurisdiction is **UK / UK-GDPR** (England & Wales governing law, UK GDPR / DPA
-  2018) — matches the home server's location and the repo's British spelling. The
+  2018) — matches where the app is hosted (London) and the repo's British spelling. The
   data-controller contact is the maintainer's email for now. These are good-faith
   plain-English drafts, **not legal advice** — worth a solicitor's eyes before any
   broad/public launch (proportionate to skip for a private family beta).

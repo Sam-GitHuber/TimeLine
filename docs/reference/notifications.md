@@ -405,7 +405,7 @@ row, and `manage.py send_pushes` drains it on a systemd timer every minute
 A push failure can never fail a user's action, and a send that dies halfway is
 retried rather than lost — which a fire-and-forget thread could not promise.
 A minute is the latency/load trade: still reads as "just happened" to a human,
-without waking a process every few seconds on a home server.
+without waking a process every few seconds on a small single-instance box.
 
 **Three properties fall out of putting the enqueue in `create_notification`:**
 
