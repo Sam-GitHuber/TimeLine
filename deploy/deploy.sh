@@ -13,7 +13,12 @@
 set -euo pipefail
 
 COMPOSE_FILE="docker-compose.prod.yml"
-DATA_MOUNT="/srv/timeline"
+DATA_MOUNT="${TIMELINE_DATA_MOUNT:-/srv/timeline}"
+
+# Whether DATA_MOUNT is expected to be a separate disk — see the long note in
+# deploy/autodeploy.sh. 1 (default) = home box, two disks, the mount must be up.
+# 0 = single-disk host (AWS Lightsail), where only Safety 3 below applies.
+REQUIRE_DATA_MOUNT="${TIMELINE_REQUIRE_DATA_MOUNT:-1}"
 
 main() {
   # Work from the repo root regardless of where this was invoked.
@@ -21,9 +26,12 @@ main() {
 
   # Safety 1: never deploy if the NVMe data disk isn't mounted — otherwise the
   # stack would write Postgres data / media onto the OS SSD. (Docker's systemd
-  # unit also guards this; belt and braces.)
-  if ! mountpoint -q "$DATA_MOUNT"; then
+  # unit also guards this; belt and braces.) Skipped on a single-disk host,
+  # where there is no other disk to land on and the check can only ever fail;
+  # Safety 3 still runs there and is the part that catches a real mistake.
+  if [[ "$REQUIRE_DATA_MOUNT" == "1" ]] && ! mountpoint -q "$DATA_MOUNT"; then
     echo "ERROR: data disk $DATA_MOUNT is not mounted. Aborting deploy." >&2
+    echo "       (Single-disk host? Set TIMELINE_REQUIRE_DATA_MOUNT=0.)" >&2
     exit 1
   fi
 
