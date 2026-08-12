@@ -3,7 +3,7 @@
 The repeatable runbook for getting a new version of the app (`mobile/`, the
 Expo/React Native app) onto testers' phones, **and** the rationale behind each
 step. This is the mobile sibling of [`deploy.md`](deploy.md): where that doc ships
-the backend/web app to the home server, this one ships the phone app to testers.
+the backend/web app to production, this one ships the phone app to testers.
 
 **iOS is below; [Android has its own section](#android-phase-10).** One codebase,
 two quite different distribution stories — Apple's is a single channel

@@ -4,17 +4,24 @@ Instructions for Claude Code when working in this repo.
 
 ## Current status
 
-**Phases 0–9b are done.** The app is deployed on a wiped home PC on public HTTPS
-at https://your-timeline.net, and there is an **iOS app in external TestFlight
-beta** with real testers. Shipped: accounts/auth, the reverse-chronological feed,
-photos + profiles, the symmetric connection graph + pruned comment trees, direct +
-group messaging, groups, emoji reactions, the unified **notifications / activity
-centre**, **group events + a planning calendar**, full home-server
-productionisation (backups, continuous deploy, security hardening, uptime
-monitoring, ToS/privacy + account deletion), the **iPhone app** (full parity +
-push), and the **messaging overhaul** that brought messaging up to the standard of
-a high-end messenger on both clients. A site-wide **design system** underpins the
-frontend (warm-modern "living line" look — see `docs/design-system.md`).
+**Phases 0–9b and 11 are done.** The app runs on **AWS Lightsail** (London) on
+public HTTPS at https://your-timeline.net, and there is an **iOS app in external
+TestFlight beta** with real testers. Shipped: accounts/auth, the
+reverse-chronological feed, photos + profiles, the symmetric connection graph +
+pruned comment trees, direct + group messaging, groups, emoji reactions, the
+unified **notifications / activity centre**, **group events + a planning
+calendar**, full productionisation (backups, continuous deploy, security
+hardening, uptime monitoring, ToS/privacy + account deletion), the **iPhone app**
+(full parity + push), and the **messaging overhaul** that brought messaging up to
+the standard of a high-end messenger on both clients. A site-wide **design
+system** underpins the frontend (warm-modern "living line" look — see
+`docs/design-system.md`).
+
+**Phase 11 (AWS migration) shipped early, on 2026-08-12** — not because the beta
+had proven itself but because the home ISP moved the connection behind **CGNAT**,
+which makes inbound port-forwarding impossible at any price. It ran on a wiped
+home PC until then. `docs/deploy.md` is the runbook and carries the *why*; the
+home-server details are in git history.
 
 **How each shipped feature works lives in `docs/reference/`** — one topic doc each
 (accounts, feed-and-posts, connections, messaging, groups, reactions,
@@ -37,8 +44,8 @@ device-side rather than sent through Expo/Apple. It exists to fix the
 Reply-with-no-context problem *and* to build most of 9c's milestone 7 early.
 **One open decision** in it needs the user's call before M3.
 **E2E encryption (9c) is deliberately scheduled after Android**, at the user's
-call: friends are waiting on an Android build. Phases 11–13 (AWS migration →
-short video clips) remain sketches in `docs/phases/`.
+call: friends are waiting on an Android build. Phases 12–13 (open source/funding
+→ short video clips) remain sketches in `docs/phases/`.
 
 ## Before doing any work
 
