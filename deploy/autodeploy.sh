@@ -43,7 +43,21 @@
 set -euo pipefail
 
 COMPOSE_FILES=(-f docker-compose.prod.yml -f docker-compose.ghcr.yml)
-DATA_MOUNT="/srv/timeline"
+DATA_MOUNT="${TIMELINE_DATA_MOUNT:-/srv/timeline}"
+
+# Is DATA_MOUNT expected to be a SEPARATE DISK? On the home box it is: data
+# lives on a 1 TB NVMe while the OS is on a small SSD, so "not mounted" means
+# Postgres would silently write to the wrong disk — worth aborting over.
+#
+# A single-disk host (the AWS Lightsail instance, one 58 GB volume) has no wrong
+# disk to write to, so there the mount check can only ever fail. Set
+# TIMELINE_REQUIRE_DATA_MOUNT=0 there — via `Environment=` in
+# timeline-autodeploy.service — and the check below falls back to asserting the
+# data directories exist, which is the part that still protects anything.
+#
+# Defaults to 1 so the home box, and anyone copying this setup, keeps the
+# stricter check without having to know this variable exists.
+REQUIRE_DATA_MOUNT="${TIMELINE_REQUIRE_DATA_MOUNT:-1}"
 
 # Which release to run. The GHCR override interpolates TIMELINE_TAG too, so this
 # export is what keeps the tag this script *inspects* and the tag compose
@@ -66,6 +80,38 @@ IMAGES=(
 # Spelled out rather than `date -Is`: -I is GNU-only, and the test harness runs
 # on macOS too, where BSD date rejects it and every log line grows an error.
 log() { echo "$(date '+%Y-%m-%dT%H:%M:%S%z') autodeploy: $*"; }
+
+# Refuse to deploy unless the data location is sound. Two host shapes:
+#
+#   REQUIRE_DATA_MOUNT=1 (default, home box)  — DATA_MOUNT must be a real mount
+#     point, i.e. the data disk is actually mounted. Its subdirectories are
+#     guaranteed to be on the right disk once that holds.
+#   REQUIRE_DATA_MOUNT=0 (single-disk host)   — there is no separate disk to
+#     mount, so instead assert the two bind-mount targets exist. Docker's local
+#     bind driver does NOT create them; without this the stack fails later with
+#     an opaque "no such file or directory".
+#
+# A separate function (rather than inline in main) so deploy/tests can drive it
+# directly — main() also pulls, deploys and talks to GHCR, which tests can't.
+check_data_location() {
+  if [[ "$REQUIRE_DATA_MOUNT" == "1" ]]; then
+    if ! mountpoint -q "$DATA_MOUNT"; then
+      log "ERROR: data disk $DATA_MOUNT is not mounted; aborting."
+      log "       (Single-disk host? Set TIMELINE_REQUIRE_DATA_MOUNT=0.)"
+      return 1
+    fi
+    return 0
+  fi
+
+  local dir
+  for dir in "$DATA_MOUNT/postgres" "$DATA_MOUNT/media"; do
+    if [[ ! -d "$dir" ]]; then
+      log "ERROR: data directory $dir does not exist; aborting."
+      log "       Create it once: sudo mkdir -p $DATA_MOUNT/{postgres,media}"
+      return 1
+    fi
+  done
+}
 
 image_id() {
   # Local image ID for an image reference; empty if the image isn't on the box.
@@ -141,12 +187,9 @@ converge() {
 main() {
   cd "$(dirname "$0")/.."
 
-  # Same safety guards as deploy.sh: never deploy without the data disk mounted
-  # or the secrets file present.
-  if ! mountpoint -q "$DATA_MOUNT"; then
-    log "ERROR: data disk $DATA_MOUNT is not mounted; aborting."
-    exit 1
-  fi
+  # Same safety guards as deploy.sh: never deploy without the data location
+  # sound or the secrets file present.
+  check_data_location || exit 1
   if [[ ! -f .env.prod ]]; then
     log "ERROR: .env.prod not found in $(pwd); aborting."
     exit 1

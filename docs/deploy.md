@@ -177,6 +177,23 @@ systemctl status timeline-autodeploy.timer --no-pager
 To pause auto-deploy (e.g. during maintenance): `sudo systemctl stop
 timeline-autodeploy.timer`. Re-enable with `start`.
 
+**On a single-disk host** (e.g. the AWS Lightsail instance, one volume — not
+this home box, which keeps data on a separate NVMe), `deploy.sh` and
+`autodeploy.sh` would both abort: their first guard requires `/srv/timeline` to
+be a real *mount point*, and there it's an ordinary directory. Set
+
+```ini
+# /etc/systemd/system/timeline-autodeploy.service
+Environment=TIMELINE_REQUIRE_DATA_MOUNT=0
+```
+
+and export the same variable when running `deploy.sh` by hand. The guard then
+asserts the two bind-mount targets (`postgres/`, `media/`) **exist** instead —
+which is the part that still catches a real mistake. The mount check itself is
+about not writing to the *wrong disk*, which can't happen when there's only one.
+`TIMELINE_DATA_MOUNT` moves the path if ever needed. Both default to the
+stricter two-disk behaviour, so this box is unaffected.
+
 **Changing `autodeploy.sh`?** Run its tests first — they cover the redeploy
 decision (including the stall this section describes) with a stubbed `docker`, so
 they need no daemon and take a second:
