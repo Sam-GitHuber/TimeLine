@@ -49,20 +49,49 @@ LOCAL_KEEP="${LOCAL_KEEP:-7}"
 DB_KEEP_DAYS="${DB_KEEP_DAYS:-30}"
 MEDIA_ARCHIVE_KEEP_DAYS="${MEDIA_ARCHIVE_KEEP_DAYS:-30}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
-DATA_MOUNT="/srv/timeline"
+DATA_MOUNT="${TIMELINE_DATA_MOUNT:-/srv/timeline}"
+
+# Whether DATA_MOUNT is expected to be a separate disk — see the long note in
+# deploy/autodeploy.sh. 1 (default) = home box, two disks, the mount must be up.
+# 0 = single-disk host (AWS Lightsail), where the mount check can only ever fail;
+# the MEDIA_DIR check below is what still catches a real mistake there.
+REQUIRE_DATA_MOUNT="${TIMELINE_REQUIRE_DATA_MOUNT:-1}"
+
+# Refuse to back up unless the data we'd read is real data. A separate function
+# so deploy/tests/test_backup_guards.sh can drive it without running a backup —
+# main() dumps Postgres and talks to R2, which tests can't.
+check_preconditions() {
+  # Safety: never run if the NVMe data disk isn't mounted — the DB/media we'd
+  # try to read wouldn't be the real data, and LOCAL_STAGE would land on the OS
+  # SSD. deploy.sh guards the same way. Skipped on a single-disk host, where
+  # there is no other disk to read the wrong data from.
+  if [[ "$REQUIRE_DATA_MOUNT" == "1" ]] && ! mountpoint -q "$DATA_MOUNT"; then
+    echo "ERROR: data disk $DATA_MOUNT is not mounted. Aborting backup." >&2
+    echo "       (Single-disk host? Set TIMELINE_REQUIRE_DATA_MOUNT=0.)" >&2
+    return 1
+  fi
+
+  # Whatever the host shape, refuse to back up a media tree that isn't there —
+  # otherwise `rclone sync` would faithfully mirror an EMPTY directory over the
+  # off-site copy and delete every photo in it. The archive (see
+  # MEDIA_ARCHIVE_KEEP_DAYS) would hold them for a while, but this is the one
+  # failure in this script that can destroy the backup it is meant to protect.
+  # It matters most on a single-disk host, where the mount check above is off
+  # and this is the only thing standing between a missing directory and a
+  # wiped off-site mirror.
+  if [[ ! -d "$MEDIA_DIR" ]]; then
+    echo "ERROR: media dir $MEDIA_DIR does not exist. Aborting backup." >&2
+    echo "       Refusing to sync an empty tree over the off-site copy." >&2
+    return 1
+  fi
+}
 
 main() {
   # Work from the repo root regardless of where this was invoked (so the
   # relative COMPOSE_FILE resolves), mirroring deploy.sh.
   cd "$(dirname "$0")/.."
 
-  # Safety: never run if the NVMe data disk isn't mounted — the DB/media we'd
-  # try to read wouldn't be the real data, and LOCAL_STAGE would land on the OS
-  # SSD. deploy.sh guards the same way.
-  if ! mountpoint -q "$DATA_MOUNT"; then
-    echo "ERROR: data disk $DATA_MOUNT is not mounted. Aborting backup." >&2
-    exit 1
-  fi
+  check_preconditions || exit 1
 
   local ts dump_file
   ts="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
@@ -130,4 +159,9 @@ main() {
   echo "==> Backup complete ($ts)."
 }
 
-main "$@"
+# Executed directly -> run a backup. Sourced (deploy/tests/test_backup_guards.sh)
+# -> just define the functions above, so the guards can be tested without
+# dumping Postgres or touching R2. Mirrors deploy/autodeploy.sh.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
