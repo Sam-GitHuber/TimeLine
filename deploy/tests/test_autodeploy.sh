@@ -221,12 +221,103 @@ test_pinned_tag() {
   finish_case
 }
 
+# --- data-location guard -----------------------------------------------------
+#
+# check_data_location decides whether it's safe to deploy at all. Two host
+# shapes: the home box (data on a separate NVMe — the mount MUST be up) and a
+# single-disk host like AWS Lightsail (no separate disk, so the mount check can
+# only ever fail and the directories are what matter). Getting this wrong is
+# either a stack that won't deploy or, worse, Postgres writing to the wrong
+# disk — so both directions are asserted.
+#
+# Driven by sourcing rather than via converge(): the guard lives in main(),
+# which also pulls and deploys, so it's called directly. TIMELINE_DATA_MOUNT
+# points it at a temp dir, keeping the tests off /srv/timeline entirely.
+
+run_guard() {
+  # $1 = REQUIRE_DATA_MOUNT value ("" leaves it unset, to test the default),
+  # $2 = directory to treat as the data mount
+  (
+    if [[ -n "$1" ]]; then
+      export TIMELINE_REQUIRE_DATA_MOUNT="$1"
+    else
+      unset TIMELINE_REQUIRE_DATA_MOUNT
+    fi
+    export TIMELINE_DATA_MOUNT="$2"
+    # shellcheck source=../autodeploy.sh
+    source "$SCRIPT"
+    check_data_location
+  ) >"$STATE/out.log" 2>&1
+  printf '%s' "$?" >"$STATE/exit_code"
+}
+
+assert_exit_fails() {
+  local code
+  code="$(cat "$STATE/exit_code")"
+  [[ "$code" != "0" ]] || fail "expected a non-zero exit, got 0"
+}
+
+# Single-disk host, directories present: the common AWS case — deploy proceeds
+# even though nothing is mounted at the data path.
+test_guard_single_disk_ok() {
+  new_world "guard_single_disk_ok"
+  mkdir -p "$STATE/data/postgres" "$STATE/data/media"
+
+  run_guard 0 "$STATE/data"
+  assert_exit_ok
+  finish_case
+}
+
+# Single-disk host with a missing bind target. Docker's local bind driver won't
+# create it, so without this the stack fails later with an opaque "no such file
+# or directory" — catch it here with a message that says what to do.
+test_guard_single_disk_missing_dir() {
+  new_world "guard_single_disk_missing_dir"
+  mkdir -p "$STATE/data/postgres"   # media/ deliberately absent
+
+  run_guard 0 "$STATE/data"
+  assert_exit_fails
+  assert_output_contains "media does not exist"
+  finish_case
+}
+
+# The home box's default: a plain directory is NOT a mount point, so a data disk
+# that failed to mount must abort rather than quietly write to the OS disk.
+# This is the check that must not regress.
+test_guard_requires_mount_by_default() {
+  new_world "guard_requires_mount_by_default"
+  mkdir -p "$STATE/data/postgres" "$STATE/data/media"
+
+  run_guard 1 "$STATE/data"
+  assert_exit_fails
+  assert_output_contains "is not mounted"
+  finish_case
+}
+
+# With the variable UNSET the strict check must still apply. Without this, a
+# future edit could flip the default to the laxer single-disk behaviour and
+# every other case here would still pass, silently removing the home box's
+# protection against deploying onto an unmounted data disk.
+test_guard_default_is_strict() {
+  new_world "guard_default_is_strict"
+  mkdir -p "$STATE/data/postgres" "$STATE/data/media"
+
+  run_guard "" "$STATE/data"
+  assert_exit_fails
+  assert_output_contains "is not mounted"
+  finish_case
+}
+
 test_nothing_to_do
 test_new_release_image
 test_container_drift
 test_missing_container
 test_missing_image
 test_pinned_tag
+test_guard_default_is_strict
+test_guard_single_disk_ok
+test_guard_single_disk_missing_dir
+test_guard_requires_mount_by_default
 
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
