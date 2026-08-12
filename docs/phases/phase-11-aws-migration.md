@@ -234,9 +234,17 @@ Distil this file into `docs/reference/` and delete it.
   change turned it from "when the beta proves itself" into "the only way back
   online without throwaway work".
 - **Phase 4 built storage through `django-storages`** precisely so an S3 switch
-  would be config, not a rewrite — and it is. The open question in decision 2 is
-  not *can we*, it's *should we*, and the answer turns on the `forward_auth`
+  would be config, not a rewrite — and it is. The question in decision 2 was
+  never *can we*, it was *should we*, and the answer turned on the `forward_auth`
   revocation property rather than on effort.
+- **Keeping media on disk also keeps issue #223 possible.** `deploy/Caddyfile`
+  notes that per-author connection gating on `/media/*` is deferred to "Phase 7b"
+  (this phase), and #223 points out the phase never listed it. It stays deferred
+  here — this migration deliberately changes hosting, not behaviour — but it is
+  worth recording that the decision above *preserves* the ability to do it. Live
+  per-request `forward_auth` is exactly where that gating would go; signed S3
+  URLs would have made it much harder, since there is no request to authorise at
+  view time. Schedule #223 as its own piece of work after cutover.
 - **Same-origin serving still applies** (one Caddy in front of SPA + API) so the
   CSRF cookie flow keeps working. Carry the Phase 7 security notes over intact.
 - **The `/admin/` allow-list is the single most important thing not to get wrong
