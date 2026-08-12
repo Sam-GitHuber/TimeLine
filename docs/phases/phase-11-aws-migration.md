@@ -1,82 +1,253 @@
 # Phase 11 — Migrate to AWS Lightsail
 
-**Status:** not started
+**Status:** planned, not started
 
 > **When we start this phase, walk the user through it step by step.** They are
 > new to hosting/cloud and want simple, one-thing-at-a-time guidance. That
 > hand-holding happens live — deliberately **not** written out here, to keep this
-> doc short. This file records *what* and *why*, not the keystrokes.
+> doc about *what* and *why*, not keystrokes.
 
 ## Goal
 
-Once the home-server beta (Phase 7) has proven the app worth keeping, move
-**everything** — the app *and* all real data people created (accounts, posts,
-comments, photos) — from the home PC to **AWS Lightsail**, with **no data loss**
-and minimal downtime.
+Move **everything** — the app and all real data people created (accounts, posts,
+comments, photos, messages) — from the home PC to **AWS Lightsail**, with **no
+data loss** and minimal downtime.
 
-The core promise: **nobody loses anything.** Everything from the beta comes
-across intact.
+The core promise: **nobody loses anything.**
+
+## Why this is happening now (changed 2026-08-12)
+
+The original trigger was "the beta proved the app worth paying for". That still
+holds, but a second, harder trigger arrived: **the new ISP (Toob) puts the house
+behind CGNAT.**
+
+`tracepath` from the box shows hop 1 `192.168.1.1`, hop 2 `100.127.240.247` —
+inside `100.64.0.0/10`, the RFC 6598 carrier-grade NAT range. The public address
+`145.40.156.204` that DNS returns is Toob's *shared* outer NAT address, not the
+house. **No port-forward can ever work**, because inbound traffic never reaches
+the Linksys in the first place. The site is currently down for this reason and
+this reason alone — the box, the containers and the certificate are all healthy
+(`--resolve your-timeline.net:443:127.0.0.1` returns 200 on both `/` and
+`/api/healthz/`).
+
+The alternative was a Cloudflare Tunnel. That is a day of work that Phase 11
+throws away anyway, so the migration wins on effort as well as on merit. A
+Lightsail static IP fixes the problem permanently.
+
+**This means the home server can no longer act as a public rollback target.** See
+*Rollback* below — the original plan's escape hatch is gone and is replaced.
 
 ## Precondition
 
-Phase 7 ran, feedback was good enough to commit to paid hosting, and the tested
-off-box backups from Phase 7 exist (the safety net for the migration).
+Tested off-box backups exist (Phase 7, `deploy/backup.sh` → encrypted rclone
+remote on Cloudflare R2, covering **both** the `pg_dump` and the whole media
+tree). These are the safety net for the migration and they already work.
 
 ## Runnable product at the end of this phase
 
 The same app, at the same URL, over HTTPS — now on AWS, always-on, with all beta
-data present. The home server can be switched off and wiped.
+data present, reachable from anywhere without touching a router. The home server
+can be switched off and wiped.
 
-## How it's kept safe
+## What we are actually moving (measured 2026-08-12)
 
-Move the **database** (accounts/posts/comments) and the **media** (photos)
-separately: photos go to an S3-compatible bucket (moved once, never again), the
-DB is dumped and restored, both are verified, then DNS flips — with the home
-server left running as an instant rollback until AWS is proven.
+| | Size |
+|---|---|
+| Postgres database | **13 MB** |
+| Media (post photos, avatars, chat photos) | **39 MB**, 112 files |
+| Busiest table | 272 rows (`api_message`) |
+
+This is small enough that the whole cutover is minutes, not a maintenance
+window. Sizing and risk decisions below all follow from that.
+
+## Cost — settled
+
+| Line | Monthly |
+|---|---|
+| Lightsail instance, 2 GB RAM / 2 vCPU / 60 GB SSD / 3 TB transfer | $12 |
+| Automatic snapshots (~12 GB used) | ~$0.60 |
+| **Total** | **≈ $13 / £13 inc. VAT** |
+
+Confirmed acceptable by the user on 2026-08-12. Notes:
+
+- **Self-hosted Postgres in a container, not a Lightsail managed DB.** Managed
+  adds $15/mo (nearly doubling the bill) for automated backups and patching we
+  already have via `deploy/backup.sh` + unattended-upgrades. Revisit if the user
+  base grows beyond friends and family.
+- **2 GB, not the $7 1 GB tier.** The box uses ~960 MB today so 1 GB would
+  *probably* run it, but a Docker image build or a migration in 1 GB is where
+  things get OOM-killed at the worst moment. Lightsail resizes later if needed.
+- The 3 TB transfer allowance is thousands of times current traffic.
+- **Set an AWS budget alert on day one** (see M1). First-time AWS accounts are
+  where surprise bills happen; Lightsail itself is fixed-price, but a stray S3 or
+  data-transfer charge should page us, not appear on a statement.
+
+## Decisions settled up front
+
+- **Region `eu-west-2` (London).** Latency for UK friends and family, and it
+  keeps real personal data in the UK, which matches the privacy-first principle
+  and keeps the privacy policy honest. Do not default to `us-east-1`.
+- **Lightsail instance + Docker Compose**, not Lightsail Container Service. The
+  stack is already Compose; this is a lift-and-shift, and Container Service costs
+  more and would need the deploy shape rewritten.
+- **Keep backups on Cloudflare R2, not in AWS.** Backups belong with a *different*
+  provider than the thing they protect — an AWS account problem shouldn't take
+  the backups with it. R2 is already set up, encrypted and tested.
+- **Retire the Cloudflare DDNS timer.** A static IP makes
+  `deploy/cloudflare-ddns.{sh,service,timer}` dead weight; delete the units and
+  set the A record by hand, once. One fewer moving part.
+- **Keep the pull-based autodeploy** (systemd timer polling GHCR). It works, and
+  it avoids giving CI any credentials that can reach production.
+- **Carry over the other timers unchanged:** `backup`, `token-flush`,
+  `send-pushes`, `timeline-healthcheck`.
+
+## Decisions taken (2026-08-12)
+
+### 1. Django admin — `manage.py` over SSH; no web admin in production
+
+`deploy/Caddyfile` restricts `/admin/` to `127.0.0.1/8 ::1 10.0.0.0/8
+192.168.0.0/16` and 403s everyone else. **On AWS there is no LAN, so that
+allow-list matches nothing.** Rather than widen it, the web admin goes away in
+production: administration happens through `manage.py` over SSH.
+
+This is the most secure option — the highest-value credential in the system
+stops having a login form on the public internet at all — at the cost of
+convenience. The Caddy `/admin/` rule stays exactly as it is, still fail-closed,
+now denying everyone including us. Verify after cutover that `/admin/` 403s from
+the public internet.
+
+Rejected: adding `172.18.0.1/32` (the Docker bridge gateway) to the allow-list.
+It converts a deliberately fail-closed design into a fail-open one — if Docker's
+userland proxy ever SNATs published-port traffic, the whole internet arrives as
+that address and the admin login is exposed. The Caddyfile comment calls this
+trap out; don't walk into it. An SSH tunnel *through Caddy* fails for the same
+underlying reason: host-loopback traffic reaches Caddy as `172.18.0.1`, observed
+in the access log on 2026-08-12.
+
+### 2. Media stays on the instance disk
+
+Media is **not** moving to S3 in this phase, deviating from the original sketch's
+"move once, never again" goal. 39 MB is already backed up encrypted to R2 by
+`deploy/backup.sh` and covered by instance snapshots.
+
+**Why:** `/media/*` is gated by Caddy `forward_auth` → `/api/media-auth/`, so the
+backend authorises **every single request** — a leaked URL is useless to a
+logged-out stranger and a banned member's saved URLs stop working immediately.
+S3 with `querystring_auth` signed URLs replaces that with a URL that stays valid
+for its whole lifetime regardless of what happens to the account behind it, and
+changes every media URL on every page load (likely breaking client-side image
+caching on web and mobile). That is a real loss of a privacy property for no
+benefit at 39 MB.
+
+**Cost was not the deciding factor** — an earlier draft overweighted S3 egress.
+S3 storage in London is ~$0.024/GB-month and **the first 100 GB/month of internet
+egress is free across the whole AWS account**, so S3 would cost pennies at this
+scale. The security model is the reason, not the bill.
+
+**Moving later is cheap, which is what makes deferring safe.** Django stores
+*relative* paths via `upload_to` (see `api/imaging.py`), so the DB holds keys like
+`posts/<uuid>.jpg`, not URLs — copy the tree into a bucket preserving structure,
+set `DJANGO_MEDIA_STORAGE=s3` plus the bucket vars, restart, and existing rows
+just work. **No database rewrite.** The genuinely hard part (the `forward_auth` →
+signed-URL change and client cache testing) is identical whenever it happens, so
+deferring costs nothing but a larger `aws s3 sync`.
+
+**Revisit when:** media approaches a few GB, or the 60 GB instance disk drops
+below comfortable headroom (~12 GB is OS + Docker, leaving ~48 GB). If it does
+move, prefer a fixed-price Lightsail bucket over raw S3 to keep the bill
+predictable, and use a short (~5 min) signed-URL lifetime.
+
+## Rollback — reworked, because the old plan no longer works
+
+The original plan kept the home server serving publicly and rolled back by
+flipping DNS. **CGNAT killed that.** The replacement:
+
+1. **Nothing is deleted from the home box** until AWS has run stable for a week.
+   It stays powered on and intact — just not publicly reachable.
+2. The **pre-cutover dump is kept in three places**: on the home box, in R2, and
+   downloaded locally.
+3. Rollback within the cutover window = **restore the pre-cutover dump onto the
+   AWS instance** (fast: 13 MB) and fix forward. This is the realistic path and
+   it must be **rehearsed in M4 before the real cutover**, not improvised.
+4. **Lower the DNS TTL to 60s a day ahead** so DNS is never the thing that's slow.
+5. If AWS is unrecoverable, the home box can be restored to service only by
+   also solving CGNAT (Cloudflare Tunnel) — hours, not minutes. Treat this as
+   disaster recovery, not rollback, and accept it.
 
 ## Definition of done
 
-- [ ] AWS Lightsail provisioned + documented (**instance + Docker Compose** vs.
-      **Container Service** — decide, note why + cost)
-- [ ] Production Postgres on AWS (**managed Lightsail DB** vs. self-hosted
-      container + backups — decide, document)
-- [ ] **Media moved to S3-compatible object storage** via `django-storages`; all
-      existing beta photos uploaded
-- [ ] **Data migration verified:** DB restored on AWS with **row counts matching**
-      the source (users/posts/comments), and **every beta photo loads** on the
-      live site
-- [ ] Domain **cut over** to AWS; HTTPS valid; login + feed + photos all work
-- [ ] **Rollback kept during cutover:** home server left running, DNS TTL lowered
-      ahead of time
-- [ ] Backups on AWS with a **tested restore**
-- [ ] Uptime monitoring re-pointed at AWS
-- [ ] Secrets from AWS env/secret config, never the repo
-- [ ] Home server **decommissioned only after** AWS is verified stable (a few days
-      on standby first)
-- [ ] Updated **monthly cost estimate** written down (feeds funding, Phase 12)
+- [ ] Lightsail instance provisioned in `eu-west-2`, documented, **budget alert set**
+- [ ] Static IP allocated and attached; DNS A record points at it (**grey cloud**,
+      not Proxied — Caddy needs a direct connection for Let's Encrypt)
+- [ ] Production Postgres running as a container with `deploy/backup.sh` proven
+      on AWS
+- [ ] Media on the instance volume, with `forward_auth` gating verified to behave
+      identically to the home box (a logged-out request for a media URL 403s)
+- [ ] Django admin reachable **only** via `manage.py` over SSH; `/admin/` verified
+      **403 from the public internet** by a real request from mobile data
+- [ ] **Data migration verified:** row counts match the source for users, posts,
+      comments and messages, and **every beta photo loads** on the live site
+- [ ] Domain cut over; HTTPS valid; login, feed, photos, messaging, push all work
+- [ ] **Rollback rehearsed** (restore pre-cutover dump onto AWS) before real cutover
+- [ ] Backups running on AWS to R2 with a **tested restore**
+- [ ] Uptime monitoring (healthchecks.io) re-pointed at AWS
+- [ ] Mobile app verified against the new host (push included)
+- [ ] Secrets from env/secret config on the instance, never the repo
+- [ ] DDNS units removed; `docs/deploy.md` rewritten for AWS, including the
+      correction that **this ISP does use CGNAT** (the current note at ~line 655
+      says it doesn't — true of the old ISP only)
+- [ ] Home server decommissioned only after a week of stable AWS operation
+- [ ] Final monthly cost written down (feeds Phase 12 funding)
 
-## Steps (high level — details walked through live)
+## Milestones
 
-1. Stand up an empty stack on Lightsail; prove the deploy shape before any data
-   moves.
-2. Switch media storage to an S3 bucket; upload the beta's media folder.
-3. Rehearse the migration: dump the home DB, restore to AWS, spot-check.
-4. Real cutover: lower DNS TTL a day ahead, brief maintenance/read-only, final
-   dump + restore, sync new photos, verify counts + photos load.
-5. Flip DNS to AWS; confirm everything works for an external visitor.
-6. Watch with the home server on standby (rollback); once stable, retire + wipe
-   the old PC.
+**M1 — Account and instance.** AWS account, billing alert, Lightsail instance in
+`eu-west-2`, static IP, SSH key, unattended-upgrades, firewall limited to 22/80/443.
+Nothing app-related yet.
+
+**M2 — Empty stack.** Docker + Compose, clone the repo, GHCR pull, bring the
+stack up on a **temporary hostname** with a throwaway DNS record so Let's
+Encrypt works without touching the live domain. Confirm `/admin/` 403s (it now
+does so for everyone, by design) and that `manage.py` over SSH works in its
+place. Prove the deploy shape before any real data moves.
+
+**M3 — Media.** Media stays on disk, so this is verification rather than
+migration: confirm the media volume mounts correctly on AWS and that Caddy's
+`forward_auth` gate behaves identically — a logged-in member loads a photo, a
+logged-out request for the same URL is refused.
+
+**M4 — Migration rehearsal.** Dump the home DB, restore to AWS, sync media,
+compare row counts, click through the app on the temporary hostname. **Then
+rehearse the rollback restore.** Throw the data away and repeat until clean.
+
+**M5 — Cutover.** Lower DNS TTL a day ahead. Brief read-only/maintenance window,
+final dump, restore, final media sync, verify counts and photos, flip DNS to the
+static IP, confirm as an external visitor on mobile data.
+
+**M6 — Watch and retire.** Monitoring re-pointed, backups verified on AWS, a
+week of stability, mobile app checked, then power off and wipe the home PC.
+Distil this file into `docs/reference/` and delete it.
 
 ## Notes / decisions log
 
-- **This migration is the accepted cost of the home-first plan (Phase 7).** Kept
-  low-risk by: moving media to S3 so photos never move again, rehearsing the
-  migration, and keeping the home box as a live rollback during cutover.
-- **Phase 4 builds storage through `django-storages`** precisely so switching to
-  an S3 bucket here is a **config change, not a rewrite**.
-- **Managed DB vs. self-hosted Postgres — decide at the start.** For real family
-  data, lean managed (automatic backups/patching) unless cost is tight.
-- **Same-origin serving still applies** (reverse proxy in front of SPA + API) so
-  the CSRF-cookie flow keeps working — carry over the Phase 7 security notes.
-- **Confirm the monthly cost here** — the number that feeds the Phase 12 funding
-  conversation.
+- **CGNAT forced the timing** (2026-08-12). The phase was always planned; the ISP
+  change turned it from "when the beta proves itself" into "the only way back
+  online without throwaway work".
+- **Phase 4 built storage through `django-storages`** precisely so an S3 switch
+  would be config, not a rewrite — and it is. The question in decision 2 was
+  never *can we*, it was *should we*, and the answer turned on the `forward_auth`
+  revocation property rather than on effort.
+- **Keeping media on disk also keeps issue #223 possible.** `deploy/Caddyfile`
+  notes that per-author connection gating on `/media/*` is deferred to "Phase 7b"
+  (this phase), and #223 points out the phase never listed it. It stays deferred
+  here — this migration deliberately changes hosting, not behaviour — but it is
+  worth recording that the decision above *preserves* the ability to do it. Live
+  per-request `forward_auth` is exactly where that gating would go; signed S3
+  URLs would have made it much harder, since there is no request to authorise at
+  view time. Schedule #223 as its own piece of work after cutover.
+- **Same-origin serving still applies** (one Caddy in front of SPA + API) so the
+  CSRF cookie flow keeps working. Carry the Phase 7 security notes over intact.
+- **The `/admin/` allow-list is the single most important thing not to get wrong
+  in this migration.** It is currently fail-closed by design; every option in
+  decision 1 except (d) preserves that. Verify with a real request from mobile
+  data after cutover, not by reading the config.
