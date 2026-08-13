@@ -8570,7 +8570,9 @@ class DevicePushTokenTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        # 200 with the preview credential (Phase 10b), not the original 204:
+        # the plaintext exists here and nowhere else afterwards.
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
         token = DevicePushToken.objects.get()
         self.assertEqual(token.user, self.me)
         self.assertEqual(token.platform, "ios")
@@ -8600,9 +8602,124 @@ class DevicePushTokenTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(DevicePushToken.objects.count(), 1)
         self.assertEqual(DevicePushToken.objects.get().user, self.me)
+
+    # --- The preview credential and its toggle (Phase 10b) --------------------
+
+    def test_registering_issues_a_preview_credential(self):
+        # The notification service extension can't use the account's tokens, so
+        # registration is where it gets one of its own. Returned in plaintext
+        # exactly once; stored hashed, so a database dump yields nothing usable.
+        resp = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[abc123]", "platform": "ios"},
+            format="json",
+        )
+
+        raw = resp.data["preview_token"]
+        self.assertTrue(raw)
+        device = DevicePushToken.objects.get()
+        self.assertNotIn(raw, device.preview_token_hash)
+        self.assertEqual(
+            device.preview_token_hash, DevicePushToken.hash_preview_token(raw)
+        )
+
+    def test_re_registering_replaces_the_preview_credential(self):
+        # Rotating on every launch is what makes a lost credential self-repairing
+        # — there is no separate recovery path to build. Safe only because
+        # nothing but the app ever mints or writes it.
+        first = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[abc123]", "platform": "ios"},
+            format="json",
+        ).data["preview_token"]
+
+        second = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[abc123]", "platform": "ios"},
+            format="json",
+        ).data["preview_token"]
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            DevicePushToken.objects.get().preview_token_hash,
+            DevicePushToken.hash_preview_token(second),
+        )
+
+    def test_a_device_changing_hands_loses_its_preview_setting(self):
+        # The row deliberately moves to the new user — but a preference about a
+        # lock screen must not be inherited with it. Ada enables previews, logs
+        # out, her partner logs in on the same tablet: a stranger's private
+        # messages must not start rendering there.
+        DevicePushToken.objects.create(
+            user=self.other,
+            expo_token="ExponentPushToken[shared]",
+            platform="ios",
+            show_previews=True,
+        )
+
+        self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[shared]", "platform": "ios"},
+            format="json",
+        )
+
+        device = DevicePushToken.objects.get()
+        self.assertEqual(device.user, self.me)
+        self.assertFalse(device.show_previews)
+
+    def test_re_registering_your_own_device_keeps_your_preview_setting(self):
+        # The other half: the app POSTs on *every* launch, so a reset that
+        # didn't check ownership would turn previews off every cold start.
+        DevicePushToken.objects.create(
+            user=self.me,
+            expo_token="ExponentPushToken[mine]",
+            platform="ios",
+            show_previews=True,
+        )
+
+        self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[mine]", "platform": "ios"},
+            format="json",
+        )
+
+        self.assertTrue(DevicePushToken.objects.get().show_previews)
+
+    def test_the_toggle_turns_previews_on_for_one_device(self):
+        DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[mine]", platform="ios"
+        )
+
+        resp = self.client.patch(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[mine]", "show_previews": True},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["show_previews"])
+        self.assertTrue(DevicePushToken.objects.get().show_previews)
+
+    def test_cannot_toggle_previews_on_someone_elses_device(self):
+        # Same rule as unregister: a leaked token value must not let anyone turn
+        # previews *on* for a phone they don't hold.
+        DevicePushToken.objects.create(
+            user=self.other,
+            expo_token="ExponentPushToken[theirs]",
+            platform="ios",
+        )
+
+        resp = self.client.patch(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[theirs]", "show_previews": True},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(DevicePushToken.objects.get().show_previews)
 
     def test_unregister_deletes_the_token(self):
         DevicePushToken.objects.create(
@@ -8654,6 +8771,407 @@ class DevicePushTokenTests(APITestCase):
         )
 
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class ConversationPushPreviewTests(APITestCase):
+    """🔒 The preview endpoint (Phase 10b).
+
+    This is the one route that lets a message's *text* off the box in response
+    to something other than a session, so its visibility rule is the security-
+    critical part of the milestone. It reaches the same gate every other
+    per-thread route starts from (``_thread_for_viewer``) rather than
+    re-implementing one, which is why "who may see this" can't drift from the
+    thread endpoint itself.
+
+    Two shapes of refusal, and the distinction is deliberate:
+
+    - **404** where the thread is *unreachable* — not a member, left, blocked.
+      Never 403: this endpoint is reachable with a credential that has no other
+      power, so a 403 would let anyone holding one walk conversation ids and map
+      the install. (The phase plan called for 404 on a ``pending`` member too;
+      that turned out to mean special-casing a state the shared gate lets
+      through everywhere else, so those get the 204 below instead. Both are
+      silent about content, and there is one gate rather than two.)
+    - **204** where the thread is reachable but there is nothing this person may
+      be shown. The extension treats it exactly like a timeout: keep the body
+      the server already composed.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.ada = make_user("preview-ada@example.com", first_name="Ada")
+        self.bea = make_user("preview-bea@example.com", first_name="Bea")
+        self.stranger = make_user("preview-nobody@example.com")
+        make_connection(self.ada, self.bea)
+        self.device = DevicePushToken.objects.create(
+            user=self.bea, expo_token="ExponentPushToken[bea]", platform="ios"
+        )
+        self.raw, self.device.preview_token_hash = (
+            DevicePushToken.new_preview_token()
+        )
+        self.device.show_previews = True
+        self.device.save()
+
+    def tearDown(self):
+        cache.clear()
+
+    def _url(self, convo):
+        return f"/api/conversations/{convo.id}/push-preview/"
+
+    def _as_device(self, raw=None):
+        # `is None`, not falsy: the empty-credential case below passes "" on
+        # purpose, and `raw or self.raw` would hand it the real one instead.
+        credential = self.raw if raw is None else raw
+        self.client.credentials(HTTP_AUTHORIZATION=f"Preview {credential}")
+
+    def _direct(self, *users):
+        a, b = users or (self.ada, self.bea)
+        convo = Conversation.objects.create(kind="direct", user_a=a, user_b=b)
+        for user in (a, b):
+            p = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=convo.created_at
+            )
+        return convo
+
+    def _group(self, title="", members=None):
+        convo = Conversation.objects.create(
+            kind="group", title=title, created_by=self.ada
+        )
+        for user in members or (self.ada, self.bea):
+            p = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=convo.created_at
+            )
+        return convo
+
+    def _say(self, convo, sender, text="hello", **kwargs):
+        return Message.objects.create(
+            conversation=convo, sender=sender, text=text, **kwargs
+        )
+
+    # --- What it says ---------------------------------------------------------
+
+    def test_it_returns_the_latest_message_text(self):
+        convo = self._direct()
+        self._say(convo, self.ada, "older")
+        self._say(convo, self.ada, "the newest one")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["body"], "Ada: the newest one")
+
+    def test_a_one_to_one_never_renders_a_trailing_in(self):
+        # An unguarded concatenation of sender + conversation title puts "Ada in
+        # " on every 1:1, because Conversation.title is blank by default.
+        convo = self._direct()
+        self._say(convo, self.ada, "no title here")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertNotIn(" in :", resp.data["body"])
+        self.assertNotIn(" in ", resp.data["body"])
+
+    def test_a_named_group_says_which_one(self):
+        convo = self._group(title="Sunday Lunch")
+        self._say(convo, self.ada, "who's bringing pudding")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(
+            resp.data["body"], "Ada in Sunday Lunch: who's bringing pudding"
+        )
+
+    def test_an_untitled_group_falls_back_rather_than_inventing_a_name(self):
+        convo = self._group()
+        self._say(convo, self.ada, "hello all")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada: hello all")
+
+    def test_a_mention_says_so_first(self):
+        convo = self._group(title="Plans")
+        message = self._say(convo, self.ada, "@Bea can you make it")
+        MessageMention.objects.create(message=message, user=self.bea)
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(
+            resp.data["body"], "Ada mentioned you in Plans: @Bea can you make it"
+        )
+
+    def test_an_uncaptioned_photo_still_says_a_photo_was_sent(self):
+        # The case that decides the endpoint returns a finished body rather than
+        # its ingredients: `text` is empty here, so a client assembling fields
+        # would put a title over a blank line — strictly worse than today.
+        convo = self._direct()
+        message = self._say(convo, self.ada, text="")
+        MessageAttachment.objects.create(
+            message=message,
+            file="m/a.jpg",
+            thumbnail="m/a-t.jpg",
+            width=10,
+            height=10,
+        )
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada sent a photo")
+
+    def test_a_captioned_photo_shows_the_caption(self):
+        convo = self._direct()
+        message = self._say(convo, self.ada, text="look at this")
+        MessageAttachment.objects.create(
+            message=message,
+            file="m/a.jpg",
+            thumbnail="m/a-t.jpg",
+            width=10,
+            height=10,
+        )
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada sent a photo: look at this")
+
+    def test_a_long_message_is_truncated_server_side(self):
+        # One number, on the side that can be tested — and shortening it later
+        # doesn't need an app release.
+        convo = self._direct()
+        self._say(convo, self.ada, "x" * 400)
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        body = resp.data["body"]
+        self.assertTrue(body.endswith("…"))
+        self.assertEqual(len(body), len("Ada: ") + notifications.PREVIEW_TEXT_LIMIT + 1)
+
+    def test_it_reports_the_unread_count(self):
+        convo = self._direct()
+        self._say(convo, self.ada, "one")
+        self._say(convo, self.ada, "two")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["unread_count"], 2)
+
+    # --- Who may see it -------------------------------------------------------
+
+    def test_a_non_participant_gets_404(self):
+        # 404, never 403: ids are sequential, so a 403 would say how many
+        # private threads the install has and roughly when each was created.
+        convo = self._direct(self.ada, self.stranger)
+        self._say(convo, self.ada, "not for Bea")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_a_participant_who_left_gets_404(self):
+        convo = self._group(title="Old Chat")
+        self._say(convo, self.ada, "still talking")
+        Participant.objects.filter(conversation=convo, user=self.bea).update(
+            left_at=timezone.now()
+        )
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_a_pending_participant_is_told_nothing(self):
+        # They can't read a line of the thread yet, so there is nothing to
+        # preview — 204, and the extension keeps the contentless body.
+        convo = Conversation.objects.create(
+            kind="group", title="Not yet", created_by=self.ada
+        )
+        ada = Participant.objects.create(
+            conversation=convo, user=self.ada, status="active"
+        )
+        ParticipantInterval.objects.create(
+            participant=ada, started_at=convo.created_at
+        )
+        Participant.objects.create(
+            conversation=convo, user=self.bea, status="pending"
+        )
+        self._say(convo, self.ada, "members only")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_a_message_sent_during_an_interval_gap_is_not_previewed(self):
+        # The interval rule, which is what stops a re-promoted member seeing
+        # what was said while they were out. The preview falls back to the
+        # newest message they *may* read rather than refusing outright: they can
+        # open the thread and see that one, so there is nothing to withhold.
+        convo = self._group(title="Gap")
+        self._say(convo, self.ada, "before")
+        bea = Participant.objects.get(conversation=convo, user=self.bea)
+        deactivate(bea, timezone.now())
+        self._say(convo, self.ada, "said while Bea was out")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada in Gap: before")
+        self.assertNotIn("while Bea was out", resp.data["body"])
+
+    def test_your_own_messages_are_skipped(self):
+        # Reply from the web between a push being queued and delivered, and
+        # without this the lock screen shows "New message from Ada" over your
+        # own words.
+        convo = self._direct()
+        self._say(convo, self.ada, "theirs")
+        self._say(convo, self.bea, "mine, sent from the laptop")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada: theirs")
+
+    def test_a_thread_of_only_your_own_messages_gives_204(self):
+        convo = self._direct()
+        self._say(convo, self.bea, "just me talking")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_a_deleted_message_is_skipped(self):
+        convo = self._direct()
+        self._say(convo, self.ada, "still here")
+        self._say(convo, self.ada, text="", deleted_at=timezone.now())
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada: still here")
+
+    def test_a_muted_participant_still_gets_a_preview(self):
+        # Mute is a *delivery* policy, not a permission one. By the time this is
+        # called a push has already been delivered, so the mute question was
+        # answered upstream at enqueue — including the @mention carve-out that
+        # beats it. Second-guessing it here would blank the previews for exactly
+        # the mentions that were allowed through to be read.
+        convo = self._group(title="Busy")
+        Participant.objects.filter(conversation=convo, user=self.bea).update(
+            muted_at=timezone.now()
+        )
+        self._say(convo, self.ada, "quietly")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada in Busy: quietly")
+
+    # --- The credential -------------------------------------------------------
+
+    def test_a_device_with_previews_off_is_told_nothing(self):
+        # It shouldn't be asking — its pushes carry no mutableContent, so its
+        # extension is never woken — but the flag is the user's decision and
+        # this is the side that enforces it.
+        convo = self._direct()
+        self._say(convo, self.ada, "private")
+        self.device.show_previews = False
+        self.device.save(update_fields=["show_previews"])
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_no_credential_is_401(self):
+        convo = self._direct()
+        self._say(convo, self.ada, "private")
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_a_wrong_credential_is_401(self):
+        convo = self._direct()
+        self._say(convo, self.ada, "private")
+        self._as_device(raw="not-a-real-credential")
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_an_empty_credential_does_not_match_a_device_without_one(self):
+        # Devices registered before Phase 10b carry an empty hash. Without the
+        # guard, an empty credential would hash to a value and match them.
+        DevicePushToken.objects.create(
+            user=self.ada, expo_token="ExponentPushToken[old]", platform="ios"
+        )
+        convo = self._direct()
+        self._say(convo, self.ada, "private")
+        self._as_device(raw="")
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_the_accounts_own_bearer_token_cannot_use_this_endpoint(self):
+        # The other half of "this credential's only power is one GET": the
+        # endpoint accepts the preview credential and nothing else, so the two
+        # can't be quietly substituted for one another in either direction.
+        # A real Bearer token rather than force_authenticate, which bypasses the
+        # authentication classes entirely and so would pass whatever they said.
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        convo = self._direct()
+        self._say(convo, self.ada, "private")
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {AccessToken.for_user(self.bea)}"
+        )
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_a_deactivated_owner_stops_getting_previews(self):
+        # The admin-approval / ban gate, honoured here as everywhere else: the
+        # device row can outlive the session that created it.
+        convo = self._direct()
+        self._say(convo, self.ada, "private")
+        self.bea.is_active = False
+        self.bea.save(update_fields=["is_active"])
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_logging_out_kills_the_credential(self):
+        # Why the credential lives on the device row rather than being a JWT:
+        # revoking it is the row delete logout already does, with no blacklist
+        # and no second lifecycle to keep in sync.
+        convo = self._direct()
+        self._say(convo, self.ada, "private")
+        self.device.delete()
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
 class _FakeExpoResponse:
@@ -8907,6 +9425,65 @@ class MessagePushEnqueueTests(APITestCase):
             self._send(convo, self.ada, text=f"message {i}")
 
         self.assertEqual(self._queued_for(self.bea).count(), 1)
+
+    def test_a_burst_points_its_one_push_at_the_newest_message(self):
+        # Coalescing must not leave the row aimed at the *first* message of the
+        # burst: everything the sender reads off it — the wording, the channel,
+        # the read-marker comparison — is then read off the wrong message.
+        convo = self._direct()
+        self._send(convo, self.ada, text="first")
+        last = self._send(convo, self.ada, text="last")
+
+        self.assertEqual(self._queued_for(self.bea).get().message, last)
+
+    def test_a_mention_mid_burst_lands_on_the_mentions_channel(self):
+        # The sharpest version of the above, and a live bug before Phase 10b:
+        # `Kind.MENTION` never creates a Notification, so a mention *always*
+        # rides the message row. Aimed at a stale first message it is phrased as
+        # a plain message and filed on the messages channel — silenced by
+        # exactly the "turn Messages down" the separate channel exists to
+        # survive.
+        convo = Conversation.objects.create(kind="group", created_by=self.ada)
+        for user in (self.ada, self.bea):
+            p = Participant.objects.create(
+                conversation=convo, user=user, status="active"
+            )
+            ParticipantInterval.objects.create(
+                participant=p, started_at=convo.created_at
+            )
+        self._send(convo, self.ada, text="chatter")
+        mention = Message.objects.create(
+            conversation=convo, sender=self.ada, text="@Bea look"
+        )
+        MessageMention.objects.create(message=mention, user=self.bea)
+        notifications.enqueue_message_pushes(mention)
+
+        row = self._queued_for(self.bea).get()
+        self.assertEqual(row.message, mention)
+        # And the payload the sender builds off it says so.
+        from .management.commands.send_pushes import Command
+
+        command = Command()
+        self.assertEqual(command._payload(row)["channel"], notifications.MENTION_CHANNEL)
+
+    def test_a_burst_survives_a_read_marker_past_its_first_message(self):
+        # `_should_drop` compares the read marker against the row's message. Left
+        # pointing at the first of a burst, a thread read mid-burst bins the push
+        # for the later messages too — they were never read, and the phone stays
+        # silent.
+        convo = self._direct()
+        first = self._send(convo, self.ada, text="first")
+        ConversationRead.objects.create(
+            conversation=convo, user=self.bea, last_read_at=first.created_at
+        )
+        self._send(convo, self.ada, text="second")
+
+        row = self._queued_for(self.bea).get()
+        from .management.commands.send_pushes import Command
+
+        command = Command()
+        markers = command._read_markers([row])
+        self.assertFalse(command._should_drop(row, markers))
 
     def test_a_new_push_is_queued_once_the_previous_one_is_sent(self):
         # Coalescing keys off *unsent* rows only, so a later message still buzzes
@@ -10782,6 +11359,76 @@ class SendPushesCommandTests(APITestCase):
         urlopen = self._run()
 
         self.assertNotIn("categoryId", self._sent_body(urlopen)[0])
+
+    # --- Preview previews (Phase 10b) -----------------------------------------
+
+    def test_the_wire_body_never_carries_the_message_text(self):
+        # The rule the whole push design rests on, pinned on the wire rather
+        # than in a helper: the body transits Expo and Apple/Google, so it names
+        # the sender and never quotes them. Phase 10b adds previews *without*
+        # touching this — the text reaches the phone over TLS afterwards.
+        self._queue_message(text="the secret is under the mat")
+        self.device.show_previews = True
+        self.device.save(update_fields=["show_previews"])
+
+        urlopen = self._run()
+
+        wire = json.dumps(self._sent_body(urlopen))
+        self.assertNotIn("secret", wire)
+        self.assertNotIn("under the mat", wire)
+
+    def test_an_opted_in_device_gets_mutable_content_on_a_message_push(self):
+        # What wakes the notification service extension. Without it the
+        # extension is never run and previews silently do nothing.
+        self._queue_message()
+        self.device.show_previews = True
+        self.device.save(update_fields=["show_previews"])
+
+        urlopen = self._run()
+
+        self.assertTrue(self._sent_body(urlopen)[0]["mutableContent"])
+
+    def test_a_device_with_previews_off_gets_no_mutable_content(self):
+        # Previews are off by default, and a device that hasn't opted in must
+        # get exactly today's push — including its Reply field, which is
+        # deliberately unchanged for every device.
+        self._queue_message()
+
+        urlopen = self._run()
+
+        message = self._sent_body(urlopen)[0]
+        self.assertNotIn("mutableContent", message)
+        self.assertEqual(message["categoryId"], "message")
+
+    def test_a_notification_push_never_gets_mutable_content(self):
+        # Gated on the *payload* being a message, not on the device's flag
+        # alone. Two failures this pins: waking the extension for "Ada reacted
+        # to your post", which has no preview to fetch; and — if the gate read a
+        # key the notification branch doesn't set — a KeyError inside the
+        # drain's transaction, which would stop all push delivery every tick.
+        self._queue()
+        self.device.show_previews = True
+        self.device.save(update_fields=["show_previews"])
+
+        urlopen = self._run()
+
+        self.assertNotIn("mutableContent", self._sent_body(urlopen)[0])
+
+    def test_one_opted_in_device_does_not_opt_in_the_others(self):
+        # Per device, because what leaks is a lock screen and a lock screen
+        # belongs to a phone: previews on the phone, off on the kitchen tablet.
+        tablet = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[tablet]", platform="ios"
+        )
+        self.device.show_previews = True
+        self.device.save(update_fields=["show_previews"])
+        self._queue_message()
+
+        urlopen = self._run(payload=_ok_tickets(2))
+
+        by_token = {m["to"]: m for m in self._sent_body(urlopen)}
+        self.assertTrue(by_token[self.device.expo_token]["mutableContent"])
+        self.assertNotIn("mutableContent", by_token[tablet.expo_token])
 
     def test_every_push_carries_the_recipients_icon_badge(self):
         # Issue #179. Unlike `categoryId`/`channelId`, which a kind opts into,

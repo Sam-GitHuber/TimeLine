@@ -1,3 +1,6 @@
+import hashlib
+import secrets
+
 from django.conf import settings
 from django.db import models
 from django.db.models.functions import Greatest, Least
@@ -1887,16 +1890,91 @@ class DevicePushToken(models.Model):
     # for a long time can be pruned later rather than us pushing into the void
     # forever. Expo also reports permanently-dead tokens on send (Milestone D).
     last_seen = models.DateTimeField(auto_now=True)
+    # Whether this device may show the *text* of a message on its lock screen
+    # (Phase 10b). The push itself still carries no content — the device fetches
+    # it over TLS after the push arrives; this flag is only what tells the sender
+    # to set ``mutableContent`` so the notification extension is woken at all.
+    #
+    # **Per device, and off by default.** What leaks is a lock screen, and a lock
+    # screen belongs to a phone rather than to an account: someone can reasonably
+    # want previews on the phone in their pocket and not on the tablet in the
+    # kitchen. Off by default because turning a default on later is one line,
+    # while quietly starting to render people's messages on their friends'
+    # lock screens is not something to do on anyone's behalf.
+    #
+    # **Reset when the row changes hands** (see ``DevicePushTokenView.post``):
+    # registration deliberately moves the row to the new user, and a preference
+    # about a lock screen must never be inherited along with it.
+    show_previews = models.BooleanField(default=False)
+    # SHA-256 of this device's **preview credential** (Phase 10b), or "" if it
+    # has none yet.
+    #
+    # The iOS notification service extension is a separate process that has to
+    # authenticate to fetch a preview, and it deliberately cannot use the
+    # account's own tokens. Two reasons, and the first is a correctness one:
+    # refreshing rotates and blacklists, so a second process refreshing the
+    # account's refresh token would leave the app holding a dead one — spurious
+    # logouts nothing could reproduce. And the access token is lazily refreshed,
+    # so it is dead exactly overnight, which is exactly when a lock-screen
+    # preview matters.
+    #
+    # So the extension gets its own credential whose only power is
+    # ``GET /conversations/<id>/push-preview/``. It is **opaque and random**
+    # rather than a JWT precisely so revoking it is a row delete rather than a
+    # blacklist: the credential lives on the device row, so logout — which
+    # already deletes that row — kills it, with nothing new to keep in sync.
+    #
+    # Stored as a hash, like a password: a database dump must not yield working
+    # credentials. The plaintext exists only in the registration response and in
+    # the app's keychain.
+    preview_token_hash = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         indexes = [
             # The send path (Milestone D) always asks "which devices does this
             # user have?", so index that lookup.
             models.Index(fields=["user"]),
+            # The preview endpoint authenticates by hash, so that lookup needs
+            # to be an index rather than a scan of every device in the install.
+            models.Index(fields=["preview_token_hash"]),
         ]
 
     def __str__(self):
         return f"{self.user} · {self.platform} · {self.expo_token[:16]}…"
+
+    @staticmethod
+    def hash_preview_token(raw):
+        """The stored form of a preview credential.
+
+        A plain SHA-256, deliberately **not** a password hasher. The input is 32
+        bytes of ``secrets`` output, so there is no dictionary to attack and
+        nothing for a slow KDF to buy; what the hash is for is making sure a
+        database dump yields no working credentials. It also has to be fast,
+        because it runs on the authentication path of every push preview.
+        """
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    @classmethod
+    def new_preview_token(cls):
+        """Mint a fresh preview credential, as ``(plaintext, hash)``.
+
+        The plaintext is returned rather than stored: this is the only moment it
+        exists outside the app's keychain, so the caller has to hand it straight
+        to the response.
+
+        Minted fresh on every registration rather than reused, which is possible
+        only because the app re-registers on every launch: a device that somehow
+        loses its copy repairs itself the next time it opens, with no separate
+        recovery path to build or test. Rotating here is safe in a way it would
+        not be for the account's refresh token — only the app ever mints or
+        writes this, and the extension only ever reads — so there is no second
+        process to leave holding a dead credential. The worst case is an
+        extension that reads a superseded token, gets a 401, and falls back to
+        the body the server already composed, which is what it does for every
+        other failure too.
+        """
+        raw = secrets.token_urlsafe(32)
+        return raw, cls.hash_preview_token(raw)
 
 
 class PushOutbox(models.Model):

@@ -395,6 +395,90 @@ def create_notifications(recipients, actor, kind, *, post=None, comment=None,
     return refreshed + created
 
 
+# How much of a message a **preview** may put on a lock screen (Phase 10b).
+# Defined here rather than in the extension's Swift so there is one number, on
+# the side that can be tested — and so shortening it later doesn't need an app
+# release. Generous enough that most messages arrive whole, short enough that a
+# long one can't fill a stranger's screen over someone's shoulder.
+PREVIEW_TEXT_LIMIT = 120
+
+
+def message_push_body(message, recipient_id, *, preview=False):
+    """The line a **message** push shows, for one recipient.
+
+    The single implementation of message push wording, shared by the sender
+    (``manage.py send_pushes``, which calls it contentless) and the preview
+    endpoint (which calls it with ``preview=True``). They must agree: the
+    preview *replaces* the body the sender composed, on the same notification,
+    and two copies of this phrasing would drift the moment either grew a branch.
+
+    **Contentless mode is the wire body**, and the rule it follows is the one
+    the whole push design rests on: name the person, never quote them. It
+    travels through Expo and Apple/Google, so it says who and what medium and
+    nothing else.
+
+    **Preview mode is device-side**, composed for a body that will be swapped in
+    by the notification extension after the push has arrived over TLS. Only here
+    may the message's own text appear, truncated to ``PREVIEW_TEXT_LIMIT``.
+
+    The four branches are the same in both modes, which is the point — a preview
+    is the ordinary body with the text appended, not a separate format:
+
+    - **mentioned** first, because being named is *why* the push exists whenever
+      the thread is muted, and a silenced chat that suddenly buzzes owes an
+      explanation.
+    - **a photo** next: knowing a picture is waiting is often the whole reason to
+      open the app, and "sent a photo" is no more revealing than "sent a
+      message". Said whenever there's an attachment, caption or not.
+    - **a named group** qualifies either of those, and stands alone otherwise,
+      because "New message from Ada" is ambiguous when Ada is in four of your
+      chats. An untitled group falls back to the neutral phrasing rather than
+      inventing a name — and a 1:1 must never render a trailing "in ".
+    - otherwise the plain line.
+
+    The plain branch is the one place the two modes differ in *shape*: contentless
+    it reads "New message from Ada", which does not extend into "New message from
+    Ada: hello". With text to show, the sender's name alone is the natural
+    prefix.
+
+    A photo with **no caption** is why this can't return its ingredients for
+    someone else to assemble: ``text`` is empty on those, and a caller
+    concatenating fields would put a title over a blank line — strictly worse
+    than "Ada sent a photo".
+    """
+    sender = message.sender.display_name
+    convo = message.conversation
+    photo = message.attachments.exists()
+    mentioned = any(
+        mention.user_id == recipient_id for mention in message.mentions.all()
+    )
+    named_group = convo.kind == convo.Kind.GROUP and convo.title
+    suffix = f" in {convo.title}" if named_group else ""
+
+    if mentioned:
+        line = f"{sender} mentioned you{suffix}"
+    elif photo:
+        line = f"{sender} sent a photo{suffix}"
+    elif named_group:
+        line = f"{sender} in {convo.title}"
+    elif preview:
+        line = sender
+    else:
+        return f"New message from {sender}"
+
+    if not preview:
+        return line
+
+    text = (message.text or "").strip()
+    if not text:
+        # An uncaptioned photo, and the one case where a preview says exactly
+        # what the contentless body would have. There is nothing to quote.
+        return line
+    if len(text) > PREVIEW_TEXT_LIMIT:
+        text = text[:PREVIEW_TEXT_LIMIT].rstrip() + "…"
+    return f"{line}: {text}"
+
+
 def enqueue_message_pushes(message):
     """Queue a push for everyone who should be told about ``message``.
 
@@ -483,13 +567,34 @@ def enqueue_message_pushes(message):
     if not recipient_ids:
         return []
 
-    already_queued = set(
-        PushOutbox.objects.filter(
-            sent_at__isnull=True,
-            message__conversation_id=convo_id,
-            recipient_id__in=recipient_ids,
-        ).values_list("recipient_id", flat=True)
+    stale = PushOutbox.objects.filter(
+        sent_at__isnull=True,
+        message__conversation_id=convo_id,
+        recipient_id__in=recipient_ids,
     )
+    already_queued = set(stale.values_list("recipient_id", flat=True))
+    if already_queued:
+        # **Re-point the queued row at the message that just arrived.** Without
+        # this, coalescing leaves the row aimed at the *first* message of the
+        # burst, and everything the sender reads off it is then read off the
+        # wrong message — which is a live bug, not merely an inefficiency:
+        #
+        # - The wording comes from that message, so an @mention arriving
+        #   mid-burst is phrased as a plain message **and filed on the messages
+        #   channel instead of the mentions one**, defeating the exact scenario
+        #   the separate channel exists for. ``Kind.MENTION`` never creates a
+        #   ``Notification`` row, so a mention always rides this path.
+        # - ``_should_drop`` compares the read marker against that message's
+        #   timestamp, so a burst whose first message was already read is binned
+        #   entirely — including the later ones that weren't.
+        # - With previews (Phase 10b) it would also show the oldest unread
+        #   message rather than the newest, which is the wrong way round.
+        #
+        # Cheap and safe: the row is unsent by definition here, and the push it
+        # will send is about the conversation either way. The one thing that
+        # *doesn't* change is the count of buzzes — a burst still buzzes once,
+        # which is the whole point of coalescing.
+        stale.update(message=message)
     outstanding = recipient_ids - already_queued
     if not outstanding:
         return []
