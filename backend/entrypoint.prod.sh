@@ -4,6 +4,44 @@
 # app with gunicorn. The dev counterpart (runserver, live reload) is entrypoint.sh.
 set -euo pipefail
 
+# --- run as an unprivileged user --------------------------------------------
+# Everything below this block runs as `app` (uid 1000, created in the Dockerfile),
+# not root — issue #199. A remote-code-execution bug in Django or any dependency
+# then executes as a user that cannot rewrite the application code under /app,
+# cannot chown its way out, and is a much longer step from owning the host.
+#
+# We still start as root for one job the app user cannot do for itself: aligning
+# ownership of the media volume. That volume is a bind mount to
+# /srv/timeline/media on the host, created root-owned (docs/deploy.md) and — until
+# this change — filled with root-owned files by this very container. Doing it here
+# on every boot means no manual `chown` step gates a release, and it self-heals if
+# anything ever writes there as root again (a `docker compose exec` one-off, an
+# older image rolled back to). It is also exactly the alignment
+# deploy/restore.sh needs to write media back as the deploy user (issue #197).
+#
+# `chown -R` walks the whole media tree each boot. That is milliseconds at this
+# scale (tens of MB); if media ever grows to the point where it isn't, that is
+# also the point where it should be in object storage, not on the disk.
+APP_USER="${APP_USER:-app}"
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Aligning ownership of /app/media to ${APP_USER}..."
+  chown -R "${APP_USER}:${APP_USER}" /app/media
+
+  # Re-exec this same script as the app user. setpriv ships with util-linux in
+  # the base image, so there's no gosu to install. --init-groups reads the
+  # user's groups from /etc/passwd; --inh-caps=-all makes sure no Linux
+  # capability survives the switch. setpriv keeps the environment as-is, so HOME
+  # has to be exported by hand or it would still say /root — not cosmetic:
+  # gunicorn puts its control socket under $HOME and logs
+  # "Control server error: [Errno 13] Permission denied: '/root/.gunicorn'"
+  # without this.
+  export HOME="/home/${APP_USER}"
+  echo "Dropping privileges to ${APP_USER}..."
+  exec setpriv --reuid="${APP_USER}" --regid="${APP_USER}" --init-groups --inh-caps=-all \
+    bash "$0" "$@"
+fi
+echo "Running as $(id -un) (uid $(id -u))."
+
 echo "Waiting for Postgres at ${POSTGRES_HOST:-db}:${POSTGRES_PORT:-5432}..."
 until python -c "
 import os, socket, sys

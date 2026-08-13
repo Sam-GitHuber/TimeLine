@@ -98,10 +98,14 @@ jobs:
       - name: Run tests
         run: npm test
 
-  # deploy-scripts — the box's shell scripts. Only autodeploy.sh has tests so
-  # far: its redeploy decision is the piece that silently stopped deploying for
-  # six days (issue #104), and it's pure logic around a handful of `docker`
-  # calls, so a stub `docker` on PATH tests it properly with no daemon here.
+  # deploy-scripts — the box's shell scripts. Each suite covers the decision a
+  # script gets to make, not the work it does: autodeploy's redeploy decision
+  # (the piece that silently stopped deploying for six days, issue #104),
+  # backup's preconditions, and restore's preflight (the checks that must happen
+  # *before* it stops the app and overwrites the database, issue #197). All are
+  # pure logic around a handful of `docker`/`rclone` calls, so sourcing the real
+  # script — with a stub `docker` on PATH where one is needed — tests them
+  # properly with no daemon, no Postgres and no R2 here.
   # Seconds to run — no Docker, no services, no install step.
   deploy-scripts:
     runs-on: ubuntu-latest
@@ -114,6 +118,9 @@ jobs:
 
       - name: Test the backup preconditions
         run: ./deploy/tests/test_backup_guards.sh
+
+      - name: Test the restore preflight
+        run: ./deploy/tests/test_restore_preflight.sh
 
   # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
   # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't

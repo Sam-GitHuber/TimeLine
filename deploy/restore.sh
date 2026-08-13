@@ -17,6 +17,12 @@
 #      database mid-restore, then brought back up automatically on success.
 #         ./deploy/restore.sh            # interactive: pick a dump, restore to prod
 #
+#   3. PREFLIGHT — run every check the real restore does before it becomes
+#      destructive, against the REAL production targets, and stop there. It does
+#      not stop the app, write to the database or sync media. This is how the
+#      monthly rehearsal covers the live path without restoring over it (#197):
+#         ./deploy/restore.sh --preflight
+#
 # Config (the rclone remote, compose file) is read from the same env file as
 # backup.sh: /etc/timeline/backup.env.
 set -euo pipefail
@@ -49,9 +55,54 @@ if [[ -n "${TARGET_DB:-}" && -z "${TARGET_MEDIA_DIR:-}" ]]; then
 fi
 TARGET_MEDIA_DIR="${TARGET_MEDIA_DIR:-/srv/timeline/media}"
 
+# --preflight: run the checks, report, change nothing. Anything else is the dump
+# to restore.
+PREFLIGHT_ONLY=0
+if [[ "${1:-}" == "--preflight" ]]; then
+  PREFLIGHT_ONLY=1
+  shift
+fi
 WHICH="${1:-latest}"   # a DB dump filename (as shown by --list) or "latest"
 
 dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
+
+# Why the media target might not be writable, and how to fix it. Its own
+# function only so both failure paths below print the same thing.
+media_permission_hint() {
+  echo "       The backend container aligns that tree to uid 1000 — the deploy" >&2
+  echo "       user — every time it boots (backend/entrypoint.prod.sh). If it is" >&2
+  echo "       still root-owned, the box has not yet run a release carrying that" >&2
+  echo "       change. One-off fix:" >&2
+  echo "         sudo chown -R 1000:1000 $1" >&2
+}
+
+# Prove the media target can actually be written BEFORE anything destructive
+# happens. This is the check whose absence made a real restore a mid-incident
+# surprise (issue #197): the media sync is the LAST step of a restore, so
+# without it the app is already stopped and the database already overwritten by
+# the time a permissions problem shows itself — the worst possible moment to
+# start debugging one.
+#
+# A separate function so deploy/tests/test_restore_preflight.sh can drive it
+# without rclone, Docker or a real backup — the same shape as backup.sh's
+# check_preconditions.
+check_media_writable() {
+  local dir="$1"
+  if [[ ! -d "$dir" ]] && ! mkdir -p "$dir" 2>/dev/null; then
+    echo "ERROR: cannot create the media target $dir (running as $(id -un))." >&2
+    media_permission_hint "$dir"
+    return 1
+  fi
+  # Writing is the only honest test: the directory can be readable, listable and
+  # still refuse a new file, which is exactly the case that broke.
+  local probe="$dir/.restore-write-probe.$$"
+  if ! touch "$probe" 2>/dev/null; then
+    echo "ERROR: cannot write into the media target $dir (running as $(id -un))." >&2
+    media_permission_hint "$dir"
+    return 1
+  fi
+  rm -f "$probe"
+}
 
 # --- cleanup / safety-net ---------------------------------------------------
 # Globals so the EXIT trap (which runs outside main's scope) can see them.
@@ -100,6 +151,31 @@ main() {
   echo "==> DB dump:      ${RCLONE_REMOTE}db/${dump_name}"
   echo "==> Target DB:    ${target_db}$( [[ "$target_db" == "$live_db" ]] && echo '   <-- LIVE PRODUCTION DATABASE' )"
   echo "==> Target media: ${TARGET_MEDIA_DIR}$( [[ "$TARGET_MEDIA_DIR" == /srv/timeline/media ]] && echo '   <-- LIVE PRODUCTION MEDIA' )"
+
+  # --- preflight: everything that must hold BEFORE we become destructive ----
+  # The ORDER is the point, more than the checks themselves. Below this block
+  # the script stops the app and runs `pg_restore --clean`; a failure after that
+  # leaves the site down with a half-replaced database and an operator debugging
+  # permissions mid-incident. Every reason to refuse belongs here, where
+  # refusing still costs nothing.
+  echo
+  echo "==> Preflight..."
+  check_media_writable "$TARGET_MEDIA_DIR" || exit 1
+  echo "    media target is writable"
+  # Catches a mistyped dump name now rather than after the app is stopped. For
+  # "latest" this is redundant (the name came from a listing) — one cheap call
+  # is worth not having two paths to reason about.
+  if ! rclone lsf "${RCLONE_REMOTE}db/" --include "$dump_name" | grep -q .; then
+    echo "ERROR: dump '${dump_name}' not found at ${RCLONE_REMOTE}db/." >&2
+    exit 1
+  fi
+  echo "    dump is present off-site"
+
+  if (( PREFLIGHT_ONLY )); then
+    echo
+    echo "==> Preflight OK — the real restore path is clear. Nothing was changed."
+    exit 0
+  fi
 
   # --- confirmation ---------------------------------------------------------
   # Only a restore into the LIVE data is destructive; make the operator type it.
@@ -165,4 +241,9 @@ main() {
   fi
 }
 
-main "$@"
+# Executed directly -> run a restore. Sourced (deploy/tests/test_restore_preflight.sh)
+# -> just define the functions above, so the preflight guards can be tested
+# without rclone, Docker or a real backup. Mirrors deploy/backup.sh.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
