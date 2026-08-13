@@ -35,7 +35,9 @@ real home screen) is safe and normal.
 Recorded here so a fresh checkout knows the state. None of this needs repeating.
 (Android's equivalent is [below](#one-time-setup--already-done-do-not-redo-1).)
 
-- **Apple Developer Program** — enrolled and active (account `samejefford@gmail.com`).
+- **Apple Developer Program** — enrolled and active, under the operator's
+  personal Apple ID. (The address isn't written down here: this repo is public,
+  and an Apple ID is a login. It's in the password manager.)
 - **EAS project** — `@sam-apples-team/timeline`
   (`projectId b40a5a21-a02d-47fd-94a9-06ee94c2e1a1`, in `app.json`). Logged in via
   `eas login` as `sam-apple`.
