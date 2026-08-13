@@ -8946,6 +8946,17 @@ class ConversationPushPreviewTests(APITestCase):
 
         self.assertEqual(resp.data["body"], "Ada sent a photo: look at this")
 
+    def test_newlines_are_collapsed_so_the_body_stays_one_line(self):
+        # A multi-line body is the one way a preview would look visibly unlike
+        # the contentless notification it replaces.
+        convo = self._direct()
+        self._say(convo, self.ada, "line one\n\nline   two\ttabbed")
+        self._as_device()
+
+        resp = self.client.get(self._url(convo))
+
+        self.assertEqual(resp.data["body"], "Ada: line one line two tabbed")
+
     def test_a_long_message_is_truncated_server_side(self):
         # One number, on the side that can be tested — and shortening it later
         # doesn't need an app release.
@@ -9115,9 +9126,12 @@ class ConversationPushPreviewTests(APITestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_an_empty_credential_does_not_match_a_device_without_one(self):
-        # Devices registered before Phase 10b carry an empty hash. Without the
-        # guard, an empty credential would hash to a value and match them.
+    def test_an_empty_credential_is_refused_without_a_lookup(self):
+        # Devices registered before Phase 10b carry an empty `preview_token_hash`.
+        # They are not reachable by sending an empty credential — `sha256("")` is
+        # a 64-character digest and can never equal `""` — but the empty case is
+        # rejected up front anyway, which is the only version of this check that
+        # can actually fire, and it saves the query.
         DevicePushToken.objects.create(
             user=self.ada, expo_token="ExponentPushToken[old]", platform="ios"
         )
@@ -9425,65 +9439,6 @@ class MessagePushEnqueueTests(APITestCase):
             self._send(convo, self.ada, text=f"message {i}")
 
         self.assertEqual(self._queued_for(self.bea).count(), 1)
-
-    def test_a_burst_points_its_one_push_at_the_newest_message(self):
-        # Coalescing must not leave the row aimed at the *first* message of the
-        # burst: everything the sender reads off it — the wording, the channel,
-        # the read-marker comparison — is then read off the wrong message.
-        convo = self._direct()
-        self._send(convo, self.ada, text="first")
-        last = self._send(convo, self.ada, text="last")
-
-        self.assertEqual(self._queued_for(self.bea).get().message, last)
-
-    def test_a_mention_mid_burst_lands_on_the_mentions_channel(self):
-        # The sharpest version of the above, and a live bug before Phase 10b:
-        # `Kind.MENTION` never creates a Notification, so a mention *always*
-        # rides the message row. Aimed at a stale first message it is phrased as
-        # a plain message and filed on the messages channel — silenced by
-        # exactly the "turn Messages down" the separate channel exists to
-        # survive.
-        convo = Conversation.objects.create(kind="group", created_by=self.ada)
-        for user in (self.ada, self.bea):
-            p = Participant.objects.create(
-                conversation=convo, user=user, status="active"
-            )
-            ParticipantInterval.objects.create(
-                participant=p, started_at=convo.created_at
-            )
-        self._send(convo, self.ada, text="chatter")
-        mention = Message.objects.create(
-            conversation=convo, sender=self.ada, text="@Bea look"
-        )
-        MessageMention.objects.create(message=mention, user=self.bea)
-        notifications.enqueue_message_pushes(mention)
-
-        row = self._queued_for(self.bea).get()
-        self.assertEqual(row.message, mention)
-        # And the payload the sender builds off it says so.
-        from .management.commands.send_pushes import Command
-
-        command = Command()
-        self.assertEqual(command._payload(row)["channel"], notifications.MENTION_CHANNEL)
-
-    def test_a_burst_survives_a_read_marker_past_its_first_message(self):
-        # `_should_drop` compares the read marker against the row's message. Left
-        # pointing at the first of a burst, a thread read mid-burst bins the push
-        # for the later messages too — they were never read, and the phone stays
-        # silent.
-        convo = self._direct()
-        first = self._send(convo, self.ada, text="first")
-        ConversationRead.objects.create(
-            conversation=convo, user=self.bea, last_read_at=first.created_at
-        )
-        self._send(convo, self.ada, text="second")
-
-        row = self._queued_for(self.bea).get()
-        from .management.commands.send_pushes import Command
-
-        command = Command()
-        markers = command._read_markers([row])
-        self.assertFalse(command._should_drop(row, markers))
 
     def test_a_new_push_is_queued_once_the_previous_one_is_sent(self):
         # Coalescing keys off *unsent* rows only, so a later message still buzzes
@@ -11413,6 +11368,26 @@ class SendPushesCommandTests(APITestCase):
         urlopen = self._run()
 
         self.assertNotIn("mutableContent", self._sent_body(urlopen)[0])
+
+    def test_an_android_device_gets_no_mutable_content(self):
+        # `mutable-content` is an APNs field; FCM has no equivalent, so on
+        # Android it wakes nothing and fetches nothing. Setting it anyway would
+        # disclose the user's privacy setting to Expo and Google for no benefit
+        # at all. Android's rewrite path is M4.
+        android = DevicePushToken.objects.create(
+            user=self.me,
+            expo_token="ExponentPushToken[droid]",
+            platform="android",
+            show_previews=True,
+        )
+        self.device.delete()
+        self._queue_message()
+
+        urlopen = self._run()
+
+        message = self._sent_body(urlopen)[0]
+        self.assertEqual(message["to"], android.expo_token)
+        self.assertNotIn("mutableContent", message)
 
     def test_one_opted_in_device_does_not_opt_in_the_others(self):
         # Per device, because what leaks is a lock screen and a lock screen

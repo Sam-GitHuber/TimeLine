@@ -717,11 +717,57 @@ hello`, and an uncaptioned photo still just `Ada sent a photo`. The one branch
 that differs is the plain 1:1, which is `New message from Ada` contentless and
 `Ada: …` with text, because the former doesn't extend into a sentence.
 
-**The coalescing staleness fix landed with it and broke no existing test** —
-worth noting, because `tests.py`'s coalescing coverage passed both before and
-after. Three new tests pin the behaviour that was actually wrong: the row points
-at the newest message, a mid-burst @mention reaches `MENTION_CHANNEL`, and a
-burst isn't binned by a read marker that only passed its first message.
+**The coalescing staleness fix was written, reviewed, and taken back out.** The
+plan called it "three lines"; it isn't, and an `xhigh` review of the M1 diff
+found five separate ways it goes wrong. Recorded here because the reasoning is
+the valuable part, and because the underlying bug is still real:
+
+1. **It can 500 the message send.** `PushOutbox` has a unique constraint on
+   `(message, recipient)`. Two concurrent sends can each queue a row for the
+   same recipient under READ COMMITTED — different `message_id`s, so the
+   constraint permits both — and a later `UPDATE ... SET message_id` collapses
+   them onto the same pair. `enqueue_message_pushes` runs *inside* the
+   message-create transaction, so that's a rolled-back message and a 500 for the
+   sender, repeating for every message in the thread until a drain settles one.
+2. **It is asymmetric.** It fixes chatter-then-mention and breaks
+   mention-then-chatter: the row is re-pointed off the mention, losing
+   `MENTION_CHANNEL` and the "Ada mentioned you" wording — for the person who
+   turned Messages down precisely because the group is busy.
+3. **A soft-delete swallows the burst.** Re-point at a message, delete that
+   message, and `_should_drop` bins the row — including the earlier, undeleted
+   messages it was originally for.
+4. **It puts a lock on the request path.** `send_pushes` holds
+   `select_for_update` across its Expo HTTP calls. An `UPDATE` here blocks on
+   those locks, so a slow Expo would start stalling message sends — breaking the
+   promise made three lines above the call site: *"the send is out-of-band, so
+   Expo being slow or down can never slow down or fail sending a message."*
+5. **It strands delivery state.** `delivered_tokens`, `attempts` and
+   `last_error` still describe the old message, so a partially-delivered row
+   permanently skips the device that received the *previous* one.
+
+The mid-burst @mention misrouting is a genuine live bug and is filed as its own
+issue, along with a second one the review turned up beside it: a row that
+exhausts `MAX_ATTEMPTS` keeps `sent_at` NULL forever, so the coalescing check
+matches it and that thread's pushes go permanently silent. Neither belongs in
+this milestone — and **10b never needed the fix**, which is exactly why the
+endpoint is conversation-scoped.
+
+### M1 review, 2026-08-13 — other fixes
+
+- **`mutableContent` is iOS-only.** It is an APNs field with no FCM equivalent,
+  so on Android it woke nothing and fetched nothing while still disclosing the
+  user's privacy setting to Expo and Google. M4 is where Android opts in.
+- **`is_mentioned` is one predicate**, shared by the wording and the channel.
+  Two copies of it is precisely how a body reading "Ada mentioned you" ends up
+  on the messages channel.
+- **Whitespace collapses before truncation**, so a message with newlines can't
+  render a multi-line lock-screen body — the one way a preview would look
+  visibly unlike the contentless notification it replaces.
+- **The empty-credential guard moved before the hash.** As written it tested the
+  stored value, which `sha256("")` can never equal, so it was unreachable and
+  its test pinned nothing.
+- **Registration kept `update_or_create`**, which resolves the create/create
+  race on the unique `expo_token` rather than 500ing on it.
 
 ## Corrections from review
 

@@ -403,6 +403,24 @@ def create_notifications(recipients, actor, kind, *, post=None, comment=None,
 PREVIEW_TEXT_LIMIT = 120
 
 
+def is_mentioned(message, recipient_id):
+    """Whether ``message`` names ``recipient_id`` with an ``@``.
+
+    One definition, because two callers need the same answer for different
+    reasons and they must not disagree: it changes the *wording*
+    (``message_push_body``) and it changes the Android *channel*
+    (``send_pushes._payload``). A push phrased "Ada mentioned you" that arrives
+    on the messages channel is the exact failure the mentions channel exists to
+    prevent, and two copies of this predicate is how that happens.
+
+    Reads the prefetched relation rather than querying, so the send path's
+    ``prefetch_related("message__mentions")`` still covers it.
+    """
+    return any(
+        mention.user_id == recipient_id for mention in message.mentions.all()
+    )
+
+
 def message_push_body(message, recipient_id, *, preview=False):
     """The line a **message** push shows, for one recipient.
 
@@ -449,9 +467,7 @@ def message_push_body(message, recipient_id, *, preview=False):
     sender = message.sender.display_name
     convo = message.conversation
     photo = message.attachments.exists()
-    mentioned = any(
-        mention.user_id == recipient_id for mention in message.mentions.all()
-    )
+    mentioned = is_mentioned(message, recipient_id)
     named_group = convo.kind == convo.Kind.GROUP and convo.title
     suffix = f" in {convo.title}" if named_group else ""
 
@@ -469,12 +485,23 @@ def message_push_body(message, recipient_id, *, preview=False):
     if not preview:
         return line
 
-    text = (message.text or "").strip()
+    # Every run of whitespace collapses to one space, which does two jobs. A
+    # message with embedded newlines would otherwise wrap the notification body
+    # over several lines — the one way a preview would look visibly unlike the
+    # contentless body it replaces — and collapsing first means the character
+    # budget below is spent on words rather than on layout someone typed.
+    text = " ".join((message.text or "").split())
     if not text:
         # An uncaptioned photo, and the one case where a preview says exactly
         # what the contentless body would have. There is nothing to quote.
         return line
     if len(text) > PREVIEW_TEXT_LIMIT:
+        # Sliced on codepoints, so a cut can still land inside a grapheme
+        # cluster (a ZWJ family, a flag's regional-indicator pair, a skin-tone
+        # modifier) and leave a broken glyph before the ellipsis. Accepted:
+        # fixing it properly needs a grapheme-segmentation dependency for a
+        # cosmetic edge on a truncated lock-screen line, and the limit is
+        # generous enough that most messages never reach it.
         text = text[:PREVIEW_TEXT_LIMIT].rstrip() + "…"
     return f"{line}: {text}"
 
@@ -567,34 +594,27 @@ def enqueue_message_pushes(message):
     if not recipient_ids:
         return []
 
-    stale = PushOutbox.objects.filter(
-        sent_at__isnull=True,
-        message__conversation_id=convo_id,
-        recipient_id__in=recipient_ids,
+    # NB: a queued row keeps pointing at the message it was created for, which
+    # means a burst is phrased, channelled and drop-checked from its *first*
+    # message rather than its newest. That is a real bug — a mid-burst @mention
+    # rides the messages channel instead of the mentions one — and it is
+    # deliberately **not** fixed here. Re-pointing the row looks like three
+    # lines and isn't: it can violate ``unique_message_push_per_recipient`` when
+    # two concurrent sends have each queued a row, it downgrades the reverse
+    # case (a mention *followed* by chatter loses the channel it had), it lets a
+    # later soft-delete bin a push that covered earlier undeleted messages, it
+    # strands ``delivered_tokens`` describing a different message, and — the
+    # one that rules it out from here entirely — an UPDATE takes row locks that
+    # ``send_pushes`` holds across its Expo HTTP calls, so a slow Expo would
+    # start blocking the message-send request this function is called from.
+    # See the promise at the call site. Tracked as its own issue.
+    already_queued = set(
+        PushOutbox.objects.filter(
+            sent_at__isnull=True,
+            message__conversation_id=convo_id,
+            recipient_id__in=recipient_ids,
+        ).values_list("recipient_id", flat=True)
     )
-    already_queued = set(stale.values_list("recipient_id", flat=True))
-    if already_queued:
-        # **Re-point the queued row at the message that just arrived.** Without
-        # this, coalescing leaves the row aimed at the *first* message of the
-        # burst, and everything the sender reads off it is then read off the
-        # wrong message — which is a live bug, not merely an inefficiency:
-        #
-        # - The wording comes from that message, so an @mention arriving
-        #   mid-burst is phrased as a plain message **and filed on the messages
-        #   channel instead of the mentions one**, defeating the exact scenario
-        #   the separate channel exists for. ``Kind.MENTION`` never creates a
-        #   ``Notification`` row, so a mention always rides this path.
-        # - ``_should_drop`` compares the read marker against that message's
-        #   timestamp, so a burst whose first message was already read is binned
-        #   entirely — including the later ones that weren't.
-        # - With previews (Phase 10b) it would also show the oldest unread
-        #   message rather than the newest, which is the wrong way round.
-        #
-        # Cheap and safe: the row is unsent by definition here, and the push it
-        # will send is about the conversation either way. The one thing that
-        # *doesn't* change is the count of buzzes — a burst still buzzes once,
-        # which is the whole point of coalescing.
-        stale.update(message=message)
     outstanding = recipient_ids - already_queued
     if not outstanding:
         return []

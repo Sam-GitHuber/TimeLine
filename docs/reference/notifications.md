@@ -541,16 +541,17 @@ is the first feature that hands user data to a third party.
 
 A push carries: the Expo push token, the title `TimeLine`, the server-phrased
 line (*"Ada replied to your post"*), and the deep-link route. It travels to
-**Expo's push service**, then to **Apple's APNs** or **Google's FCM** (Phase 10),
-before reaching the phone. So both see a recipient's device token and the
-**display name of the person who acted**.
+**Expo's push service**, then to **Apple's APNs** or **Google's FCM**, before
+reaching the phone. So both see a recipient's device token and the **display
+name of the person who acted**.
 
 **The deep-link route is metadata, and it is not nothing.** A message push
-carries `"url": "/messages/<conversation id>"` (`send_pushes.py:287`), so the
-services in the path see a stable identifier for *which* thread buzzed, and can
-count how often it does. That's defensible — it's the price of a push that opens
-the right screen, it names no participant and quotes no text — but it means the
-honest claim is "no content", not "no conversation".
+carries `"url": "/messages/<conversation id>"`, so the services in the path see
+a stable identifier for *which* thread buzzed, and can count how often it does.
+That's defensible — it's the price of a push that opens the right screen, it
+names no participant and quotes no text — but it means the honest claim is "no
+content", **not "no conversation"**. An earlier version of this section claimed
+the latter, and it was never true.
 
 A mention says *"Ada mentioned you"* (Phase 9b M8) — which is the same rule, and
 earns its place because a chat you silenced suddenly buzzing owes you an
@@ -580,16 +581,63 @@ extension **fetch** the body over TLS from our own server;
 [Phase 9c](../phases/phase-9c-e2e-encryption.md) later swaps that fetch for a
 local **decrypt**, once there's a ciphertext to decrypt.
 
-**Until 10b ships, the rule above stands exactly as written.** After it, the
-push still carries no message content — but two smaller things change, and this
-section should be rewritten rather than appended to when they do:
+### Lock-screen previews (Phase 10b, backend landed)
 
-- Previews are **per device and off by default**, so a push to an opted-in
-  device sets `mutableContent`. Its presence on the wire is therefore a readout
-  of one privacy setting, visible to Expo and Apple.
-- The **device** learns more, from us, over TLS. That's the point of the design:
-  the extra content moves on the one leg of the journey that has no third party
-  in it.
+**The rule above is unchanged and stays unchanged: no push carries message
+content.** A test asserts that against the exact bytes sent to Expo. What 10b
+adds is a second, private channel for the words — straight from us to the
+device over TLS, on the one leg of the journey with no third party on it.
+
+**M1 (the backend) has landed. The extension that consumes it has not**, so
+nothing renders a preview yet and no client can turn one on.
+
+Two things did change about what leaves the box, and they are small but real:
+
+- **`mutableContent` on the wire.** A message push to an **opted-in iOS device**
+  carries it — that flag is what wakes the extension. Its presence is therefore
+  a readout of one privacy setting, disclosed to Expo and Apple: not content,
+  but the *value* of a preference. It is set only on message pushes (a reaction
+  has no preview to fetch) and only on iOS (`mutable-content` is an APNs field;
+  FCM has no equivalent, so setting it on Android would be that disclosure for
+  no benefit whatever — Android's rewrite path is M4 and may not land).
+- **The device learns more, from us.** That is the whole design, not a
+  side effect.
+
+**`GET /conversations/<id>/push-preview/`** is what the extension asks. It
+returns a **finished** `{body, unread_count}` — the same four-branch wording
+`send_pushes` composes (`notifications.message_push_body`), with the message
+text appended and truncated to 120 characters, whitespace collapsed so the body
+stays one line. Composition is server-side deliberately: an extension
+assembling fields would render a blank line under the title for an uncaptioned
+photo, and "Ada in " for every 1:1.
+
+- **Conversation-scoped, not message-scoped**, because coalescing means the
+  queued row names the *first* message of a burst — a message-scoped question
+  would answer with the oldest unread message forever.
+- **Visibility comes from `_thread_for_viewer`**, the gate every other
+  per-thread route starts from, so it cannot drift from the thread endpoint.
+  **404** where the thread is unreachable (not a member, left, blocked) —
+  never 403, because ids are sequential and a 403 would let a credential-holder
+  walk them and count the install's private threads. **204** where the thread is
+  reachable but holds nothing showable: previews off, nothing visible, or every
+  visible message being the caller's own (you can reply from the web between a
+  push being queued and delivered, and a lock screen headed "New message from
+  Ada" whose body is your own words is worse than no preview). Throttled, since
+  DRF throttling is opt-in per view and that walk is what it is for.
+- **Mute is not consulted.** It is a *delivery* policy, decided upstream at
+  enqueue — including the @mention carve-out that beats it. By the time this is
+  called a push has already been delivered, so re-deciding it here would blank
+  the previews for exactly the mentions that were let through to be read.
+- **Every failure falls back** to the contentless body already sitting in the
+  payload. No push is ever silent because an extension had a bad day.
+
+**Previews are per device and off by default** (`DevicePushToken.show_previews`),
+because what leaks is a lock screen and a lock screen belongs to a phone rather
+than to an account. The flag resets when the device row changes owner. See
+[accounts.md](accounts.md#push-device-registration) for the endpoint and for the
+**preview credential** the extension authenticates with — including an honest
+account of what a leaked one can reach, which is more than a single
+notification's preview and less than the account.
 
 **Why Expo rather than talking to APNs directly.** Direct APNs would keep
 Apple in the path but remove Expo from it, at the cost of holding and rotating

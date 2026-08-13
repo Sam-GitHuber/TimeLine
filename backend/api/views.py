@@ -3592,10 +3592,18 @@ class ConversationPushPreviewView(APIView):
     **Returns a finished ``body``, not its ingredients.** Composition stays on
     the side that can be unit-tested; an extension assembling fields would put a
     title over a blank line for the uncaptioned photo that ``message_push_body``
-    handles, and render "Ada in " for every 1:1. ``unread_count`` rides along
-    because it is one query on a request already being made — whether it earns a
-    place in the wording is a decision for when there's a real lock screen to
-    look at.
+    handles, and render "Ada in " for every 1:1.
+
+    ``unread_count`` is returned before anything renders it — the wording
+    question ("3 new messages" as prose or as a badge?) is deliberately left
+    until there is a real lock screen to look at. It is **not** free: it costs
+    about four statements, because ``unread_count_for`` re-enters
+    ``_messages_for_viewer`` and repeats the participant and interval lookups
+    done a few lines above, plus the ``ConversationRead`` read that feeds it.
+    Paid on purpose. That helper is documented as the single implementation of
+    the unread rule precisely so the thread badge and the nav total can't
+    disagree, and inlining a cheaper copy here to save three queries on a
+    once-per-push request is how a third answer to "what is unread" gets born.
     """
 
     authentication_classes = [PushPreviewAuthentication]
@@ -3609,7 +3617,13 @@ class ConversationPushPreviewView(APIView):
         # conversation exists. It shouldn't be asking — the push it received
         # carried no ``mutableContent``, so its extension was never woken — but
         # the flag is the user's decision and this is the side that enforces it.
-        if not getattr(device, "show_previews", False):
+        # A plain attribute read, not a defaulting ``getattr``: the field is
+        # concrete and non-nullable on the only object this view's one
+        # authenticator ever returns, so a default could only ever paper over a
+        # future wiring mistake — and it would paper over it as a permanent 204,
+        # indistinguishable from the user having turned previews off, with
+        # nothing raised and nothing logged.
+        if not device.show_previews:
             return Response(status=status.HTTP_204_NO_CONTENT)
 
         user = request.user

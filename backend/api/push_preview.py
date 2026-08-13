@@ -28,10 +28,28 @@ the reason for a choice below:
 1. **It cannot rotate**, so the two-process hazard cannot arise by construction.
 2. **It is revocable by a row delete.** It lives on ``DevicePushToken``, which
    logout already deletes — no blacklist, no second lifecycle to keep in sync.
-3. **What a leak costs is bounded.** It is stored in a keychain group a second
-   target can read, which is a wider blast radius than the app's own keychain.
-   If it escapes, what escapes is read-only access to notification previews for
-   one device, not the account.
+3. **What a leak costs is smaller than the account, and worth stating
+   precisely.** It is stored in a keychain group a second target can read, which
+   is a wider blast radius than the app's own keychain, so the honest
+   description matters more than the reassuring one.
+
+   What it *cannot* do: post, read a thread's history, change a setting, see a
+   profile, or refresh itself into anything else. It authenticates one GET.
+
+   What it *can* do, and this is more than "one notification's preview":
+   nothing binds a request to a push that was actually delivered, so a holder
+   can ask for **any conversation the account is in**, at any time, and get the
+   latest inbound line of each — a rate-limited read feed over the newest
+   message of every private thread, for as long as the device row lives. That
+   is bounded by the throttle and killed by logout, and it is still a real
+   capability rather than a keyhole.
+
+   Narrowing it to a delivered ``PushOutbox`` row, or to a nonce carried in the
+   push payload, would make the power match the name. Not done here: it is a
+   design change with its own failure mode (a preview that silently stops
+   working when the outbox row is pruned or the timing slips) and it belongs
+   with the extension in M3, where it can be tested end to end. Recorded as an
+   open question on the phase rather than left as a comfortable docstring.
 
 It is an **opaque random string, not a JWT**, for (2): a JWT would have to carry
 its own revocation story, and the honest one at this scale is a database row.
@@ -82,6 +100,16 @@ class PushPreviewAuthentication(authentication.BaseAuthentication):
                 "Invalid preview credential header."
             ) from exc
 
+        # Refused *before* hashing, which is the only place this check can
+        # actually fire. Hashing first and then testing the stored value would
+        # read as a guard against an empty credential matching the empty
+        # ``preview_token_hash`` a pre-10b device row carries — but
+        # ``sha256("")`` is a 64-character digest that can never equal ``""``,
+        # so such a test is unreachable and pins nothing. This one costs a
+        # query too.
+        if not raw:
+            raise exceptions.AuthenticationFailed("Invalid preview credential.")
+
         # Looked up by hash, so the database never holds anything usable. An
         # exact-match index lookup rather than a comparison in Python: there is
         # no per-candidate work for a timing attack to measure, and the input is
@@ -93,10 +121,7 @@ class PushPreviewAuthentication(authentication.BaseAuthentication):
             .select_related("user")
             .first()
         )
-        # An empty hash is what a device registered before this existed has, so
-        # guard against a caller sending an empty credential and matching every
-        # one of them.
-        if device is None or not device.preview_token_hash:
+        if device is None:
             raise exceptions.AuthenticationFailed("Invalid preview credential.")
         if not device.user.is_active:
             # The admin-approval / ban gate, honoured here as everywhere else. A

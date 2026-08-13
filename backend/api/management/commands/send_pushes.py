@@ -51,6 +51,7 @@ from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
 from ...notifications import (
     MENTION_CHANNEL,
     channel_for_kind,
+    is_mentioned,
     message_push_body,
 )
 from ...serializers import NotificationSerializer
@@ -291,10 +292,10 @@ class Command(BaseCommand):
         # the device, so a second copy of the phrasing would drift the moment
         # either side grew a branch.
         text = message_push_body(message, row.recipient_id)
-        mentioned = any(
-            mention.user_id == row.recipient_id
-            for mention in message.mentions.all()
-        )
+        # The same predicate the wording used, from the same helper: a body
+        # reading "Ada mentioned you" that arrives on the messages channel is
+        # the precise failure the mentions channel exists to prevent.
+        mentioned = is_mentioned(message, row.recipient_id)
         return {
             # No notification id: there is no activity-centre row to mark read.
             # The app keys off `kind` to know that.
@@ -393,7 +394,17 @@ class Command(BaseCommand):
         # leave the box is the flag itself: its presence tells Expo and Apple
         # that this device has previews on. A privacy setting's *value*, not any
         # content, and the honest disclosure is in notifications.md.
-        if data.get("previewable") and device.show_previews:
+        #
+        # **iOS only, for now.** ``mutable-content`` is an APNs field; FCM has
+        # no equivalent, so on Android it wakes nothing and fetches nothing —
+        # all it would do is make the disclosure above for no benefit at all.
+        # Android's rewrite path is M4, and it may not land; if it does, this
+        # gate is where it opts in.
+        if (
+            data.get("previewable")
+            and device.show_previews
+            and device.platform == DevicePushToken.Platform.IOS
+        ):
             message["mutableContent"] = True
         return message
 
