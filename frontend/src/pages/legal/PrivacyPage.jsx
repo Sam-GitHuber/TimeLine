@@ -6,11 +6,11 @@ import { LegalPage, Section, P, UL } from "./LegalLayout.jsx";
 //
 // NOTE: good-faith plain-English draft, not legal advice — worth a solicitor's
 // review before any broader launch (see docs/SHARED.md).
-const CONTACT = "samejefford@gmail.com";
+const CONTACT = "timeline.support@icloud.com";
 
 export default function PrivacyPage() {
   return (
-    <LegalPage title="Privacy Policy" updated="11 July 2026">
+    <LegalPage title="Privacy Policy" updated="13 August 2026">
       <Section heading="Who we are">
         <P>
           TimeLine is a private, invite-only social timeline operated by an

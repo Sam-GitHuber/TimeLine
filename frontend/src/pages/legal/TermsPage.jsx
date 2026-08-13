@@ -7,11 +7,11 @@ import { LegalPage, Section, P, UL } from "./LegalLayout.jsx";
 //
 // NOTE: this is a good-faith plain-English draft, not legal advice. Before any
 // broader / public launch it's worth a solicitor's review (see docs/SHARED.md).
-const CONTACT = "samejefford@gmail.com";
+const CONTACT = "timeline.support@icloud.com";
 
 export default function TermsPage() {
   return (
-    <LegalPage title="Terms of Service" updated="11 July 2026">
+    <LegalPage title="Terms of Service" updated="13 August 2026">
       <Section heading="1. About these terms">
         <P>
           TimeLine (“the Service”) is a small, private, invite-only social
