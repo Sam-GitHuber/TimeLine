@@ -1,11 +1,14 @@
 # Phase 10b — Notification content, without leaking it
 
-**Status: PLAN.** Fleshed 2026-07-30 and confirmed with the user; **revised the
-same day** after a source-checked review of the plan itself. The review found
-that two of the mechanisms this phase leans on don't behave the way the first
-draft assumed — see *Corrections from review* at the end for what changed and
-why, so the reasoning isn't lost. **One decision is open** (which credential the
-extension uses); everything else is ready to execute.
+**Status: IN PROGRESS — M1 done.** Fleshed 2026-07-30 and confirmed with the
+user; **revised the same day** after a source-checked review of the plan itself.
+The review found that two of the mechanisms this phase leans on don't behave the
+way the first draft assumed — see *Corrections from review* at the end for what
+changed and why, so the reasoning isn't lost.
+
+**The open decision is settled (2026-08-13): Option B**, a scoped credential.
+Its shape changed in the building — see *Notes / decisions log*. M1 (backend) is
+merged; M2 (keychain) is next.
 
 **Why the odd number.** It follows Phase 10 (Android) and comes *before* Phase 9c
 (E2E), which is scheduled after Android. The numbering is chronological, not a
@@ -146,7 +149,7 @@ including both nights on the lock screen, the whole point of the phase — falls
 back to `New message from Ada`. Previews would work in testing and feel broken in
 use.
 
-#### Decision needed before M3: which credential the extension reads
+#### Decided (2026-08-13): Option B, built as an opaque device credential
 
 **Option A — the access token** (the first draft's plan). No backend work. Costs
 the fallback rate above, and puts a **full-privilege account token** in a
@@ -167,10 +170,11 @@ issued for" shape needed here. Costs: one more token type, a mint-on-login /
 mint-on-register step, and a revocation story (revoke on logout with the device
 row; re-mint on next launch if missing).
 
-**This is the user's call.** B is the recommendation — A's failure mode is that
-the feature quietly doesn't work in the case it was built for. If A is chosen
-anyway, DoD 1 should be honest about it and say "when the app has been opened
-inside the access-token lifetime".
+**The user chose B.** A's failure mode is that the feature quietly doesn't work
+in the case it was built for. See the decisions log for the one way the built
+version departs from the sketch above — the credential is an opaque random
+string on the device row rather than a JWT, which is what turns B's stated cost
+("a revocation story") into a row delete that logout already performs.
 
 ### The Reply field is not touched
 
@@ -333,7 +337,14 @@ rule outranks the Android design in M4**, which is where it bites.
 
 ## Milestones
 
-### M1 — Backend: the preview endpoint and the payload flag
+### M1 — Backend: the preview endpoint and the payload flag ✅ **Done**
+
+Built as written below except for the four deviations in *Notes / decisions
+log*: the credential is opaque rather than a JWT, a `pending` participant gets
+204 rather than 404, the payload gate is a `previewable` boolean rather than a
+conversation id, and the shared body helper is
+`notifications.message_push_body`.
+
 
 - Add `show_previews` (boolean, default `False`) to `DevicePushToken`; migration.
 - **Do not put `show_previews` in `PushTokenView.post`'s `update_or_create`
@@ -641,6 +652,122 @@ notification, or post a replacement, in the states we care about?**
 - **Does the unread count earn its place in the body?** It's in the M1 response
   because it's free on the same call, but "3 new messages" may read better as a
   badge than as prose. Decide when the Swift exists and it can be seen.
+
+## Notes / decisions log
+
+Deviations from the plan above, recorded as they were made.
+
+### M1, 2026-08-13 — merged
+
+**The preview credential is an opaque random string on `DevicePushToken`, not a
+JWT.** Option B asked for "a long-lived token whose only power is
+`GET …/push-preview/`", pointing at `MobileRefreshToken`'s `client` claim as the
+shape. The claim pattern is the right *idea* — a credential usable only for what
+it was issued for — but a JWT would have had to invent a revocation story, and B
+listed exactly that as its cost. An opaque token hashed onto the device row
+gives it away for free:
+
+- **Revocation is a row delete**, and logout already deletes that row
+  (`DevicePushTokenView.delete`, `forgetLocalPushToken`). No blacklist table, no
+  second lifecycle to keep in sync with the account's.
+- **Scoping is structural**, not a claim to be checked: it authenticates through
+  `PushPreviewAuthentication`, which is mounted on that one view and nowhere
+  else. Pinned in both directions — the account's own Bearer token is refused
+  here, and the preview credential works nowhere else.
+- **It is per device**, which is the grain `show_previews` already has.
+- Stored as a SHA-256, so a database dump yields nothing usable. Plaintext
+  exists in the registration response and the app's keychain, nowhere else.
+
+It is **minted fresh on every registration**, which the app already does on every
+launch — so a device that loses its copy repairs itself on the next open, with no
+recovery path to build or test. Safe to rotate here in a way the account's
+refresh token is not: only the app ever mints or writes it, the extension only
+ever reads, so there is no second process left holding a dead one. The cost is
+that `POST /push-tokens/` now answers **200 with `{preview_token}` instead of
+204**. Checked against the shipped app: `api.ts`'s `request` parses whatever body
+arrives and `registerPushToken` is typed `<void>`, so builds already on testers'
+phones ignore it.
+
+**A `pending` participant gets 204, not the 404 the plan asked for.** The plan
+listed pending alongside "departed" and "deactivated" as 404 cases. Departed and
+deactivated already are, through the gate every per-thread route starts from
+(`_thread_for_viewer`, and the credential's own `is_active` check) — but pending
+is *not* something that gate refuses anywhere else in the API: a pending member
+can list the thread and can mute it. Special-casing it here would have meant a
+second copy of the visibility rule that could drift from the thread endpoint's.
+They have no `ParticipantInterval`, so the message query returns nothing and they
+get the 204 that already means "nothing here you may be shown". Same security
+property, one gate. The distinction the endpoint actually draws is **404 where
+the thread is unreachable, 204 where it is reachable but empty of anything
+showable** — which is also what a member in an interval *gap* gets: the newest
+message they may read, never the one sent while they were out.
+
+**`previewable`, not a conversation id, is what `_message` gates on.** The plan
+said `_payload()` should gain the conversation id on the message branch. It
+didn't need to: the gate only has to answer "is this a message push", the wire
+already carries `/messages/<id>` in `url`, and the plan separately forbids a
+second conversation field that could fall out of step with it. A bare boolean on
+the message branch says exactly what the gate asks and adds nothing to the wire.
+
+**The body composition helper lives in `notifications.py`**
+(`message_push_body`), called contentless by `send_pushes` and with
+`preview=True` by the endpoint. The preview shape is the ordinary body with the
+text appended — `Ada: hello`, `Ada in Sunday Lunch: hello`, `Ada mentioned you:
+hello`, and an uncaptioned photo still just `Ada sent a photo`. The one branch
+that differs is the plain 1:1, which is `New message from Ada` contentless and
+`Ada: …` with text, because the former doesn't extend into a sentence.
+
+**The coalescing staleness fix was written, reviewed, and taken back out.** The
+plan called it "three lines"; it isn't, and an `xhigh` review of the M1 diff
+found five separate ways it goes wrong. Recorded here because the reasoning is
+the valuable part, and because the underlying bug is still real:
+
+1. **It can 500 the message send.** `PushOutbox` has a unique constraint on
+   `(message, recipient)`. Two concurrent sends can each queue a row for the
+   same recipient under READ COMMITTED — different `message_id`s, so the
+   constraint permits both — and a later `UPDATE ... SET message_id` collapses
+   them onto the same pair. `enqueue_message_pushes` runs *inside* the
+   message-create transaction, so that's a rolled-back message and a 500 for the
+   sender, repeating for every message in the thread until a drain settles one.
+2. **It is asymmetric.** It fixes chatter-then-mention and breaks
+   mention-then-chatter: the row is re-pointed off the mention, losing
+   `MENTION_CHANNEL` and the "Ada mentioned you" wording — for the person who
+   turned Messages down precisely because the group is busy.
+3. **A soft-delete swallows the burst.** Re-point at a message, delete that
+   message, and `_should_drop` bins the row — including the earlier, undeleted
+   messages it was originally for.
+4. **It puts a lock on the request path.** `send_pushes` holds
+   `select_for_update` across its Expo HTTP calls. An `UPDATE` here blocks on
+   those locks, so a slow Expo would start stalling message sends — breaking the
+   promise made three lines above the call site: *"the send is out-of-band, so
+   Expo being slow or down can never slow down or fail sending a message."*
+5. **It strands delivery state.** `delivered_tokens`, `attempts` and
+   `last_error` still describe the old message, so a partially-delivered row
+   permanently skips the device that received the *previous* one.
+
+The mid-burst @mention misrouting is a genuine live bug and is filed as its own
+issue, along with a second one the review turned up beside it: a row that
+exhausts `MAX_ATTEMPTS` keeps `sent_at` NULL forever, so the coalescing check
+matches it and that thread's pushes go permanently silent. Neither belongs in
+this milestone — and **10b never needed the fix**, which is exactly why the
+endpoint is conversation-scoped.
+
+### M1 review, 2026-08-13 — other fixes
+
+- **`mutableContent` is iOS-only.** It is an APNs field with no FCM equivalent,
+  so on Android it woke nothing and fetched nothing while still disclosing the
+  user's privacy setting to Expo and Google. M4 is where Android opts in.
+- **`is_mentioned` is one predicate**, shared by the wording and the channel.
+  Two copies of it is precisely how a body reading "Ada mentioned you" ends up
+  on the messages channel.
+- **Whitespace collapses before truncation**, so a message with newlines can't
+  render a multi-line lock-screen body — the one way a preview would look
+  visibly unlike the contentless notification it replaces.
+- **The empty-credential guard moved before the hash.** As written it tested the
+  stored value, which `sha256("")` can never equal, so it was unreachable and
+  its test pinned nothing.
+- **Registration kept `update_or_create`**, which resolves the create/create
+  race on the unique `expo_token` rather than 500ing on it.
 
 ## Corrections from review
 

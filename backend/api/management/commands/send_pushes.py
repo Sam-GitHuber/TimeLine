@@ -48,7 +48,12 @@ from django.db.models import Q
 from django.utils import timezone
 
 from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
-from ...notifications import MENTION_CHANNEL, channel_for_kind
+from ...notifications import (
+    MENTION_CHANNEL,
+    channel_for_kind,
+    is_mentioned,
+    message_push_body,
+)
 from ...serializers import NotificationSerializer
 from ...views import badge_count_for
 
@@ -280,41 +285,17 @@ class Command(BaseCommand):
         # sender is a non-null CASCADE FK, so a deleted account takes its
         # messages (and these rows) with it — no "Someone" fallback needed here,
         # unlike a Notification's actor, which is SET_NULL on purpose.
-        sender = message.sender.display_name
-        # A photo says so (Phase 9b M7). It names the sender and the medium and
-        # nothing else — the same rule as every other push body here, which is
-        # why this one needed no new thinking: "sent a photo" is no more
-        # revealing than "sent a message", and it's more useful, because knowing
-        # a picture is waiting is often the whole reason to open the app.
         #
-        # Said whenever there's an attachment, caption or not: the photo is the
-        # notable thing, and a caption is content we wouldn't quote anyway.
-        photo = message.attachments.exists()
-        # Named with an @ (Phase 9b M8). Said first because it's the *reason*
-        # this push exists whenever the thread is muted — a silenced chat that
-        # suddenly buzzes owes you an explanation, and "Ada mentioned you" is it.
-        # Still names the person and nothing else: a mention quotes no more of
-        # the message than any other push body does.
-        mentioned = any(
-            mention.user_id == row.recipient_id
-            for mention in message.mentions.all()
-        )
-        # A group thread says which one, since "New message from Ada" is
-        # ambiguous when Ada is in four of your chats. An untitled group falls
-        # back to the neutral phrasing rather than inventing a name.
-        named_group = convo.kind == convo.Kind.GROUP and convo.title
-        if mentioned:
-            text = f"{sender} mentioned you"
-            if named_group:
-                text += f" in {convo.title}"
-        elif photo:
-            text = f"{sender} sent a photo"
-            if named_group:
-                text += f" in {convo.title}"
-        elif named_group:
-            text = f"{sender} in {convo.title}"
-        else:
-            text = f"New message from {sender}"
+        # The wording lives in ``notifications.message_push_body`` rather than
+        # here, because Phase 10b's preview endpoint has to compose the *same*
+        # four branches with the message text appended. It replaces this body on
+        # the device, so a second copy of the phrasing would drift the moment
+        # either side grew a branch.
+        text = message_push_body(message, row.recipient_id)
+        # The same predicate the wording used, from the same helper: a body
+        # reading "Ada mentioned you" that arrives on the messages channel is
+        # the precise failure the mentions channel exists to prevent.
+        mentioned = is_mentioned(message, row.recipient_id)
         return {
             # No notification id: there is no activity-centre row to mark read.
             # The app keys off `kind` to know that.
@@ -337,6 +318,20 @@ class Command(BaseCommand):
             # silences their @mentions with it. Which is the exact outcome the
             # separate channel exists to prevent.
             "channel": MENTION_CHANNEL if mentioned else channel_for_kind("message"),
+            # This push has something a device could fetch a preview *for*
+            # (Phase 10b) — set on the message branch and nowhere else.
+            #
+            # It is what ``_message`` gates ``mutableContent`` on, and the gate
+            # has to be the payload rather than the device alone. Gate on the
+            # device only and the first *notification* push to a preview-enabled
+            # device reads a key this branch never sets: a ``KeyError`` inside
+            # ``_drain``'s transaction, rolling back the whole drain and taking
+            # the receipt check and prune with it — all push delivery stops,
+            # every tick, until someone notices. Gate loosely with ``.get()`` on
+            # a key both branches set and you wake the extension for "Ada
+            # reacted to your post", which has no preview to fetch and is
+            # explicitly not what this feature is for.
+            "previewable": True,
         }
 
     def _message(self, device, data, badge):
@@ -383,6 +378,34 @@ class Command(BaseCommand):
         # these ids must match the app's. See ``notifications.channel_for_kind``.
         if data.get("channel"):
             message["channelId"] = data["channel"]
+        # APNs' ``mutable-content``, which is what wakes the iOS notification
+        # service extension so it can replace the body with the actual message
+        # (Phase 10b). **Both gates are load-bearing.** The payload one keeps it
+        # off every non-message push — see ``previewable`` in ``_payload`` for
+        # what gating on the device alone would cost. The device one is the
+        # user's own choice, read per device because what leaks is a lock
+        # screen: ``_message`` already runs once per device, so this costs
+        # nothing to honour here.
+        #
+        # Note what this does *not* do: it adds no content to the push. The body
+        # on the wire is still the contentless line composed above, and it stays
+        # there as the fallback for every way the extension can fail to run —
+        # which is why the push is never sent silent. The one thing that does
+        # leave the box is the flag itself: its presence tells Expo and Apple
+        # that this device has previews on. A privacy setting's *value*, not any
+        # content, and the honest disclosure is in notifications.md.
+        #
+        # **iOS only, for now.** ``mutable-content`` is an APNs field; FCM has
+        # no equivalent, so on Android it wakes nothing and fetches nothing —
+        # all it would do is make the disclosure above for no benefit at all.
+        # Android's rewrite path is M4, and it may not land; if it does, this
+        # gate is where it opts in.
+        if (
+            data.get("previewable")
+            and device.show_previews
+            and device.platform == DevicePushToken.Platform.IOS
+        ):
+            message["mutableContent"] = True
         return message
 
     def _send(self, messages):

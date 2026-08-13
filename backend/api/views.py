@@ -82,6 +82,7 @@ from .models import (
     Reaction,
     Report,
 )
+from .push_preview import PushPreviewAuthentication
 from .serializers import (
     CONVERSATION_TITLE_MAX_LENGTH,
     EVERYONE,
@@ -94,6 +95,7 @@ from .serializers import (
     ConversationRenameSerializer,
     ConversationSerializer,
     DevicePushTokenDeleteSerializer,
+    DevicePushTokenPreviewSerializer,
     DevicePushTokenSerializer,
     EventWriteSerializer,
     FinaliseSerializer,
@@ -3550,6 +3552,130 @@ class ConversationMuteView(APIView):
         return self._set(request, pk, None)
 
 
+class ConversationPushPreviewView(APIView):
+    """What this conversation's notification should say
+    (``GET /conversations/<pk>/push-preview/``) — Phase 10b.
+
+    Called by the **iOS notification service extension**, not by the app: a push
+    arrives carrying the contentless body, the extension wakes, asks this, and
+    replaces the body before the notification is shown. So the message text
+    reaches the phone over TLS from us, on the one leg of the journey with no
+    third party on it, and never enters the push path at all. See
+    ``api/push_preview.py`` for the credential and docs/reference/notifications.md
+    for the delivery pipeline.
+
+    **Conversation-scoped, not message-scoped**, which is not merely a taste.
+    ``enqueue_message_pushes`` coalesces a burst into one queued row, so a
+    message id in the payload would be the *first* message of the burst — asking
+    about it would show the oldest unread message and never the newest. Asking
+    "what should this thread's notification say" sidesteps that, is the right
+    question for a notification that is about a thread, and is the shape Phase 9c
+    will want when the answer comes from local decryption instead.
+
+    **404, never 403**, for a thread the caller isn't in — the convention every
+    other conversation route follows, and it matters more here than most: this
+    endpoint is reachable with a credential that has no other power, so a 403
+    would let anyone holding one walk ``1..5000`` and map how many private
+    threads the install has and, ids being sequential, roughly when each was
+    created. Throttled for the same reason; DRF's throttling is opt-in per view
+    (there is no ``DEFAULT_THROTTLE_CLASSES``), so leaving it off would leave
+    that walk unlimited.
+
+    **204 means "keep the body you already have."** Three separate cases produce
+    it — previews off for this device, nothing visible to describe, or every
+    visible message being the caller's own — and the extension treats all of them
+    the same way it treats a timeout or a 500: show the contentless line the
+    server already composed. Every failure path lands on a notification that
+    still says *something*, because a push that goes silent when an extension has
+    a bad day is worse than a vague one.
+
+    **Returns a finished ``body``, not its ingredients.** Composition stays on
+    the side that can be unit-tested; an extension assembling fields would put a
+    title over a blank line for the uncaptioned photo that ``message_push_body``
+    handles, and render "Ada in " for every 1:1.
+
+    ``unread_count`` is returned before anything renders it — the wording
+    question ("3 new messages" as prose or as a badge?) is deliberately left
+    until there is a real lock screen to look at. It is **not** free: it costs
+    about four statements, because ``unread_count_for`` re-enters
+    ``_messages_for_viewer`` and repeats the participant and interval lookups
+    done a few lines above, plus the ``ConversationRead`` read that feeds it.
+    Paid on purpose. That helper is documented as the single implementation of
+    the unread rule precisely so the thread badge and the nav total can't
+    disagree, and inlining a cheaper copy here to save three queries on a
+    once-per-push request is how a third answer to "what is unread" gets born.
+    """
+
+    authentication_classes = [PushPreviewAuthentication]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "push_preview"
+
+    def get(self, request, pk):
+        device = request.auth
+        # Checked first, and before the thread is resolved: a device with
+        # previews off should learn nothing at all here, not even whether the
+        # conversation exists. It shouldn't be asking — the push it received
+        # carried no ``mutableContent``, so its extension was never woken — but
+        # the flag is the user's decision and this is the side that enforces it.
+        # A plain attribute read, not a defaulting ``getattr``: the field is
+        # concrete and non-nullable on the only object this view's one
+        # authenticator ever returns, so a default could only ever paper over a
+        # future wiring mistake — and it would paper over it as a permanent 204,
+        # indistinguishable from the user having turned previews off, with
+        # nothing raised and nothing logged.
+        if not device.show_previews:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        user = request.user
+        # The whole visibility rule, and deliberately the *same* gate every other
+        # per-thread route starts from rather than a second copy of it: 404 for a
+        # thread they aren't in, have left, or that a block has taken away.
+        convo, _my_status = _thread_for_viewer(pk, user)
+        message = (
+            # Interval-clipped, so a member sitting at ``pending`` or in the gap
+            # between two intervals gets nothing — they cannot read the thread,
+            # and a preview must never show what the app would then refuse to.
+            _messages_for_viewer(convo, user)
+            .filter(deleted_at__isnull=True)
+            # Your own message is excluded for a case that happens constantly:
+            # reply from the web between a push being queued and delivered, and
+            # without this the lock screen shows a notification titled "New
+            # message from Ada" whose body is your own words.
+            .exclude(sender=user)
+            .order_by("-created_at", "-id")
+            # ``mentions`` only: the body helper iterates those, but asks
+            # ``attachments`` for an ``exists()``, which doesn't read a prefetch
+            # cache — prefetching it would buy a second query, not save one.
+            .prefetch_related("mentions")
+            .select_related("conversation")
+            .first()
+        )
+        if message is None:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        # **Mute is deliberately not consulted.** It is a delivery policy, not a
+        # permission one, and by the time this is called a push has already been
+        # delivered — which means the mute question was answered upstream at
+        # enqueue, including the @mention carve-out that beats it. This
+        # endpoint's job is visibility only, and second-guessing that decision
+        # here would silence the previews for exactly the mentions that were
+        # allowed through to be read.
+        read_at = (
+            ConversationRead.objects.filter(conversation=convo, user=user)
+            .values_list("last_read_at", flat=True)
+            .first()
+        )
+        return Response(
+            {
+                "body": notifications.message_push_body(
+                    message, user.id, preview=True
+                ),
+                "unread_count": unread_count_for(convo, user, read_at),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class MessageDetailView(APIView):
     """Edit (PATCH) or delete (DELETE) one message at
     ``/conversations/<pk>/messages/<message_id>/``.
@@ -5709,14 +5835,66 @@ class DevicePushTokenView(APIView):
     def post(self, request):
         serializer = DevicePushTokenSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        expo_token = serializer.validated_data["expo_token"]
+
+        # Read the row before writing it, because Phase 10b needs to know
+        # whether this device is changing hands — which the upsert would
+        # otherwise erase the evidence of.
+        existing = DevicePushToken.objects.filter(expo_token=expo_token).first()
+        changed_owner = existing is not None and existing.user_id != request.user.id
+
+        # Minted fresh on every registration, which is what makes a lost
+        # credential self-repairing: the app registers on every launch, so the
+        # next open replaces it with no recovery path of its own. Nothing else
+        # ever mints or writes it, so rotating here can't leave a second process
+        # holding a dead one — see ``DevicePushToken.new_preview_token``.
+        preview_token, preview_hash = DevicePushToken.new_preview_token()
+        defaults = {
+            "user": request.user,
+            "platform": serializer.validated_data["platform"],
+            "preview_token_hash": preview_hash,
+        }
+        if existing is None or changed_owner:
+            # A preference about a lock screen must not be inherited. The row
+            # deliberately *moves* to the new user (see the class docstring), and
+            # that is right for the device registration — but Ada enabling
+            # previews, logging out, and her partner logging in on the same
+            # tablet must not leave a stranger's messages rendering on it.
+            #
+            # The ``is None`` half covers the race the read above can lose: if a
+            # concurrent request created the row between the two statements, this
+            # writes the safe value rather than whatever it decided.
+            defaults["show_previews"] = False
+        # Still update_or_create rather than a save() on the row read above: it
+        # resolves the create/create race on the unique ``expo_token`` (catching
+        # the IntegrityError and re-fetching) instead of 500ing on it. Two
+        # launches registering at once is exactly the shape #219 describes.
         DevicePushToken.objects.update_or_create(
-            expo_token=serializer.validated_data["expo_token"],
-            defaults={
-                "user": request.user,
-                "platform": serializer.validated_data["platform"],
-            },
+            expo_token=expo_token, defaults=defaults
         )
-        return Response(status=status.HTTP_204_NO_CONTENT)
+
+        # 200 rather than the old 204: the plaintext credential exists here and
+        # nowhere else afterwards, so this response is the only chance to hand it
+        # over. Old clients ignore an unexpected body, so this is compatible with
+        # the builds already on testers' phones.
+        return Response({"preview_token": preview_token}, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        """Turn lock-screen previews on or off for one of *your* devices."""
+        serializer = DevicePushTokenPreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # Scoped to the caller, exactly like DELETE below and for the same
+        # reason: a leaked token value must not let anyone turn previews *on*
+        # for someone else's phone.
+        updated = DevicePushToken.objects.filter(
+            user=request.user, expo_token=serializer.validated_data["expo_token"]
+        ).update(show_previews=serializer.validated_data["show_previews"])
+        if not updated:
+            raise NotFound()
+        return Response(
+            {"show_previews": serializer.validated_data["show_previews"]},
+            status=status.HTTP_200_OK,
+        )
 
     def delete(self, request):
         serializer = DevicePushTokenDeleteSerializer(data=request.data)

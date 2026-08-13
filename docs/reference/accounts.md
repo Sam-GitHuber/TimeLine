@@ -363,15 +363,42 @@ land; both are product decisions, not cleanups.
 
 ### Push device registration
 
-`POST`/`DELETE /api/push-tokens/` registers or removes one device's **Expo push
-token** (`api.models.DevicePushToken`: `user`, `expo_token`, `platform`,
-`created_at`, `last_seen`). One user can have several devices.
+`POST`/`PATCH`/`DELETE /api/push-tokens/` registers, configures or removes one
+device's **Expo push token** (`api.models.DevicePushToken`: `user`, `expo_token`,
+`platform`, `created_at`, `last_seen`, `show_previews`, `preview_token_hash`).
+One user can have several devices.
 
 `expo_token` is unique **globally**, not per user, and POST upserts on it —
 overwriting `user`. An Expo token identifies a *device*, so when a phone changes
 hands the row must move rather than leave the previous owner's notifications
 going somewhere they no longer control. DELETE is scoped to the caller, so a
 leaked token value can't be used to silence someone else's phone.
+
+**POST answers `200 {preview_token: …}`, not `204`** (Phase 10b). The last two
+fields are the lock-screen preview feature, and both are worth knowing before
+touching this endpoint:
+
+- **`show_previews`** — whether this device may show a message's *text* on its
+  lock screen. Off by default, and **per device rather than per account**,
+  because what leaks is a lock screen and a lock screen belongs to a phone.
+  Changed through `PATCH` (`{expo_token, show_previews}`, scoped to the caller's
+  own devices, 404 otherwise) and deliberately **not** through POST: the app
+  POSTs on every launch, so a value in the registration upsert would either
+  reset the user's choice on every cold start or raise on the launch path.
+
+  Registration **clears it when the row changes owner**. The row moving to a
+  phone's next owner is the rule above and stays; a preference about a lock
+  screen must not be inherited with it.
+- **`preview_token_hash`** — SHA-256 of the device's **preview credential**, the
+  thing the iOS notification service extension authenticates with. Minted fresh
+  on every registration and returned in plaintext in that one response, which is
+  the only place it exists outside the app's keychain. It is opaque and random
+  rather than a JWT so that revoking it is the row delete DELETE already
+  performs; its only power is `GET /conversations/<id>/push-preview/`, and the
+  account's own bearer token is refused *there* just as this credential is
+  refused everywhere else. See `api/push_preview.py` for why the extension can't
+  use the account's tokens, and for an honest account of what a leaked one can
+  reach.
 
 Push itself is documented in [notifications.md](notifications.md); the app that
 registers the token is in [mobile-app.md](mobile-app.md).

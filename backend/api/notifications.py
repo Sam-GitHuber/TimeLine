@@ -395,6 +395,117 @@ def create_notifications(recipients, actor, kind, *, post=None, comment=None,
     return refreshed + created
 
 
+# How much of a message a **preview** may put on a lock screen (Phase 10b).
+# Defined here rather than in the extension's Swift so there is one number, on
+# the side that can be tested — and so shortening it later doesn't need an app
+# release. Generous enough that most messages arrive whole, short enough that a
+# long one can't fill a stranger's screen over someone's shoulder.
+PREVIEW_TEXT_LIMIT = 120
+
+
+def is_mentioned(message, recipient_id):
+    """Whether ``message`` names ``recipient_id`` with an ``@``.
+
+    One definition, because two callers need the same answer for different
+    reasons and they must not disagree: it changes the *wording*
+    (``message_push_body``) and it changes the Android *channel*
+    (``send_pushes._payload``). A push phrased "Ada mentioned you" that arrives
+    on the messages channel is the exact failure the mentions channel exists to
+    prevent, and two copies of this predicate is how that happens.
+
+    Reads the prefetched relation rather than querying, so the send path's
+    ``prefetch_related("message__mentions")`` still covers it.
+    """
+    return any(
+        mention.user_id == recipient_id for mention in message.mentions.all()
+    )
+
+
+def message_push_body(message, recipient_id, *, preview=False):
+    """The line a **message** push shows, for one recipient.
+
+    The single implementation of message push wording, shared by the sender
+    (``manage.py send_pushes``, which calls it contentless) and the preview
+    endpoint (which calls it with ``preview=True``). They must agree: the
+    preview *replaces* the body the sender composed, on the same notification,
+    and two copies of this phrasing would drift the moment either grew a branch.
+
+    **Contentless mode is the wire body**, and the rule it follows is the one
+    the whole push design rests on: name the person, never quote them. It
+    travels through Expo and Apple/Google, so it says who and what medium and
+    nothing else.
+
+    **Preview mode is device-side**, composed for a body that will be swapped in
+    by the notification extension after the push has arrived over TLS. Only here
+    may the message's own text appear, truncated to ``PREVIEW_TEXT_LIMIT``.
+
+    The four branches are the same in both modes, which is the point — a preview
+    is the ordinary body with the text appended, not a separate format:
+
+    - **mentioned** first, because being named is *why* the push exists whenever
+      the thread is muted, and a silenced chat that suddenly buzzes owes an
+      explanation.
+    - **a photo** next: knowing a picture is waiting is often the whole reason to
+      open the app, and "sent a photo" is no more revealing than "sent a
+      message". Said whenever there's an attachment, caption or not.
+    - **a named group** qualifies either of those, and stands alone otherwise,
+      because "New message from Ada" is ambiguous when Ada is in four of your
+      chats. An untitled group falls back to the neutral phrasing rather than
+      inventing a name — and a 1:1 must never render a trailing "in ".
+    - otherwise the plain line.
+
+    The plain branch is the one place the two modes differ in *shape*: contentless
+    it reads "New message from Ada", which does not extend into "New message from
+    Ada: hello". With text to show, the sender's name alone is the natural
+    prefix.
+
+    A photo with **no caption** is why this can't return its ingredients for
+    someone else to assemble: ``text`` is empty on those, and a caller
+    concatenating fields would put a title over a blank line — strictly worse
+    than "Ada sent a photo".
+    """
+    sender = message.sender.display_name
+    convo = message.conversation
+    photo = message.attachments.exists()
+    mentioned = is_mentioned(message, recipient_id)
+    named_group = convo.kind == convo.Kind.GROUP and convo.title
+    suffix = f" in {convo.title}" if named_group else ""
+
+    if mentioned:
+        line = f"{sender} mentioned you{suffix}"
+    elif photo:
+        line = f"{sender} sent a photo{suffix}"
+    elif named_group:
+        line = f"{sender} in {convo.title}"
+    elif preview:
+        line = sender
+    else:
+        return f"New message from {sender}"
+
+    if not preview:
+        return line
+
+    # Every run of whitespace collapses to one space, which does two jobs. A
+    # message with embedded newlines would otherwise wrap the notification body
+    # over several lines — the one way a preview would look visibly unlike the
+    # contentless body it replaces — and collapsing first means the character
+    # budget below is spent on words rather than on layout someone typed.
+    text = " ".join((message.text or "").split())
+    if not text:
+        # An uncaptioned photo, and the one case where a preview says exactly
+        # what the contentless body would have. There is nothing to quote.
+        return line
+    if len(text) > PREVIEW_TEXT_LIMIT:
+        # Sliced on codepoints, so a cut can still land inside a grapheme
+        # cluster (a ZWJ family, a flag's regional-indicator pair, a skin-tone
+        # modifier) and leave a broken glyph before the ellipsis. Accepted:
+        # fixing it properly needs a grapheme-segmentation dependency for a
+        # cosmetic edge on a truncated lock-screen line, and the limit is
+        # generous enough that most messages never reach it.
+        text = text[:PREVIEW_TEXT_LIMIT].rstrip() + "…"
+    return f"{line}: {text}"
+
+
 def enqueue_message_pushes(message):
     """Queue a push for everyone who should be told about ``message``.
 
@@ -483,6 +594,20 @@ def enqueue_message_pushes(message):
     if not recipient_ids:
         return []
 
+    # NB: a queued row keeps pointing at the message it was created for, which
+    # means a burst is phrased, channelled and drop-checked from its *first*
+    # message rather than its newest. That is a real bug — a mid-burst @mention
+    # rides the messages channel instead of the mentions one — and it is
+    # deliberately **not** fixed here. Re-pointing the row looks like three
+    # lines and isn't: it can violate ``unique_message_push_per_recipient`` when
+    # two concurrent sends have each queued a row, it downgrades the reverse
+    # case (a mention *followed* by chatter loses the channel it had), it lets a
+    # later soft-delete bin a push that covered earlier undeleted messages, it
+    # strands ``delivered_tokens`` describing a different message, and — the
+    # one that rules it out from here entirely — an UPDATE takes row locks that
+    # ``send_pushes`` holds across its Expo HTTP calls, so a slow Expo would
+    # start blocking the message-send request this function is called from.
+    # See the promise at the call site. Tracked as its own issue.
     already_queued = set(
         PushOutbox.objects.filter(
             sent_at__isnull=True,

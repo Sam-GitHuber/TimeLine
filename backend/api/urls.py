@@ -153,6 +153,14 @@ urlpatterns = [
         views.ConversationMuteView.as_view(),
         name="conversation-mute",
     ),
+    # Phase 10b: what this thread's notification should say. Called by the iOS
+    # notification service extension with its own scoped credential, never by
+    # the app — see api/push_preview.py.
+    path(
+        "conversations/<int:pk>/push-preview/",
+        views.ConversationPushPreviewView.as_view(),
+        name="conversation-push-preview",
+    ),
     path(
         "messages/unread-count/",
         views.UnreadMessageCountView.as_view(),

@@ -349,6 +349,16 @@ REST_FRAMEWORK = {
         # it caps how fast one account can accumulate DevicePushToken rows by
         # POSTing distinct fabricated token values.
         "push_register": os.environ.get("DJANGO_THROTTLE_PUSH_REGISTER", "20/min"),
+        # fetch a notification preview (Phase 10b). Counted per *user*, not per
+        # device — the preview credential authenticates as the device's owner, so
+        # someone with a phone and a tablet shares one bucket. The real client is
+        # an iOS notification service extension woken once per message push, so
+        # a busy group chat is the shape to size for — bursty, but coalesced into
+        # one push per thread per drain. Generous enough never to silence a real
+        # phone, tight enough that the endpoint can't be used to walk
+        # conversation ids: it 404s on a thread you're not in, and this is what
+        # stops that 404 being a fast oracle.
+        "push_preview": os.environ.get("DJANGO_THROTTLE_PUSH_PREVIEW", "60/min"),
         # sign up (per-IP; the caller is anonymous). Registration creates a User
         # row and emails a verification code, so an unthrottled endpoint is both
         # an inbox-bomb aimed at whatever addresses are submitted (from our own

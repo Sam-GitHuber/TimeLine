@@ -1726,3 +1726,18 @@ class DevicePushTokenDeleteSerializer(serializers.Serializer):
     DELETE identifies a device without re-stating its platform."""
 
     expo_token = serializers.CharField(max_length=255)
+
+
+class DevicePushTokenPreviewSerializer(serializers.Serializer):
+    """Turn lock-screen previews on or off for one device (Phase 10b).
+
+    Deliberately **not** part of ``DevicePushTokenSerializer``. The app POSTs
+    that one on every launch, so a ``show_previews`` in the registration
+    upsert's ``defaults`` would reset the user's choice on every cold start —
+    and, since the serializer doesn't carry the field, reading it there would
+    raise on the launch path instead. Registration keeps its two fields; the
+    preference gets its own request, made only when someone changes it.
+    """
+
+    expo_token = serializers.CharField(max_length=255)
+    show_previews = serializers.BooleanField()
