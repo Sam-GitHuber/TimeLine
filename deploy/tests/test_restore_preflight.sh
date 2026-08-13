@@ -4,10 +4,13 @@
 # Run it from anywhere:  ./deploy/tests/test_restore_preflight.sh
 # CI runs it in the "deploy-scripts" job (.github/workflows/main.yml).
 #
-# HOW IT WORKS. restore.sh only restores when executed directly, so this harness
-# *sources* it (with CONFIG pointing at a temp env file, which is where the
-# script reads its settings) and calls `check_media_writable` on its own. That
-# keeps the tests away from Postgres, rclone and the real R2 remote entirely.
+# HOW IT WORKS, two ways. restore.sh only restores when executed directly, so
+# most cases *source* it (with CONFIG pointing at a temp env file, which is where
+# the script reads its settings) and call `check_media_writable` on their own.
+# The last few cases run the script for real with stub `docker` and `rclone`
+# commands first on PATH, because the thing they check is not a return value but
+# an ORDER — that nothing destructive is issued before the checks pass. Either
+# way the tests stay away from Postgres, rclone and the real R2 remote entirely.
 #
 # WHY THIS MATTERS. restore.sh syncs media LAST, after it has stopped the app and
 # run `pg_restore --clean`. Before this guard existed, a media directory the
@@ -61,6 +64,58 @@ run_guard() {
     check_media_writable "$1"
   ) >"$STATE/out.log" 2>&1
   printf '%s' "$?" >"$STATE/exit_code"
+}
+
+# Fake `docker` and `rclone` for the whole-script cases below. Deliberately
+# minimal — they only have to answer the three questions restore.sh asks before
+# it becomes destructive, and log every call so the tests can assert on what was
+# NOT issued.
+install_stubs() {
+  mkdir -p "$STATE/bin"
+  cat >"$STATE/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "docker $*" >>"$STUB_STATE/calls.log"
+# `compose exec -T db sh -c 'printf %s "$POSTGRES_DB"'` — the live DB name.
+case "$*" in
+  *"exec -T db"*) printf %s "timeline" ;;
+esac
+exit 0
+STUB
+  cat >"$STATE/bin/rclone" <<'STUB'
+#!/usr/bin/env bash
+echo "rclone $*" >>"$STUB_STATE/calls.log"
+case "${1:-}" in
+  lsf) echo "db-2026-08-01T03-30-05Z.dump" ;;
+  # pg_dump custom-format magic, which the preflight reads to prove the crypt
+  # remote really decrypts.
+  cat) printf 'PGDMP' ;;
+esac
+exit 0
+STUB
+  chmod +x "$STATE/bin/docker" "$STATE/bin/rclone"
+  : >"$STATE/calls.log"
+}
+
+# Run the real script end to end against the stubs. $@ = its arguments.
+# LIVE_MEDIA_DIR is pointed at the temp world so "restoring over production" can
+# be exercised without a production to restore over.
+run_script() {
+  (
+    export CONFIG="$STATE/restore.env"
+    export STUB_STATE="$STATE"
+    export LIVE_MEDIA_DIR="$STATE/data/media"
+    export PATH="$STATE/bin:$PATH"
+    # The confirmation phrase, so a regression that reordered the preflight below
+    # the app stop would actually get that far and be caught.
+    printf 'restore production\n' | "$SCRIPT" "$@"
+  ) >"$STATE/out.log" 2>&1
+  printf '%s' "$?" >"$STATE/exit_code"
+}
+
+assert_not_called() {
+  if grep -q -- "$1" "$STATE/calls.log" 2>/dev/null; then
+    fail "expected NOT to run: $1 (calls: $(tr '\n' '; ' <"$STATE/calls.log"))"
+  fi
 }
 
 fail() {
@@ -123,8 +178,10 @@ test_unwritable_dir_aborts() {
   run_guard "$STATE/data/media"
   assert_fails
   assert_output_contains "cannot write into the media target"
-  # The message has to carry the fix, because it's read mid-disaster.
-  assert_output_contains "sudo chown -R 1000:1000"
+  # The message has to carry the fix, because it's read mid-disaster — and the
+  # uid has to be the one actually running the restore, not a hardcoded 1000,
+  # since a scratch target has nothing to do with the backend container.
+  assert_output_contains "sudo chown -R $(id -u):$(id -g)"
   finish_case
 }
 
@@ -179,12 +236,127 @@ test_sourcing_does_not_restore() {
   finish_case
 }
 
+# A root-owned SUBdirectory is just as fatal as a root-owned top: `rclone sync`
+# writes deep inside media/. A probe at the top would pass this straight through,
+# which is how the guard could have shipped looking correct and still failed the
+# restore it exists to protect.
+test_foreign_owned_subdir_aborts() {
+  new_world "foreign_owned_subdir_aborts"
+  mkdir -p "$STATE/data/media/posts"
+  # Can't chown without root, so fake the same condition the other way: ask the
+  # guard to accept a tree while pretending we are a different uid.
+  (
+    export CONFIG="$STATE/restore.env"
+    # shellcheck source=../restore.sh
+    source "$SCRIPT"
+    # id -u is what the guard compares against; override it for this subshell so
+    # every path in the tree looks foreign-owned.
+    id() { if [[ "${1:-}" == "-u" ]]; then echo 999999; else command id "$@"; fi; }
+    check_media_writable "$STATE/data/media"
+  ) >"$STATE/out.log" 2>&1
+  printf '%s' "$?" >"$STATE/exit_code"
+  assert_fails
+  assert_output_contains "is not owned by"
+  finish_case
+}
+
+# --- whole-script ordering cases ---------------------------------------------
+
+# THE INVARIANT THIS PR EXISTS FOR. With the media target unwritable, the script
+# must refuse having issued NOTHING destructive — no `compose stop`, no
+# pg_restore. Move the preflight below the stop and this is the case that fails.
+test_refuses_before_stopping_the_app() {
+  new_world "refuses_before_stopping_the_app"
+  if (( IS_ROOT )); then skip_case "runs as root; permission bits don't apply"; return; fi
+  install_stubs
+  mkdir -p "$STATE/data/media"
+  chmod 500 "$STATE/data/media"
+  run_script
+  assert_fails
+  assert_output_contains "cannot write into the media target"
+  # ...and for the LIVE tree specifically, the explanation of why it's like that.
+  assert_output_contains "aligns this tree to its own uid"
+  assert_not_called "stop backend web"
+  assert_not_called "pg_restore"
+  finish_case
+}
+
+# --preflight stops after the checks: no stop, no restore, no media sync, exit 0.
+test_preflight_only_changes_nothing() {
+  new_world "preflight_only_changes_nothing"
+  install_stubs
+  mkdir -p "$STATE/data/media"
+  run_script --preflight
+  assert_ok
+  assert_output_contains "Preflight OK"
+  assert_not_called "stop backend web"
+  assert_not_called "pg_restore"
+  assert_not_called "rclone sync"
+  finish_case
+}
+
+# The flag has to win wherever it appears. `restore.sh latest --preflight` reads
+# as check-only to anyone typing it, and previously ran a real restore.
+test_preflight_flag_is_positional_independent() {
+  new_world "preflight_flag_is_positional_independent"
+  install_stubs
+  mkdir -p "$STATE/data/media"
+  run_script latest --preflight
+  assert_ok
+  assert_output_contains "Preflight OK"
+  assert_not_called "stop backend web"
+  finish_case
+}
+
+# An unknown flag must be refused, not silently taken as a dump name — a typo'd
+# --preflight would otherwise restore.
+test_unknown_flag_refused() {
+  new_world "unknown_flag_refused"
+  install_stubs
+  mkdir -p "$STATE/data/media"
+  run_script --prefligth
+  assert_fails
+  assert_output_contains "unknown option"
+  assert_not_called "stop backend web"
+  finish_case
+}
+
+# A dump that lists but doesn't decrypt (wrong crypt password, truncated upload)
+# must be caught here, not after pg_restore --clean has dropped the schema.
+test_undecryptable_dump_aborts() {
+  new_world "undecryptable_dump_aborts"
+  install_stubs
+  mkdir -p "$STATE/data/media"
+  # `rclone cat` returns bytes that aren't a pg_dump archive.
+  cat >"$STATE/bin/rclone" <<'STUB'
+#!/usr/bin/env bash
+echo "rclone $*" >>"$STUB_STATE/calls.log"
+case "${1:-}" in
+  lsf) echo "db-2026-08-01T03-30-05Z.dump" ;;
+  cat) printf '\x00\x01\x02\x03\x04' ;;
+esac
+exit 0
+STUB
+  chmod +x "$STATE/bin/rclone"
+  run_script
+  assert_fails
+  assert_output_contains "does not read back as a"
+  assert_not_called "stop backend web"
+  finish_case
+}
+
 test_writable_dir_passes
 test_unwritable_dir_aborts
 test_missing_dir_is_created
 test_uncreatable_dir_aborts
 test_probe_file_is_cleaned_up
+test_foreign_owned_subdir_aborts
 test_sourcing_does_not_restore
+test_refuses_before_stopping_the_app
+test_preflight_only_changes_nothing
+test_preflight_flag_is_positional_independent
+test_unknown_flag_refused
+test_undecryptable_dump_aborts
 
 echo
 SKIP_NOTE=""

@@ -442,7 +442,7 @@ and then re-execs itself under `setpriv` as `app`
   with `--build-arg APP_UID=…`, and the restore preflight will tell you loudly if
   that has been missed.
 
-**When running a one-off command that writes media, pass `-u app`.**
+**When running a one-off command that touches media, pass `-u app`.**
 `docker compose … exec` uses the *image's* default user, which is still root, so
 a root-written file would sit in the media tree until the next boot repairs it:
 
@@ -450,9 +450,12 @@ a root-written file would sit in the media tree until the next boot repairs it:
 docker compose -f docker-compose.prod.yml exec -u app backend python manage.py <cmd>
 ```
 
-Read-only commands and DB-only ones (`createsuperuser`, the shell one-liners
-below, the `send_pushes`/`flushexpiredtokens` timers) don't touch media and are
-fine as they are.
+That includes the account-deletion one-liner below — deleting a user sweeps their
+uploaded files off disk (`api/media_cleanup.py`). It happens to work as root
+today, since root can unlink anything, but the habit is what keeps the tree
+consistent. DB-only commands (`createsuperuser`, approving a sign-up, the
+`send_pushes` / `flushexpiredtokens` timers) never touch media and are fine as
+they are.
 
 ## Handling reports & deletion requests (moderation)
 
@@ -492,7 +495,7 @@ Members can flag content and delete their own accounts (Phase 7 legal gate).
   out), from inside the repo on the box:
 
   ```bash
-  docker compose -f docker-compose.prod.yml exec backend python manage.py shell -c \
+  docker compose -f docker-compose.prod.yml exec -u app backend python manage.py shell -c \
     "from api.views import delete_account; from django.contrib.auth import get_user_model as g; delete_account(g().objects.get(email='them@example.com'))"
   ```
 
