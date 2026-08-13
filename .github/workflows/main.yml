@@ -10,20 +10,24 @@
 # frontend PR only made the PR wait. Read backend.yml's header before changing
 # that arrangement — its skipping is why it isn't a required check.
 #
-# Also here: "deploy-scripts", a fast shell-level test of the box's autodeploy
-# decision (issue #104) — no Docker daemon involved, see the job.
+# Also here: "deploy-scripts", fast shell-level tests of the box's own scripts —
+# the autodeploy decision (issue #104), the backup preconditions and the restore
+# preflight (issue #197), all with no Docker daemon involved; and
+# "backend-image", which builds the production backend image and checks it boots
+# unprivileged (issue #199), the one thing no other job covers.
 #
 # The job names here ("frontend", "mobile", "semgrep") plus CodeQL's "Analyze
 # (…)" jobs are the required status checks for branch protection on main — all
 # must pass before a PR can merge.
 #
-# "deploy-scripts" is NOT yet in that branch-protection list — it's new. It runs
-# unfiltered on every PR, so unlike "backend" (see backend.yml) there's no
-# skipped-check hazard in requiring it; add it when convenient with:
+# "deploy-scripts" and "backend-image" are NOT yet in that branch-protection
+# list. Both run unfiltered on every PR, so unlike "backend" (see backend.yml)
+# there's no skipped-check hazard in requiring them; add them when convenient:
 #
 #   gh api repos/Sam-GitHuber/TimeLine/branches/main/protection/required_status_checks \
 #     -X PATCH -f 'contexts[]=frontend' -f 'contexts[]=mobile' \
 #     -f 'contexts[]=semgrep' -f 'contexts[]=deploy-scripts' \
+#     -f 'contexts[]=backend-image' \
 #     -f 'contexts[]=Analyze (javascript-typescript)' -f 'contexts[]=Analyze (python)'
 name: CI
 
@@ -98,10 +102,14 @@ jobs:
       - name: Run tests
         run: npm test
 
-  # deploy-scripts — the box's shell scripts. Only autodeploy.sh has tests so
-  # far: its redeploy decision is the piece that silently stopped deploying for
-  # six days (issue #104), and it's pure logic around a handful of `docker`
-  # calls, so a stub `docker` on PATH tests it properly with no daemon here.
+  # deploy-scripts — the box's shell scripts. Each suite covers the decision a
+  # script gets to make, not the work it does: autodeploy's redeploy decision
+  # (the piece that silently stopped deploying for six days, issue #104),
+  # backup's preconditions, and restore's preflight (the checks that must happen
+  # *before* it stops the app and overwrites the database, issue #197). All are
+  # pure logic around a handful of `docker`/`rclone` calls, so sourcing the real
+  # script — with a stub `docker` on PATH where one is needed — tests them
+  # properly with no daemon, no Postgres and no R2 here.
   # Seconds to run — no Docker, no services, no install step.
   deploy-scripts:
     runs-on: ubuntu-latest
@@ -114,6 +122,52 @@ jobs:
 
       - name: Test the backup preconditions
         run: ./deploy/tests/test_backup_guards.sh
+
+      - name: Test the restore preflight
+        run: ./deploy/tests/test_restore_preflight.sh
+
+  # backend-image — builds the production backend image and proves it starts the
+  # way it's supposed to. Nothing else in CI does: the image is otherwise built
+  # only by release-deploy.yml, straight to GHCR, from where the box pulls it —
+  # so a break in the user creation or the privilege drop (issue #199) would
+  # first show up as a crash-looping backend on the live site, and the release
+  # workflow would go green while it happened. The failure modes are real if
+  # unlikely: a future base image taking uid 1000, or dropping setpriv.
+  # ~1 min; no database needed, because the entrypoint drops privileges before
+  # it ever waits for Postgres.
+  backend-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Build the production backend image
+        run: docker build -t timeline-backend:ci ./backend
+
+      - name: The app user exists, and cannot rewrite the code it runs
+        run: |
+          test "$(docker run --rm timeline-backend:ci id -u app)" = "1000"
+          # /app stays root-owned on purpose — the half of #199 about a
+          # compromise editing the application in place.
+          docker run --rm -u app timeline-backend:ci \
+            sh -c 'if touch /app/pwned 2>/dev/null; then echo "app user can write /app"; exit 1; fi'
+          # ...but it must own the two directories it actually writes to.
+          docker run --rm -u app timeline-backend:ci \
+            sh -c 'touch /app/media/probe /app/staticfiles/probe'
+
+      - name: The prod entrypoint drops privileges and repairs media ownership
+        run: |
+          docker volume create ci-media
+          # Seed the volume the way the real box's media tree was: root-owned.
+          docker run --rm -v ci-media:/m timeline-backend:ci \
+            sh -c 'mkdir -p /m/posts && echo x > /m/posts/photo.jpg && chown -R 0:0 /m'
+          # No reachable Postgres, so it parks in the wait loop — which is AFTER
+          # the drop, so 20s is plenty to see whether it happened.
+          docker run --rm -v ci-media:/app/media -e POSTGRES_HOST=nowhere.invalid \
+            timeline-backend:ci bash -c 'timeout 20 bash /app/entrypoint.prod.sh' >boot.log 2>&1 || true
+          cat boot.log
+          grep -q 'Running as app (uid 1000).' boot.log
+          test "$(docker run --rm -v ci-media:/m timeline-backend:ci stat -c %u /m/posts/photo.jpg)" = "1000"
 
   # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
   # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't

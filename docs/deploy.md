@@ -61,6 +61,11 @@ checkout:
    `deploy/deploy.sh` and `deploy/backup.sh` both refuse to run if either is
    missing.
 
+   Create them root-owned and leave them alone: the backend container takes
+   ownership of `media` itself on every boot — see "The backend runs
+   unprivileged" below, which is also why the deploy user can write there
+   during a restore.
+
 4. **Tell the deploy scripts this is a single-disk host.** `deploy.sh`,
    `autodeploy.sh` and `backup.sh` all default to requiring `/srv/timeline` to be
    a real **mount point**, which suited the old two-disk home box. Lightsail has
@@ -412,6 +417,46 @@ just don't be surprised that `curl https://your-timeline.net/media/...` returns 
 without a valid session cookie. (Per-author connection gating is a later, Phase 11
 step; today any logged-in member can fetch a media file whose URL they already hold.)
 
+## The backend runs unprivileged (and owns the media tree)
+
+Gunicorn — and the migrations and `collectstatic` before it — run as the
+container's `app` user, **uid 1000**, not root (issue #199). The point is blast
+radius: a remote-code-execution bug in Django or any dependency then executes as
+a user that cannot rewrite the application code under `/app` (still root-owned),
+cannot chown its way out, and is a much longer step from owning the box. It
+doesn't prevent the RCE; it turns "attacker owns the host" into "attacker owns
+one process".
+
+The container still *starts* as root to do one thing the app user can't do for
+itself — `chown -R app:app /app/media`, i.e. `/srv/timeline/media` on the host —
+and then re-execs itself under `setpriv` as `app`
+(`backend/entrypoint.prod.sh`). Two consequences worth knowing:
+
+- **No manual step gates a release.** Every photo uploaded before this change
+  landed root-owned; the first boot of a release carrying it fixes the whole tree
+  and every boot after that keeps it fixed. Nothing to run on the box.
+- **uid 1000 is the deploy user (`ubuntu`).** That is the whole reason
+  `deploy/restore.sh` can write media back during a disaster recovery — it runs
+  as `ubuntu`, and the files it has to overwrite now belong to `ubuntu` (issue
+  #197). If the box's deploy user is ever not uid 1000, the image must be rebuilt
+  with `--build-arg APP_UID=…`, and the restore preflight will tell you loudly if
+  that has been missed.
+
+**When running a one-off command that touches media, pass `-u app`.**
+`docker compose … exec` uses the *image's* default user, which is still root, so
+a root-written file would sit in the media tree until the next boot repairs it:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -u app backend python manage.py <cmd>
+```
+
+That includes the account-deletion one-liner below — deleting a user sweeps their
+uploaded files off disk (`api/media_cleanup.py`). It happens to work as root
+today, since root can unlink anything, but the habit is what keeps the tree
+consistent. DB-only commands (`createsuperuser`, approving a sign-up, the
+`send_pushes` / `flushexpiredtokens` timers) never touch media and are fine as
+they are.
+
 ## Handling reports & deletion requests (moderation)
 
 Members can flag content and delete their own accounts (Phase 7 legal gate).
@@ -450,7 +495,7 @@ Members can flag content and delete their own accounts (Phase 7 legal gate).
   out), from inside the repo on the box:
 
   ```bash
-  docker compose -f docker-compose.prod.yml exec backend python manage.py shell -c \
+  docker compose -f docker-compose.prod.yml exec -u app backend python manage.py shell -c \
     "from api.views import delete_account; from django.contrib.auth import get_user_model as g; delete_account(g().objects.get(email='them@example.com'))"
   ```
 
@@ -501,8 +546,9 @@ A quick end-to-end check that the bind really works — write through the backen
 container and see it land on the host:
 
 ```bash
-docker exec timeline-prod-backend-1 sh -c 'echo probe > /app/media/probe.txt'
-sudo ls -l /srv/timeline/media/probe.txt && docker exec timeline-prod-backend-1 rm /app/media/probe.txt
+docker exec -u app timeline-prod-backend-1 sh -c 'echo probe > /app/media/probe.txt'
+# owner should be 1000 (the deploy user) — that's what makes a restore writable
+sudo ls -ln /srv/timeline/media/probe.txt && docker exec -u app timeline-prod-backend-1 rm /app/media/probe.txt
 ```
 
 ## Reboot-survival
@@ -842,6 +888,13 @@ so a future change doesn't quietly undo the reasoning.
   The allow-list was written for the home LAN. On a cloud host **nothing matches
   it**, so `/admin/` now 403s universally and administration moved to `manage.py`
   over SSH — a strengthening, kept on purpose rather than worked around.
+- **The backend process is unprivileged, and that is also what makes the restore
+  work.** Gunicorn runs as uid 1000, matching the deploy user, after a root-only
+  bootstrap step that aligns the media tree's ownership (see "The backend runs
+  unprivileged"). It was one mistake with two faces: root-written media was both
+  the security exposure (#199) and the reason disaster recovery couldn't write
+  media back (#197). Caddy stays root because the official image needs it to bind
+  80/443, and it only ever reads media, never writes it.
 - **Uptime = an on-box active probe + a dead-man's switch.** healthchecks.io is
   *passive* (it waits for pings, it does not probe your URL), so the active half
   lives on our side: a 5-min timer curls `GET /api/healthz/` (public, runs

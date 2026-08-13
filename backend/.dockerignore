@@ -4,3 +4,13 @@ __pycache__/
 db.sqlite3
 .env
 .git
+
+# Runtime data, never build input. `media/` is a developer's real uploaded
+# photos (gitignored for that reason) — `COPY . .` would bake them into every
+# locally built image, and their subdirectories would land root-owned inside it,
+# past the chown in the Dockerfile. In production both directories come from
+# elsewhere anyway: media from the bind-mounted volume, staticfiles from
+# `collectstatic` at boot. In dev the bind mount supplies them, so excluding
+# them here changes nothing there.
+media/
+staticfiles/

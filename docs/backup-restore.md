@@ -209,7 +209,29 @@ rm -rf /srv/timeline/backups/restore-timeline_restore_test-media
 > DB path — re-run it once real photos exist so the media encrypt→R2→restore
 > round-trip is exercised with actual files (the checksum check above is how).
 
-Re-run this test occasionally (e.g. monthly) — backups rot silently otherwise.
+### Then check the REAL target, not just the scratch one
+
+The test above deliberately restores into a scratch directory the deploy user
+owns, so it can pass forever while the only path that matters — writing into
+`/srv/timeline/media` — is broken. That is not hypothetical: it *was* broken,
+because the backend container wrote every photo there as root (issues #197,
+#199), and a real recovery would have discovered it after stopping the app and
+overwriting the database.
+
+So finish the rehearsal by running the restore's own preflight against the live
+targets. It runs every check the real thing runs before it becomes destructive —
+media target writable, dump present off-site — and then stops, without touching
+the app, the database or media:
+
+```bash
+./deploy/restore.sh --preflight
+```
+
+Expect `Preflight OK`. If it refuses, it prints why and the fix; sort that out
+now rather than mid-incident. **A green scratch restore plus a green preflight is
+the pair that means "the restore works"** — either alone doesn't.
+
+Re-run both occasionally (e.g. monthly) — backups rot silently otherwise.
 
 ---
 
@@ -224,6 +246,12 @@ then brings it back up automatically once the restore succeeds. `db` stays up
 (the restore runs through it). If the restore aborts partway, the app is left
 stopped on purpose — the script prints the `docker compose … up -d` command to
 bring it back once you've resolved the problem.
+
+Before any of that it runs a **preflight** — it proves it can write the media
+target and that the dump is really off-site *before* it stops anything. A refusal
+at that stage has cost you nothing; that ordering is the whole point (issue
+#197). You can run the preflight on its own at any time with
+`./deploy/restore.sh --preflight`.
 
 On a rebuilt box, first do the normal deploy setup (`docs/deploy.md`) so the
 stack + rclone config exist, then:
