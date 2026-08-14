@@ -11,6 +11,10 @@ import { render, screen } from '@testing-library/react-native';
 import { Text } from 'react-native';
 
 import { AuthProvider, useAuth } from '@/auth';
+import {
+  getPreviewCredential,
+  savePreviewCredential,
+} from '@/previewCredential';
 import { getAccessToken, saveTokens } from '@/tokens';
 
 const mockFetch = jest.fn();
@@ -72,6 +76,36 @@ it('signs out and wipes tokens when the stored token is rejected', async () => {
 
   expect(await screen.findByText('signedOut:none')).toBeTruthy();
   expect(await getAccessToken()).toBeNull();
+});
+
+it("takes this device's push secrets with them when the token is rejected", async () => {
+  // 🔒 The **third** teardown path, and the one that doesn't go through
+  // `push.ts`. `signOut` calls `unregisterPush`; the session-expired handler
+  // calls `forgetLocalPushToken`; but a refresh that *succeeds* followed by a
+  // replay that 401s never fires the expiry handler at all, and lands in the
+  // cold-start catch instead. An account deactivated while the app was closed
+  // looks exactly like that, and `is_active=False` is an ordinary state in this
+  // product because sign-ups are admin-gated.
+  //
+  // Left unhandled, the phone reaches the login screen still holding a preview
+  // credential whose server row nothing has deleted — so the notification
+  // extension goes on fetching and rendering that person's messages on the lock
+  // screen of a signed-out device.
+  await saveTokens({ access: 'stale', refresh: 'refresh-1' });
+  await savePreviewCredential('a-live-preview-credential');
+  mockFetch.mockImplementation(async (url: string) => {
+    if (url.endsWith('/api/auth/mobile/refresh/')) {
+      return jsonResponse({ access: 'access-2', refresh: 'refresh-2' });
+    }
+    // The replay carries a brand-new access token and is still refused.
+    return jsonResponse({ detail: 'User is inactive.' }, 401);
+  });
+
+  await renderProbe();
+
+  expect(await screen.findByText('signedOut:none')).toBeTruthy();
+  expect(await getAccessToken()).toBeNull();
+  expect(await getPreviewCredential()).toBeNull();
 });
 
 it('keeps the tokens when the cold-start check fails on a network error', async () => {

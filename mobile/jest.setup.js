@@ -3,20 +3,136 @@
  *
  * `expo-secure-store` is a native module — it calls into the iOS Keychain, which
  * doesn't exist under Node. Every test would fail at import without a stand-in,
- * so we swap in an in-memory map with the same four-method surface. This is the
- * one place tokens are faked; `src/tokens.ts` is otherwise exercised for real.
+ * so we swap in an in-memory keychain with the same surface. This is the one
+ * place tokens are faked; `src/tokens.ts` is otherwise exercised for real.
+ *
+ * **It models the options, not just the key** (Phase 10b, M2). It used to be a
+ * flat `Map` keyed on `key` alone, which discarded the options argument
+ * entirely — so a test that a value is stored with the right service, access
+ * group or accessibility was structurally incapable of failing, and so was a
+ * test that a delete reaches the copy in a shared group. Those are precisely
+ * the properties the notification service extension depends on, and the ones
+ * whose failure is invisible from inside the app.
+ *
+ * Five behaviours of the real thing are reproduced, each because getting it
+ * wrong is a shipped bug (`SecureStoreModule.swift` for all five):
+ *
+ *   1. **The service is part of the identity**, and defaults to expo's `"app"`.
+ *      An item stored under a pinned service is not found by a default read.
+ *   2. **The stored service carries a `:no-auth` / `:auth` suffix**, chosen by
+ *      `requireAuthentication`, and a read falls back through no-auth → auth →
+ *      the bare "legacy" service. That suffix is part of the literal M3's Swift
+ *      hardcodes, so it has to be a thing a test can see: flip the flag and
+ *      every item moves service, the extension gets `errSecItemNotFound` on
+ *      every push on every device, and nothing in the app notices.
+ *   3. **A read or delete with no access group matches across every group**,
+ *      the way `SecItemCopyMatching`/`SecItemDelete` do when
+ *      `kSecAttrAccessGroup` is absent. This is the behaviour that made the
+ *      plan's original "write it into the group, then delete the original"
+ *      migration delete the copy it had just written.
+ *   4. **A write with no access group lands in the app's own group**, rather
+ *      than in some group-less limbo — an add always picks a group.
+ *   5. **Re-writing an existing item changes its value and nothing else.** The
+ *      real `set` is a `SecItemAdd` that falls back to a `SecItemUpdate` of
+ *      `kSecValueData` alone, so accessibility is stamped once, at first write,
+ *      and no later save can correct it. `savePreviewCredential` deletes first
+ *      because of this, and this is what makes that provable.
  */
 
 jest.mock('expo-secure-store', () => {
+  // The group an add picks when the caller names none: on device, the app's own
+  // (`$(AppIdentifierPrefix)net.yourtimeline.app`). The literal doesn't matter —
+  // that there is exactly one of it, and that a group-less query ignores it,
+  // does.
+  const DEFAULT_GROUP = 'app-id-group';
+  const DEFAULT_SERVICE = 'app';
+  const WHEN_UNLOCKED = 'whenUnlocked';
+
+  // (service, accessGroup, key) -> { value, accessible, ... }. Keyed through
+  // JSON rather than a joined string, so a service or key containing the
+  // separator can't collide with a different triple.
   const store = new Map();
+  const idOf = (service, group, key) => JSON.stringify([service, group, key]);
+
+  const baseService = (options = {}) => options.keychainService ?? DEFAULT_SERVICE;
+  /** `null` means "any", for a query. Only `set` resolves it to a real group. */
+  const groupOf = (options = {}) => options.accessGroup ?? null;
+
+  // (2) The three service aliases an item can be stored under, newest first —
+  // the order the real `get` tries them in.
+  const aliases = (options = {}) => {
+    const base = baseService(options);
+    return [`${base}:no-auth`, `${base}:auth`, base];
+  };
+  const writeAlias = (options = {}) =>
+    `${baseService(options)}:${options.requireAuthentication ? 'auth' : 'no-auth'}`;
+
+  /** Every stored entry a query for (service, key) would match. */
+  const matches = (key, service, group) =>
+    [...store.values()].filter(
+      (entry) =>
+        entry.key === key &&
+        entry.service === service &&
+        (group === null || entry.group === group)
+    );
+
+  const remove = (entries) => {
+    for (const entry of entries) {
+      store.delete(idOf(entry.service, entry.group, entry.key));
+    }
+  };
+
   return {
-    __store: store,
-    setItemAsync: jest.fn(async (key, value) => {
-      store.set(key, value);
+    /** Empty the keychain between tests. */
+    __reset: () => store.clear(),
+    /** Everything stored, for assertions about how it was stored. */
+    __entries: () => [...store.values()],
+
+    AFTER_FIRST_UNLOCK: 'afterFirstUnlock',
+    AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY: 'afterFirstUnlockThisDeviceOnly',
+    WHEN_UNLOCKED,
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'whenUnlockedThisDeviceOnly',
+    WHEN_PASSCODE_SET_THIS_DEVICE_ONLY: 'whenPasscodeSetThisDeviceOnly',
+
+    setItemAsync: jest.fn(async (key, value, options = {}) => {
+      const service = writeAlias(options);
+      const group = options.accessGroup ?? DEFAULT_GROUP;
+      const id = idOf(service, group, key);
+      const existing = store.get(id);
+      if (existing) {
+        // (5) An update writes the data and leaves every attribute alone.
+        existing.value = value;
+        return;
+      }
+      store.set(id, {
+        key,
+        service,
+        group,
+        value,
+        accessible: options.keychainAccessible ?? WHEN_UNLOCKED,
+      });
+      // A successful add sweeps the other two aliases, so a read can't find an
+      // older copy of the same key first.
+      remove(
+        aliases(options)
+          .filter((alias) => alias !== service)
+          .flatMap((alias) => matches(key, alias, groupOf(options)))
+      );
     }),
-    getItemAsync: jest.fn(async (key) => store.get(key) ?? null),
-    deleteItemAsync: jest.fn(async (key) => {
-      store.delete(key);
+
+    getItemAsync: jest.fn(async (key, options = {}) => {
+      for (const service of aliases(options)) {
+        const [first] = matches(key, service, groupOf(options));
+        if (first) return first.value;
+      }
+      return null;
+    }),
+
+    deleteItemAsync: jest.fn(async (key, options = {}) => {
+      // (3) With no group named, this sweeps every group — all of them, not the
+      // first. That is the whole hazard, so the mock must delete plurally. All
+      // three aliases go, as the real one does.
+      remove(aliases(options).flatMap((alias) => matches(key, alias, groupOf(options))));
     }),
   };
 });
@@ -379,7 +495,7 @@ jest.mock('react-native-keyboard-controller', () =>
 // module-level and would otherwise carry into the next test in the file.
 beforeEach(() => {
   const SecureStore = require('expo-secure-store');
-  SecureStore.__store.clear();
+  SecureStore.__reset();
   require('@react-native-community/datetimepicker').__resetPicker();
   jest.clearAllMocks();
 });

@@ -127,7 +127,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // the two is the status a lost connection carries: `0`, meaning we never
         // asked. Never loosen this to the class (#245).
         const rejected = err instanceof ApiError && err.status === 401;
-        if (rejected) await clearTokens();
+        // 🔒 **The third teardown path, and the one that's easy to miss.** The
+        // other two go through `push.ts` — `signOut` calls `unregisterPush`,
+        // and the expiry handler above calls `forgetLocalPushToken` — but this
+        // one reaches `clearTokens` directly, because `request` only fires the
+        // expiry handler when the *refresh* is refused. A refresh that succeeds
+        // followed by a replay that 401s lands here instead, which is what an
+        // account deactivated while the app was closed looks like (the sign-up
+        // gate makes `is_active=False` an ordinary state in this product).
+        //
+        // Without this the device keeps both push secrets after being sent back
+        // to the login screen: a stale Expo token, and — since 10b — a preview
+        // credential whose server row `forgetLocalPushToken` deliberately
+        // leaves alive. The extension would go on fetching and rendering that
+        // person's messages on the lock screen of a signed-out phone. Local
+        // only, like the expiry path and for the same reason: the session is
+        // precisely what has just been refused, so a server call would 401.
+        if (rejected) {
+          await forgetLocalPushToken();
+          await clearTokens();
+        }
         if (cancelled) return;
         setUser(null);
         // Offline with good tokens still lands on the login screen, because v1

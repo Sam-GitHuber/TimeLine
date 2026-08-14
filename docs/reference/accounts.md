@@ -400,6 +400,26 @@ touching this endpoint:
   use the account's tokens, and for an honest account of what a leaked one can
   reach.
 
+  **On the device it lives in `mobile/src/previewCredential.ts`**, not in
+  `tokens.ts` with the session. It is stored under a keychain service this repo
+  pins (rather than expo's default, which a package upgrade could change) and
+  with `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`, because an extension woken by a
+  push has to read it while the phone is locked — SecureStore's default,
+  `WHEN_UNLOCKED`, would work on every unlocked dev handset and never on a lock
+  screen. Keeping it out of `tokens.ts` is what confines that at-rest downgrade
+  to a read-only preview credential: the access and refresh tokens keep the
+  stricter property they have always had. It is deleted wherever this device's
+  registration is dropped: sign-out, session expiry, and a cold start whose
+  token the server refuses.
+
+  **Only sign-out revokes it server-side**, though, and the asymmetry is worth
+  knowing. Sign-out DELETEs the row, which takes the hash with it. The other two
+  paths deliberately leave the row alone — the unregister endpoint is
+  authenticated, and by then the session is precisely what has been refused — so
+  the hash stays valid until the next registration rotates it. What they remove
+  is the plaintext, which is the only copy that could be used; there is no way
+  for a signed-out device to reach the endpoint without it.
+
 Push itself is documented in [notifications.md](notifications.md); the app that
 registers the token is in [mobile-app.md](mobile-app.md).
 

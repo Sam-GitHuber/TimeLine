@@ -12,6 +12,7 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 import { api } from '@/api';
+import { getPreviewCredential } from '@/previewCredential';
 import {
   CHANNEL_IDS,
   conversationIdFromUrl,
@@ -55,6 +56,17 @@ jest.mock('expo-constants', () => ({
 const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 const TOKEN = 'ExponentPushToken[test]';
 const STORAGE_KEY = 'timeline.expoPushToken';
+/** What `POST /push-tokens/` answers with since Phase 10b. */
+const PREVIEW = 'preview-credential';
+
+/**
+ * One turn of the event loop as a **macrotask**, so every microtask an
+ * unawaited registration is sitting on has drained by the time it returns —
+ * which is what lets these tests say "it got exactly this far" rather than
+ * hoping. Module scope, because two describes want it and the
+ * macrotask-not-microtask subtlety is the sort that gets fixed in one copy.
+ */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   mockIsDevice = true;
@@ -65,7 +77,9 @@ beforeEach(() => {
   mockNotifications.getExpoPushTokenAsync.mockResolvedValue({
     data: TOKEN,
   } as never);
-  jest.spyOn(api, 'registerPushToken').mockResolvedValue(undefined as never);
+  jest
+    .spyOn(api, 'registerPushToken')
+    .mockResolvedValue({ preview_token: PREVIEW } as never);
   jest.spyOn(api, 'unregisterPushToken').mockResolvedValue(undefined as never);
 });
 
@@ -203,14 +217,6 @@ describe('unregisterPush', () => {
 });
 
 describe('a session ending while a registration is in flight (#219)', () => {
-  /**
-   * One turn of the event loop as a **macrotask**, so every microtask an
-   * unawaited registration is sitting on has drained by the time it returns —
-   * which is what lets these tests say "it got exactly this far" rather than
-   * hoping.
-   */
-  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-
   /** A promise a test resolves by hand, to hold a call open. */
   function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
     let resolve!: (value: T) => void;
@@ -354,6 +360,109 @@ describe('a session ending while a registration is in flight (#219)', () => {
 
     landing.resolve();
     await registration;
+  });
+});
+
+describe('the preview credential (Phase 10b)', () => {
+  it('is stored when the registration mints one', async () => {
+    await registerForPush();
+
+    expect(await getPreviewCredential()).toBe(PREVIEW);
+  });
+
+  it('still registers against a backend that mints none', async () => {
+    // The endpoint answered 204 before 10b, and `request` resolves an empty
+    // body as null. A LAN dev box or a staging box mid-release is exactly that,
+    // and destructuring null here would throw into `runRegistration`'s catch —
+    // turning "no previews" into "push never registers at all", on the login
+    // path, silently.
+    jest.spyOn(api, 'registerPushToken').mockResolvedValue(null as never);
+
+    expect(await registerForPush()).toBe(TOKEN);
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBe(TOKEN);
+    expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('goes when this device is unregistered', async () => {
+    await registerForPush();
+
+    await unregisterPush();
+
+    // The server row it authenticates against is deleted by the same call, so
+    // this copy is already dead — but a live-looking credential left on a phone
+    // that has been handed on is not something to leave to the server's memory.
+    expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('goes when the session expires, even though the server row survives', async () => {
+    // `forgetLocalPushToken` deliberately leaves the row alone: an expiry
+    // doesn't change whose phone this is, and the unregister endpoint would
+    // 401 anyway. A credential is a different bargain from a push token,
+    // though — it reads the newest inbound line of every thread, with no
+    // further authentication — so it does not get to stay.
+    await registerForPush();
+
+    await forgetLocalPushToken();
+
+    expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('failing to store it is not a failed registration', async () => {
+    // By this point the server row exists and the Expo token is stored, so a
+    // keychain refusal here loses previews and nothing else. Reporting `null`
+    // would call a registration that wholly succeeded a failure — and because
+    // the save deletes before writing, it also leaves the device with no
+    // credential rather than a stale one, which is the right end state.
+    const setItem = SecureStore.setItemAsync as jest.Mock;
+    const passthrough = setItem.getMockImplementation()!;
+    setItem
+      // The Expo token, written before the POST, stores normally.
+      .mockImplementationOnce(passthrough)
+      .mockImplementationOnce(async () => {
+        throw new Error('the keystore refused');
+      });
+
+    expect(await registerForPush()).toBe(TOKEN);
+    expect(api.registerPushToken).toHaveBeenCalledWith(TOKEN);
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBe(TOKEN);
+    expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('is cleared even when dropping the Expo token fails', async () => {
+    // Android's `deleteValueWithKeyAsync` rethrows a failure as a
+    // `DeleteException`, unlike iOS, which ignores `SecItemDelete`'s status. In
+    // sequence, a hiccup on the first delete would skip the second — leaving
+    // the *more* sensitive of the two secrets behind because the less sensitive
+    // one failed — and, from inside `unregisterPush`'s `finally`, would reject
+    // out past the catch that exists to keep a network failure from trapping
+    // someone in a logged-in app.
+    await registerForPush();
+    (SecureStore.deleteItemAsync as jest.Mock).mockImplementationOnce(
+      async () => {
+        throw new Error('the keystore refused');
+      }
+    );
+
+    await expect(unregisterPush()).resolves.toBeUndefined();
+
+    expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('is not written by a registration whose session ended mid-POST', async () => {
+    // The Expo token is written *before* the POST on purpose, and this one
+    // isn't, for the opposite reason: writing it here would put a working
+    // read-credential onto a phone nobody is signed in on, immediately after
+    // the teardown that was meant to clear it. Dropping it costs nothing —
+    // the next registration mints another.
+    jest.spyOn(api, 'registerPushToken').mockImplementation(async () => {
+      await forgetLocalPushToken();
+      return { preview_token: PREVIEW } as never;
+    });
+
+    await registerForPush();
+    await flush();
+
+    expect(await getPreviewCredential()).toBeNull();
   });
 });
 

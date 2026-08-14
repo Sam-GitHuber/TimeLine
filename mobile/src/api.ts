@@ -49,6 +49,7 @@ import type {
   PollOptionPayload,
   Post,
   ProfileUser,
+  PushRegistration,
   ReactionSummary,
   ReactorGroup,
   RefreshResponse,
@@ -1834,9 +1835,20 @@ export const api = {
    *
    * Upserts server-side on the Expo token, so calling it on every launch is
    * both safe and wanted — Expo can rotate a device's token.
+   *
+   * Answers this device's **preview credential** (Phase 10b) — the response is
+   * the only place its plaintext ever appears, so the caller must hand it
+   * straight to `savePreviewCredential` and keep it nowhere else.
+   *
+   * **`| null` is not defensive typing.** Before 10b this endpoint answered
+   * `204`, and `request` resolves an empty body as `null`. A backend that
+   * hasn't been deployed yet — a LAN dev box, a staging box mid-release — still
+   * registers the device perfectly well, and destructuring `null` at the call
+   * site would throw where `runRegistration` swallows it — turning "no
+   * previews" into "push never registers at all", on the login path, silently.
    */
   registerPushToken: (expoToken: string) =>
-    request<void>('/api/push-tokens/', {
+    request<PushRegistration | null>('/api/push-tokens/', {
       method: 'POST',
       // Platform.OS rather than a literal 'ios': the backend already accepts
       // both values, so Phase 10 (Android) needs no change here.

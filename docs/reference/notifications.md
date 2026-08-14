@@ -581,15 +581,20 @@ extension **fetch** the body over TLS from our own server;
 [Phase 9c](../phases/phase-9c-e2e-encryption.md) later swaps that fetch for a
 local **decrypt**, once there's a ciphertext to decrypt.
 
-### Lock-screen previews (Phase 10b, backend landed)
+### Lock-screen previews (Phase 10b, backend + keychain landed)
 
 **The rule above is unchanged and stays unchanged: no push carries message
 content.** A test asserts that against the exact bytes sent to Expo. What 10b
 adds is a second, private channel for the words — straight from us to the
 device over TLS, on the one leg of the journey with no third party on it.
 
-**M1 (the backend) has landed. The extension that consumes it has not**, so
-nothing renders a preview yet and no client can turn one on.
+**The backend and the device-side credential have landed. The extension that
+consumes them has not**, so nothing renders a preview yet and no client can turn
+one on. What exists today: the endpoint, the per-device flag, `mutableContent`
+on the wire for opted-in iOS devices, and a credential sitting in the app's
+keychain in the place and with the properties an extension can read
+(`mobile/src/previewCredential.ts`, and
+[accounts.md](accounts.md#push-device-registration) for why those properties).
 
 Two things did change about what leaves the box, and they are small but real:
 

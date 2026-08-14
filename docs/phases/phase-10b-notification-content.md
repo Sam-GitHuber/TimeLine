@@ -1,14 +1,16 @@
 # Phase 10b — Notification content, without leaking it
 
-**Status: IN PROGRESS — M1 done.** Fleshed 2026-07-30 and confirmed with the
+**Status: IN PROGRESS — M1 and M2 done.** Fleshed 2026-07-30 and confirmed with the
 user; **revised the same day** after a source-checked review of the plan itself.
 The review found that two of the mechanisms this phase leans on don't behave the
 way the first draft assumed — see *Corrections from review* at the end for what
 changed and why, so the reasoning isn't lost.
 
 **The open decision is settled (2026-08-13): Option B**, a scoped credential.
-Its shape changed in the building — see *Notes / decisions log*. M1 (backend) is
-merged; M2 (keychain) is next.
+Its shape changed in the building — see *Notes / decisions log*. M1 (backend)
+and M2 (keychain) are built; **M3 (the iOS extension) is next**, and it is where
+everything M2 wrote is finally read. As always, git is the authority on what has
+actually merged — this file says what has been *done*, not what is on `main`.
 
 **Why the odd number.** It follows Phase 10 (Android) and comes *before* Phase 9c
 (E2E), which is scheduled after Android. The numbering is chronological, not a
@@ -97,7 +99,10 @@ roughly one endpoint and the ~40 lines of Swift that call it.
    the extension had a bad day. This rule constrains the Android design (M4) and
    outranks it.
 7. **An upgrading tester stays logged in.** Verified on a build installed *over*
-   the current TestFlight build, not a clean install.
+   the current TestFlight build, not a clean install. *(M2 made this hold by
+   construction — no existing keychain item changes — but it is still checked on
+   the first release that ships the extension, because M3 adds an entitlement
+   and a second signed target.)*
 8. `notifications.md` and `messaging.md` describe the new shape; the privacy
    policy gains a push section (it has none today).
 9. Phase 9c's milestone 7 is rewritten to "swap fetch for decrypt", with this
@@ -403,7 +408,15 @@ conversation id, and the shared body helper is
   on message pushes**; `categoryId` is unchanged for every device
   (`tests.py:7879` must still pass untouched).
 
-### M2 — Keychain sharing, and its migration
+### M2 — Keychain sharing, and its migration ✅ **Done**
+
+Built to the three warnings below, but **not to the shape they assumed**: there
+is no migration and no `accessGroup`, because Option B's credential is a new key
+no shipped build has ever written. See the decisions log for the full reasoning
+— it is the second time in this phase that choosing B has made a piece of the
+plan unnecessary rather than merely different. What survived intact is warning
+1 (accessibility), warning 2 (which is why the save deletes first), and the
+insistence on a test double that can see any of it.
 
 `expo-secure-store` supports an **`accessGroup`** option, which is what lets the
 NSE read the credential written by `src/tokens.ts`. Three things about this are
@@ -503,6 +516,22 @@ project: the extension must come from a **config plugin**, never a hand-edit of
 Xcode. `expo-notifications` does not ship an NSE; the well-trodden route is a
 plugin that copies a Swift file into a new target and signs it.
 
+- **The extension must declare the app's keychain access group** — the half of
+  M2's entitlement work that moved here, because it is the target that needs it.
+  The extension's own App ID gives it
+  `$(AppIdentifierPrefix)net.yourtimeline.app.NotificationService`, which is not
+  where the credential is; it must list
+  `keychain-access-groups: ["$(AppIdentifierPrefix)net.yourtimeline.app"]` in
+  the plugin's entitlements **and** in the EAS `appExtensions[].entitlements`,
+  so the provisioning profile carries it. The Xcode variable is expanded in the
+  plist, so no Team ID literal is needed anywhere.
+  - Get it wrong and nothing fails at build time: `SecItemCopyMatching` returns
+    `errSecMissingEntitlement` (-34018) forever, the fallback discipline hides
+    it, and DoD 1 just never passes. It is indistinguishable from the wrong-query
+    failure below, so change one thing at a time.
+  - The **app** target needs no entitlement. Adding one would make its first
+    entry the default access group for every `SecItemAdd` the app makes,
+    including `tokens.ts`'s — see the M2 decisions log.
 - Choose between an existing community plugin and a small local one in
   `mobile/plugins/`. **Lean local**: this is ~100 lines of well-documented
   plugin API, and an unmaintained third-party plugin in the build path is a
@@ -625,15 +654,16 @@ notification, or post a replacement, in the states we care about?**
   independently shippable.
 - **Two processes and one rotating refresh token.** Mitigated by the
   never-refresh rule. Option B removes the hazard by construction.
-- **The keychain migration logs people out.** Mitigated by never deleting during
-  migration, by failing towards "stay logged in", and by a test double that can
-  actually see the bug. Test on a build upgraded from the current TestFlight
-  build, not a clean install — a clean install cannot reproduce this.
-- **A tester skips the migration release.** "One release later that path can go"
-  assumes everyone passes through the migrating build, and there is **no
-  minimum-version or forced-update mechanism anywhere in this repo**. Removing
-  the migration would silently log out anyone who jumped it. Keep it until such
-  a mechanism exists, or add one first.
+- ~~**The keychain migration logs people out.**~~ **Gone** (M2). There is no
+  migration: the credential is a new key, and no existing keychain item changes
+  in any way. What was mitigated is now absent, which is the better outcome.
+  The one thing to keep from it is the test double, which was rewritten to see
+  keychain options and is what any future migration would be judged by.
+- ~~**A tester skips the migration release.**~~ **Gone with it** (M2) — and the
+  underlying observation stands and should outlive this phase: there is **no
+  minimum-version or forced-update mechanism anywhere in this repo**, so any
+  future change that assumes every install passed through a particular build is
+  unsound until one exists.
 - **A config plugin breaks the iOS build.** It sits on the path of every
   release. Mitigated by keeping the plugin local and minimal, and by shipping
   through TestFlight internal first — `docs/mobile-release.md` is required
@@ -768,6 +798,161 @@ endpoint is conversation-scoped.
   its test pinned nothing.
 - **Registration kept `update_or_create`**, which resolves the create/create
   race on the unique `expo_token` rather than 500ing on it.
+
+### M2, 2026-08-14
+
+**There is no migration, because there is nothing to migrate.** M2's whole
+middle section — read without the group, write with the group, never delete,
+and the warning that the obvious version logs every upgrading tester out — was
+written for **Option A**, where the item the extension reads is the access token
+the app has already been storing since Phase 9. Under Option B the item is a
+credential no shipped build has ever written, under a key nothing has ever used.
+The first write on every device is a fresh add with the right properties, so
+there is no old copy to move and no delete to get wrong.
+
+That collapses a risk rather than mitigating one. *"The keychain migration logs
+people out"* and *"a tester skips the migration release"* both come off the
+Risks list: no existing keychain item changes in any way, so DoD 7 (an upgrading
+tester stays logged in) holds by construction. It still wants confirming on a
+real upgrade install, but that check now belongs to M3, which is the first
+release with anything to see.
+
+**No `accessGroup` is passed, and no entitlement is added to the app target.**
+The credential lands in the app's own keychain access group —
+`$(AppIdentifierPrefix)net.yourtimeline.app`, where everything this app stores
+already lands — and M3's extension declares *that* group in its own
+entitlements. The separate `…shared` group the plan imagined was rejected for
+two reasons, either sufficient:
+
+1. **It needs the literal ten-character Team ID at runtime.**
+   `$(AppIdentifierPrefix)` is expanded by Xcode inside an entitlements plist
+   and means nothing to `kSecAttrAccessGroup` at runtime, so the group string
+   would have to be compiled into the JS (via `ios.appleTeamId`, which
+   `app.json` doesn't have). A wrong or stale literal there fails the way this
+   milestone's warnings say everything fails: no build error, no runtime
+   complaint, `errSecMissingEntitlement` forever, and previews that just never
+   work.
+2. **Adding `keychain-access-groups` to the app target changes where every
+   existing write goes.** The first entry in that array becomes the default
+   access group for any `SecItemAdd` that doesn't name one — which is every call
+   `tokens.ts` makes. Get the ordering wrong and the session's items move house
+   and everyone is logged out: the exact failure M2 exists to avoid, arrived at
+   from a direction the plan didn't consider. Not adding the entitlement at all
+   is unambiguously safe, and the app has implicit access to its own group
+   regardless.
+
+**The cost, stated plainly:** the extension is *entitled* to read the account
+tokens, since they share that group. It never queries them, it is forty lines of
+our own Swift, and the boundary between an app and its own extension is not a
+security boundary against anyone who can run code in either. What Option B
+actually buys is untouched: the credential the extension **uses** is scoped to
+one read-only endpoint, doesn't rotate, and is revoked by a row delete. If we
+ever want the stronger separation as well, the way back is `ios.appleTeamId` in
+`app.json` plus the literal group in `previewCredential.ts` — and it would then
+need the entitlement on both targets, app group listed first.
+
+**The at-rest downgrade is scoped to the credential**, which is a dividend of
+the above worth writing down for M5's privacy text. `tokens.ts` is untouched, so
+the access and refresh tokens keep `WHEN_UNLOCKED`; only the preview credential
+is stored `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`. Under Option A that weakening
+would have had to apply to the account session itself. M5 should say *the
+credential* becomes readable on a locked phone, not *your tokens*.
+
+**`savePreviewCredential` deletes before it writes** — not for the migration
+reason, which is gone, but for warning 2. SecureStore's `set` is a `SecItemAdd`
+that falls back to a `SecItemUpdate` of `kSecValueData` alone, so accessibility
+is stamped once, at first write, and no later save can correct it. An install
+that ever stored this item the wrong way would be unrepairable from the app and
+undiagnosable from outside it. Nothing is at risk in the gap: the server rotates
+the credential on every registration, so the value being replaced is already
+dead.
+
+**The credential's write is epoch-guarded; the Expo token's deliberately
+isn't.** `push.ts` writes the Expo token *before* the POST because losing it
+strands a live server row. The credential goes the other way — a sign-out
+landing during the POST would otherwise write a working read-credential onto a
+phone nobody is signed in on, immediately after the teardown meant to clear it.
+Dropping it costs nothing, because the next registration mints another; that
+self-repair is the same property that made rotating it safe in M1. It also
+closes, for this key, the window `forgetLocalPushToken` documents for the Expo
+token, since the epoch is bumped synchronously before that function's first
+await.
+
+**`registerPushToken` tolerates a backend that answers 204.** M1 changed the
+response from 204 to `200 {preview_token}`, and `request` resolves an empty body
+as `null`. A LAN dev box or a staging box mid-release is exactly that case, and
+destructuring `null` would have thrown into `runRegistration`'s catch — turning
+"no previews" into "push never registers at all", on the login path, silently.
+
+**The plan's "`tokens.ts` passes the options on all six calls" is void**, along
+with its instruction to add the extension to that file's docstring as a fourth
+caller. `tokens.ts` passes no options at all and its keys are not what the
+extension reads. Its docstring instead now says which rule is about the *keys*
+rather than about SecureStore, names the three other files that legitimately use
+the store, and records why the account tokens didn't have to change.
+
+**The test double was rewritten first, as instructed, and it earned it.** The
+old flat `Map` discarded the options argument, so every assertion in this
+milestone would have passed no matter what the code did. It now keys on
+(service, access group, key), records accessibility, models a group-less
+query as matching *across* groups — the behaviour that would have broken the
+plan's migration — and reproduces the update-keeps-attributes rule above.
+Verified the hard way: removing the delete-before-write, and unpinning the
+service, each make a test fail.
+
+### M2 review, 2026-08-14 — fixes
+
+An `xhigh` review of the M2 diff. Three findings were about the same mistake
+seen from three sides — **a credential has more teardown paths than a
+preference does** — and they are the ones worth remembering.
+
+- **The session guard moved into `previewCredential.ts`, and grew two more
+  checks.** The first version guarded the *call* to `savePreviewCredential` from
+  `push.ts`, which closes the window only up to the moment that function is
+  entered — and the function then awaits twice. A sign-out landing inside the
+  delete deletes nothing (we have just deleted) and then watches the credential
+  be written onto a phone that is by then on the login screen. It now owns a
+  counter of its own, exactly as `tokens.ts` does, checked on entry, again after
+  the delete, and again after the write, with a compare-and-delete undo for the
+  sliver that remains. Declining to write is better than writing-and-undoing,
+  because a teardown can be followed by a *new* registration storing its own
+  credential — the undo can remove what it wrote but cannot put back what it
+  clobbered. That last case was found by a test written to assert the opposite.
+- **There is a third teardown path, and it isn't in `push.ts`.** `signOut` calls
+  `unregisterPush` and the expiry handler calls `forgetLocalPushToken`, but a
+  refresh that *succeeds* followed by a replay that 401s never fires the expiry
+  handler — it lands in `auth.tsx`'s cold-start catch, which reaches
+  `clearTokens` directly. An account deactivated while the app was closed looks
+  exactly like that, and `is_active=False` is an ordinary state here because
+  sign-ups are admin-gated. The device reached the login screen still holding
+  both push secrets. That gap pre-dates 10b for the Expo token; it now clears
+  both.
+- **The two local deletes are independent.** Android's
+  `deleteValueWithKeyAsync` rethrows failures as a `DeleteException`, unlike
+  iOS, which ignores `SecItemDelete`'s status — so sequential awaits let a
+  hiccup on the Expo token skip the credential entirely, leaving the more
+  sensitive of the two behind because the less sensitive one failed. From inside
+  `unregisterPush`'s `finally` it would also reject past the catch that exists
+  to stop a network failure trapping someone in a logged-in app. Both now go
+  through one `Promise.allSettled`.
+- **A failed credential write is no longer a failed registration.** It sits
+  after the POST, so the row exists and the Expo token is stored; letting it
+  fall to `runRegistration`'s catch reported a registration that wholly
+  succeeded as `null`.
+- **The test double now models `requireAuthentication`**, which is what decides
+  the `:no-auth` suffix on the service — part of the literal M3's Swift
+  hardcodes. Flip that flag and every item moves service, the extension gets
+  `errSecItemNotFound` on every push on every device, and nothing in the app
+  notices. It also models the read's fallback through the three service aliases,
+  as the real `get` does. The test now asserts the exact string
+  `timeline:no-auth` rather than the pinned half of it.
+- **The "account tokens aren't stored alongside" test checks both keys.** It
+  filtered on `timeline.access`, so a tidy-up that moved only the *refresh*
+  token onto the credential's options — the long-lived half, which buys a whole
+  session — would have downgraded its accessibility with the suite still green.
+- **`accounts.md` claimed the local copy and the server row "go at the same
+  time".** They don't: only sign-out deletes the row. The doc now states the
+  asymmetry, since it is the one M5's privacy text will be written from.
 
 ## Corrections from review
 

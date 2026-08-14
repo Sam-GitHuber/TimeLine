@@ -37,7 +37,8 @@ mobile/
 │   ├── app/         # Expo Router routes (file-based) — note: src/app, not /app
 │   ├── api.ts       # fetch wrapper — Bearer token, not cookies
 │   ├── auth.tsx     # AuthProvider
-│   ├── tokens.ts    # expo-secure-store wrapper
+│   ├── tokens.ts    # the account session's tokens, in expo-secure-store
+│   ├── previewCredential.ts  # the notification extension's scoped credential
 │   ├── types.ts     # hand-written types for the API's JSON
 │   ├── components/  # RN components (View/Text, not div/span)
 │   └── theme.ts     # design tokens translated from the Tailwind @theme

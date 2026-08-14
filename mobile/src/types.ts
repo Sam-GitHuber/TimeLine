@@ -626,6 +626,18 @@ export type Notification = {
   addressed: boolean;
 };
 
+/**
+ * `POST /api/push-tokens/` — the one response that carries this device's
+ * preview credential (Phase 10b).
+ *
+ * The server mints a fresh one on every registration and stores only its
+ * SHA-256, so this response is the sole moment the plaintext exists outside the
+ * Keychain. `src/previewCredential.ts` is the only thing that may keep it.
+ */
+export type PushRegistration = {
+  preview_token: string;
+};
+
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */
 export type Post = {
   id: number;
