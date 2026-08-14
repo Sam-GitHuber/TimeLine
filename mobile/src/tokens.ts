@@ -1,5 +1,5 @@
 /**
- * Token storage, isolated behind four functions.
+ * The **account session's** tokens, isolated in one module.
  *
  * **Why `expo-secure-store` and not `AsyncStorage`.** SecureStore is backed by
  * the iOS Keychain / Android Keystore, so the tokens are encrypted at rest and
@@ -12,8 +12,22 @@
  *
  *   1. Never log a token — not to the console, not to an error reporter.
  *   2. Never put one in a URL. URLs land in server access logs and crash reports.
- *   3. Read them here and attach them in `api.ts`. Nowhere else should touch
- *      SecureStore directly, so the surface stays this one file.
+ *   3. Read them here and attach them in `api.ts`. Nothing else may touch
+ *      *these two keys*, so the account session's surface stays this one file.
+ *
+ * **Rule 3 is about the keys, not about SecureStore.** Three other places store
+ * things there — `push.ts` (this device's Expo token), `preferences.tsx` (a UI
+ * preference, for want of a synchronous store) and `previewCredential.ts` (the
+ * notification extension's scoped read credential, Phase 10b). None of them is
+ * a session token, and none of them shares a key with this file.
+ *
+ * `previewCredential.ts` is the one worth knowing about from here, because it
+ * is the reason the account tokens **didn't** have to change. A notification
+ * service extension is a separate process that must read a credential off a
+ * locked phone, which means an item stored with a weaker `kSecAttrAccessible`
+ * than these have. Giving it its own credential is what confines that downgrade
+ * to a read-only preview scope and leaves the pair below exactly as strict as
+ * they were.
  */
 
 import * as SecureStore from 'expo-secure-store';

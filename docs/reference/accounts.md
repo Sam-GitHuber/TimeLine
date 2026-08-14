@@ -400,6 +400,18 @@ touching this endpoint:
   use the account's tokens, and for an honest account of what a leaked one can
   reach.
 
+  **On the device it lives in `mobile/src/previewCredential.ts`**, not in
+  `tokens.ts` with the session. It is stored under a keychain service this repo
+  pins (rather than expo's default, which a package upgrade could change) and
+  with `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`, because an extension woken by a
+  push has to read it while the phone is locked — SecureStore's default,
+  `WHEN_UNLOCKED`, would work on every unlocked dev handset and never on a lock
+  screen. Keeping it out of `tokens.ts` is what confines that at-rest downgrade
+  to a read-only preview credential: the access and refresh tokens keep the
+  stricter property they have always had. It is deleted wherever this device's
+  registration is dropped — sign-out and session expiry both — so the local copy
+  and the server row that authenticates it go at the same time.
+
 Push itself is documented in [notifications.md](notifications.md); the app that
 registers the token is in [mobile-app.md](mobile-app.md).
 
