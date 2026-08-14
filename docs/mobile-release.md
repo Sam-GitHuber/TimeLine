@@ -109,10 +109,14 @@ a mobile-only change). Merge (squash) and delete the branch.
 >   `keychain-access-groups` entitlement declared in that same entry. EAS syncs
 >   capabilities from it; if it ever doesn't, the symptom is not a build failure
 >   but previews silently never appearing.
-> - The extension's version and build number are copied from the app target at
->   prebuild, so they match whatever `autoIncrement` chose. A mismatch is
->   rejected at App Store Connect *validation*, after the upload, in a message
->   that names neither number.
+> - The extension's version and build number are read at prebuild from the **app
+>   config** — the same source Expo's own Info.plist writer uses — so they match
+>   whatever `autoIncrement` chose. Not from the app *target*'s
+>   `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` build settings, which look like
+>   the obvious source and which nothing reads; copying those is what stamped an
+>   extension `1.0` inside an app `1.0.0` during M3. A mismatch is rejected at
+>   App Store Connect *validation*, after the upload, in a message that names
+>   neither number.
 
 ```bash
 git checkout main && git pull

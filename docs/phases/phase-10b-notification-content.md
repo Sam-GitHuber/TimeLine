@@ -978,12 +978,13 @@ project. Two mods would have depended on the order Expo applies them in, which
 is not something this repo should be pinned to; the paths are all available from
 `modRequest` either way.
 
-**It is idempotent, which the plan didn't ask for and the workflow needs.**
-`expo prebuild` without `--clean` is the normal local invocation, and adding the
-target twice produces a project Xcode opens and then refuses to build, blaming
-neither the plugin nor the duplicate. The files are rewritten every time (so
-editing the Swift and re-running prebuild does the obvious thing) and the target
-is created only if `pbxTargetByName` doesn't already find it.
+**It is idempotent, which the plan didn't ask for.** The files and the build
+settings are rewritten on every run — so editing the Swift, or bumping the
+version, and re-running prebuild does the obvious thing — while the target
+itself is created only if it isn't already there. The path that needs this is
+`expo prebuild --no-clean`; **cleaning is the default and there is no `--clean`
+flag**, which is worth knowing both ways round, since a plain `expo prebuild`
+silently deletes `ios/build` along with everything else.
 
 **The versions are copied — but not from where the plan said, and the difference
 was a live bug.** "Have the plugin copy the app target's values rather than state
@@ -1052,6 +1053,73 @@ would have shipped as "previews are flaky and nobody can say why":
 the injected API URL, and version keys equal to the app's. What is left is the
 device matrix, and `docs/mobile-release.md` now carries the warning that the
 first build with the extension re-enters the interactive Apple-login path.
+
+### M3 review, 2026-08-14 — fixes
+
+An `xhigh` review of the M3 diff. The theme: **the idempotent path was never
+actually exercised, so nothing in it worked** — and it was written to be
+exercised by an invocation the plan had backwards.
+
+- **The idempotency guard could never fire.** `addTarget` stores the target's
+  name *quoted*, and `pbxTargetByName` compares the section comment verbatim, so
+  `pbxTargetByName('NotificationService')` returns `null` forever. Confirmed by
+  driving the `xcode` library against the real generated project: a second run
+  produced two targets, four build configurations, and two `.appex` rows in the
+  app's Copy Files phase — precisely the unbuildable project the guard was there
+  to prevent. Replaced with a lookup that accepts either spelling and returns
+  the *uuid*, which is what the rest of the plugin needs anyway.
+- **And the settings it guarded were the ones that must not be skipped.** The
+  early `return` meant the versions, the entitlements path and the deployment
+  target were written only on the run that created the target. With the guard
+  repaired, a `--no-clean` prebuild after a version bump would have left the
+  extension stamped with the old version while Expo rewrote the app's Info.plist
+  with the new — the App Store Connect rejection this milestone had *already*
+  been rewritten once to avoid, arriving by a second route. They now sit outside
+  the branch and refresh every run. Verified by bumping `expo.version`,
+  re-prebuilding, and watching both extension configurations follow.
+- **The settings are applied through the target's own configuration list**, not
+  by scanning the whole project for a matching `PRODUCT_NAME`. A name match is a
+  coincidence away from writing into another target and one change in how
+  `xcode` quotes that value away from matching *nothing* — which would silently
+  drop `CODE_SIGN_ENTITLEMENTS`, the one setting this milestone turns on, with
+  the Swift's fallback discipline hiding the result forever.
+- **`deliver()` could drop a notification entirely.** If `mutableCopy()` ever
+  returned nil, both it and `serviceExtensionTimeWillExpire` fell through their
+  `guard` and the content handler was never called — so iOS dropped the push
+  rather than showing the contentless body. That is the one outcome the file's
+  own header says cannot happen. It now keeps the original content and delivers
+  that.
+- **`deliver()` was not thread-safe.** The URLSession completion runs on the
+  session's queue and the expiry hook on the system's, so a response landing as
+  the budget expires let both pass the nil-check before either cleared it, and
+  call the handler twice — undefined behaviour, not a duplicate notification.
+  The same window raced the body write against the read. An `NSLock` now covers
+  the take-and-clear and the write.
+- **Orphan build files removed.** `addPbxGroup` registers a `PBXBuildFile` for
+  each path it hasn't seen, so the Info.plist and the entitlements came away
+  with build files belonging to no phase — inert, but labelled `in Resources`,
+  which reads as though the entitlements plist is copied into the shipped
+  bundle.
+- **The `??` on the bundle identifier was dead code.**
+  `IOSConfig.BundleIdentifier.getBundleIdentifier` is literally
+  `config.ios?.bundleIdentifier ?? null` — the same expression as the left-hand
+  side. A fallback that can never supply a value is worse than none.
+- **The default API URL is read out of `api.ts`** rather than restated in the
+  test. It lives in three files that must agree, and a test carrying its own
+  fourth copy compared all three against a literal none of them has to match.
+- **The `logs nothing` assertion scans the comment-stripped source**, like its
+  two neighbours. As written, strengthening the Swift's own warning comment to
+  name the calls it forbids would have failed the suite — and the obvious repair
+  is to weaken the check.
+- **`app.json`'s `appExtensions` is read with optional chaining.** Dereferenced
+  in a `describe` body, deleting that block took the whole file down at
+  collection time with a `TypeError`, losing all forty assertions — including
+  the three that would have said what broke.
+- **The `ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES` comment was wrong.** The value
+  is right; the setting controls whether the Swift runtime dylibs are copied
+  into the bundle, not symbol stripping. In this repo the comments are the
+  reference, so a wrong *why* leaves the next reader unable to tell whether the
+  value was chosen for it.
 
 ## Corrections from review
 

@@ -56,16 +56,31 @@ class NotificationService: UNNotificationServiceExtension {
   /// `deliver()` to run rather than being cut off by the system.
   private static let requestTimeout: TimeInterval = 10
 
+  /// Guards `contentHandler` and `bestAttempt`. **Not optional tidiness.** The
+  /// URLSession completion runs on the session's own queue while
+  /// `serviceExtensionTimeWillExpire()` is called by the system on another, so a
+  /// response landing just as the budget expires has two threads reaching
+  /// `deliver()` at once. Without this they can both pass the nil-check before
+  /// either clears it, and call the content handler twice — which is undefined
+  /// behaviour, not a duplicate notification. The same lock covers the body
+  /// write, which otherwise races the read.
+  private let lock = NSLock()
   private var contentHandler: ((UNNotificationContent) -> Void)?
   private var bestAttempt: UNMutableNotificationContent?
+  /// What the server sent us. Kept so `deliver()` can hand back *something*
+  /// even if the mutable copy below could not be made.
+  private var original: UNNotificationContent?
 
   override func didReceive(
     _ request: UNNotificationRequest,
     withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
-    self.contentHandler = contentHandler
     let bestAttempt = request.content.mutableCopy() as? UNMutableNotificationContent
+    lock.lock()
+    self.contentHandler = contentHandler
+    self.original = request.content
     self.bestAttempt = bestAttempt
+    lock.unlock()
 
     guard
       let bestAttempt,
@@ -114,7 +129,13 @@ class NotificationService: UNNotificationServiceExtension {
       // assembled here — an extension building a body from parts renders a
       // blank line under the title for an uncaptioned photo, and "Ada in " for
       // every one-to-one.
+      //
+      // Under the lock, because the expiry hook may be reading this very object
+      // from another thread if the system's patience runs out as the response
+      // lands.
+      self.lock.lock()
       bestAttempt.body = body
+      self.lock.unlock()
     }.resume()
 
     // **Not optional.** A session created here and not held anywhere is
@@ -133,15 +154,29 @@ class NotificationService: UNNotificationServiceExtension {
     deliver()
   }
 
-  /// Hand the notification to the system, at most once.
+  /// Hand the notification to the system, exactly once.
   ///
-  /// Two paths race to call this — the response callback and
-  /// `serviceExtensionTimeWillExpire` — and calling a `contentHandler` twice is
-  /// undefined behaviour. Clearing it first makes the second call a no-op.
+  /// Two paths race to call this — the response callback, on the session's
+  /// queue, and `serviceExtensionTimeWillExpire`, on the system's — and calling
+  /// a `contentHandler` twice is undefined behaviour rather than a duplicate
+  /// notification. Taking the handler *out* under the lock is what makes the
+  /// loser a no-op; a bare nil-check would let both pass it before either
+  /// cleared it.
+  ///
+  /// **It always delivers something.** If the mutable copy could not be made,
+  /// the original content the server sent is handed back unchanged. Returning
+  /// empty-handed here would mean iOS drops the push entirely — no
+  /// notification at all, rather than a vague one — which is the single outcome
+  /// this whole file is arranged to prevent.
   private func deliver() {
-    guard let contentHandler, let bestAttempt else { return }
-    self.contentHandler = nil
-    contentHandler(bestAttempt)
+    lock.lock()
+    let handler = contentHandler
+    let content = bestAttempt ?? original
+    contentHandler = nil
+    lock.unlock()
+
+    guard let handler, let content else { return }
+    handler(content)
   }
 
   /// Which conversation this push is about, read from the same `url` the deep

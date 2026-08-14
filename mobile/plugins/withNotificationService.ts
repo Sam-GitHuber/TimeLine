@@ -20,9 +20,13 @@
  * build settings Xcode would have filled in through its target template, and
  * writes the entitlement without which the extension cannot read the keychain.
  *
- * It is **idempotent**: a second prebuild over an existing project finds the
- * target already there and only refreshes the files. That matters because
- * `expo prebuild` without `--clean` is the normal local workflow.
+ * It is **idempotent**: a second run over an existing project finds the target
+ * already there and refreshes the files and the build settings rather than
+ * adding a second copy of everything. That path is reached only by
+ * `expo prebuild --no-clean` — cleaning is the *default*, and there is no
+ * `--clean` flag — which is precisely why it has to be right: the one
+ * invocation that exercises it is the one nobody runs until they are already
+ * debugging something else.
  *
  * ⚠️ **EAS also needs to be told the target exists.** In a managed project EAS
  * discovers app extensions from `extra.eas.build.experimental.ios.appExtensions`
@@ -158,6 +162,40 @@ function entitlements(appBundleIdentifier: string): string {
 `;
 }
 
+/** One target's build configurations, Debug and Release. */
+function configurationsForTarget(
+  project: XcodeProject,
+  targetUuid: string
+): { buildSettings?: Record<string, string> }[] {
+  const listUuid = project.pbxNativeTargetSection()[targetUuid]?.buildConfigurationList;
+  const lists = project.pbxXCConfigurationList();
+  const configurations = project.pbxXCBuildConfigurationSection();
+  return ((lists[listUuid]?.buildConfigurations ?? []) as { value: string }[])
+    .map((entry) => configurations[entry.value])
+    .filter(Boolean);
+}
+
+/**
+ * The uuid of a target, found by its name.
+ *
+ * ⚠️ **Not `pbxTargetByName`, which cannot find this target.** `addTarget`
+ * stores the name *quoted* (`"NotificationService"`), and `pbxTargetByName`
+ * compares the section comment verbatim — so the obvious call returns `null`
+ * forever, and an idempotency guard built on it silently never fires. This
+ * accepts either spelling, and returns the uuid rather than the item, which is
+ * what everything below actually needs.
+ */
+function findTargetUuid(project: XcodeProject, name: string): string | undefined {
+  const section = project.pbxNativeTargetSection();
+  for (const key of Object.keys(section)) {
+    if (!key.endsWith('_comment')) continue;
+    if (section[key] === name || section[key] === `"${name}"`) {
+      return key.slice(0, -'_comment'.length);
+    }
+  }
+  return undefined;
+}
+
 /**
  * Copy a build setting from the app target rather than restating it.
  *
@@ -171,20 +209,15 @@ function entitlements(appBundleIdentifier: string): string {
  * straight into the app's Info.plist from the config and never touches the build
  * settings (`@expo/config-plugins`' `ios/Version.ts` mentions neither). Copying
  * them gave an extension stamped `1.0` inside an app stamped `1.0.0` — caught
- * here only because the built bundles were compared by hand. See
- * `versionsFromConfig` for what to use instead.
+ * only because the built bundles were compared by hand. `IOSConfig.Version` is
+ * what to use instead.
  */
 function appTargetSetting(project: XcodeProject, name: string): string | undefined {
-  const appTarget = project.getFirstTarget();
-  const listUuid = appTarget.firstTarget.buildConfigurationList;
-  const configurations = project.pbxXCBuildConfigurationSection();
-  const lists = project.pbxXCConfigurationList();
-  const configurationUuids: string[] = (
-    lists[listUuid]?.buildConfigurations ?? []
-  ).map((entry: { value: string }) => entry.value);
-
-  for (const uuid of configurationUuids) {
-    const value = configurations[uuid]?.buildSettings?.[name];
+  for (const configuration of configurationsForTarget(
+    project,
+    project.getFirstTarget().uuid
+  )) {
+    const value = configuration.buildSettings?.[name];
     if (value !== undefined) return String(value);
   }
   return undefined;
@@ -194,9 +227,12 @@ const withNotificationService: ConfigPlugin = (config) =>
   withXcodeProject(config, (config) => {
     const project = config.modResults;
     const projectRoot = config.modRequest.platformProjectRoot;
-    const appBundleIdentifier =
-      config.ios?.bundleIdentifier ??
-      IOSConfig.BundleIdentifier.getBundleIdentifier(config);
+    // Deliberately not falling back to
+    // `IOSConfig.BundleIdentifier.getBundleIdentifier`, which reads as a second,
+    // independent source and is literally `config.ios?.bundleIdentifier ?? null`
+    // — the same expression. A fallback that can never supply a value is worse
+    // than none, because the next reader trusts it.
+    const appBundleIdentifier = config.ios?.bundleIdentifier;
 
     if (!appBundleIdentifier) {
       throw new Error(
@@ -224,66 +260,107 @@ const withNotificationService: ConfigPlugin = (config) =>
       entitlements(appBundleIdentifier)
     );
 
-    // 2. The target — but only once. `expo prebuild` without `--clean` runs
-    //    over an existing project, and adding the target twice produces a
-    //    pbxproj Xcode opens and then refuses to build, with an error naming
+    // 2. The target — created once, then found on every later run.
+    //
+    //    `expo prebuild` **cleans by default**; `--no-clean` is the opt-out that
+    //    applies changes to the native folders already there. So the common path
+    //    never reaches the `else` below — and that is exactly why this has to be
+    //    right, because the one path that exercises it is the one nobody runs
+    //    until they are debugging something else. Adding the target twice
+    //    produces a pbxproj Xcode opens and then refuses to build, blaming
     //    neither this plugin nor the duplicate.
-    if (project.pbxTargetByName(TARGET_NAME)) return config;
+    let targetUuid = findTargetUuid(project, TARGET_NAME);
+
+    if (!targetUuid) {
+      // `addTarget` does the genuinely fiddly half: the product reference, the
+      // build configuration list, the Copy Files phase that embeds the built
+      // `.appex` into the app, and the app's dependency on it. Getting any of
+      // those wrong yields an app that builds and ships without its extension.
+      // `String(...)` only so the narrowing survives: `addTarget` is untyped,
+      // and assigning `any` back into a `string | undefined` leaves it wide.
+      targetUuid = String(
+        project.addTarget(
+          TARGET_NAME,
+          'app_extension',
+          TARGET_NAME,
+          `${appBundleIdentifier}.${TARGET_NAME}`
+        ).uuid
+      );
+
+      project.addBuildPhase(
+        [`${TARGET_NAME}.swift`],
+        'PBXSourcesBuildPhase',
+        'Sources',
+        targetUuid
+      );
+      // Empty, and kept anyway because Xcode's own extension template creates
+      // both and tools downstream (CocoaPods, and Xcode itself when a human
+      // opens the project to debug) assume every native target has them.
+      // Nothing needs linking here: `UserNotifications` and `Security` are
+      // system frameworks that Swift auto-links.
+      project.addBuildPhase([], 'PBXResourcesBuildPhase', 'Resources', targetUuid);
+      project.addBuildPhase([], 'PBXFrameworksBuildPhase', 'Frameworks', targetUuid);
+
+      // 3. The group, so the files are visible in Xcode's navigator. Cosmetic
+      //    for a CI build, and the difference between debuggable and not for a
+      //    human.
+      //
+      //    `addPbxGroup` registers a `PBXBuildFile` for every path it hasn't
+      //    seen before. The Swift already has one from the Sources phase above
+      //    and is reused, but the plist and the entitlements come away with
+      //    build files belonging to no phase. They are inert, and they are
+      //    labelled `in Resources` — which reads as though the entitlements
+      //    plist is copied into the shipped bundle, and would become true if
+      //    anything ever reconciled orphans into a phase. So take them back out.
+      const buildFiles = project.pbxBuildFileSection();
+      const before = new Set(Object.keys(buildFiles));
+      const group = project.addPbxGroup(
+        [
+          `${TARGET_NAME}.swift`,
+          `${TARGET_NAME}-Info.plist`,
+          `${TARGET_NAME}.entitlements`,
+        ],
+        TARGET_NAME,
+        TARGET_NAME
+      );
+      for (const key of Object.keys(buildFiles)) {
+        if (!before.has(key)) delete buildFiles[key];
+      }
+      project.addToPbxGroup(group.uuid, project.getFirstProject().firstProject.mainGroup);
+    }
+
+    // 4. The build settings Xcode's own target template would have filled in.
+    //    `addTarget` sets PRODUCT_NAME, PRODUCT_BUNDLE_IDENTIFIER, INFOPLIST_FILE
+    //    and SKIP_INSTALL; everything below is what it leaves out.
+    //
+    //    **Outside the branch above, deliberately.** These are refreshed on
+    //    every run, like the files in step 1, because the versions come from the
+    //    app config: skip them when the target already exists and a `--no-clean`
+    //    prebuild after a version bump leaves the extension stamped with the old
+    //    one, while Expo rewrites the app's Info.plist with the new — which is
+    //    the App Store Connect rejection this file was already rewritten once to
+    //    avoid.
+    //
+    //    Reached through the target's own configuration list rather than by
+    //    scanning the project for `PRODUCT_NAME`: a name match is a coincidence
+    //    away from writing into someone else's target, and one change to how
+    //    `xcode` quotes that value away from matching *nothing* — which would
+    //    silently drop `CODE_SIGN_ENTITLEMENTS`, the single setting this
+    //    milestone turns on.
 
     // **The same two functions Expo's own Info.plist writer uses**, so the
     // extension's version keys cannot differ from the app's. Reading them from
     // the config rather than restating them is what survives
     // `appVersionSource: remote` + `autoIncrement`: EAS resolves the build
     // number and puts it in the config *before* prebuild runs, so by the time we
-    // are called this is already the number the app will carry. A literal here
-    // would be wrong on the very next build, and an extension whose
-    // `CFBundleVersion` differs from its host's is rejected at App Store Connect
-    // validation — after the upload, in a message naming neither number.
+    // are called this is already the number the app will carry.
     const marketingVersion = IOSConfig.Version.getVersion(config);
     const currentProjectVersion = IOSConfig.Version.getBuildNumber(config);
     const deploymentTarget = appTargetSetting(project, 'IPHONEOS_DEPLOYMENT_TARGET');
 
-    // `addTarget` does the genuinely fiddly half: the product reference, the
-    // build configuration list, the Copy Files phase that embeds the built
-    // `.appex` into the app, and the app's dependency on it. Getting any of
-    // those wrong yields an app that builds and ships without its extension.
-    const target = project.addTarget(
-      TARGET_NAME,
-      'app_extension',
-      TARGET_NAME,
-      `${appBundleIdentifier}.${TARGET_NAME}`
-    );
-
-    project.addBuildPhase(
-      [`${TARGET_NAME}.swift`],
-      'PBXSourcesBuildPhase',
-      'Sources',
-      target.uuid
-    );
-    // Empty, and kept anyway because Xcode's own extension template creates
-    // both and tools downstream (CocoaPods, and Xcode itself when a human opens
-    // the project to debug) assume every native target has them. Nothing needs
-    // linking here: `UserNotifications` and `Security` are system frameworks
-    // that Swift auto-links.
-    project.addBuildPhase([], 'PBXResourcesBuildPhase', 'Resources', target.uuid);
-    project.addBuildPhase([], 'PBXFrameworksBuildPhase', 'Frameworks', target.uuid);
-
-    // 3. The group, so the files are visible in Xcode's navigator. Cosmetic for
-    //    a CI build and the difference between debuggable and not for a human.
-    const group = project.addPbxGroup(
-      [`${TARGET_NAME}.swift`, `${TARGET_NAME}-Info.plist`, `${TARGET_NAME}.entitlements`],
-      TARGET_NAME,
-      TARGET_NAME
-    );
-    project.addToPbxGroup(group.uuid, project.getFirstProject().firstProject.mainGroup);
-
-    // 4. The build settings Xcode's own target template would have filled in.
-    //    `addTarget` sets PRODUCT_NAME, PRODUCT_BUNDLE_IDENTIFIER, INFOPLIST_FILE
-    //    and SKIP_INSTALL; everything below is what it leaves out.
-    const configurations = project.pbxXCBuildConfigurationSection();
-    for (const key of Object.keys(configurations)) {
-      const settings = configurations[key]?.buildSettings;
-      if (settings?.PRODUCT_NAME !== `"${TARGET_NAME}"`) continue;
+    for (const configuration of configurationsForTarget(project, targetUuid)) {
+      const settings = configuration.buildSettings;
+      if (!settings) continue;
 
       settings.CODE_SIGN_ENTITLEMENTS = `"${TARGET_NAME}/${TARGET_NAME}.entitlements"`;
       settings.SWIFT_VERSION = '5.0';
@@ -291,8 +368,11 @@ const withNotificationService: ConfigPlugin = (config) =>
       settings.TARGETED_DEVICE_FAMILY = '"1"';
       settings.CLANG_ENABLE_MODULES = 'YES';
       settings.SWIFT_EMIT_LOC_STRINGS = 'YES';
-      // The extension ships inside the app rather than being installed, so it
-      // must not be stripped of the symbols the app's own dSYM references.
+      // Whether the Swift runtime dylibs are copied into this bundle's own
+      // `Frameworks` directory. `NO`, because an app extension is loaded inside
+      // its host and takes the host's copy; embedding a second set makes the
+      // `.appex` several megabytes larger for nothing, and App Store Connect
+      // rejects an extension that ships its own.
       settings.ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = 'NO';
       if (marketingVersion) settings.MARKETING_VERSION = marketingVersion;
       if (currentProjectVersion) settings.CURRENT_PROJECT_VERSION = currentProjectVersion;

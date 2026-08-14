@@ -49,7 +49,21 @@ const plugin = readFileSync(
   join(MOBILE_ROOT, 'plugins', 'withNotificationService.ts'),
   'utf8'
 );
+const api = readFileSync(join(MOBILE_ROOT, 'src', 'api.ts'), 'utf8');
 const appJson = JSON.parse(readFileSync(join(MOBILE_ROOT, 'app.json'), 'utf8'));
+
+/**
+ * The app's own default backend, read out of `api.ts` rather than restated.
+ *
+ * The URL now exists in three files that must agree — `api.ts`, the plugin, and
+ * the Swift — and a test carrying its own fourth copy would compare all three
+ * against a literal none of them has to match. Change `BASE_URL`'s fallback and
+ * such a test stays green while the app talks to the new host and the extension
+ * keeps asking the old one.
+ */
+const DEFAULT_API_URL = api.match(
+  /process\.env\.EXPO_PUBLIC_API_URL \|\|\s*'([^']+)'/
+)?.[1];
 
 /**
  * The Swift with its comment lines removed.
@@ -156,10 +170,24 @@ describe('the fallback discipline', () => {
   });
 
   it('cannot call the content handler twice', () => {
-    // Two paths race to deliver — the response callback and the expiry hook —
-    // and calling a `contentHandler` twice is undefined behaviour. Clearing it
-    // first is what makes the loser a no-op.
-    expect(swift).toContain('self.contentHandler = nil');
+    // Two paths race to deliver — the response callback, on the session's
+    // queue, and the expiry hook, on the system's — and calling a
+    // `contentHandler` twice is undefined behaviour rather than a duplicate
+    // notification. Taking the handler *out under a lock* is what makes the
+    // loser a no-op; a bare nil-check lets both pass it before either clears it.
+    const deliver = swiftCode.match(/private func deliver\(\) \{([\s\S]*?)\n {2}\}/)?.[1];
+    expect(deliver).toBeTruthy();
+    expect(deliver).toContain('lock.lock()');
+    expect(deliver).toContain('contentHandler = nil');
+    expect(deliver).toContain('lock.unlock()');
+  });
+
+  it('delivers the original when no mutable copy could be made', () => {
+    // `deliver()` returning empty-handed means iOS drops the push entirely — no
+    // notification at all, rather than a vague one, which is the single outcome
+    // this file is arranged to prevent. Falling back to the content the server
+    // sent costs one stored reference.
+    expect(swiftCode).toContain('bestAttempt ?? original');
   });
 });
 
@@ -169,8 +197,11 @@ describe('what the extension may write down', () => {
     // message, and the ordinary way to debug an extension is to print things
     // and read Console.app — which anything on the attached Mac can also read.
     // `tokens.ts` states this rule for JavaScript; it binds harder here.
+    // `swiftCode`, not `swift`: the file's own warning comment names these
+    // calls, and scanning the prose would fail the suite for a comment that
+    // makes the rule *clearer* — whose likely repair is to weaken the check.
     for (const call of ['os_log', 'NSLog', 'print(', 'debugPrint', 'dump(']) {
-      expect(swift).not.toContain(call);
+      expect(swiftCode).not.toContain(call);
     }
   });
 
@@ -187,13 +218,16 @@ describe('the backend URL', () => {
     expect(plugin).toContain(`const API_URL_KEY = '${key}'`);
   });
 
-  it('defaults to production, exactly as the app does', () => {
+  it('defaults to whatever the app defaults to', () => {
     // A native target can read neither `process.env` nor `Constants`, so the
-    // plugin inlines `EXPO_PUBLIC_API_URL` at prebuild. Both sides need the
-    // same default, or a build without a `.env` sends dev traffic to
-    // production — which 401s and looks like a broken extension.
-    expect(swiftConstant('defaultApiUrl')).toBe('https://your-timeline.net');
-    expect(plugin).toContain("'https://your-timeline.net'");
+    // plugin inlines `EXPO_PUBLIC_API_URL` at prebuild. All three need the same
+    // default and the same variable name, and the one that matters is `api.ts`
+    // — it is the app's answer, and the extension asking a different host is
+    // indistinguishable from a bad entitlement.
+    expect(DEFAULT_API_URL).toBeTruthy();
+    expect(swiftConstant('defaultApiUrl')).toBe(DEFAULT_API_URL);
+    expect(plugin).toContain(`'${DEFAULT_API_URL}'`);
+    expect(plugin).toContain('process.env.EXPO_PUBLIC_API_URL');
   });
 });
 
@@ -219,7 +253,13 @@ describe('what EAS is told', () => {
   // plugin generates — it decides which provisioning profiles to fetch before
   // prebuild has run. Disagree with the plugin and the build dies ~15 minutes
   // in with "No profiles for '…NotificationService' were found".
-  const declared = appJson.expo.extra.eas.build.experimental.ios.appExtensions;
+  // Optional chaining, and read here rather than dereferenced: without it,
+  // deleting the block (or an `app.json` reformat dropping `experimental`)
+  // takes the whole *file* down at collection time with a TypeError — losing
+  // all forty assertions, including the three below that would have explained
+  // what broke and why it costs a fifteen-minute build.
+  const declared: { targetName: string; bundleIdentifier: string; entitlements: Record<string, string[]> }[] =
+    appJson.expo?.extra?.eas?.build?.experimental?.ios?.appExtensions ?? [];
 
   it('declares exactly the one extension the plugin builds', () => {
     expect(declared).toHaveLength(1);
