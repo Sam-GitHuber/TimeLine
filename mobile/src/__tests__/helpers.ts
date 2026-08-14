@@ -298,6 +298,17 @@ export function backHandlerCount(): number {
  */
 export const androidIt = Platform.OS === 'android' ? it : it.skip;
 
+/**
+ * `it`, but only under the **ios** project.
+ *
+ * The mirror of the above, for features that exist on one platform because the
+ * platform decides so rather than because we chose. Lock-screen message
+ * previews (Phase 10b) are the first: they ride an APNs field that FCM has no
+ * equivalent of, so on Android the control is deliberately absent and a test
+ * that pressed it would be asserting on something nothing renders.
+ */
+export const iosIt = Platform.OS === 'ios' ? it : it.skip;
+
 // --- Date / time pickers ----------------------------------------------------
 
 /**

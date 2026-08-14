@@ -636,6 +636,14 @@ export type Notification = {
  */
 export type PushRegistration = {
   preview_token: string;
+  /**
+   * Where this device's lock-screen preview switch currently stands.
+   *
+   * Answered here because there is nowhere else to learn it, and only two
+   * things ever change it: this registration, which resets it when the phone
+   * changes hands, and the PATCH the settings toggle sends.
+   */
+  show_previews: boolean;
 };
 
 /** `GET /api/feed/` and `GET /api/posts/<id>/` — `PostSerializer`. */

@@ -8688,6 +8688,46 @@ class DevicePushTokenTests(APITestCase):
 
         self.assertTrue(DevicePushToken.objects.get().show_previews)
 
+    def test_registration_answers_where_the_preview_setting_stands(self):
+        # There is nowhere else to learn it, and the settings toggle has to
+        # render the switch in the position it is actually in. Both values that
+        # this endpoint can leave it in are worth pinning, because the
+        # interesting one is the reset below.
+        DevicePushToken.objects.create(
+            user=self.me,
+            expo_token="ExponentPushToken[mine]",
+            platform="ios",
+            show_previews=True,
+        )
+
+        resp = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[mine]", "platform": "ios"},
+            format="json",
+        )
+
+        self.assertTrue(resp.data["show_previews"])
+
+    def test_a_device_changing_hands_says_so_in_the_response(self):
+        # The reset is silent otherwise: the new owner's app would go on
+        # showing the switch in the position the *previous* owner left it,
+        # while the server has already turned it off. Someone would toggle it
+        # off-then-on to fix a setting that was never on.
+        DevicePushToken.objects.create(
+            user=self.other,
+            expo_token="ExponentPushToken[shared]",
+            platform="ios",
+            show_previews=True,
+        )
+
+        resp = self.client.post(
+            PUSH_TOKENS_URL,
+            {"expo_token": "ExponentPushToken[shared]", "platform": "ios"},
+            format="json",
+        )
+
+        self.assertFalse(resp.data["show_previews"])
+
     def test_the_toggle_turns_previews_on_for_one_device(self):
         DevicePushToken.objects.create(
             user=self.me, expo_token="ExponentPushToken[mine]", platform="ios"

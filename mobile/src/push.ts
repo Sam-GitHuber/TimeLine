@@ -43,6 +43,23 @@ import {
 const PUSH_TOKEN_KEY = 'timeline.expoPushToken';
 
 /**
+ * Where this device's lock-screen preview switch stands (Phase 10b M5).
+ *
+ * A mirror of the server's `show_previews`, not a second source of truth: it is
+ * written from the registration response and from the PATCH, which are the only
+ * two things that can change it. Kept so Settings can draw the switch in the
+ * right position immediately, and so that "this device isn't registered for
+ * push" and "previews are off" stay distinguishable — they need different
+ * words on screen.
+ *
+ * In SecureStore for want of anywhere else, exactly as `preferences.tsx` puts a
+ * UI preference there: nothing here is a secret, but this is the store the app
+ * has, and sharing the push token's lifecycle means the teardown that forgets
+ * the device forgets this too.
+ */
+const PREVIEW_SETTING_KEY = 'timeline.showPreviews';
+
+/**
  * The `data` blob the backend puts on every push (`send_pushes.py`'s `_message`).
  *
  * `notificationId` is explicitly nullable: a **message** push has no
@@ -555,6 +572,28 @@ async function runRegistration(
         // See above.
       }
     }
+
+    // Where the server says this device's preview switch stands (M5). Mirrored
+    // locally so the settings screen can render it without a round trip, and
+    // without an endpoint that would have to carry a device identifier in a URL.
+    //
+    // **Needs no session guard**, unlike the credential above: it is a boolean
+    // preference rather than something that grants access, the teardown clears
+    // it either way, and a copy that somehow outlived its session is corrected
+    // by the next registration — which is also the moment the server resets it,
+    // when the phone has changed hands. Its own try/catch for the same reason
+    // as the credential's: the registration itself has already succeeded.
+    if (typeof registration?.show_previews === 'boolean') {
+      try {
+        await SecureStore.setItemAsync(
+          PREVIEW_SETTING_KEY,
+          registration.show_previews ? '1' : '0'
+        );
+      } catch {
+        // Previews keep working; only the switch's remembered position is lost,
+        // and the next launch restores it.
+      }
+    }
     return token;
   } catch {
     // Deliberately swallowed: see above. The user is logged in either way.
@@ -613,8 +652,51 @@ export async function unregisterPush(): Promise<void> {
 async function clearLocalPushState(): Promise<void> {
   await Promise.allSettled([
     SecureStore.deleteItemAsync(PUSH_TOKEN_KEY),
+    SecureStore.deleteItemAsync(PREVIEW_SETTING_KEY),
     clearPreviewCredential(),
   ]);
+}
+
+/**
+ * What Settings needs to draw the preview switch: whether this device is
+ * registered for push at all, and where its switch stands.
+ *
+ * The two are separate answers on purpose. A phone that never got push
+ * permission has no server row to toggle, and offering it a switch that would
+ * 404 is worse than saying so — see `MessagePreviewSection`, which puts
+ * different words on screen for each.
+ */
+export async function pushPreviewState(): Promise<{
+  registered: boolean;
+  showPreviews: boolean;
+}> {
+  const [token, setting] = await Promise.all([
+    SecureStore.getItemAsync(PUSH_TOKEN_KEY),
+    SecureStore.getItemAsync(PREVIEW_SETTING_KEY),
+  ]);
+  return { registered: Boolean(token), showPreviews: setting === '1' };
+}
+
+/**
+ * Turn lock-screen previews on or off for this device, and remember it.
+ *
+ * **The server's answer is what gets stored**, not the value asked for. They
+ * agree today, but a mirror that records the request rather than the result is
+ * how a local copy starts drifting from the thing it mirrors — and this one is
+ * read on every Settings visit and believed.
+ *
+ * Throws on failure, unlike everything else in this file: this one is a
+ * deliberate act by someone watching, so a switch that silently doesn't stick
+ * would be worse than an error message. The caller rolls the switch back.
+ */
+export async function setPushPreviews(showPreviews: boolean): Promise<boolean> {
+  const token = await SecureStore.getItemAsync(PUSH_TOKEN_KEY);
+  if (!token) {
+    throw new Error('This device is not registered for push notifications.');
+  }
+  const { show_previews: saved } = await api.setPushPreviews(token, showPreviews);
+  await SecureStore.setItemAsync(PREVIEW_SETTING_KEY, saved ? '1' : '0');
+  return saved;
 }
 
 /**

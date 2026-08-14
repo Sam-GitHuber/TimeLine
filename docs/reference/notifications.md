@@ -588,11 +588,20 @@ content.** A test asserts that against the exact bytes sent to Expo. What 10b
 adds is a second, private channel for the words — straight from us to the
 device over TLS, on the one leg of the journey with no third party on it.
 
-**The iOS path is built end to end; nothing can switch it on yet.** The endpoint,
-the per-device flag, `mutableContent` on the wire, the credential in the keychain
-and the extension that reads it all exist — but `show_previews` defaults to off
-and the settings toggle is M5, so every device today behaves exactly as it did
-before. Android is M4 and may not land; see *The extension*, below.
+**The iOS path is built end to end, switch included.** *Settings → Message
+previews* turns it on for the phone you are holding; it is **off until someone
+turns it on**, and set per device, because what it exposes is a lock screen and
+a lock screen belongs to a phone rather than to an account. The switch is
+absent on Android, deliberately: `mutable-content` is an APNs field with no FCM
+equivalent, so there it would set a flag nothing acts on. Android is M4 and may
+not land; see *The extension*, below.
+
+The app learns where its own switch stands from the **registration response**
+(`POST /push-tokens/` answers `show_previews` alongside the credential) and
+mirrors it locally, so Settings can draw the switch without a round trip. That
+is the only mirror, and it cannot drift: the two things that change the setting
+are that upsert — which resets it when the phone changes hands — and the PATCH
+the switch itself sends.
 
 #### The extension
 
