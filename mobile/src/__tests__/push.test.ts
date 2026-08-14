@@ -58,6 +58,8 @@ const TOKEN = 'ExponentPushToken[test]';
 const STORAGE_KEY = 'timeline.expoPushToken';
 /** What `POST /push-tokens/` answers with since Phase 10b. */
 const PREVIEW = 'preview-credential';
+/** The local mirror of the server's `show_previews` for this device. */
+const PREVIEW_SETTING_KEY = 'timeline.showPreviews';
 
 /**
  * One turn of the event loop as a **macrotask**, so every microtask an
@@ -79,7 +81,7 @@ beforeEach(() => {
   } as never);
   jest
     .spyOn(api, 'registerPushToken')
-    .mockResolvedValue({ preview_token: PREVIEW } as never);
+    .mockResolvedValue({ preview_token: PREVIEW, show_previews: false } as never);
   jest.spyOn(api, 'unregisterPushToken').mockResolvedValue(undefined as never);
 });
 
@@ -446,6 +448,45 @@ describe('the preview credential (Phase 10b)', () => {
     await expect(unregisterPush()).resolves.toBeUndefined();
 
     expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('mirrors where the server says the switch stands', async () => {
+    // There is nowhere else to learn it — the registration response is the only
+    // answer — and Settings draws the switch from this copy.
+    await registerForPush();
+
+    expect(await SecureStore.getItemAsync(PREVIEW_SETTING_KEY)).toBe('0');
+  });
+
+  it('records the reset when the phone has changed hands', async () => {
+    // The server clears `show_previews` when the row moves to a new user. Left
+    // unmirrored, the new owner's app would go on drawing the switch where the
+    // *previous* owner left it while the server had already turned it off — so
+    // someone would toggle it off and on to fix a setting that was never on.
+    await SecureStore.setItemAsync(PREVIEW_SETTING_KEY, '1');
+    jest
+      .spyOn(api, 'registerPushToken')
+      .mockResolvedValue({ preview_token: PREVIEW, show_previews: false } as never);
+
+    await registerForPush();
+
+    expect(await SecureStore.getItemAsync(PREVIEW_SETTING_KEY)).toBe('0');
+  });
+
+  it('is forgotten when this device is unregistered', async () => {
+    await SecureStore.setItemAsync(PREVIEW_SETTING_KEY, '1');
+
+    await unregisterPush();
+
+    expect(await SecureStore.getItemAsync(PREVIEW_SETTING_KEY)).toBeNull();
+  });
+
+  it('is forgotten when the session expires', async () => {
+    await SecureStore.setItemAsync(PREVIEW_SETTING_KEY, '1');
+
+    await forgetLocalPushToken();
+
+    expect(await SecureStore.getItemAsync(PREVIEW_SETTING_KEY)).toBeNull();
   });
 
   it('is not written by a registration whose session ended mid-POST', async () => {

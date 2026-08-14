@@ -1196,6 +1196,49 @@ benign. Chased through `settle`, an explicit in-`act` unmount, and removing both
 because the remaining candidates are all inside react-query's teardown and the
 cost of the noise is lower than the cost of contorting the component around it.
 
+### M5 review, 2026-08-14 — fixes
+
+An `xhigh` review of the M5 diff. The two that matter most are the same shape:
+**a state was being inferred from the wrong signal, and the wrong answer looked
+like a normal one.**
+
+- **"Is this device registered?" was answering the Expo token's presence**, and
+  the token is deliberately written *before* the registration POST — so it can
+  name a row that was never created. A first launch whose POST went out and lost
+  its answer would have drawn the switch, and flipping it would have put "Not
+  found." under a privacy control. It now keys off the mirror, which only a
+  registration *response* writes; that also removes the second keychain read,
+  and with it the `Promise.all` that would have discarded a good token read
+  because the preference read failed.
+- **A failed read rendered as "you haven't turned on notifications."** Exactly
+  #317, one section along: no error branch meant a keychain failure fell through
+  to the not-registered note and told someone to switch on notifications they
+  already had on, with no retry and no way to reach their own switch.
+- **The not-registered note was a dead end within the session.** Registration
+  runs on sign-in and cold start and nowhere else, so following the instruction,
+  returning to the app and finding the same note was the likely outcome — with a
+  force-quit as the only cure, and nothing on screen saying so. It now offers
+  *Check again*, which re-registers and re-reads.
+- **The mirror had no tests.** The settings tests seeded it by hand, so deleting
+  either the write in `runRegistration` or the delete in `clearLocalPushState`
+  left the suite green — including the owner-change reset this milestone's whole
+  argument rests on. Four tests now cover it, checked by breaking the code.
+- **The privacy policy was missing the at-rest downgrade `previewCredential.ts`
+  promises M5 would disclose**, and it named three US companies as new
+  recipients without saying that a transfer outside the UK occurs — in a policy
+  that invokes UK GDPR by name, in the very section added to close a
+  transparency gap. Both stated now, in plain words.
+- Smaller: the query is `enabled` only on iOS, so Android's Settings no longer
+  does two Keystore reads for a section that renders nothing;
+  `clearLocalPushState`'s docstring said "both" and "the two" when it now clears
+  three things; and the `setPushPreviews` guard is labelled as the defensive
+  assertion it is, since `serverMessage` can never surface a non-`ApiError`
+  message and the sentence it authored was unreachable.
+- **`notifications.md`'s "it cannot drift" was an overclaim.** A launch whose
+  POST never lands leaves the previous value for the session — swallowed on
+  purpose, because push must not break a launch. Now stated, so nobody later
+  decides against a reconciliation path on the strength of an absolute.
+
 ## Corrections from review
 
 Recorded so the reasoning isn't repeated. The first draft asserted, and source

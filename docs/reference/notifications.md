@@ -598,10 +598,17 @@ not land; see *The extension*, below.
 
 The app learns where its own switch stands from the **registration response**
 (`POST /push-tokens/` answers `show_previews` alongside the credential) and
-mirrors it locally, so Settings can draw the switch without a round trip. That
-is the only mirror, and it cannot drift: the two things that change the setting
-are that upsert — which resets it when the phone changes hands — and the PATCH
-the switch itself sends.
+mirrors it locally, so Settings can draw the switch without a round trip. Only
+two things change the setting — that upsert, which resets it when the phone
+changes hands, and the PATCH the switch sends — and both write the mirror, so
+there is no third source to reconcile against.
+
+It can still go **stale**, and that is accepted rather than solved: a launch
+whose registration POST never lands leaves the previous value in place for the
+session, since the failure is swallowed on purpose (push must not break a
+launch). The next successful registration corrects it. The mirror's *presence*,
+not the Expo token's, is also what tells Settings a server row exists — the
+token is written before the POST and can name a row that was never created.
 
 #### The extension
 

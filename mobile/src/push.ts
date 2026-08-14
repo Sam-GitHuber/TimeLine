@@ -637,17 +637,18 @@ export async function unregisterPush(): Promise<void> {
 }
 
 /**
- * Drop both of this device's local push secrets, independently of each other.
+ * Drop everything this device holds locally about its push registration — the
+ * Expo token, the preview credential, and the mirror of the preview setting —
+ * independently of one another.
  *
  * **`allSettled`, and that is the whole point of the function.** Android's
  * `deleteValueWithKeyAsync` rethrows any failure as a `DeleteException`
  * (`SecureStoreModule.kt`) — unlike iOS, which ignores `SecItemDelete`'s
- * status — so sequential awaits would let a hiccup deleting the Expo token skip
- * the credential delete entirely, leaving the more sensitive of the two behind
- * because the less sensitive one failed. Neither of these is worth trapping
- * someone in a logged-in app over, and `unregisterPush` calls this from a
- * `finally`, where a rejection would escape the `catch` that exists to keep a
- * network failure from doing exactly that.
+ * status — so sequential awaits would let a hiccup deleting the first thing
+ * skip the rest, and the credential is the one that must not be left behind.
+ * None of these is worth trapping someone in a logged-in app over, and
+ * `unregisterPush` calls this from a `finally`, where a rejection would escape
+ * the `catch` that exists to keep a network failure from doing exactly that.
  */
 async function clearLocalPushState(): Promise<void> {
   await Promise.allSettled([
@@ -658,23 +659,34 @@ async function clearLocalPushState(): Promise<void> {
 }
 
 /**
- * What Settings needs to draw the preview switch: whether this device is
- * registered for push at all, and where its switch stands.
+ * What Settings needs to draw the preview switch: whether there is a server row
+ * to toggle at all, and where its switch stands.
  *
  * The two are separate answers on purpose. A phone that never got push
- * permission has no server row to toggle, and offering it a switch that would
- * 404 is worse than saying so — see `MessagePreviewSection`, which puts
- * different words on screen for each.
+ * permission has no row, and offering it a switch that would 404 is worse than
+ * saying so — see `MessagePreviewSection`, which puts different words on screen
+ * for each.
+ *
+ * ⚠️ **`registered` is the presence of the mirror, not of the Expo token**, and
+ * the distinction is the whole reason this reads one key rather than two. The
+ * token is deliberately written *before* the POST (see `runRegistration`), so
+ * it can name a row that was never created — a first launch whose registration
+ * went out and lost its answer leaves a token on disk and nothing on the
+ * server. Keying off it would have drawn a switch whose PATCH answers "Not
+ * found." under a privacy control. The mirror is written only from a
+ * registration response, so its presence means the server has confirmed a row.
+ *
+ * A read that *fails* is deliberately allowed to reject rather than being
+ * flattened to "not registered": those are different states and they need
+ * different words. The caller renders an error and a retry for one, and an
+ * explanation for the other.
  */
 export async function pushPreviewState(): Promise<{
   registered: boolean;
   showPreviews: boolean;
 }> {
-  const [token, setting] = await Promise.all([
-    SecureStore.getItemAsync(PUSH_TOKEN_KEY),
-    SecureStore.getItemAsync(PREVIEW_SETTING_KEY),
-  ]);
-  return { registered: Boolean(token), showPreviews: setting === '1' };
+  const stored = await SecureStore.getItemAsync(PREVIEW_SETTING_KEY);
+  return { registered: stored !== null, showPreviews: stored === '1' };
 }
 
 /**
@@ -687,11 +699,17 @@ export async function pushPreviewState(): Promise<{
  *
  * Throws on failure, unlike everything else in this file: this one is a
  * deliberate act by someone watching, so a switch that silently doesn't stick
- * would be worse than an error message. The caller rolls the switch back.
+ * would be worse than an error message. The caller rolls the switch back and
+ * shows what the server said.
  */
 export async function setPushPreviews(showPreviews: boolean): Promise<boolean> {
   const token = await SecureStore.getItemAsync(PUSH_TOKEN_KEY);
   if (!token) {
+    // A defensive assertion, not a sentence anyone reads: `pushPreviewState`
+    // only reports `registered` when a registration response has been stored,
+    // and Settings offers no switch without it. `serverMessage` would replace
+    // this with the caller's own wording anyway, since it isn't an `ApiError`
+    // the server authored.
     throw new Error('This device is not registered for push notifications.');
   }
   const { show_previews: saved } = await api.setPushPreviews(token, showPreviews);

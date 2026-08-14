@@ -22,11 +22,19 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ActivityIndicator, Platform, StyleSheet, Switch, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Switch,
+  Text,
+  View,
+} from 'react-native';
 
 import { serverMessage } from '@/api';
-import { pushPreviewState, setPushPreviews } from '@/push';
-import { colors, fontSize, spacing } from '@/theme';
+import { pushPreviewState, registerForPush, setPushPreviews } from '@/push';
+import { colors, fontSize, radius, spacing } from '@/theme';
 import { useHoldOpen } from '@/writeHold';
 
 const PREVIEW_KEY = ['pushPreviewState'] as const;
@@ -37,8 +45,22 @@ export function MessagePreviewSection() {
   const stateQuery = useQuery({
     queryKey: PREVIEW_KEY,
     queryFn: pushPreviewState,
+    // Nothing below renders on Android, and the read is two trips into the
+    // Keystore. The `return null` has to come *after* the hooks, so the work is
+    // declined here rather than by moving the guard up.
+    enabled: Platform.OS === 'ios',
   });
   const state = stateQuery.data;
+
+  /**
+   * **A failed read is not "previews are off"** (#317's lesson, one section
+   * along). Without this, a keychain error falls straight through to the
+   * `!registered` branch and tells someone to go and switch on notifications
+   * they already have on — with no error, no retry, and no way to reach their
+   * own switch. `&& !state` rather than a bare `isError`, so a failed *refresh*
+   * keeps the switch you are looking at.
+   */
+  const loadFailed = stateQuery.isError && !state;
 
   const mutation = useMutation({
     mutationFn: setPushPreviews,
@@ -84,17 +106,42 @@ export function MessagePreviewSection() {
         this on means anyone who can see your lock screen can read your messages.
       </Text>
 
-      {stateQuery.isLoading ? (
+      {loadFailed ? (
+        <View style={styles.failure}>
+          <Text style={styles.error} accessibilityRole="alert">
+            {serverMessage(
+              stateQuery.error,
+              'Couldn’t read this device’s preview setting.'
+            )}
+          </Text>
+          <Retry label="Try again" onPress={() => stateQuery.refetch()} />
+        </View>
+      ) : stateQuery.isLoading ? (
         <ActivityIndicator color={colors.accent} style={styles.spinner} />
       ) : !state?.registered ? (
         // Not an error, and not a switch. There is no server row to toggle
         // until this device has registered for push, so a switch here would
         // 404 — and "previews are off" would be the wrong thing to say to
         // someone who has simply declined notifications altogether.
-        <Text style={styles.note}>
-          Turn on notifications for TimeLine in your phone&apos;s Settings to use
-          this.
-        </Text>
+        //
+        // The button matters as much as the sentence. Registration happens on
+        // sign-in and cold start and nowhere else, so following the
+        // instruction, coming back to the app and finding the same note is the
+        // obvious way to write a dead end: the only other cure is a force-quit,
+        // which nothing on screen would have told anyone about.
+        <View style={styles.failure}>
+          <Text style={styles.note}>
+            Turn on notifications for TimeLine in your phone&apos;s Settings, then
+            check again.
+          </Text>
+          <Retry
+            label="Check again"
+            onPress={async () => {
+              await registerForPush();
+              await stateQuery.refetch();
+            }}
+          />
+        </View>
       ) : (
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Show message text on the lock screen</Text>
@@ -114,6 +161,19 @@ export function MessagePreviewSection() {
         </Text>
       ) : null}
     </View>
+  );
+}
+
+/** The same outlined button as every other retry in Settings. */
+function Retry({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+    >
+      <Text style={styles.retryText}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -138,6 +198,17 @@ const styles = StyleSheet.create({
     color: colors.inkFaint,
     lineHeight: 20,
   },
+  failure: { alignItems: 'flex-start' },
+  retry: {
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+  },
+  retryText: { color: colors.ink, fontWeight: '600' },
+  pressed: { opacity: 0.7 },
   row: {
     marginTop: spacing.md,
     flexDirection: 'row',

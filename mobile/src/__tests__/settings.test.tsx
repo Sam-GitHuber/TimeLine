@@ -798,9 +798,45 @@ describe('MessagePreviewSection (Phase 10b)', () => {
 
     await settle(2);
     expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    expect(screen.getByText(/Turn on notifications for TimeLine/)).toBeTruthy();
+    // And a way out of it. Registration runs on sign-in and cold start only, so
+    // without this, following the instruction and coming back finds the same
+    // note — the cure would be a force-quit that nothing mentions.
+    expect(screen.getByText('Check again')).toBeTruthy();
+  });
+
+  iosIt('offers no switch when the POST never reached the server', async () => {
+    // The Expo token is stored *before* the registration POST, on purpose, so
+    // it can name a row that was never created — a first launch that lost its
+    // answer. Keyed off the token, this would have drawn a switch whose PATCH
+    // answers "Not found." under a privacy control. It keys off the mirror,
+    // which only a registration *response* writes.
+    await SecureStore.setItemAsync('timeline.expoPushToken', DEVICE);
+
+    await renderWithClient(<MessagePreviewSection />);
+
+    await settle(2);
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    expect(screen.getByText(/Turn on notifications for TimeLine/)).toBeTruthy();
+  });
+
+  iosIt('says a failed read failed, rather than blaming notifications', async () => {
+    // The #317 defect one section along: with no error branch, a keychain
+    // failure falls through to the note above and tells someone to switch on
+    // notifications they already have on — no error, no retry, and no way to
+    // reach their own switch.
+    (SecureStore.getItemAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('keychain unavailable')
+    );
+
+    await renderWithClient(<MessagePreviewSection />);
+
+    await settle(2);
     expect(
-      screen.getByText(/Turn on notifications for TimeLine/)
+      screen.getByText('Couldn’t read this device’s preview setting.')
     ).toBeTruthy();
+    expect(screen.getByText('Try again')).toBeTruthy();
+    expect(screen.queryByText(/Turn on notifications for TimeLine/)).toBeNull();
   });
 
   androidIt('renders nothing at all', async () => {

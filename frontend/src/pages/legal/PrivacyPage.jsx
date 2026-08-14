@@ -108,7 +108,11 @@ export default function PrivacyPage() {
           about things like new messages and replies. Getting a notification onto
           your phone means passing it through two companies we don’t control:{" "}
           <strong>Expo</strong>, and then <strong>Apple</strong> (on iPhone) or{" "}
-          <strong>Google</strong> (on Android).
+          <strong>Google</strong> (on Android). These are US-based companies, so
+          the little that a notification carries — described below — is
+          transferred outside the UK. Nothing else about your account or your
+          content leaves the London server described above, other than the
+          encrypted backups.
         </P>
         <P>
           Because of that, we deliberately keep notifications almost empty. A
@@ -128,9 +132,17 @@ export default function PrivacyPage() {
           your phone fetches it from us directly, over an encrypted connection,
           after the notification has already arrived. To make that possible your
           phone stores a limited access key, which can only be used to fetch these
-          previews and nothing else, and which is removed when you sign out. The
-          trade-off is the obvious one: with previews on, anyone who can see your
-          lock screen can read your messages.
+          previews and nothing else, and which is removed when you sign out.
+        </P>
+        <P>
+          Two things about that are worth stating plainly. With previews on,
+          anyone who can see your lock screen can read your messages. And because
+          your phone has to be able to fetch a preview while it is locked in your
+          pocket, that access key is stored so that it can be read once the phone
+          has been unlocked at least once since being switched on — a slightly
+          weaker protection than the one used for your login, which is readable
+          only while the phone is actually unlocked. The key never leaves the
+          device, and is not included in backups or synced to iCloud.
         </P>
         <P>
           You can stop notifications entirely at any time, either in your phone’s
