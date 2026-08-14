@@ -8,8 +8,9 @@ changed and why, so the reasoning isn't lost.
 
 **The open decision is settled (2026-08-13): Option B**, a scoped credential.
 Its shape changed in the building — see *Notes / decisions log*. M1 (backend)
-and M2 (keychain) are merged; **M3 (the iOS extension) is next**, and it is
-where everything M2 wrote is finally read.
+and M2 (keychain) are built; **M3 (the iOS extension) is next**, and it is where
+everything M2 wrote is finally read. As always, git is the authority on what has
+actually merged — this file says what has been *done*, not what is on `main`.
 
 **Why the odd number.** It follows Phase 10 (Android) and comes *before* Phase 9c
 (E2E), which is scheduled after Android. The numbering is chronological, not a
@@ -798,7 +799,7 @@ endpoint is conversation-scoped.
 - **Registration kept `update_or_create`**, which resolves the create/create
   race on the unique `expo_token` rather than 500ing on it.
 
-### M2, 2026-08-14 — merged
+### M2, 2026-08-14
 
 **There is no migration, because there is nothing to migrate.** M2's whole
 middle section — read without the group, write with the group, never delete,
@@ -898,6 +899,60 @@ query as matching *across* groups — the behaviour that would have broken the
 plan's migration — and reproduces the update-keeps-attributes rule above.
 Verified the hard way: removing the delete-before-write, and unpinning the
 service, each make a test fail.
+
+### M2 review, 2026-08-14 — fixes
+
+An `xhigh` review of the M2 diff. Three findings were about the same mistake
+seen from three sides — **a credential has more teardown paths than a
+preference does** — and they are the ones worth remembering.
+
+- **The session guard moved into `previewCredential.ts`, and grew two more
+  checks.** The first version guarded the *call* to `savePreviewCredential` from
+  `push.ts`, which closes the window only up to the moment that function is
+  entered — and the function then awaits twice. A sign-out landing inside the
+  delete deletes nothing (we have just deleted) and then watches the credential
+  be written onto a phone that is by then on the login screen. It now owns a
+  counter of its own, exactly as `tokens.ts` does, checked on entry, again after
+  the delete, and again after the write, with a compare-and-delete undo for the
+  sliver that remains. Declining to write is better than writing-and-undoing,
+  because a teardown can be followed by a *new* registration storing its own
+  credential — the undo can remove what it wrote but cannot put back what it
+  clobbered. That last case was found by a test written to assert the opposite.
+- **There is a third teardown path, and it isn't in `push.ts`.** `signOut` calls
+  `unregisterPush` and the expiry handler calls `forgetLocalPushToken`, but a
+  refresh that *succeeds* followed by a replay that 401s never fires the expiry
+  handler — it lands in `auth.tsx`'s cold-start catch, which reaches
+  `clearTokens` directly. An account deactivated while the app was closed looks
+  exactly like that, and `is_active=False` is an ordinary state here because
+  sign-ups are admin-gated. The device reached the login screen still holding
+  both push secrets. That gap pre-dates 10b for the Expo token; it now clears
+  both.
+- **The two local deletes are independent.** Android's
+  `deleteValueWithKeyAsync` rethrows failures as a `DeleteException`, unlike
+  iOS, which ignores `SecItemDelete`'s status — so sequential awaits let a
+  hiccup on the Expo token skip the credential entirely, leaving the more
+  sensitive of the two behind because the less sensitive one failed. From inside
+  `unregisterPush`'s `finally` it would also reject past the catch that exists
+  to stop a network failure trapping someone in a logged-in app. Both now go
+  through one `Promise.allSettled`.
+- **A failed credential write is no longer a failed registration.** It sits
+  after the POST, so the row exists and the Expo token is stored; letting it
+  fall to `runRegistration`'s catch reported a registration that wholly
+  succeeded as `null`.
+- **The test double now models `requireAuthentication`**, which is what decides
+  the `:no-auth` suffix on the service — part of the literal M3's Swift
+  hardcodes. Flip that flag and every item moves service, the extension gets
+  `errSecItemNotFound` on every push on every device, and nothing in the app
+  notices. It also models the read's fallback through the three service aliases,
+  as the real `get` does. The test now asserts the exact string
+  `timeline:no-auth` rather than the pinned half of it.
+- **The "account tokens aren't stored alongside" test checks both keys.** It
+  filtered on `timeline.access`, so a tidy-up that moved only the *refresh*
+  token onto the credential's options — the long-lived half, which buys a whole
+  session — would have downgraded its accessibility with the suite still green.
+- **`accounts.md` claimed the local copy and the server row "go at the same
+  time".** They don't: only sign-out deletes the row. The doc now states the
+  asymmetry, since it is the one M5's privacy text will be written from.
 
 ## Corrections from review
 

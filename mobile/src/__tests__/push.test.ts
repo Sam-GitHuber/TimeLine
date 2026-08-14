@@ -59,6 +59,15 @@ const STORAGE_KEY = 'timeline.expoPushToken';
 /** What `POST /push-tokens/` answers with since Phase 10b. */
 const PREVIEW = 'preview-credential';
 
+/**
+ * One turn of the event loop as a **macrotask**, so every microtask an
+ * unawaited registration is sitting on has drained by the time it returns —
+ * which is what lets these tests say "it got exactly this far" rather than
+ * hoping. Module scope, because two describes want it and the
+ * macrotask-not-microtask subtlety is the sort that gets fixed in one copy.
+ */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 beforeEach(() => {
   mockIsDevice = true;
   mockNotifications.getPermissionsAsync.mockResolvedValue({
@@ -208,14 +217,6 @@ describe('unregisterPush', () => {
 });
 
 describe('a session ending while a registration is in flight (#219)', () => {
-  /**
-   * One turn of the event loop as a **macrotask**, so every microtask an
-   * unawaited registration is sitting on has drained by the time it returns —
-   * which is what lets these tests say "it got exactly this far" rather than
-   * hoping.
-   */
-  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-
   /** A promise a test resolves by hand, to hold a call open. */
   function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
     let resolve!: (value: T) => void;
@@ -363,9 +364,6 @@ describe('a session ending while a registration is in flight (#219)', () => {
 });
 
 describe('the preview credential (Phase 10b)', () => {
-  /** As above: a macrotask, so every pending microtask has drained. */
-  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-
   it('is stored when the registration mints one', async () => {
     await registerForPush();
 
@@ -405,6 +403,47 @@ describe('the preview credential (Phase 10b)', () => {
     await registerForPush();
 
     await forgetLocalPushToken();
+
+    expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('failing to store it is not a failed registration', async () => {
+    // By this point the server row exists and the Expo token is stored, so a
+    // keychain refusal here loses previews and nothing else. Reporting `null`
+    // would call a registration that wholly succeeded a failure — and because
+    // the save deletes before writing, it also leaves the device with no
+    // credential rather than a stale one, which is the right end state.
+    const setItem = SecureStore.setItemAsync as jest.Mock;
+    const passthrough = setItem.getMockImplementation()!;
+    setItem
+      // The Expo token, written before the POST, stores normally.
+      .mockImplementationOnce(passthrough)
+      .mockImplementationOnce(async () => {
+        throw new Error('the keystore refused');
+      });
+
+    expect(await registerForPush()).toBe(TOKEN);
+    expect(api.registerPushToken).toHaveBeenCalledWith(TOKEN);
+    expect(await SecureStore.getItemAsync(STORAGE_KEY)).toBe(TOKEN);
+    expect(await getPreviewCredential()).toBeNull();
+  });
+
+  it('is cleared even when dropping the Expo token fails', async () => {
+    // Android's `deleteValueWithKeyAsync` rethrows a failure as a
+    // `DeleteException`, unlike iOS, which ignores `SecItemDelete`'s status. In
+    // sequence, a hiccup on the first delete would skip the second — leaving
+    // the *more* sensitive of the two secrets behind because the less sensitive
+    // one failed — and, from inside `unregisterPush`'s `finally`, would reject
+    // out past the catch that exists to keep a network failure from trapping
+    // someone in a logged-in app.
+    await registerForPush();
+    (SecureStore.deleteItemAsync as jest.Mock).mockImplementationOnce(
+      async () => {
+        throw new Error('the keystore refused');
+      }
+    );
+
+    await expect(unregisterPush()).resolves.toBeUndefined();
 
     expect(await getPreviewCredential()).toBeNull();
   });

@@ -409,8 +409,16 @@ touching this endpoint:
   screen. Keeping it out of `tokens.ts` is what confines that at-rest downgrade
   to a read-only preview credential: the access and refresh tokens keep the
   stricter property they have always had. It is deleted wherever this device's
-  registration is dropped — sign-out and session expiry both — so the local copy
-  and the server row that authenticates it go at the same time.
+  registration is dropped: sign-out, session expiry, and a cold start whose
+  token the server refuses.
+
+  **Only sign-out revokes it server-side**, though, and the asymmetry is worth
+  knowing. Sign-out DELETEs the row, which takes the hash with it. The other two
+  paths deliberately leave the row alone — the unregister endpoint is
+  authenticated, and by then the session is precisely what has been refused — so
+  the hash stays valid until the next registration rotates it. What they remove
+  is the plaintext, which is the only copy that could be used; there is no way
+  for a signed-out device to reach the endpoint without it.
 
 Push itself is documented in [notifications.md](notifications.md); the app that
 registers the token is in [mobile-app.md](mobile-app.md).

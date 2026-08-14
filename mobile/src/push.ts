@@ -34,7 +34,11 @@ import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
 import { api } from '@/api';
-import { clearPreviewCredential, savePreviewCredential } from '@/previewCredential';
+import {
+  clearPreviewCredential,
+  previewCredentialSession,
+  savePreviewCredential,
+} from '@/previewCredential';
 
 const PUSH_TOKEN_KEY = 'timeline.expoPushToken';
 
@@ -479,6 +483,9 @@ async function runRegistration(
   epoch: number,
   attempt: { committed: boolean }
 ): Promise<string | null> {
+  // Captured now, before any await, so the credential save at the end can tell
+  // whether a teardown has happened in between — see `previewCredential.ts`.
+  const previewSession = previewCredentialSession();
   try {
     if (!canRegisterForPush()) return null;
 
@@ -524,22 +531,29 @@ async function runRegistration(
     // The preview credential the registration just minted (Phase 10b), for the
     // notification service extension to read off the Keychain.
     //
-    // **Checked against the epoch again, unlike the Expo token above**, and the
-    // asymmetry is deliberate in both directions. The Expo token is written
-    // *before* the POST because losing it strands a live server row; this is a
-    // live *credential*, so the cost of keeping it a moment too long runs the
-    // other way — a sign-out landing during the POST would otherwise have us
-    // write, straight after the teardown's delete, a working read-credential
-    // over the previous user's message previews onto a phone nobody is signed
-    // in on. And there is nothing to lose by dropping it: the next
-    // registration mints a fresh one, which is the only recovery path this
-    // credential has or needs.
+    // **Session-guarded, unlike the Expo token above**, and the asymmetry is
+    // deliberate in both directions. The Expo token is written *before* the
+    // POST because losing it strands a live server row; this is a live
+    // *credential*, so the cost of keeping it a moment too long runs the other
+    // way — a sign-out landing during the POST would otherwise write a working
+    // read-credential over the previous user's message previews onto a phone
+    // nobody is signed in on, straight after the teardown meant to remove it.
+    // There is nothing to lose by dropping it: the next registration mints a
+    // fresh one, which is the only recovery path this credential has or needs.
+    // `previewCredential.ts` owns that guard, including the part of the window
+    // that lies inside the write itself.
     //
-    // It closes the window `forgetLocalPushToken` documents for the Expo token,
-    // because the epoch is bumped synchronously by `endRegistrationsForSession`
-    // before that function's first await.
-    if (epoch === sessionEpoch && registration?.preview_token) {
-      await savePreviewCredential(registration.preview_token);
+    // **Its own try/catch**, because a failure here is not a failed
+    // registration: the row exists server-side and the Expo token is stored.
+    // Letting it fall to the catch below would report a registration that
+    // wholly succeeded as `null`. All that is actually lost is previews, which
+    // fall back to the contentless body like every other failure in this phase.
+    if (registration?.preview_token) {
+      try {
+        await savePreviewCredential(registration.preview_token, previewSession);
+      } catch {
+        // See above.
+      }
     }
     return token;
   } catch {
@@ -573,14 +587,34 @@ export async function unregisterPush(): Promise<void> {
     // Always drop the local copy. If the server row survived a failed DELETE,
     // the next person to log in on this phone re-registers the same token and
     // the backend's upsert-on-token moves the row to them anyway.
-    await SecureStore.deleteItemAsync(PUSH_TOKEN_KEY);
+    //
     // And the preview credential with it — a copy left here would go on
     // answering for the person who has just signed out. The server-side half of
     // this is the DELETE above, which drops the row the credential's hash lives
     // on; both halves matter, because either one alone leaves a way for a
     // preview to be fetched by someone who is no longer signed in.
-    await clearPreviewCredential();
+    await clearLocalPushState();
   }
+}
+
+/**
+ * Drop both of this device's local push secrets, independently of each other.
+ *
+ * **`allSettled`, and that is the whole point of the function.** Android's
+ * `deleteValueWithKeyAsync` rethrows any failure as a `DeleteException`
+ * (`SecureStoreModule.kt`) — unlike iOS, which ignores `SecItemDelete`'s
+ * status — so sequential awaits would let a hiccup deleting the Expo token skip
+ * the credential delete entirely, leaving the more sensitive of the two behind
+ * because the less sensitive one failed. Neither of these is worth trapping
+ * someone in a logged-in app over, and `unregisterPush` calls this from a
+ * `finally`, where a rejection would escape the `catch` that exists to keep a
+ * network failure from doing exactly that.
+ */
+async function clearLocalPushState(): Promise<void> {
+  await Promise.allSettled([
+    SecureStore.deleteItemAsync(PUSH_TOKEN_KEY),
+    clearPreviewCredential(),
+  ]);
 }
 
 /**
@@ -624,18 +658,17 @@ export async function unregisterPush(): Promise<void> {
  */
 export async function forgetLocalPushToken(): Promise<void> {
   endRegistrationsForSession();
-  await SecureStore.deleteItemAsync(PUSH_TOKEN_KEY);
-  // The preview credential goes even though the server row survives an expiry.
-  // The row surviving is defensible — this is still the same person's phone,
-  // and they simply have to log in again — but a *credential* sitting on it,
-  // usable without any further authentication to read the newest inbound line
-  // of every thread they're in, is not the same bargain. Nothing needs it until
-  // the next registration, which mints a new one.
+  // The preview credential goes too, even though the server row survives an
+  // expiry. The row surviving is defensible — this is still the same person's
+  // phone, and they simply have to log in again — but a *credential* sitting on
+  // it, usable without any further authentication to read the newest inbound
+  // line of every thread they're in, is not the same bargain. Nothing needs it
+  // until the next registration, which mints a new one.
   //
-  // The window this function documents above doesn't apply to it: a committed
-  // registration landing after us re-reads the epoch bumped on the first line
-  // and declines to write.
-  await clearPreviewCredential();
+  // The window this function documents above doesn't apply to it: the delete
+  // bumps `previewCredential.ts`'s counter synchronously, so a committed
+  // registration landing afterwards declines to write rather than restoring it.
+  await clearLocalPushState();
 }
 
 /**
