@@ -509,7 +509,14 @@ migration: here it's the behaviour we want, matching both copies.
   build. A clean install proves nothing here — that's the whole lesson of this
   milestone.
 
-### M3 — The iOS Notification Service Extension
+### M3 — The iOS Notification Service Extension ✅ **Built**
+
+Built as written below, with the deviations in *Notes / decisions log*. The one
+thing it cannot claim is **verified**: the extension compiles and the app embeds
+it, but whether it *runs* is the device matrix under Risks, and that needs a
+TestFlight build over the current one.
+
+
 
 The native dirs are **gitignored** (`mobile/.gitignore:57`), so this is a CNG
 project: the extension must come from a **config plugin**, never a hand-edit of
@@ -953,6 +960,166 @@ preference does** — and they are the ones worth remembering.
 - **`accounts.md` claimed the local copy and the server row "go at the same
   time".** They don't: only sign-out deletes the row. The doc now states the
   asymmetry, since it is the one M5's privacy text will be written from.
+
+### M3, 2026-08-14
+
+**The plugin is local, and it is bigger than "~100 lines".** The estimate
+assumed the plugin API does the work; most of it is `xcode`'s `addTarget`, which
+handles the genuinely fiddly half — the product reference, the build
+configuration list, the Copy Files phase that embeds the `.appex`, and the app's
+dependency on it. What's left is the build settings Xcode's target template
+would have filled in and which `addTarget` leaves out: the entitlements path,
+`SWIFT_VERSION`, the device family, and the three settings copied off the app
+target. Still well short of taking a third-party plugin onto the release path.
+
+**Everything happens in one `withXcodeProject` mod**, including writing the
+files, rather than a `withDangerousMod` for the files and a second mod for the
+project. Two mods would have depended on the order Expo applies them in, which
+is not something this repo should be pinned to; the paths are all available from
+`modRequest` either way.
+
+**It is idempotent, which the plan didn't ask for.** The files and the build
+settings are rewritten on every run — so editing the Swift, or bumping the
+version, and re-running prebuild does the obvious thing — while the target
+itself is created only if it isn't already there. The path that needs this is
+`expo prebuild --no-clean`; **cleaning is the default and there is no `--clean`
+flag**, which is worth knowing both ways round, since a plain `expo prebuild`
+silently deletes `ios/build` along with everything else.
+
+**The versions are copied — but not from where the plan said, and the difference
+was a live bug.** "Have the plugin copy the app target's values rather than state
+them" is the right instinct and the wrong source. The app target *does* carry
+`MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`, and **nothing reads them**:
+Expo writes `CFBundleShortVersionString`/`CFBundleVersion` straight into the
+app's Info.plist from the config and never touches the build settings
+(`@expo/config-plugins`' `ios/Version.ts` mentions neither). Copying them
+produced an extension stamped **1.0** inside an app stamped **1.0.0** — which is
+precisely the App Store Connect validation rejection the plan warned about, and
+it would have arrived after a fifteen-minute build and an upload, in a message
+naming neither number.
+
+Caught by building the app and diffing the two `Info.plist`s by hand, which is
+the only place it was visible: the extension target built fine, the app built
+fine, and every test passed. The fix is `IOSConfig.Version.getVersion` /
+`getBuildNumber` — the same two functions Expo's own writer uses — so the two
+bundles cannot disagree. That also survives `appVersionSource: remote` +
+`autoIncrement`, because EAS puts the resolved build number in the config
+*before* prebuild runs. `IPHONEOS_DEPLOYMENT_TARGET` is still copied off the app
+target, because that one really is a build setting.
+
+**`NSAllowsLocalNetworking` is in the extension's Info.plist.** Not in the plan,
+and needed for the plan's own dev story to work: `EXPO_PUBLIC_API_URL` pointed at
+a LAN Django is `http://192.168.x.x`, which App Transport Security blocks
+outright. This exception covers LAN and loopback addresses only, so public HTTPS
+is exactly as strict as before — the alternative would have been an extension
+that cannot be developed against a local backend, which is the only way to
+develop it.
+
+**The tests read the Swift as text, and that is the point.** Jest cannot run an
+extension and the Simulator cannot easily be made to deliver one a push — but
+worse, the fallback discipline means *every* way it can be wrong looks identical
+from outside: it delivers exactly the notification a working one would have
+delivered before 10b. Nothing crashes and nothing logs. So the suite pins the
+string equalities no compiler checks: the keychain key and service against
+`previewCredential.ts`, the URL path against the backend route, the `Preview`
+auth keyword, the `/messages/` prefix, the Info.plist key against the plugin,
+and — the one that saves fifteen minutes of EAS build time — that `app.json`'s
+`appExtensions` entry agrees with the plugin on the bundle identifier and the
+entitlement.
+
+It also asserts the extension logs *nothing*: no `os_log`, `NSLog`, `print`,
+`debugPrint` or `dump`. The usual way to debug an extension is to print things
+and read Console.app, everything this process touches is either a credential or
+somebody's private message, and Console.app is readable by anything on the Mac
+the phone is plugged into.
+
+**Two Swift fixes found by reading rather than by building**, both of which
+would have shipped as "previews are flaky and nobody can say why":
+
+- The `URLSession` was created locally and never held, so it was free to be
+  released while its request was in flight — which cancels the request.
+  `finishTasksAndInvalidate()` after `resume()` is the documented way to say
+  "let what's outstanding finish, then let go".
+- The completion closure captured `self` weakly. There was no cycle to break
+  (the session is invalidated), and a released instance would mean the content
+  handler was never called at all — a notification dropped rather than merely
+  un-previewed. Strong capture is the safer failure here.
+
+**Verified as far as a laptop can:** `expo prebuild --clean` produces the target;
+`xcodebuild` builds the `.appex`; the whole app builds and ships it in
+`TimeLine.app/PlugIns/`; and the embedded bundle carries the right
+`NSExtensionPointIdentifier`, a principal class of
+`NotificationService.NotificationService` resolved from `$(PRODUCT_MODULE_NAME)`,
+the injected API URL, and version keys equal to the app's. What is left is the
+device matrix, and `docs/mobile-release.md` now carries the warning that the
+first build with the extension re-enters the interactive Apple-login path.
+
+### M3 review, 2026-08-14 — fixes
+
+An `xhigh` review of the M3 diff. The theme: **the idempotent path was never
+actually exercised, so nothing in it worked** — and it was written to be
+exercised by an invocation the plan had backwards.
+
+- **The idempotency guard could never fire.** `addTarget` stores the target's
+  name *quoted*, and `pbxTargetByName` compares the section comment verbatim, so
+  `pbxTargetByName('NotificationService')` returns `null` forever. Confirmed by
+  driving the `xcode` library against the real generated project: a second run
+  produced two targets, four build configurations, and two `.appex` rows in the
+  app's Copy Files phase — precisely the unbuildable project the guard was there
+  to prevent. Replaced with a lookup that accepts either spelling and returns
+  the *uuid*, which is what the rest of the plugin needs anyway.
+- **And the settings it guarded were the ones that must not be skipped.** The
+  early `return` meant the versions, the entitlements path and the deployment
+  target were written only on the run that created the target. With the guard
+  repaired, a `--no-clean` prebuild after a version bump would have left the
+  extension stamped with the old version while Expo rewrote the app's Info.plist
+  with the new — the App Store Connect rejection this milestone had *already*
+  been rewritten once to avoid, arriving by a second route. They now sit outside
+  the branch and refresh every run. Verified by bumping `expo.version`,
+  re-prebuilding, and watching both extension configurations follow.
+- **The settings are applied through the target's own configuration list**, not
+  by scanning the whole project for a matching `PRODUCT_NAME`. A name match is a
+  coincidence away from writing into another target and one change in how
+  `xcode` quotes that value away from matching *nothing* — which would silently
+  drop `CODE_SIGN_ENTITLEMENTS`, the one setting this milestone turns on, with
+  the Swift's fallback discipline hiding the result forever.
+- **`deliver()` could drop a notification entirely.** If `mutableCopy()` ever
+  returned nil, both it and `serviceExtensionTimeWillExpire` fell through their
+  `guard` and the content handler was never called — so iOS dropped the push
+  rather than showing the contentless body. That is the one outcome the file's
+  own header says cannot happen. It now keeps the original content and delivers
+  that.
+- **`deliver()` was not thread-safe.** The URLSession completion runs on the
+  session's queue and the expiry hook on the system's, so a response landing as
+  the budget expires let both pass the nil-check before either cleared it, and
+  call the handler twice — undefined behaviour, not a duplicate notification.
+  The same window raced the body write against the read. An `NSLock` now covers
+  the take-and-clear and the write.
+- **Orphan build files removed.** `addPbxGroup` registers a `PBXBuildFile` for
+  each path it hasn't seen, so the Info.plist and the entitlements came away
+  with build files belonging to no phase — inert, but labelled `in Resources`,
+  which reads as though the entitlements plist is copied into the shipped
+  bundle.
+- **The `??` on the bundle identifier was dead code.**
+  `IOSConfig.BundleIdentifier.getBundleIdentifier` is literally
+  `config.ios?.bundleIdentifier ?? null` — the same expression as the left-hand
+  side. A fallback that can never supply a value is worse than none.
+- **The default API URL is read out of `api.ts`** rather than restated in the
+  test. It lives in three files that must agree, and a test carrying its own
+  fourth copy compared all three against a literal none of them has to match.
+- **The `logs nothing` assertion scans the comment-stripped source**, like its
+  two neighbours. As written, strengthening the Swift's own warning comment to
+  name the calls it forbids would have failed the suite — and the obvious repair
+  is to weaken the check.
+- **`app.json`'s `appExtensions` is read with optional chaining.** Dereferenced
+  in a `describe` body, deleting that block took the whole file down at
+  collection time with a `TypeError`, losing all forty assertions — including
+  the three that would have said what broke.
+- **The `ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES` comment was wrong.** The value
+  is right; the setting controls whether the Swift runtime dylibs are copied
+  into the bundle, not symbol stripping. In this repo the comments are the
+  reference, so a wrong *why* leaves the next reader unable to tell whether the
+  value was chosen for it.
 
 ## Corrections from review
 

@@ -89,6 +89,35 @@ a mobile-only change). Merge (squash) and delete the branch.
 > credential/login step ("Run this command again in interactive mode"). Once
 > credentials exist on EAS, later builds/submits are non-interactive and fine.
 
+> **⚠️ The first build carrying the notification service extension re-enters
+> that path.** Phase 10b M3 added a **second** signed target,
+> `net.yourtimeline.app.NotificationService`, which needs its own **App ID and
+> provisioning profile** at Apple — so the build that first includes it asks for
+> an Apple login exactly like the very first one did. Run it in a real Terminal
+> and be ready to babysit it. Afterwards the new credentials live on EAS
+> alongside the app's and later builds are non-interactive again.
+>
+> While you're there, three things about that build are worth knowing, because
+> each fails late and says something unhelpful:
+>
+> - It is provisioned from `extra.eas.build.experimental.ios.appExtensions` in
+>   `app.json`, **not** from the Xcode project — EAS decides which profiles to
+>   fetch before `expo prebuild` has run. If that entry is missing or its bundle
+>   identifier is wrong, the build dies ~15 minutes in with *"No profiles for
+>   'net.yourtimeline.app.NotificationService' were found"*.
+> - The extension's App ID needs the **Keychain Sharing** capability, for the
+>   `keychain-access-groups` entitlement declared in that same entry. EAS syncs
+>   capabilities from it; if it ever doesn't, the symptom is not a build failure
+>   but previews silently never appearing.
+> - The extension's version and build number are read at prebuild from the **app
+>   config** — the same source Expo's own Info.plist writer uses — so they match
+>   whatever `autoIncrement` chose. Not from the app *target*'s
+>   `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` build settings, which look like
+>   the obvious source and which nothing reads; copying those is what stamped an
+>   extension `1.0` inside an app `1.0.0` during M3. A mismatch is rejected at
+>   App Store Connect *validation*, after the upload, in a message that names
+>   neither number.
+
 ```bash
 git checkout main && git pull
 cd mobile

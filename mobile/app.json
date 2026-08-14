@@ -55,7 +55,8 @@
           "microphonePermission": false
         }
       ],
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      "./plugins/withNotificationService"
     ],
     "experiments": {
       "typedRoutes": true,
@@ -64,7 +65,24 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "b40a5a21-a02d-47fd-94a9-06ee94c2e1a1"
+        "projectId": "b40a5a21-a02d-47fd-94a9-06ee94c2e1a1",
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "targetName": "NotificationService",
+                  "bundleIdentifier": "net.yourtimeline.app.NotificationService",
+                  "entitlements": {
+                    "keychain-access-groups": [
+                      "$(AppIdentifierPrefix)net.yourtimeline.app"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
       }
     },
     "owner": "sam-apples-team"
