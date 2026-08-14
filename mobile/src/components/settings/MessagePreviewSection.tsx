@@ -1,18 +1,36 @@
 /**
- * "Message previews" — the lock-screen preview switch (Phase 10b, M5).
+ * "Message previews" — how much a notification says (Phase 10b, M5).
+ *
+ * ⚠️ **Not a lock-screen switch, despite what it governs the risk of.** It
+ * decides whether a message notification *contains* the sender and the text at
+ * all; where that content is then displayed is not ours to choose. An earlier
+ * label said "on the lock screen" and was wrong in both directions — it
+ * promised less than the setting does, and implied a locked/unlocked
+ * distinction that only Apple can make.
  *
  * Separate from `NotificationPreferencesSection` above it, and the split is the
  * point: those preferences are **per account** and decide *whether* you are
  * notified. This decides *how much a notification says*, and it is **per
- * device** — because what it governs is a lock screen, and a lock screen
+ * device** — because what it exposes is a lock screen, and a lock screen
  * belongs to a phone. Someone can reasonably want previews on the handset in
  * their pocket and not on the tablet on the kitchen table. Merging the two
  * would put an account-wide switch next to a device-wide one under the same
  * heading, with nothing on screen saying which was which.
  *
- * **Off by default**, and it stays that way: turning a default on later is one
- * line, and quietly starting to show people's messages on their friends' lock
- * screens is not.
+ * **On by default** (revised 2026-08-14), matching WhatsApp and Signal. The
+ * earlier "off by default" reasoning — that quietly rendering messages on
+ * people's lock screens isn't ours to do — turned out to be answered by iOS
+ * rather than by us: *Settings → Notifications → Show Previews* defaults to
+ * **When Unlocked** on any Face ID iPhone, so the OS already withholds the
+ * content until its owner is looking at the phone. We supply the words; Apple
+ * decides when it is safe to reveal them. That is also why the blurb points at
+ * Apple's setting: it has nearly our name and does a different job, one screen
+ * away.
+ *
+ * **Off governs both halves** — no sender *and* no text, and no Reply action.
+ * Naming the correspondent while withholding the words would be a strange
+ * half-privacy, since it is who is messaging you, more than what they said,
+ * that a glance at a lock screen gives away.
  *
  * **iOS only for now.** The mechanism is an APNs field that wakes a notification
  * service extension; FCM has no equivalent, so on Android the switch would
@@ -97,13 +115,19 @@ export function MessagePreviewSection() {
     <View style={styles.section}>
       <Text style={styles.heading}>Message previews</Text>
       <Text style={styles.blurb}>
-        Show what a message says on this phone&apos;s lock screen, instead of just
-        who it&apos;s from. Off by default, and separate for every device you use.
+        Notifications show who a message is from and what it says. Turn this off
+        and they show neither — just that something has arrived. It&apos;s set
+        separately for every device you use.
       </Text>
       <Text style={styles.blurb}>
-        The text never travels inside the notification — your phone fetches it
-        from TimeLine directly, once the notification has already arrived. Turning
-        this on means anyone who can see your lock screen can read your messages.
+        This applies wherever notifications appear. Your iPhone separately
+        decides whether to reveal them on the lock screen before you unlock it —
+        that&apos;s Show Previews, in the Settings app under Notifications.
+      </Text>
+      <Text style={styles.blurb}>
+        The message text never travels inside the notification: your phone
+        fetches it from TimeLine directly, once the notification has already
+        arrived.
       </Text>
 
       {loadFailed ? (
@@ -144,13 +168,13 @@ export function MessagePreviewSection() {
         </View>
       ) : (
         <View style={styles.row}>
-          <Text style={styles.rowLabel}>Show message text on the lock screen</Text>
+          <Text style={styles.rowLabel}>Show message previews</Text>
           <Switch
             value={state.showPreviews}
             disabled={mutation.isPending}
             onValueChange={(next) => mutation.mutate(next)}
             trackColor={{ true: colors.accent, false: colors.lineStrong }}
-            accessibilityLabel="Show message text on the lock screen"
+            accessibilityLabel="Show message previews"
           />
         </View>
       )}

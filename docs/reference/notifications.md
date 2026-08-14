@@ -680,9 +680,20 @@ photo, and "Ada in " for every 1:1.
 - **Every failure falls back** to the contentless body already sitting in the
   payload. No push is ever silent because an extension had a bad day.
 
-**Previews are per device and off by default** (`DevicePushToken.show_previews`),
-because what leaks is a lock screen and a lock screen belongs to a phone rather
-than to an account. The flag resets when the device row changes owner. See
+**Previews are per device and on by default** (`DevicePushToken.show_previews`),
+per device because what it exposes is a lock screen and a lock screen belongs to
+a phone rather than to an account. The flag resets to that default when the
+device row changes owner — the next owner starts where a fresh install starts.
+
+**Turning them off governs both halves and reaches the wire.** The body becomes
+`New message`, naming nobody, and the **Reply** action is withheld. That is a
+deliberate reversal of the phase's original "off gets exactly today's behaviour"
+rule, which held only while off still named the sender: once it doesn't, a reply
+field answers an unknown message from an unknown person. It also means an
+anonymous body is what Expo and Apple/Google see — the one privacy gain here
+that isn't about a lock screen at all. It applies to **message** pushes only;
+"Ada reacted to your post" is not a message preview, and anonymising the
+activity centre is a different setting nobody has asked for. See
 [accounts.md](accounts.md#push-device-registration) for the endpoint and for the
 **preview credential** the extension authenticates with — including an honest
 account of what a leaked one can reach, which is more than a single

@@ -125,18 +125,26 @@ export default function PrivacyPage() {
           , so they are never handed to those companies.
         </P>
         <P>
-          On iPhone you can turn on <strong>message previews</strong> in the app’s
-          settings, which shows what a message says on your lock screen. This is
-          off unless you switch it on, and it is set separately on each device you
-          use. Even then the text still doesn’t travel inside the notification:
-          your phone fetches it from us directly, over an encrypted connection,
-          after the notification has already arrived. To make that possible your
-          phone stores a limited access key, which can only be used to fetch these
-          previews and nothing else, and which is removed when you sign out.
+          On iPhone, the app then shows what a message says as well. It does this
+          without putting the text in the notification: your phone fetches it from
+          us directly, over an encrypted connection, after the notification has
+          already arrived. To make that possible your phone stores a limited
+          access key, which can only be used to fetch these previews and nothing
+          else, and which is removed when you sign out.
         </P>
         <P>
-          Two things about that are worth stating plainly. With previews on,
-          anyone who can see your lock screen can read your messages. And because
+          You can turn this off per device, under{" "}
+          <strong>Message previews</strong> in the app’s settings. With it off,
+          notifications from that device say only that something has arrived —
+          not who it’s from and not what it says — and nothing is fetched. Your
+          phone also decides separately whether to reveal a notification’s
+          contents on the lock screen before you unlock it; on iPhone that’s{" "}
+          <em>Show Previews</em>, in the Settings app under Notifications, and it
+          applies to every app.
+        </P>
+        <P>
+          Two things about that are worth stating plainly. While previews are on,
+          anyone who can see your unlocked screen can read your messages. And because
           your phone has to be able to fetch a preview while it is locked in your
           pocket, that access key is stored so that it can be read once the phone
           has been unlocked at least once since being switched on — a slightly

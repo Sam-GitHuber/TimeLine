@@ -402,6 +402,17 @@ def create_notifications(recipients, actor, kind, *, post=None, comment=None,
 # long one can't fill a stranger's screen over someone's shoulder.
 PREVIEW_TEXT_LIMIT = 120
 
+# What a message push says to a device whose owner has turned previews **off**
+# (Phase 10b, revised 2026-08-14). It names nobody, on purpose: the setting
+# governs who a message is from as well as what it says, because it is the
+# correspondent — more than the words — that a glance at a lock screen gives
+# away. It is also the one body in this app that Expo and Apple/Google can read
+# no name out of.
+#
+# Deliberately not "New message from someone", which is worse than either
+# alternative: it says nothing more and reads like a bug.
+ANONYMOUS_MESSAGE_BODY = "New message"
+
 
 def is_mentioned(message, recipient_id):
     """Whether ``message`` names ``recipient_id`` with an ``@``.

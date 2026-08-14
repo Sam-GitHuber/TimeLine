@@ -1329,8 +1329,10 @@ unchanged; what changed is that the device learns more, from us.
 
 Three consequences worth knowing from here:
 
-- **Off by default and per device**, because what it exposes is a lock screen,
-  and a lock screen belongs to a phone rather than to an account.
+- **On by default and per device**, the second because what it exposes is a
+  lock screen and a lock screen belongs to a phone rather than to an account.
+  Turning it off takes the sender's name with the text — and the **Reply**
+  field with both — so the push says only `New message`.
 - **The endpoint it calls is conversation-scoped**, not message-scoped, which
   falls out of the coalescing rule above: the queued row names the *first*
   message of a burst, so a message-scoped question would answer with the oldest

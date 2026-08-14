@@ -722,7 +722,7 @@ describe('MessagePreviewSection (Phase 10b)', () => {
     await SecureStore.setItemAsync('timeline.showPreviews', showPreviews ? '1' : '0');
   }
 
-  const SWITCH = 'Show message text on the lock screen';
+  const SWITCH = 'Show message previews';
 
   iosIt('draws the switch where the server left it', async () => {
     await registered(true);

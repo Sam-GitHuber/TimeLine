@@ -378,9 +378,16 @@ leaked token value can't be used to silence someone else's phone.
 The last two fields are the lock-screen preview feature, and both are worth
 knowing before touching this endpoint:
 
-- **`show_previews`** — whether this device may show a message's *text* on its
-  lock screen. Off by default, and **per device rather than per account**,
-  because what leaks is a lock screen and a lock screen belongs to a phone.
+- **`show_previews`** — whether this device's notifications name the sender and
+  say what a message says. **On by default** (revised 2026-08-14, matching
+  WhatsApp and Signal — iOS's own *Show Previews* already withholds a
+  notification's contents on a locked Face ID phone, so the earlier
+  off-by-default caution was answering a question Apple had answered). Turning
+  it off governs **both halves**: the body says only that something arrived,
+  naming nobody, and the **Reply** action is withheld — a reply field answering
+  an unknown message from an unknown person is worse than the trap this feature
+  fixed. **Per device rather than per account**, because what it exposes is a
+  lock screen and a lock screen belongs to a phone.
   Changed through `PATCH` (`{expo_token, show_previews}`, scoped to the caller's
   own devices, 404 otherwise) and deliberately **not** through POST: the app
   POSTs on every launch, so a value in the registration upsert would either
