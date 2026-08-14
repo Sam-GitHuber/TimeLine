@@ -615,6 +615,66 @@ plugin that copies a Swift file into a new target and signs it.
 
 ### M4 — Android, or a written decision not to
 
+> **⛔ Blocked, and not on us (2026-08-14).** The spike below needs an Android
+> push to arrive, and **Android push doesn't work yet**: Phase 10 lists *"FCM
+> credentials"* as outstanding, meaning the Firebase service-account key has
+> never been uploaded to EAS. Until it is, Expo cannot deliver to FCM at all,
+> and the one question M4 exists to answer is unanswerable. A local
+> `scheduleNotificationAsync` is no substitute — the background task consumer
+> fires from `FirebaseMessagingDelegate.onMessageReceived`, which a local
+> notification never reaches.
+>
+> **The prerequisite is Phase 10's, not this phase's**, and it needs the
+> maintainer's Firebase console: create the service-account private key
+> (Firebase → Project settings → Service accounts) and upload it to EAS as the
+> *FCM V1 service account key*. `google-services.json` is already in place; it
+> is the client half, and the two must belong to the same Firebase project or
+> push fails silently.
+
+#### What the source already answers, before the spike runs
+
+Read out of `expo-notifications@~57.0.6` in `node_modules`, so it describes the
+version we are pinned to rather than the one the issue tracker was arguing about.
+It changes the shape of the milestone in both directions.
+
+**Good news: the task path exists and is reached on every message.**
+`FirebaseMessagingDelegate.onMessageReceived` ends with
+`runTaskManagerTasks(...)`, and `BackgroundRemoteNotificationTaskConsumer`
+registers itself into that delegate. More tellingly, `onMessageReceived`
+*constructs and presents the notification itself*
+(`createNotification` → `NotificationsService.receive`) — which is only
+reachable in the background if Expo sends **data-only** messages to FCM, since a
+notification-message is drawn by the system without ever calling
+`onMessageReceived`. So the callback is live when the app isn't, and the
+milestone's central worry is narrower than "does anything run at all".
+
+**Bad news, and it's structural: the notification is presented _before_ the task
+runs.** Those two lines are in that order, and nothing in between can suppress
+the first. So Android cannot do what iOS does — there is no "rewrite it before
+anyone sees it". The best available is **present, then replace**, and the
+replacement is visible as a change on screen rather than as the original.
+
+That is not fatal, and there is a lever for it: `getNotificationIdentifier`
+uses `remoteMessage.data["tag"]` as the notification id, with the explicit
+comment that *"if a notification comes in with the same tag as a notification
+that is already in the tray, the existing notification is replaced"*. A
+replacement scheduled under the same identifier should therefore **swap in
+place** rather than stack — which is the difference between a brief flicker and
+two notifications. **Verify this in the spike**; it is the single thing that
+decides whether the Android experience is acceptable or merely possible.
+
+**And the fallback route is cheaper than the plan feared.**
+`FirebaseMessagingDelegate` is an `open class` and `createNotificationRequest`
+is `protected open`, i.e. deliberately built for subclassing. If the task route
+fails, a delegate subclass could suppress or alter the first presentation
+instead of racing it — still a native surface, but a documented extension point
+rather than a reimplementation of `FirebaseMessagingService`.
+
+**Unchanged:** `expo-task-manager` is still not a dependency (confirmed against
+`package.json`), so the task route adds one.
+
+---
+
 **iOS and Android are not symmetric here, and that's the main risk in the phase.**
 An NSE runs for every push regardless of app state — that's its whole design.
 Android's equivalent through Expo is `Notifications.registerTaskAsync` +
@@ -633,7 +693,16 @@ So Android keeps the same notification-message payload as iOS, and the question
 is narrowed to: **can a background task rewrite an already-delivered
 notification, or post a replacement, in the states we care about?**
 
-- **Spike first**, before writing anything else. Timebox it. And spike the right
+- **Spike first**, before writing anything else. Timebox it. It now has three
+  questions rather than one, in this order — stop at the first that fails:
+  1. Does the task fire at all when the app is swiped away? (The source says the
+     callback is reached; the issue history says it sometimes isn't.)
+  2. Does a replacement scheduled under the **same identifier** swap in place,
+     rather than stacking a second notification?
+  3. Is the visible present-then-replace acceptable to look at, or does it read
+     as a glitch? This one is a judgement call and needs a person holding the
+     phone, not a log line.
+- And spike the right
   state: **background, and swiped-away-from-recents — not force-stopped.**
   Android's *stopped state* (after "Force stop" in Settings) delivers no FCM
   messages at all until the user relaunches the app, by design and independent of
