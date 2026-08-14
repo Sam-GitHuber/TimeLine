@@ -848,7 +848,7 @@ describe('MessagePreviewSection (Phase 10b)', () => {
 
     await renderWithClient(<MessagePreviewSection />);
 
-    expect(screen.queryByText('Message previews')).toBeNull();
+    expect(screen.queryByText('Messages')).toBeNull();
     expect(screen.queryByLabelText(SWITCH)).toBeNull();
   });
 });

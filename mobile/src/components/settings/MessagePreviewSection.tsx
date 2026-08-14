@@ -1,12 +1,23 @@
 /**
- * "Message previews" — how much a notification says (Phase 10b, M5).
+ * "Messages" — the one setting for how much a message notification says
+ * (Phase 10b, M5).
+ *
+ * **Deliberately unexplained on screen.** An earlier version carried three
+ * paragraphs about where the text comes from, what "off" withholds, and how
+ * Apple's own *Show Previews* differs from ours. All true, and all removed at
+ * the user's call: a settings screen is a place to change something, not to be
+ * taught. The explanation lives where someone can go looking for it — the
+ * privacy policy's push section, `notifications.md`, and this docstring — and
+ * the switch just says what it does.
  *
  * ⚠️ **Not a lock-screen switch, despite what it governs the risk of.** It
  * decides whether a message notification *contains* the sender and the text at
  * all; where that content is then displayed is not ours to choose. An earlier
  * label said "on the lock screen" and was wrong in both directions — it
  * promised less than the setting does, and implied a locked/unlocked
- * distinction that only Apple can make.
+ * distinction that only Apple can make. Worth knowing when reading a bug report
+ * that says previews "don't work": iOS's *Show Previews* defaults to *When
+ * Unlocked*, so a locked screen showing no text is the OS, not this.
  *
  * Separate from `NotificationPreferencesSection` above it, and the split is the
  * point: those preferences are **per account** and decide *whether* you are
@@ -23,9 +34,7 @@
  * rather than by us: *Settings → Notifications → Show Previews* defaults to
  * **When Unlocked** on any Face ID iPhone, so the OS already withholds the
  * content until its owner is looking at the phone. We supply the words; Apple
- * decides when it is safe to reveal them. That is also why the blurb points at
- * Apple's setting: it has nearly our name and does a different job, one screen
- * away.
+ * decides when it is safe to reveal them.
  *
  * **Off governs both halves** — no sender *and* no text, and no Reply action.
  * Naming the correspondent while withholding the words would be a strange
@@ -113,22 +122,7 @@ export function MessagePreviewSection() {
 
   return (
     <View style={styles.section}>
-      <Text style={styles.heading}>Message previews</Text>
-      <Text style={styles.blurb}>
-        Notifications show who a message is from and what it says. Turn this off
-        and they show neither — just that something has arrived. It&apos;s set
-        separately for every device you use.
-      </Text>
-      <Text style={styles.blurb}>
-        This applies wherever notifications appear. Your iPhone separately
-        decides whether to reveal them on the lock screen before you unlock it —
-        that&apos;s Show Previews, in the Settings app under Notifications.
-      </Text>
-      <Text style={styles.blurb}>
-        The message text never travels inside the notification: your phone
-        fetches it from TimeLine directly, once the notification has already
-        arrived.
-      </Text>
+      <Text style={styles.heading}>Messages</Text>
 
       {loadFailed ? (
         <View style={styles.failure}>
@@ -209,12 +203,6 @@ const styles = StyleSheet.create({
     borderTopColor: colors.line,
   },
   heading: { fontSize: fontSize.lg, fontWeight: '700', color: colors.ink },
-  blurb: {
-    marginTop: spacing.xs,
-    fontSize: fontSize.sm,
-    color: colors.inkSoft,
-    lineHeight: 20,
-  },
   spinner: { marginTop: spacing.lg, alignSelf: 'flex-start' },
   note: {
     marginTop: spacing.md,
