@@ -42,6 +42,7 @@ mobile/
 │   ├── types.ts     # hand-written types for the API's JSON
 │   ├── components/  # RN components (View/Text, not div/span)
 │   └── theme.ts     # design tokens translated from the Tailwind @theme
+├── plugins/         # config plugins — native targets the prebuild generates
 ├── scripts/         # build-time Node tools (icon generation) — never bundled
 ├── app.json
 └── package.json     # its own deps; does NOT merge with frontend's

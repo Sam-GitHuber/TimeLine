@@ -581,20 +581,48 @@ extension **fetch** the body over TLS from our own server;
 [Phase 9c](../phases/phase-9c-e2e-encryption.md) later swaps that fetch for a
 local **decrypt**, once there's a ciphertext to decrypt.
 
-### Lock-screen previews (Phase 10b, backend + keychain landed)
+### Lock-screen previews (Phase 10b, iOS built)
 
 **The rule above is unchanged and stays unchanged: no push carries message
 content.** A test asserts that against the exact bytes sent to Expo. What 10b
 adds is a second, private channel for the words — straight from us to the
 device over TLS, on the one leg of the journey with no third party on it.
 
-**The backend and the device-side credential have landed. The extension that
-consumes them has not**, so nothing renders a preview yet and no client can turn
-one on. What exists today: the endpoint, the per-device flag, `mutableContent`
-on the wire for opted-in iOS devices, and a credential sitting in the app's
-keychain in the place and with the properties an extension can read
-(`mobile/src/previewCredential.ts`, and
-[accounts.md](accounts.md#push-device-registration) for why those properties).
+**The iOS path is built end to end; nothing can switch it on yet.** The endpoint,
+the per-device flag, `mutableContent` on the wire, the credential in the keychain
+and the extension that reads it all exist — but `show_previews` defaults to off
+and the settings toggle is M5, so every device today behaves exactly as it did
+before. Android is M4 and may not land; see *The extension*, below.
+
+#### The extension
+
+An iOS **notification service extension** — a second process iOS wakes for any
+push carrying `mutable-content`, given a few seconds to rewrite the notification
+before it is shown. It reads the preview credential from the shared keychain,
+parses the conversation id out of the same `/messages/<id>` the deep link uses,
+GETs the endpoint below, and sets the body from what comes back.
+
+Three things about it are worth knowing before touching it:
+
+- **It is generated, not committed.** `mobile/ios` is gitignored, so the target
+  is created on every prebuild by `mobile/plugins/withNotificationService.ts`,
+  from the Swift in `mobile/plugins/notification-service/`. A target added by
+  hand in Xcode survives until the next build and no longer. The plugin also
+  writes the `keychain-access-groups` entitlement without which
+  `SecItemCopyMatching` returns `errSecMissingEntitlement` forever, and inlines
+  `EXPO_PUBLIC_API_URL` into the extension's Info.plist — a native target can
+  read neither `process.env` nor `Constants`, so without that a dev build's
+  extension would ask production.
+- **EAS is told separately.** `extra.eas.build.experimental.ios.appExtensions`
+  in `app.json` is how EAS learns the target exists at all; it provisions from
+  that, not from the Xcode project. The two must agree, and
+  `src/__tests__/notificationService.test.ts` is what checks they do.
+- **Every failure delivers the original notification**, which is the contentless
+  body the server already composed. That is also what makes it hard to test:
+  a broken extension is indistinguishable from a working one that fell back. The
+  suite above pins the string-equality contracts between the Swift, the
+  TypeScript and `app.json`; whether it *runs* is the device matrix in the phase
+  doc, and there is no substitute for that.
 
 Two things did change about what leaves the box, and they are small but real:
 
