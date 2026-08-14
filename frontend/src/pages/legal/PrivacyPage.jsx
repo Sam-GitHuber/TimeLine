@@ -10,7 +10,7 @@ const CONTACT = "timeline.support@icloud.com";
 
 export default function PrivacyPage() {
   return (
-    <LegalPage title="Privacy Policy" updated="13 August 2026">
+    <LegalPage title="Privacy Policy" updated="14 August 2026">
       <Section heading="Who we are">
         <P>
           TimeLine is a private, invite-only social timeline operated by an
@@ -93,11 +93,61 @@ export default function PrivacyPage() {
 
       <Section heading="Where your data is stored">
         <P>
-          The Service runs on a server kept at the operator’s home in the United
-          Kingdom. To protect against data loss, we take regular backups which are{" "}
+          The Service runs on a single rented server in London, United Kingdom
+          (Amazon Web Services). To protect against data loss, we take regular
+          backups which are{" "}
           <strong>encrypted before they leave the server</strong> and stored with
           a cloud storage provider (Cloudflare). Backups are only ever held in
           encrypted form; the provider cannot read their contents.
+        </P>
+      </Section>
+
+      <Section heading="Push notifications">
+        <P>
+          If you use our phone app and allow notifications, we send you alerts
+          about things like new messages and replies. Getting a notification onto
+          your phone means passing it through two companies we don’t control:{" "}
+          <strong>Expo</strong>, and then <strong>Apple</strong> (on iPhone) or{" "}
+          <strong>Google</strong> (on Android). These are US-based companies, so
+          the little that a notification carries — described below — is
+          transferred outside the UK. Nothing else about your account or your
+          content leaves the London server described above, other than the
+          encrypted backups.
+        </P>
+        <P>
+          Because of that, we deliberately keep notifications almost empty. A
+          notification says who it’s from — “New message from Ada” — and which
+          conversation it belongs to, so that tapping it opens the right screen.{" "}
+          <strong>
+            The words of your messages, posts and comments are never put inside a
+            notification
+          </strong>
+          , so they are never handed to those companies.
+        </P>
+        <P>
+          On iPhone you can turn on <strong>message previews</strong> in the app’s
+          settings, which shows what a message says on your lock screen. This is
+          off unless you switch it on, and it is set separately on each device you
+          use. Even then the text still doesn’t travel inside the notification:
+          your phone fetches it from us directly, over an encrypted connection,
+          after the notification has already arrived. To make that possible your
+          phone stores a limited access key, which can only be used to fetch these
+          previews and nothing else, and which is removed when you sign out.
+        </P>
+        <P>
+          Two things about that are worth stating plainly. With previews on,
+          anyone who can see your lock screen can read your messages. And because
+          your phone has to be able to fetch a preview while it is locked in your
+          pocket, that access key is stored so that it can be read once the phone
+          has been unlocked at least once since being switched on — a slightly
+          weaker protection than the one used for your login, which is readable
+          only while the phone is actually unlocked. The key never leaves the
+          device, and is not included in backups or synced to iCloud.
+        </P>
+        <P>
+          You can stop notifications entirely at any time, either in your phone’s
+          own settings or by signing out, and you can choose which kinds you
+          receive in the app’s settings.
         </P>
       </Section>
 

@@ -5869,7 +5869,7 @@ class DevicePushTokenView(APIView):
         # resolves the create/create race on the unique ``expo_token`` (catching
         # the IntegrityError and re-fetching) instead of 500ing on it. Two
         # launches registering at once is exactly the shape #219 describes.
-        DevicePushToken.objects.update_or_create(
+        device, _created = DevicePushToken.objects.update_or_create(
             expo_token=expo_token, defaults=defaults
         )
 
@@ -5877,7 +5877,18 @@ class DevicePushTokenView(APIView):
         # nowhere else afterwards, so this response is the only chance to hand it
         # over. Old clients ignore an unexpected body, so this is compatible with
         # the builds already on testers' phones.
-        return Response({"preview_token": preview_token}, status=status.HTTP_200_OK)
+        #
+        # ``show_previews`` rides along because **there is nowhere else to learn
+        # it** (Phase 10b M5). The settings toggle has to render the switch in
+        # the position it is actually in, and the only two things that ever
+        # change that are this upsert — which resets it when the phone changes
+        # hands — and the PATCH below. Answering it here means the app can keep
+        # a local copy that cannot drift, without a GET that would have to carry
+        # a device identifier in the URL.
+        return Response(
+            {"preview_token": preview_token, "show_previews": device.show_previews},
+            status=status.HTTP_200_OK,
+        )
 
     def patch(self, request):
         """Turn lock-screen previews on or off for one of *your* devices."""

@@ -90,12 +90,22 @@ compromised *device*, or against the other person screenshotting.
    message**, because it cannot read it. So the only way a notification shows
    content again is to decrypt it **on the device, before it is displayed**.
 
-   **[Phase 10b](phase-10b-notification-content.md) builds the extension ahead
-   of this phase** — the iOS service extension and its config plugin, the
-   Android path, the shared keychain, the credentials-in-an-extension rules, the
-   per-device toggle, the fallback discipline — against *plaintext* messages,
-   because all of that is independent of the cryptography. Read it first; it is
-   the starting point for this milestone, not background.
+   **[Phase 10b](phase-10b-notification-content.md) has built the extension
+   ahead of this phase**, against *plaintext* messages, because all of it is
+   independent of the cryptography. Read it first; it is the starting point for
+   this milestone, not background. What exists today, and where:
+
+   | Built | Where |
+   | --- | --- |
+   | The iOS service extension | `mobile/plugins/notification-service/NotificationService.swift` |
+   | The config plugin that creates and signs its target | `mobile/plugins/withNotificationService.ts` |
+   | The EAS declaration that gets it provisioned | `extra.eas.build.experimental.ios.appExtensions` in `mobile/app.json` |
+   | Shared keychain access, and the accessibility that makes it readable while locked | `mobile/src/previewCredential.ts` + the extension's entitlement |
+   | A scoped, non-rotating credential and its lifecycle | same, plus `DevicePushToken.preview_token_hash` |
+   | `mutableContent` on the wire, per device, message pushes only | `send_pushes.py` |
+   | The per-device toggle, off by default | `MessagePreviewSection.tsx`, `PATCH /api/push-tokens/` |
+   | The fallback discipline, and tests that pin the cross-language contracts | `notificationService.test.ts` |
+   | Android | **Not built** — see 10b's M4 |
 
    **What is left for 9c is one substitution**: the extension stops *fetching*
    the body from an endpoint and starts *decrypting* it locally. Which is still
@@ -159,7 +169,15 @@ work is nearly all client-side.
 7. **On-device notification decryption** (hard part 7): swap
    [10b](phase-10b-notification-content.md)'s fetch for local decryption.
    Sequenced after 1:1 messaging works, so the extension is decrypting a format
-   that has stopped moving.
+   that has stopped moving. Concretely: delete `GET
+   …/push-preview/`, `push_preview.py` and the credential that authenticates to
+   it, and replace the ~30 lines of Swift between "read the keychain" and "set
+   the body" — everything either side of those stays. Then re-do the two rows
+   10b's table marks as lost: the extension becomes a *writer* of shared
+   protocol state, which is the hazard the rest of hard part 7 is about, and the
+   server-side body composition (`notifications.message_push_body`) has to move
+   device-side, since the server will no longer be able to phrase anything but
+   "New message from Ada".
 8. Web (or the documented decision not to).
 9. Migration: what happens to existing plaintext history. **Probably: leave it
    plaintext and encrypt from a cutover date**, since retro-encrypting needs keys

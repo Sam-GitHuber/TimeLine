@@ -22,12 +22,14 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react-native';
+import * as SecureStore from 'expo-secure-store';
 import type { ReactElement } from 'react';
 
 import SettingsScreen from '@/app/settings';
 import { ChangePasswordSection } from '@/components/settings/ChangePasswordSection';
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
+import { MessagePreviewSection } from '@/components/settings/MessagePreviewSection';
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
 import { PrivacySection } from '@/components/settings/PrivacySection';
 
@@ -35,6 +37,7 @@ import {
   androidIt,
   captureBackHandler,
   holdRequest,
+  iosIt,
   pressBack,
   settle,
   switchValue,
@@ -707,5 +710,145 @@ describe('PrivacySection (Phase 9b M4)', () => {
     // about you, so showing it as off while it's still on would be the wrong
     // way round to be wrong.
     expect(switchValue(screen.getByLabelText('Send read receipts'))).toBe(true);
+  });
+});
+
+describe('MessagePreviewSection (Phase 10b)', () => {
+  const DEVICE = 'ExponentPushToken[settings]';
+
+  /** Put this device in the state the app would be in after a registration. */
+  async function registered(showPreviews: boolean) {
+    await SecureStore.setItemAsync('timeline.expoPushToken', DEVICE);
+    await SecureStore.setItemAsync('timeline.showPreviews', showPreviews ? '1' : '0');
+  }
+
+  const SWITCH = 'Show message text on the lock screen';
+
+  iosIt('draws the switch where the server left it', async () => {
+    await registered(true);
+
+    await renderWithClient(<MessagePreviewSection />);
+
+    expect(switchValue(await screen.findByLabelText(SWITCH))).toBe(true);
+  });
+
+  iosIt('turns previews on for this device, not for the account', async () => {
+    // Per device is the whole point: the PATCH has to name *which* phone, or
+    // enabling it on a handset would enable it on the tablet as well.
+    await registered(false);
+    mockFetch.mockResolvedValue(jsonResponse({ show_previews: true }));
+    await renderWithClient(<MessagePreviewSection />);
+
+    await act(async () =>
+      fireEvent(await screen.findByLabelText(SWITCH), 'valueChange', true)
+    );
+    // The save is two awaits deep — the PATCH, then the local mirror — so the
+    // state it settles into arrives after `fireEvent` has returned.
+    await settle(2);
+
+    expect(requestBody(/\/api\/push-tokens\//, 'PATCH')).toEqual({
+      expo_token: DEVICE,
+      show_previews: true,
+    });
+  });
+
+  iosIt('remembers the new position, so the next visit is not stale', async () => {
+    // The mirror in SecureStore is what the switch reads on every later open.
+    // Left unwritten, turning previews on would look as though it hadn't stuck
+    // the moment you came back to this screen.
+    await registered(false);
+    mockFetch.mockResolvedValue(jsonResponse({ show_previews: true }));
+    await renderWithClient(<MessagePreviewSection />);
+
+    await act(async () =>
+      fireEvent(await screen.findByLabelText(SWITCH), 'valueChange', true)
+    );
+    // The save is two awaits deep — the PATCH, then the local mirror — so the
+    // state it settles into arrives after `fireEvent` has returned.
+    await settle(2);
+
+    expect(await SecureStore.getItemAsync('timeline.showPreviews')).toBe('1');
+  });
+
+  iosIt('puts the switch back and says so when the save fails', async () => {
+    await registered(false);
+    mockFetch.mockResolvedValue(jsonResponse({ detail: 'Nope.' }, 500));
+    await renderWithClient(<MessagePreviewSection />);
+
+    await act(async () =>
+      fireEvent(await screen.findByLabelText(SWITCH), 'valueChange', true)
+    );
+    // The save is two awaits deep — the PATCH, then the local mirror — so the
+    // state it settles into arrives after `fireEvent` has returned.
+    await settle(2);
+
+    expect(await screen.findByText('Nope.')).toBeTruthy();
+    // Wrong in the safe direction: a switch stuck *on* when the server has it
+    // off would tell someone their messages are on the lock screen when they
+    // are not — but the reverse is what actually costs privacy.
+    expect(switchValue(screen.getByLabelText(SWITCH))).toBe(false);
+    expect(await SecureStore.getItemAsync('timeline.showPreviews')).toBe('0');
+  });
+
+  iosIt('offers no switch on a phone that never registered for push', async () => {
+    // There is no server row to toggle, so the PATCH would 404 — and "previews
+    // are off" is the wrong thing to say to someone who declined notifications
+    // altogether. Different state, different words.
+    await renderWithClient(<MessagePreviewSection />);
+
+    await settle(2);
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    expect(screen.getByText(/Turn on notifications for TimeLine/)).toBeTruthy();
+    // And a way out of it. Registration runs on sign-in and cold start only, so
+    // without this, following the instruction and coming back finds the same
+    // note — the cure would be a force-quit that nothing mentions.
+    expect(screen.getByText('Check again')).toBeTruthy();
+  });
+
+  iosIt('offers no switch when the POST never reached the server', async () => {
+    // The Expo token is stored *before* the registration POST, on purpose, so
+    // it can name a row that was never created — a first launch that lost its
+    // answer. Keyed off the token, this would have drawn a switch whose PATCH
+    // answers "Not found." under a privacy control. It keys off the mirror,
+    // which only a registration *response* writes.
+    await SecureStore.setItemAsync('timeline.expoPushToken', DEVICE);
+
+    await renderWithClient(<MessagePreviewSection />);
+
+    await settle(2);
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    expect(screen.getByText(/Turn on notifications for TimeLine/)).toBeTruthy();
+  });
+
+  iosIt('says a failed read failed, rather than blaming notifications', async () => {
+    // The #317 defect one section along: with no error branch, a keychain
+    // failure falls through to the note above and tells someone to switch on
+    // notifications they already have on — no error, no retry, and no way to
+    // reach their own switch.
+    (SecureStore.getItemAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('keychain unavailable')
+    );
+
+    await renderWithClient(<MessagePreviewSection />);
+
+    await settle(2);
+    expect(
+      screen.getByText('Couldn’t read this device’s preview setting.')
+    ).toBeTruthy();
+    expect(screen.getByText('Try again')).toBeTruthy();
+    expect(screen.queryByText(/Turn on notifications for TimeLine/)).toBeNull();
+  });
+
+  androidIt('renders nothing at all', async () => {
+    // `mutable-content` is an APNs field with no FCM equivalent, so the switch
+    // would set a server flag that nothing on this platform acts on. M4 decides
+    // whether Android gets its own path; until then, no control beats a dead
+    // one.
+    await registered(true);
+
+    await renderWithClient(<MessagePreviewSection />);
+
+    expect(screen.queryByText('Message previews')).toBeNull();
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
   });
 });

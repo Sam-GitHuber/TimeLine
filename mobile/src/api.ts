@@ -1855,6 +1855,21 @@ export const api = {
       body: { expo_token: expoToken, platform: Platform.OS },
     }),
 
+  /**
+   * Turn lock-screen message previews on or off **for this device** (Phase 10b).
+   *
+   * Per device rather than per account because what it governs is a lock
+   * screen, and a lock screen belongs to a phone: someone can reasonably want
+   * previews on their own handset and not on the tablet in the kitchen. Scoped
+   * server-side to the caller's own devices, so a leaked token value can't be
+   * used to switch previews *on* for somebody else's phone.
+   */
+  setPushPreviews: (expoToken: string, showPreviews: boolean) =>
+    request<{ show_previews: boolean }>('/api/push-tokens/', {
+      method: 'PATCH',
+      body: { expo_token: expoToken, show_previews: showPreviews },
+    }),
+
   /** Unregister this device. Must run while still authenticated. */
   unregisterPushToken: (expoToken: string) =>
     request<void>('/api/push-tokens/', {

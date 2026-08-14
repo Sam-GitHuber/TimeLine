@@ -1313,14 +1313,37 @@ thread you're looking at banners without being filed there at all. That's app-si
 bookkeeping with no messaging endpoint behind it — see
 [notifications.md](notifications.md#taking-a-notification-back-once-its-been-dealt-with-178).
 
-**The body never quotes the message.** It reads `New message from Ada`, or
-`Ada in Book Club` for a titled group. Push bodies transit Expo's servers and
-Apple's, so naming the sender is the most we ever say — that rule is what makes
-pushing private messages acceptable at all. Its known cost is the **Reply**
-action below: a text field for a message you can't read. The fix is on-device
-fetch (later decryption) in a notification service extension, not a chattier
-body — see [notifications.md](notifications.md#what-leaves-the-box-and-who-sees-it)
-and [Phase 10b](../phases/phase-10b-notification-content.md).
+**The body never quotes the message, and that has not changed.** It reads `New
+message from Ada`, or `Ada in Book Club` for a titled group. Push bodies transit
+Expo's servers and Apple's or Google's, so naming the sender is the most we ever
+say — that rule is what makes pushing private messages acceptable at all, and a
+test asserts it against the exact bytes sent to Expo.
+
+Its known cost was the **Reply** action below: a text field for a message you
+can't read. **Phase 10b fixed that without touching the rule.** On an iPhone
+whose owner has switched previews on, the push carries an APNs flag that wakes a
+notification service extension, which fetches the words **from us, over TLS,
+after the notification has already arrived** — the one leg of the journey with
+no third party on it — and rewrites the body before it is shown. The wire is
+unchanged; what changed is that the device learns more, from us.
+
+Three consequences worth knowing from here:
+
+- **Off by default and per device**, because what it exposes is a lock screen,
+  and a lock screen belongs to a phone rather than to an account.
+- **The endpoint it calls is conversation-scoped**, not message-scoped, which
+  falls out of the coalescing rule above: the queued row names the *first*
+  message of a burst, so a message-scoped question would answer with the oldest
+  unread message forever.
+- **Mute is not consulted** by that endpoint. Mute is a delivery policy, decided
+  at enqueue — including the @mention carve-out that beats it — so by the time
+  the extension asks, the question has already been answered upstream. Re-asking
+  it there would blank the preview for exactly the mentions that were let
+  through to be read.
+
+See [notifications.md](notifications.md#what-leaves-the-box-and-who-sees-it) for
+the mechanism and [Phase 10b](../phases/phase-10b-notification-content.md) for
+the reasoning.
 
 **Mute** is per-participant (`Participant.muted_at`), not per-conversation, so
 silencing a busy group chat is your choice alone. It lives on `Participant` rather

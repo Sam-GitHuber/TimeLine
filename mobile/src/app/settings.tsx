@@ -27,6 +27,7 @@ import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { ChangePasswordSection } from '@/components/settings/ChangePasswordSection';
 import { DeleteAccountSection } from '@/components/settings/DeleteAccountSection';
 import { FeedPreferencesSection } from '@/components/settings/FeedPreferencesSection';
+import { MessagePreviewSection } from '@/components/settings/MessagePreviewSection';
 import { NotificationPreferencesSection } from '@/components/settings/NotificationPreferencesSection';
 import { PrivacySection } from '@/components/settings/PrivacySection';
 import { colors, fontSize, spacing } from '@/theme';
@@ -104,6 +105,11 @@ export default function SettingsScreen() {
         <WriteHoldProvider hold={hold}>
           <FeedPreferencesSection />
           <NotificationPreferencesSection />
+          {/* Immediately after the notification preferences, because it is the
+              obvious next question once you've decided what notifies you — but
+              its own section, because those are per account and this is per
+              device. */}
+          <MessagePreviewSection />
           <PrivacySection />
           <ChangePasswordSection />
           <LegalSection />

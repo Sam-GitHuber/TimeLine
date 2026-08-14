@@ -374,9 +374,9 @@ hands the row must move rather than leave the previous owner's notifications
 going somewhere they no longer control. DELETE is scoped to the caller, so a
 leaked token value can't be used to silence someone else's phone.
 
-**POST answers `200 {preview_token: …}`, not `204`** (Phase 10b). The last two
-fields are the lock-screen preview feature, and both are worth knowing before
-touching this endpoint:
+**POST answers `200 {preview_token, show_previews}`, not `204`** (Phase 10b).
+The last two fields are the lock-screen preview feature, and both are worth
+knowing before touching this endpoint:
 
 - **`show_previews`** — whether this device may show a message's *text* on its
   lock screen. Off by default, and **per device rather than per account**,
@@ -389,6 +389,13 @@ touching this endpoint:
   Registration **clears it when the row changes owner**. The row moving to a
   phone's next owner is the rule above and stays; a preference about a lock
   screen must not be inherited with it.
+
+  Registration also **answers it**, and that is the only way a client can learn
+  where its own switch stands — there is no GET, deliberately, since one would
+  have to carry a device identifier in a URL. It costs nothing, because the app
+  registers on every launch, and it means the reset above isn't silent: without
+  it the new owner's app would go on drawing the switch in the position the
+  previous owner left it.
 - **`preview_token_hash`** — SHA-256 of the device's **preview credential**, the
   thing the iOS notification service extension authenticates with. Minted fresh
   on every registration and returned in plaintext in that one response, which is

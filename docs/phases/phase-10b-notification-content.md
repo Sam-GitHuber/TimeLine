@@ -1,16 +1,23 @@
 # Phase 10b — Notification content, without leaking it
 
-**Status: IN PROGRESS — M1 and M2 done.** Fleshed 2026-07-30 and confirmed with the
+**Status: IN PROGRESS — M1, M2, M3 and M5 done; M4 (Android) is all that
+remains, and it may end in a written decision not to.** Fleshed 2026-07-30 and confirmed with the
 user; **revised the same day** after a source-checked review of the plan itself.
 The review found that two of the mechanisms this phase leans on don't behave the
 way the first draft assumed — see *Corrections from review* at the end for what
 changed and why, so the reasoning isn't lost.
 
 **The open decision is settled (2026-08-13): Option B**, a scoped credential.
-Its shape changed in the building — see *Notes / decisions log*. M1 (backend)
-and M2 (keychain) are built; **M3 (the iOS extension) is next**, and it is where
-everything M2 wrote is finally read. As always, git is the authority on what has
-actually merged — this file says what has been *done*, not what is on `main`.
+Its shape changed in the building — see *Notes / decisions log*. The whole iOS
+path exists: endpoint, credential, extension, and the switch that turns it on.
+
+**What is owed is not code.** Nothing here has run on a real phone. The
+extension's failure mode is that it delivers exactly the notification a working
+one would have delivered before this phase, so the only thing that can tell them
+apart is the device matrix under *Risks* — and it needs a TestFlight build
+installed **over** the current one, which is also the build that re-enters the
+interactive Apple-login path (`docs/mobile-release.md`). As always, git is the
+authority on what has actually merged — this file says what has been *done*.
 
 **Why the odd number.** It follows Phase 10 (Android) and comes *before* Phase 9c
 (E2E), which is scheduled after Android. The numbering is chronological, not a
@@ -626,7 +633,14 @@ notification, or post a replacement, in the states we care about?**
   strictly no worse than today. Hide the toggle on Android in that case rather
   than offering a switch that does nothing.
 
-### M5 — Settings, docs, and the 9c handoff
+### M5 — Settings, docs, and the 9c handoff ✅ **Built**
+
+Everything below is done except the Android half of the toggle, which waits on
+M4. See the decisions log for the one thing the plan didn't anticipate — the app
+had no way to *read* its own setting — and for a factual error in the privacy
+policy that this work surfaced.
+
+
 
 - Preview toggle in the app's notification settings, with plain wording about
   what it does and where the text comes from. iOS for certain; Android only if
@@ -1120,6 +1134,110 @@ exercised by an invocation the plan had backwards.
   into the bundle, not symbol stripping. In this repo the comments are the
   reference, so a wrong *why* leaves the next reader unable to tell whether the
   value was chosen for it.
+
+### M5, 2026-08-14
+
+**The plan forgot that the app cannot read its own setting.** `show_previews`
+was writable (`PATCH`) and readable by nobody: `POST /push-tokens/` answered
+only the credential, and there is no GET. A switch has to be drawn in the
+position it is actually in, so registration now answers `show_previews` too.
+That is cheaper than the alternatives and can't drift: the app registers on
+every launch, and the only two things that change the value are that upsert —
+which resets it when the phone changes hands — and the PATCH the switch sends.
+A GET would have had to carry a device identifier in a URL, which is the one
+thing `tokens.ts`'s rules forbid outright.
+
+It also makes the owner-change reset visible. Without it, the new owner's app
+would go on drawing the switch where the *previous* owner left it while the
+server had already turned it off — so someone would toggle it off and on again
+to fix a setting that was never on.
+
+**The mirror stores the server's answer, not the value asked for.** They agree
+today. A local copy that records the request rather than the result is how a
+mirror starts drifting from the thing it mirrors, and this one is read on every
+Settings visit and believed.
+
+**"Not registered for push" and "previews off" are different states with
+different words.** A phone that never got notification permission has no server
+row to toggle, so a switch there would `404`. It gets a sentence pointing at the
+OS settings instead. Conflating them would have told someone their previews were
+off when the truth is that nothing can notify them at all.
+
+**Its own section, not a row inside Notification preferences.** Those are per
+*account* and decide whether you are notified; this is per *device* and decides
+how much a notification says. Merging them would have put two different scopes
+under one heading with nothing on screen saying which was which.
+
+**The switch is absent on Android rather than disabled.** `mutable-content` is
+an APNs field with no FCM equivalent, so there it would set a server flag that
+nothing acts on. M4 decides whether Android gets a path of its own; until then,
+no control beats a dead one. A shared `iosIt` helper joins `androidIt` in the
+test helpers for the same reason the latter exists.
+
+**The privacy policy said the server lives in the operator's home.** It hasn't
+since Phase 11 moved to AWS on 2026-08-12 — so a legal document was wrong about
+which jurisdiction and which company holds members' personal data, which is
+squarely the sort of thing that policy exists to state. Corrected while writing
+the push section, since that is the section that sends people to read it.
+
+The new push section says, in plain words: notifications pass through Expo and
+then Apple or Google; they deliberately carry no message text; previews are
+opt-in, per device, and fetched by the phone directly afterwards; the phone
+stores a limited key to do it, removed on sign-out; and — stated rather than
+implied — with previews on, anyone who can see your lock screen can read your
+messages.
+
+**Known noise:** three of the new Settings tests emit React's *"testing
+environment is not configured to support act"* on stderr. It is react-query
+notifying its observers as a settled mutation is dropped, after RNTL has already
+switched the act environment off; the assertions pass and the updates are
+benign. Chased through `settle`, an explicit in-`act` unmount, and removing both
+`useHoldOpen` and `cancelQueries` — none of which moved it — and then left,
+because the remaining candidates are all inside react-query's teardown and the
+cost of the noise is lower than the cost of contorting the component around it.
+
+### M5 review, 2026-08-14 — fixes
+
+An `xhigh` review of the M5 diff. The two that matter most are the same shape:
+**a state was being inferred from the wrong signal, and the wrong answer looked
+like a normal one.**
+
+- **"Is this device registered?" was answering the Expo token's presence**, and
+  the token is deliberately written *before* the registration POST — so it can
+  name a row that was never created. A first launch whose POST went out and lost
+  its answer would have drawn the switch, and flipping it would have put "Not
+  found." under a privacy control. It now keys off the mirror, which only a
+  registration *response* writes; that also removes the second keychain read,
+  and with it the `Promise.all` that would have discarded a good token read
+  because the preference read failed.
+- **A failed read rendered as "you haven't turned on notifications."** Exactly
+  #317, one section along: no error branch meant a keychain failure fell through
+  to the not-registered note and told someone to switch on notifications they
+  already had on, with no retry and no way to reach their own switch.
+- **The not-registered note was a dead end within the session.** Registration
+  runs on sign-in and cold start and nowhere else, so following the instruction,
+  returning to the app and finding the same note was the likely outcome — with a
+  force-quit as the only cure, and nothing on screen saying so. It now offers
+  *Check again*, which re-registers and re-reads.
+- **The mirror had no tests.** The settings tests seeded it by hand, so deleting
+  either the write in `runRegistration` or the delete in `clearLocalPushState`
+  left the suite green — including the owner-change reset this milestone's whole
+  argument rests on. Four tests now cover it, checked by breaking the code.
+- **The privacy policy was missing the at-rest downgrade `previewCredential.ts`
+  promises M5 would disclose**, and it named three US companies as new
+  recipients without saying that a transfer outside the UK occurs — in a policy
+  that invokes UK GDPR by name, in the very section added to close a
+  transparency gap. Both stated now, in plain words.
+- Smaller: the query is `enabled` only on iOS, so Android's Settings no longer
+  does two Keystore reads for a section that renders nothing;
+  `clearLocalPushState`'s docstring said "both" and "the two" when it now clears
+  three things; and the `setPushPreviews` guard is labelled as the defensive
+  assertion it is, since `serverMessage` can never surface a non-`ApiError`
+  message and the sentence it authored was unreachable.
+- **`notifications.md`'s "it cannot drift" was an overclaim.** A launch whose
+  POST never lands leaves the previous value for the session — swallowed on
+  purpose, because push must not break a launch. Now stated, so nobody later
+  decides against a reconciliation path on the strength of an absolute.
 
 ## Corrections from review
 
