@@ -1890,22 +1890,42 @@ class DevicePushToken(models.Model):
     # for a long time can be pruned later rather than us pushing into the void
     # forever. Expo also reports permanently-dead tokens on send (Milestone D).
     last_seen = models.DateTimeField(auto_now=True)
-    # Whether this device may show the *text* of a message on its lock screen
-    # (Phase 10b). The push itself still carries no content — the device fetches
-    # it over TLS after the push arrives; this flag is only what tells the sender
-    # to set ``mutableContent`` so the notification extension is woken at all.
+    # Whether this device's notifications name the sender and say what a message
+    # says (Phase 10b). It governs **both halves**, which is the whole shape of
+    # the setting:
     #
-    # **Per device, and off by default.** What leaks is a lock screen, and a lock
-    # screen belongs to a phone rather than to an account: someone can reasonably
-    # want previews on the phone in their pocket and not on the tablet in the
-    # kitchen. Off by default because turning a default on later is one line,
-    # while quietly starting to render people's messages on their friends'
-    # lock screens is not something to do on anyone's behalf.
+    #   on  — the push body names the sender ("New message from Ada"), and on
+    #         iOS carries ``mutableContent`` so the notification extension is
+    #         woken to replace it with the message text.
+    #   off — the body says only that something arrived, naming nobody, and the
+    #         **Reply** action is withheld: a text field answering an unknown
+    #         message from an unknown person is the trap this phase exists to
+    #         fix, in a worse form than the one it started with.
+    #
+    # Turning it off therefore also improves what leaves the box, which is worth
+    # knowing: an anonymous body is one Expo and Apple/Google cannot read a
+    # correspondent's name out of.
+    #
+    # **Per device.** What it exposes is a lock screen, and a lock screen belongs
+    # to a phone rather than to an account: someone can reasonably want previews
+    # on the phone in their pocket and not on the tablet in the kitchen.
+    #
+    # **On by default**, matching WhatsApp and Signal, and settled with the user
+    # on 2026-08-14 after the first build reached a real handset. The earlier
+    # "off by default" reasoning — that quietly rendering messages on people's
+    # lock screens isn't ours to do — turned out to be answered by iOS rather
+    # than by us: *Settings → Notifications → Show Previews* defaults to **When
+    # Unlocked** on any Face ID iPhone, so the OS already withholds the content
+    # until its owner is looking at it. We supply the words; Apple decides when
+    # it is safe to reveal them.
     #
     # **Reset when the row changes hands** (see ``DevicePushTokenView.post``):
     # registration deliberately moves the row to the new user, and a preference
-    # about a lock screen must never be inherited along with it.
-    show_previews = models.BooleanField(default=False)
+    # about a lock screen must never be inherited along with it. Reset to *this
+    # default*, not to off — the point is that the next owner starts where a
+    # fresh install starts, not that they start in the strictest state.
+    PREVIEWS_DEFAULT = True
+    show_previews = models.BooleanField(default=PREVIEWS_DEFAULT)
     # SHA-256 of this device's **preview credential** (Phase 10b), or "" if it
     # has none yet.
     #

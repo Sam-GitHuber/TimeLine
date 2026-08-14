@@ -95,12 +95,19 @@ roughly one endpoint and the ~40 lines of Swift that call it.
    reason recorded (see M4 — this is genuinely less reliable and may not land).
 3. The push payload on the wire still contains **no message content**, verified
    by a test asserting the exact body the server sends.
-4. **Previews are per device and off by default**, toggled in the app's
-   notification settings, stored on `DevicePushToken`, and **reset to off when
-   the device row changes hands** (M1).
-5. A device with previews **off** gets exactly today's behaviour — **including
-   the Reply field, unchanged**. The trap is fixed by giving Reply something to
-   reply to, not by deleting Reply. See *The Reply field is not touched*, below.
+4. **Previews are per device**, toggled in the app's notification settings,
+   stored on `DevicePushToken`, and **reset when the device row changes hands**
+   (M1). *Revised 2026-08-14: **on** by default, and the reset is to that
+   default — see the M5 revision log.*
+5. ~~A device with previews **off** gets exactly today's behaviour — including
+   the Reply field, unchanged.~~ **Reversed 2026-08-14.** That held while "off"
+   still named the sender. Off now hides the sender too, so a Reply field would
+   answer an unknown message from an unknown person — the trap this phase
+   exists to fix, in a worse form. Off means `New message` and no Reply; *on*
+   keeps Reply and gives it something to reply to, which was always the point.
+   See the M5 revision log, and *The Reply field is not touched* below for the
+   reasoning that still stands (Reply must never be removed from the **default**
+   experience).
 6. Every failure path falls back to `New message from Ada` — the body the server
    already composed and put in the payload. **No push is ever silent** because
    the extension had a bad day. This rule constrains the Android design (M4) and
@@ -211,7 +218,7 @@ So: **Reply stays exactly as it is.** The fix for the trap is the preview, not
 the removal of the field. Devices with previews off are no worse off than today,
 which is the correct bar for a phase that adds an opt-in feature.
 
-### Previews are per *device*, and off by default
+### Previews are per *device* (and, since 2026-08-14, on by default)
 
 Per-device because the thing that leaks is a **lock screen**, and a lock screen
 belongs to a phone, not an account. Someone can want previews on their own
@@ -219,9 +226,19 @@ phone and not on the tablet in the kitchen. It's also nearly free: `_payload()`
 is computed once per outbox row, but `_message(device, payload)` already runs per
 device (`send_pushes.py:165`), so the flag slots into the existing shape.
 
-**Off by default**, because turning a default on later is one line and quietly
+~~**Off by default**, because turning a default on later is one line and quietly
 starting to show people's messages on their friends' lock screens is not. Ask
-the TestFlight group once it exists.
+the TestFlight group once it exists.~~
+
+**Revised to on by default, 2026-08-14**, before anyone outside the maintainer's
+own devices had the build. The caution above was answering a question **Apple
+has already answered**: *Settings → Notifications → Show Previews* defaults to
+*When Unlocked* on any Face ID iPhone, so the OS withholds a notification's
+contents until its owner is looking at the phone. We supply the words; Apple
+decides when it is safe to reveal them — and there is no hook for us to make
+that decision ourselves, since the extension runs once at delivery and the
+reveal happens later, repeatedly, at display time. WhatsApp and Signal both
+default this on for the same reason. See the M5 revision log.
 
 **And it must reset when the device changes owner.** `DevicePushToken` is keyed
 on the *token*, and `PushTokenView.post` deliberately reassigns `user` on an
@@ -1238,6 +1255,58 @@ like a normal one.**
   POST never lands leaves the previous value for the session — swallowed on
   purpose, because push must not break a launch. Now stated, so nobody later
   decides against a reconciliation path on the strength of an absolute.
+
+### M5 revised, 2026-08-14 — what the first real handset changed
+
+The build reached a phone, previews worked, and using it for ten minutes
+produced two corrections that no amount of review had caught. Both came from the
+user; both are recorded here because the *reasoning* is the part worth keeping.
+
+**"Show message text on the lock screen" was the wrong label, in both
+directions.** The setting doesn't govern the lock screen — it governs whether
+the notification *contains* the sender and the text at all, everywhere a
+notification appears. The label under-described what it does *and* implied a
+locked/unlocked distinction the feature cannot make. It is now "Show message
+previews", with the lock screen where it belongs: as the *reason* you might turn
+it off, in the explanatory text.
+
+**The locked/unlocked behaviour we thought we might owe is Apple's, and we get
+it free.** The user asked for WhatsApp's behaviour — text hidden on a locked
+screen, revealed once you pick the phone up. That is not WhatsApp; it is
+*Settings → Notifications → Show Previews*, which defaults to **When Unlocked**
+on any Face ID iPhone and applies to every app. We could not build it if we
+wanted to: the extension runs once, at delivery, and produces one body, while
+the reveal decision is made later and repeatedly at display time. So the OS is
+already doing the hard half.
+
+That collapses the whole off-by-default argument. It was written to avoid
+"quietly starting to show people's messages on their friends' lock screens" —
+which iOS already prevents. **Default is now on**, matching WhatsApp and Signal,
+with a data migration bringing existing rows along (safe here, and *only* here,
+because nothing outside the maintainer's own devices has ever had the feature —
+flipping a privacy default under people who have made a choice is a different
+act and would need telling them).
+
+**A third thing followed from the second.** If the switch is what people reach
+for when they want privacy, then "off" naming the sender is a strange
+half-privacy: it is *who* is messaging you, more than what they said, that a
+glance at a lock screen gives away. So off now hides both, and the body on the
+wire becomes `New message` — which is also the one privacy gain in this phase
+that has nothing to do with a lock screen, since it is the body Expo and
+Apple/Google see.
+
+**And the Reply field had to go with it**, reversing DoD 5. That rule was
+written when "off" still named the sender, and it was right then. Once it
+doesn't, a reply field answers an unknown message from an unknown person: the
+trap this entire phase exists to fix, in a worse form than the one it started
+with. Reply stays on the default path, which was always the real point of the
+rule.
+
+**Note the shape of this.** Three of the four corrections came from *using* the
+thing for ten minutes, not from reading it. The design was internally coherent
+and wrong at the edges, and the specific way it was wrong — a label that
+described the risk rather than the behaviour — is not something a reviewer with
+the same mental model as the author will catch.
 
 ## Corrections from review
 

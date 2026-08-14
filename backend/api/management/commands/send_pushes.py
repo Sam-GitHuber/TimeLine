@@ -49,6 +49,7 @@ from django.utils import timezone
 
 from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
 from ...notifications import (
+    ANONYMOUS_MESSAGE_BODY,
     MENTION_CHANNEL,
     channel_for_kind,
     is_mentioned,
@@ -367,10 +368,37 @@ class Command(BaseCommand):
                 "url": data["url"],
             },
         }
+        # **A device with previews off gets an anonymous body, and no Reply.**
+        #
+        # The setting governs both halves of what a notification discloses: who
+        # it is from, and what they said. Leaving the sender's name on while
+        # withholding the text would be a strange half-privacy — it is the
+        # correspondent, more than the words, that a glance at a lock screen
+        # gives away.
+        #
+        # It also improves what leaves the box, which is the one privacy gain in
+        # this phase that isn't about a lock screen at all: this body is what
+        # Expo and Apple/Google see, and an anonymous one is a body they cannot
+        # read a correspondent's name out of.
+        #
+        # **Reply goes with it**, reversing the rule this phase started with
+        # ("previews off gets exactly today's behaviour, Reply included"). That
+        # held while off still named the sender. Once it doesn't, a reply field
+        # answers an unknown message from an unknown person — the trap this
+        # phase exists to fix, in a worse form than the one it started with.
+        #
+        # Gated on ``previewable`` so it touches message pushes only. "Ada
+        # reacted to your post" names a person and is not a message preview;
+        # anonymising it is a different setting, and the phase's non-goals say
+        # so.
+        anonymous = data.get("previewable") and not device.show_previews
+        if anonymous:
+            message["body"] = ANONYMOUS_MESSAGE_BODY
+
         # Expo's field name for APNs' ``category``. Sent only where there's an
         # action to offer, so a notification kind that grows one later opts in
         # by adding it to its payload rather than by changing this.
-        if data.get("category"):
+        if data.get("category") and not anonymous:
             message["categoryId"] = data["category"]
         # The Android notification channel (Phase 10). Ignored by iOS, and
         # **required** on Android: a push naming a channel the device doesn't

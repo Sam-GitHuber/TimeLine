@@ -8657,7 +8657,7 @@ class DevicePushTokenTests(APITestCase):
             user=self.other,
             expo_token="ExponentPushToken[shared]",
             platform="ios",
-            show_previews=True,
+            show_previews=False,
         )
 
         self.client.post(
@@ -8668,16 +8668,21 @@ class DevicePushTokenTests(APITestCase):
 
         device = DevicePushToken.objects.get()
         self.assertEqual(device.user, self.me)
-        self.assertFalse(device.show_previews)
+        # Reset to the *default*, not to off: the next owner starts where a
+        # fresh install starts. Seeded off above so this can only pass by
+        # resetting, not by inheriting.
+        self.assertTrue(device.show_previews)
 
     def test_re_registering_your_own_device_keeps_your_preview_setting(self):
         # The other half: the app POSTs on *every* launch, so a reset that
-        # didn't check ownership would turn previews off every cold start.
+        # didn't check ownership would undo the user's choice every cold start.
+        # Seeded *off* — the opposite of the default — so this can only pass by
+        # preserving what was there.
         DevicePushToken.objects.create(
             user=self.me,
             expo_token="ExponentPushToken[mine]",
             platform="ios",
-            show_previews=True,
+            show_previews=False,
         )
 
         self.client.post(
@@ -8686,7 +8691,7 @@ class DevicePushTokenTests(APITestCase):
             format="json",
         )
 
-        self.assertTrue(DevicePushToken.objects.get().show_previews)
+        self.assertFalse(DevicePushToken.objects.get().show_previews)
 
     def test_registration_answers_where_the_preview_setting_stands(self):
         # There is nowhere else to learn it, and the settings toggle has to
@@ -8717,7 +8722,7 @@ class DevicePushTokenTests(APITestCase):
             user=self.other,
             expo_token="ExponentPushToken[shared]",
             platform="ios",
-            show_previews=True,
+            show_previews=False,
         )
 
         resp = self.client.post(
@@ -8726,7 +8731,7 @@ class DevicePushTokenTests(APITestCase):
             format="json",
         )
 
-        self.assertFalse(resp.data["show_previews"])
+        self.assertTrue(resp.data["show_previews"])
 
     def test_the_toggle_turns_previews_on_for_one_device(self):
         DevicePushToken.objects.create(
@@ -8750,6 +8755,10 @@ class DevicePushTokenTests(APITestCase):
             user=self.other,
             expo_token="ExponentPushToken[theirs]",
             platform="ios",
+            # Seeded against the default, so "unchanged" and "the default" can't
+            # be confused for one another — the assertion below has to fail if
+            # the PATCH lands.
+            show_previews=False,
         )
 
         resp = self.client.patch(
@@ -11384,16 +11393,58 @@ class SendPushesCommandTests(APITestCase):
         self.assertTrue(self._sent_body(urlopen)[0]["mutableContent"])
 
     def test_a_device_with_previews_off_gets_no_mutable_content(self):
-        # Previews are off by default, and a device that hasn't opted in must
-        # get exactly today's push — including its Reply field, which is
-        # deliberately unchanged for every device.
+        # Nothing to wake, because there is nothing for the extension to fetch.
         self._queue_message()
+        self.device.show_previews = False
+        self.device.save(update_fields=["show_previews"])
+
+        urlopen = self._run()
+
+        self.assertNotIn("mutableContent", self._sent_body(urlopen)[0])
+
+    def test_a_device_with_previews_off_is_told_nothing_but_that_it_happened(self):
+        # The setting governs *both* halves of what a notification discloses:
+        # who it is from as well as what they said. Naming the sender while
+        # withholding the text would be a strange half-privacy — it is the
+        # correspondent, more than the words, that a glance at a lock screen
+        # gives away. This is also the one body in the app that Expo and
+        # Apple/Google can read no name out of.
+        self._queue_message()
+        self.device.show_previews = False
+        self.device.save(update_fields=["show_previews"])
 
         urlopen = self._run()
 
         message = self._sent_body(urlopen)[0]
-        self.assertNotIn("mutableContent", message)
-        self.assertEqual(message["categoryId"], "message")
+        self.assertEqual(message["body"], "New message")
+        self.assertNotIn("Ada", json.dumps(message))
+
+    def test_a_device_with_previews_off_is_offered_no_reply(self):
+        # Reversing the rule this phase started with ("previews off gets exactly
+        # today's behaviour, Reply included"), which held only while off still
+        # named the sender. Once it doesn't, a reply field answers an unknown
+        # message from an unknown person — the trap this phase exists to fix, in
+        # a worse form than the one it started with.
+        self._queue_message()
+        self.device.show_previews = False
+        self.device.save(update_fields=["show_previews"])
+
+        urlopen = self._run()
+
+        self.assertNotIn("categoryId", self._sent_body(urlopen)[0])
+
+    def test_previews_being_off_anonymises_nothing_but_messages(self):
+        # A reaction push names a person and is not a message preview. The
+        # phase's non-goals say so, and the gate is `previewable` for exactly
+        # this reason — anonymising the activity centre is a different setting
+        # nobody has asked for.
+        self._queue()
+        self.device.show_previews = False
+        self.device.save(update_fields=["show_previews"])
+
+        urlopen = self._run()
+
+        self.assertNotEqual(self._sent_body(urlopen)[0]["body"], "New message")
 
     def test_a_notification_push_never_gets_mutable_content(self):
         # Gated on the *payload* being a message, not on the device's flag
@@ -11433,7 +11484,10 @@ class SendPushesCommandTests(APITestCase):
         # Per device, because what leaks is a lock screen and a lock screen
         # belongs to a phone: previews on the phone, off on the kitchen tablet.
         tablet = DevicePushToken.objects.create(
-            user=self.me, expo_token="ExponentPushToken[tablet]", platform="ios"
+            user=self.me,
+            expo_token="ExponentPushToken[tablet]",
+            platform="ios",
+            show_previews=False,
         )
         self.device.show_previews = True
         self.device.save(update_fields=["show_previews"])

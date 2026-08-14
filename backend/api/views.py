@@ -5857,14 +5857,19 @@ class DevicePushTokenView(APIView):
         if existing is None or changed_owner:
             # A preference about a lock screen must not be inherited. The row
             # deliberately *moves* to the new user (see the class docstring), and
-            # that is right for the device registration — but Ada enabling
-            # previews, logging out, and her partner logging in on the same
-            # tablet must not leave a stranger's messages rendering on it.
+            # that is right for the device registration — but Ada's choice about
+            # her own lock screen is hers, not her partner's, once the tablet has
+            # changed hands.
+            #
+            # **Reset to the field's default, not to off.** The point is that the
+            # next owner starts where a fresh install starts; sending them
+            # somewhere stricter than that would be a second, invisible setting
+            # nobody chose either. Read off the model so the two cannot drift.
             #
             # The ``is None`` half covers the race the read above can lose: if a
             # concurrent request created the row between the two statements, this
-            # writes the safe value rather than whatever it decided.
-            defaults["show_previews"] = False
+            # writes the intended value rather than whatever it decided.
+            defaults["show_previews"] = DevicePushToken.PREVIEWS_DEFAULT
         # Still update_or_create rather than a save() on the row read above: it
         # resolves the create/create race on the unique ``expo_token`` (catching
         # the IntegrityError and re-fetching) instead of 500ing on it. Two
