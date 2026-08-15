@@ -14,7 +14,11 @@
  */
 
 import { act, render, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api.js";
@@ -24,9 +28,21 @@ import {
   useMarkThreadRead,
 } from "./useMarkThreadRead.js";
 
-function Harness({ id = 7, ready = true, count = 1 }) {
-  useMarkThreadRead(id, ready, count);
+/**
+ * Stands in for the thread's own transcript query.
+ *
+ * It has to be a real *observer*, not a seeded cache entry: `refetchQueries`
+ * only touches active queries, so without something subscribed the guard under
+ * test would have nothing to refetch and would pass vacuously.
+ */
+function Transcript({ id, queryFn }) {
+  useQuery({ queryKey: ["messages", id], queryFn, retry: false });
   return null;
+}
+
+function Harness({ id = 7, ready = true, count = 1, transcript }) {
+  useMarkThreadRead(id, ready, count);
+  return transcript ? <Transcript id={id} queryFn={transcript} /> : null;
 }
 
 function renderHook(props = {}) {
@@ -41,6 +57,7 @@ function renderHook(props = {}) {
   const view = render(wrap(props));
   return {
     ...view,
+    queryClient,
     update: (next) => view.rerender(wrap(next)),
   };
 }
@@ -104,6 +121,45 @@ describe("useMarkThreadRead", () => {
     await waitFor(() => expect(markRead).toHaveBeenCalledWith(7));
   });
 
+  it("does not claim a read when the transcript refetch fails", async () => {
+    // The sharp edge of the tab-return trigger. The server stamps the marker
+    // `now()`, so writing against a stale cached transcript would claim "read"
+    // over messages this tab never fetched — binning their queued push and
+    // drawing the sender a second tick for something nobody saw. Coming back
+    // offline is exactly when that happens, so the refetch has to gate it.
+    let fail = false;
+    const transcript = () =>
+      fail ? Promise.reject(new Error("offline")) : Promise.resolve([]);
+
+    const view = renderHook({ transcript });
+    await waitFor(() => expect(markRead).toHaveBeenCalled());
+    markRead.mockClear();
+
+    fail = true;
+    returnToTab();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it("claims the read once the transcript refetch succeeds", async () => {
+    // The other half: the guard must not be so strict that the trigger never
+    // fires. This is the reported case — phone locked, polls paused, nothing
+    // but the return to say the messages have been seen.
+    const transcript = () => Promise.resolve([]);
+
+    const view = renderHook({ transcript });
+    await waitFor(() => expect(markRead).toHaveBeenCalled());
+    markRead.mockClear();
+
+    returnToTab();
+
+    await waitFor(() => expect(markRead).toHaveBeenCalledWith(7));
+    expect(view).toBeTruthy();
+  });
+
   it("ignores a visibility change that hid the tab", async () => {
     renderHook();
     await waitFor(() => expect(markRead).toHaveBeenCalled());
@@ -114,6 +170,44 @@ describe("useMarkThreadRead", () => {
 
     await Promise.resolve();
     expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the badge and the conversation list after a read lands", async () => {
+    // The whole user-visible point of the write: without these the nav badge
+    // goes on claiming mail the reader has just read until the next 12s poll.
+    const view = renderHook();
+    const invalidate = vi.spyOn(view.queryClient, "invalidateQueries");
+    await waitFor(() => expect(markRead).toHaveBeenCalled());
+
+    const keys = invalidate.mock.calls.map((call) => call[0]?.queryKey);
+    expect(keys).toContainEqual(["unreadMessages"]);
+    expect(keys).toContainEqual(["conversations"]);
+  });
+
+  it("still refreshes them when the view has already gone", async () => {
+    // The regression this guards: gating the invalidation on the effect's
+    // cleanup left the nav badge claiming mail the reader had just read
+    // whenever they closed the drawer inside the round trip. The write landed;
+    // the cache has to hear about it either way.
+    let settleWrite;
+    markRead.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settleWrite = () => resolve({});
+        }),
+    );
+
+    const view = renderHook();
+    const invalidate = vi.spyOn(view.queryClient, "invalidateQueries");
+    await waitFor(() => expect(markRead).toHaveBeenCalled());
+    view.unmount();
+
+    await act(async () => {
+      settleWrite();
+    });
+
+    const keys = invalidate.mock.calls.map((call) => call[0]?.queryKey);
+    expect(keys).toContainEqual(["unreadMessages"]);
   });
 
   it("retries a write that did not land", async () => {

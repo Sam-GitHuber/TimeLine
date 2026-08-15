@@ -162,14 +162,6 @@ class Command(BaseCommand):
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
                 continue
-            # Too soon to say. Left queued **untouched** — no `sent_at`, no
-            # `attempts` — because this is "ask again shortly", not a failure:
-            # spending an attempt here would let a chatty thread exhaust
-            # MAX_ATTEMPTS without Expo ever having been called. See
-            # _should_defer.
-            if row.message_id and self._should_defer(row, read_markers, now):
-                deferred += 1
-                continue
             # Skip devices this row already reached on an earlier attempt, so a
             # retry never re-buzzes a phone that got it the first time.
             delivered = set(row.delivered_tokens or [])
@@ -186,6 +178,21 @@ class Command(BaseCommand):
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
                 continue
+            # Too soon to say. Left queued **untouched** — no `sent_at`, no
+            # `attempts` — because this is "ask again shortly", not a failure:
+            # spending an attempt here would let a chatty thread exhaust
+            # MAX_ATTEMPTS without Expo ever having been called. See
+            # _should_defer.
+            #
+            # **Below the device check on purpose.** There is nothing to protect
+            # a recipient with no registered device from — no phone will buzz
+            # either way — so deferring one would leave a row queued for a drain
+            # that can never send it, and (because `enqueue_message_pushes`
+            # coalesces onto any unsent row) suppress the *next* message's row
+            # behind it.
+            if row.message_id and self._should_defer(row, read_markers, now):
+                deferred += 1
+                continue
             payload = self._payload(row)
             badge = self._badge(row, badges)
             for device in outstanding:
@@ -193,11 +200,16 @@ class Command(BaseCommand):
                     (row, device, self._message(device, payload, badge))
                 )
 
+        # Reported on **every** path, not just the empty one. A held row is a
+        # fourth outcome beside sent/settled/requeued, and a drain that also has
+        # something to send is the usual case — so leaving it off the busy path
+        # would make a misconfigured grace look like a perfectly healthy drain
+        # while nobody's phone buzzed. See _should_defer.
+        if deferred:
+            self.stdout.write(f"{deferred} message push(es) held back.")
+
         if not messages:
-            self.stdout.write(
-                f"{len(pending)} queued, nothing outstanding to send"
-                f"{f' ({deferred} held back)' if deferred else ''}."
-            )
+            self.stdout.write(f"{len(pending)} queued, nothing outstanding to send.")
             return
 
         if dry_run:
@@ -320,6 +332,19 @@ class Command(BaseCommand):
         **It cannot strand a row.** The age test is against the message's own
         ``created_at``, which doesn't move, so once a row is older than the grace
         no later run can defer it again however active the recipient looks.
+
+        **Known limitation: "active" is broader than "reading".** The marker is
+        also stamped when the recipient *sends* (``MessageCreateView`` —
+        "sending implies you've read everything up to now") and when they swipe
+        **Mark read** on the conversation list. So someone who fires off a reply
+        and pockets the phone looks active for the next
+        ``PUSH_ACTIVE_THREAD_SECONDS``, and a reply arriving in that window is
+        held for a drain rather than sent — which on the present per-minute
+        timer is the *most* conversational exchanges buzzing slowest. It is
+        bounded (one extra tick, and never more than once per message) and the
+        alternative is a presence signal this deliberately avoids, but it is a
+        real cost and it argues for keeping the window well under the drain
+        interval rather than equal to it.
 
         This deliberately does **not** try to answer "is the thread on screen".
         That needs a presence signal from the client, and the whole point of

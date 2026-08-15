@@ -11236,7 +11236,17 @@ class MarkConversationUnreadTests(APITestCase):
         self.assertEqual(self.client.delete(self.url).status_code, 404)
 
 
-@override_settings(EXPO_ACCESS_TOKEN="", EXPO_PUSH_RETENTION_DAYS=14)
+@override_settings(
+    EXPO_ACCESS_TOKEN="",
+    EXPO_PUSH_RETENTION_DAYS=14,
+    # Pinned rather than inherited (#355). Both are operator-tunable via the
+    # environment — 0 is the legitimate way to switch the hold off — so tests
+    # that read them from the ambient settings would go red for anyone with
+    # either exported, and would silently stop testing anything if a default
+    # were retuned. The offsets below are chosen against *these* numbers.
+    PUSH_MESSAGE_GRACE_SECONDS=6,
+    PUSH_ACTIVE_THREAD_SECONDS=60,
+)
 class SendPushesCommandTests(APITestCase):
     """Draining the outbox (Phase 9, Milestone D).
 
@@ -11772,8 +11782,10 @@ class SendPushesCommandTests(APITestCase):
             user=self.me,
             last_read_at=timezone.now() - timedelta(seconds=40),
         )
-        # Older than PUSH_MESSAGE_GRACE_SECONDS. `update` because `created_at`
-        # is auto_now_add and would otherwise be rewritten on save.
+        # Older than PUSH_MESSAGE_GRACE_SECONDS. `update` rather than `save`
+        # only to skip the model's other save-time work — `created_at` is
+        # `auto_now_add`, so it is written on INSERT and never rewritten, which
+        # is exactly what `_should_defer`'s "cannot strand a row" rests on.
         Message.objects.filter(pk=message.pk).update(
             created_at=timezone.now() - timedelta(seconds=30)
         )
@@ -11806,6 +11818,67 @@ class SendPushesCommandTests(APITestCase):
         urlopen = self._run()
 
         self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    def test_a_marker_just_outside_the_active_window_is_not_held_back(self):
+        # Pins the *value* of PUSH_ACTIVE_THREAD_SECONDS, not merely its sign.
+        # Without a case either side of the boundary the window could be retuned
+        # to almost anything — or its units confused — with nothing going red.
+        convo, _message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=61),
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    def test_a_recipient_with_no_devices_is_settled_rather_than_held(self):
+        # The hold exists to stop a *phone* buzzing for a message on its screen.
+        # Someone with no registered device has no phone to protect, so holding
+        # their row would leave it queued for a drain that can never send it —
+        # and `enqueue_message_pushes` coalesces onto any unsent row, so the
+        # next message would get no row of its own either.
+        convo, _message = self._queue_message()
+        DevicePushToken.objects.all().delete()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=2),
+        )
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_a_held_row_does_not_hold_up_the_rest_of_the_batch(self):
+        # The mixed batch is the usual case in production, and the only one
+        # where the `continue` placement and the shared clock matter. A held row
+        # must not settle, swallow or delay its neighbours.
+        held_convo, _held_message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=held_convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=2),
+        )
+        # A second thread with no marker at all — nothing to wait for. A group,
+        # because a second *direct* thread between the same pair is barred by
+        # `unique_conversation_pair`.
+        other_convo, _other_message = self._queue_message(
+            kind="group", title="Book Club"
+        )
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["data"]["url"], f"/messages/{other_convo.id}")
+        # The held row is still queued, unspent; its neighbour is settled.
+        held_row = PushOutbox.objects.get(message__conversation=held_convo)
+        self.assertIsNone(held_row.sent_at)
+        self.assertEqual(held_row.attempts, 0)
 
     def test_a_comment_notification_deep_links_to_its_parent_post(self):
         # The route needs the *post* id, but the notification carries a comment

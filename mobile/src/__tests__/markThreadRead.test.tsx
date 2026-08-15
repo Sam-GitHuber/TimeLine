@@ -17,7 +17,11 @@
  * failure is retried rather than dropped on the floor.
  */
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from '@tanstack/react-query';
 import { act, render } from '@testing-library/react-native';
 import { AppState } from 'react-native';
 
@@ -44,18 +48,38 @@ const dismiss = dismissConversationNotifications as jest.MockedFunction<
   typeof dismissConversationNotifications
 >;
 
+/**
+ * Stands in for the thread's own transcript query.
+ *
+ * It has to be a real *observer*, not a seeded cache entry: `refetchQueries`
+ * only touches active queries, so without something subscribed the foreground
+ * guard would have nothing to refetch and would pass vacuously.
+ */
+function Transcript({
+  id,
+  queryFn,
+}: {
+  id: number;
+  queryFn: () => Promise<unknown>;
+}) {
+  useQuery({ queryKey: ['messages', id], queryFn, retry: false });
+  return null;
+}
+
 /** Drives the hook with nothing else on screen to get in the way. */
 function Harness({
   id = 7,
   ready = true,
   count = 1,
+  transcript,
 }: {
   id?: number;
   ready?: boolean;
   count?: number;
+  transcript?: () => Promise<unknown>;
 }) {
   useMarkThreadRead(id, ready, count);
-  return null;
+  return transcript ? <Transcript id={id} queryFn={transcript} /> : null;
 }
 
 async function renderHook(props: Parameters<typeof Harness>[0] = {}) {
@@ -74,6 +98,7 @@ async function renderHook(props: Parameters<typeof Harness>[0] = {}) {
   // result's methods, and leaves an act scope open across the next render.
   const view = await render(wrap(props));
   return {
+    client,
     /** Re-render with new props, keeping the same query client. */
     update: (next: Parameters<typeof Harness>[0]) => view.rerender(wrap(next)),
     unmount: () => view.unmount(),
@@ -162,6 +187,47 @@ describe('useMarkThreadRead', () => {
     expect(markRead).toHaveBeenCalledWith(7);
   });
 
+  it('does not claim a read when the transcript refetch fails', async () => {
+    // The sharp edge of the foreground trigger. The server stamps the marker
+    // `now()`, so writing against the cached pages would claim "read" over
+    // every message that arrived while the phone was locked — binning their
+    // queued push and drawing the sender a second tick for something nobody
+    // saw. Unlocking with no signal is exactly when that happens.
+    let fail = false;
+    const transcript = () =>
+      fail ? Promise.reject(new Error('offline')) : Promise.resolve([]);
+
+    await renderHook({ transcript });
+    await settle();
+    markRead.mockClear();
+
+    fail = true;
+    await act(async () => {
+      listener?.('active');
+      await tick();
+      await tick();
+    });
+
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('claims the read once the transcript refetch succeeds', async () => {
+    // The other half: the guard must not be so strict that the trigger never
+    // fires. This is the reported case — phone locked, polls paused, nothing
+    // but the return to say the messages have been seen.
+    await renderHook({ transcript: () => Promise.resolve([]) });
+    await settle();
+    markRead.mockClear();
+
+    await act(async () => {
+      listener?.('active');
+      await tick();
+      await tick();
+    });
+
+    expect(markRead).toHaveBeenCalledWith(7);
+  });
+
   it('ignores a foreground transition that is not "active"', async () => {
     await renderHook();
     await settle();
@@ -225,6 +291,48 @@ describe('useMarkThreadRead', () => {
     await settle();
 
     expect(dismiss).toHaveBeenCalledWith([7]);
+  });
+
+  it('refreshes the badge and the conversation list after a read lands', async () => {
+    // The whole user-visible point of the write: without these the badge goes
+    // on claiming mail the reader has just read until the next 12s poll.
+    const view = await renderHook();
+    const invalidate = jest.spyOn(view.client, 'invalidateQueries');
+    markRead.mockClear();
+    invalidate.mockClear();
+
+    await view.update({ count: 2 });
+    await settle();
+
+    const keys = invalidate.mock.calls.map((call) => call[0]?.queryKey);
+    expect(keys).toContainEqual(['unreadMessages']);
+    expect(keys).toContainEqual(['conversations']);
+  });
+
+  it('still refreshes them when the reader has already left the thread', async () => {
+    // The regression this guards: blur (not just unmount) runs the cleanup, so
+    // gating the invalidation on it left the tab badge claiming mail the reader
+    // had just read whenever they tapped Back inside the round trip. The write
+    // landed; the cache has to hear about it either way.
+    let settleWrite: (() => void) | undefined;
+    markRead.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          settleWrite = () => resolve();
+        }) as never
+    );
+
+    const view = await renderHook();
+    const invalidate = jest.spyOn(view.client, 'invalidateQueries');
+    await view.unmount();
+
+    await act(async () => {
+      settleWrite?.();
+      await tick();
+    });
+
+    const keys = invalidate.mock.calls.map((call) => call[0]?.queryKey);
+    expect(keys).toContainEqual(['unreadMessages']);
   });
 
   it('does not write for a thread it has been unmounted from', async () => {

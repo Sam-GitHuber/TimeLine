@@ -495,7 +495,22 @@ sends at once.
 
 A held row is left **completely untouched** — no `sent_at`, no `attempts`. It is
 "ask again shortly", not a failure; spending an attempt would let a busy thread
-exhaust `MAX_ATTEMPTS` without Expo ever having been called.
+exhaust `MAX_ATTEMPTS` without Expo ever having been called. The check also sits
+*below* the device lookup, so a recipient with no registered device — a web-only
+user — is settled immediately rather than held for a drain that could never have
+buzzed them anyway.
+
+**"Active" is broader than "reading", and that is the mechanism's weak point.**
+`last_read_at` is stamped by three things, only one of which is reading it:
+opening the thread, **sending** in it (`MessageCreateView`: "sending implies
+you've read everything up to now"), and swiping **Mark read** on the list. So
+someone who fires off a reply and pockets the phone looks active for the next
+minute, and a reply landing in that window waits a drain instead of going
+straight out. That is bounded — one extra tick, once per message — but it means
+the most conversational exchanges are the ones that buzz slowest, and it argues
+for keeping `PUSH_ACTIVE_THREAD_SECONDS` well under the drain interval rather
+than equal to it. Distinguishing the three would need a presence signal, which
+is exactly what leaning on `ConversationRead` avoids.
 
 **The cost, honestly:** a held row waits for the next drain, so on the present
 per-minute timer the few pushes this catches can land up to a minute later than
@@ -943,7 +958,7 @@ payload field and no backend change.
 
 | When | What it clears | Where |
 |---|---|---|
-| The thread screen marks itself read (on open, as messages land, on re-focus, and on the app foregrounding — #355) — **only once the transcript has actually loaded** (#321) | every notification whose `url` is `/messages/<this id>` | `useMarkThreadRead.ts` |
+| The thread screen has a message (on open and as messages land) — **only once the transcript has actually loaded** (#321), and deliberately *not* gated on the screen being focused (#355), since a thread sitting behind its own info screen is exactly when its pushes get filed rather than suppressed | every notification whose `url` is `/messages/<this id>` | `useMarkThreadRead.ts` |
 | **Mark read** swiped on a row in the conversation list | the same | `(tabs)/messages.tsx` |
 | The activity centre marks everything seen (on open) | every notification carrying a `notificationId` | `activity.tsx` |
 | A **Reply** typed into a notification *lands* | that conversation's notifications | `usePushTaps.ts` |
@@ -1157,7 +1172,7 @@ the property the badge depends on**, so it's worth listing:
 
 | Action | Invalidates | Where |
 | --- | --- | --- |
-| Open a thread | `unreadMessages` | `[conversationId].tsx`, after the `read/` POST |
+| Open a thread (and on re-focus / foreground — #355) | `unreadMessages`, `conversations`, `conversation` | `useMarkThreadRead.ts`'s `invalidateThreadRead`, after the `read/` POST |
 | Swipe read / unread in the list | `unreadMessages` | `(tabs)/messages.tsx`'s `rowAction` |
 | Block, leave, accept a pending chat | `unreadMessages` | `BlockButton`, `info.tsx`, `PendingChatPanel` |
 | Open the activity centre | `notificationsUnread` | `activity.tsx`, after `seen` |

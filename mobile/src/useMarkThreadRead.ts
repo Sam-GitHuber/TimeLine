@@ -22,19 +22,21 @@
  * `attach_read_receipts` reads it to draw the other person's second tick. A
  * write that silently never happens is a wrong push *and* a wrong tick.
  *
- * **Focus is the gate, not merely mount.** The write fires whenever the screen
- * is focused and gains a reason to — which also means it no longer fires while
- * the thread sits mounted *behind* its info screen. That's a deliberate
- * tightening: the notification-claim effect beside it already treats "navigated
- * away" as not reading, and marking a thread read that the reader cannot see a
- * line of would tell the sender they'd read it.
+ * **Focus gates the write, but not the tray sweep.** The POST fires only while
+ * the screen is focused — marking a thread read the reader has navigated away
+ * from would claim a read receipt for messages they cannot see. Taking this
+ * thread's notifications *back* has the opposite polarity: it destroys nothing
+ * and is wanted the moment the app knows about a message, so it stays on a
+ * plain effect exactly as before (#178). Focus-gating that too stranded "New
+ * message from Ada" on the lock screen for anyone sitting on the thread's own
+ * info screen.
  *
  * Its own module rather than another effect in the screen, for the reason
  * `usePushDismissals` is: a hook can be rendered by a test harness and driven
  * directly, and a closure buried in a 2,000-line screen can't.
  */
 
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
@@ -56,6 +58,23 @@ export const MARK_READ_RETRY_MS = 3000;
 export const MARK_READ_MAX_ATTEMPTS = 4;
 
 /**
+ * Everything one mark-read from *inside a thread* implies for the cache.
+ *
+ * **Deliberately not `['conversation', id]`**, which the conversation list's
+ * own mark-read (`(tabs)/messages.tsx`) does invalidate. The difference is
+ * frequency, not principle: the list's is a one-shot swipe, where a header left
+ * disagreeing with the row would read as a bug, while this fires on every
+ * arriving message, every re-focus and every foreground. Invalidating the
+ * heaviest per-thread payload — participants and every read marker — that often
+ * would replace one polled fetch per 12s with one per message, and the reader is
+ * already looking at the thread it would refresh.
+ */
+export function invalidateThreadRead(queryClient: QueryClient): void {
+  queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
+  queryClient.invalidateQueries({ queryKey: ['conversations'] });
+}
+
+/**
  * Mark `conversationId` read while its screen is focused.
  *
  * `ready` is the screen's own "the transcript is actually on screen" answer
@@ -75,23 +94,65 @@ export function useMarkThreadRead(
 
   /**
    * Coming back to the app is a reason to re-assert the marker, and one the old
-   * effect had no way to notice.
+   * effect had no way to notice: the phone was locked when the message arrived,
+   * so `focusManager` had `refetchInterval` paused and no count changed while
+   * it was away.
    *
-   * It matters most in precisely the reported case: the phone was locked when
-   * the message arrived, so `focusManager` had `refetchInterval` paused and no
-   * count changed while it was away. Counting transitions rather than tracking
-   * a boolean keeps this a plain trigger — every `active` is a fresh reason to
-   * write, even if the last one also was.
+   * **The transcript is refetched first, and the counter only moves if that
+   * succeeds.** The server stamps the marker `now()`, so firing against the
+   * *cached* pages would claim "read" over every message that arrived while the
+   * phone was locked — messages this client hasn't fetched and the reader has
+   * never seen. That would bin their queued push (`_should_drop`) and draw the
+   * sender a second tick for something nobody read: the #315/#321/#324 rule
+   * broken through a door those guards don't cover, and worse than the bug this
+   * hook fixes, because a lost push is silent. Refetching first means the
+   * marker can only ever claim messages the client actually holds.
    */
   useEffect(() => {
     const subscription = AppState.addEventListener(
       'change',
       (next: AppStateStatus) => {
-        if (next === 'active') setForegrounds((n) => n + 1);
+        if (next !== 'active') return;
+        queryClient
+          // **`throwOnError` is load-bearing.** `refetchQueries` resolves even
+          // when the fetch failed (query-core swallows per-query errors by
+          // default), so without this the `.then` below runs on exactly the
+          // offline foreground the guard exists to catch, and the `.catch` is
+          // dead code.
+          .refetchQueries(
+            { queryKey: ['messages', conversationId] },
+            { throwOnError: true }
+          )
+          .then(() => setForegrounds((n) => n + 1))
+          // A refetch we couldn't complete is precisely when we must *not*
+          // claim a read. The screen's own poll will come round again.
+          .catch(() => {});
       }
     );
     return () => subscription.remove();
-  }, []);
+  }, [conversationId, queryClient]);
+
+  /**
+   * Take this thread's notifications back off the lock screen (#178).
+   *
+   * A plain effect, deliberately **not** the focused one below: this is wanted
+   * as soon as the app knows about a message, and the thread sitting behind its
+   * own info screen is exactly when a push for it gets *filed* rather than
+   * suppressed (blur clears `setOnScreenConversation`). Gating it on focus left
+   * those notifications stranded until the reader happened to navigate back
+   * through the thread itself.
+   *
+   * Not chained onto the write either: whether the server hears about the read
+   * doesn't change the fact the user has read it, and the shade is local. It
+   * deliberately does *not* re-run on `foregrounds` — `usePushDismissals`
+   * already sweeps the whole tray on every foreground, and a second full
+   * `getPresentedNotificationsAsync` beside it would be pure duplication.
+   */
+  useEffect(() => {
+    if (!ready) return;
+    void messageCount;
+    void dismissConversationNotifications([conversationId]);
+  }, [conversationId, ready, messageCount]);
 
   useFocusEffect(
     useCallback(() => {
@@ -99,7 +160,9 @@ export function useMarkThreadRead(
       // `messageCount` and `foregrounds` are **triggers**: the effect re-runs
       // when either changes, which is the whole reason they're in the
       // dependency list. Naming them keeps that list honest rather than
-      // pretending the body reads them.
+      // pretending the body reads them. Unlike the web twin these are
+      // load-bearing — the dep array sits on `useCallback`, which the lint rule
+      // *does* police for unnecessary entries.
       void messageCount;
       void foregrounds;
 
@@ -110,9 +173,14 @@ export function useMarkThreadRead(
         api
           .markConversationRead(conversationId)
           .then(() => {
-            if (cancelled) return;
-            queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
-            queryClient.invalidateQueries({ queryKey: ['conversations'] });
+            // **Not gated on `cancelled`.** The write landed, so the badge and
+            // the conversation list are wrong until something says so — and
+            // these are global cache operations, safe long after this screen has
+            // gone. Blur runs the cleanup below, so gating this left the tab
+            // badge claiming mail the reader had just read whenever they tapped
+            // Back inside the round trip: the exact symptom the hook exists to
+            // remove.
+            invalidateThreadRead(queryClient);
           })
           .catch(() => {
             // Caught, not swallowed. This fires exactly when the connection is
@@ -123,18 +191,14 @@ export function useMarkThreadRead(
           });
       };
 
-      // Take this thread's notifications back off the lock screen (#178).
-      // Deliberately not chained onto the write: whether the server hears about
-      // it doesn't change the fact the user has read it, and the shade is local.
-      void dismissConversationNotifications([conversationId]);
       attempt(1);
 
       return () => {
         // A re-run (new message, re-focus, foreground) supersedes whatever the
-        // last one was doing. The in-flight POST can't be recalled, but its
-        // result is ignored and a fresh one goes out — and since the server
-        // stamps `last_read_at` with its own clock, the later write is the one
-        // that should win anyway.
+        // last one was doing. The in-flight POST can't be recalled, but a fresh
+        // one goes out — and since the server stamps `last_read_at` with its own
+        // clock, the later write is the one that should win anyway. Only the
+        // *retry chain* is cancelled here; the invalidation is not.
         cancelled = true;
         if (timer) clearTimeout(timer);
       };
