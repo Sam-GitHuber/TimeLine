@@ -45,6 +45,11 @@ import { useAndroidBack } from '@/useAndroidBack';
 import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
 import { colors, fontSize, fonts, radius, spacing } from '@/theme';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 type PollDimension = 'date' | 'time' | 'location' | 'custom';
 /** Which chip's editor is open, and whether it's setting a value or opening a poll. */
 type Editing = { dimension: PollDimension; mode: 'set' | 'poll' };

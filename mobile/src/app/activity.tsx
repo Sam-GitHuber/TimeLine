@@ -41,6 +41,11 @@ import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Notification, Paginated } from '@/types';
 import { formatRelativeTime } from '@/utils';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 export default function ActivityScreen() {
   const queryClient = useQueryClient();
   const goBack = () => (router.canGoBack() ? router.back() : router.replace('/'));

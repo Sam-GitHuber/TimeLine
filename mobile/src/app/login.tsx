@@ -24,6 +24,11 @@ import { useAuth } from '@/auth';
 import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { colors, fontSize, radius, spacing } from '@/theme';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 export default function LoginScreen() {
   const { signIn } = useAuth();
   const [email, setEmail] = useState('');

@@ -140,6 +140,11 @@ import { useAndroidBack } from '@/useAndroidBack';
 import { useWriteHold, WriteHoldProvider } from '@/writeHold';
 import { useDayBoundary } from '@/useDayBoundary';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 /** The composer bar's base vertical padding, before the home-indicator inset. */
 const COMPOSER_PAD = spacing.sm + 2;
 

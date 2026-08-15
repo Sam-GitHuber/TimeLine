@@ -18,6 +18,11 @@ import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { colors, fontSize, spacing } from '@/theme';
 import { useWriteHold, WriteHoldProvider } from '@/writeHold';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 export default function NewGroupScreen() {
   // Back is the only control on this screen that isn't the form's, and it
   // unmounts the form's error with it — so it reads the form's declared write

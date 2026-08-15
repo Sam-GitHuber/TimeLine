@@ -205,6 +205,15 @@ Each of these was a live bug. Several share a shape worth naming: **the
 development harness supports something the real one doesn't**, so the failure
 surfaces on a device or in production, not in the loop where you'd catch it.
 
+**Expo Router installs no error boundary — not even the one it ships.** It has a
+`Try` component and a ready-made `ErrorBoundary` view, so it looks handled, but a
+route is only wrapped if that route's module *exports* an `ErrorBoundary`. Until
+#299 nothing did, so any render error unmounted the app to a blank screen on a
+device with no reload button. Every file in `src/app/` now carries the one-line
+export, and a new screen is unprotected until it does too — see
+[`error-boundaries.md`](error-boundaries.md), which also covers why that export
+is per-screen and not on the layouts.
+
 **Auth-gated media needs a header — use `AuthedImage`.** Caddy `forward_auth`s
 every `/media/*` request in production, and a browser satisfies that for free by
 attaching its cookie to image requests. A native app gets no such help: a bare

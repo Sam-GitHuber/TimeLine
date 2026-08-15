@@ -26,6 +26,14 @@ import {
 } from '@/components/icons';
 import { colors } from '@/theme';
 
+// The tab group's own boundary (#299). It runs three badge queries and renders
+// from them, so it is as crash-prone as any screen — and without this a throw
+// here skips all 20 per-screen boundaries and lands on the root one, taking the
+// whole app (including every non-tab route) with it. Here, the root Stack
+// survives instead. `Try` wraps the module's own export, so this fallback
+// replaces the tab bar; that is the cost of protecting the thing that draws it.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 // The bar's content height *above* the home-indicator inset. The stock iOS tab
 // bar is ~49pt here, which reads chunky under our lighter chrome; 40 trims it
 // without crowding the smaller icon + label. The safe-area inset is added on

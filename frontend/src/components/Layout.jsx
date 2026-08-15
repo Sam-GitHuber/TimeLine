@@ -6,6 +6,11 @@ import { useMessaging } from "../messaging.jsx";
 import { useGroupsDrawer } from "../groups-drawer.jsx";
 import MessagesDrawer from "./MessagesDrawer.jsx";
 import GroupsDrawer from "./GroupsDrawer.jsx";
+import {
+  RouteErrorBoundary,
+  PanelErrorBoundary,
+  NavErrorBoundary,
+} from "./ErrorBoundary.jsx";
 import NavUserMenu from "./NavUserMenu.jsx";
 import ActivityCenter from "./ActivityCenter.jsx";
 import NavBadge from "./NavBadge.jsx";
@@ -162,17 +167,37 @@ export default function Layout() {
                 {unreadMessages > 0 && <NavBadge count={unreadMessages} />}
               </button>
               {/* The unified activity centre (Phase 8): one bell for replies,
-                  reactions, connection requests and group invites. */}
-              <ActivityCenter />
+                  reactions, connection requests and group invites.
+
+                  Boundaried, and it's the piece of chrome that most needs it:
+                  it's an infinite list over server notification rows, rendered
+                  above `<main>` and so outside the outlet's boundary. Without
+                  this a bad notification page blanks the entire app from the
+                  nav bar — the exact failure #299 is about. Same for the user
+                  menu beside it, one boundary each so one can't take the
+                  other. */}
+              <NavErrorBoundary>
+                <ActivityCenter />
+              </NavErrorBoundary>
               {/* Profile, Settings, Admin and Log out — all "about me" — live
                   behind the avatar so they don't crowd the destinations. */}
-              <NavUserMenu />
+              <NavErrorBoundary>
+                <NavUserMenu />
+              </NavErrorBoundary>
             </div>
           </nav>
         </header>
 
+        {/* The boundary that earns its keep (#299). A render error in a page
+            stops here instead of unmounting the app, so the header above and
+            the footer below stay on screen and you can navigate out of it —
+            the difference between a broken page and a broken app. It resets
+            itself on navigation, so leaving is the recovery; "Try again"
+            re-runs the failed queries for when you'd rather stay. */}
         <main>
-          <Outlet />
+          <RouteErrorBoundary>
+            <Outlet />
+          </RouteErrorBoundary>
         </main>
 
         {/* A quiet footer with the legal links, so the Terms and Privacy Policy
@@ -191,9 +216,20 @@ export default function Layout() {
 
       {/* Both companion drawers portal to <body>, so they sit above the column
           and dock to the viewport edges regardless of the centered layout —
-          groups on the left, messages on the right. */}
-      <GroupsDrawer />
-      <MessagesDrawer />
+          groups on the left, messages on the right.
+
+          One boundary each, and *not* the one around the outlet above: a portal
+          escapes the DOM tree but not the React tree, so without these two a
+          crash in a drawer would sail past `<main>`'s boundary and land on the
+          root one — blanking the app from a panel. Separate boundaries also
+          keep them independent of each other and of the page underneath, which
+          is the same reasoning as the outlet's, one level down. */}
+      <PanelErrorBoundary side="left" isOpen={groupsDrawer.isOpen}>
+        <GroupsDrawer />
+      </PanelErrorBoundary>
+      <PanelErrorBoundary side="right" isOpen={messaging.isOpen}>
+        <MessagesDrawer />
+      </PanelErrorBoundary>
     </div>
   );
 }

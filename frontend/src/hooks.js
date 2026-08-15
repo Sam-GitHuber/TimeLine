@@ -94,7 +94,15 @@ export function useInfiniteList(queryKey, fetchFirstPage, options = {}) {
     queryFn: ({ pageParam }) =>
       pageParam ? api.getPage(pageParam) : fetchFirstPage(),
     initialPageParam: undefined,
-    getNextPageParam: (lastPage) => lastPage.next ?? undefined,
+    // `?.`, not `.`, and the optional chain is the whole point: this is the one
+    // shared paging seam on the web, and dereferencing a page that isn't one is
+    // exactly how #297/#306 threw — a query-key collision put something else in
+    // the cache, and `getNextPageParam` ran during render, so the TypeError took
+    // the whole app down. #299 added a boundary underneath, but a net is not a
+    // fix: an unpageable `lastPage` means "no next page", which is both true and
+    // survivable. Every list in the web client pages through here, so this is
+    // one token for the whole class.
+    getNextPageParam: (lastPage) => lastPage?.next ?? undefined,
   });
 
   // Deduped by id: page-*number* paging re-sends a row when the underlying set
