@@ -6,9 +6,9 @@
 # `--no-build` the box runs the pre-built release image and never compiles:
 #
 #   docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
-#     pull backend web
+#     pull backend pushes web
 #   docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
-#     up -d --no-build backend web
+#     up -d --no-build backend pushes web
 #
 # TIMELINE_TAG selects which release to run, defaulting to `latest` — the tag the
 # release workflow moves once both images are built. Set it to pin the box to a

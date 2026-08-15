@@ -118,6 +118,11 @@ assert_not_called() {
   fi
 }
 
+assert_called() {
+  grep -q -- "$1" "$STATE/calls.log" 2>/dev/null ||
+    fail "expected to run: $1 (calls: $(tr '\n' '; ' <"$STATE/calls.log"))"
+}
+
 fail() {
   FAILURES=$((FAILURES + 1))
   echo "FAIL: $CURRENT — $1"
@@ -276,8 +281,29 @@ test_refuses_before_stopping_the_app() {
   assert_output_contains "cannot write into the media target"
   # ...and for the LIVE tree specifically, the explanation of why it's like that.
   assert_output_contains "aligns this tree to its own uid"
-  assert_not_called "stop backend web"
+  assert_not_called "stop backend"
   assert_not_called "pg_restore"
+  finish_case
+}
+
+# EVERY DATABASE WRITER IS STOPPED, NOT JUST THE WEB-FACING ONES (issue #354).
+#
+# `pg_restore --clean` drops and recreates every object, and is not run in a
+# single transaction — so anything still holding a connection means blocked
+# DROPs or a write landing between a table being dropped and reloaded, i.e. a
+# half-restored database during an actual disaster recovery.
+#
+# The drain is the one that gets forgotten: it serves no requests, so nothing
+# about it looks like "the app", but it opens a transaction and takes FOR UPDATE
+# locks on api_pushoutbox every two seconds and has `restart: unless-stopped`.
+# It was missed when the service was added. This case is what makes the next
+# database writer somebody adds impossible to miss the same way.
+test_stops_every_database_writer() {
+  new_world "stops_every_database_writer"
+  install_stubs
+  mkdir -p "$STATE/data/media"
+  run_script
+  assert_called "stop backend pushes web"
   finish_case
 }
 
@@ -289,7 +315,7 @@ test_preflight_only_changes_nothing() {
   run_script --preflight
   assert_ok
   assert_output_contains "Preflight OK"
-  assert_not_called "stop backend web"
+  assert_not_called "stop backend"
   assert_not_called "pg_restore"
   assert_not_called "rclone sync"
   finish_case
@@ -304,7 +330,7 @@ test_preflight_flag_is_positional_independent() {
   run_script latest --preflight
   assert_ok
   assert_output_contains "Preflight OK"
-  assert_not_called "stop backend web"
+  assert_not_called "stop backend"
   finish_case
 }
 
@@ -317,7 +343,7 @@ test_unknown_flag_refused() {
   run_script --prefligth
   assert_fails
   assert_output_contains "unknown option"
-  assert_not_called "stop backend web"
+  assert_not_called "stop backend"
   finish_case
 }
 
@@ -341,7 +367,7 @@ STUB
   run_script
   assert_fails
   assert_output_contains "does not read back as a"
-  assert_not_called "stop backend web"
+  assert_not_called "stop backend"
   finish_case
 }
 
@@ -353,6 +379,7 @@ test_probe_file_is_cleaned_up
 test_foreign_owned_subdir_aborts
 test_sourcing_does_not_restore
 test_refuses_before_stopping_the_app
+test_stops_every_database_writer
 test_preflight_only_changes_nothing
 test_preflight_flag_is_positional_independent
 test_unknown_flag_refused

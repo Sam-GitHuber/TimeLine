@@ -545,10 +545,24 @@ it:
   `sent_at` on rows it settles *without* calling Expo — a recipient with no
   devices, a deleted message, a push dropped as already-read. Counting those as a
   buzz would silence the next message for a minute, and would do it most often to
-  people in a live conversation, who are precisely who a fast drain is for.
+  people in a live conversation, who are precisely who a fast drain is for. A
+  `DeviceNotRegistered` reap is the same case and is deliberately **not** added
+  to `delivered_tokens`: it rang nobody, and the moment it fires is a reinstall
+  or a token rotation — exactly when the recipient has a working device again.
 - **@mentions are exempt**, for the same reason they're exempt from mute: being
   named is how you get someone's attention, and a busy thread is both what puts
   you in cooldown and where a minute's silence is most obviously wrong.
+
+  **The exemption has to look past the row's own message.** A queued row keeps
+  pointing at the message it was created for while later ones coalesce onto it,
+  so asking `is_mentioned(row.message, …)` answers about the *first* message of
+  a burst — and a mention arriving mid-burst creates no row of its own. Since a
+  busy thread is the only place a row is reliably already queued, that would
+  have broken the exemption in precisely the case it exists for.
+  `_mention_marks` asks whether the recipient has been named anywhere in the
+  thread since the row's message instead, which is everything the row now stands
+  for. Soft-deleted messages are excluded — a mention taken back shouldn't go on
+  punching pushes through.
 
 ### Holding a message push back (#355)
 

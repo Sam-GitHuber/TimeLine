@@ -11981,6 +11981,86 @@ class SendPushesCommandTests(APITestCase):
         self.assertEqual(len(self._sent_body(urlopen)), 1)
 
     @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_that_coalesced_onto_a_queued_row_is_still_exempt(self):
+        # The hole the first version of the exemption had. A queued row keeps
+        # pointing at the message it was created for while later messages
+        # coalesce onto it, so asking `is_mentioned(row.message, …)` answers
+        # about the *first* message of a burst. A mention arriving mid-burst
+        # creates no row of its own — and a busy thread is the only place a row
+        # is reliably already queued, so it is exactly the case the exemption
+        # exists for.
+        convo, first = self._queue_message()
+        self._already_buzzed(convo)
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me look at this"
+        )
+        MessageMention.objects.create(message=later, user=self.me)
+        # No second row: the enqueue coalesces onto the unsent one.
+        notifications.enqueue_message_pushes(later)
+        self.assertEqual(PushOutbox.objects.filter(sent_at__isnull=True).count(), 1)
+        self.assertEqual(
+            PushOutbox.objects.get(sent_at__isnull=True).message_id, first.id
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_on_a_deleted_message_does_not_punch_through(self):
+        # A mention taken back shouldn't go on beating the cooldown for ever.
+        convo, _first = self._queue_message()
+        self._already_buzzed(convo)
+        later = Message.objects.create(
+            conversation=convo,
+            sender=self.actor,
+            text="@me oops",
+            deleted_at=timezone.now(),
+        )
+        MessageMention.objects.create(message=later, user=self.me)
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_push_that_only_reaped_a_dead_token_starts_no_cooldown(self):
+        # `DeviceNotRegistered` settles a row without any phone having buzzed,
+        # so it must not look like a buzz to `_last_pushes`. The moment it fires
+        # is a reinstall or a token rotation — precisely when the recipient has
+        # a working device again and should hear about the next message.
+        convo, _message = self._queue_message()
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "gone",
+                        "details": {"error": "DeviceNotRegistered"},
+                    }
+                ]
+            }
+        )
+        reaped = PushOutbox.objects.get()
+        self.assertIsNotNone(reaped.sent_at)          # settled, not retried
+        self.assertEqual(reaped.delivered_tokens, [])  # but nobody was reached
+
+        # They re-register and a new message arrives well inside the cooldown.
+        device = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[new]", platform="ios"
+        )
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="second"
+        )
+        notifications.enqueue_message_pushes(later)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["to"], device.expo_token)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
     def test_the_cooldown_is_per_thread_not_per_person(self):
         # Otherwise one chatty group would silence every other conversation
         # someone is in — a far worse failure than the buzz storm this prevents.
@@ -12447,6 +12527,38 @@ class SendPushesLoopTests(APITestCase):
         # for a whole maintenance interval.
         self.assertEqual(receipts.call_count, 1)
         self.assertEqual(prune.call_count, 1)
+
+    def test_a_failing_maintenance_step_stays_on_its_own_schedule(self):
+        # Maintenance used to share the drain's try/except, and `next_maintenance`
+        # was only advanced *after* it succeeded — so a stuck prune retried on
+        # every single pass, firing Expo's getReceipts endpoint at drain cadence
+        # (the exact waste the two-cadence split exists to prevent), reported
+        # itself as "Drain failed", and backed the drain off to 10s for a fault
+        # that had nothing to do with it.
+        from api.management.commands.send_pushes import Command as SendPushes
+
+        with (
+            mock.patch.object(SendPushes, "_check_receipts") as receipts,
+            mock.patch.object(
+                SendPushes, "_prune", side_effect=RuntimeError("lock timeout")
+            ),
+            # Mocked for the same reason as in the failed-drain case below: the
+            # real call would shut the connection this test's own transaction is
+            # running in and take the rest of the class with it.
+            mock.patch(
+                "api.management.commands.send_pushes.close_old_connections"
+            ),
+        ):
+            out, drains = self._run_loop(
+                drains=5, interval=0.001, maintenance_interval=3600
+            )
+
+        self.assertEqual(drains, 5)
+        # Once, not once per pass.
+        self.assertEqual(receipts.call_count, 1)
+        # And the heartbeat — which deploy.md calls the alarm — still prints,
+        # which is when you most need it.
+        self.assertIn("Alive:", out)
 
     def test_a_failed_drain_does_not_kill_the_loop(self):
         # The whole point of being resident. A oneshot could exit on a Postgres

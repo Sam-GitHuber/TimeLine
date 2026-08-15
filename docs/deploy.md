@@ -239,7 +239,7 @@ holds, and not what's sitting in GHCR. Both images also carry it as an
 # What each container is running, and whether that matches the release image.
 docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps
 docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
-  $(docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps -q backend web)
+  $(docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps -q backend pushes web)
 ```
 
 If those disagree with the latest release, just let the timer tick — autodeploy
@@ -715,6 +715,11 @@ two seconds a pass it would be 43,000 lines a day. A hand-run still prints it.
 database connection and carries on ten seconds later, so a single line after a
 Postgres restart is expected and self-healing. A *repeating* one is not.
 
+`Maintenance failed: …` is the receipt check or the prune, and is deliberately a
+**different** line: it does not mean pushes have stopped going out, and it does
+not slow the drain. It retries on the next maintenance tick, not the next pass —
+so a stuck prune can't turn into an Expo call every ten seconds.
+
 ## Uptime monitoring
 
 You want to hear about an outage from a robot, not from a friend texting "is the
@@ -904,7 +909,7 @@ so a future change doesn't quietly undo the reasoning.
   Triggering on *release* (not every merge) keeps a deploy a deliberate human
   action with a version/changelog, and fork PRs can't publish releases so untrusted
   code never builds our images. Chosen a systemd timer over Watchtower for
-  consistency with the box's other timers (backups, pushes, health) and transparency. Config
+  consistency with the box's other timers (backups, token flush, health) and transparency. Config
   (Caddyfile, compose files) travels via `git pull`; only the heavy image build is
   offloaded to CI, and the box stays on `main` so the manual `deploy.sh`
   build-from-source path still works as a fallback. **Security:** the whole

@@ -94,10 +94,25 @@ services:
         condition: service_started
     # SIGTERM makes the loop finish its current drain and exit, rather than being
     # torn down mid-Expo-call with rows claimed and no record of whether they
-    # were sent. Docker's default is 10s, which a drain that is waiting out a 30s
-    # Expo timeout would blow through; this makes the wait long enough to cover
-    # the command's own worst case.
-    stop_grace_period: 45s
+    # were sent.
+    #
+    # **600s, matching the TimeoutStartSec of the systemd unit this replaced**,
+    # and for its reason: one drain takes up to EXPO_PUSH_MAX_ROWS (200) rows,
+    # which is several EXPO_PUSH_BATCH_SIZE (100) batches at 30s of Expo timeout
+    # each — more when recipients own several devices. Docker's default is 10s
+    # and an earlier version of this file said 45s; both are under that worst
+    # case, and going under it is not a slow shutdown but a **correctness** bug.
+    # `_drain` runs inside `transaction.atomic()`, so a SIGKILL rolls back the
+    # `delivered_tokens` of every device Expo had already accepted in this pass,
+    # and the next drain re-sends to all of them: one message, two buzzes on
+    # every phone in the batch.
+    #
+    # What waiting costs is a slower redeploy, and it fits: an idle drain exits
+    # in milliseconds, so the grace is only ever spent when Expo itself is
+    # hanging — and `timeline-autodeploy.service` allows `TimeoutStartSec=1200`,
+    # so even the pathological case leaves the deploy half its budget. Raise
+    # that first if this is ever raised.
+    stop_grace_period: 600s
     restart: unless-stopped
 
   web:

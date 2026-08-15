@@ -57,7 +57,13 @@ from django.db import close_old_connections, transaction
 from django.db.models import Max, Q
 from django.utils import timezone
 
-from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
+from ...models import (
+    ConversationRead,
+    DevicePushToken,
+    MessageMention,
+    PushOutbox,
+    PushReceipt,
+)
 from ...notifications import (
     ANONYMOUS_MESSAGE_BODY,
     MENTION_CHANNEL,
@@ -259,13 +265,6 @@ class Command(BaseCommand):
                 with transaction.atomic():
                     self._drain(max_rows, dry_run=False)
                 drains += 1
-
-                if next_maintenance is None or started >= next_maintenance:
-                    self._check_receipts(dry_run=False)
-                    self._prune(dry_run=False)
-                    self._heartbeat(drains)
-                    drains = 0
-                    next_maintenance = started + maintenance_interval
             except Exception as exc:
                 # A resident drain that dies on a transient fault is worse than
                 # the timer it replaced, which at least got a fresh process next
@@ -276,6 +275,33 @@ class Command(BaseCommand):
                 close_old_connections()
                 stop.wait(_LOOP_ERROR_BACKOFF_SECONDS)
                 continue
+
+            if next_maintenance is None or started >= next_maintenance:
+                # **Advanced before the work, not after.** Assigning this
+                # afterwards means a maintenance step that keeps failing is
+                # retried on *every* pass rather than every minute — so a stuck
+                # prune would fire Expo's getReceipts endpoint at drain cadence,
+                # which is the exact waste the two-cadence split exists to
+                # prevent, arriving only when something is already wrong.
+                next_maintenance = started + maintenance_interval
+                try:
+                    self._check_receipts(dry_run=False)
+                    self._prune(dry_run=False)
+                except Exception as exc:
+                    # **Its own try, for the reason `handle` keeps these outside
+                    # the drain's**: a receipts failure must not be reported as,
+                    # or back off, a drain that actually succeeded. Sharing one
+                    # handler made a stuck prune degrade push latency from 2s to
+                    # the error backoff and log "Drain failed" for a drain that
+                    # was fine — misdirecting exactly the person reading the log
+                    # to find out why nothing is buzzing.
+                    self.stderr.write(f"Maintenance failed: {exc}")
+                    close_old_connections()
+                # Outside that try on purpose: the heartbeat is what deploy.md
+                # calls the alarm, and a maintenance fault is when you most need
+                # to still be hearing it.
+                self._heartbeat(drains)
+                drains = 0
 
             stop.wait(max(0.0, interval - (time.monotonic() - started)))
 
@@ -356,7 +382,15 @@ class Command(BaseCommand):
             devices_by_user.setdefault(device.user_id, []).append(device)
 
         read_markers = self._read_markers(pending)
-        last_pushes = self._last_pushes(pending)
+        # Both of these feed `_should_space_out` and nothing else, so switching
+        # the cooldown off (the documented `PUSH_MESSAGE_COOLDOWN_SECONDS=0`
+        # path) should not still pay for two grouped queries on every drain —
+        # which at a 2s cadence is 30 a minute for a feature that is disabled.
+        if settings.PUSH_MESSAGE_COOLDOWN_SECONDS > 0:
+            last_pushes = self._last_pushes(pending)
+            mention_marks = self._mention_marks(pending)
+        else:
+            last_pushes = mention_marks = {}
         # recipient_id → icon-badge count, filled in on demand by `_badge`.
         badges = {}
 
@@ -407,7 +441,7 @@ class Command(BaseCommand):
             # behind it.
             if row.message_id and (
                 self._should_defer(row, read_markers, now)
-                or self._should_space_out(row, last_pushes, now)
+                or self._should_space_out(row, last_pushes, mention_marks, now)
             ):
                 deferred += 1
                 continue
@@ -498,6 +532,42 @@ class Command(BaseCommand):
             (entry["message__conversation_id"], entry["recipient_id"]): entry[
                 "last_sent"
             ]
+            for entry in grouped
+        }
+
+    def _mention_marks(self, pending):
+        """``{(conversation_id, user_id): newest_mention_time}`` for the message
+        rows in this batch.
+
+        Read by ``_should_space_out`` to answer "has this person been named in
+        this thread since the message their queued push points at?" — which is
+        the question the cooldown's @mention exemption actually needs, because a
+        row covers every message that coalesced onto it, not just its own.
+
+        The **newest** mention is all that need be stored: the caller compares it
+        against the row's own message time, and if the most recent mention is
+        older than that, no later one exists to find.
+
+        Soft-deleted messages are excluded. A mention taken back should not go on
+        punching a push through the cooldown, and ``_should_drop`` already treats
+        a deleted message as a reason not to send at all.
+        """
+        wanted = [row for row in pending if row.message_id]
+        if not wanted:
+            return {}
+        pairs = Q(pk__in=[])
+        for row in wanted:
+            pairs |= Q(
+                message__conversation_id=row.message.conversation_id,
+                user_id=row.recipient_id,
+            )
+        grouped = (
+            MessageMention.objects.filter(pairs, message__deleted_at__isnull=True)
+            .values("message__conversation_id", "user_id")
+            .annotate(newest=Max("message__created_at"))
+        )
+        return {
+            (entry["message__conversation_id"], entry["user_id"]): entry["newest"]
             for entry in grouped
         }
 
@@ -626,7 +696,7 @@ class Command(BaseCommand):
         active = timedelta(seconds=settings.PUSH_ACTIVE_THREAD_SECONDS)
         return now - marker < active
 
-    def _should_space_out(self, row, last_pushes, now):
+    def _should_space_out(self, row, last_pushes, mention_marks, now):
         """Whether this *message* push is too soon after the last one we sent the
         same person about the same thread (issue #354).
 
@@ -659,16 +729,27 @@ class Command(BaseCommand):
         (Phase 9b M8): naming someone is how you get their attention, and being
         named in a busy thread is the case where a minute's silence is most
         obviously wrong. It is also the case the cooldown would otherwise hurt
-        most, because a busy thread is what puts you in cooldown.
+        most, because a busy thread is what puts you in cooldown — which is why
+        the exemption has to look at every message the row stands for, not just
+        the one it points at. See ``_mention_marks``.
         """
         cooldown = timedelta(seconds=settings.PUSH_MESSAGE_COOLDOWN_SECONDS)
         if cooldown <= timedelta(0):
             return False
-        if is_mentioned(row.message, row.recipient_id):
+        key = (row.message.conversation_id, row.recipient_id)
+        # **Not ``is_mentioned(row.message, …)``.** A queued row keeps pointing
+        # at the message it was created for while later ones coalesce onto it
+        # (see the NB in ``enqueue_message_pushes``), so asking its own message
+        # answers about the *first* message of the burst. An @mention arriving
+        # mid-burst creates no row of its own and would be held the full
+        # cooldown — in a busy thread, which is the only place a row is reliably
+        # already queued, and therefore in exactly the case the exemption was
+        # written for. ``_mention_marks`` asks about everything the row now
+        # stands for instead.
+        mentioned_at = mention_marks.get(key)
+        if mentioned_at is not None and mentioned_at >= row.message.created_at:
             return False
-        last_sent = last_pushes.get(
-            (row.message.conversation_id, row.recipient_id)
-        )
+        last_sent = last_pushes.get(key)
         return last_sent is not None and now - last_sent < cooldown
 
     def _payload(self, row):
@@ -898,9 +979,22 @@ class Command(BaseCommand):
                     # The app was uninstalled or the token rotated. Drop the
                     # device so we stop pushing into the void; this is the only
                     # signal Expo gives us that a token is permanently dead.
-                    # Counts as settled, not failed — retrying can't help.
+                    # Counts as settled, not failed — retrying can't help, and
+                    # touching `outcome` at all is what settles the row: no
+                    # errors recorded means `sent_at` is stamped below.
                     device.delete()
-                    outcome(row)["delivered"].append(device.expo_token)
+                    # **Deliberately NOT added to `delivered_tokens`** (issue
+                    # #354). That list means "a phone was reached", and
+                    # `_last_pushes` reads exactly that to decide whether a
+                    # cooldown has started. A token we have just discovered was
+                    # dead buzzed nobody, so recording it would silence the
+                    # recipient's *next* message for a minute on the strength of
+                    # a push that never rang — and the moment this fires is a
+                    # reinstall or a token rotation, i.e. precisely when they
+                    # have a working device again. Skipping the entry is safe
+                    # because its only other job is stopping a retry re-buzzing
+                    # a device, and this device no longer exists.
+                    outcome(row)
                     continue
 
                 outcome(row)["errors"].append(
