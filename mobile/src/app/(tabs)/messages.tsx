@@ -51,6 +51,11 @@ import type { Conversation } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
 import { formatRelativeTime } from '@/utils';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 /**
  * How many conversations before the search field is worth its space.
  *
