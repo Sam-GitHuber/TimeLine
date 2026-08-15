@@ -484,7 +484,7 @@ So `_should_defer` holds a **message** push back when both are true:
 - the message is younger than `PUSH_MESSAGE_GRACE_SECONDS` (6s — it has to clear
   the client's 4s poll plus a round trip), **and**
 - the recipient's read marker for *that thread* moved within
-  `PUSH_ACTIVE_THREAD_SECONDS` (60s), which is as close to "they are in this
+  `PUSH_ACTIVE_THREAD_SECONDS` (15s), which is as close to "they are in this
   conversation right now" as the server gets without a presence system.
 
 Both conditions matter. Waiting unconditionally would put a floor under every
@@ -1172,7 +1172,7 @@ the property the badge depends on**, so it's worth listing:
 
 | Action | Invalidates | Where |
 | --- | --- | --- |
-| Open a thread (and on re-focus / foreground — #355) | `unreadMessages`, `conversations`, `conversation` | `useMarkThreadRead.ts`'s `invalidateThreadRead`, after the `read/` POST |
+| Open a thread (and on re-focus / foreground — #355) | `unreadMessages`, `conversations` — **not** `conversation`, see `invalidateThreadRead` for why | `useMarkThreadRead.ts`'s `invalidateThreadRead`, after the `read/` POST |
 | Swipe read / unread in the list | `unreadMessages` | `(tabs)/messages.tsx`'s `rowAction` |
 | Block, leave, accept a pending chat | `unreadMessages` | `BlockButton`, `info.tsx`, `PendingChatPanel` |
 | Open the activity centre | `notificationsUnread` | `activity.tsx`, after `seen` |

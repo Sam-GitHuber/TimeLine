@@ -85,18 +85,42 @@ export function useMarkThreadRead(conversationId, ready, messageCount) {
    * the marker can only claim messages the client actually holds.
    */
   useEffect(() => {
+    const queryKey = ["messages", conversationId];
     const onVisibility = () => {
       if (document.visibilityState !== "visible") return;
       queryClient
-        // **`throwOnError` is load-bearing.** `refetchQueries` resolves even
-        // when the fetch failed (query-core swallows per-query errors by
-        // default), so without it the `.then` below runs on exactly the offline
-        // return the guard exists to catch, and the `.catch` is dead code.
         .refetchQueries(
-          { queryKey: ["messages", conversationId] },
-          { throwOnError: true },
+          { queryKey },
+          {
+            // `throwOnError` turns a *failed* fetch into a rejection, which the
+            // `.catch` below swallows without claiming a read.
+            throwOnError: true,
+            // **Not cancelling.** query-core's own `focusManager` refetches this
+            // query on the same event, and `cancelRefetch` defaults to true — so
+            // without this we abort the fetch already in flight and replay every
+            // loaded page of an infinite query a second time, on every return.
+            cancelRefetch: false,
+          },
         )
-        .then(() => setVisibleAgain((n) => n + 1))
+        .then(() => {
+          // **The promise alone is not proof.** `refetchQueries` returns
+          // `Promise.resolve()` for a query the online manager *paused* — it
+          // never attempted the fetch, so `throwOnError` has nothing to throw
+          // (query-core `queryClient.js`: `fetchStatus === "paused" ?
+          // Promise.resolve() : promise`). Returning to a tab with no
+          // connection is exactly that case, and exactly the one this guard
+          // exists for, so the cache has to be asked directly.
+          const unfinished = queryClient
+            .getQueryCache()
+            .findAll({ queryKey })
+            .some(
+              (query) =>
+                query.state.fetchStatus === "paused" ||
+                query.state.status === "error",
+            );
+          if (unfinished) return;
+          setVisibleAgain((n) => n + 1);
+        })
         // A refetch we couldn't complete is precisely when we must *not* claim
         // a read. The thread's own poll will come round again.
         .catch(() => {});

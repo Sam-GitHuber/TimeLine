@@ -179,6 +179,25 @@ function tick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** The AppState listener the hook subscribed with. */
+let listener: ((status: string) => void) | undefined;
+
+/**
+ * A real return to the app: `background` then `active`.
+ *
+ * The hook ignores a bare `inactive` → `active`, because iOS emits that for
+ * Control Centre, the notification shade and permission dialogs — none of which
+ * are a foreground.
+ */
+async function foreground() {
+  await act(async () => {
+    listener?.('background');
+    listener?.('active');
+    await tick();
+    await tick();
+  });
+}
+
 /** Let effects and the promise chain behind them settle. */
 async function settle() {
   await act(async () => {
@@ -187,9 +206,6 @@ async function settle() {
 }
 
 describe('useMarkThreadRead', () => {
-  /** The AppState listener the hook subscribed with. */
-  let listener: ((status: string) => void) | undefined;
-
   beforeEach(() => {
     // Focus is module state on the stub, so it has to be reset between tests
     // or a blurred screen leaks into the next one.
@@ -252,10 +268,7 @@ describe('useMarkThreadRead', () => {
     await settle();
     markRead.mockClear();
 
-    await act(async () => {
-      listener?.('active');
-      await tick();
-    });
+    await foreground();
 
     expect(markRead).toHaveBeenCalledWith(7);
   });
@@ -275,11 +288,7 @@ describe('useMarkThreadRead', () => {
     markRead.mockClear();
 
     fail = true;
-    await act(async () => {
-      listener?.('active');
-      await tick();
-      await tick();
-    });
+    await foreground();
 
     expect(markRead).not.toHaveBeenCalled();
   });
@@ -292,11 +301,7 @@ describe('useMarkThreadRead', () => {
     await settle();
     markRead.mockClear();
 
-    await act(async () => {
-      listener?.('active');
-      await tick();
-      await tick();
-    });
+    await foreground();
 
     expect(markRead).toHaveBeenCalledWith(7);
   });
@@ -308,6 +313,25 @@ describe('useMarkThreadRead', () => {
 
     await act(async () => {
       listener?.('background');
+      await tick();
+    });
+
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('ignores an inactive blip that never backgrounded the app', async () => {
+    // iOS emits `inactive` → `active` for Control Centre, the notification
+    // shade, permission dialogs and the app switcher. Treating those as a
+    // return would force a transcript refetch and a `read/` POST every time
+    // someone glanced at Control Centre with a thread open.
+    await renderHook();
+    await settle();
+    markRead.mockClear();
+
+    await act(async () => {
+      listener?.('inactive');
+      listener?.('active');
+      await tick();
       await tick();
     });
 

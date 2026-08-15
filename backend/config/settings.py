@@ -612,8 +612,16 @@ EXPO_PUSH_RETENTION_DAYS = env_int("EXPO_PUSH_RETENTION_DAYS", 14)
 #   ACTIVE — how recently the recipient's read marker must have moved for the
 #            grace to apply at all. Someone who hasn't touched the thread in
 #            minutes is exactly who push is *for*, and waits for nothing.
+#
+# ACTIVE is deliberately **well under the drain interval** (60s today). At 60 it
+# was equal to it, which maximises the limitation `_should_defer` documents:
+# `last_read_at` is also stamped by *sending*, so anyone who fired off a reply
+# and pocketed the phone looked "active" for a whole extra tick and had the
+# answer to their own message held back a minute. 15s still comfortably covers a
+# genuine reader — their client polls every 4s — without catching the
+# send-and-pocket case.
 PUSH_MESSAGE_GRACE_SECONDS = env_int("PUSH_MESSAGE_GRACE_SECONDS", 6)
-PUSH_ACTIVE_THREAD_SECONDS = env_int("PUSH_ACTIVE_THREAD_SECONDS", 60)
+PUSH_ACTIVE_THREAD_SECONDS = env_int("PUSH_ACTIVE_THREAD_SECONDS", 15)
 
 # Delivery receipts. A *ticket* (the synchronous reply to a send) only says Expo
 # accepted the message; whether Apple/Google delivered it comes back later from

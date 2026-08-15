@@ -109,21 +109,53 @@ export function useMarkThreadRead(
    * marker can only ever claim messages the client actually holds.
    */
   useEffect(() => {
+    const queryKey = ['messages', conversationId];
+    // **`background` → `active`, not merely `active`.** iOS emits
+    // `inactive` → `active` for Control Centre, the notification shade, a
+    // permission dialog, an incoming-call banner and the app switcher. Treating
+    // those as a foreground would force a transcript refetch and a `read/` POST
+    // every time someone glanced at Control Centre while a thread was open.
+    let previous: AppStateStatus = AppState.currentState;
     const subscription = AppState.addEventListener(
       'change',
       (next: AppStateStatus) => {
-        if (next !== 'active') return;
+        const returning = previous === 'background' && next === 'active';
+        previous = next;
+        if (!returning) return;
         queryClient
-          // **`throwOnError` is load-bearing.** `refetchQueries` resolves even
-          // when the fetch failed (query-core swallows per-query errors by
-          // default), so without this the `.then` below runs on exactly the
-          // offline foreground the guard exists to catch, and the `.catch` is
-          // dead code.
           .refetchQueries(
-            { queryKey: ['messages', conversationId] },
-            { throwOnError: true }
+            { queryKey },
+            {
+              // `throwOnError` turns a *failed* fetch into a rejection, which
+              // the `.catch` below swallows without claiming a read.
+              throwOnError: true,
+              // **Not cancelling.** `_layout.tsx` wires `focusManager` to the
+              // same AppState event, so query-core is already refetching this
+              // query — and `cancelRefetch` defaults to true, which would abort
+              // that and replay every loaded page of an infinite query again.
+              cancelRefetch: false,
+            }
           )
-          .then(() => setForegrounds((n) => n + 1))
+          .then(() => {
+            // **The promise alone is not proof.** `refetchQueries` returns
+            // `Promise.resolve()` for a query the online manager *paused* — it
+            // never attempted the fetch, so `throwOnError` has nothing to throw
+            // (query-core `queryClient.js`: `fetchStatus === "paused" ?
+            // Promise.resolve() : promise`). Unlocking with no signal is
+            // exactly that case, and exactly the one this guard exists for, so
+            // the cache has to be asked directly. `onlineManager` is unwired on
+            // this client today (`_layout.tsx`), which makes the check dead
+            // weight here and load-bearing the moment that lands — and its twin
+            // needs it now, because the browser wires it by default.
+            const current = queryClient.getQueryCache().findAll({ queryKey });
+            const unfinished = current.some(
+              (query) =>
+                query.state.fetchStatus === 'paused' ||
+                query.state.status === 'error'
+            );
+            if (unfinished) return;
+            setForegrounds((n) => n + 1);
+          })
           // A refetch we couldn't complete is precisely when we must *not*
           // claim a read. The screen's own poll will come round again.
           .catch(() => {});

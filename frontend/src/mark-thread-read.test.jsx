@@ -17,6 +17,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import {
   QueryClient,
   QueryClientProvider,
+  onlineManager,
   useQuery,
 } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -142,6 +143,31 @@ describe("useMarkThreadRead", () => {
     });
 
     expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it("does not claim a read when the tab comes back offline", async () => {
+    // The hole that let the first version of this guard ship. An *offline*
+    // client doesn't fail its fetch — query-core pauses it, and
+    // `refetchQueries` then returns `Promise.resolve()` without ever
+    // attempting anything, so `throwOnError` has nothing to throw. Rejecting
+    // `queryFn`s (the test above) never reach that path.
+    const transcript = () => Promise.resolve([]);
+    const view = renderHook({ transcript });
+    await waitFor(() => expect(markRead).toHaveBeenCalled());
+    markRead.mockClear();
+
+    onlineManager.setOnline(false);
+    try {
+      returnToTab();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+
+      expect(markRead).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+    expect(view).toBeTruthy();
   });
 
   it("claims the read once the transcript refetch succeeds", async () => {
