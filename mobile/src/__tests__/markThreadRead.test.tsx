@@ -33,6 +33,75 @@ import {
   useMarkThreadRead,
 } from '@/useMarkThreadRead';
 
+/**
+ * A **focusable** `useFocusEffect`, overriding the global stub.
+ *
+ * `jest.setup.js` replaces `useFocusEffect` with a plain `useEffect` for the
+ * whole app, on the reasonable grounds that most screens are always focused
+ * under test. That stub makes this suite's headline claims untestable: swap the
+ * hook to a bare `useEffect` and every assertion still passes, because under it
+ * the two are literally the same hook. Since focus is precisely what #355
+ * changed — it is the gate on the write, and the reason a re-focused thread
+ * marks itself read at all — the suite has to be able to blur.
+ *
+ * `jest.setup.js` says a suite may supply its own; this is that suite.
+ */
+jest.mock('expo-router', () => {
+  // `require` inside the factory: it is hoisted above the imports.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const React = require('react');
+  const state = {
+    focused: true,
+    /** Bumped on every focus change, to re-run the effects below. */
+    generation: 0,
+    // Every mounted `useFocusEffect`'s re-render trigger. Untyped on purpose:
+    // a type parameter inside a hoisted `jest.mock` factory reads to Babel's
+    // out-of-scope check as a variable reference, and the suite won't load.
+    subscribers: new Set(),
+  };
+  return {
+    __focus: state,
+    useFocusEffect: (callback: () => void | (() => void)) => {
+      const [, force] = React.useState(0);
+      React.useEffect(() => {
+        state.subscribers.add(force);
+        return () => {
+          state.subscribers.delete(force);
+        };
+      }, []);
+      React.useEffect(() => {
+        // Blurred screens don't run their effect — and a dependency change
+        // while blurred re-subscribes without invoking it, which is the real
+        // hook's behaviour and the whole point of this stand-in.
+        if (!state.focused) return undefined;
+        return callback();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [callback, state.generation]);
+    },
+  };
+});
+
+/** The focus state the stub above hands back, for the tests to drive. */
+const focusState = (
+  jest.requireMock('expo-router') as {
+    __focus: {
+      focused: boolean;
+      generation: number;
+      subscribers: Set<(n: number) => void>;
+    };
+  }
+).__focus;
+
+/** Focus or blur the screen, the way navigating within the app would. */
+async function setFocused(next: boolean) {
+  await act(async () => {
+    focusState.focused = next;
+    focusState.generation += 1;
+    focusState.subscribers.forEach((force) => force(focusState.generation));
+    await tick();
+  });
+}
+
 jest.mock('@/api', () => ({
   api: { markConversationRead: jest.fn(async () => ({})) },
 }));
@@ -122,6 +191,10 @@ describe('useMarkThreadRead', () => {
   let listener: ((status: string) => void) | undefined;
 
   beforeEach(() => {
+    // Focus is module state on the stub, so it has to be reset between tests
+    // or a blurred screen leaks into the next one.
+    focusState.focused = true;
+    focusState.generation = 0;
     listener = undefined;
     markRead.mockReset();
     markRead.mockResolvedValue({} as never);
@@ -239,6 +312,53 @@ describe('useMarkThreadRead', () => {
     });
 
     expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('marks read again when the thread is re-focused', async () => {
+    // The actual fix for "nothing ever re-opens this screen": a push tapped for
+    // the thread already on screen reuses the mounted one, and the thread stays
+    // mounted behind its own info screen — so coming back to it is a re-focus,
+    // never a remount, and the old count-keyed effect saw nothing at all.
+    await renderHook();
+    await settle();
+    markRead.mockClear();
+
+    await setFocused(false);
+    await setFocused(true);
+
+    expect(markRead).toHaveBeenCalledWith(7);
+  });
+
+  it('does not mark read while the thread sits blurred behind another screen', async () => {
+    // The deliberate tightening. A message arriving while the reader is on the
+    // thread's info screen still moves `messageCount` — the poll is running —
+    // but they can see none of it, and marking it read would clear their badge
+    // and tell the sender they had read it.
+    const view = await renderHook({ count: 1 });
+    await settle();
+    await setFocused(false);
+    markRead.mockClear();
+
+    await view.update({ count: 2 });
+    await settle();
+
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('still clears the tray for a thread that is blurred', async () => {
+    // The other half of that tightening, and the one that must *not* be
+    // focus-gated (#178): a blurred thread is exactly when its pushes get
+    // filed rather than suppressed, so the sweep has to keep running or "New
+    // message from Ada" is stranded on the lock screen.
+    const view = await renderHook({ count: 1 });
+    await settle();
+    await setFocused(false);
+    dismiss.mockClear();
+
+    await view.update({ count: 2 });
+    await settle();
+
+    expect(dismiss).toHaveBeenCalledWith([7]);
   });
 
   it('retries a write that did not land', async () => {
