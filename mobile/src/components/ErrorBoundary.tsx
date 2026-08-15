@@ -43,11 +43,52 @@
 
 import type { ErrorBoundaryProps } from 'expo-router';
 import { router } from 'expo-router';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { useEffect } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { colors, fontSize, radius, spacing } from '@/theme';
+import { colors, fonts, fontSize, radius, spacing } from '@/theme';
+
+/**
+ * Report the caught error, in every build.
+ *
+ * **This has to be here, because nothing else does it.** The catching class is
+ * expo-router's `Try`, which implements `getDerivedStateFromError` and nothing
+ * else — no `componentDidCatch`, no logging. So before this the mobile app
+ * caught a render crash, showed a generic apology, and discarded the error
+ * completely in a release build: nothing on screen, nothing in the console,
+ * nothing in device logs. That is strictly *less* than the pre-#299 behaviour,
+ * where React at least reported it — the exact downgrade the web boundary's
+ * `componentDidCatch` was written to avoid, and which the docs claimed held for
+ * both clients when it only held for one.
+ *
+ * Tagged like `push.ts`'s warnings so a maintainer reading a device log can tell
+ * where it came from.
+ */
+function useReportCrash(error: Error) {
+  useEffect(() => {
+    console.error('[crash] render error caught by ErrorBoundary:', error);
+  }, [error]);
+}
+
+/**
+ * Drop the cached responses that most plausibly caused the crash.
+ *
+ * **`type: 'inactive'` is the load-bearing part.** By the time a fallback is on
+ * screen the crashed screen has unmounted, so *its* queries are the inactive
+ * ones — which makes "inactive" a precise name for "the data that just killed a
+ * screen". The previous unfiltered `resetQueries()` reset the whole cache, which
+ * on a phone is worse than it sounds: React Navigation keeps the tabs and the
+ * stack beneath mounted, so recovering one crashed screen also blanked the three
+ * tab badges, dropped every mounted sibling to its loading state, and threw away
+ * every page of every `useInfiniteQuery` — so a reader who had paged months back
+ * through a conversation lost the lot to fix an unrelated screen, and the app
+ * fired a dozen refetches at once to rebuild it.
+ */
+function resetCrashedQueries(queryClient: QueryClient) {
+  queryClient.resetQueries({ type: 'inactive' });
+}
 
 /**
  * The message and stack, in development only.
@@ -105,19 +146,22 @@ function Button({
  *
  *     export { ErrorBoundary } from '@/components/ErrorBoundary';
  *
- * **Why "Try again" resets the query cache first.** The likeliest cause of a
+ * **Why both actions reset the query cache first.** The likeliest cause of a
  * render error here is one unexpected shape in a cached response — a null where
  * a list was assumed, a field a new server version stopped sending. Retrying
- * onto that same cached object throws again immediately, so the button would
- * look broken. `resetQueries()` drops the cached data and lets the screen
- * refetch, which is the mobile equivalent of the web's `QueryErrorResetBoundary`
- * — blunter (it resets every query, not just this screen's), but a crash is not
- * the moment to be precious about a cache, and everything it clears is server
- * data that refetches. Nothing unsent is in there: drafts and the outbox live
- * in their own storage.
+ * onto that same cached object throws again immediately, so the button looks
+ * broken. Nothing unsent is dropped: drafts and the outbox have their own
+ * storage, and this only clears server data that refetches.
+ *
+ * "Back to the feed" needs it just as much, which the first version missed: on
+ * the feed tab itself `router.replace('/')` targets the route already on screen,
+ * so the *only* thing that button did was `retry()` against an untouched cache —
+ * a guaranteed re-crash, with no visible response, on the app's most-used
+ * screen.
  */
 export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
   const queryClient = useQueryClient();
+  useReportCrash(error);
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -131,7 +175,7 @@ export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
           <Button
             label="Try again"
             onPress={() => {
-              queryClient.resetQueries();
+              resetCrashedQueries(queryClient);
               retry();
             }}
           />
@@ -142,9 +186,11 @@ export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
               // `replace`, not `back`: the screen we're standing on is broken,
               // and `back` on a cold-start deep link (a tapped notification —
               // the most common way anyone lands deep in this app) has nowhere
-              // to go and silently does nothing. `retry()` afterwards clears
-              // the caught error so this screen isn't still in its fallback
-              // state if the reader navigates back to it later.
+              // to go and silently does nothing. The reset matters as much as
+              // the navigation — see the note above. `retry()` last, so this
+              // screen isn't still in its fallback state if the reader comes
+              // back to it.
+              resetCrashedQueries(queryClient);
               router.replace('/');
               retry();
             }}
@@ -168,6 +214,8 @@ export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
  * which is a phone's version of reloading the page.
  */
 export function RootErrorBoundary({ error, retry }: ErrorBoundaryProps) {
+  useReportCrash(error);
+
   return (
     <View style={styles.screen}>
       <View style={styles.centre}>
@@ -233,7 +281,7 @@ const styles = StyleSheet.create({
   ghostLabel: { color: colors.ink },
   devDetails: {
     marginTop: spacing.lg,
-    fontFamily: 'Menlo',
+    fontFamily: fonts.mono,
     fontSize: 10,
     lineHeight: 14,
     color: colors.inkFaint,

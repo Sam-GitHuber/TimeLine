@@ -33,20 +33,31 @@ const APP_DIR = join(__dirname, '..', 'app');
 
 // `__DEV__` is a global under Jest (jest-expo sets it), not a value Babel has
 // already inlined — so a test can flip it and see the release-build branch.
+// Restored in `afterEach` rather than a try/finally, so a failing assertion
+// can't leak `false` into the test that asserts the dev branch.
 const devGlobal = globalThis as unknown as { __DEV__: boolean };
-const dev = () => devGlobal.__DEV__;
-const setDev = (value: boolean) => {
-  devGlobal.__DEV__ = value;
-};
 
-function screenFiles(dir: string): string[] {
+// Every extension expo-router treats as a route. The scan below used to collect
+// only `.tsx`, which made it a leaky net for the one thing it exists to catch:
+// expo-router's route context matches `/.*\.[tj]sx?$/`, so a screen added as
+// `.ts`, `.js` or `.jsx` is a real route that would have passed the check with
+// no boundary at all.
+const ROUTE_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js'];
+
+/**
+ * Every route file that must carry the per-screen boundary.
+ *
+ * Only the *root* layout is exempt, because it gets `RootErrorBoundary`
+ * instead. `(tabs)/_layout.tsx` is deliberately **not** exempt: it runs three
+ * badge queries of its own, and a throw there would otherwise skip every
+ * per-screen boundary and take the whole app down through the root one.
+ */
+function routeFiles(dir: string, atRoot = true): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) return screenFiles(full);
-    // Layouts get the *root* boundary instead, and only the root one does:
-    // a boundary on a layout replaces that layout, tab bar and all, which is
-    // the blast radius the per-screen exports exist to avoid.
-    if (!entry.name.endsWith('.tsx') || entry.name === '_layout.tsx') return [];
+    if (entry.isDirectory()) return routeFiles(full, false);
+    if (!ROUTE_EXTENSIONS.some((ext) => entry.name.endsWith(ext))) return [];
+    if (atRoot && entry.name === '_layout.tsx') return [];
     return [full];
   });
 }
@@ -54,26 +65,41 @@ function screenFiles(dir: string): string[] {
 // `render` is async in RNTL v14; awaiting it is what keeps `screen` populated
 // (a bare `render(...)` returns a promise that spreads to nothing, and every
 // later query then throws "render has not been called").
-async function renderRoute(error: Error, retry = jest.fn()) {
+async function renderRoute(error: Error) {
+  const retry = jest.fn();
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    // `gcTime: 0` on **mutations** as well as queries — they have separate
+    // caches with separate five-minute timers, and a suite that leaves either
+    // running hangs the Jest run rather than failing it (mobile-app.md).
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
   });
   const resetQueries = jest.spyOn(queryClient, 'resetQueries');
-  const view = await render(
+  await render(
     <QueryClientProvider client={queryClient}>
       <ErrorBoundary error={error} retry={retry} />
     </QueryClientProvider>
   );
-  return { view, retry, resetQueries };
+  return { retry, resetQueries };
 }
+
+let consoleError: jest.SpyInstance;
 
 beforeEach(() => {
   mockReplace.mockReset();
+  consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  consoleError.mockRestore();
+  devGlobal.__DEV__ = true;
 });
 
 describe('every screen registers a boundary', () => {
   it('exports ErrorBoundary from each route file', () => {
-    const missing = screenFiles(APP_DIR).filter(
+    const missing = routeFiles(APP_DIR).filter(
       (file) => !readFileSync(file, 'utf8').includes('export { ErrorBoundary }')
     );
     expect(missing).toEqual([]);
@@ -91,20 +117,20 @@ describe('the per-screen boundary', () => {
     // raw message is a developer's, not a reader's: it means nothing to them and
     // reads as "this is really broken", which is the impression the whole
     // fallback exists to avoid.
-    const wasDev = dev();
-    setDev(false);
-    try {
-      await renderRoute(new Error('Cannot read properties of undefined'));
+    devGlobal.__DEV__ = false;
+    await renderRoute(new Error('Cannot read properties of undefined'));
 
-      expect(
-        screen.getByText(/Something went wrong on this screen/i)
-      ).toBeOnTheScreen();
-      expect(
-        screen.queryByText(/Cannot read properties of undefined/)
-      ).toBeNull();
-    } finally {
-      setDev(wasDev);
-    }
+    expect(
+      screen.getByText(/Something went wrong on this screen/i)
+    ).toBeOnTheScreen();
+    expect(screen.queryByText(/Cannot read properties of undefined/)).toBeNull();
+    // ...but it is still *reported*, which is the whole point of logging from
+    // the fallback: expo-router's `Try` has no `componentDidCatch`, so without
+    // this a release-build crash would leave no trace anywhere at all.
+    expect(consoleError).toHaveBeenCalledWith(
+      '[crash] render error caught by ErrorBoundary:',
+      expect.any(Error)
+    );
   });
 
   it('does show the stack in development, where it is the whole point', async () => {
@@ -125,12 +151,15 @@ describe('the per-screen boundary', () => {
 
     // Retrying onto the same cached response — the likeliest cause of a render
     // crash — throws again immediately, which makes the button look broken.
-    expect(resetQueries).toHaveBeenCalled();
+    // Scoped to `inactive`: the crashed screen has unmounted, so its queries are
+    // the inactive ones, while everything still on screen (the tab badges, the
+    // stack underneath) keeps its data instead of blinking to a spinner.
+    expect(resetQueries).toHaveBeenCalledWith({ type: 'inactive' });
     expect(retry).toHaveBeenCalled();
   });
 
-  it('leaves by replacing, not by going back', async () => {
-    const { retry } = await renderRoute(new Error('boom'));
+  it('leaves by replacing, not by going back — and resets on the way out', async () => {
+    const { retry, resetQueries } = await renderRoute(new Error('boom'));
 
     fireEvent.press(screen.getByText('Back to the feed'));
 
@@ -138,6 +167,10 @@ describe('the per-screen boundary', () => {
     // notification, which is the most common way anyone lands deep in this app
     // — and would silently do nothing, stranding the reader on the fallback.
     expect(mockReplace).toHaveBeenCalledWith('/');
+    // The reset is what stops this being a no-op on the feed tab itself, where
+    // `replace('/')` navigates nowhere and `retry()` alone would re-render the
+    // same screen against the same poisoned cache.
+    expect(resetQueries).toHaveBeenCalledWith({ type: 'inactive' });
     expect(retry).toHaveBeenCalled();
   });
 });
@@ -153,6 +186,11 @@ describe('the root boundary', () => {
 
     expect(screen.getByText(/TimeLine hit a problem/i)).toBeOnTheScreen();
     expect(screen.queryByText('Back to the feed')).toBeNull();
+    // It still reports, even with no provider to lean on.
+    expect(consoleError).toHaveBeenCalledWith(
+      '[crash] render error caught by ErrorBoundary:',
+      expect.any(Error)
+    );
 
     fireEvent.press(screen.getByText('Try again'));
     expect(retry).toHaveBeenCalled();
