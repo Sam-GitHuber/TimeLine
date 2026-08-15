@@ -47,6 +47,11 @@ import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Conversation, PersonSummary } from '@/types';
 import { useHoldScreen } from '@/writeHold';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 const FOOTER_PAD = spacing.sm + 2;
 
 export default function NewChatScreen() {

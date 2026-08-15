@@ -40,6 +40,11 @@ import {
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { GroupMember } from '@/types';
 
+// A render error on this screen stops here instead of blanking the whole app
+// (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
+// nothing by default — see `components/ErrorBoundary` for what that means.
+export { ErrorBoundary } from '@/components/ErrorBoundary';
+
 /**
  * What the roster's one mutation was asked to do. A discriminated variable
  * rather than a callback, because `onSuccess` has to know whether the write

@@ -37,6 +37,14 @@ import { usePushNotificationTaps } from '@/usePushTaps';
 import { useSessionReset } from '@/useSessionReset';
 import { colors } from '@/theme';
 
+// The boundary of last resort (#299): a crash in this layout, in one of the
+// providers below, or in the navigator itself. Every *screen* exports the other
+// one (`ErrorBoundary`), which keeps the tab bar and the stack alive and is the
+// one that does the day-to-day work; this only catches what escapes those.
+// expo-router installs no boundary of its own at any level — see
+// `components/ErrorBoundary` for the evidence and what it means.
+export { RootErrorBoundary as ErrorBoundary } from '@/components/ErrorBoundary';
+
 // Module scope, not an effect: the handler decides whether a notification that
 // arrives while the app is foregrounded is shown at all, and it has to be set
 // before any notification can be delivered.

@@ -16,6 +16,7 @@ content was distilled into these files; the phase-by-phase history lives in git.
 | [notifications.md](notifications.md) | The unified activity centre: the `Notification` model, three read-states, per-type preferences, event generation, and the push-ready payload |
 | [events.md](events.md) | Group events + planning calendar: advisory date/time/location/custom polls, the organiser-anchored connection gate (complete counts, gated names), RSVPs, the forward-mirror calendar + month grid, and the five event notification kinds |
 | [mobile-app.md](mobile-app.md) | The Expo/React Native app: repo layout, running it, tests + CI, the design translation, the React Native traps that cost real time, and the unbuilt OTA plan |
+| [error-boundaries.md](error-boundaries.md) | What a **crash** looks like on each client: where the boundaries are, why the root one can't navigate, why every mobile screen carries its own, and what a boundary doesn't catch |
 
 **Not here (kept as their own topic docs):**
 

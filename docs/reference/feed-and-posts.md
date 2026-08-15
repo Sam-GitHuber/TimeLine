@@ -436,9 +436,13 @@ counts exclude your own messages.
     `status: 'pending'`, `fetchStatus: 'paused'` — and `isLoading` is
     `isPending && isFetching`, so it reads **false with no data behind it**.
     Rendering the list on `!isLoading && !isError` hit `comments.length` on
-    `undefined`, and with no ErrorBoundary anywhere in the tree (#299) that
-    unmounted the whole app to a blank page (#306). Offline is the single
-    likeliest way this request fails, so it now says so in words.
+    `undefined`, and with no ErrorBoundary anywhere in the tree that unmounted
+    the whole app to a blank page (#306). Offline is the single likeliest way
+    this request fails, so it now says so in words. The blast radius was closed
+    separately: #299 added boundaries to both clients, so the next throw of this
+    shape breaks a page rather than the app — see
+    [`error-boundaries.md`](error-boundaries.md). Branching on the data is still
+    the fix; the boundary is the net under it.
   - **The app dropped a thread it already had.** It returned on `error` *before*
     looking at the tree, and query-core's error action sets `status: 'error'`
     while keeping the data — so a failed foreground refetch of an open thread
