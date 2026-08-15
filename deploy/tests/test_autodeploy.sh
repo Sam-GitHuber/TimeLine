@@ -119,6 +119,7 @@ test_nothing_to_do() {
   have_image "$BACKEND_IMAGE" sha256:aaa
   have_image "$WEB_IMAGE" sha256:bbb
   running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
   running_container web c_web sha256:bbb
 
   run_converge
@@ -135,6 +136,7 @@ test_new_release_image() {
   have_image "$BACKEND_IMAGE" sha256:aaa
   have_image "$WEB_IMAGE" sha256:bbb
   running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
   running_container web c_web sha256:bbb
   pull_delivers "$BACKEND_IMAGE" sha256:new
 
@@ -154,12 +156,34 @@ test_container_drift() {
   have_image "$BACKEND_IMAGE" sha256:aaa
   have_image "$WEB_IMAGE" sha256:bbb
   running_container backend c_backend sha256:localbuild
+  running_container pushes c_pushes sha256:aaa
   running_container web c_web sha256:bbb
 
   run_converge
   assert_exit_ok
   assert_deployed
   assert_output_contains "container is running localbuild"
+  finish_case
+}
+
+# THE REGRESSION TEST FOR #354's DEPLOY HALF. `pushes` (the resident push drain)
+# runs the same image as `backend` but is a separate container, so it can drift
+# on its own — and when it does, nothing user-facing looks wrong: the site is up,
+# healthz is 200, the backend is on the release image. The only symptom is that
+# nobody's phone buzzes, or buzzes according to last month's rules. If `pushes`
+# were ever dropped from SERVICES this case is what fails.
+test_pushes_drift() {
+  new_world "pushes_drift"
+  have_image "$BACKEND_IMAGE" sha256:aaa
+  have_image "$WEB_IMAGE" sha256:bbb
+  running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:stale
+  running_container web c_web sha256:bbb
+
+  run_converge
+  assert_exit_ok
+  assert_deployed
+  assert_output_contains "pushes: container is running stale"
   finish_case
 }
 
@@ -170,6 +194,7 @@ test_missing_container() {
   have_image "$BACKEND_IMAGE" sha256:aaa
   have_image "$WEB_IMAGE" sha256:bbb
   running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
   # web has no container at all.
 
   run_converge
@@ -202,6 +227,7 @@ test_pinned_tag() {
   have_image "ghcr.io/sam-githuber/timeline-backend:v0.14.0" sha256:old
   have_image "ghcr.io/sam-githuber/timeline-web:v0.14.0" sha256:oldweb
   running_container backend c_backend sha256:old
+  running_container pushes c_pushes sha256:old
   running_container web c_web sha256:oldweb
 
   (
@@ -311,6 +337,7 @@ test_guard_default_is_strict() {
 test_nothing_to_do
 test_new_release_image
 test_container_drift
+test_pushes_drift
 test_missing_container
 test_missing_image
 test_pinned_tag

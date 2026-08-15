@@ -48,6 +48,58 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # The resident push drain (issue #354). Same image as `backend`, different
+  # command: it never serves a request, it just sweeps PushOutbox every couple of
+  # seconds and hands what it finds to Expo.
+  #
+  # WHY ITS OWN SERVICE RATHER THAN A SYSTEMD TIMER. The old
+  # deploy/send-pushes.timer ran `docker compose exec -T backend …` once a
+  # minute, paying for a cold Django process every tick. Tightening that to
+  # seconds is unaffordable; starting Django once is not. But a resident process
+  # started by `exec` would be orphaned by the next autodeploy — the backend
+  # container it lives inside is replaced and takes it with it — so the drain has
+  # to be a container compose owns, restarts, and recreates on release. That is
+  # also why deploy/autodeploy.sh lists `pushes` alongside backend and web: a
+  # service it doesn't know about would keep running last month's code for ever
+  # (the #104 failure, in a new place).
+  #
+  # NO entrypoint.prod.sh here. That script migrates, collects static and starts
+  # gunicorn — running it in a second container would race two `migrate` calls on
+  # every boot. This one runs the command directly, and doesn't need to wait for
+  # the backend to finish migrating either: a drain against a database that isn't
+  # ready raises, and the loop's own error handling logs it and tries again in
+  # ten seconds. Coming up before the schema does is a noisy ten seconds, not a
+  # failure. `depends_on` is ordering only, for the same reason.
+  pushes:
+    build: ./backend
+    command: ["python", "manage.py", "send_pushes", "--loop"]
+    # The image deliberately has no USER directive: it starts as root so
+    # entrypoint.prod.sh can align media ownership before dropping privileges
+    # (issue #199). Bypassing that entrypoint means bypassing the drop too, so
+    # it's done here instead. This container has nothing to do as root — it
+    # touches no volumes, only the database and Expo's API.
+    user: app
+    env_file: .env.prod
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      # setpriv keeps the environment as-is, so the backend's entrypoint exports
+      # this by hand; nothing does that here. Without it HOME still says /root,
+      # which the app user cannot write to.
+      HOME: /home/app
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    # SIGTERM makes the loop finish its current drain and exit, rather than being
+    # torn down mid-Expo-call with rows claimed and no record of whether they
+    # were sent. Docker's default is 10s, which a drain that is waiting out a 30s
+    # Expo timeout would blow through; this makes the wait long enough to cover
+    # the command's own worst case.
+    stop_grace_period: 45s
+    restart: unless-stopped
+
   web:
     build:
       context: .

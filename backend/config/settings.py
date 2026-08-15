@@ -570,7 +570,8 @@ SECURE_HSTS_PRELOAD = env_bool("DJANGO_HSTS_PRELOAD", default=False)
 
 # --- Push notifications (Phase 9, Milestone D) ---------------------------------
 # Notifications are queued into PushOutbox by create_notification() and drained
-# by `manage.py send_pushes` on a systemd timer. Expo's push service fans out to
+# by `manage.py send_pushes --loop`, the resident `pushes` compose service (issue
+# #354, which retired the systemd timer). Expo's push service fans out to
 # APNs (and FCM in Phase 10), so the backend never speaks to Apple directly and
 # holds no APNs key — that lives with EAS. See docs/reference/notifications.md.
 EXPO_PUSH_URL = os.environ.get(
@@ -590,8 +591,11 @@ EXPO_ACCESS_TOKEN = os.environ.get("EXPO_ACCESS_TOKEN", "")
 #   BATCH_SIZE — *messages* per HTTP request to Expo. 100 is Expo's documented
 #                maximum; there is no reason to raise it.
 #   MAX_ROWS   — *outbox rows* drained per run. The ceiling on how much work one
-#                timer tick does; must stay comfortably inside the service's
-#                TimeoutStartSec at the worst-case devices-per-user.
+#                sweep does. It used to have to fit inside the systemd unit's
+#                TimeoutStartSec; a resident drain has no such deadline, so what
+#                it now bounds is how long one pass can hold its transaction —
+#                and therefore how long a SIGTERM'd redeploy waits to shut down
+#                (`stop_grace_period` in docker-compose.prod.yml).
 EXPO_PUSH_BATCH_SIZE = env_int("EXPO_PUSH_BATCH_SIZE", 100)
 EXPO_PUSH_MAX_ROWS = env_int("EXPO_PUSH_MAX_ROWS", 200)
 
@@ -603,6 +607,10 @@ EXPO_PUSH_RETENTION_DAYS = env_int("EXPO_PUSH_RETENTION_DAYS", 14)
 # (issue #355). Both are read by `send_pushes._should_defer`; the full reasoning
 # lives there and in docs/reference/notifications.md.
 #
+# These two, and PUSH_MESSAGE_COOLDOWN_SECONDS below, are what the once-a-minute
+# timer used to provide for free. Removing the slow timer (#354) means saying
+# them out loud.
+#
 #   GRACE  — how long a message push waits before it may be sent to someone who
 #            looks like they're reading that thread right now. It has to clear
 #            the app's own MESSAGE_POLL_MS (4s) plus a round trip, because the
@@ -613,15 +621,56 @@ EXPO_PUSH_RETENTION_DAYS = env_int("EXPO_PUSH_RETENTION_DAYS", 14)
 #            grace to apply at all. Someone who hasn't touched the thread in
 #            minutes is exactly who push is *for*, and waits for nothing.
 #
-# ACTIVE is deliberately **well under the drain interval** (60s today). At 60 it
-# was equal to it, which maximises the limitation `_should_defer` documents:
-# `last_read_at` is also stamped by *sending*, so anyone who fired off a reply
-# and pocketed the phone looked "active" for a whole extra tick and had the
-# answer to their own message held back a minute. 15s still comfortably covers a
-# genuine reader — their client polls every 4s — without catching the
-# send-and-pocket case.
+# **ACTIVE was 15s while the drain ran once a minute, and 120 is not a typo.**
+# The old value was small because a deferred row waited for the *next drain* — a
+# whole minute — so a wide window meant anyone who had merely sent a message
+# recently ("sending implies you've read everything", so it stamps the marker
+# too) had the answer to their own message held back sixty seconds. Small window,
+# small blast radius.
+#
+# The resident drain (#354) inverts that. A held row is now re-examined every
+# PUSH_DRAIN_INTERVAL_SECONDS, so the *most* a defer can cost is the grace above
+# — six seconds — no matter how wide ACTIVE is. Cheap holding makes the old
+# trade-off backwards: a narrow window's real cost is now the case it misses,
+# the silent reader. Someone staring at a quiet thread writes no read marker
+# while nothing arrives, so at 15s their marker is stale and the 2s drain buzzes
+# them for a message on the screen in front of them — the exact #355 symptom,
+# reintroduced by making delivery faster. 120s covers "plausibly still in this
+# thread" and costs at most six seconds to anyone it catches wrongly.
 PUSH_MESSAGE_GRACE_SECONDS = env_int("PUSH_MESSAGE_GRACE_SECONDS", 6)
-PUSH_ACTIVE_THREAD_SECONDS = env_int("PUSH_ACTIVE_THREAD_SECONDS", 15)
+PUSH_ACTIVE_THREAD_SECONDS = env_int("PUSH_ACTIVE_THREAD_SECONDS", 120)
+
+# How closely two *message* pushes to the same person about the same thread may
+# follow each other (issue #354). Read by `send_pushes._should_space_out`.
+#
+# **This is not a new policy — it is an old one that used to be free.** The
+# enqueue coalesces onto an already-queued row, so a burst buzzed a phone once
+# and left the unread badge to carry the count. That worked only because a row
+# sat unsent for up to a minute: the per-minute timer was, in effect, "at most
+# one message buzz per person per thread per minute", and nobody had to write
+# that down. Drain every two seconds and the same code buzzes thirty times a
+# minute, which `enqueue_message_pushes` calls "the single fastest way to make
+# someone turn notifications off".
+#
+# So the property the timer provided by accident is stated here on purpose, at
+# the value it used to have. A push held by this rule is **not dropped** — it
+# goes out when the cooldown expires, which is also what the old timer did with
+# the row a coalesced burst left behind. Set to 0 to disable.
+PUSH_MESSAGE_COOLDOWN_SECONDS = env_int("PUSH_MESSAGE_COOLDOWN_SECONDS", 60)
+
+# The resident drain's two cadences (issue #354), read by `send_pushes --loop`.
+#
+#   DRAIN       — how often the outbox is swept. The floor on our half of push
+#                 latency; Expo → APNs/FCM → device adds 1-5s on top that we do
+#                 not control, so tightening this below a second or two buys
+#                 nothing a human could perceive.
+#   MAINTENANCE — how often delivery receipts are checked and delivered rows
+#                 pruned. Deliberately left at the old timer's minute: receipts
+#                 are not even *asked* for until they are 15 minutes old
+#                 (EXPO_RECEIPT_CHECK_DELAY_SECONDS) and pruning is daily work,
+#                 so running either at drain cadence would be pure waste.
+PUSH_DRAIN_INTERVAL_SECONDS = env_int("PUSH_DRAIN_INTERVAL_SECONDS", 2)
+PUSH_MAINTENANCE_INTERVAL_SECONDS = env_int("PUSH_MAINTENANCE_INTERVAL_SECONDS", 60)
 
 # Delivery receipts. A *ticket* (the synchronous reply to a send) only says Expo
 # accepted the message; whether Apple/Google delivered it comes back later from

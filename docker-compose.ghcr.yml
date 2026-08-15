@@ -24,5 +24,11 @@ services:
   backend:
     image: ghcr.io/sam-githuber/timeline-backend:${TIMELINE_TAG:-latest}
 
+  # The push drain runs the *same* image as the backend, only with a different
+  # command — so there is no third release artifact, and the drain can never be
+  # running a different build of the code than the API it shares a database with.
+  pushes:
+    image: ghcr.io/sam-githuber/timeline-backend:${TIMELINE_TAG:-latest}
+
   web:
     image: ghcr.io/sam-githuber/timeline-web:${TIMELINE_TAG:-latest}

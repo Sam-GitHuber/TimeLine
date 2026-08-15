@@ -169,6 +169,29 @@ jobs:
           grep -q 'Running as app (uid 1000).' boot.log
           test "$(docker run --rm -v ci-media:/m timeline-backend:ci stat -c %u /m/posts/photo.jpg)" = "1000"
 
+      - name: The push drain starts unprivileged and survives a dead database
+        run: |
+          # The `pushes` service (issue #354) runs this image with a different
+          # command and NO entrypoint.prod.sh — so it gets neither that script's
+          # privilege drop nor its HOME export, and docker-compose.prod.yml
+          # supplies both by hand instead. Nothing else in CI exercises that
+          # combination, and its failure mode is the quiet one: the site stays
+          # up, healthz stays green, and nobody's phone ever buzzes again.
+          #
+          # No reachable Postgres on purpose. A resident drain that exits on a
+          # transient database fault is worse than the timer it replaced, which
+          # at least got a fresh process the next minute — so "logged it and
+          # kept going" is the behaviour to pin, not an incidental detail.
+          docker run --rm -u app -e HOME=/home/app -e DJANGO_DEBUG=true \
+            -e POSTGRES_HOST=nowhere.invalid timeline-backend:ci \
+            bash -c 'timeout 25 python manage.py send_pushes --loop --interval 1' \
+            >drain.log 2>&1 || true
+          cat drain.log
+          grep -q 'Draining every' drain.log
+          # Twice, not once: one line would also be printed by a loop that then
+          # died, which is the thing being ruled out.
+          test "$(grep -c 'Drain failed' drain.log)" -ge 2
+
   # Semgrep — framework-aware static analysis (Django/React/JS/Python + secret
   # detection). Complements CodeQL (see codeql.yml) with rules CodeQL doesn't
   # ship. Its own job so a finding here is easy to tell apart from a test

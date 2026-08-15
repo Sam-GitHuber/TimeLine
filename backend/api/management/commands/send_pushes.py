@@ -1,19 +1,25 @@
 """Drain the push outbox: send queued notifications to Expo (Phase 9, D).
 
-Run on a systemd timer (``deploy/send-pushes.timer``), not from a web request —
-see ``PushOutbox`` for why the send is out-of-band.
+Run out-of-band, never from a web request — see ``PushOutbox`` for why.
+
+**Two ways to run it.** ``--loop`` is the production one (issue #354): a resident
+process that starts Django once and sweeps the outbox every couple of seconds,
+run as the ``pushes`` service in the compose stack. Without it the command does
+exactly one pass and exits, which is what a hand-run and every test does, and
+what the retired ``deploy/send-pushes.timer`` used to do once a minute.
 
 The flow per drain:
 
 1. Take the oldest unsent rows that haven't exhausted their retries, locking
-   them so a hand-run and a timer tick can't send the same push twice.
+   them so a hand-run and the resident drain can't send the same push twice.
 2. Resolve each recipient's *current* device tokens (looked up now, not at
    enqueue time, so a rotated token still gets the push), skipping any device
    this row has already reached.
 3. Build one Expo message per (row × outstanding device) and POST in batches.
    A **message** row is dropped here instead if the recipient has since read the
    thread (``_should_drop``), or left queued for a later run if it is so fresh
-   that they have not had a chance to say so yet (``_should_defer``).
+   that they have not had a chance to say so yet (``_should_defer``) or if they
+   were buzzed about this same thread moments ago (``_should_space_out``).
 4. Read the reply's per-message tickets, then settle each row: delivered
    everywhere → mark sent; anything still outstanding → record the error and
    leave it queued for the next tick. Tokens Expo reports as
@@ -38,14 +44,17 @@ quote them.
 """
 
 import json
+import signal
+import threading
+import time
 import urllib.parse
 import urllib.request
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
-from django.db import transaction
-from django.db.models import Q
+from django.core.management.base import BaseCommand, CommandError
+from django.db import close_old_connections, transaction
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from ...models import ConversationRead, DevicePushToken, PushOutbox, PushReceipt
@@ -62,9 +71,31 @@ from ...views import badge_count_for
 # Expo's reply carries one ticket per message, in the order sent.
 _DEVICE_NOT_REGISTERED = "DeviceNotRegistered"
 
+# How long ``--loop`` waits after an iteration raised before trying again.
+#
+# The whole point of a resident drain is that it survives things a oneshot could
+# just exit on — a Postgres restart, a network blip — so an exception cannot be
+# allowed to kill the process. But it equally cannot be allowed to spin: a
+# database that is down stays down for seconds at least, and retrying every two
+# seconds would fill the log faster than anyone could read it. Ten seconds is
+# long enough to be quiet and short enough that recovery is not something you
+# wait for.
+_LOOP_ERROR_BACKOFF_SECONDS = 10
+
 
 class Command(BaseCommand):
     help = "Send queued push notifications to Expo's push service."
+
+    # How many message pushes the last drain held back, for the loop's
+    # heartbeat to report. A count rather than a line per row per pass: a row
+    # held for the full cooldown spans thirty drains.
+    _last_deferred = 0
+
+    # Suppressed in ``--loop``: at a two-second cadence "Nothing queued." is
+    # 43,000 lines a day saying nothing happened, which is how a log stops being
+    # read. The loop prints a periodic heartbeat instead, and every line that
+    # describes *work* still prints on both paths. See ``_note_idle``.
+    quiet_when_idle = False
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -78,10 +109,49 @@ class Command(BaseCommand):
             action="store_true",
             help="Show what would be sent without calling Expo or writing state.",
         )
+        parser.add_argument(
+            "--loop",
+            action="store_true",
+            help=(
+                "Stay resident and drain repeatedly (the production mode; see "
+                "the `pushes` service in docker-compose.prod.yml). Without it "
+                "the command makes exactly one pass and exits."
+            ),
+        )
+        parser.add_argument(
+            "--interval",
+            type=float,
+            default=settings.PUSH_DRAIN_INTERVAL_SECONDS,
+            help="Seconds between drains in --loop mode.",
+        )
+        parser.add_argument(
+            "--maintenance-interval",
+            type=float,
+            default=settings.PUSH_MAINTENANCE_INTERVAL_SECONDS,
+            help=(
+                "Seconds between receipt checks and prunes in --loop mode. "
+                "Deliberately much larger than --interval."
+            ),
+        )
 
     def handle(self, *args, **options):
         max_rows = options["max_rows"]
         dry_run = options["dry_run"]
+
+        if options["loop"]:
+            if dry_run:
+                # A dry run writes no state, so a looping one would print the
+                # same rows for ever and never make progress. Refusing is
+                # clearer than obeying.
+                raise CommandError("--loop and --dry-run cannot be combined.")
+            if options["interval"] <= 0:
+                raise CommandError("--interval must be greater than zero.")
+            self._run_loop(
+                max_rows,
+                interval=options["interval"],
+                maintenance_interval=options["maintenance_interval"],
+            )
+            return
 
         if dry_run:
             self._drain(max_rows, dry_run=True)
@@ -98,6 +168,143 @@ class Command(BaseCommand):
         # send failure must not stop us reaping dead tokens.
         self._check_receipts(dry_run)
         self._prune(dry_run)
+
+    def _run_loop(self, max_rows, *, interval, maintenance_interval):
+        """Stay resident, draining every ``interval`` seconds (issue #354).
+
+        **Why resident rather than a faster timer.** The old
+        ``send-pushes.timer`` fired ``docker compose exec … manage.py
+        send_pushes`` once a minute, and every tick paid for a cold Django
+        process. Tightening *that* to two seconds would have meant 43,000
+        interpreter startups a day on a 2 vCPU box, almost all of them to
+        discover an empty queue. Starting Django once and asking again in a loop
+        makes an idle sweep one indexed ``SELECT`` — measured at ~7ms against
+        ~740ms for a cold oneshot — so this is both far quicker *and* cheaper at
+        rest than the timer it replaces, despite running 30× as often. The
+        figures and the method are in docs/reference/notifications.md.
+
+        **The two cadences are the point.** ``handle`` runs drain → receipts →
+        prune together because at one pass a minute there is no reason not to.
+        Here they must come apart: receipts are not even asked for until they are
+        fifteen minutes old and pruning is daily work, so running either every
+        two seconds would be pure waste. Only the drain goes fast.
+
+        **They still run in one thread, in order.** A slow Expo can therefore
+        stall a drain behind a receipt check — which is exactly what the oneshot
+        did too, so it is not a regression, and it is self-limiting: an Expo slow
+        enough to block the receipt call is an Expo the sends are queueing behind
+        anyway. A second thread would buy a rare few seconds in exchange for a
+        second database connection and a second set of transaction boundaries.
+
+        **Losing systemd's overlap guard costs nothing.** It never started a
+        second run while one was active; here there is only ever one loop. The
+        real defence against double-sends was always ``_drain``'s
+        ``select_for_update(skip_locked=True)``, which is untouched and is also
+        what still makes a hand-run alongside this safe.
+        """
+        stop = threading.Event()
+
+        def request_stop(signum, _frame):
+            # Only ever set a flag. The current drain finishes and its
+            # transaction commits, rather than being torn down partway through
+            # an Expo call with rows claimed and no idea whether they were sent.
+            # Restoring the default handler means a *second* signal — an
+            # impatient Ctrl-C, or docker's SIGKILL chaser — still kills at once.
+            signal.signal(signum, signal.SIG_DFL)
+            stop.set()
+            self.stdout.write("Stopping after this drain…")
+
+        # Saved so they can go back on the way out. A dedicated container never
+        # notices either way, but a command that permanently replaces the
+        # process's SIGINT handler is rude to anything that runs it in-process —
+        # a test suite, a shell, a future supervisor — and leaves Ctrl-C dead
+        # afterwards.
+        previous_handlers = {
+            sig: signal.signal(sig, request_stop)
+            for sig in (signal.SIGTERM, signal.SIGINT)
+        }
+
+        self.quiet_when_idle = True
+        self.stdout.write(
+            f"Draining every {interval}s, maintenance every "
+            f"{maintenance_interval}s. SIGTERM to stop."
+        )
+        try:
+            self._loop_until(
+                stop,
+                max_rows,
+                interval=interval,
+                maintenance_interval=maintenance_interval,
+            )
+        finally:
+            for sig, handler in previous_handlers.items():
+                signal.signal(sig, handler)
+        self.stdout.write("Stopped.")
+
+    def _loop_until(self, stop, max_rows, *, interval, maintenance_interval):
+        """The loop body proper — split out only so ``_run_loop`` can put the
+        signal handlers back however this returns."""
+
+        # `None` rather than 0: maintenance runs on the very first pass, so a
+        # restart doesn't leave receipts unchecked for a minute.
+        next_maintenance = None
+        drains = 0
+        while not stop.is_set():
+            # Timed from the *start* of the pass, so the cadence is "every two
+            # seconds" and not "two seconds after the last one finished" —
+            # otherwise a slow drain quietly stretches the interval it was
+            # supposed to hold.
+            started = time.monotonic()
+            try:
+                with transaction.atomic():
+                    self._drain(max_rows, dry_run=False)
+                drains += 1
+
+                if next_maintenance is None or started >= next_maintenance:
+                    self._check_receipts(dry_run=False)
+                    self._prune(dry_run=False)
+                    self._heartbeat(drains)
+                    drains = 0
+                    next_maintenance = started + maintenance_interval
+            except Exception as exc:
+                # A resident drain that dies on a transient fault is worse than
+                # the timer it replaced, which at least got a fresh process next
+                # minute. So: log it, drop the database connection so the next
+                # pass reconnects rather than reusing a socket Postgres has
+                # already closed, and back off enough not to spin.
+                self.stderr.write(f"Drain failed: {exc}")
+                close_old_connections()
+                stop.wait(_LOOP_ERROR_BACKOFF_SECONDS)
+                continue
+
+            stop.wait(max(0.0, interval - (time.monotonic() - started)))
+
+    def _heartbeat(self, drains):
+        """One line per maintenance tick saying the loop is alive.
+
+        Without it a healthy quiet stretch and a wedged process produce exactly
+        the same output — nothing — and the failure mode to recognise is "no
+        phone ever buzzes", which looks like silence either way.
+        """
+        held = self._last_deferred
+        line = f"Alive: {drains} drain(s) since the last report"
+        if held:
+            line += f", {held} message push(es) currently held back"
+        self.stdout.write(f"{line}.")
+
+    def _note_idle(self, message):
+        """Say something a resident loop would otherwise repeat verbatim.
+
+        These lines describe a *state* rather than an event — nothing queued,
+        nothing outstanding, N rows still held — so they stay true across passes
+        and a two-second loop would print each one thousands of times for a
+        single unchanging fact. Printed by a oneshot run, where the output is a
+        report someone asked for and read; folded into the heartbeat in
+        ``--loop``. Lines that describe work actually done (``Sent 1, requeued
+        0.``) go straight to stdout on both paths.
+        """
+        if not self.quiet_when_idle:
+            self.stdout.write(message)
 
     def _drain(self, max_rows, *, dry_run):
         rows = PushOutbox.objects.filter(
@@ -134,7 +341,12 @@ class Command(BaseCommand):
 
         pending = list(rows.order_by("created_at")[:max_rows])
         if not pending:
-            self.stdout.write("Nothing queued.")
+            # **The whole of an idle sweep**: one indexed query and out, before
+            # any of the per-batch lookups below. That early return is what makes
+            # `--loop` cheaper at rest than the per-minute timer despite running
+            # 30× as often, so keep new per-batch work below this line.
+            self._last_deferred = 0
+            self._note_idle("Nothing queued.")
             return
 
         # One query for every recipient's devices, rather than one per row.
@@ -144,6 +356,7 @@ class Command(BaseCommand):
             devices_by_user.setdefault(device.user_id, []).append(device)
 
         read_markers = self._read_markers(pending)
+        last_pushes = self._last_pushes(pending)
         # recipient_id → icon-badge count, filled in on demand by `_badge`.
         badges = {}
 
@@ -178,11 +391,13 @@ class Command(BaseCommand):
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
                 continue
-            # Too soon to say. Left queued **untouched** — no `sent_at`, no
-            # `attempts` — because this is "ask again shortly", not a failure:
-            # spending an attempt here would let a chatty thread exhaust
-            # MAX_ATTEMPTS without Expo ever having been called. See
-            # _should_defer.
+            # Two reasons to hold a message push rather than send it now: the
+            # recipient may be about to tell us they've read it (_should_defer),
+            # or they were buzzed about this thread moments ago
+            # (_should_space_out). Both leave the row **untouched** — no
+            # `sent_at`, no `attempts` — because this is "ask again shortly", not
+            # a failure: spending an attempt here would let a chatty thread
+            # exhaust MAX_ATTEMPTS without Expo ever having been called.
             #
             # **Below the device check on purpose.** There is nothing to protect
             # a recipient with no registered device from — no phone will buzz
@@ -190,7 +405,10 @@ class Command(BaseCommand):
             # that can never send it, and (because `enqueue_message_pushes`
             # coalesces onto any unsent row) suppress the *next* message's row
             # behind it.
-            if row.message_id and self._should_defer(row, read_markers, now):
+            if row.message_id and (
+                self._should_defer(row, read_markers, now)
+                or self._should_space_out(row, last_pushes, now)
+            ):
                 deferred += 1
                 continue
             payload = self._payload(row)
@@ -205,11 +423,18 @@ class Command(BaseCommand):
         # something to send is the usual case — so leaving it off the busy path
         # would make a misconfigured grace look like a perfectly healthy drain
         # while nobody's phone buzzed. See _should_defer.
+        #
+        # In `--loop` it goes through `_note_idle` and out to the heartbeat
+        # instead: a row held for the full cooldown spans thirty drains, and
+        # thirty identical lines describe one event, not thirty.
+        self._last_deferred = deferred
         if deferred:
-            self.stdout.write(f"{deferred} message push(es) held back.")
+            self._note_idle(f"{deferred} message push(es) held back.")
 
         if not messages:
-            self.stdout.write(f"{len(pending)} queued, nothing outstanding to send.")
+            self._note_idle(
+                f"{len(pending)} queued, nothing outstanding to send."
+            )
             return
 
         if dry_run:
@@ -235,6 +460,45 @@ class Command(BaseCommand):
         return {
             (read.conversation_id, read.user_id): read.last_read_at
             for read in ConversationRead.objects.filter(pairs)
+        }
+
+    def _last_pushes(self, pending):
+        """``{(conversation_id, user_id): sent_at}`` — when each recipient in
+        this batch was last *actually buzzed* about each thread.
+
+        Read by ``_should_space_out``. One grouped query for the batch, in the
+        same shape and for the same reason as ``_read_markers``.
+
+        **``sent_at`` alone is the wrong question**, which is the trap here.
+        ``_drain`` stamps it on rows it settles without calling Expo at all — a
+        recipient with no devices, a message deleted since enqueue, a push
+        dropped because they'd already read it. Treating those as a buzz would
+        let a *silent* row start a minute of cooldown, and the commonest of them
+        (dropped-as-read) fires precisely for the people in a live conversation,
+        so the mistake would fall hardest on exactly the exchanges that must stay
+        quick. ``delivered_tokens`` is the honest record: it is non-empty only
+        once Expo accepted the message for a device.
+        """
+        wanted = [row for row in pending if row.message_id]
+        if not wanted:
+            return {}
+        pairs = Q(pk__in=[])
+        for row in wanted:
+            pairs |= Q(
+                message__conversation_id=row.message.conversation_id,
+                recipient_id=row.recipient_id,
+            )
+        grouped = (
+            PushOutbox.objects.filter(pairs, sent_at__isnull=False)
+            .exclude(delivered_tokens=[])
+            .values("message__conversation_id", "recipient_id")
+            .annotate(last_sent=Max("sent_at"))
+        )
+        return {
+            (entry["message__conversation_id"], entry["recipient_id"]): entry[
+                "last_sent"
+            ]
+            for entry in grouped
         }
 
     def _badge(self, row, cache):
@@ -271,7 +535,7 @@ class Command(BaseCommand):
         stays as a tombstone so the thread doesn't reshuffle — so unlike the
         notification path there's no cascade to take the queued push with it.
         Without this check, deleting a message you regret still buzzes everyone
-        up to a timer tick later, and the tap lands on "message deleted". The
+        up to a drain later, and the tap lands on "message deleted". The
         cascade covers the hard-delete case (conversation → messages → pushes);
         this covers the soft one, so "a push for deleted content cannot fire"
         holds either way.
@@ -305,11 +569,12 @@ class Command(BaseCommand):
         in that window buzzes a phone for a message already on its screen.
 
         Nothing protected us from that except the drain being slow: a
-        once-a-minute timer lands inside a 4s window about one message in
-        fifteen. That is not a design, it's a coincidence, and it inverts the
-        moment the drain gets quicker (issue #354) — at a two-second cadence the
-        drain would beat the poll nearly every time and the read check would stop
-        working almost entirely. So the wait has to be explicit.
+        once-a-minute timer landed inside a 4s window about one message in
+        fifteen. That was not a design, it was a coincidence — and #354 has since
+        removed it. **At today's two-second cadence the drain beats the poll
+        every time, so this method is now the only thing standing between a
+        reader and a pointless buzz.** It was written in anticipation of that and
+        is now load-bearing.
 
         **Why it is conditional.** Waiting is only ever right for someone who
         might be about to say "I've seen it". Applying it to everyone would put a
@@ -321,13 +586,14 @@ class Command(BaseCommand):
         server can get without a presence system. No marker at all — they have
         never opened the thread — is emphatically not active.
 
-        **What it costs.** A deferred row waits for the next drain, so on the
-        present per-minute timer the few pushes this catches can land up to a
-        minute later than they would have. That is the right way round: the
-        recipient it defers is, by construction, one who was reading the thread
-        seconds ago, so the overwhelmingly likely next event is their read marker
-        arriving and the push being dropped as read rather than delayed. The cost
-        shrinks to nothing when the drain interval does (#354).
+        **What it costs — much less than it used to.** A deferred row waits for
+        the next drain, which is now two seconds away rather than up to sixty, so
+        the *most* this can delay a push is the grace itself: six seconds. The
+        age test is what caps it, and the cap is why
+        ``PUSH_ACTIVE_THREAD_SECONDS`` could be widened from 15s to 120s in the
+        same change — a wide window used to mean minute-long holds and now means
+        six-second ones, while a narrow one misses the silent reader whose marker
+        hasn't moved because nothing has arrived to move it.
 
         **It cannot strand a row.** The age test is against the message's own
         ``created_at``, which doesn't move, so once a row is older than the grace
@@ -339,12 +605,10 @@ class Command(BaseCommand):
         **Mark read** on the conversation list. So someone who fires off a reply
         and pockets the phone looks active for the next
         ``PUSH_ACTIVE_THREAD_SECONDS``, and a reply arriving in that window is
-        held for a drain rather than sent — which on the present per-minute
-        timer is the *most* conversational exchanges buzzing slowest. It is
-        bounded (one extra tick, and never more than once per message) and the
-        alternative is a presence signal this deliberately avoids, but it is a
-        real cost and it argues for keeping the window well under the drain
-        interval rather than equal to it.
+        held. This used to be the argument for keeping the window small; with a
+        resident drain it is bounded by the grace at six seconds, which is why
+        the window could stop paying for it. The alternative — telling the three
+        apart — needs a presence signal this deliberately avoids.
 
         This deliberately does **not** try to answer "is the thread on screen".
         That needs a presence signal from the client, and the whole point of
@@ -361,6 +625,51 @@ class Command(BaseCommand):
             return False
         active = timedelta(seconds=settings.PUSH_ACTIVE_THREAD_SECONDS)
         return now - marker < active
+
+    def _should_space_out(self, row, last_pushes, now):
+        """Whether this *message* push is too soon after the last one we sent the
+        same person about the same thread (issue #354).
+
+        **This is not a new policy. It is an old one that used to be free.**
+        ``enqueue_message_pushes`` coalesces: if a recipient already has an
+        unsent push queued for a conversation, a further message doesn't add
+        another row, because "a burst of ten messages should buzz a phone once
+        and leave the unread badge to carry the count". But that only ever
+        worked because a row *sat* unsent — up to a minute, on the old timer.
+        The property the app actually shipped was **at most one message buzz per
+        person per thread per drain interval**, and nobody wrote it down because
+        the drain interval was sixty seconds and it looked like the coalescing
+        doing the work.
+
+        Make the drain resident at two seconds and the same coalescing code
+        permits thirty buzzes a minute. Nothing in the enqueue changed; the thing
+        holding it up was removed. So the guarantee is restated here explicitly,
+        at the value the timer used to give it
+        (``PUSH_MESSAGE_COOLDOWN_SECONDS``, 60s).
+
+        **Held, not dropped.** The row goes out when the cooldown expires. That
+        matches what the old timer did with the row left over after a coalesced
+        burst — a second buzz, up to a minute later — and it means a thread
+        nobody is reading still nudges again rather than falling silent after one
+        push. It also cannot strand a row: ``last_sent`` belongs to an
+        already-sent row and never moves, and no *other* push for the pair can
+        overtake it, since it is held by this same rule.
+
+        **@mentions are exempt**, for the same reason they are exempt from mute
+        (Phase 9b M8): naming someone is how you get their attention, and being
+        named in a busy thread is the case where a minute's silence is most
+        obviously wrong. It is also the case the cooldown would otherwise hurt
+        most, because a busy thread is what puts you in cooldown.
+        """
+        cooldown = timedelta(seconds=settings.PUSH_MESSAGE_COOLDOWN_SECONDS)
+        if cooldown <= timedelta(0):
+            return False
+        if is_mentioned(row.message, row.recipient_id):
+            return False
+        last_sent = last_pushes.get(
+            (row.message.conversation_id, row.recipient_id)
+        )
+        return last_sent is not None and now - last_sent < cooldown
 
     def _payload(self, row):
         """The ``(text, url, kind, id)`` a push is built from, for either target.
@@ -599,6 +908,15 @@ class Command(BaseCommand):
                 )
 
         sent = requeued = 0
+        # How long the rows in this batch waited between being enqueued and
+        # going to Expo — **our** half of push latency, which is the only half we
+        # can do anything about (issue #354). Reported because the alternative is
+        # guessing: Expo → APNs/FCM → device adds 1-5s nobody here can see, so
+        # "is the delay ours?" is unanswerable without this number, and it is the
+        # number that says whether tuning the drain interval further would
+        # achieve anything at all. The worst wait rather than the mean: a batch's
+        # slowest row is the one a person notices.
+        waits = []
         for entry in outcomes.values():
             row = entry["row"]
             if entry["delivered"]:
@@ -613,6 +931,7 @@ class Command(BaseCommand):
                 requeued += 1
             else:
                 row.sent_at = timezone.now()
+                waits.append((row.sent_at - row.created_at).total_seconds())
                 sent += 1
             row.save(
                 update_fields=[
@@ -629,7 +948,10 @@ class Command(BaseCommand):
             # whole drain over — we already hold the row we need.
             PushReceipt.objects.bulk_create(receipts, ignore_conflicts=True)
 
-        self.stdout.write(f"Sent {sent}, requeued {requeued}.")
+        summary = f"Sent {sent}, requeued {requeued}"
+        if waits:
+            summary += f" (queued up to {max(waits):.1f}s)"
+        self.stdout.write(f"{summary}.")
 
     def _post(self, payload):
         """POST a batch of messages to Expo and return its list of tickets."""
