@@ -350,7 +350,11 @@ matters — not that one identifier appears everywhere, but that no site
 re-derives the answer for itself, which is how the two halves of a file drift
 apart.
 `markConversationRead` carries a `.catch()` besides, since the old error flag in
-the guard was what used to keep the write off a failing connection.
+the guard was what used to keep the write off a failing connection. **That
+`.catch()` no longer swallows** (#355): the write moved to
+`src/useMarkThreadRead.ts` and the rejection now schedules a bounded retry, on
+the reasoning that a marker the server never receives is a push for a message
+already on screen *and* a read receipt the sender never gets.
 
 **Same shape, different fix, and a guard was the wrong tool (#318).**
 `post/[postId].tsx` and `events/[eventId].tsx` dismissed a post's/event's pushes
@@ -387,13 +391,25 @@ render never runs it. Three consequences worth knowing:
 
 `useQueryClient()` moved above the `useQuery` in `post/[postId].tsx` for it.
 
-Still open, same family, **not** the same edit: the mark-read + tray dismissal on
-`messages/[conversationId].tsx` (and the web's `ConversationThreadView.jsx`) is
-gated on `readingMessages`, which a warm cache also satisfies synchronously — so
-a reopen whose transcript refetch fails can mark read, and dismiss, a message
-that arrived while you were away and isn't in the cached pages. Moving it is a
-larger change than these two were: the transcript is an infinite query, and the
-write deliberately re-runs as messages land rather than once per fetch.
+Same family, **partly closed by #355**: the mark-read + tray dismissal moved out
+of `messages/[conversationId].tsx` (and the web's `ConversationThreadView.jsx`)
+into `src/useMarkThreadRead.ts` / `frontend/src/useMarkThreadRead.js`. It is
+still gated on `readingMessages`, which a warm cache satisfies synchronously —
+so a reopen whose transcript refetch fails can still mark read a message that
+arrived while you were away and isn't in the cached pages.
+
+What #355 did close is the **foreground** arm of that, which it would otherwise
+have made much worse: coming back to the app refetches the transcript first and
+only writes the marker if that refetch succeeds. Without it, unlocking a phone
+onto a still-mounted thread would have stamped `last_read_at = now()` over every
+message that arrived while the polls were paused — binning their queued push and
+drawing the sender a second tick for messages nobody had seen.
+
+Still open is the *mount* path: a cold open whose refetch fails writes against
+whatever the cache held. Closing it properly means the marker naming the newest
+message the client actually holds rather than the wall clock — the shape
+`ConversationReadView.delete` already uses for mark-*unread* — which is an API
+change rather than a client one.
 
 #### The mirror image: no error branch at all
 

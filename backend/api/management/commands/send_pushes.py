@@ -12,7 +12,8 @@ The flow per drain:
    this row has already reached.
 3. Build one Expo message per (row × outstanding device) and POST in batches.
    A **message** row is dropped here instead if the recipient has since read the
-   thread — see ``_message_body``.
+   thread (``_should_drop``), or left queued for a later run if it is so fresh
+   that they have not had a chance to say so yet (``_should_defer``).
 4. Read the reply's per-message tickets, then settle each row: delivered
    everywhere → mark sent; anything still outstanding → record the error and
    leave it queued for the next tick. Tokens Expo reports as
@@ -147,6 +148,10 @@ class Command(BaseCommand):
         badges = {}
 
         messages = []
+        deferred = 0
+        # One clock for the whole pass, so every row in a batch is judged
+        # against the same instant rather than drifting apart as it runs.
+        now = timezone.now()
         for row in pending:
             # Two reasons to drop a message push rather than send it, both
             # settled (not retried) because neither state is ever undone: the
@@ -173,12 +178,35 @@ class Command(BaseCommand):
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
                 continue
+            # Too soon to say. Left queued **untouched** — no `sent_at`, no
+            # `attempts` — because this is "ask again shortly", not a failure:
+            # spending an attempt here would let a chatty thread exhaust
+            # MAX_ATTEMPTS without Expo ever having been called. See
+            # _should_defer.
+            #
+            # **Below the device check on purpose.** There is nothing to protect
+            # a recipient with no registered device from — no phone will buzz
+            # either way — so deferring one would leave a row queued for a drain
+            # that can never send it, and (because `enqueue_message_pushes`
+            # coalesces onto any unsent row) suppress the *next* message's row
+            # behind it.
+            if row.message_id and self._should_defer(row, read_markers, now):
+                deferred += 1
+                continue
             payload = self._payload(row)
             badge = self._badge(row, badges)
             for device in outstanding:
                 messages.append(
                     (row, device, self._message(device, payload, badge))
                 )
+
+        # Reported on **every** path, not just the empty one. A held row is a
+        # fourth outcome beside sent/settled/requeued, and a drain that also has
+        # something to send is the usual case — so leaving it off the busy path
+        # would make a misconfigured grace look like a perfectly healthy drain
+        # while nobody's phone buzzed. See _should_defer.
+        if deferred:
+            self.stdout.write(f"{deferred} message push(es) held back.")
 
         if not messages:
             self.stdout.write(f"{len(pending)} queued, nothing outstanding to send.")
@@ -263,6 +291,76 @@ class Command(BaseCommand):
             (row.message.conversation_id, row.recipient_id)
         )
         return marker is not None and marker >= row.message.created_at
+
+    def _should_defer(self, row, read_markers, now):
+        """Whether this *message* push should be left queued a little longer
+        (issue #355).
+
+        **The problem it solves.** ``_should_drop`` above asks whether the
+        recipient has already read the message, and that question is only
+        answerable once their client has *told* us. A client cannot do that
+        until its own poll (``MESSAGE_POLL_MS``, 4s) has delivered the message —
+        so for the first few seconds of a message's life, "have they read it?"
+        reliably answers *no* for someone staring straight at it. A drain landing
+        in that window buzzes a phone for a message already on its screen.
+
+        Nothing protected us from that except the drain being slow: a
+        once-a-minute timer lands inside a 4s window about one message in
+        fifteen. That is not a design, it's a coincidence, and it inverts the
+        moment the drain gets quicker (issue #354) — at a two-second cadence the
+        drain would beat the poll nearly every time and the read check would stop
+        working almost entirely. So the wait has to be explicit.
+
+        **Why it is conditional.** Waiting is only ever right for someone who
+        might be about to say "I've seen it". Applying it to everyone would put a
+        floor under every push, including the case push actually exists for — a
+        phone in a pocket, where nobody is going to mark anything read and the
+        grace would be pure delay. So it applies only when the recipient's read
+        marker for *this* thread moved within ``PUSH_ACTIVE_THREAD_SECONDS``,
+        which is as close to "they're in this conversation right now" as the
+        server can get without a presence system. No marker at all — they have
+        never opened the thread — is emphatically not active.
+
+        **What it costs.** A deferred row waits for the next drain, so on the
+        present per-minute timer the few pushes this catches can land up to a
+        minute later than they would have. That is the right way round: the
+        recipient it defers is, by construction, one who was reading the thread
+        seconds ago, so the overwhelmingly likely next event is their read marker
+        arriving and the push being dropped as read rather than delayed. The cost
+        shrinks to nothing when the drain interval does (#354).
+
+        **It cannot strand a row.** The age test is against the message's own
+        ``created_at``, which doesn't move, so once a row is older than the grace
+        no later run can defer it again however active the recipient looks.
+
+        **Known limitation: "active" is broader than "reading".** The marker is
+        also stamped when the recipient *sends* (``MessageCreateView`` —
+        "sending implies you've read everything up to now") and when they swipe
+        **Mark read** on the conversation list. So someone who fires off a reply
+        and pockets the phone looks active for the next
+        ``PUSH_ACTIVE_THREAD_SECONDS``, and a reply arriving in that window is
+        held for a drain rather than sent — which on the present per-minute
+        timer is the *most* conversational exchanges buzzing slowest. It is
+        bounded (one extra tick, and never more than once per message) and the
+        alternative is a presence signal this deliberately avoids, but it is a
+        real cost and it argues for keeping the window well under the drain
+        interval rather than equal to it.
+
+        This deliberately does **not** try to answer "is the thread on screen".
+        That needs a presence signal from the client, and the whole point of
+        leaning on ``ConversationRead`` is that it is state the app already
+        maintains for its own reasons.
+        """
+        grace = timedelta(seconds=settings.PUSH_MESSAGE_GRACE_SECONDS)
+        if now - row.message.created_at >= grace:
+            return False
+        marker = read_markers.get(
+            (row.message.conversation_id, row.recipient_id)
+        )
+        if marker is None:
+            return False
+        active = timedelta(seconds=settings.PUSH_ACTIVE_THREAD_SECONDS)
+        return now - marker < active
 
     def _payload(self, row):
         """The ``(text, url, kind, id)`` a push is built from, for either target.

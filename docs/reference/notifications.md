@@ -459,6 +459,66 @@ The drain claims its rows with `select_for_update(skip_locked=True)`, so a
 hand-run during a timer tick takes different rows rather than sending the same
 push twice.
 
+### Holding a message push back (#355)
+
+`_should_drop` (above) bins a message push the recipient has already read, and
+its whole appeal is that it needs no presence system: the app moves
+`ConversationRead` for its own reasons and the drain just reads it.
+
+**But the marker can only ever be as current as the client's last poll.** A
+client learns a message exists on its own `MESSAGE_POLL_MS` tick — four seconds —
+and only then posts the marker. So for the first few seconds of a message's life,
+"have they read it?" answers *no* even for someone looking straight at the
+thread, and a drain landing in that window buzzes a phone for a message already
+on its screen.
+
+Nothing prevented that except the drain being slow. A once-a-minute timer,
+randomly phased against a message, lands inside a four-second window about **one
+message in fifteen** — rare enough to look like a fluke. That is a coincidence,
+not a design, and it inverts the moment the drain speeds up: at a two-second
+cadence the drain would beat the poll nearly every time and the read check would
+stop working almost entirely.
+
+So `_should_defer` holds a **message** push back when both are true:
+
+- the message is younger than `PUSH_MESSAGE_GRACE_SECONDS` (6s — it has to clear
+  the client's 4s poll plus a round trip), **and**
+- the recipient's read marker for *that thread* moved within
+  `PUSH_ACTIVE_THREAD_SECONDS` (15s), which is as close to "they are in this
+  conversation right now" as the server gets without a presence system.
+
+Both conditions matter. Waiting unconditionally would put a floor under every
+push including the case push exists for — a phone in a pocket, where nobody is
+going to mark anything read and the grace is pure delay. And a *missing* marker
+means they have never opened the thread, which is the opposite of active: it
+sends at once.
+
+A held row is left **completely untouched** — no `sent_at`, no `attempts`. It is
+"ask again shortly", not a failure; spending an attempt would let a busy thread
+exhaust `MAX_ATTEMPTS` without Expo ever having been called. The check also sits
+*below* the device lookup, so a recipient with no registered device — a web-only
+user — is settled immediately rather than held for a drain that could never have
+buzzed them anyway.
+
+**"Active" is broader than "reading", and that is the mechanism's weak point.**
+`last_read_at` is stamped by three things, only one of which is reading it:
+opening the thread, **sending** in it (`MessageCreateView`: "sending implies
+you've read everything up to now"), and swiping **Mark read** on the list. So
+someone who fires off a reply and pockets the phone looks active for the next
+minute, and a reply landing in that window waits a drain instead of going
+straight out. That is bounded — one extra tick, once per message — but it means
+the most conversational exchanges are the ones that buzz slowest, and it argues
+for keeping `PUSH_ACTIVE_THREAD_SECONDS` well under the drain interval rather
+than equal to it. Distinguishing the three would need a presence signal, which
+is exactly what leaning on `ConversationRead` avoids.
+
+**The cost, honestly:** a held row waits for the next drain, so on the present
+per-minute timer the few pushes this catches can land up to a minute later than
+they would have. That's the right way round — the recipient it defers was, by
+construction, reading the thread seconds ago, so the likeliest next event is
+their marker arriving and the push being dropped as *read* rather than delayed —
+but it is a real cost, and it shrinks to nothing when the drain interval does.
+
 ### Replying from the notification (Phase 9b M8)
 
 A **message** push carries `categoryId: "message"` — an iOS notification
@@ -836,12 +896,24 @@ the top of the stack:
   from a thread that navigator is the root **stack**. It doesn't accumulate —
   the second tap diverges inside the tab navigator and jumps — and Back returns
   where you were, so it's left alone.
-- Tapping a message push for the thread already on screen is now visibly
-  nothing: the screen doesn't remount, and its open-at-the-unread-divider jump
-  is deliberately once-per-mount so a poll can't yank a reader back
+- Tapping a message push for the thread already on screen is visibly nothing:
+  the screen doesn't remount, and its open-at-the-unread-divider jump is
+  deliberately once-per-mount so a poll can't yank a reader back
   (`[conversationId].tsx`). The message still arrives on the four-second poll,
   with jump-to-latest one tap away. Making a tap mean "take me to the newest"
   needs a re-open signal into the screen, which is its own change.
+
+  **That "nothing" used to include not marking the thread read** (#355), which
+  was the invisible half and much worse than the missing jump. The tap writes
+  nothing server-side for a message push — the `markNotificationAddressed` call
+  beside it is guarded on `data.notificationId`, and message pushes carry none —
+  so with no remount and no focus change, the only thing that could still move
+  the marker was the next count change, behind a single un-retried POST. Reading
+  a message could leave the server believing it unread until the app was
+  force-quit. `useMarkThreadRead` now fires on foreground as well as focus and
+  count, which covers the tap-from-background case that produced the report; a
+  tap while *already* foregrounded on that same thread still rests on the poll's
+  count change, now with retries behind it.
 
 A second deep link **is** honoured within a screen that stays mounted, which
 took two fixes once the remount went away: `[postId].tsx` re-arms its
@@ -876,7 +948,9 @@ you had since read it *in the app*. Read everything in a thread, go back to the
 home screen, and "New message from Ada" was still on the lock screen. The server
 already did the *pre*-delivery half well — `_should_drop` bins a queued message
 push whose read marker has moved past it, so a thread you read before the timer
-ticked never buzzes — but nothing existed for after delivery.
+ticked never buzzes (with the caveat in [Holding a message push
+back](#holding-a-message-push-back-355)) — but nothing existed for after
+delivery.
 
 Seven things now remove one. All of them are **local** —
 `getPresentedNotificationsAsync` + `dismissNotificationAsync` — with no new
@@ -884,7 +958,7 @@ payload field and no backend change.
 
 | When | What it clears | Where |
 |---|---|---|
-| The thread screen marks itself read (on open, and as messages land) — **only once the transcript has actually loaded** (#321) | every notification whose `url` is `/messages/<this id>` | `[conversationId].tsx` |
+| The thread screen has a message (on open and as messages land) — **only once the transcript has actually loaded** (#321), and deliberately *not* gated on the screen being focused (#355), since a thread sitting behind its own info screen is exactly when its pushes get filed rather than suppressed | every notification whose `url` is `/messages/<this id>` | `useMarkThreadRead.ts` |
 | **Mark read** swiped on a row in the conversation list | the same | `(tabs)/messages.tsx` |
 | The activity centre marks everything seen (on open) | every notification carrying a `notificationId` | `activity.tsx` |
 | A **Reply** typed into a notification *lands* | that conversation's notifications | `usePushTaps.ts` |
@@ -1098,7 +1172,7 @@ the property the badge depends on**, so it's worth listing:
 
 | Action | Invalidates | Where |
 | --- | --- | --- |
-| Open a thread | `unreadMessages` | `[conversationId].tsx`, after the `read/` POST |
+| Open a thread (and on re-focus / foreground — #355) | `unreadMessages`, `conversations` — **not** `conversation`, see `invalidateThreadRead` for why | `useMarkThreadRead.ts`'s `invalidateThreadRead`, after the `read/` POST |
 | Swipe read / unread in the list | `unreadMessages` | `(tabs)/messages.tsx`'s `rowAction` |
 | Block, leave, accept a pending chat | `unreadMessages` | `BlockButton`, `info.tsx`, `PendingChatPanel` |
 | Open the activity centre | `notificationsUnread` | `activity.tsx`, after `seen` |

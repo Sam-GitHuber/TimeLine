@@ -599,6 +599,30 @@ EXPO_PUSH_MAX_ROWS = env_int("EXPO_PUSH_MAX_ROWS", 200)
 # it. Long enough to debug "why didn't my phone buzz", short enough not to grow.
 EXPO_PUSH_RETENTION_DAYS = env_int("EXPO_PUSH_RETENTION_DAYS", 14)
 
+# Holding a *message* push back so the reader's client can get a word in
+# (issue #355). Both are read by `send_pushes._should_defer`; the full reasoning
+# lives there and in docs/reference/notifications.md.
+#
+#   GRACE  — how long a message push waits before it may be sent to someone who
+#            looks like they're reading that thread right now. It has to clear
+#            the app's own MESSAGE_POLL_MS (4s) plus a round trip, because the
+#            client cannot mark a thread read until its poll has told it the
+#            message exists. Below that, the drain outruns the reader and buzzes
+#            a phone for a message already on its screen.
+#   ACTIVE — how recently the recipient's read marker must have moved for the
+#            grace to apply at all. Someone who hasn't touched the thread in
+#            minutes is exactly who push is *for*, and waits for nothing.
+#
+# ACTIVE is deliberately **well under the drain interval** (60s today). At 60 it
+# was equal to it, which maximises the limitation `_should_defer` documents:
+# `last_read_at` is also stamped by *sending*, so anyone who fired off a reply
+# and pocketed the phone looked "active" for a whole extra tick and had the
+# answer to their own message held back a minute. 15s still comfortably covers a
+# genuine reader — their client polls every 4s — without catching the
+# send-and-pocket case.
+PUSH_MESSAGE_GRACE_SECONDS = env_int("PUSH_MESSAGE_GRACE_SECONDS", 6)
+PUSH_ACTIVE_THREAD_SECONDS = env_int("PUSH_ACTIVE_THREAD_SECONDS", 15)
+
 # Delivery receipts. A *ticket* (the synchronous reply to a send) only says Expo
 # accepted the message; whether Apple/Google delivered it comes back later from
 # this endpoint. Checking it is what lets us reap tokens that died after
