@@ -12272,6 +12272,30 @@ class SendPushesCommandTests(APITestCase):
             row.delivered_tokens, [first_token, second.expo_token]
         )
 
+    def test_devices_are_batched_in_a_deterministic_order(self):
+        # The drain matches Expo's reply onto its messages *positionally*, so
+        # the order devices come back in decides which one is credited with
+        # which ticket. The query carried no `order_by` for a long time, which
+        # left that to Postgres's physical heap order — stable enough to look
+        # fine, until a table has seen enough inserts and deletes for it not to
+        # be. It failed on CI and passed locally on the same commit, which is
+        # the mild version; the same non-determinism is what would make "the
+        # wrong device got retried" unreproducible in production.
+        #
+        # The second device's token sorts *before* setUp's "…[aaa]" while its
+        # id comes after, so registration order and alphabetical order disagree.
+        # Without that the assertion would hold under either and pin nothing.
+        newer = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[000]", platform="ios"
+        )
+        self._queue()
+
+        urlopen = self._run(payload=_ok_tickets(2))
+
+        sent = [message["to"] for message in self._sent_body(urlopen)]
+        # Registration order, not token order and not whatever the heap holds.
+        self.assertEqual(sent, [self.device.expo_token, newer.expo_token])
+
     def test_a_dead_device_settles_rather_than_blocking_the_row(self):
         # DeviceNotRegistered can never succeed on retry, so it must count as
         # settled — otherwise one uninstalled app keeps a row queued until it

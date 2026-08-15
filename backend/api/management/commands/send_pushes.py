@@ -396,7 +396,13 @@ class Command(BaseCommand):
             # blocking on ours.
             rows = rows.select_for_update(skip_locked=True, of=("self",))
 
-        pending = list(rows.order_by("created_at")[:max_rows])
+        # `id` breaks ties on `created_at`, which is only microsecond-resolution
+        # and is set by a single `bulk_create` for every recipient of a group
+        # message — so ties are the normal case there, not a rarity. Without it
+        # the `[:max_rows]` slice could take a different subset of a tied group
+        # on each run, i.e. whose push goes out this drain and whose waits would
+        # be arbitrary. Same reasoning as the device ordering below.
+        pending = list(rows.order_by("created_at", "id")[:max_rows])
         if not pending:
             # **The whole of an idle sweep**: one indexed query and out, before
             # any of the per-batch lookups below. That early return is what makes
@@ -407,9 +413,24 @@ class Command(BaseCommand):
             return
 
         # One query for every recipient's devices, rather than one per row.
+        #
+        # **Ordered, and that is not cosmetic.** This list decides the order
+        # messages go into the batch, and `_send` matches Expo's reply back onto
+        # them *positionally* (`zip(chunk, tickets, strict=True)`) — so which
+        # device is credited with which ticket, which one a partial failure
+        # leaves outstanding, and which straddle a chunk boundary all follow
+        # from it. Unordered, Postgres is free to return whatever physical heap
+        # order it currently has, which shifts as rows are inserted and deleted
+        # over a table's life; the drain then behaves differently run to run for
+        # reasons nothing in the code expresses. It surfaced as a CI-only
+        # failure of the partial-multi-device test, which is the mild version —
+        # the same non-determinism is what makes a production report of "the
+        # wrong device got retried" impossible to reproduce.
         recipient_ids = {row.recipient_id for row in pending}
         devices_by_user = {}
-        for device in DevicePushToken.objects.filter(user_id__in=recipient_ids):
+        for device in DevicePushToken.objects.filter(
+            user_id__in=recipient_ids
+        ).order_by("id"):
             devices_by_user.setdefault(device.user_id, []).append(device)
 
         read_markers = self._read_markers(pending)
