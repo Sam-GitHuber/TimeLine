@@ -11293,7 +11293,13 @@ class SendPushesCommandTests(APITestCase):
                 urlopen.return_value = _FakeExpoResponse(
                     payload if payload is not None else _ok_tickets(1)
                 )
-            call_command("send_pushes", verbosity=0, **kwargs)
+            # Quiet by default so a 68-case run isn't a wall of send lines —
+            # and it is a real setting now, not decoration: the command used to
+            # accept `--verbosity` and ignore it. `setdefault` rather than a
+            # fixed kwarg so the cases that assert on output can ask for 1
+            # without colliding with it.
+            kwargs.setdefault("verbosity", 0)
+            call_command("send_pushes", **kwargs)
         return urlopen
 
     def _sent_body(self, urlopen):
@@ -11896,10 +11902,43 @@ class SendPushesCommandTests(APITestCase):
             created_at=timezone.now() - timedelta(seconds=9)
         )
 
+        # verbosity=1 explicitly: `_run` passes 0, which the command now
+        # actually honours, and this case is about what it prints.
         out = StringIO()
-        self._run(stdout=out)
+        self._run(stdout=out, verbosity=1)
 
         self.assertIn("queued up to 9.", out.getvalue())
+
+    def test_minus_v0_really_is_quiet(self):
+        # `--verbosity` used to be accepted and ignored, so the suite passed
+        # `verbosity=0` and got a send line per case anyway.
+        self._queue()
+
+        out = StringIO()
+        self._run(stdout=out, verbosity=0)
+
+        self.assertEqual(out.getvalue(), "")
+        # Still did the work, though — quiet is not dry-run.
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_a_drain_that_only_settles_rows_still_says_so(self):
+        # Settling writes `sent_at`, so it is work, not idleness — and in
+        # `--loop` the "nothing outstanding" line is swallowed as idle. Without
+        # this line a drain that binned every queued push would look exactly
+        # like an empty queue, which is the one symptom a `_should_drop` bug
+        # would produce.
+        convo, message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=message.created_at + timedelta(seconds=1),
+        )
+
+        out = StringIO()
+        urlopen = self._run(stdout=out, verbosity=1)
+
+        urlopen.assert_not_called()
+        self.assertIn("Settled 1 row(s) without sending", out.getvalue())
 
     # --- the cooldown between two buzzes about one thread (issue #354) --------
     #
@@ -12632,6 +12671,18 @@ class SendPushesLoopTests(APITestCase):
 
         with self.assertRaises(CommandError):
             call_command("send_pushes", loop=True, interval=0)
+
+    def test_a_zero_maintenance_interval_is_refused(self):
+        # Fails differently from the above and was unguarded: it doesn't spin
+        # the CPU, it makes every pass a maintenance pass — an HTTP round-trip
+        # to Expo and a full-table DELETE every two seconds, which is the exact
+        # waste the two cadences exist to avoid, from a setting whose symptom
+        # points nowhere near it.
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("send_pushes", loop=True, maintenance_interval=0)
 
 
 @override_settings(EXPO_RECEIPT_CHECK_DELAY_SECONDS=0)

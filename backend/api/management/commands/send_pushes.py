@@ -97,10 +97,16 @@ class Command(BaseCommand):
     # held for the full cooldown spans thirty drains.
     _last_deferred = 0
 
-    # Suppressed in ``--loop``: at a two-second cadence "Nothing queued." is
-    # 43,000 lines a day saying nothing happened, which is how a log stops being
-    # read. The loop prints a periodic heartbeat instead, and every line that
-    # describes *work* still prints on both paths. See ``_note_idle``.
+    # **Two independent axes, deliberately.** `verbosity` is Django's own
+    # "how much do you want to hear" (0 = nothing), and applies to both modes.
+    # `quiet_when_idle` is about *which* lines make sense in a resident process
+    # rather than how many: at a two-second cadence "Nothing queued." is 43,000
+    # lines a day saying nothing happened, which is how a log stops being read,
+    # while "Sent 1" must keep printing because the container log is the only
+    # record there is. Collapsing them (`--loop` implying `-v0`) would silence
+    # the half that matters. Class attributes so `_drain` still works when a
+    # test or a shell calls it directly.
+    verbosity = 1
     quiet_when_idle = False
 
     def add_arguments(self, parser):
@@ -143,6 +149,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         max_rows = options["max_rows"]
         dry_run = options["dry_run"]
+        self.verbosity = options["verbosity"]
 
         if options["loop"]:
             if dry_run:
@@ -152,6 +159,18 @@ class Command(BaseCommand):
                 raise CommandError("--loop and --dry-run cannot be combined.")
             if options["interval"] <= 0:
                 raise CommandError("--interval must be greater than zero.")
+            if options["maintenance_interval"] <= 0:
+                # Guarded for the same reason as --interval, though it fails
+                # differently: 0 doesn't spin the CPU, it makes `started >=
+                # next_maintenance` true on every pass, so the receipt check
+                # fires an HTTP round-trip to Expo and the prune a full-table
+                # DELETE every two seconds. That is ~43,000 Expo calls a day —
+                # precisely the waste the two-cadence split exists to avoid —
+                # and nothing about the symptom would point at this setting.
+                raise CommandError(
+                    "--maintenance-interval must be greater than zero; it is "
+                    "meant to be much larger than --interval."
+                )
             self._run_loop(
                 max_rows,
                 interval=options["interval"],
@@ -218,7 +237,7 @@ class Command(BaseCommand):
             # impatient Ctrl-C, or docker's SIGKILL chaser — still kills at once.
             signal.signal(signum, signal.SIG_DFL)
             stop.set()
-            self.stdout.write("Stopping after this drain…")
+            self._say("Stopping after this drain…")
 
         # Saved so they can go back on the way out. A dedicated container never
         # notices either way, but a command that permanently replaces the
@@ -231,7 +250,7 @@ class Command(BaseCommand):
         }
 
         self.quiet_when_idle = True
-        self.stdout.write(
+        self._say(
             f"Draining every {interval}s, maintenance every "
             f"{maintenance_interval}s. SIGTERM to stop."
         )
@@ -245,7 +264,7 @@ class Command(BaseCommand):
         finally:
             for sig, handler in previous_handlers.items():
                 signal.signal(sig, handler)
-        self.stdout.write("Stopped.")
+        self._say("Stopped.")
 
     def _loop_until(self, stop, max_rows, *, interval, maintenance_interval):
         """The loop body proper — split out only so ``_run_loop`` can put the
@@ -316,7 +335,19 @@ class Command(BaseCommand):
         line = f"Alive: {drains} drain(s) since the last report"
         if held:
             line += f", {held} message push(es) currently held back"
-        self.stdout.write(f"{line}.")
+        self._say(f"{line}.")
+
+    def _say(self, message):
+        """Ordinary output, gated on Django's ``--verbosity``.
+
+        The command used to write to ``self.stdout`` unconditionally, so
+        ``-v0`` did nothing — including for the test suite, which passes it
+        and then printed a send line per case anyway. **Errors deliberately
+        do not go through here**: ``-v0`` asks for quiet, not for a failed
+        drain to become invisible.
+        """
+        if self.verbosity >= 1:
+            self.stdout.write(message)
 
     def _note_idle(self, message):
         """Say something a resident loop would otherwise repeat verbatim.
@@ -330,7 +361,7 @@ class Command(BaseCommand):
         0.``) go straight to stdout on both paths.
         """
         if not self.quiet_when_idle:
-            self.stdout.write(message)
+            self._say(message)
 
     def _drain(self, max_rows, *, dry_run):
         rows = PushOutbox.objects.filter(
@@ -396,6 +427,15 @@ class Command(BaseCommand):
 
         messages = []
         deferred = 0
+        # Rows this pass settles *without* calling Expo — no device, deleted
+        # since enqueue, or already read. Counted because settling is real work
+        # that writes `sent_at`, and it used to be reported only through the
+        # "nothing outstanding to send" line, which `--loop` swallows as idle.
+        # A drain that silently binned every queued push then looked exactly
+        # like an empty queue, and "nobody's phone buzzes" is the symptom of
+        # both — so a `_should_drop` gone wrong (a read-marker bug, clock skew)
+        # would have been invisible in the one log there is.
+        settled = 0
         # One clock for the whole pass, so every row in a batch is judged
         # against the same instant rather than drifting apart as it runs.
         now = timezone.now()
@@ -405,6 +445,7 @@ class Command(BaseCommand):
             # message has since been deleted, or the recipient has already read
             # it. See _should_drop.
             if row.message_id and self._should_drop(row, read_markers):
+                settled += 1
                 if not dry_run:
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
@@ -421,6 +462,7 @@ class Command(BaseCommand):
                 # Either a web-only user with no devices at all, or every device
                 # was reached earlier. Settle it rather than retrying forever;
                 # the in-app notification exists and is unaffected either way.
+                settled += 1
                 if not dry_run:
                     row.sent_at = timezone.now()
                     row.save(update_fields=["sent_at"])
@@ -465,6 +507,14 @@ class Command(BaseCommand):
         if deferred:
             self._note_idle(f"{deferred} message push(es) held back.")
 
+        # Through `_say`, not `_note_idle`: this describes rows whose state
+        # changed, so it belongs in the resident log next to "Sent N".
+        if settled:
+            self._say(
+                f"Settled {settled} row(s) without sending "
+                "(no device, deleted, or already read)."
+            )
+
         if not messages:
             self._note_idle(
                 f"{len(pending)} queued, nothing outstanding to send."
@@ -473,24 +523,47 @@ class Command(BaseCommand):
 
         if dry_run:
             for _row, device, message in messages:
-                self.stdout.write(f"→ {device.expo_token[:20]}… {message['body']}")
-            self.stdout.write(f"Dry run: {len(messages)} message(s) not sent.")
+                self._say(f"→ {device.expo_token[:20]}… {message['body']}")
+            self._say(f"Dry run: {len(messages)} message(s) not sent.")
             return
 
         self._send(messages)
 
-    def _read_markers(self, pending):
-        """``{(conversation_id, user_id): last_read_at}`` for the message rows in
-        this batch — one query for the lot rather than one per row."""
+    def _message_pairs(self, pending, conversation_field, user_field):
+        """OR one ``(conversation, recipient)`` predicate per message row in this
+        batch, or ``None`` if the batch has no message rows.
+
+        Three lookups need the same shape — ``_read_markers``,
+        ``_last_pushes``, ``_mention_marks`` — and differ only in what the two
+        columns are called from where they start. They were three copies of this
+        loop until the third one made that obvious.
+
+        ``Q(pk__in=[])`` is the identity to OR onto: a predicate matching
+        nothing, so the chain says exactly "any of these pairs" even for one row.
+
+        One query per lookup rather than one per row is the whole point; the
+        pending list is capped at ``EXPO_PUSH_MAX_ROWS``, so the OR-chain has a
+        known ceiling.
+        """
         wanted = [row for row in pending if row.message_id]
         if not wanted:
-            return {}
+            return None
         pairs = Q(pk__in=[])
         for row in wanted:
             pairs |= Q(
-                conversation_id=row.message.conversation_id,
-                user_id=row.recipient_id,
+                **{
+                    conversation_field: row.message.conversation_id,
+                    user_field: row.recipient_id,
+                }
             )
+        return pairs
+
+    def _read_markers(self, pending):
+        """``{(conversation_id, user_id): last_read_at}`` for the message rows in
+        this batch — one query for the lot rather than one per row."""
+        pairs = self._message_pairs(pending, "conversation_id", "user_id")
+        if pairs is None:
+            return {}
         return {
             (read.conversation_id, read.user_id): read.last_read_at
             for read in ConversationRead.objects.filter(pairs)
@@ -513,15 +586,11 @@ class Command(BaseCommand):
         quick. ``delivered_tokens`` is the honest record: it is non-empty only
         once Expo accepted the message for a device.
         """
-        wanted = [row for row in pending if row.message_id]
-        if not wanted:
+        pairs = self._message_pairs(
+            pending, "message__conversation_id", "recipient_id"
+        )
+        if pairs is None:
             return {}
-        pairs = Q(pk__in=[])
-        for row in wanted:
-            pairs |= Q(
-                message__conversation_id=row.message.conversation_id,
-                recipient_id=row.recipient_id,
-            )
         grouped = (
             PushOutbox.objects.filter(pairs, sent_at__isnull=False)
             .exclude(delivered_tokens=[])
@@ -552,15 +621,11 @@ class Command(BaseCommand):
         punching a push through the cooldown, and ``_should_drop`` already treats
         a deleted message as a reason not to send at all.
         """
-        wanted = [row for row in pending if row.message_id]
-        if not wanted:
+        pairs = self._message_pairs(
+            pending, "message__conversation_id", "user_id"
+        )
+        if pairs is None:
             return {}
-        pairs = Q(pk__in=[])
-        for row in wanted:
-            pairs |= Q(
-                message__conversation_id=row.message.conversation_id,
-                user_id=row.recipient_id,
-            )
         grouped = (
             MessageMention.objects.filter(pairs, message__deleted_at__isnull=True)
             .values("message__conversation_id", "user_id")
@@ -1045,7 +1110,7 @@ class Command(BaseCommand):
         summary = f"Sent {sent}, requeued {requeued}"
         if waits:
             summary += f" (queued up to {max(waits):.1f}s)"
-        self.stdout.write(f"{summary}.")
+        self._say(f"{summary}.")
 
     def _post(self, payload):
         """POST a batch of messages to Expo and return its list of tickets."""
@@ -1125,7 +1190,7 @@ class Command(BaseCommand):
         ).order_by("created_at")
 
         if dry_run:
-            self.stdout.write(
+            self._say(
                 f"Would check {ready.count()} receipt(s), "
                 f"expire {expired.count()}."
             )
@@ -1133,7 +1198,7 @@ class Command(BaseCommand):
 
         expired_count, _ = expired.delete()
         if expired_count:
-            self.stdout.write(
+            self._say(
                 f"Gave up on {expired_count} receipt(s) past Expo's window."
             )
 
@@ -1184,7 +1249,7 @@ class Command(BaseCommand):
         if settled:
             PushReceipt.objects.filter(pk__in=settled).delete()
 
-        self.stdout.write(
+        self._say(
             f"Checked {len(settled)} receipt(s); reaped {reaped} dead device(s)."
         )
 
@@ -1198,8 +1263,8 @@ class Command(BaseCommand):
             | Q(attempts__gte=PushOutbox.MAX_ATTEMPTS, created_at__lt=cutoff)
         )
         if dry_run:
-            self.stdout.write(f"Would prune {stale.count()} row(s).")
+            self._say(f"Would prune {stale.count()} row(s).")
             return
         deleted, _ = stale.delete()
         if deleted:
-            self.stdout.write(f"Pruned {deleted} row(s).")
+            self._say(f"Pruned {deleted} row(s).")
