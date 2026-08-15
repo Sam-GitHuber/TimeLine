@@ -1292,12 +1292,20 @@ centre exists for. So `PushOutbox` takes a `Message` as an alternative target to
 **Two things drop a queued push at send time**, both settled rather than retried
 since neither state is ever undone:
 
-- **Already read.** Because the send is out-of-band, by the time the timer drains
-  the queue anyone with the thread open — web or app — has polled and moved their
-  `ConversationRead` marker past the message. Comparing against that marker gets
-  "don't buzz me for the thread I'm looking at" with no presence system, no
-  heartbeat, and nothing for the app to report. It also covers a message read on
-  another device before the timer fired.
+- **Already read.** Comparing the message against the recipient's
+  `ConversationRead` marker gets "don't buzz me for the thread I'm looking at"
+  with no presence system, no heartbeat, and nothing for the app to report. It
+  also covers a message read on another device before the timer fired.
+
+  **This used to lean on the drain being slow, and that was a coincidence rather
+  than a design** (issue #355). The marker only moves when the recipient's client
+  *tells* us, and a client can't do that until its own 4s poll has delivered the
+  message — so for the first few seconds "have they read it?" answers no even for
+  someone staring straight at the thread. A once-a-minute timer lands inside that
+  window about one message in fifteen; a two-second one would land inside it
+  nearly every time. So a fresh message push to a recipient who looks *active in
+  that thread* is now **held back** rather than sent (`_should_defer`) — see
+  [notifications.md](notifications.md#holding-a-message-push-back-355).
 - **Deleted since enqueue.** Message deletion is *soft* (a tombstone, so the
   thread doesn't reshuffle), so there's no cascade to take the queued push with
   it the way there is for a hard delete. Without this check, deleting a message
@@ -2045,6 +2053,15 @@ is looking at the messages. Less damaging than the app's version, which also
 cleared that thread's pushes out of the notification tray; the browser has no
 tray, so this half is the badge alone.
 
+**The write itself is `useMarkThreadRead` now** (#355), shared in shape with the
+phone's hook of the same name. Two things changed: a failed POST is **retried**
+rather than swallowed, and returning to a backgrounded tab re-asserts the marker
+— a throttled tab may have been away for hours, which is both the likeliest
+moment for the marker to be stale and the likeliest moment for the last attempt
+to have failed. The browser never had the phone's never-remounts problem, but the
+marker is one shared row: the server reads it to decide whether to buzz someone's
+phone, so a write the *browser* drops shows up as a stray push on the *app*.
+
 **The thread header is now identity + `⋯`** — Details · Mute · Add people ·
 Leave — for the reason the app's is: three icon buttons were crowding the name of
 the person you're talking to, which is the one thing a chat header is for. One
@@ -2698,6 +2715,20 @@ dismissed that thread's delivered pushes from the tray and POSTed `read`. It wai
 on `readingMessages = showingThread && !!pages` now; `!!pages` and not
 `!messagesLoadFailed`, because gating on the failure alone still fires on the
 commit before we know the request failed.
+
+**The write now lives in `useMarkThreadRead`, and has more than one trigger**
+(#355). It used to fire only when the loaded message count changed, and swallow
+its own failure because "the next open marks it again" — but nothing re-opens
+this screen: a push tapped for the thread already on screen reuses the mounted
+one, and it stays mounted behind its own info screen. Reading a message could
+therefore leave the server believing it unread until the app was force-quit,
+which is both a stray push and a wrong tick for the sender. It now fires on
+focus, on new messages, and on the app foregrounding, and retries a write that
+doesn't land. Focus (rather than mere mounting) also means it no longer marks
+read while the thread sits behind its info screen — matching what
+`setOnScreenConversation` already treated as "not reading". See
+[notifications.md](notifications.md#holding-a-message-push-back-355) for the
+server half.
 
 **And so did the quieter write next to it.** `setOnScreenConversation(id)` on
 focus makes the foreground handler return `shouldShowList: false` for this

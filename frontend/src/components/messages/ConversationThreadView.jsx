@@ -35,6 +35,7 @@ import { useHoldMessagesOpen, useMessaging } from "../../messaging.jsx";
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from "../../outbox.js";
 import { readStateFor, receiptsVisible } from "../../readReceipts.js";
 import { firstUnreadId, toThreadRows } from "../../threadRows.js";
+import { useMarkThreadRead } from "../../useMarkThreadRead.js";
 
 // How far from the newest message counts as "scrolled away", in px — the point
 // at which jump-to-latest appears.
@@ -526,51 +527,39 @@ export default function ConversationThreadView() {
   }, []);
 
   /**
-   * Mark read on open and as new messages land, clearing the badges.
+   * Mark read on open, as new messages land, and on coming back to the tab —
+   * clearing the badges.
+   *
+   * **The write itself lives in `useMarkThreadRead` (#355).** It used to be a
+   * single un-retried POST here, fired only when the message count changed and
+   * swallowing its own failure on the reasoning that the next open would mark it
+   * again. The marker is what suppresses a push for a message already on screen
+   * and what draws the other person's second tick, so a write that quietly never
+   * happens is visible twice over. The hook's comment carries the detail.
    *
    * **It waits for the detail**, where it used to fire on mount. The unread
    * divider is drawn from `unread_count` on that payload and this POST is what
    * zeroes it, so running before the detail lands makes the two race, with the
-   * divider missing whenever the write wins.
+   * divider missing whenever the write wins. The count is latched during render,
+   * above — it survives the write being made more often for the same reason it
+   * survived being made once.
+   *
+   * **The readiness question is asked once, through the values the render
+   * branches use.** `convoQuery.isError` used to be the guard, back when it
+   * meant the same thing as "nothing is on screen". A failed refetch now keeps
+   * the thread up, and the reader is looking at the messages — so an error guard
+   * left the tab badge claiming unread mail they had just read. `!!detail` isn't
+   * the replacement either: a *404* on a refetch never clears the cached detail,
+   * so `detail` stays truthy while every render branch has switched to "This
+   * conversation isn't available". And `showingThread` alone isn't the whole of
+   * it (#324) — it answers for the *detail*, not for the transcript this write
+   * claims to have been read. `readingMessages` is that value.
    */
-  useEffect(() => {
-    // **This asks the same question the render branches ask, through the same
-    // value.** `convoQuery.isError` used to be the guard here, back when it
-    // meant the same thing as "nothing is on screen" — an error was an error
-    // card with no transcript, so not marking read was right. This commit is
-    // exactly what stops that being true: a failed refetch now keeps the thread
-    // up, and the reader is looking at the messages while this returns early,
-    // with the tab badge and the conversation list going on claiming unread
-    // mail they have just read.
-    //
-    // `!!detail` on its own isn't the replacement, tempting as it looks. A
-    // *404* on a refetch never clears the cached detail either, so `detail`
-    // stays truthy while every render branch has switched to "This conversation
-    // isn't available" — and this would fire a doomed write for a conversation
-    // that is showing nothing. `showingThread` is the one value both halves of
-    // the file read, so they can't drift.
-    //
-    // And `showingThread` alone isn't the whole of it either (#324): it answers
-    // for the *detail*, not for the transcript this write claims to have been
-    // read. `readingMessages` is that value — see its comment for why it's
-    // `!!pages` and not `!messagesLoadFailed`.
-    if (isPending || !readingMessages) return;
-    // The unread count has already been latched during render, above — this is
-    // the write it has to survive.
-    //
-    // `.catch()` because that guard is what used to keep this write off a
-    // failing connection. Without it the POST fires exactly when it is most
-    // likely to reject, and an unhandled rejection is noise for a failure that
-    // genuinely doesn't matter: the reader has read them either way, and the
-    // next open marks it again.
-    api
-      .markConversationRead(conversationId)
-      .then(() => {
-        queryClient.invalidateQueries({ queryKey: ["unreadMessages"] });
-        queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      })
-      .catch(() => {});
-  }, [conversationId, messageCount, isPending, readingMessages, queryClient]);
+  useMarkThreadRead(
+    conversationId,
+    !isPending && readingMessages,
+    messageCount
+  );
 
   /**
    * Keep the draft store in step with the composer.

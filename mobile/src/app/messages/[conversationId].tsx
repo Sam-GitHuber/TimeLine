@@ -114,12 +114,10 @@ import { useMentions } from '@/mentions';
 import type { Outgoing, OutgoingPhoto } from '@/outbox';
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
 import { usePhotoPicker } from '@/photoSource';
-import {
-  dismissConversationNotifications,
-  setOnScreenConversation,
-} from '@/push';
+import { setOnScreenConversation } from '@/push';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
+import { useMarkThreadRead } from '@/useMarkThreadRead';
 import {
   colors,
   emojiPickerTheme,
@@ -947,10 +945,22 @@ export default function ThreadScreen() {
   }
 
   /**
-   * Mark read on open and as new messages land, clearing the tab badge and this
-   * thread's pill.
+   * Mark read on open, as new messages land, on re-focus, and on the app coming
+   * back to the foreground — clearing the tab badge and this thread's pill.
    *
-   * **It waits for the detail now** (M5), where it used to fire on mount. The
+   * **The write itself now lives in `useMarkThreadRead` (#355).** It was a
+   * single un-retried POST fired only when the loaded message count changed,
+   * which meant a thread could be read repeatedly without the server ever being
+   * told: nothing remounts this screen (a push tapped for the thread already on
+   * screen reuses it, and it stays mounted behind its own info screen), so the
+   * "the next open marks it again" that justified swallowing the failure had no
+   * next open to rely on. The marker is what suppresses a push for a message
+   * already on screen and what draws the sender's second tick, so losing it is
+   * visible twice over. The hook's own comment carries the detail.
+   *
+   * What's kept from the effect this replaces:
+   *
+   * **It waits for the detail** (M5), where it used to fire on mount. The
    * unread divider is drawn from `unread_count` on that payload, and this POST
    * is what zeroes it — so run before the detail lands and the two race, with
    * the divider missing whenever the write wins. Waiting also stops a `pending`
@@ -977,37 +987,16 @@ export default function ThreadScreen() {
    * moment the transcript got an error branch of its own: the conversation can
    * be fully on screen while its messages are not. See `readingMessages` above
    * — it waits for the transcript exactly as this used to wait for the detail.
+   *
+   * The unread count has already been latched during render, above — this is
+   * the write it has to survive, and it survives being made more often for the
+   * same reason it survived being made once.
+   *
+   * `readingMessages` is a boolean rather than `detail` itself: the payload is
+   * re-fetched every `CONVERSATION_DETAIL_POLL_MS`, so depending on the object
+   * would turn this into a mark-read poll of its own. A boolean flips once.
    */
-  useEffect(() => {
-    if (isPending || !readingMessages) return;
-    // Take back this thread's notifications from the phone's notification
-    // centre (#178). Reading a thread in the app is the commonest way a
-    // notification goes stale, and until this landed nothing ever removed one:
-    // you could read everything and still find "New message from Ada" on the
-    // lock screen. Deliberately *not* chained onto the POST below — whether the
-    // server hears about it doesn't change the fact the user has read it, and
-    // the shade is local. Re-runs with the effect, so a push that arrives while
-    // this thread is open is mopped up on the next poll.
-    void dismissConversationNotifications([id]);
-    // The unread count has already been latched during render, above — this is
-    // the write it has to survive.
-    api
-      .markConversationRead(id)
-      .then(() => {
-        queryClient.invalidateQueries({ queryKey: ['unreadMessages'] });
-        queryClient.invalidateQueries({ queryKey: ['conversations'] });
-      })
-      // Swallowed on purpose, and it has to be caught now the error guard above
-      // is gone: this fires while the connection is patchy, which is exactly
-      // when it will reject. There is nothing to tell the reader — they have
-      // read the messages either way, and the next open marks it again — but an
-      // uncaught rejection is a redbox in development and a warning in
-      // production, for a write whose failure is genuinely uninteresting.
-      .catch(() => {});
-    // A boolean rather than `detail`: the payload is re-fetched every
-    // `CONVERSATION_DETAIL_POLL_MS`, so depending on the object itself would
-    // turn this into a mark-read poll of its own. A boolean flips once.
-  }, [id, messageCount, isPending, readingMessages, queryClient]);
+  useMarkThreadRead(id, !isPending && readingMessages, messageCount);
 
   /**
    * Tell the notification handler this thread is the one on screen (#178), so a

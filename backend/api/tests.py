@@ -11737,6 +11737,76 @@ class SendPushesCommandTests(APITestCase):
 
         self.assertEqual(len(self._sent_body(urlopen)), 1)
 
+    def test_a_fresh_message_is_held_back_from_someone_still_in_the_thread(self):
+        # Issue #355. `_should_drop` above can only see a read marker the
+        # recipient's client has already sent, and that client cannot send one
+        # until its own 4s poll has told it the message exists. So for the first
+        # few seconds "have they read it?" answers *no* even for someone staring
+        # straight at the thread — and sending buzzes a phone for a message on
+        # its own screen. Marker just *before* the message: they were reading a
+        # moment ago, and haven't been told about this one yet.
+        convo, _message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=2),
+        )
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        row = PushOutbox.objects.get()
+        # Held, *not* settled and not failed — it still goes out on a later run
+        # if they turn out not to have been reading after all. Spending an
+        # attempt here would let a busy thread burn through MAX_ATTEMPTS without
+        # Expo ever having been called.
+        self.assertIsNone(row.sent_at)
+        self.assertEqual(row.attempts, 0)
+
+    def test_a_held_back_message_goes_out_once_the_grace_has_passed(self):
+        # The hold is a short wait, not a veto: someone who was reading a minute
+        # ago but has since put the phone down still gets their push.
+        convo, message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=40),
+        )
+        # Older than PUSH_MESSAGE_GRACE_SECONDS. `update` because `created_at`
+        # is auto_now_add and would otherwise be rewritten on save.
+        Message.objects.filter(pk=message.pk).update(
+            created_at=timezone.now() - timedelta(seconds=30)
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    def test_an_idle_recipient_is_never_held_back(self):
+        # The case push exists for: the thread was read hours ago and the phone
+        # is in a pocket. Nobody is about to mark anything read, so waiting would
+        # be pure delay — this is what keeps the grace off the common path.
+        convo, _message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(hours=3),
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    def test_never_having_opened_the_thread_is_not_being_active_in_it(self):
+        # No marker at all means they have never opened this conversation, which
+        # is the *opposite* of reading it right now. A missing row must not be
+        # mistaken for a recent one.
+        self._queue_message()
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
     def test_a_comment_notification_deep_links_to_its_parent_post(self):
         # The route needs the *post* id, but the notification carries a comment
         # FK — the serializer resolves it, so the app needs no extra round-trip.
