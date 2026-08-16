@@ -239,7 +239,7 @@ holds, and not what's sitting in GHCR. Both images also carry it as an
 # What each container is running, and whether that matches the release image.
 docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps
 docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
-  $(docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps -q backend web)
+  $(docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml ps -q backend pushes web)
 ```
 
 If those disagree with the latest release, just let the timer tick — autodeploy
@@ -454,8 +454,8 @@ That includes the account-deletion one-liner below — deleting a user sweeps th
 uploaded files off disk (`api/media_cleanup.py`). It happens to work as root
 today, since root can unlink anything, but the habit is what keeps the tree
 consistent. DB-only commands (`createsuperuser`, approving a sign-up, the
-`send_pushes` / `flushexpiredtokens` timers) never touch media and are fine as
-they are.
+`flushexpiredtokens` timer, the `pushes` service) never touch media and are fine
+as they are.
 
 ## Handling reports & deletion requests (moderation)
 
@@ -624,35 +624,51 @@ Notifications destined for a phone are queued into `PushOutbox` by the web
 request and delivered out-of-band by `manage.py send_pushes`, so a slow or
 unreachable Expo can never fail a user's action — see
 [`reference/notifications.md`](reference/notifications.md#phone-push-phase-9-milestone-d)
-for the why. **Without this timer installed, notifications still appear in the
+for the why. **Without the drain running, notifications still appear in the
 in-app activity centre but no phone ever buzzes** — the rows just accumulate
 unsent, which is the failure mode to recognise.
 
-```bash
-sudo cp deploy/send-pushes.{service,timer} /etc/systemd/system/
-sudo nano /etc/systemd/system/send-pushes.service   # set User= and paths
-sudo systemctl daemon-reload
-sudo systemctl enable --now send-pushes.timer
+**There is nothing to install.** Since #354 the drain is the `pushes` service in
+the compose stack: a resident process running `send_pushes --loop`, which sweeps
+the outbox every two seconds. It comes up with `docker compose up -d` like any
+other service, `restart: unless-stopped` brings it back after a crash or a
+reboot, and autodeploy recreates it on release alongside `backend` and `web`.
 
-# check it's scheduled, then watch a few runs
-systemctl list-timers send-pushes.timer
-journalctl -u send-pushes.service -f
+```bash
+# is it alive? a heartbeat a minute, plus a line per real send
+docker compose -f docker-compose.prod.yml logs -f pushes
 ```
 
-Prove it by hand first — this is safe to run repeatedly and sends nothing:
+Prove the send path by hand — safe to run repeatedly, and sends nothing:
 
 ```bash
 docker compose -f docker-compose.prod.yml exec -T backend \
   python manage.py send_pushes --dry-run
 ```
 
-It runs every minute (not `Persistent=true`, unlike the other timers here: after
-the box has been off, firing a backlog of stale pushes at people's phones is
-worse than skipping them — the rows still go out on the next ordinary tick).
-
-Safe to run by hand alongside the timer: the drain claims rows with
+Safe to run by hand alongside the resident drain: it claims rows with
 `select_for_update(skip_locked=True)`, so a manual run takes different rows
-rather than double-sending.
+rather than double-sending. Without `--loop` the command makes exactly one pass
+and exits, which is what a hand-run and every test does.
+
+### One-time migration off the old timer
+
+Before #354 this was `send-pushes.timer`, a systemd unit firing a fresh Django
+process once a minute. Those unit files are gone from the repo, **but `git pull`
+cannot remove them from `/etc/systemd/system`** — so a box set up before that
+release goes on running the old oneshot alongside the new container until it is
+told not to. Nothing breaks if both run (`skip_locked` means they take different
+rows); it is a wasted process a minute and two places to look. Once, on the box:
+
+```bash
+sudo systemctl disable --now send-pushes.timer
+sudo rm -f /etc/systemd/system/send-pushes.{service,timer}
+sudo systemctl daemon-reload
+
+# confirm it's gone, and that the container has taken over
+systemctl list-timers --all | grep send-pushes     # expect no output
+docker compose -f docker-compose.prod.yml logs --tail 20 pushes
+```
 
 Set `EXPO_ACCESS_TOKEN` in `.env.prod` at the same time — see
 `.env.prod.example`. Without it Expo accepts unauthenticated sends, meaning
@@ -661,16 +677,55 @@ app's name.
 
 ### Reading the log
 
-Each run prints what it did. `Sent 1, requeued 0.` means Expo **accepted** one
-message — not that a phone buzzed; that only shows up in a later run's receipt
-line, e.g. `Checked 1 receipt(s); reaped 0 dead device(s).` A non-zero "reaped"
-is normal and healthy: it's a device whose app was deleted or whose token was
-retired, being removed so we stop pushing into the void.
+`Sent 1, requeued 0 (queued up to 2.1s).` means Expo **accepted** one message —
+not that a phone buzzed; that only shows up in a later receipt line, e.g.
+`Checked 1 receipt(s); reaped 0 dead device(s).` A non-zero "reaped" is normal
+and healthy: it's a device whose app was deleted or whose token was retired,
+being removed so we stop pushing into the void.
+
+**"queued up to Ns" is our half of push latency**, from the row being written by
+the web request to it going to Expo. It is the number to look at before tuning
+anything (#354): Expo → APNs/FCM → device adds another 1–5s that we can neither
+see nor control, so if a push feels slow while this line says 2s, the delay isn't
+ours and a tighter `PUSH_DRAIN_INTERVAL_SECONDS` will not fix it. To split the
+two legs, note this number and the moment the phone actually buzzes — the
+difference is Expo's. Values well above the drain interval mean a message push
+was deliberately held; see
+[the two hold rules](reference/notifications.md#how-often-it-drains-354).
 
 Receipts are asked about ~15 min after the send, so a quiet gap between the two
 lines is expected. `Gave up on N receipt(s) past Expo's window.` means Expo never
 answered within its 24h retention — worth a glance if it's routine, since it
-suggests the timer isn't running often enough to catch its own tickets.
+suggests the drain isn't running often enough to catch its own tickets.
+
+`Alive: 30 drain(s) since the last report.` is the loop's heartbeat, once a
+minute. **It exists because a healthy quiet stretch and a wedged process produce
+identical output otherwise — nothing** — and the symptom of a wedged drain
+("nobody's phone buzzes") looks exactly like nobody having sent anything. If the
+heartbeat stops, that's the alarm. It sometimes carries `, N message push(es)
+currently held back`, which is normal: see
+[the two hold rules](reference/notifications.md#how-often-it-drains-354). A count
+that never falls to zero is not — that would mean a misconfigured
+`PUSH_MESSAGE_COOLDOWN_SECONDS` or `PUSH_MESSAGE_GRACE_SECONDS`.
+
+`, and rows queued behind them are waiting` on the same line means a drain used
+every window it is allowed and still had held rows filling them, so work it never
+looked at is sitting in the queue. That is a backlog, not a hang — the next drain
+tries again two seconds later — but it is the one heartbeat variant that says
+*do something*: check the two hold settings above first, then whether
+`EXPO_PUSH_MAX_ROWS` is too small for what the queue is now carrying.
+
+The per-pass "Nothing queued." line is deliberately suppressed in `--loop`; at
+two seconds a pass it would be 43,000 lines a day. A hand-run still prints it.
+
+`Drain failed: …` on stderr is one pass that raised. The loop logs it, drops its
+database connection and carries on ten seconds later, so a single line after a
+Postgres restart is expected and self-healing. A *repeating* one is not.
+
+`Maintenance failed: …` is the receipt check or the prune, and is deliberately a
+**different** line: it does not mean pushes have stopped going out, and it does
+not slow the drain. It retries on the next maintenance tick, not the next pass —
+so a stuck prune can't turn into an Expo call every ten seconds.
 
 ## Uptime monitoring
 
@@ -861,7 +916,7 @@ so a future change doesn't quietly undo the reasoning.
   Triggering on *release* (not every merge) keeps a deploy a deliberate human
   action with a version/changelog, and fork PRs can't publish releases so untrusted
   code never builds our images. Chosen a systemd timer over Watchtower for
-  consistency with the box's other timers (backups, pushes, health) and transparency. Config
+  consistency with the box's other timers (backups, token flush, health) and transparency. Config
   (Caddyfile, compose files) travels via `git pull`; only the heavy image build is
   offloaded to CI, and the box stays on `main` so the manual `deploy.sh`
   build-from-source path still works as a fallback. **Security:** the whole

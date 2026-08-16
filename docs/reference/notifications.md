@@ -400,12 +400,9 @@ tokens being reaped.
 `create_notification` runs inside ordinary web requests. Calling Expo's HTTP API
 there would put a third-party round-trip — and its timeouts — on the critical
 path of a request that has nothing to do with push. So the request only writes a
-row, and `manage.py send_pushes` drains it on a systemd timer every minute
-(`deploy/send-pushes.{service,timer}`; install steps in [deploy.md](../deploy.md)).
-A push failure can never fail a user's action, and a send that dies halfway is
-retried rather than lost — which a fire-and-forget thread could not promise.
-A minute is the latency/load trade: still reads as "just happened" to a human,
-without waking a process every few seconds on a small single-instance box.
+row, and `manage.py send_pushes` drains it out-of-band. A push failure can never
+fail a user's action, and a send that dies halfway is retried rather than lost —
+which a fire-and-forget thread could not promise.
 
 **Three properties fall out of putting the enqueue in `create_notification`:**
 
@@ -456,14 +453,179 @@ notification becomes several messages, so letting one bound the other would
 make the drain's real workload hard to reason about.
 
 The drain claims its rows with `select_for_update(skip_locked=True)`, so a
-hand-run during a timer tick takes different rows rather than sending the same
-push twice.
+hand-run alongside the resident drain takes different rows rather than sending
+the same push twice.
+
+### How often it drains (#354)
+
+`send_pushes --loop` is a **resident process**, run as the `pushes` service in
+the compose stack. It starts Django once and sweeps the outbox every
+`PUSH_DRAIN_INTERVAL_SECONDS` (2s), so our half of push latency is a couple of
+seconds rather than the ~30s average a per-minute timer gave.
+
+It replaced `deploy/send-pushes.{service,timer}`, which ran `docker compose exec
+-T backend python manage.py send_pushes` once a minute. **The old cadence was a
+cost problem, not a policy.** Every tick paid for a cold Django process; at 60s
+that is 1,440 interpreter startups a day, almost all of them to find an empty
+queue, and tightening it to seconds would have meant 43,000.
+
+Starting Django once inverts that, and the inversion is big enough to have been
+worth measuring rather than assuming. An idle sweep is **one indexed `SELECT`**
+(three round-trips with its `BEGIN`/`COMMIT`), because `_drain` returns before any
+of its per-batch lookups when nothing is queued. Timed on a dev machine:
+
+| | per pass | passes/day | work/day |
+|---|---|---|---|
+| old timer, cold oneshot | ~740 ms | 1,440 | ~18 min |
+| resident loop, idle sweep | ~7 ms | 43,200 | ~5 min |
+
+So the drain is roughly **three times cheaper at rest while running 30× as
+often** — and the 740 ms understates the old side, which also paid for a `docker
+compose exec` the loop doesn't. Re-measure on the box if this ever matters; the
+shape of the answer, not the exact figures, is the point.
+
+Four details that aren't obvious:
+
+- **Two cadences in one loop.** `handle()` runs drain → receipts → prune
+  together, which is fine once a minute. The loop splits them: only the drain
+  runs at `PUSH_DRAIN_INTERVAL_SECONDS`, while receipts and pruning stay on
+  `PUSH_MAINTENANCE_INTERVAL_SECONDS` (60s, the old timer's interval). Receipts
+  aren't even *asked* for until they're 15 minutes old, so checking them every
+  two seconds would be 43,000 pointless round-trips to Expo a day.
+- **It has to be a compose service, not a systemd unit.** The old unit `exec`ed
+  *into* the backend container. A resident process started that way is orphaned
+  by the next autodeploy, which replaces that container. So `pushes` is a
+  container compose owns — and it is listed in `deploy/autodeploy.sh`'s
+  `SERVICES`, without which it would run last month's code for ever while every
+  health signal read green (the #104 failure, in a service nobody watches).
+- **SIGTERM is a request, not an abort.** It sets a flag — and *only* a flag; the
+  current drain finishes and commits. Being killed partway through an Expo call
+  would leave rows claimed with no record of whether they were sent. Nothing is
+  printed from the handler itself: Python runs it on the main thread between
+  bytecodes, so writing there can re-enter a `BufferedWriter` mid-write and
+  raise into unrelated code. The container also runs with `init: true`, because
+  a bare `python` as PID 1 has *no default action* for a signal it hasn't yet
+  installed a handler for — a stop landing during Django's startup would be
+  ignored outright and then wait out the full 600s grace.
+- **A held row must not squat the selection window.** Held rows keep `sent_at IS
+  NULL` and their original `created_at`, so they stay at the head of the
+  `[:EXPO_PUSH_MAX_ROWS]` window — for a *minute*, under the cooldown. Once
+  enough of them fill a window, every drain would re-select the same rows, send
+  nothing, and starve what is queued behind them, including notification rows
+  that are subject to no hold at all. So a drain that fills its window and still
+  holds something back takes another look past the rows it held, up to
+  `_MAX_DRAIN_PAGES` windows, and says so in the heartbeat when it runs out.
+
+An exception in one pass is logged, the database connection dropped (so the next
+pass reconnects rather than reusing a socket Postgres has closed), and the loop
+carries on after a short backoff. A resident drain that died on a transient fault
+would be worse than the timer, which at least got a fresh process next minute.
+Two things follow from taking that promise seriously: **the recovery itself is
+guarded** (writing to a log whose reader has gone away, or closing an already-dead
+connection, both raise — and an exception there would kill the process while
+handling the fault it was meant to survive), and **each maintenance step has its
+own guard**, so a receipt check that keeps failing can't quietly stop the prune
+from ever running and let the outbox grow without bound behind a green site.
+
+**Our half is not the whole latency.** Expo → APNs/FCM → device adds 1–5s that we
+don't control, so the honest target was "under ~5s", not "instant", and
+tightening below a second or two buys nothing a human can perceive.
+
+#### What the slow timer was doing by accident
+
+Speeding the drain up is not a one-line change, because **a once-a-minute sweep
+was quietly providing two behaviours nothing else was enforcing.** Both had to
+be written down before it could be removed.
+
+1. **Read-suppression had time to work.** `_should_drop` can only bin a push the
+   recipient has *told* us they've read, and that takes a 4s client poll. At 60s
+   the drain almost always lost that race in the reader's favour; at 2s it wins
+   every time. That is `_should_defer`'s job now — see below.
+2. **A thread buzzed at most once a minute.** `enqueue_message_pushes` coalesces
+   onto an *unsent* row, so a burst buzzes once and lets the unread badge carry
+   the count. But that only worked because rows *sat* unsent. Nothing in the
+   enqueue changed here; the thing holding rows up was removed, and the same code
+   would now permit thirty buzzes a minute. `_should_space_out` restates the
+   guarantee explicitly, at the value the timer used to give it
+   (`PUSH_MESSAGE_COOLDOWN_SECONDS`, 60s).
+
+If either of these is ever retuned, retune it against the drain interval. The
+tests for both pin values rather than signs for exactly that reason.
+
+### Spacing out message pushes (#354)
+
+`_should_space_out` holds a **message** push back if we sent that recipient one
+about *that thread* within `PUSH_MESSAGE_COOLDOWN_SECONDS`. Three things about
+it:
+
+- **Held, not dropped.** The row goes out when the cooldown expires, matching
+  what the old timer did with the row a coalesced burst left behind. A thread
+  nobody reads should nudge again, not fall silent after one push.
+- **"Last buzzed" means `delivered_tokens`, not `sent_at`.** The drain stamps
+  `sent_at` on rows it settles *without* calling Expo — a recipient with no
+  devices, a deleted message, a push dropped as already-read. Counting those as a
+  buzz would silence the next message for a minute, and would do it most often to
+  people in a live conversation, who are precisely who a fast drain is for. A
+  `DeviceNotRegistered` reap is the same case and is deliberately **not** added
+  to `delivered_tokens`: it rang nobody, and the moment it fires is a reinstall
+  or a token rotation — exactly when the recipient has a working device again.
+- **@mentions are exempt**, for the same reason they're exempt from mute: being
+  named is how you get someone's attention, and a busy thread is both what puts
+  you in cooldown and where a minute's silence is most obviously wrong.
+
+  **The exemption has to look past the row's own message.** A queued row keeps
+  pointing at the message it was created for while later ones coalesce onto it,
+  so asking `is_mentioned(row.message, …)` answers about the *first* message of
+  a burst — and a mention arriving mid-burst creates no row of its own. Since a
+  busy thread is the only place a row is reliably already queued, that would
+  have broken the exemption in precisely the case it exists for.
+  `_mention_marks` asks whether the recipient has been named anywhere in the
+  thread since the row's message instead, which is everything the row now stands
+  for. Soft-deleted messages are excluded — a mention taken back shouldn't go on
+  punching pushes through.
+
+### Dropping a message push, and what "read" has to mean
+
+`_should_drop` bins a message push the recipient has already read, and its whole
+appeal is that it needs no presence system: the app moves `ConversationRead` for
+its own reasons and the drain just reads it.
+
+**Read *what*, though.** A queued row keeps pointing at the message it was
+created for while every later message in the thread coalesces onto it, so
+comparing the marker against `row.message.created_at` answers a question about
+the *first* message of a burst. Answering "yes, read" there settles the row —
+and the nine messages behind it are never announced at all, with nothing
+anywhere recording that they were dropped. The cooldown made that the normal
+case rather than a race: it holds the row for a minute, which is a minute in
+which a glance at the thread on a laptop can silence the phone for everything
+that arrives next.
+
+So the marker is compared against **the newest message the row now stands for**
+(`_later_messages`), and only a recipient who is genuinely caught up is dropped.
+Three carve-outs in that lookup:
+
+- **Their own messages don't count.** Sending stamps the read marker, but the
+  marker and the message are two writes rather than one instant, so counting
+  your own reply as unread mail would buzz you about something you just typed.
+- **A muted thread counts only mentions.** A mention is the only kind of message
+  `enqueue_message_pushes` would have queued or coalesced for someone who muted
+  the thread, so ordinary chatter afterwards must not revive a push they have
+  already read — that would buzz them through a quiet they asked for.
+- **Visibility is *not* re-checked.** A message in an interval gap the recipient
+  can't read still counts as "the thread has moved on", so it can rescue a row.
+  The cost is one push about a thread they are in, phrased from a message they
+  can see; the cost of the reverse — re-deriving the enqueue's audience on the
+  read side — is a second copy of the visibility rules, which is a worse thing
+  to get wrong. See [connections.md](connections.md) for where visibility lives.
+
+What a rescued row *says* is still phrased and channelled from its first
+message. That half of the coalescing problem is unchanged and tracked
+separately; a push naming the wrong sender of a real unread message is a smaller
+wrong than no push at all. The deleted-message branch is deliberately left as
+"drop, full stop" — it has the same shape of hole, but "a push for deleted
+content cannot fire" is the stronger promise and the one this doc makes above.
 
 ### Holding a message push back (#355)
-
-`_should_drop` (above) bins a message push the recipient has already read, and
-its whole appeal is that it needs no presence system: the app moves
-`ConversationRead` for its own reasons and the drain just reads it.
 
 **But the marker can only ever be as current as the client's last poll.** A
 client learns a message exists on its own `MESSAGE_POLL_MS` tick — four seconds —
@@ -473,18 +635,18 @@ thread, and a drain landing in that window buzzes a phone for a message already
 on its screen.
 
 Nothing prevented that except the drain being slow. A once-a-minute timer,
-randomly phased against a message, lands inside a four-second window about **one
-message in fifteen** — rare enough to look like a fluke. That is a coincidence,
-not a design, and it inverts the moment the drain speeds up: at a two-second
-cadence the drain would beat the poll nearly every time and the read check would
-stop working almost entirely.
+randomly phased against a message, landed inside a four-second window about **one
+message in fifteen** — rare enough to look like a fluke. That was a coincidence,
+not a design, and #354 has since removed it: **at 2s the drain beats the poll
+every time, so `_should_defer` is now the only thing between a reader and a
+pointless buzz.** It was written in anticipation of that and is now load-bearing.
 
 So `_should_defer` holds a **message** push back when both are true:
 
 - the message is younger than `PUSH_MESSAGE_GRACE_SECONDS` (6s — it has to clear
   the client's 4s poll plus a round trip), **and**
 - the recipient's read marker for *that thread* moved within
-  `PUSH_ACTIVE_THREAD_SECONDS` (15s), which is as close to "they are in this
+  `PUSH_ACTIVE_THREAD_SECONDS` (120s), which is as close to "they are in this
   conversation right now" as the server gets without a presence system.
 
 Both conditions matter. Waiting unconditionally would put a floor under every
@@ -505,19 +667,23 @@ buzzed them anyway.
 opening the thread, **sending** in it (`MessageCreateView`: "sending implies
 you've read everything up to now"), and swiping **Mark read** on the list. So
 someone who fires off a reply and pockets the phone looks active for the next
-minute, and a reply landing in that window waits a drain instead of going
-straight out. That is bounded — one extra tick, once per message — but it means
-the most conversational exchanges are the ones that buzz slowest, and it argues
-for keeping `PUSH_ACTIVE_THREAD_SECONDS` well under the drain interval rather
-than equal to it. Distinguishing the three would need a presence signal, which
-is exactly what leaning on `ConversationRead` avoids.
+`PUSH_ACTIVE_THREAD_SECONDS`, and a reply landing in that window is held.
+Distinguishing the three would need a presence signal, which is exactly what
+leaning on `ConversationRead` avoids.
 
-**The cost, honestly:** a held row waits for the next drain, so on the present
-per-minute timer the few pushes this catches can land up to a minute later than
-they would have. That's the right way round — the recipient it defers was, by
-construction, reading the thread seconds ago, so the likeliest next event is
-their marker arriving and the push being dropped as *read* rather than delayed —
-but it is a real cost, and it shrinks to nothing when the drain interval does.
+**The cost, and why the window grew from 15s to 120s.** A held row waits for the
+next drain — which used to be up to a minute away and is now two seconds. Since
+the age test caps the hold at the grace itself, **the most a defer can now cost
+anyone is six seconds**, however wide the active window is.
+
+That inverts the original trade. 15s was chosen because a wide window meant
+minute-long holds for the send-and-pocket case above; with holding this cheap,
+the expensive mistake is the other one — the **silent reader**. Someone staring
+at a quiet thread writes no read marker, because nothing has arrived to move it,
+so at 15s their marker looks stale and the 2s drain buzzes them for a message on
+the screen in front of them. That is the exact #355 symptom, reintroduced by
+making delivery faster. 120s covers "plausibly still in this thread" and costs at
+most six seconds to anyone it catches wrongly.
 
 ### Replying from the notification (Phase 9b M8)
 

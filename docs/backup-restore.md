@@ -240,12 +240,18 @@ Re-run both occasionally (e.g. monthly) — backups rot silently otherwise.
 Only when live data is actually lost/corrupt. This **overwrites** the live DB
 and media and asks you to type a confirmation phrase.
 
-The script **stops the app** (`backend` + `web`) for the duration so nothing
-writes to the database while `pg_restore` is dropping and recreating objects,
+The script **stops every database writer** (`backend`, `pushes`, `web`) for the
+duration so nothing writes while `pg_restore` is dropping and recreating objects,
 then brings it back up automatically once the restore succeeds. `db` stays up
 (the restore runs through it). If the restore aborts partway, the app is left
 stopped on purpose — the script prints the `docker compose … up -d` command to
 bring it back once you've resolved the problem.
+
+`pushes` is on that list because it is the writer that doesn't look like one: it
+serves no requests, but the resident drain (#354) opens a transaction and takes
+`FOR UPDATE` locks on the outbox every two seconds, and it carries
+`restart: unless-stopped`. If a future service writes to Postgres, add it to the
+stop list in `restore.sh` — `deploy/tests/test_restore_preflight.sh` pins it.
 
 Before any of that it runs a **preflight** — it proves it can write the media
 target and that the dump is really off-site *before* it stops anything. A refusal

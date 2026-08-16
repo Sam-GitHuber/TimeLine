@@ -2,9 +2,10 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import tempfile
 from datetime import UTC, time, timedelta
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -11246,6 +11247,11 @@ class MarkConversationUnreadTests(APITestCase):
     # were retuned. The offsets below are chosen against *these* numbers.
     PUSH_MESSAGE_GRACE_SECONDS=6,
     PUSH_ACTIVE_THREAD_SECONDS=60,
+    # Off for the class, turned on per-test by the cooldown cases (#354). Every
+    # test here builds its conversations from scratch and drains once, so at the
+    # real 60s default any case that put two message pushes through one thread
+    # would silently be testing the cooldown instead of the thing it names.
+    PUSH_MESSAGE_COOLDOWN_SECONDS=0,
 )
 class SendPushesCommandTests(APITestCase):
     """Draining the outbox (Phase 9, Milestone D).
@@ -11287,7 +11293,13 @@ class SendPushesCommandTests(APITestCase):
                 urlopen.return_value = _FakeExpoResponse(
                     payload if payload is not None else _ok_tickets(1)
                 )
-            call_command("send_pushes", verbosity=0, **kwargs)
+            # Quiet by default so a 68-case run isn't a wall of send lines —
+            # and it is a real setting now, not decoration: the command used to
+            # accept `--verbosity` and ignore it. `setdefault` rather than a
+            # fixed kwarg so the cases that assert on output can ask for 1
+            # without colliding with it.
+            kwargs.setdefault("verbosity", 0)
+            call_command("send_pushes", **kwargs)
         return urlopen
 
     def _sent_body(self, urlopen):
@@ -11747,6 +11759,118 @@ class SendPushesCommandTests(APITestCase):
 
         self.assertEqual(len(self._sent_body(urlopen)), 1)
 
+    def _backdate(self, message, seconds):
+        """Move a message's ``created_at`` into the past.
+
+        ``update`` rather than ``save`` because ``created_at`` is
+        ``auto_now_add`` — written on INSERT and never rewritten — and because
+        the drain re-reads the row from the database anyway.
+        """
+        when = timezone.now() - timedelta(seconds=seconds)
+        Message.objects.filter(pk=message.pk).update(created_at=when)
+        message.created_at = when
+        return message
+
+    def test_a_burst_is_not_binned_because_its_first_message_was_read(self):
+        # The hole the cooldown widened (issue #354). A queued row keeps
+        # pointing at the message it was created for while every later message
+        # coalesces onto it — so comparing the read marker against *that*
+        # message means glancing at the thread bins the whole rest of the burst,
+        # silently, with nothing anywhere recording that it happened. The
+        # cooldown holds the row for a minute, which is a minute of exposure
+        # every time rather than the old timer's random slice of one.
+        convo, first = self._queue_message()
+        self._backdate(first, 30)
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="and another"
+        )
+        self._backdate(later, 10)
+        # No second row: the enqueue coalesces onto the unsent one.
+        notifications.enqueue_message_pushes(later)
+        self.assertEqual(
+            PushOutbox.objects.filter(sent_at__isnull=True).count(), 1
+        )
+        # Read up to the first message and no further.
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=20),
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    def test_reading_the_whole_thread_still_drops_the_push(self):
+        # The other side of the same test: the drop is not weakened into "send
+        # whenever anything newer exists". Someone genuinely caught up is still
+        # not buzzed, which is what "don't buzz me for a thread I'm looking at"
+        # costs us — almost nothing.
+        convo, first = self._queue_message()
+        self._backdate(first, 30)
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="and another"
+        )
+        self._backdate(later, 20)
+        notifications.enqueue_message_pushes(later)
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=10),
+        )
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_your_own_reply_does_not_resurrect_a_push_you_have_read(self):
+        # Sending stamps the read marker ("sending implies you've read
+        # everything up to now"), but the marker and the message are two writes,
+        # not one instant. Counting your own message as unread mail would buzz
+        # you about something you just typed.
+        convo, first = self._queue_message()
+        self._backdate(first, 30)
+        mine = Message.objects.create(
+            conversation=convo, sender=self.me, text="on it"
+        )
+        self._backdate(mine, 10)
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=11),
+        )
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+
+    def test_chatter_in_a_muted_thread_does_not_revive_a_read_mention(self):
+        # A muted thread only ever queues (or coalesces) a push for someone when
+        # they are *named*, so ordinary chatter arriving afterwards is not mail
+        # they are waiting for — and treating it as such would buzz them through
+        # a quiet they explicitly asked for, which is the one thing mute has to
+        # be able to promise.
+        convo, first = self._queue_message()
+        MessageMention.objects.create(message=first, user=self.me)
+        self._backdate(first, 30)
+        Participant.objects.filter(conversation=convo, user=self.me).update(
+            muted_at=timezone.now()
+        )
+        chatter = Message.objects.create(
+            conversation=convo, sender=self.actor, text="unrelated"
+        )
+        self._backdate(chatter, 10)
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=20),
+        )
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+
     def test_a_fresh_message_is_held_back_from_someone_still_in_the_thread(self):
         # Issue #355. `_should_drop` above can only see a read marker the
         # recipient's client has already sent, and that client cannot send one
@@ -11879,6 +12003,284 @@ class SendPushesCommandTests(APITestCase):
         held_row = PushOutbox.objects.get(message__conversation=held_convo)
         self.assertIsNone(held_row.sent_at)
         self.assertEqual(held_row.attempts, 0)
+
+    def test_the_send_line_reports_how_long_the_row_waited(self):
+        # Our half of push latency, and the only half anyone here can act on:
+        # Expo → APNs/FCM → device adds 1-5s that is neither visible nor
+        # controllable from the box. Without this number "is the delay ours?" is
+        # unanswerable, which is the question issue #354 was opened to settle.
+        self._queue()
+        PushOutbox.objects.update(
+            created_at=timezone.now() - timedelta(seconds=9)
+        )
+
+        # verbosity=1 explicitly: `_run` passes 0, which the command now
+        # actually honours, and this case is about what it prints.
+        out = StringIO()
+        self._run(stdout=out, verbosity=1)
+
+        self.assertIn("queued up to 9.", out.getvalue())
+
+    def test_minus_v0_really_is_quiet(self):
+        # `--verbosity` used to be accepted and ignored, so the suite passed
+        # `verbosity=0` and got a send line per case anyway.
+        self._queue()
+
+        out = StringIO()
+        self._run(stdout=out, verbosity=0)
+
+        self.assertEqual(out.getvalue(), "")
+        # Still did the work, though — quiet is not dry-run.
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)
+
+    def test_a_drain_that_only_settles_rows_still_says_so(self):
+        # Settling writes `sent_at`, so it is work, not idleness — and in
+        # `--loop` the "nothing outstanding" line is swallowed as idle. Without
+        # this line a drain that binned every queued push would look exactly
+        # like an empty queue, which is the one symptom a `_should_drop` bug
+        # would produce.
+        convo, message = self._queue_message()
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=message.created_at + timedelta(seconds=1),
+        )
+
+        out = StringIO()
+        urlopen = self._run(stdout=out, verbosity=1)
+
+        urlopen.assert_not_called()
+        self.assertIn("Settled 1 row(s) without sending", out.getvalue())
+
+    # --- the cooldown between two buzzes about one thread (issue #354) --------
+    #
+    # Until the drain became resident, "at most one message buzz per person per
+    # thread per minute" was a property of the *timer*, not of any code: the
+    # enqueue coalesced onto a row that then sat unsent for up to a minute.
+    # Sweeping every two seconds removes the sitting-still without touching the
+    # enqueue, so the guarantee has to be asserted somewhere it can't evaporate
+    # again the next time an interval is tuned.
+
+    def _already_buzzed(self, convo, when=None):
+        """A message push we really sent about ``convo``, ``when`` ago.
+
+        ``delivered_tokens`` is the part that matters: `_last_pushes` reads it
+        rather than `sent_at` precisely so that rows settled *without* calling
+        Expo don't start a cooldown.
+        """
+        earlier = Message.objects.create(
+            conversation=convo, sender=self.actor, text="earlier"
+        )
+        return PushOutbox.objects.create(
+            message=earlier,
+            recipient=self.me,
+            sent_at=when or timezone.now(),
+            delivered_tokens=[self.device.expo_token],
+        )
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_second_message_does_not_buzz_again_straight_away(self):
+        convo, _message = self._queue_message()
+        self._already_buzzed(convo)
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        # Held exactly like the read-grace holds: no `sent_at`, no `attempts`.
+        # Dropping it instead would mean a thread nobody reads goes quiet after
+        # one push, which is not what the old timer did.
+        row = PushOutbox.objects.get(sent_at__isnull=True)
+        self.assertEqual(row.attempts, 0)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_the_held_message_goes_out_once_the_cooldown_expires(self):
+        convo, _message = self._queue_message()
+        self._already_buzzed(convo, when=timezone.now() - timedelta(seconds=61))
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_push_settled_without_buzzing_starts_no_cooldown(self):
+        # The trap `_last_pushes` exists to avoid. `sent_at` is stamped on rows
+        # the drain settles without calling Expo at all — including one dropped
+        # because the recipient had already read the thread. Counting those as a
+        # buzz would silence the *next* message for a minute, and would do it
+        # most often to people in a live conversation, who are exactly the ones
+        # a fast drain is for.
+        convo, _message = self._queue_message()
+        silent = self._already_buzzed(convo)
+        silent.delivered_tokens = []
+        silent.save(update_fields=["delivered_tokens"])
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_is_not_held_by_the_cooldown(self):
+        # Being named is how you get someone's attention, and a busy thread is
+        # both what puts you in cooldown and where a minute's silence is most
+        # obviously wrong. Same carve-out mute gets, for the same reason.
+        convo, message = self._queue_message()
+        MessageMention.objects.create(message=message, user=self.me)
+        self._already_buzzed(convo)
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_that_coalesced_onto_a_queued_row_is_still_exempt(self):
+        # The hole the first version of the exemption had. A queued row keeps
+        # pointing at the message it was created for while later messages
+        # coalesce onto it, so asking `is_mentioned(row.message, …)` answers
+        # about the *first* message of a burst. A mention arriving mid-burst
+        # creates no row of its own — and a busy thread is the only place a row
+        # is reliably already queued, so it is exactly the case the exemption
+        # exists for.
+        convo, first = self._queue_message()
+        self._already_buzzed(convo)
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me look at this"
+        )
+        MessageMention.objects.create(message=later, user=self.me)
+        # No second row: the enqueue coalesces onto the unsent one.
+        notifications.enqueue_message_pushes(later)
+        self.assertEqual(PushOutbox.objects.filter(sent_at__isnull=True).count(), 1)
+        self.assertEqual(
+            PushOutbox.objects.get(sent_at__isnull=True).message_id, first.id
+        )
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_on_a_deleted_message_does_not_punch_through(self):
+        # A mention taken back shouldn't go on beating the cooldown for ever.
+        convo, _first = self._queue_message()
+        self._already_buzzed(convo)
+        later = Message.objects.create(
+            conversation=convo,
+            sender=self.actor,
+            text="@me oops",
+            deleted_at=timezone.now(),
+        )
+        MessageMention.objects.create(message=later, user=self.me)
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_push_that_only_reaped_a_dead_token_starts_no_cooldown(self):
+        # `DeviceNotRegistered` settles a row without any phone having buzzed,
+        # so it must not look like a buzz to `_last_pushes`. The moment it fires
+        # is a reinstall or a token rotation — precisely when the recipient has
+        # a working device again and should hear about the next message.
+        convo, _message = self._queue_message()
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "gone",
+                        "details": {"error": "DeviceNotRegistered"},
+                    }
+                ]
+            }
+        )
+        reaped = PushOutbox.objects.get()
+        self.assertIsNotNone(reaped.sent_at)          # settled, not retried
+        self.assertEqual(reaped.delivered_tokens, [])  # but nobody was reached
+
+        # They re-register and a new message arrives well inside the cooldown.
+        device = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[new]", platform="ios"
+        )
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="second"
+        )
+        notifications.enqueue_message_pushes(later)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["to"], device.expo_token)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_the_cooldown_is_per_thread_not_per_person(self):
+        # Otherwise one chatty group would silence every other conversation
+        # someone is in — a far worse failure than the buzz storm this prevents.
+        self._already_buzzed(
+            Conversation.objects.create(
+                kind="group", title="Book Club", created_by=self.actor
+            )
+        )
+        convo, _message = self._queue_message()
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["data"]["url"], f"/messages/{convo.id}")
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=0)
+    def test_the_cooldown_can_be_switched_off(self):
+        # It's operator-tunable, and 0 has to mean off rather than "compare
+        # against a zero-length window and hold anyway".
+        convo, _message = self._queue_message()
+        self._already_buzzed(convo)
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_held_row_does_not_squat_the_window(self):
+        # A held row keeps `sent_at IS NULL` and its original `created_at`, so
+        # it stays at the *head* of the selection window — and the cooldown
+        # keeps it there for a minute, i.e. across thirty drains. Once enough of
+        # them fill a window, every drain would select the same held rows, send
+        # nothing, and starve what is queued behind: here a notification row,
+        # which is subject to no hold at all and has no reason to wait. The old
+        # six-second read-grace could never squat a window for long enough to
+        # matter.
+        convo, _message = self._queue_message()
+        self._already_buzzed(convo)
+        n = self._queue()
+
+        # One row per window, so the held message fills the first on its own.
+        urlopen = self._run(max_rows=1)
+
+        sent = self._sent_body(urlopen)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["data"]["notificationId"], n.id)
+        # And the message row is still queued, unspent — held, not skipped.
+        held = PushOutbox.objects.get(
+            message__conversation=convo, sent_at__isnull=True
+        )
+        self.assertIsNone(held.sent_at)
+        self.assertEqual(held.attempts, 0)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_running_out_of_windows_is_said_out_loud(self):
+        # The looking-again is bounded, because a drain has to stay a
+        # predictable amount of work. What it must not be is silent: rows queued
+        # behind held ones and a drain that found nothing to do produce exactly
+        # the same output otherwise, and "nobody's phone buzzes" is the symptom
+        # of both.
+        for title in ("Book Club", "Five-a-side", "Cottage"):
+            convo, _message = self._queue_message(kind="group", title=title)
+            self._already_buzzed(convo)
+
+        out = StringIO()
+        self._run(max_rows=1, stdout=out, verbosity=1)
+
+        self.assertIn("Stopped after", out.getvalue())
 
     def test_a_comment_notification_deep_links_to_its_parent_post(self):
         # The route needs the *post* id, but the notification carries a comment
@@ -12024,6 +12426,30 @@ class SendPushesCommandTests(APITestCase):
         self.assertCountEqual(
             row.delivered_tokens, [first_token, second.expo_token]
         )
+
+    def test_devices_are_batched_in_a_deterministic_order(self):
+        # The drain matches Expo's reply onto its messages *positionally*, so
+        # the order devices come back in decides which one is credited with
+        # which ticket. The query carried no `order_by` for a long time, which
+        # left that to Postgres's physical heap order — stable enough to look
+        # fine, until a table has seen enough inserts and deletes for it not to
+        # be. It failed on CI and passed locally on the same commit, which is
+        # the mild version; the same non-determinism is what would make "the
+        # wrong device got retried" unreproducible in production.
+        #
+        # The second device's token sorts *before* setUp's "…[aaa]" while its
+        # id comes after, so registration order and alphabetical order disagree.
+        # Without that the assertion would hold under either and pin nothing.
+        newer = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[000]", platform="ios"
+        )
+        self._queue()
+
+        urlopen = self._run(payload=_ok_tickets(2))
+
+        sent = [message["to"] for message in self._sent_body(urlopen)]
+        # Registration order, not token order and not whatever the heap holds.
+        self.assertEqual(sent, [self.device.expo_token, newer.expo_token])
 
     def test_a_dead_device_settles_rather_than_blocking_the_row(self):
         # DeviceNotRegistered can never succeed on retry, so it must count as
@@ -12209,6 +12635,302 @@ class SendPushesCommandTests(APITestCase):
         )
 
         self.assertEqual(PushReceipt.objects.count(), 0)
+
+
+class SendPushesLoopTests(APITestCase):
+    """The resident drain, ``send_pushes --loop`` (issue #354).
+
+    This replaced a systemd timer that fired a fresh Django process once a
+    minute. Everything the timer used to provide is now this loop's
+    responsibility, and each of those things is a way for pushes to stop
+    silently — the failure mode is "nobody's phone buzzes", which looks exactly
+    like nobody having sent anything.
+
+    Stopping is driven by a **real SIGTERM** rather than by reaching into the
+    loop's state, because the signal path is the thing production depends on:
+    ``docker compose up -d`` sends SIGTERM on every redeploy, and a loop that
+    ignored it would be SIGKILLed partway through an Expo call with rows claimed
+    and no record of whether they were sent.
+    """
+
+    def _run_loop(self, *, drains=1, side_effect=None, **kwargs):
+        """Run the loop, stopping it with SIGTERM after ``drains`` passes.
+
+        Returns ``(stdout_text, drain_calls)``. ``side_effect`` is called with
+        the (1-based) pass number before the real drain, so a case can make one
+        pass fail.
+        """
+        from django.core.management import call_command
+
+        from api.management.commands.send_pushes import Command as SendPushes
+
+        real_drain = SendPushes._drain
+        passes = []
+
+        def counting_drain(command, *args, **inner):
+            passes.append(len(passes) + 1)
+            if side_effect is not None:
+                side_effect(len(passes))
+            try:
+                return real_drain(command, *args, **inner)
+            finally:
+                if len(passes) >= drains:
+                    # If the handler somehow isn't installed, SIGTERM would kill
+                    # the whole test runner. Fail the case instead.
+                    if signal.getsignal(signal.SIGTERM) in (
+                        signal.SIG_DFL,
+                        signal.SIG_IGN,
+                    ):
+                        raise AssertionError(
+                            "the loop did not install a SIGTERM handler"
+                        )
+                    os.kill(os.getpid(), signal.SIGTERM)
+
+        out = StringIO()
+        with mock.patch.object(SendPushes, "_drain", counting_drain):
+            call_command("send_pushes", loop=True, stdout=out, **kwargs)
+        return out.getvalue(), len(passes)
+
+    def test_it_keeps_draining_until_it_is_told_to_stop(self):
+        _out, drains = self._run_loop(drains=3, interval=0.001)
+
+        self.assertEqual(drains, 3)
+
+    def test_sigterm_finishes_the_current_drain_rather_than_aborting_it(self):
+        # The signal only sets a flag. A drain torn down mid-Expo-call would
+        # leave rows claimed inside a rolled-back transaction with no record of
+        # whether Expo took them, which is the one thing the outbox exists to
+        # avoid.
+        finished = []
+
+        def note(_n):
+            finished.append("started")
+
+        out, drains = self._run_loop(
+            drains=1, interval=0.001, side_effect=note
+        )
+
+        self.assertEqual(drains, 1)
+        self.assertEqual(finished, ["started"])
+        self.assertIn("Stopped.", out)
+
+    def test_the_signal_handlers_are_put_back_afterwards(self):
+        # A management command that permanently replaces the process's SIGINT
+        # handler leaves Ctrl-C dead for whatever runs it next — this suite
+        # included.
+        before = signal.getsignal(signal.SIGINT)
+
+        self._run_loop(drains=1, interval=0.001)
+
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
+    def test_receipts_and_pruning_stay_on_the_slow_schedule(self):
+        # The reason for two cadences. Receipts aren't even *asked* for until
+        # they are 15 minutes old and pruning is daily work, so running either
+        # at drain cadence would be pure waste — and the receipts call is an
+        # HTTP round-trip to Expo, so it would also be waste that talks to a
+        # third party 43,000 times a day.
+        from api.management.commands.send_pushes import Command as SendPushes
+
+        with (
+            mock.patch.object(SendPushes, "_check_receipts") as receipts,
+            mock.patch.object(SendPushes, "_prune") as prune,
+        ):
+            _out, drains = self._run_loop(
+                drains=5, interval=0.001, maintenance_interval=3600
+            )
+
+        self.assertEqual(drains, 5)
+        # Once, on the first pass: a restart shouldn't leave receipts unchecked
+        # for a whole maintenance interval.
+        self.assertEqual(receipts.call_count, 1)
+        self.assertEqual(prune.call_count, 1)
+
+    def test_a_failing_maintenance_step_stays_on_its_own_schedule(self):
+        # Maintenance used to share the drain's try/except, and `next_maintenance`
+        # was only advanced *after* it succeeded — so a stuck prune retried on
+        # every single pass, firing Expo's getReceipts endpoint at drain cadence
+        # (the exact waste the two-cadence split exists to prevent), reported
+        # itself as "Drain failed", and backed the drain off to 10s for a fault
+        # that had nothing to do with it.
+        from api.management.commands.send_pushes import Command as SendPushes
+
+        with (
+            mock.patch.object(SendPushes, "_check_receipts") as receipts,
+            mock.patch.object(
+                SendPushes, "_prune", side_effect=RuntimeError("lock timeout")
+            ),
+            # Mocked for the same reason as in the failed-drain case below: the
+            # real call would shut the connection this test's own transaction is
+            # running in and take the rest of the class with it.
+            mock.patch(
+                "api.management.commands.send_pushes.close_old_connections"
+            ),
+        ):
+            out, drains = self._run_loop(
+                drains=5, interval=0.001, maintenance_interval=3600
+            )
+
+        self.assertEqual(drains, 5)
+        # Once, not once per pass.
+        self.assertEqual(receipts.call_count, 1)
+        # And the heartbeat — which deploy.md calls the alarm — still prints,
+        # which is when you most need it.
+        self.assertIn("Alive:", out)
+
+    def test_a_failing_receipt_check_still_leaves_the_prune_to_run(self):
+        # They used to share one try. A receipt check that kept raising — its
+        # Expo call is guarded internally, but its `delete()` of expired
+        # receipts and dead tokens is not — therefore skipped the prune every
+        # time, for ever, and the outbox grew without bound while the site
+        # looked perfectly healthy. Swallowing the failure (right, for a
+        # resident process) is exactly what made that permanent.
+        from api.management.commands.send_pushes import Command as SendPushes
+
+        with (
+            mock.patch.object(
+                SendPushes,
+                "_check_receipts",
+                side_effect=RuntimeError("lock timeout"),
+            ),
+            mock.patch.object(SendPushes, "_prune") as prune,
+            mock.patch(
+                "api.management.commands.send_pushes.close_old_connections"
+            ),
+        ):
+            out, drains = self._run_loop(
+                drains=3, interval=0.001, maintenance_interval=3600
+            )
+
+        self.assertEqual(drains, 3)
+        # The step after the failing one still ran — once, on its own schedule.
+        self.assertEqual(prune.call_count, 1)
+        self.assertIn("Alive:", out)
+
+    def test_a_log_nobody_is_reading_does_not_kill_the_loop(self):
+        # The recovery path is the easiest place to break the loop's promise:
+        # writing to a log whose consumer has gone away raises BrokenPipeError,
+        # and closing a connection whose socket is already dead re-raises the
+        # driver's error — both while *handling* a fault the loop was meant to
+        # survive, and both outside any try before this was fixed.
+        class _Broken:
+            def write(self, *_args, **_kwargs):
+                raise BrokenPipeError("log consumer went away")
+
+            def flush(self):
+                pass
+
+            def isatty(self):
+                return False
+
+        def explode_once(n):
+            if n == 1:
+                raise RuntimeError("database is starting up")
+
+        with (
+            mock.patch(
+                "api.management.commands.send_pushes."
+                "_LOOP_ERROR_BACKOFF_SECONDS",
+                0.001,
+            ),
+            mock.patch(
+                "api.management.commands.send_pushes.close_old_connections",
+                side_effect=OSError("socket is already gone"),
+            ),
+        ):
+            _out, drains = self._run_loop(
+                drains=3,
+                interval=0.001,
+                side_effect=explode_once,
+                stderr=_Broken(),
+            )
+
+        self.assertEqual(drains, 3)
+
+    def test_a_failed_drain_does_not_kill_the_loop(self):
+        # The whole point of being resident. A oneshot could exit on a Postgres
+        # restart and get a fresh process next minute; this one has to carry on,
+        # or a single transient fault silences push until someone notices.
+        #
+        # `close_old_connections` is mocked rather than allowed to run: it is
+        # the right thing in production — the next pass reconnects instead of
+        # reusing a socket Postgres has already dropped — but here it would shut
+        # the connection this test case's own transaction is running in, taking
+        # the rest of the class down with it. Asserting the call is the part
+        # that matters anyway.
+        def explode_once(n):
+            if n == 1:
+                raise RuntimeError("database is starting up")
+
+        with (
+            mock.patch(
+                "api.management.commands.send_pushes."
+                "_LOOP_ERROR_BACKOFF_SECONDS",
+                0.001,
+            ),
+            mock.patch(
+                "api.management.commands.send_pushes.close_old_connections"
+            ) as reconnect,
+        ):
+            _out, drains = self._run_loop(
+                drains=3, interval=0.001, side_effect=explode_once
+            )
+
+        self.assertEqual(drains, 3)
+        # A stale connection is the likeliest cause of the failure it just
+        # swallowed, so carrying on with the same one would fail for ever.
+        reconnect.assert_called_once()
+
+    def test_an_idle_loop_reports_a_heartbeat_instead_of_every_pass(self):
+        # At two seconds a pass, "Nothing queued." is 43,000 lines a day saying
+        # nothing happened — which is how a log stops being read, and this log
+        # is the only place a wedged drain shows up.
+        out, _drains = self._run_loop(
+            drains=4, interval=0.001, maintenance_interval=3600
+        )
+
+        self.assertNotIn("Nothing queued.", out)
+        self.assertIn("Alive:", out)
+
+    def test_a_oneshot_run_still_says_what_it_found(self):
+        # The other half: quietness belongs to the loop, not to the command. A
+        # hand-run is a report someone asked for.
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("send_pushes", stdout=out)
+
+        self.assertIn("Nothing queued.", out.getvalue())
+
+    def test_looping_a_dry_run_is_refused(self):
+        # A dry run writes no state, so a looping one would print the same rows
+        # for ever without ever making progress.
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("send_pushes", loop=True, dry_run=True)
+
+    def test_a_zero_interval_is_refused(self):
+        # It would spin the CPU flat out against Postgres rather than doing
+        # anything useful faster.
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("send_pushes", loop=True, interval=0)
+
+    def test_a_zero_maintenance_interval_is_refused(self):
+        # Fails differently from the above and was unguarded: it doesn't spin
+        # the CPU, it makes every pass a maintenance pass — an HTTP round-trip
+        # to Expo and a full-table DELETE every two seconds, which is the exact
+        # waste the two cadences exist to avoid, from a setting whose symptom
+        # points nowhere near it.
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("send_pushes", loop=True, maintenance_interval=0)
 
 
 @override_settings(EXPO_RECEIPT_CHECK_DELAY_SECONDS=0)

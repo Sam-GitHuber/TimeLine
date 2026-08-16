@@ -12,9 +12,9 @@
 #       you can't accidentally clobber live media by forgetting TARGET_MEDIA_DIR.)
 #
 #   2. REAL disaster recovery — restore into the LIVE database + media. This
-#      OVERWRITES current data and requires typing a confirmation phrase. The
-#      app (backend + web) is stopped for the duration so nothing writes to the
-#      database mid-restore, then brought back up automatically on success.
+#      OVERWRITES current data and requires typing a confirmation phrase. Every
+#      database writer (backend, pushes, web) is stopped for the duration so
+#      nothing writes mid-restore, then brought back up automatically on success.
 #         ./deploy/restore.sh            # interactive: pick a dump, restore to prod
 #
 #   3. PREFLIGHT — run every check the real restore does before it becomes
@@ -293,11 +293,25 @@ main() {
   # --- quiesce the app (live restore only) ----------------------------------
   # pg_restore --clean drops & recreates every object; if gunicorn is still
   # connected and writing, that means blocked DROPs and half-restored reads.
-  # Stop the writers (backend + Caddy) but keep `db` up — pg_restore runs
-  # through it. Restarted automatically once the restore succeeds (below).
+  # Stop the writers but keep `db` up — pg_restore runs through it. Restarted
+  # automatically once the restore succeeds (below, via `up -d`, which brings
+  # back everything named here without this list having to agree with that one).
+  #
+  # **`pushes` is a database writer too, and the least obvious one** (issue
+  # #354). It is not a web service, so nothing about it says "app" — but it runs
+  # `send_pushes --loop`, which opens a transaction and takes `FOR UPDATE` locks
+  # on api_pushoutbox every two seconds, stamps `sent_at`, deletes
+  # api_pushreceipt rows and prunes. Left running through a `pg_restore --clean`
+  # it either blocks the DROPs or slips a write in between a table being dropped
+  # and reloaded, and pg_restore is not run in a single transaction, so the
+  # result is a half-restored database. It also has `restart: unless-stopped`,
+  # so it is not the sort of thing that stays down by accident.
+  #
+  # If a future service writes to Postgres, it belongs in this list. The test
+  # in deploy/tests/test_restore_preflight.sh pins that.
   if (( restoring_live )); then
-    echo "==> Stopping app (backend, web) so nothing writes during the restore..."
-    dc stop backend web
+    echo "==> Stopping writers (backend, pushes, web) so nothing writes during the restore..."
+    dc stop backend pushes web
     app_stopped=1
   fi
 

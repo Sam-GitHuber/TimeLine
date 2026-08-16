@@ -1287,7 +1287,7 @@ centre exists for. So `PushOutbox` takes a `Message` as an alternative target to
 | `active`, not left, active account | The same population that can read the thread. |
 | Their `ParticipantInterval` spans the message | **The one that's easy to get wrong.** A `pending` member, or one in a gap between intervals, is clipped out of the thread by `visible_messages_for` — buzzing them would announce a message the app then refuses to show. The interval test is a *single* `filter()` call so one interval must satisfy both ends; split in two, Django joins the table twice and a gap member slips through. |
 | Not muted (`Participant.muted_at`) | See below. |
-| No unsent push already queued for that thread | **Coalescing.** Ten rapid messages must be one buzz — the unread badge carries the count. Without it the outbox faithfully delivers ten, which is the fastest way to make someone turn notifications off. |
+| No unsent push already queued for that thread | **Coalescing.** Ten rapid messages must be one buzz — the unread badge carries the count. Without it the outbox faithfully delivers ten, which is the fastest way to make someone turn notifications off. This rule only bites while a row *sits* unsent, so since the drain went resident (#354) it is backed up by an explicit per-thread cooldown at send time; see [notifications.md](notifications.md#spacing-out-message-pushes-354). |
 
 **Two things drop a queued push at send time**, both settled rather than retried
 since neither state is ever undone:
@@ -1295,17 +1295,18 @@ since neither state is ever undone:
 - **Already read.** Comparing the message against the recipient's
   `ConversationRead` marker gets "don't buzz me for the thread I'm looking at"
   with no presence system, no heartbeat, and nothing for the app to report. It
-  also covers a message read on another device before the timer fired.
+  also covers a message read on another device before the drain ran.
 
   **This used to lean on the drain being slow, and that was a coincidence rather
   than a design** (issue #355). The marker only moves when the recipient's client
   *tells* us, and a client can't do that until its own 4s poll has delivered the
   message — so for the first few seconds "have they read it?" answers no even for
-  someone staring straight at the thread. A once-a-minute timer lands inside that
-  window about one message in fifteen; a two-second one would land inside it
-  nearly every time. So a fresh message push to a recipient who looks *active in
-  that thread* is now **held back** rather than sent (`_should_defer`) — see
-  [notifications.md](notifications.md#holding-a-message-push-back-355).
+  someone staring straight at the thread. A once-a-minute timer landed inside that
+  window about one message in fifteen. **The drain now runs every two seconds
+  (#354) and lands inside it every time**, so a fresh message push to a recipient
+  who looks *active in that thread* is **held back** rather than sent
+  (`_should_defer`) — which is no longer a safety net but the whole mechanism.
+  See [notifications.md](notifications.md#holding-a-message-push-back-355).
 - **Deleted since enqueue.** Message deletion is *soft* (a tombstone, so the
   thread doesn't reshuffle), so there's no cascade to take the queued push with
   it the way there is for a hard delete. Without this check, deleting a message

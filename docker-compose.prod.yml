@@ -33,6 +33,15 @@ services:
 
   backend:
     build: ./backend
+    # Named explicitly, and it must stay in step with `pushes` below: the two
+    # services build the *same* context and have to end up on the same image, or
+    # the API and the drain can be running different code against one database.
+    # Compose would otherwise tag this build `timeline-prod-backend` and the
+    # drain's `timeline-prod-pushes` — two separate images from one Dockerfile,
+    # free to diverge on any cache miss. (The GHCR path pins both to one
+    # `image:` already; this is the build-from-source fallback, which
+    # docs/deploy.md keeps as the hotfix route.)
+    image: timeline-prod-backend
     # Production startup: wait for DB, migrate, collectstatic, run gunicorn.
     command: ["bash", "/app/entrypoint.prod.sh"]
     env_file: .env.prod
@@ -46,6 +55,90 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
+
+  # The resident push drain (issue #354). Same image as `backend`, different
+  # command: it never serves a request, it just sweeps PushOutbox every couple of
+  # seconds and hands what it finds to Expo.
+  #
+  # WHY ITS OWN SERVICE RATHER THAN A SYSTEMD TIMER. The old
+  # deploy/send-pushes.timer ran `docker compose exec -T backend …` once a
+  # minute, paying for a cold Django process every tick. Tightening that to
+  # seconds is unaffordable; starting Django once is not. But a resident process
+  # started by `exec` would be orphaned by the next autodeploy — the backend
+  # container it lives inside is replaced and takes it with it — so the drain has
+  # to be a container compose owns, restarts, and recreates on release. That is
+  # also why deploy/autodeploy.sh lists `pushes` alongside backend and web: a
+  # service it doesn't know about would keep running last month's code for ever
+  # (the #104 failure, in a new place).
+  #
+  # NO entrypoint.prod.sh here. That script migrates, collects static and starts
+  # gunicorn — running it in a second container would race two `migrate` calls on
+  # every boot. This one runs the command directly, and doesn't need to wait for
+  # the backend to finish migrating either: a drain against a database that isn't
+  # ready raises, and the loop's own error handling logs it and tries again in
+  # ten seconds. Coming up before the schema does is a noisy ten seconds, not a
+  # failure. `depends_on` is ordering only, for the same reason.
+  pushes:
+    build: ./backend
+    # Deliberately the same image name as `backend` — see the note there.
+    image: timeline-prod-backend
+    command: ["python", "manage.py", "send_pushes", "--loop"]
+    # Run the loop under docker's own init (tini) as PID 1.
+    #
+    # WITHOUT IT SIGTERM CAN BE IGNORED ENTIRELY. `python` would be PID 1 in
+    # this container's namespace, and Linux applies no default action for a
+    # signal PID 1 has no handler for — so a SIGTERM arriving before
+    # `send_pushes` installs its handler (which is after django.setup() and the
+    # model/view imports: seconds, on a 2 vCPU box) is silently dropped. Docker
+    # then waits out the whole `stop_grace_period` below before SIGKILL, so a
+    # `docker compose stop pushes` that lands in the startup window — a redeploy
+    # straight after a crash-restart, or restore.sh's `dc stop backend pushes
+    # web` while the container is coming back — blocks for ten minutes at
+    # exactly the moment nobody has ten minutes. tini is always PID 1 and always
+    # has handlers, and forwards the signal to a child whose default action then
+    # applies.
+    init: true
+    # The image deliberately has no USER directive: it starts as root so
+    # entrypoint.prod.sh can align media ownership before dropping privileges
+    # (issue #199). Bypassing that entrypoint means bypassing the drop too, so
+    # it's done here instead. This container has nothing to do as root — it
+    # touches no volumes, only the database and Expo's API.
+    user: app
+    env_file: .env.prod
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      # setpriv keeps the environment as-is, so the backend's entrypoint exports
+      # this by hand; nothing does that here. Without it HOME still says /root,
+      # which the app user cannot write to.
+      HOME: /home/app
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    # SIGTERM makes the loop finish its current drain and exit, rather than being
+    # torn down mid-Expo-call with rows claimed and no record of whether they
+    # were sent.
+    #
+    # **600s, matching the TimeoutStartSec of the systemd unit this replaced**,
+    # and for its reason: one drain takes up to EXPO_PUSH_MAX_ROWS (200) rows,
+    # which is several EXPO_PUSH_BATCH_SIZE (100) batches at 30s of Expo timeout
+    # each — more when recipients own several devices. Docker's default is 10s
+    # and an earlier version of this file said 45s; both are under that worst
+    # case, and going under it is not a slow shutdown but a **correctness** bug.
+    # `_drain` runs inside `transaction.atomic()`, so a SIGKILL rolls back the
+    # `delivered_tokens` of every device Expo had already accepted in this pass,
+    # and the next drain re-sends to all of them: one message, two buzzes on
+    # every phone in the batch.
+    #
+    # What waiting costs is a slower redeploy, and it fits: an idle drain exits
+    # in milliseconds, so the grace is only ever spent when Expo itself is
+    # hanging — and `timeline-autodeploy.service` allows `TimeoutStartSec=1200`,
+    # so even the pathological case leaves the deploy half its budget. Raise
+    # that first if this is ever raised.
+    stop_grace_period: 600s
     restart: unless-stopped
 
   web:

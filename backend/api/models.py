@@ -2005,9 +2005,10 @@ class PushOutbox(models.Model):
     Expo's HTTP API there would put a third-party network round-trip — and its
     timeouts — on the critical path of a request that has nothing to do with
     push. So the request only writes a row; ``manage.py send_pushes`` drains the
-    queue on a systemd timer (see ``deploy/send-pushes.timer``). A push failure
-    can never fail a user's action, and a send that dies halfway is retried
-    rather than lost, which a fire-and-forget thread could not promise.
+    queue out-of-band, as a resident process sweeping every couple of seconds
+    (the ``pushes`` compose service; issue #354). A push failure can never fail a
+    user's action, and a send that dies halfway is retried rather than lost,
+    which a fire-and-forget thread could not promise.
 
     **No device tokens are stored here.** The recipient's ``DevicePushToken``
     rows are looked up at *send* time, not enqueue time, so a device that
@@ -2092,7 +2093,7 @@ class PushOutbox(models.Model):
     delivered_tokens = models.JSONField(default=list, blank=True)
 
     # Give up after this many failed drains, so one permanently-poisoned row
-    # can't be retried forever on every timer tick.
+    # can't be retried forever on every drain.
     MAX_ATTEMPTS = 5
 
     class Meta:

@@ -71,8 +71,17 @@ export TIMELINE_TAG
 # SERVICES pairs with index i of IMAGES. (db is deliberately absent: it runs
 # stock postgres:16 from the prod compose file, isn't part of a release, and must
 # not be recreated on every deploy.)
-SERVICES=(backend web)
+#
+# `pushes` is the resident push drain (issue #354). It runs the SAME image as
+# backend with a different command, which is why the two entries repeat an image
+# reference rather than that being a copy-paste slip. Listing it here is not
+# optional bookkeeping: a service missing from this array is never inspected and
+# never recreated, so it would go on running whatever build it started with while
+# every signal said the box was up to date — the #104 failure this whole script
+# exists to prevent, in a service nobody was watching.
+SERVICES=(backend pushes web)
 IMAGES=(
+  "ghcr.io/sam-githuber/timeline-backend:${TIMELINE_TAG}"
   "ghcr.io/sam-githuber/timeline-backend:${TIMELINE_TAG}"
   "ghcr.io/sam-githuber/timeline-web:${TIMELINE_TAG}"
 )

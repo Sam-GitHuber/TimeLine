@@ -72,8 +72,10 @@ the box, revoke tokens *before* you delete the accounts that manage them).
 ### 2. Stop the app on the server
 - [ ] `cd ~/TimeLine && docker compose -f docker-compose.prod.yml down`
 - [ ] Disable the systemd timers so nothing restarts it or runs backups:
-      `sudo systemctl disable --now timeline-autodeploy.timer backup.timer timeline-healthcheck.timer send-pushes.timer token-flush.timer`
-      (skip any you never installed).
+      `sudo systemctl disable --now timeline-autodeploy.timer backup.timer timeline-healthcheck.timer token-flush.timer`
+      (skip any you never installed. `send-pushes.timer` was retired in #354 —
+      disable it too on a box old enough to still have it; the push drain is now
+      the `pushes` container, which the `down` above already stopped.)
 - [ ] **Delete the Lightsail instance _and release its static IP_.** An instance
       that is merely *stopped* still bills, and a static IP left detached starts
       costing on its own — that pair is the usual reason a "shut down" AWS
