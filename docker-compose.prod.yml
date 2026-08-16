@@ -33,6 +33,15 @@ services:
 
   backend:
     build: ./backend
+    # Named explicitly, and it must stay in step with `pushes` below: the two
+    # services build the *same* context and have to end up on the same image, or
+    # the API and the drain can be running different code against one database.
+    # Compose would otherwise tag this build `timeline-prod-backend` and the
+    # drain's `timeline-prod-pushes` — two separate images from one Dockerfile,
+    # free to diverge on any cache miss. (The GHCR path pins both to one
+    # `image:` already; this is the build-from-source fallback, which
+    # docs/deploy.md keeps as the hotfix route.)
+    image: timeline-prod-backend
     # Production startup: wait for DB, migrate, collectstatic, run gunicorn.
     command: ["bash", "/app/entrypoint.prod.sh"]
     env_file: .env.prod
@@ -72,7 +81,24 @@ services:
   # failure. `depends_on` is ordering only, for the same reason.
   pushes:
     build: ./backend
+    # Deliberately the same image name as `backend` — see the note there.
+    image: timeline-prod-backend
     command: ["python", "manage.py", "send_pushes", "--loop"]
+    # Run the loop under docker's own init (tini) as PID 1.
+    #
+    # WITHOUT IT SIGTERM CAN BE IGNORED ENTIRELY. `python` would be PID 1 in
+    # this container's namespace, and Linux applies no default action for a
+    # signal PID 1 has no handler for — so a SIGTERM arriving before
+    # `send_pushes` installs its handler (which is after django.setup() and the
+    # model/view imports: seconds, on a 2 vCPU box) is silently dropped. Docker
+    # then waits out the whole `stop_grace_period` below before SIGKILL, so a
+    # `docker compose stop pushes` that lands in the startup window — a redeploy
+    # straight after a crash-restart, or restore.sh's `dc stop backend pushes
+    # web` while the container is coming back — blocks for ten minutes at
+    # exactly the moment nobody has ten minutes. tini is always PID 1 and always
+    # has handlers, and forwards the signal to a child whose default action then
+    # applies.
+    init: true
     # The image deliberately has no USER directive: it starts as root so
     # entrypoint.prod.sh can align media ownership before dropping privileges
     # (issue #199). Bypassing that entrypoint means bypassing the drop too, so

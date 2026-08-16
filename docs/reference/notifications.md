@@ -484,7 +484,7 @@ often** — and the 740 ms understates the old side, which also paid for a `dock
 compose exec` the loop doesn't. Re-measure on the box if this ever matters; the
 shape of the answer, not the exact figures, is the point.
 
-Three details that aren't obvious:
+Four details that aren't obvious:
 
 - **Two cadences in one loop.** `handle()` runs drain → receipts → prune
   together, which is fine once a minute. The loop splits them: only the drain
@@ -498,14 +498,34 @@ Three details that aren't obvious:
   container compose owns — and it is listed in `deploy/autodeploy.sh`'s
   `SERVICES`, without which it would run last month's code for ever while every
   health signal read green (the #104 failure, in a service nobody watches).
-- **SIGTERM is a request, not an abort.** It sets a flag; the current drain
-  finishes and commits. Being killed partway through an Expo call would leave
-  rows claimed with no record of whether they were sent.
+- **SIGTERM is a request, not an abort.** It sets a flag — and *only* a flag; the
+  current drain finishes and commits. Being killed partway through an Expo call
+  would leave rows claimed with no record of whether they were sent. Nothing is
+  printed from the handler itself: Python runs it on the main thread between
+  bytecodes, so writing there can re-enter a `BufferedWriter` mid-write and
+  raise into unrelated code. The container also runs with `init: true`, because
+  a bare `python` as PID 1 has *no default action* for a signal it hasn't yet
+  installed a handler for — a stop landing during Django's startup would be
+  ignored outright and then wait out the full 600s grace.
+- **A held row must not squat the selection window.** Held rows keep `sent_at IS
+  NULL` and their original `created_at`, so they stay at the head of the
+  `[:EXPO_PUSH_MAX_ROWS]` window — for a *minute*, under the cooldown. Once
+  enough of them fill a window, every drain would re-select the same rows, send
+  nothing, and starve what is queued behind them, including notification rows
+  that are subject to no hold at all. So a drain that fills its window and still
+  holds something back takes another look past the rows it held, up to
+  `_MAX_DRAIN_PAGES` windows, and says so in the heartbeat when it runs out.
 
 An exception in one pass is logged, the database connection dropped (so the next
 pass reconnects rather than reusing a socket Postgres has closed), and the loop
 carries on after a short backoff. A resident drain that died on a transient fault
 would be worse than the timer, which at least got a fresh process next minute.
+Two things follow from taking that promise seriously: **the recovery itself is
+guarded** (writing to a log whose reader has gone away, or closing an already-dead
+connection, both raise — and an exception there would kill the process while
+handling the fault it was meant to survive), and **each maintenance step has its
+own guard**, so a receipt check that keeps failing can't quietly stop the prune
+from ever running and let the outbox grow without bound behind a green site.
 
 **Our half is not the whole latency.** Expo → APNs/FCM → device adds 1–5s that we
 don't control, so the honest target was "under ~5s", not "instant", and
@@ -564,11 +584,48 @@ it:
   for. Soft-deleted messages are excluded — a mention taken back shouldn't go on
   punching pushes through.
 
-### Holding a message push back (#355)
+### Dropping a message push, and what "read" has to mean
 
-`_should_drop` (above) bins a message push the recipient has already read, and
-its whole appeal is that it needs no presence system: the app moves
-`ConversationRead` for its own reasons and the drain just reads it.
+`_should_drop` bins a message push the recipient has already read, and its whole
+appeal is that it needs no presence system: the app moves `ConversationRead` for
+its own reasons and the drain just reads it.
+
+**Read *what*, though.** A queued row keeps pointing at the message it was
+created for while every later message in the thread coalesces onto it, so
+comparing the marker against `row.message.created_at` answers a question about
+the *first* message of a burst. Answering "yes, read" there settles the row —
+and the nine messages behind it are never announced at all, with nothing
+anywhere recording that they were dropped. The cooldown made that the normal
+case rather than a race: it holds the row for a minute, which is a minute in
+which a glance at the thread on a laptop can silence the phone for everything
+that arrives next.
+
+So the marker is compared against **the newest message the row now stands for**
+(`_later_messages`), and only a recipient who is genuinely caught up is dropped.
+Three carve-outs in that lookup:
+
+- **Their own messages don't count.** Sending stamps the read marker, but the
+  marker and the message are two writes rather than one instant, so counting
+  your own reply as unread mail would buzz you about something you just typed.
+- **A muted thread counts only mentions.** A mention is the only kind of message
+  `enqueue_message_pushes` would have queued or coalesced for someone who muted
+  the thread, so ordinary chatter afterwards must not revive a push they have
+  already read — that would buzz them through a quiet they asked for.
+- **Visibility is *not* re-checked.** A message in an interval gap the recipient
+  can't read still counts as "the thread has moved on", so it can rescue a row.
+  The cost is one push about a thread they are in, phrased from a message they
+  can see; the cost of the reverse — re-deriving the enqueue's audience on the
+  read side — is a second copy of the visibility rules, which is a worse thing
+  to get wrong. See [connections.md](connections.md) for where visibility lives.
+
+What a rescued row *says* is still phrased and channelled from its first
+message. That half of the coalescing problem is unchanged and tracked
+separately; a push naming the wrong sender of a real unread message is a smaller
+wrong than no push at all. The deleted-message branch is deliberately left as
+"drop, full stop" — it has the same shape of hole, but "a push for deleted
+content cannot fire" is the stronger promise and the one this doc makes above.
+
+### Holding a message push back (#355)
 
 **But the marker can only ever be as current as the client's last poll.** A
 client learns a message exists on its own `MESSAGE_POLL_MS` tick — four seconds —

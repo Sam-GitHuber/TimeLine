@@ -708,6 +708,13 @@ currently held back`, which is normal: see
 that never falls to zero is not — that would mean a misconfigured
 `PUSH_MESSAGE_COOLDOWN_SECONDS` or `PUSH_MESSAGE_GRACE_SECONDS`.
 
+`, and rows queued behind them are waiting` on the same line means a drain used
+every window it is allowed and still had held rows filling them, so work it never
+looked at is sitting in the queue. That is a backlog, not a hang — the next drain
+tries again two seconds later — but it is the one heartbeat variant that says
+*do something*: check the two hold settings above first, then whether
+`EXPO_PUSH_MAX_ROWS` is too small for what the queue is now carrying.
+
 The per-pass "Nothing queued." line is deliberately suppressed in `--loop`; at
 two seconds a pass it would be 43,000 lines a day. A hand-run still prints it.
 

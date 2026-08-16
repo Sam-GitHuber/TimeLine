@@ -11,13 +11,16 @@ what the retired ``deploy/send-pushes.timer`` used to do once a minute.
 The flow per drain:
 
 1. Take the oldest unsent rows that haven't exhausted their retries, locking
-   them so a hand-run and the resident drain can't send the same push twice.
+   them so a hand-run and the resident drain can't send the same push twice. A
+   window filled by rows the drain then holds back is looked past rather than
+   re-read on every tick — see ``_MAX_DRAIN_PAGES``.
 2. Resolve each recipient's *current* device tokens (looked up now, not at
    enqueue time, so a rotated token still gets the push), skipping any device
    this row has already reached.
 3. Build one Expo message per (row × outstanding device) and POST in batches.
-   A **message** row is dropped here instead if the recipient has since read the
-   thread (``_should_drop``), or left queued for a later run if it is so fresh
+   A **message** row is dropped here instead if the recipient has since read
+   everything it stands for (``_should_drop``), or left queued for a later run
+   if it is so fresh
    that they have not had a chance to say so yet (``_should_defer``) or if they
    were buzzed about this same thread moments ago (``_should_space_out``).
 4. Read the reply's per-message tickets, then settle each row: delivered
@@ -60,7 +63,9 @@ from django.utils import timezone
 from ...models import (
     ConversationRead,
     DevicePushToken,
+    Message,
     MessageMention,
+    Participant,
     PushOutbox,
     PushReceipt,
 )
@@ -88,6 +93,27 @@ _DEVICE_NOT_REGISTERED = "DeviceNotRegistered"
 # wait for.
 _LOOP_ERROR_BACKOFF_SECONDS = 10
 
+# How many windows of ``--max-rows`` one drain will look at before giving up and
+# waiting for the next tick.
+#
+# **Why more than one.** A held row (cooldown or read-grace) keeps
+# ``sent_at IS NULL`` and its original ``created_at``, so it stays at the head of
+# the ``[:max_rows]`` window it was selected in — and the cooldown holds it there
+# for a *minute*, i.e. across thirty drains. Once a backlog of held rows fills a
+# whole window, every drain would select the same held rows, send nothing, and
+# starve everything queued behind them — including notification rows (a reply, a
+# reaction, an invite), which are not subject to any hold and have no reason to
+# wait. The old six-second read-grace could never squat a window for long enough
+# to matter; a sixty-second cooldown can.
+#
+# So a drain that fills its window *and* holds something back takes another look
+# past the rows it held. Bounded rather than "keep going until you find work"
+# because a drain has to stay a predictable amount of work: the ceiling on rows
+# examined is this times ``--max-rows``, and rows past it simply wait for the
+# next tick two seconds later. `_drain` says so in the log when it stops here,
+# because a silent cap reads exactly like an empty queue.
+_MAX_DRAIN_PAGES = 3
+
 
 class Command(BaseCommand):
     help = "Send queued push notifications to Expo's push service."
@@ -96,6 +122,12 @@ class Command(BaseCommand):
     # heartbeat to report. A count rather than a line per row per pass: a row
     # held for the full cooldown spans thirty drains.
     _last_deferred = 0
+
+    # Whether the last drain ran out of windows with rows still queued behind
+    # held ones (see _MAX_DRAIN_PAGES). Carried to the heartbeat for the same
+    # reason as the count above — it is a *state* that persists across drains,
+    # so a line per pass would be thirty a minute describing one backlog.
+    _last_capped = False
 
     # **Two independent axes, deliberately.** `verbosity` is Django's own
     # "how much do you want to hear" (0 = nothing), and applies to both modes.
@@ -235,9 +267,18 @@ class Command(BaseCommand):
             # an Expo call with rows claimed and no idea whether they were sent.
             # Restoring the default handler means a *second* signal — an
             # impatient Ctrl-C, or docker's SIGKILL chaser — still kills at once.
+            #
+            # **Nothing is printed from here, deliberately.** Python runs a
+            # signal handler on the main thread between bytecodes, so a SIGTERM
+            # landing while that thread is inside ``self.stdout.write`` would
+            # re-enter the same ``BufferedWriter`` — whose lock is not
+            # reentrant — and raise ``RuntimeError: reentrant call`` at whatever
+            # line happened to be executing, quite possibly outside the loop's
+            # own ``try``. That would kill the drain during precisely the
+            # operation this handler exists to make safe. The loop says
+            # "Stopped." itself once the flag is seen.
             signal.signal(signum, signal.SIG_DFL)
             stop.set()
-            self._say("Stopping after this drain…")
 
         # Saved so they can go back on the way out. A dedicated container never
         # notices either way, but a command that permanently replaces the
@@ -290,8 +331,18 @@ class Command(BaseCommand):
                 # minute. So: log it, drop the database connection so the next
                 # pass reconnects rather than reusing a socket Postgres has
                 # already closed, and back off enough not to spin.
-                self.stderr.write(f"Drain failed: {exc}")
-                close_old_connections()
+                #
+                # **The recovery itself is guarded**, because both halves of it
+                # can throw: ``stderr.write`` raises ``BrokenPipeError`` if
+                # whatever was consuming the log has gone away, and
+                # ``close_old_connections`` re-raises whatever the driver raises
+                # while tearing down a half-dead socket — which is exactly the
+                # state the failure it is recovering from tends to leave. An
+                # exception from either would escape this method entirely and
+                # kill the process, i.e. the one thing this handler exists to
+                # prevent, and would do it in precisely the circumstances that
+                # brought us here.
+                self._survive(f"Drain failed: {exc}")
                 stop.wait(_LOOP_ERROR_BACKOFF_SECONDS)
                 continue
 
@@ -303,19 +354,25 @@ class Command(BaseCommand):
                 # which is the exact waste the two-cadence split exists to
                 # prevent, arriving only when something is already wrong.
                 next_maintenance = started + maintenance_interval
-                try:
-                    self._check_receipts(dry_run=False)
-                    self._prune(dry_run=False)
-                except Exception as exc:
-                    # **Its own try, for the reason `handle` keeps these outside
-                    # the drain's**: a receipts failure must not be reported as,
-                    # or back off, a drain that actually succeeded. Sharing one
-                    # handler made a stuck prune degrade push latency from 2s to
-                    # the error backoff and log "Drain failed" for a drain that
-                    # was fine — misdirecting exactly the person reading the log
-                    # to find out why nothing is buzzing.
-                    self.stderr.write(f"Maintenance failed: {exc}")
-                    close_old_connections()
+                # **One try each, not one for the pair** — the same reason
+                # `handle` keeps both outside the drain's, taken one step
+                # further. A receipts failure must not be reported as, or back
+                # off, a drain that actually succeeded (sharing the drain's
+                # handler made a stuck prune degrade push latency to the error
+                # backoff and log "Drain failed" for a drain that was fine); and
+                # a receipts failure must not skip the prune either. Sharing one
+                # handler between *these two* meant a receipt check that kept
+                # raising — its Expo call is guarded internally, but its
+                # ``delete()`` of expired receipts and dead tokens is not —
+                # silently stopped the prune from ever running again, so the
+                # outbox grew without bound while the site looked perfectly
+                # healthy. That is worse here than it was in `handle`, where the
+                # same exception at least ended the process loudly.
+                for step in (self._check_receipts, self._prune):
+                    try:
+                        step(dry_run=False)
+                    except Exception as exc:
+                        self._survive(f"Maintenance failed: {exc}")
                 # Outside that try on purpose: the heartbeat is what deploy.md
                 # calls the alarm, and a maintenance fault is when you most need
                 # to still be hearing it.
@@ -335,7 +392,38 @@ class Command(BaseCommand):
         line = f"Alive: {drains} drain(s) since the last report"
         if held:
             line += f", {held} message push(es) currently held back"
+        if self._last_capped:
+            # The one line here that says *do something*: a drain hitting the
+            # window cap means rows are queued behind held ones for longer than
+            # the two seconds this loop promises.
+            line += ", and rows queued behind them are waiting"
         self._say(f"{line}.")
+
+    def _survive(self, message):
+        """Report a caught failure and reconnect, without ever raising.
+
+        The loop's promise is that nothing short of a signal stops it, and the
+        recovery path is the easiest place to break that promise: writing to a
+        log nobody is reading any more raises ``BrokenPipeError``, and closing a
+        connection whose socket is already gone re-raises the driver's error. An
+        exception here would propagate out of the loop and end the process
+        *while handling* the fault it was meant to survive.
+
+        Swallowing an error while reporting an error is normally indefensible;
+        it is the right trade only because the alternative is a dead drain and
+        the symptom of a dead drain — nobody's phone buzzes — is the one this
+        whole command is arranged to make visible.
+        """
+        try:
+            self.stderr.write(message)
+        except Exception:  # nosec B110 — see the docstring
+            pass
+        try:
+            # A stale connection is the likeliest cause of whatever we just
+            # caught, so the next pass must not reuse it.
+            close_old_connections()
+        except Exception:  # nosec B110 — see the docstring
+            pass
 
     def _say(self, message):
         """Ordinary output, gated on Django's ``--verbosity``.
@@ -396,57 +484,9 @@ class Command(BaseCommand):
             # blocking on ours.
             rows = rows.select_for_update(skip_locked=True, of=("self",))
 
-        # `id` breaks ties on `created_at`, which is only microsecond-resolution
-        # and is set by a single `bulk_create` for every recipient of a group
-        # message — so ties are the normal case there, not a rarity. Without it
-        # the `[:max_rows]` slice could take a different subset of a tied group
-        # on each run, i.e. whose push goes out this drain and whose waits would
-        # be arbitrary. Same reasoning as the device ordering below.
-        pending = list(rows.order_by("created_at", "id")[:max_rows])
-        if not pending:
-            # **The whole of an idle sweep**: one indexed query and out, before
-            # any of the per-batch lookups below. That early return is what makes
-            # `--loop` cheaper at rest than the per-minute timer despite running
-            # 30× as often, so keep new per-batch work below this line.
-            self._last_deferred = 0
-            self._note_idle("Nothing queued.")
-            return
-
-        # One query for every recipient's devices, rather than one per row.
-        #
-        # **Ordered, and that is not cosmetic.** This list decides the order
-        # messages go into the batch, and `_send` matches Expo's reply back onto
-        # them *positionally* (`zip(chunk, tickets, strict=True)`) — so which
-        # device is credited with which ticket, which one a partial failure
-        # leaves outstanding, and which straddle a chunk boundary all follow
-        # from it. Unordered, Postgres is free to return whatever physical heap
-        # order it currently has, which shifts as rows are inserted and deleted
-        # over a table's life; the drain then behaves differently run to run for
-        # reasons nothing in the code expresses. It surfaced as a CI-only
-        # failure of the partial-multi-device test, which is the mild version —
-        # the same non-determinism is what makes a production report of "the
-        # wrong device got retried" impossible to reproduce.
-        recipient_ids = {row.recipient_id for row in pending}
-        devices_by_user = {}
-        for device in DevicePushToken.objects.filter(
-            user_id__in=recipient_ids
-        ).order_by("id"):
-            devices_by_user.setdefault(device.user_id, []).append(device)
-
-        read_markers = self._read_markers(pending)
-        # Both of these feed `_should_space_out` and nothing else, so switching
-        # the cooldown off (the documented `PUSH_MESSAGE_COOLDOWN_SECONDS=0`
-        # path) should not still pay for two grouped queries on every drain —
-        # which at a 2s cadence is 30 a minute for a feature that is disabled.
-        if settings.PUSH_MESSAGE_COOLDOWN_SECONDS > 0:
-            last_pushes = self._last_pushes(pending)
-            mention_marks = self._mention_marks(pending)
-        else:
-            last_pushes = mention_marks = {}
+        messages = []
         # recipient_id → icon-badge count, filled in on demand by `_badge`.
         badges = {}
-
-        messages = []
         deferred = 0
         # Rows this pass settles *without* calling Expo — no device, deleted
         # since enqueue, or already read. Counted because settling is real work
@@ -457,63 +497,186 @@ class Command(BaseCommand):
         # both — so a `_should_drop` gone wrong (a read-marker bug, clock skew)
         # would have been invisible in the one log there is.
         settled = 0
-        # One clock for the whole pass, so every row in a batch is judged
-        # against the same instant rather than drifting apart as it runs.
+        # Rows this drain has either settled or handed to Expo — the work
+        # `--max-rows` actually bounds. **Held rows are deliberately not
+        # counted**: holding one costs a comparison and changes nothing, and
+        # counting it against the budget is exactly what let a window of held
+        # rows stand in for a window of work. See _MAX_DRAIN_PAGES.
+        acted = 0
+        # Rows held back so far, so the next window can look *past* them instead
+        # of selecting the same ones again.
+        held_ids = []
+        examined = 0
+        # Set by the `for … else` below: every window this drain was allowed was
+        # full and still holding rows back, so there is queued work it never
+        # looked at.
+        capped = False
+        # One clock for the whole drain, so every row is judged against the same
+        # instant rather than drifting apart as it runs — across windows too:
+        # otherwise a row in the second window would be judged against a later
+        # "now" than its neighbour in the first, for no reason anyone reading
+        # the outcome could see.
         now = timezone.now()
-        for row in pending:
-            # Two reasons to drop a message push rather than send it, both
-            # settled (not retried) because neither state is ever undone: the
-            # message has since been deleted, or the recipient has already read
-            # it. See _should_drop.
-            if row.message_id and self._should_drop(row, read_markers):
-                settled += 1
-                if not dry_run:
-                    row.sent_at = timezone.now()
-                    row.save(update_fields=["sent_at"])
-                continue
-            # Skip devices this row already reached on an earlier attempt, so a
-            # retry never re-buzzes a phone that got it the first time.
-            delivered = set(row.delivered_tokens or [])
-            outstanding = [
-                device
-                for device in devices_by_user.get(row.recipient_id, [])
-                if device.expo_token not in delivered
-            ]
-            if not outstanding:
-                # Either a web-only user with no devices at all, or every device
-                # was reached earlier. Settle it rather than retrying forever;
-                # the in-app notification exists and is unaffected either way.
-                settled += 1
-                if not dry_run:
-                    row.sent_at = timezone.now()
-                    row.save(update_fields=["sent_at"])
-                continue
-            # Two reasons to hold a message push rather than send it now: the
-            # recipient may be about to tell us they've read it (_should_defer),
-            # or they were buzzed about this thread moments ago
-            # (_should_space_out). Both leave the row **untouched** — no
-            # `sent_at`, no `attempts` — because this is "ask again shortly", not
-            # a failure: spending an attempt here would let a chatty thread
-            # exhaust MAX_ATTEMPTS without Expo ever having been called.
+
+        for window_number in range(_MAX_DRAIN_PAGES):
+            # `id` breaks ties on `created_at`, which is only
+            # microsecond-resolution and is set by a single `bulk_create` for
+            # every recipient of a group message — so ties are the normal case
+            # there, not a rarity. Without it the `[:max_rows]` slice could take
+            # a different subset of a tied group on each run, i.e. whose push
+            # goes out this drain and whose waits would be arbitrary. Same
+            # reasoning as the device ordering below.
+            window = rows.exclude(pk__in=held_ids) if held_ids else rows
+            pending = list(window.order_by("created_at", "id")[:max_rows])
+            if not pending:
+                if window_number == 0:
+                    # **The whole of an idle sweep**: one indexed query and out,
+                    # before any of the per-batch lookups below. That early
+                    # return is what makes `--loop` cheaper at rest than the
+                    # per-minute timer despite running 30× as often, so keep new
+                    # per-batch work below this line — and note that the second
+                    # window is only ever reached by a drain that already found
+                    # a full one, so an idle loop still pays for exactly one
+                    # query per pass.
+                    self._last_deferred = 0
+                    self._last_capped = False
+                    self._note_idle("Nothing queued.")
+                    return
+                break
+            examined += len(pending)
+            held_before = len(held_ids)
+
+            # One query for every recipient's devices, rather than one per row.
             #
-            # **Below the device check on purpose.** There is nothing to protect
-            # a recipient with no registered device from — no phone will buzz
-            # either way — so deferring one would leave a row queued for a drain
-            # that can never send it, and (because `enqueue_message_pushes`
-            # coalesces onto any unsent row) suppress the *next* message's row
-            # behind it.
-            if row.message_id and (
-                self._should_defer(row, read_markers, now)
-                or self._should_space_out(row, last_pushes, mention_marks, now)
+            # **Ordered, and that is not cosmetic.** This list decides the order
+            # messages go into the batch, and `_send` matches Expo's reply back
+            # onto them *positionally* (`zip(chunk, tickets, strict=True)`) — so
+            # which device is credited with which ticket, which one a partial
+            # failure leaves outstanding, and which straddle a chunk boundary
+            # all follow from it. Unordered, Postgres is free to return whatever
+            # physical heap order it currently has, which shifts as rows are
+            # inserted and deleted over a table's life; the drain then behaves
+            # differently run to run for reasons nothing in the code expresses.
+            # It surfaced as a CI-only failure of the partial-multi-device test,
+            # which is the mild version — the same non-determinism is what makes
+            # a production report of "the wrong device got retried" impossible
+            # to reproduce.
+            recipient_ids = {row.recipient_id for row in pending}
+            devices_by_user = {}
+            for device in DevicePushToken.objects.filter(
+                user_id__in=recipient_ids
+            ).order_by("id"):
+                devices_by_user.setdefault(device.user_id, []).append(device)
+
+            read_markers = self._read_markers(pending)
+            # Nothing older than the oldest queued message can change any
+            # decision below — every comparison is against a row's own
+            # `message.created_at` — so this bounds the two history lookups to a
+            # range instead of letting them walk the retention window.
+            since = self._oldest_message(pending)
+            later_messages = self._later_messages(pending, since)
+            muted_pairs = self._muted_pairs(pending)
+            mention_marks = self._mention_marks(pending, since)
+            # Gated because it feeds `_should_space_out` and nothing else, so
+            # switching the cooldown off (the documented
+            # `PUSH_MESSAGE_COOLDOWN_SECONDS=0` path) should not still pay for a
+            # grouped query on every drain — which at a 2s cadence is 30 a
+            # minute for a feature that is disabled. The other three are not
+            # gated: `_should_drop` reads them whatever the cooldown is set to.
+            if settings.PUSH_MESSAGE_COOLDOWN_SECONDS > 0:
+                last_pushes = self._last_pushes(pending, now)
+            else:
+                last_pushes = {}
+
+            for row in pending:
+                if acted >= max_rows:
+                    # A window may be wider than the work (see
+                    # _MAX_DRAIN_PAGES), but `--max-rows` still bounds what one
+                    # drain *does*. The rest keep their place in the queue and
+                    # go out on the next tick, two seconds later.
+                    break
+                # Two reasons to drop a message push rather than send it, both
+                # settled (not retried) because neither state is ever undone:
+                # the message has since been deleted, or the recipient has
+                # already read everything the row stands for. See _should_drop.
+                if row.message_id and self._should_drop(
+                    row, read_markers, later_messages, mention_marks, muted_pairs
+                ):
+                    settled += 1
+                    acted += 1
+                    if not dry_run:
+                        row.sent_at = timezone.now()
+                        row.save(update_fields=["sent_at"])
+                    continue
+                # Skip devices this row already reached on an earlier attempt,
+                # so a retry never re-buzzes a phone that got it the first time.
+                delivered = set(row.delivered_tokens or [])
+                outstanding = [
+                    device
+                    for device in devices_by_user.get(row.recipient_id, [])
+                    if device.expo_token not in delivered
+                ]
+                if not outstanding:
+                    # Either a web-only user with no devices at all, or every
+                    # device was reached earlier. Settle it rather than retrying
+                    # forever; the in-app notification exists and is unaffected
+                    # either way.
+                    settled += 1
+                    acted += 1
+                    if not dry_run:
+                        row.sent_at = timezone.now()
+                        row.save(update_fields=["sent_at"])
+                    continue
+                # Two reasons to hold a message push rather than send it now:
+                # the recipient may be about to tell us they've read it
+                # (_should_defer), or they were buzzed about this thread moments
+                # ago (_should_space_out). Both leave the row **untouched** — no
+                # `sent_at`, no `attempts` — because this is "ask again
+                # shortly", not a failure: spending an attempt here would let a
+                # chatty thread exhaust MAX_ATTEMPTS without Expo ever having
+                # been called.
+                #
+                # **Below the device check on purpose.** There is nothing to
+                # protect a recipient with no registered device from — no phone
+                # will buzz either way — so deferring one would leave a row
+                # queued for a drain that can never send it, and (because
+                # `enqueue_message_pushes` coalesces onto any unsent row)
+                # suppress the *next* message's row behind it.
+                if row.message_id and (
+                    self._should_defer(row, read_markers, now)
+                    or self._should_space_out(
+                        row, last_pushes, mention_marks, now
+                    )
+                ):
+                    deferred += 1
+                    held_ids.append(row.pk)
+                    continue
+                payload = self._payload(row)
+                badge = self._badge(row, badges)
+                acted += 1
+                for device in outstanding:
+                    messages.append(
+                        (row, device, self._message(device, payload, badge))
+                    )
+
+            if (
+                acted >= max_rows
+                or len(pending) < max_rows
+                or len(held_ids) == held_before
             ):
-                deferred += 1
-                continue
-            payload = self._payload(row)
-            badge = self._badge(row, badges)
-            for device in outstanding:
-                messages.append(
-                    (row, device, self._message(device, payload, badge))
-                )
+                # Any of three reasons not to look again: this drain has done
+                # its share; the queue is shorter than the window, so nothing is
+                # hiding behind it; or nothing was held, so the window wasn't
+                # squatted in the first place. The last is the ordinary case,
+                # which is why a healthy drain still runs exactly one selection.
+                break
+        else:
+            # Every window was full and still holding rows back. Reported rather
+            # than shrugged off: work is queued that this drain chose not to
+            # look at, and a cap nobody is told about reads exactly like an
+            # empty queue — the failure this command's logging is arranged
+            # around.
+            capped = True
 
         # Reported on **every** path, not just the empty one. A held row is a
         # fourth outcome beside sent/settled/requeued, and a drain that also has
@@ -523,10 +686,17 @@ class Command(BaseCommand):
         #
         # In `--loop` it goes through `_note_idle` and out to the heartbeat
         # instead: a row held for the full cooldown spans thirty drains, and
-        # thirty identical lines describe one event, not thirty.
+        # thirty identical lines describe one event, not thirty. The cap is
+        # carried the same way and for the same reason.
         self._last_deferred = deferred
+        self._last_capped = capped
         if deferred:
             self._note_idle(f"{deferred} message push(es) held back.")
+        if capped:
+            self._note_idle(
+                f"Stopped after {_MAX_DRAIN_PAGES} window(s) of {max_rows}; "
+                "more rows are queued behind held ones."
+            )
 
         # Through `_say`, not `_note_idle`: this describes rows whose state
         # changed, so it belongs in the resident log next to "Sent N".
@@ -538,7 +708,7 @@ class Command(BaseCommand):
 
         if not messages:
             self._note_idle(
-                f"{len(pending)} queued, nothing outstanding to send."
+                f"{examined} queued, nothing outstanding to send."
             )
             return
 
@@ -590,7 +760,99 @@ class Command(BaseCommand):
             for read in ConversationRead.objects.filter(pairs)
         }
 
-    def _last_pushes(self, pending):
+    def _oldest_message(self, pending):
+        """The earliest ``message.created_at`` in this window, or ``None`` if it
+        holds no message rows.
+
+        Every message-row decision below compares something against a row's own
+        ``message.created_at``, so nothing earlier than the earliest of them can
+        change any answer. Passing it to the history lookups turns them from
+        "scan what we have kept" into a bounded range — which matters because
+        they now run every two seconds rather than every sixty.
+        """
+        times = [row.message.created_at for row in pending if row.message_id]
+        return min(times) if times else None
+
+    def _later_messages(self, pending, since):
+        """``{conversation_id: [(sender_id, newest_created_at), …]}`` for the
+        threads in this window, counting only messages after ``since``.
+
+        Read by ``_should_drop`` to answer "is there anything in this thread the
+        recipient has *not* read?" — which is the question the drop test needs
+        and could not previously ask, because a queued row keeps pointing at the
+        message it was created for while later ones coalesce onto it (see the NB
+        in ``enqueue_message_pushes``). Comparing the read marker against that
+        first message alone means a burst of ten messages is binned in full the
+        moment its first is read, and the cooldown made that the *normal* case
+        rather than a rarity: it holds the row for a minute, which is a minute
+        in which the recipient can glance at the thread and silence nine
+        messages they never saw.
+
+        Grouped by sender as well as thread so the caller can ignore the
+        recipient's **own** messages. Their read marker is stamped when they
+        send (``MessageCreateView``: "sending implies you've read everything up
+        to now"), but the two writes are not one instant — so without this a
+        recipient who replies in the thread could look like someone with unread
+        mail and be buzzed about their own message.
+
+        This does **not** re-check visibility (``ParticipantInterval``) or mute
+        the way ``enqueue_message_pushes`` does when it decides who a message is
+        news to, and so it can rescue a row on the strength of a message the
+        recipient will never see — someone in an interval gap. The cost of that
+        is one push saying a thread has moved on, phrased from a message they
+        *can* see, which is the mild failure; the cost of the reverse is silent
+        loss of real messages. Mute is the case where the difference is not mild
+        — a muted thread is a standing request not to be buzzed — so the caller
+        takes it out separately, via ``_muted_pairs``.
+        """
+        conversation_ids = {
+            row.message.conversation_id for row in pending if row.message_id
+        }
+        if not conversation_ids or since is None:
+            return {}
+        grouped = (
+            Message.objects.filter(
+                conversation_id__in=conversation_ids,
+                deleted_at__isnull=True,
+                created_at__gt=since,
+            )
+            .values("conversation_id", "sender_id")
+            .annotate(newest=Max("created_at"))
+        )
+        latest = {}
+        for entry in grouped:
+            latest.setdefault(entry["conversation_id"], []).append(
+                (entry["sender_id"], entry["newest"])
+            )
+        return latest
+
+    def _muted_pairs(self, pending):
+        """The ``(conversation_id, user_id)`` pairs in this window whose
+        recipient has **muted** the thread.
+
+        Only ``_should_drop`` needs it, and only to decide *which* later
+        messages count as unread for someone. In an unmuted thread that is any
+        message; in a muted one it is only the messages that mention them,
+        because those are the only ones ``enqueue_message_pushes`` would have
+        queued or coalesced for them in the first place. Without this, chatter
+        in a muted thread would resurrect a mention's push after the mention had
+        been read — buzzing someone through a quiet they asked for, which is the
+        one thing mute has to be able to promise.
+        """
+        conversation_ids = {
+            row.message.conversation_id for row in pending if row.message_id
+        }
+        if not conversation_ids:
+            return set()
+        return set(
+            Participant.objects.filter(
+                conversation_id__in=conversation_ids,
+                user_id__in={row.recipient_id for row in pending},
+                muted_at__isnull=False,
+            ).values_list("conversation_id", "user_id")
+        )
+
+    def _last_pushes(self, pending, now):
         """``{(conversation_id, user_id): sent_at}`` — when each recipient in
         this batch was last *actually buzzed* about each thread.
 
@@ -606,14 +868,25 @@ class Command(BaseCommand):
         so the mistake would fall hardest on exactly the exchanges that must stay
         quick. ``delivered_tokens`` is the honest record: it is non-empty only
         once Expo accepted the message for a device.
+
+        **Bounded to the cooldown window.** The only thing the caller can do
+        with the answer is compare it against ``now - cooldown``, so anything
+        older is indistinguishable from nothing at all — and without the bound
+        this walks the whole retention window (a fortnight of sent rows, joined
+        to ``api_message``) every two seconds, which would make the resident
+        drain more expensive on a busy queue than the per-minute timer it
+        replaced rather than less.
         """
         pairs = self._message_pairs(
             pending, "message__conversation_id", "recipient_id"
         )
         if pairs is None:
             return {}
+        cooldown = timedelta(seconds=settings.PUSH_MESSAGE_COOLDOWN_SECONDS)
         grouped = (
-            PushOutbox.objects.filter(pairs, sent_at__isnull=False)
+            PushOutbox.objects.filter(
+                pairs, sent_at__gte=now - cooldown
+            )
             .exclude(delivered_tokens=[])
             .values("message__conversation_id", "recipient_id")
             .annotate(last_sent=Max("sent_at"))
@@ -625,14 +898,22 @@ class Command(BaseCommand):
             for entry in grouped
         }
 
-    def _mention_marks(self, pending):
+    def _mention_marks(self, pending, since):
         """``{(conversation_id, user_id): newest_mention_time}`` for the message
-        rows in this batch.
+        rows in this batch, counting only mentions after ``since``.
 
         Read by ``_should_space_out`` to answer "has this person been named in
         this thread since the message their queued push points at?" — which is
         the question the cooldown's @mention exemption actually needs, because a
-        row covers every message that coalesced onto it, not just its own.
+        row covers every message that coalesced onto it, not just its own. Read
+        by ``_should_drop`` for the same fact in a muted thread, where a mention
+        is the *only* kind of message that coalesces onto a queued row.
+
+        Bounded by ``since`` — the oldest queued message in the window — for the
+        reason ``_last_pushes`` is: every caller compares the answer against a
+        row's own ``message.created_at``, so an older mention cannot change any
+        decision, and leaving the range open makes a query that runs every two
+        seconds walk the whole mention history of every thread in the batch.
 
         The **newest** mention is all that need be stored: the caller compares it
         against the row's own message time, and if the most recent mention is
@@ -645,10 +926,14 @@ class Command(BaseCommand):
         pairs = self._message_pairs(
             pending, "message__conversation_id", "user_id"
         )
-        if pairs is None:
+        if pairs is None or since is None:
             return {}
         grouped = (
-            MessageMention.objects.filter(pairs, message__deleted_at__isnull=True)
+            MessageMention.objects.filter(
+                pairs,
+                message__deleted_at__isnull=True,
+                message__created_at__gte=since,
+            )
             .values("message__conversation_id", "user_id")
             .annotate(newest=Max("message__created_at"))
         )
@@ -684,7 +969,9 @@ class Command(BaseCommand):
             cache[row.recipient_id] = badge_count_for(row.recipient)
         return cache[row.recipient_id]
 
-    def _should_drop(self, row, read_markers):
+    def _should_drop(
+        self, row, read_markers, later_messages, mention_marks, muted_pairs
+    ):
         """Whether this queued *message* push should be dropped instead of sent.
 
         **Deleted since enqueue.** Message deletion is a *soft* delete — the row
@@ -704,13 +991,56 @@ class Command(BaseCommand):
         presence system, a heartbeat, or the app having to tell us anything. It
         also cleans up after a delayed drain: a message read on another device
         before the timer fired doesn't buzz the phone in your pocket.
+
+        **Read *what*, though.** A queued row keeps pointing at the message it
+        was created for while every later message in the thread coalesces onto
+        it, so "have they read ``row.message``?" is the wrong question the
+        moment a burst is involved: answering yes bins the nine messages behind
+        it as well, and nothing anywhere records that it happened. The cooldown
+        (issue #354) turned that from a race into the normal case, because it
+        deliberately holds the row for a minute — a minute in which a glance at
+        the thread on a laptop silences the phone for everything that arrives
+        next. So the marker is compared against the newest message the row now
+        stands for, and only a recipient who is genuinely caught up is dropped.
+
+        What the row *says* when it does go out is still phrased and channelled
+        from its first message — that half of the coalescing NB in
+        ``enqueue_message_pushes`` is unchanged and tracked separately. A push
+        naming the wrong sender of a real unread message is a smaller wrong than
+        no push at all, which is what this fixes.
+
+        **A muted thread counts only mentions**, because those are the only
+        messages that would have queued or coalesced a row for this recipient
+        (see ``_muted_pairs``); ordinary chatter in a thread they silenced must
+        not resurrect a push they have already read.
+
+        The deleted branch is deliberately left as "drop, full stop". It has the
+        same shape of hole — a burst whose *first* message is deleted takes the
+        rest of the burst's push with it — but a row that points at deleted
+        content is the one case where "a push for deleted content cannot fire"
+        is the stronger promise, and it is the promise the reference docs make.
         """
         if row.message.deleted_at is not None:
             return True
-        marker = read_markers.get(
-            (row.message.conversation_id, row.recipient_id)
-        )
-        return marker is not None and marker >= row.message.created_at
+        key = (row.message.conversation_id, row.recipient_id)
+        marker = read_markers.get(key)
+        if marker is None:
+            return False
+        covered = row.message.created_at
+        if key in muted_pairs:
+            newest = mention_marks.get(key)
+        else:
+            newest = max(
+                (
+                    when
+                    for sender_id, when in later_messages.get(key[0], ())
+                    if sender_id != row.recipient_id
+                ),
+                default=None,
+            )
+        if newest is not None and newest > covered:
+            covered = newest
+        return marker >= covered
 
     def _should_defer(self, row, read_markers, now):
         """Whether this *message* push should be left queued a little longer
