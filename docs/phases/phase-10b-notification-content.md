@@ -702,9 +702,8 @@ notification, or post a replacement, in the states we care about?**
   3. Is the visible present-then-replace acceptable to look at, or does it read
      as a glitch? This one is a judgement call and needs a person holding the
      phone, not a log line.
-- And spike the right
-  state: **background, and swiped-away-from-recents — not force-stopped.**
-  Android's *stopped state* (after "Force stop" in Settings) delivers no FCM
+- **Spike the right state**: background, and swiped-away-from-recents — *not
+  force-stopped.* Android's *stopped state* (after "Force stop" in Settings) delivers no FCM
   messages at all until the user relaunches the app, by design and independent of
   any Expo bug. The first draft's "force-stop the app, send a data-only push,
   confirm the task runs" would have failed for a reason that has nothing to do
@@ -712,9 +711,11 @@ notification, or post a replacement, in the states we care about?**
 - If the task fires: fetch, then `scheduleNotificationAsync` a replacement in the
   same channel and dismiss the original, same fallback discipline. Accept that
   the two-step is briefly visible.
-- If it doesn't: the reliable route is a native `FirebaseMessagingService`
-  subclass via a config plugin (what Notifee does). **That is a second native
-  surface**, and if the spike fails, the honest answer may be to ship iOS,
+- If it doesn't: the reliable route is native, via a config plugin — but the
+  source reading above narrows it from a `FirebaseMessagingService`
+  reimplementation (what Notifee does) to a subclass of Expo's own
+  `FirebaseMessagingDelegate`, which is `open` for exactly this. **It is still a
+  second native surface**, and if the spike fails, the honest answer may be to ship iOS,
   record the finding here, and leave Android on the contentless body — which is
   strictly no worse than today. Hide the toggle on Android in that case rather
   than offering a switch that does nothing.
