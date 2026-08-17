@@ -660,11 +660,12 @@ notification-message is drawn by the system without ever calling
 `onMessageReceived`. So the callback is live when the app isn't, and the
 milestone's central worry is narrower than "does anything run at all".
 
-**Bad news, and it's structural: the notification is presented _before_ the task
-runs.** Those two lines are in that order, and nothing in between can suppress
-the first. So Android cannot do what iOS does — there is no "rewrite it before
-anyone sees it". The best available is **present, then replace**, and the
-replacement is visible as a change on screen rather than as the original.
+**Bad news, and it's structural — but it is Expo's structure, not Android's.**
+`onMessageReceived` presents the notification and *then* runs the tasks, in that
+order, and nothing in between can suppress the first. So a task-based rewrite
+cannot do what iOS does. The best it can manage is **present, then replace**,
+and the replacement is visible as a change on screen rather than as the
+original.
 
 That is not fatal, and there is a lever for it: `getNotificationIdentifier`
 uses `remoteMessage.data["tag"]` as the notification id, with the explicit
@@ -672,18 +673,86 @@ comment that *"if a notification comes in with the same tag as a notification
 that is already in the tray, the existing notification is replaced"*. A
 replacement scheduled under the same identifier should therefore **swap in
 place** rather than stack — which is the difference between a brief flicker and
-two notifications. **Verify this in the spike**; it is the single thing that
-decides whether the Android experience is acceptable or merely possible.
+two notifications. **Verify this in the spike.**
 
-**And the fallback route is cheaper than the plan feared.**
-`FirebaseMessagingDelegate` is an `open class` and `createNotificationRequest`
-is `protected open`, i.e. deliberately built for subclassing. If the task route
-fails, a delegate subclass could suppress or alter the first presentation
-instead of racing it — still a native surface, but a documented extension point
-rather than a reimplementation of `FirebaseMessagingService`.
+#### Nobody else on Android does it this way, and that matters
 
-**Unchanged:** `expo-task-manager` is still not a dependency (confirmed against
-`package.json`), so the task route adds one.
+Checked 2026-08-17, because the milestone was about to pick an architecture on
+the assumption that Android forced one. It doesn't.
+
+The standard messaging-app shape on Android is: send a **data-only** FCM
+message, which reaches `onMessageReceived` in every state that matters
+(foreground, background, swiped-away — everything but force-stopped), then
+fetch or decrypt *there* and **post the notification yourself, once, with the
+content already in it**. There is no swap because nothing has been shown yet.
+Signal's variant is the extreme one — the push carries no content whatsoever,
+just "wake up and check" — and it is the same shape. Firebase's own guidance
+says as much: with data-only, "everything is available in `onMessageReceived`,
+so you need to throw a notification on your own."
+
+Android is in fact the *easier* platform for this. iOS obliges the system to
+display something and only lets you mutate it from an extension. Android hands
+the whole decision to the app.
+
+**We already have the raw material.** Expo sends data-only — that is why
+`onMessageReceived` is reachable in the background at all, per the source
+reading above. Expo's delegate simply spends it before our code gets a turn.
+So present-then-replace is not "the Android way"; it is **the way of doing this
+without touching native code**, and it should be described that way rather than
+as a platform constraint.
+
+#### Three routes, and the spike picks between them
+
+Ordered by how much native surface they add. Route A is the one the milestone
+assumed; C is what everyone else ships.
+
+**A — Task-based, present-then-replace.** No Kotlin. `registerTaskAsync` +
+`defineTask` (adds `expo-task-manager`, still not a dependency), fetch, then
+`scheduleNotificationAsync` under the same identifier. Fallback is free and
+perfect: the contentless notification is *already on screen*, so a failed fetch
+degrades to exactly today. Costs the visible swap, and rests entirely on the
+task firing.
+
+**B — Suppress, then post from JS.** A small delegate subclass that skips
+`NotificationsService.receive` for previewable messages and runs the tasks only;
+JS does the fetch and posts the finished notification. Single presentation,
+minimal Kotlin, and the credential stays in JS where `previewCredential.ts`
+already reads it. **But it breaks DoD 6 if the task ever fails to fire**: having
+suppressed the original, there is nothing to fall back to and the push is
+silent. Viable only if question 1 comes back unambiguously yes — and "unambiguously" is
+doing real work in that sentence, given the issue history.
+
+**C — Native, single presentation.** Override `createNotificationRequest`
+(`protected open`, and the designed hook), do a blocking fetch with a tight
+timeout inside `onMessageReceived`'s window, and return a request carrying the
+preview body; on any failure return `super`. This is the shape every other
+messenger ships, it satisfies DoD 6 by construction — the fallback is the
+superclass call — and it needs no `expo-task-manager` and no task at all.
+
+  Its real cost is **not** the hook, which is cheap:
+  `NotificationContent.Builder` has `setTitle`/`setText`, so composing content
+  natively is a few lines, and `ExpoFirebaseMessagingService` is `open` with
+  `firebaseMessagingDelegate` as a `protected open val`, so the whole chain is
+  built for subclassing.
+
+  The cost is **reading the credential from Kotlin**. `previewCredential.ts`
+  stores it through `expo-secure-store`, which on Android is encrypted
+  SharedPreferences with an Android Keystore key (`AESEncryptor` /
+  `HybridAESEncryptor`). Native code would have to reproduce that decryption
+  against the internals of a pinned package — the same class of coupling M2
+  flagged on iOS, where "a routine SDK bump would kill previews with no build
+  error", except deeper, because iOS only had to reproduce a *query* and this
+  reproduces a *cipher*. That is the number to get before choosing C, and
+  nothing above prices it.
+
+  It also means registering our service in the manifest in place of Expo's,
+  where two `MESSAGING_EVENT` services is a merge-order question rather than a
+  clean override.
+
+**Do not pick before the spike.** Question 1 decides: a task that fires
+reliably makes B available and A comfortable; a task that doesn't rules out both
+and leaves C or a written deferral. Picking now would be choosing an
+architecture on the strength of the thing the spike exists to find out.
 
 ---
 
@@ -700,6 +769,16 @@ data-only message carries no title or body, so if the fetch fails there is
 nothing to fall back to and the user gets **silence**: the outcome M4 itself
 names as its highest-likelihood risk, and the exact thing the fallback rule
 forbids. It would also mean two payload shapes, which M1 doesn't build.
+
+> **"Data-only" means two different things in this document, and they are one
+> layer apart.** *This* paragraph is about **our** payload — whether the body we
+> compose in `send_pushes.py` carries a title and text. It must, so that
+> something sensible is already on the phone when a fetch fails. The section
+> above is about **Expo's transport** — whether Expo hands FCM a `notification`
+> block or a `data` block, which is what decides whether `onMessageReceived` is
+> called at all. Expo sends `data`, and our title and body ride *inside* it.
+> Both statements are true together, and neither constrains the other: we keep a
+> real body, and we still get the callback.
 
 So Android keeps the same notification-message payload as iOS, and the question
 is narrowed to: **can a background task rewrite an already-delivered
@@ -725,17 +804,22 @@ notification, or post a replacement, in the states we care about?**
   any Expo bug. The first draft's "force-stop the app, send a data-only push,
   confirm the task runs" would have failed for a reason that has nothing to do
   with the question, and could have wrongly killed Android support.
-- If the task fires: fetch, then `scheduleNotificationAsync` a replacement in the
-  same channel and dismiss the original, same fallback discipline. Accept that
-  the two-step is briefly visible.
-- If it doesn't: the reliable route is native, via a config plugin — but the
-  source reading above narrows it from a `FirebaseMessagingService`
-  reimplementation (what Notifee does) to a subclass of Expo's own
-  `FirebaseMessagingDelegate`, which is `open` for exactly this. **It is still a
-  second native surface**, and if the spike fails, the honest answer may be to ship iOS,
-  record the finding here, and leave Android on the contentless body — which is
-  strictly no worse than today. Hide the toggle on Android in that case rather
-  than offering a switch that does nothing.
+- **If the task fires:** route A or B is open. A is the cheap one — fetch, then
+  `scheduleNotificationAsync` a replacement in the same channel under the same
+  identifier, same fallback discipline, and accept that the two-step is briefly
+  visible. Prefer B only if question 1 came back *unambiguously* yes, since B
+  gives up the free fallback A gets from having already shown something.
+- **If it doesn't:** route A and B are both dead, and the choice is route C or a
+  written deferral. C is what every other messenger ships and satisfies DoD 6 by
+  construction, but **it is a second native surface** and the credential read
+  prices it — get that number before committing. If it doesn't justify itself,
+  the honest answer is to ship iOS, record the finding here, and leave Android
+  on the contentless body — which is strictly no worse than today. Hide the
+  toggle on Android in that case rather than offering a switch that does nothing.
+- **Whatever the outcome, write it down here.** The reason this milestone spent
+  three weeks believing Android forced present-then-replace is that a source
+  reading was recorded without the comparison that would have framed it. A
+  finding about what *doesn't* work is worth as much as one about what does.
 
 ### M5 — Settings, docs, and the 9c handoff ✅ **Built**
 
