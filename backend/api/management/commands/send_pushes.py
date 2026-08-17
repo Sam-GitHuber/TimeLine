@@ -578,6 +578,11 @@ class Command(BaseCommand):
             later_messages = self._later_messages(pending, since)
             muted_pairs = self._muted_pairs(pending)
             mention_marks = self._mention_marks(pending, since)
+            # Costs a query only when a mention actually arrived mid-burst, and
+            # is therefore below `_mention_marks` rather than folded into it:
+            # the marks are needed on every drain that has a message row,
+            # the messages behind them almost never are.
+            mention_messages = self._mention_messages(pending, mention_marks)
             # Gated because it feeds `_should_space_out` and nothing else, so
             # switching the cooldown off (the documented
             # `PUSH_MESSAGE_COOLDOWN_SECONDS=0` path) should not still pay for a
@@ -596,12 +601,26 @@ class Command(BaseCommand):
                     # drain *does*. The rest keep their place in the queue and
                     # go out on the next tick, two seconds later.
                     break
+                # What this row now stands for: its own message, or the newest
+                # thing that coalesced onto it. Computed once because both the
+                # drop test and the hold test ask about it, from opposite ends —
+                # "have they read all of it" and "is any of it too new to have
+                # been read yet" — and answering those off different messages is
+                # how a drain both declines to drop a row and declines to hold
+                # it. See _newest_covered.
+                covered = (
+                    self._newest_covered(
+                        row, later_messages, mention_marks, muted_pairs
+                    )
+                    if row.message_id
+                    else None
+                )
                 # Two reasons to drop a message push rather than send it, both
                 # settled (not retried) because neither state is ever undone:
                 # the message has since been deleted, or the recipient has
                 # already read everything the row stands for. See _should_drop.
                 if row.message_id and self._should_drop(
-                    row, read_markers, later_messages, mention_marks, muted_pairs
+                    row, read_markers, covered
                 ):
                     settled += 1
                     acted += 1
@@ -644,7 +663,7 @@ class Command(BaseCommand):
                 # `enqueue_message_pushes` coalesces onto any unsent row)
                 # suppress the *next* message's row behind it.
                 if row.message_id and (
-                    self._should_defer(row, read_markers, now)
+                    self._should_defer(row, read_markers, covered, now)
                     or self._should_space_out(
                         row, last_pushes, mention_marks, now
                     )
@@ -652,7 +671,7 @@ class Command(BaseCommand):
                     deferred += 1
                     held_ids.append(row.pk)
                     continue
-                payload = self._payload(row)
+                payload = self._payload(row, mention_messages)
                 badge = self._badge(row, badges)
                 acted += 1
                 for device in outstanding:
@@ -899,6 +918,50 @@ class Command(BaseCommand):
             for entry in grouped
         }
 
+    def _readable_mentions(self):
+        """``MessageMention`` rows whose target could actually read the message
+        that named them — the base every mention lookup below starts from.
+
+        Two lookups need this exact set (``_mention_marks``, which decides
+        whether a mention beats the cooldown or rescues a muted thread, and
+        ``_mention_messages``, which decides what the push then *says*), and a
+        mention one of them counted while the other didn't would mean a push
+        channelled as a mention but phrased as chatter, or the reverse. One
+        queryset, so there is nothing to keep in step.
+
+        **Soft-deleted messages are excluded.** A mention taken back should not
+        go on punching a push through the cooldown, and ``_should_drop`` already
+        treats a deleted message as a reason not to send at all.
+
+        **The interval test and nothing else** (issue #366), matching
+        ``views.visible_messages_for``, which is what "can this person read this
+        message" means. ``enqueue_message_pushes``'s other three clauses
+        (``status``, ``left_at``, ``user__is_active``) are *not* repeated here,
+        and adding them would be a subtle bug rather than belt-and-braces: over
+        there they are read at the instant the message is created, so they
+        describe that moment; here they would be read whenever the drain happens
+        to run, and a member who drops to ``pending`` between the mention and the
+        drain keeps their pre-gap history — the mention is still readable, and
+        their closed interval still spans it. Membership *now* is a different
+        question from readability *then*.
+
+        The ``Exists`` costs a correlated subquery on lookups that run every two
+        seconds; callers bound it by ``since`` and by the batch's pairs, both its
+        joins are on indexed foreign keys, and the flat alternative would mean
+        re-testing the interval span in Python — i.e. a third copy of the rule
+        ``interval_spans`` exists to stop duplicating.
+        """
+        # Correlated per *mention*, not per batch: the interval test is against
+        # the moment of that mention's own message, so it can't be hoisted into
+        # the outer query.
+        readable = Participant.objects.filter(
+            conversation_id=OuterRef("message__conversation_id"),
+            user_id=OuterRef("user_id"),
+        ).filter(interval_spans(OuterRef("message__created_at")))
+        return MessageMention.objects.filter(
+            Exists(readable), message__deleted_at__isnull=True
+        )
+
     def _mention_marks(self, pending, since):
         """``{(conversation_id, user_id): newest_mention_time}`` for the message
         rows in this batch, counting only mentions after ``since``.
@@ -918,59 +981,20 @@ class Command(BaseCommand):
 
         The **newest** mention is all that need be stored: the caller compares it
         against the row's own message time, and if the most recent mention is
-        older than that, no later one exists to find.
+        older than that, no later one exists to find. ``_mention_messages`` turns
+        that timestamp back into the message when the wording needs it.
 
-        Soft-deleted messages are excluded. A mention taken back should not go on
-        punching a push through the cooldown, and ``_should_drop`` already treats
-        a deleted message as a reason not to send at all.
-
-        **Only mentions the recipient could actually read count** (issue #366).
-        ``enqueue_message_pushes`` is careful that a mention can never make a
-        message readable that isn't — it carves mentions out of an audience
-        already filtered by ``ParticipantInterval`` — and this is the same
-        question asked on the read side, so it applies the same interval test or
-        the two copies of the rule say different things. Without it, being named
-        during a stretch someone had left the thread (or while they were still
-        ``pending``, with no interval to span it) would punch their next push
-        through the cooldown, and would rescue a muted thread's row from
-        ``_should_drop``, on the strength of a message they will never see. The
-        ``Exists`` costs a correlated subquery on a lookup that runs every two
-        seconds; it is bounded by ``since`` and by the batch's pairs like the
-        rest of this query, both its joins are on indexed foreign keys, and the
-        flat alternative would mean re-testing the interval span in Python —
-        i.e. a third copy of the rule this is here to stop duplicating.
+        Which mentions count at all is ``_readable_mentions``'s question, not
+        this one's.
         """
         pairs = self._message_pairs(
             pending, "message__conversation_id", "user_id"
         )
         if pairs is None or since is None:
             return {}
-        # Correlated per *mention*, not per batch: the interval test is against
-        # the moment of that mention's own message, so it can't be hoisted into
-        # the outer query.
-        #
-        # **The interval test and nothing else**, matching
-        # ``views.visible_messages_for``, which is what "can this person read
-        # this message" means. The enqueue's other three clauses (``status``,
-        # ``left_at``, ``user__is_active``) are *not* repeated here, and adding
-        # them would be a subtle bug rather than belt-and-braces: over there they
-        # are read at the instant the message is created, so they describe that
-        # moment; here they would be read whenever the drain happens to run, and
-        # a member who drops to ``pending`` between the mention and the drain
-        # keeps their pre-gap history — the mention is still readable, and their
-        # closed interval still spans it. Membership *now* is a different
-        # question from readability *then*.
-        readable = Participant.objects.filter(
-            conversation_id=OuterRef("message__conversation_id"),
-            user_id=OuterRef("user_id"),
-        ).filter(interval_spans(OuterRef("message__created_at")))
         grouped = (
-            MessageMention.objects.filter(
-                pairs,
-                Exists(readable),
-                message__deleted_at__isnull=True,
-                message__created_at__gte=since,
-            )
+            self._readable_mentions()
+            .filter(pairs, message__created_at__gte=since)
             .values("message__conversation_id", "user_id")
             .annotate(newest=Max("message__created_at"))
         )
@@ -978,6 +1002,90 @@ class Command(BaseCommand):
             (entry["message__conversation_id"], entry["user_id"]): entry["newest"]
             for entry in grouped
         }
+
+    def _mention_messages(self, pending, mention_marks):
+        """``{(conversation_id, user_id): Message}`` — the mention a queued row
+        should *speak for*, where that isn't the message it points at (issue
+        #346).
+
+        **The bug this closes.** ``enqueue_message_pushes`` coalesces a burst
+        onto one row, and the row goes on pointing at the burst's *first*
+        message. ``_payload`` reads the sender, the photo and — the one that
+        matters — ``is_mentioned`` off that message, so Ada saying "chatter" and
+        then "@Bea can you make it" inside one drain window gets Bea a push
+        phrased "New message from Ada" on the **messages** channel. Which is the
+        precise outcome the mentions channel exists to prevent: turn Messages
+        down to quieten a busy group chat and you have silenced your @mentions
+        with it. ``Kind.MENTION`` never creates a ``Notification``, so a mention
+        has no other route it could have taken.
+
+        **Why this and not ``.update(message=…)`` on the row.** Re-pointing the
+        row looks like three lines and is a trap. It can violate
+        ``unique_message_push_per_recipient`` when two concurrent sends have each
+        queued a row, and ``enqueue_message_pushes`` runs inside the
+        message-create transaction — so that is a 500 for the *sender*. It
+        strands ``delivered_tokens``, ``attempts`` and ``last_error`` describing
+        a different message. It lets a later soft-delete bin a push that covered
+        earlier undeleted messages. And an UPDATE takes row locks that this
+        command holds across its Expo HTTP calls, so a slow Expo would start
+        blocking message sends — breaking the promise the call site makes, that
+        the send is out-of-band and Expo being down can never slow down sending a
+        message. Nothing here is written: the answer is assembled for the payload
+        and thrown away.
+
+        **Only where it changes something.** A pair is looked up only when the
+        newest readable mention is *strictly newer* than the row's own message,
+        which is what keeps this symmetric. The reverse case — a mention followed
+        by chatter — has the mention as the row's own message, and re-pointing at
+        the newest message would take the mentions channel *away* from a push
+        that correctly had it. So the common burst, and every batch with no
+        mid-burst mention in it at all, pays nothing: no wanted pairs, no query.
+
+        Keyed on the exact ``created_at`` ``_mention_marks`` chose rather than
+        re-deriving "the newest one", so the two lookups cannot pick different
+        messages — the row would then be channelled off one mention and phrased
+        off another.
+        """
+        pairs = Q(pk__in=[])
+        wanted = 0
+        for row in pending:
+            if not row.message_id:
+                continue
+            key = (row.message.conversation_id, row.recipient_id)
+            when = mention_marks.get(key)
+            if when is None or when <= row.message.created_at:
+                continue
+            wanted += 1
+            pairs |= Q(
+                message__conversation_id=key[0],
+                user_id=key[1],
+                message__created_at=when,
+            )
+        if not wanted:
+            return {}
+        found = {}
+        # ``select_related``/``prefetch_related`` mirror what ``_drain`` joins
+        # onto ``row.message``: ``message_push_body`` reads the sender's name and
+        # the conversation's kind and title, and ``is_mentioned`` iterates the
+        # prefetched mentions rather than querying. Without these the fix would
+        # cost four queries per re-pointed row.
+        #
+        # Ordered so that two mentions sharing a microsecond — the only way a
+        # pair can match twice — resolve the same way on every run rather than
+        # on whatever heap order Postgres happens to return.
+        for mention in (
+            self._readable_mentions()
+            .filter(pairs)
+            .select_related(
+                "message", "message__sender", "message__conversation"
+            )
+            .prefetch_related("message__mentions")
+            .order_by("message_id")
+        ):
+            found[(mention.message.conversation_id, mention.user_id)] = (
+                mention.message
+            )
+        return found
 
     def _badge(self, row, cache):
         """The number to put on this recipient's **app icon** (issue #179).
@@ -1007,7 +1115,7 @@ class Command(BaseCommand):
         return cache[row.recipient_id]
 
     def _should_drop(
-        self, row, read_markers, later_messages, mention_marks, muted_pairs
+        self, row, read_markers, covered
     ):
         """Whether this queued *message* push should be dropped instead of sent.
 
@@ -1037,19 +1145,16 @@ class Command(BaseCommand):
         (issue #354) turned that from a race into the normal case, because it
         deliberately holds the row for a minute — a minute in which a glance at
         the thread on a laptop silences the phone for everything that arrives
-        next. So the marker is compared against the newest message the row now
-        stands for, and only a recipient who is genuinely caught up is dropped.
+        next. So the marker is compared against ``covered``
+        (``_newest_covered``) — the newest message the row now stands for — and
+        only a recipient who is genuinely caught up is dropped.
 
-        What the row *says* when it does go out is still phrased and channelled
-        from its first message — that half of the coalescing NB in
-        ``enqueue_message_pushes`` is unchanged and tracked separately. A push
-        naming the wrong sender of a real unread message is a smaller wrong than
-        no push at all, which is what this fixes.
-
-        **A muted thread counts only mentions**, because those are the only
-        messages that would have queued or coalesced a row for this recipient
-        (see ``_muted_pairs``); ordinary chatter in a thread they silenced must
-        not resurrect a push they have already read.
+        What the row *says* when it does go out is phrased from its first
+        message still, except where a mid-burst @mention overrides it
+        (``_mention_messages``, issue #346) — a push naming the wrong sender of a
+        real unread message is a smaller wrong than no push at all, which is what
+        this fixes, and a mention is the one case where the wrong name costs a
+        channel too.
 
         The deleted branch is deliberately left as "drop, full stop". It has the
         same shape of hole — a burst whose *first* message is deleted takes the
@@ -1059,11 +1164,44 @@ class Command(BaseCommand):
         """
         if row.message.deleted_at is not None:
             return True
-        key = (row.message.conversation_id, row.recipient_id)
-        marker = read_markers.get(key)
+        marker = read_markers.get(
+            (row.message.conversation_id, row.recipient_id)
+        )
         if marker is None:
             return False
-        covered = row.message.created_at
+        return marker >= covered
+
+    def _newest_covered(self, row, later_messages, mention_marks, muted_pairs):
+        """The newest message this queued row now stands for.
+
+        A row keeps pointing at the message it was created for while every later
+        message in the thread coalesces onto it, so ``row.message`` is the
+        *oldest* thing it announces, not the newest. Two rules need the newest —
+        ``_should_drop`` ("have they read all of it?") and ``_should_defer``
+        ("is any of it too new to have been read yet?") — and they are the same
+        question asked from opposite ends. Answering them off different messages
+        is how a drain both declines to drop a row *and* declines to hold it,
+        which is the shape of the bug this closes (issue #346, and #355 with it).
+
+        Computed once per row in ``_drain`` and passed to both, so the two
+        cannot drift.
+
+        **A muted thread counts only mentions**, because those are the only
+        messages ``enqueue_message_pushes`` would have queued or coalesced for
+        this recipient (see ``_muted_pairs``); ordinary chatter in a thread they
+        silenced must not resurrect a push they have already read, nor hold one
+        back on the strength of an arrival they never asked to hear about.
+
+        **The recipient's own messages don't count** in the unmuted branch.
+        Sending stamps the read marker (``MessageCreateView``: "sending implies
+        you've read everything up to now"), but the two writes are not one
+        instant — so counting your own reply would make you look like someone
+        with unread mail.
+
+        Never earlier than the row's own message: a burst only ever grows what a
+        row stands for.
+        """
+        key = (row.message.conversation_id, row.recipient_id)
         if key in muted_pairs:
             newest = mention_marks.get(key)
         else:
@@ -1075,11 +1213,12 @@ class Command(BaseCommand):
                 ),
                 default=None,
             )
+        covered = row.message.created_at
         if newest is not None and newest > covered:
             covered = newest
-        return marker >= covered
+        return covered
 
-    def _should_defer(self, row, read_markers, now):
+    def _should_defer(self, row, read_markers, covered, now):
         """Whether this *message* push should be left queued a little longer
         (issue #355).
 
@@ -1109,18 +1248,42 @@ class Command(BaseCommand):
         server can get without a presence system. No marker at all — they have
         never opened the thread — is emphatically not active.
 
+        **Which message's age** (issue #346). ``covered``, not
+        ``row.message.created_at`` — the newest message the row stands for, from
+        ``_newest_covered``, the same quantity ``_should_drop`` compares the
+        marker against. A coalesced row's own message is the *oldest* thing it
+        announces, and asking that one produced a specific, repeatable buzz for
+        someone staring at the thread: a row held the full cooldown is a minute
+        old at release, so the age test said "far too old to defer" while the
+        message it was about to announce was half a second old and had not
+        reached the recipient's client yet. That is the exact #355 failure this
+        method exists to prevent, re-opened by the coalescing — and the busy
+        thread where it happens is precisely the one that is being read.
+
+        Asking the same message as ``_should_drop`` is what makes the two
+        coherent: a row is either caught up (drop), too fresh to judge (hold), or
+        neither (send). Off two different messages it could be none of them.
+
         **What it costs — much less than it used to.** A deferred row waits for
         the next drain, which is now two seconds away rather than up to sixty, so
-        the *most* this can delay a push is the grace itself: six seconds. The
-        age test is what caps it, and the cap is why
-        ``PUSH_ACTIVE_THREAD_SECONDS`` could be widened from 15s to 120s in the
-        same change — a wide window used to mean minute-long holds and now means
-        six-second ones, while a narrow one misses the silent reader whose marker
-        hasn't moved because nothing has arrived to move it.
+        one hold costs the grace: six seconds. That is also why
+        ``PUSH_ACTIVE_THREAD_SECONDS`` could be widened from 15s to 120s — a wide
+        window used to mean minute-long holds and now means six-second ones,
+        while a narrow one misses the silent reader whose marker hasn't moved
+        because nothing has arrived to move it.
 
-        **It cannot strand a row.** The age test is against the message's own
-        ``created_at``, which doesn't move, so once a row is older than the grace
-        no later run can defer it again however active the recipient looks.
+        **It cannot strand a row**, though the argument is now two-sided rather
+        than one. A hold needs *both* halves to be true at once: something in the
+        thread newer than ``now - grace``, **and** a read marker newer than
+        ``now - PUSH_ACTIVE_THREAD_SECONDS``. Neither the message times nor the
+        marker move on their own, so a thread that goes quiet for six seconds
+        releases the row, and a recipient who stops touching the thread releases
+        it within the active window whatever the thread is doing. The one case
+        that holds for longer is a thread taking a message every few seconds from
+        someone who is demonstrably in it — where every drain in between re-asks
+        ``_should_drop``, which is the outcome actually wanted for a reader. It
+        used to be capped at the grace outright, because the age test asked a
+        timestamp that could not move; that cap was bought with the bug above.
 
         **Known limitation: "active" is broader than "reading".** The marker is
         also stamped when the recipient *sends* (``MessageCreateView`` —
@@ -1128,9 +1291,9 @@ class Command(BaseCommand):
         **Mark read** on the conversation list. So someone who fires off a reply
         and pockets the phone looks active for the next
         ``PUSH_ACTIVE_THREAD_SECONDS``, and a reply arriving in that window is
-        held. This used to be the argument for keeping the window small; with a
-        resident drain it is bounded by the grace at six seconds, which is why
-        the window could stop paying for it. The alternative — telling the three
+        held for a grace. This used to be the argument for keeping the window
+        small; with a resident drain each hold is six seconds, which is why the
+        window could stop paying for it. The alternative — telling the three
         apart — needs a presence signal this deliberately avoids.
 
         This deliberately does **not** try to answer "is the thread on screen".
@@ -1139,7 +1302,7 @@ class Command(BaseCommand):
         maintains for its own reasons.
         """
         grace = timedelta(seconds=settings.PUSH_MESSAGE_GRACE_SECONDS)
-        if now - row.message.created_at >= grace:
+        if now - covered >= grace:
             return False
         marker = read_markers.get(
             (row.message.conversation_id, row.recipient_id)
@@ -1205,12 +1368,16 @@ class Command(BaseCommand):
         last_sent = last_pushes.get(key)
         return last_sent is not None and now - last_sent < cooldown
 
-    def _payload(self, row):
+    def _payload(self, row, mention_messages):
         """The ``(text, url, kind, id)`` a push is built from, for either target.
 
         A notification defers entirely to ``NotificationSerializer`` so the phone
         and the activity centre read identically. A message has no in-app row to
         match, so it's phrased here.
+
+        ``mention_messages`` (from ``_mention_messages``) is how a coalesced row
+        stops answering for its first message alone; a batch with no mid-burst
+        mention in it hands over an empty dict and nothing below changes.
         """
         if row.notification_id:
             data = NotificationSerializer(row.notification).data
@@ -1222,7 +1389,19 @@ class Command(BaseCommand):
                 "channel": channel_for_kind(data["kind"]),
             }
 
-        message = row.message
+        # **Not simply ``row.message``** (issue #346). A queued row keeps
+        # pointing at the message it was created for while every later message
+        # in the thread coalesces onto it, so a mention arriving mid-burst would
+        # otherwise be phrased and channelled as whatever the burst *opened*
+        # with. ``_mention_messages`` supplies the mention itself for exactly the
+        # pairs where that has happened, and nothing else — a burst with no
+        # mention in it still speaks for its first message, which is the
+        # trade-off ``_should_drop`` documents: a push naming the wrong sender of
+        # a real unread message is a smaller wrong than no push at all, and the
+        # preview endpoint replaces the body device-side anyway.
+        message = mention_messages.get(
+            (row.message.conversation_id, row.recipient_id), row.message
+        )
         convo = message.conversation
         # sender is a non-null CASCADE FK, so a deleted account takes its
         # messages (and these rows) with it — no "Someone" fallback needed here,

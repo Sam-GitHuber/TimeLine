@@ -601,20 +601,24 @@ def enqueue_message_pushes(message):
     if not recipient_ids:
         return []
 
-    # NB: a queued row keeps pointing at the message it was created for, which
-    # means a burst is phrased, channelled and drop-checked from its *first*
-    # message rather than its newest. That is a real bug — a mid-burst @mention
-    # rides the messages channel instead of the mentions one — and it is
-    # deliberately **not** fixed here. Re-pointing the row looks like three
+    # NB: a queued row keeps pointing at the message it was created for, and
+    # **nothing here re-points it** (issue #346). Re-pointing looks like three
     # lines and isn't: it can violate ``unique_message_push_per_recipient`` when
-    # two concurrent sends have each queued a row, it downgrades the reverse
-    # case (a mention *followed* by chatter loses the channel it had), it lets a
+    # two concurrent sends have each queued a row — and this runs inside the
+    # message-create transaction, so that is a 500 for the sender — it lets a
     # later soft-delete bin a push that covered earlier undeleted messages, it
-    # strands ``delivered_tokens`` describing a different message, and — the
-    # one that rules it out from here entirely — an UPDATE takes row locks that
+    # strands ``delivered_tokens`` describing a different message, and — the one
+    # that rules it out from here entirely — an UPDATE takes row locks that
     # ``send_pushes`` holds across its Expo HTTP calls, so a slow Expo would
-    # start blocking the message-send request this function is called from.
-    # See the promise at the call site. Tracked as its own issue.
+    # start blocking the message-send request this function is called from. See
+    # the promise at the call site.
+    #
+    # Everything that has to answer for the *burst* rather than for one message
+    # therefore does so on the read side, where it costs a lookup and no locks:
+    # ``_should_drop`` compares the read marker against the newest message the
+    # row now stands for, ``_should_space_out`` asks ``_mention_marks`` rather
+    # than the row's own message, and ``_payload`` phrases and channels a
+    # mid-burst @mention from the mention (``_mention_messages``).
     already_queued = set(
         PushOutbox.objects.filter(
             sent_at__isnull=True,

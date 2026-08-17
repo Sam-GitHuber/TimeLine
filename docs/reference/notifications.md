@@ -626,14 +626,15 @@ it:
   `_mention_marks` asks whether the recipient has been named anywhere in the
   thread since the row's message instead, which is everything the row now stands
   for. Soft-deleted messages are excluded — a mention taken back shouldn't go on
-  punching pushes through.
+  punching pushes through. The same question decides what the push then *says*;
+  see "What a coalesced push says" below.
 
   **And only mentions the recipient could actually read count** (#366). The
   enqueue is careful that "a mention can't make a message readable that isn't":
   it carves mentions out of an audience already filtered by `ParticipantInterval`
   (see [messaging.md](messaging.md#history-is-interval-clipped)).
-  `_mention_marks` asks that same
-  question on the read side, so it applies the same interval test — otherwise
+  `_readable_mentions` — the queryset `_mention_marks` starts from — asks that
+  same question on the read side, so it applies the same interval test; otherwise
   being named during a stretch you had left the thread, or while you were still
   `pending` (with no interval to span it), would punch your next push through the
   cooldown on the strength of a message you will never see. The interval rule now
@@ -694,12 +695,59 @@ Three carve-outs in that lookup:
   read side — is a second copy of the visibility rules, which is a worse thing
   to get wrong. See [connections.md](connections.md) for where visibility lives.
 
-What a rescued row *says* is still phrased and channelled from its first
-message. That half of the coalescing problem is unchanged and tracked
-separately; a push naming the wrong sender of a real unread message is a smaller
-wrong than no push at all. The deleted-message branch is deliberately left as
-"drop, full stop" — it has the same shape of hole, but "a push for deleted
-content cannot fire" is the stronger promise and the one this doc makes above.
+What a rescued row *says* is phrased from its first message, except where a
+mid-burst @mention overrides it — see "What a coalesced push says" below. A push
+naming the wrong sender of a real unread message is a smaller wrong than no push
+at all. The deleted-message branch is deliberately left as "drop, full stop" — it
+has the same shape of hole, but "a push for deleted content cannot fire" is the
+stronger promise and the one this doc makes above.
+
+### What a coalesced push says (#346)
+
+Two rules were still reading the row's own message when the row stood for a whole
+burst. The second is the grace, dealt with under "Holding a message push back"
+below; this is the first.
+
+`_payload` takes the sender, the photo and — the one that costs something real —
+`is_mentioned` off `row.message`. So Ada saying "chatter" and Cara then saying "@Bea can you make
+it" inside one drain window got Bea a push phrased **"New message from Ada"** on
+the **`messages`** channel. That defeats the entire reason the mentions channel
+exists: turn Messages down to quieten a busy group chat and you have silenced
+your @mentions with it. `Kind.MENTION` never creates a `Notification` row, so a
+mention always rides the message path — there was no other route that could have
+caught it.
+
+`_mention_messages` supplies the mention itself for exactly the pairs where the
+newest readable mention is **strictly newer** than the message the row points at,
+and `_payload` phrases and channels from that instead. Four things follow from
+how narrow that is:
+
+- **Nothing is written.** `row.message_id` never moves. Re-pointing the row is
+  the obvious fix and is a trap: it can violate
+  `unique_message_push_per_recipient` when two concurrent sends have each queued
+  a row — and the enqueue runs inside the message-create transaction, so that is
+  a **500 for the sender**; it strands `delivered_tokens`, `attempts` and
+  `last_error` describing a different message; it lets a later soft-delete bin a
+  push that covered earlier undeleted messages; and the UPDATE takes row locks
+  `send_pushes` holds across its Expo HTTP calls, so a slow Expo would start
+  blocking message *sends* — breaking the one promise the call site makes.
+- **Strictly newer, so it stays symmetric.** The reverse case — a mention
+  *followed* by chatter — has the mention as the row's own message, and
+  re-pointing at the newest message would take the mentions channel *away* from a
+  push that correctly had it.
+- **Mentions only.** A burst of ordinary chatter still speaks for its first
+  message, which is the trade-off `_should_drop` documents above. The preview
+  endpoint replaces the body device-side anyway, and it asks the *conversation*
+  rather than any message for exactly this reason.
+- **The same mentions the cooldown counts.** `_readable_mentions` is the one
+  queryset both lookups start from — soft-deleted messages out, and the
+  `interval_spans` test applied — because a mention one of them counted and the
+  other didn't would mean a push channelled as a mention and phrased as chatter,
+  or the reverse.
+
+It costs one extra query, and only on a drain that actually saw a mid-burst
+mention: no wanted pairs, no lookup. At a two-second cadence that distinction is
+the difference between a rare query and 30 pointless round trips a minute.
 
 ### Holding a message push back (#355)
 
@@ -719,8 +767,9 @@ pointless buzz.** It was written in anticipation of that and is now load-bearing
 
 So `_should_defer` holds a **message** push back when both are true:
 
-- the message is younger than `PUSH_MESSAGE_GRACE_SECONDS` (6s — it has to clear
-  the client's 4s poll plus a round trip), **and**
+- the newest message the row stands for is younger than
+  `PUSH_MESSAGE_GRACE_SECONDS` (6s — it has to clear the client's 4s poll plus a
+  round trip), **and**
 - the recipient's read marker for *that thread* moved within
   `PUSH_ACTIVE_THREAD_SECONDS` (120s), which is as close to "they are in this
   conversation right now" as the server gets without a presence system.
@@ -747,10 +796,30 @@ someone who fires off a reply and pockets the phone looks active for the next
 Distinguishing the three would need a presence signal, which is exactly what
 leaning on `ConversationRead` avoids.
 
+**Which message's age** (#346). The *newest* one the row stands for, from
+`_newest_covered` — the same quantity `_should_drop` compares the marker against.
+Asking `row.message` instead, which is what it used to do, made this the fourth
+victim of the coalescing: a row held the full cooldown is a minute old at
+release, so the age test read "far too old to defer" while the message it was
+about to announce was half a second old and hadn't reached the recipient's client
+yet. Precisely the #355 buzz this rule exists to prevent, on the busy thread
+where it is most likely to be read. Asking the same message as `_should_drop` is
+also what keeps the two coherent: a row is caught up (drop), too fresh to judge
+(hold), or neither (send) — off two different messages it could be none of them.
+
 **The cost, and why the window grew from 15s to 120s.** A held row waits for the
-next drain — which used to be up to a minute away and is now two seconds. Since
-the age test caps the hold at the grace itself, **the most a defer can now cost
-anyone is six seconds**, however wide the active window is.
+next drain — which used to be up to a minute away and is now two seconds — so one
+hold costs the grace: **six seconds**, however wide the active window is.
+
+**It still can't strand a row**, but the argument is two-sided now rather than
+one. A hold needs a message newer than `now - grace` *and* a marker newer than
+`now - PUSH_ACTIVE_THREAD_SECONDS`; neither moves on its own, so a thread that
+goes quiet for six seconds releases the row, and a recipient who stops touching
+the thread releases it within the active window whatever the thread is doing. The
+one case that holds longer is a thread taking a message every few seconds from
+someone demonstrably in it — where every drain in between re-asks `_should_drop`,
+which is the outcome wanted for a reader. The old hard cap at the grace was
+bought with the bug above.
 
 That inverts the original trade. 15s was chosen because a wide window meant
 minute-long holds for the send-and-pocket case above; with holding this cheap,
