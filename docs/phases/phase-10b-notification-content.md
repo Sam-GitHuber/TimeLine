@@ -649,7 +649,13 @@ Read out of `expo-notifications@~57.0.6` in `node_modules`, so it describes the
 version we are pinned to rather than the one the issue tracker was arguing about.
 It changes the shape of the milestone in both directions.
 
-**Good news: the task path exists and is reached on every message.**
+> **⚠️ The "good news" below is wrong, and it was disproved on a device on
+> 2026-08-17.** It is kept because the *shape* of the mistake is the lesson: a
+> sound inference from a false premise, which reads exactly like a finding. See
+> **What the emulator actually showed** immediately after it. Routes A, B and C
+> all depend on the claim below, so all three are currently unreachable.
+
+~~**Good news: the task path exists and is reached on every message.**~~
 `FirebaseMessagingDelegate.onMessageReceived` ends with
 `runTaskManagerTasks(...)`, and `BackgroundRemoteNotificationTaskConsumer`
 registers itself into that delegate. More tellingly, `onMessageReceived`
@@ -657,8 +663,75 @@ registers itself into that delegate. More tellingly, `onMessageReceived`
 (`createNotification` → `NotificationsService.receive`) — which is only
 reachable in the background if Expo sends **data-only** messages to FCM, since a
 notification-message is drawn by the system without ever calling
-`onMessageReceived`. So the callback is live when the app isn't, and the
-milestone's central worry is narrower than "does anything run at all".
+`onMessageReceived`. ~~So the callback is live when the app isn't, and the
+milestone's central worry is narrower than "does anything run at all".~~
+
+**The premise is false: Expo sends notification-messages, not data-only.** The
+reasoning above is valid and its conclusion is still wrong, because it inferred
+the transport from the fact that Expo's code *can* draw a notification. It can —
+in the foreground. In the background the Firebase SDK draws it and Expo's code
+never runs.
+
+#### What the emulator actually showed (2026-08-17)
+
+Question 0 was run on the `TimeLine_Pixel8` AVD (`google_apis_playstore`,
+API 36) against a local Django, with a debug build from `expo run:android`.
+
+**Question 0 is answered: yes, Android push works, end to end.** A real message
+from bob reached alice's emulator through our backend → Expo → FCM → device.
+Seventeen queued pushes delivered on the first drain, each on the right channel
+(`messages` at importance 4, `replies`, `events`, `reactions` silent) — which
+also confirms Phase 10's channel work on a real delivery rather than a unit
+test. The message push read `New message from Bob Baker`, the contentless body,
+exactly as expected before this phase.
+
+**And then the tags gave the game away.** Pairing each tray notification's title
+with its tag:
+
+| Push | App state | Tag | Drawn by |
+| --- | --- | --- | --- |
+| Probe C | **foreground** | `0:1786953104440465%988732d8988732d8` | **Expo** |
+| Probe A + all 17 backend pushes | **background** | `FCM-Notification:420240` etc. | **Firebase SDK** |
+
+`ExpoPresentationDelegate.presentNotification` calls
+`NotificationManagerCompat.notify(tag = notificationRequest.identifier, …)`, and
+that identifier is `data["tag"] ?: messageId ?: UUID`. The foreground tag *is* a
+raw FCM message id, so Expo drew that one. The string `FCM-Notification`
+appears **nowhere** in `expo-notifications`' Android source — it is the Firebase
+SDK's own `CommonNotificationBuilder` tag. So the background ones were drawn by
+the system, with `onMessageReceived` never called.
+
+That is the documented Firebase contract for a **notification-message**:
+foreground calls the app, background does not. It is only for a **data-message**
+that the callback fires in every state — and that is what the reasoning above
+assumed we had.
+
+**Consequence: routes A, B and C are all unreachable as written.** Every one of
+them hangs off `onMessageReceived` — A off `runTaskManagerTasks`, its *last*
+line; B off suppressing `NotificationsService.receive`; C off
+`createNotificationRequest`. None of them runs when the app is backgrounded,
+which is the only state this phase cares about.
+
+**So the real question is upstream of all three: can Expo's push service be made
+to deliver a data-message to Android at all?** Nothing else in M4 matters until
+that is answered.
+- A probe sent with `_contentAvailable: true` and no title/body was accepted
+  (`status: ok`, receipt `ok`) and produced no notification and no visible
+  effect. That is **not** evidence either way: `_contentAvailable` is the APNs
+  flag, and with no title or body there was nothing to show even if it arrived.
+- If the answer is no, on-device notification content is impossible on Android
+  *through Expo*, and M4's honest outcome is the written deferral — because the
+  alternative is removing Expo from the Android push path, which
+  `notifications.md` lists as an explicit non-goal and which is a far larger
+  change than this phase.
+
+**A caution about method, since this milestone has now been wrong twice.** The
+log evidence that looked most damning was worthless: `expo-notifications`'
+`DebugLogging` gates on the *library's* `BuildConfig.DEBUG`, which is false in
+the shipped artifact even in a debug app build. Zero log lines appeared in the
+foreground either, where the callback demonstrably ran. **The tag comparison is
+the evidence; the silence is not.** Anyone re-testing this should reproduce the
+foreground/background tag split rather than grep for logs.
 
 **Bad news, and it's structural — but it is Expo's structure, not Android's.**
 `onMessageReceived` presents the notification and *then* runs the tasks, in that
@@ -786,13 +859,17 @@ notification, or post a replacement, in the states we care about?**
 
 - **Spike first**, before writing anything else. Timebox it. It now has four
   questions rather than one, in this order — stop at the first that fails:
-  0. Does an Android push arrive at all? The credentials are in place (above) but
-     have never delivered a message to a device. Answer this on its own, before
-     anything below: a task that doesn't fire and a push that never arrives are
-     indistinguishable from the phone, and mistaking the second for the first is
-     how Android support gets wrongly written off.
+  0. ✅ **Answered 2026-08-17: yes.** Android push arrives, end to end, on the
+     right channels. See *What the emulator actually showed*.
+  0b. **Can Expo deliver a data-message to Android at all?** The new blocking
+     question, and it supersedes 1–3: the delivered push is a
+     notification-message, so `onMessageReceived` never runs in the background
+     and every route depends on it. If this is no, M4's answer is the written
+     deferral. **Do not spend time on 1–3 before answering it** — they are all
+     downstream of a callback that currently does not fire.
   1. Does the task fire at all when the app is swiped away? (The source says the
-     callback is reached; the issue history says it sometimes isn't.)
+     callback is reached; the issue history says it sometimes isn't. Moot unless
+     0b lands.)
   2. Does a replacement scheduled under the **same identifier** swap in place,
      rather than stacking a second notification?
   3. Is the visible present-then-replace acceptable to look at, or does it read
