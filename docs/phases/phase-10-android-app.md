@@ -1,6 +1,8 @@
 # Phase 10 — Android App
 
-**Status:** in progress — **A, B done; C and D largely done and verified on the emulator. Outstanding: FCM credentials, Play Console distribution.**
+**Status:** in progress — **A, B done; C and D largely done and verified on the
+emulator. FCM credentials are done (see below). Outstanding: Play Console
+distribution.**
 
 Because Phase 9 built the app in **React Native (Expo)**, the app is *already*
 cross-platform — this phase is **not a second app**. Every screen already exists.
@@ -151,17 +153,54 @@ real, located thing.
 
 ### Push (the biggest piece)
 
-- **Firebase project + FCM v1 credentials.** Google deprecated the legacy FCM
-  protocol, so this is the v1 flow: create a Firebase project, add an Android app
-  with package `net.yourtimeline.app`, download **`google-services.json`**, and
-  reference it from `app.json` (`android.googleServicesFile`). Separately,
-  generate a **service account private key** (Firebase → Project settings →
-  Service accounts) and upload it to EAS as the *FCM V1 service account key*.
-  Both must belong to the same Firebase project or push silently fails.
-- **Keep `google-services.json` out of the public repo.** It's client config, not
-  a secret, and Expo's docs are relaxed about committing it — but this repo is
-  public and privacy-first, and there's no upside. Store it as an **EAS file
-  secret** (`GOOGLE_SERVICES_JSON`) and point `app.json` at the injected path.
+- **Firebase project + FCM v1 credentials.** ✅ **Done, 2026-07-30.** Google
+  deprecated the legacy FCM protocol, so this is the v1 flow: create a Firebase
+  project, add an Android app with package `net.yourtimeline.app`, download
+  **`google-services.json`**, and reference it from `app.json`
+  (`android.googleServicesFile`). Separately, generate a **service account
+  private key** (Firebase → Project settings → Service accounts) and upload it to
+  EAS as the *FCM V1 service account key*. Both must belong to the same Firebase
+  project or push silently fails.
+
+  Both halves are in place and they match — Firebase project `timeline-e428d`,
+  service account `firebase-adminsdk-fbsvc@timeline-e428d.iam.gserviceaccount.com`,
+  uploaded to EAS on 2026-07-30; `google-services.json` carries the same
+  `project_id` and the same package. The *legacy* FCM server key
+  (`androidFcm`) is deliberately absent — v1 doesn't use it, and its absence is
+  not a missing credential.
+
+  **How to check this without guessing.** `eas credentials` is interactive-only,
+  so it can't answer the question in a script or from an agent, and the state
+  was twice written down as outstanding when it wasn't. The read-only query,
+  using the CLI session already on the machine:
+
+  ```sh
+  node -e '
+  const s = require(require("os").homedir() + "/.expo/state.json");
+  fetch("https://api.expo.dev/graphql", {
+    method: "POST",
+    headers: { "Content-Type": "application/json",
+               "expo-session": s.auth.sessionSecret },
+    body: JSON.stringify({ query: `query($appId: String!) {
+      app { byId(appId: $appId) { androidAppCredentials {
+        applicationIdentifier
+        androidFcm { id }
+        googleServiceAccountKeyForFcmV1 { clientEmail projectIdentifier createdAt }
+      } } } }`, variables: { appId: "<expo.extra.eas.projectId from app.json>" } })
+  }).then(r => r.json()).then(j => console.log(JSON.stringify(j, null, 2)));'
+  ```
+
+  This proves the credential **exists and is internally consistent**. It cannot
+  prove it still *works* — a key can be revoked in the Firebase console and EAS
+  won't know until a send fails. Only a real push to a real device proves that.
+- **`google-services.json` is committed, deliberately.** The plan originally said
+  to keep it out of the public repo as an EAS file secret (`GOOGLE_SERVICES_JSON`)
+  — reversed in the building, and the reasoning is in `mobile/.gitignore:20-31`.
+  It is client config that ships inside every APK, so it is not a secret and
+  hiding it buys nothing. What *is* a secret is the **service-account key**,
+  which can send push to every family device under this app's identity; the
+  gitignore patterns exist to catch one of those being dropped in next to it,
+  precisely because a committed `.json` here would otherwise look normal.
 - **Two different service-account keys, easily confused:** one for **FCM v1**
   (sending push) and, if we automate submission, another for the **Play Developer
   API** (`eas submit`). Different consoles, different purposes.
