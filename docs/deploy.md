@@ -683,6 +683,22 @@ not that a phone buzzed; that only shows up in a later receipt line, e.g.
 and healthy: it's a device whose app was deleted or whose token was retired,
 being removed so we stop pushing into the void.
 
+`Sent 0, requeued 0, 1 reached nobody (dead token reaped).` is the third
+outcome (#365): every device that push still had outstanding turned out to be
+dead, so it settled without reaching anyone. It carries **no** "queued up to"
+figure on purpose — a latency number for a push that rang no phone would be
+worse than none, and this is the one number below that you're asked to trust.
+Same healthy-and-normal reading as a receipt-time reap: it means a reinstall or
+a token rotation. A row that reached *one* device on an earlier attempt and then
+reaped the rest counts as sent, not as this — "reached nobody" is asked of the
+whole row, not of the last tick.
+
+`…, gave up on 1 after 5` is the fourth: that push failed five drains running
+and will not be tried again. Unlike the others this one is worth looking into —
+`PushOutbox.last_error` on the row (via `manage.py shell` or the admin) says
+what Expo kept refusing. It's normal to see a burst of these after an Expo
+outage and unusual to see them otherwise.
+
 **"queued up to Ns" is our half of push latency**, from the row being written by
 the web request to it going to Expo. It is the number to look at before tuning
 anything (#354): Expo → APNs/FCM → device adds another 1–5s that we can neither

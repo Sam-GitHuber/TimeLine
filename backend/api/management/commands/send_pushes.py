@@ -57,7 +57,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, transaction
-from django.db.models import Max, Q
+from django.db.models import Exists, Max, OuterRef, Q
 from django.utils import timezone
 
 from ...models import (
@@ -68,6 +68,7 @@ from ...models import (
     Participant,
     PushOutbox,
     PushReceipt,
+    interval_spans,
 )
 from ...notifications import (
     ANONYMOUS_MESSAGE_BODY,
@@ -922,15 +923,51 @@ class Command(BaseCommand):
         Soft-deleted messages are excluded. A mention taken back should not go on
         punching a push through the cooldown, and ``_should_drop`` already treats
         a deleted message as a reason not to send at all.
+
+        **Only mentions the recipient could actually read count** (issue #366).
+        ``enqueue_message_pushes`` is careful that a mention can never make a
+        message readable that isn't — it carves mentions out of an audience
+        already filtered by ``ParticipantInterval`` — and this is the same
+        question asked on the read side, so it applies the same interval test or
+        the two copies of the rule say different things. Without it, being named
+        during a stretch someone had left the thread (or while they were still
+        ``pending``, with no interval to span it) would punch their next push
+        through the cooldown, and would rescue a muted thread's row from
+        ``_should_drop``, on the strength of a message they will never see. The
+        ``Exists`` costs a correlated subquery on a lookup that runs every two
+        seconds; it is bounded by ``since`` and by the batch's pairs like the
+        rest of this query, both its joins are on indexed foreign keys, and the
+        flat alternative would mean re-testing the interval span in Python —
+        i.e. a third copy of the rule this is here to stop duplicating.
         """
         pairs = self._message_pairs(
             pending, "message__conversation_id", "user_id"
         )
         if pairs is None or since is None:
             return {}
+        # Correlated per *mention*, not per batch: the interval test is against
+        # the moment of that mention's own message, so it can't be hoisted into
+        # the outer query.
+        #
+        # **The interval test and nothing else**, matching
+        # ``views.visible_messages_for``, which is what "can this person read
+        # this message" means. The enqueue's other three clauses (``status``,
+        # ``left_at``, ``user__is_active``) are *not* repeated here, and adding
+        # them would be a subtle bug rather than belt-and-braces: over there they
+        # are read at the instant the message is created, so they describe that
+        # moment; here they would be read whenever the drain happens to run, and
+        # a member who drops to ``pending`` between the mention and the drain
+        # keeps their pre-gap history — the mention is still readable, and their
+        # closed interval still spans it. Membership *now* is a different
+        # question from readability *then*.
+        readable = Participant.objects.filter(
+            conversation_id=OuterRef("message__conversation_id"),
+            user_id=OuterRef("user_id"),
+        ).filter(interval_spans(OuterRef("message__created_at")))
         grouped = (
             MessageMention.objects.filter(
                 pairs,
+                Exists(readable),
                 message__deleted_at__isnull=True,
                 message__created_at__gte=since,
             )
@@ -1417,15 +1454,17 @@ class Command(BaseCommand):
                     ticket.get("message", "unknown error")
                 )
 
-        sent = requeued = 0
-        # How long the rows in this batch waited between being enqueued and
-        # going to Expo — **our** half of push latency, which is the only half we
-        # can do anything about (issue #354). Reported because the alternative is
-        # guessing: Expo → APNs/FCM → device adds 1-5s nobody here can see, so
-        # "is the delay ours?" is unanswerable without this number, and it is the
-        # number that says whether tuning the drain interval further would
-        # achieve anything at all. The worst wait rather than the mean: a batch's
-        # slowest row is the one a person notices.
+        sent = requeued = gave_up = reaped = 0
+        # How long the rows this batch actually *delivered* waited between being
+        # enqueued and being accepted by Expo — **our** half of push latency,
+        # which is the only half we can do anything about (issue #354). Reported
+        # because the alternative is guessing: Expo → APNs/FCM → device adds
+        # 1-5s nobody here can see, so "is the delay ours?" is unanswerable
+        # without this number, and it is the number that says whether tuning the
+        # drain interval further would achieve anything at all. The worst wait
+        # rather than the mean: a batch's slowest row is the one a person
+        # notices. **Delivered only** (issue #365): a row that settled having
+        # rung nobody has no latency worth reporting.
         waits = []
         for entry in outcomes.values():
             row = entry["row"]
@@ -1438,11 +1477,47 @@ class Command(BaseCommand):
                 # tick retries *only* the devices not in delivered_tokens.
                 row.attempts += 1
                 row.last_error = entry["errors"][0][:500]
-                requeued += 1
+                if row.attempts >= PushOutbox.MAX_ATTEMPTS:
+                    # **Out of retries, so settle it here rather than leaving it
+                    # to be recognised as dead by everyone who reads the table.**
+                    # `_drain` will never select this row again, so an unstamped
+                    # `sent_at` means "queued" for ever — which is how #347
+                    # happened, and it is not only the enqueue that would have
+                    # to know: `_last_pushes` bounds its scan on `sent_at`, so
+                    # without a stamp a row that reached a phone on attempt one
+                    # and then died retrying a second device is invisible to the
+                    # cooldown, and the very next message re-buzzes that phone
+                    # immediately. Stamping it gives every reader one meaning of
+                    # "still going to be sent" instead of a rule each has to
+                    # restate. It is *not* claiming a delivery: whether anyone
+                    # was reached is `delivered_tokens`, which is exactly what
+                    # `_last_pushes` reads and what `__str__` renders.
+                    row.sent_at = timezone.now()
+                    gave_up += 1
+                else:
+                    requeued += 1
             else:
                 row.sent_at = timezone.now()
-                waits.append((row.sent_at - row.created_at).total_seconds())
-                sent += 1
+                # **Cumulative, not this tick's.** A row can deliver to one
+                # device on an early attempt and settle later when its last
+                # outstanding device turns out to be dead, so asking
+                # `entry["delivered"]` — which only covers this pass — would
+                # report a phone that really did buzz as having reached nobody.
+                # `delivered_tokens` is the row's whole history and is what
+                # `_last_pushes` reads (issue #365), so the two agree.
+                if row.delivered_tokens:
+                    waits.append((row.sent_at - row.created_at).total_seconds())
+                    sent += 1
+                else:
+                    # Settled having reached nobody: every device this row still
+                    # had outstanding came back `DeviceNotRegistered` and was
+                    # reaped above, so there was no error to requeue on and no
+                    # delivery either. Counted apart from `sent` because `sent`
+                    # is the operator's answer to "is the delay ours?", and a
+                    # latency figure for a push that rang no phone is worse than
+                    # no figure. Worth seeing in its own right: a reap means a
+                    # reinstall or a token rotation.
+                    reaped += 1
             row.save(
                 update_fields=[
                     "delivered_tokens",
@@ -1459,6 +1534,10 @@ class Command(BaseCommand):
             PushReceipt.objects.bulk_create(receipts, ignore_conflicts=True)
 
         summary = f"Sent {sent}, requeued {requeued}"
+        if gave_up:
+            summary += f", gave up on {gave_up} after {PushOutbox.MAX_ATTEMPTS}"
+        if reaped:
+            summary += f", {reaped} reached nobody (dead token reaped)"
         if waits:
             summary += f" (queued up to {max(waits):.1f}s)"
         self._say(f"{summary}.")
@@ -1610,7 +1689,11 @@ class Command(BaseCommand):
         stale = PushOutbox.objects.filter(
             Q(sent_at__isnull=False, sent_at__lt=cutoff)
             # Rows that exhausted their retries are dead too; don't keep them
-            # blocking the queue's index forever.
+            # blocking the queue's index forever. `_send` now stamps `sent_at`
+            # the moment a row gives up, so new ones are already caught by the
+            # clause above at the same cutoff — this stays for rows that died
+            # before that, which have no stamp and would otherwise never be
+            # collected.
             | Q(attempts__gte=PushOutbox.MAX_ATTEMPTS, created_at__lt=cutoff)
         )
         if dry_run:

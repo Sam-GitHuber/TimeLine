@@ -9501,6 +9501,39 @@ class MessagePushEnqueueTests(APITestCase):
 
         self.assertEqual(self._queued_for(self.bea).count(), 1)
 
+    def test_a_row_that_exhausted_its_retries_does_not_suppress_the_next_push(
+        self,
+    ):
+        # Issue #347. `_drain` only ever selects rows with retries left, so a row
+        # at MAX_ATTEMPTS keeps `sent_at` NULL for ever — and coalescing that
+        # asked only about `sent_at` treated it as an outstanding push and
+        # created nothing, silencing that thread's notifications until `_prune`
+        # deleted it a fortnight later. Silently: the messages still arrive, the
+        # unread badge is still right, only the phone stops buzzing.
+        convo = self._direct()
+        self._send(convo, self.ada, text="first")
+        self._queued_for(self.bea).update(
+            attempts=PushOutbox.MAX_ATTEMPTS, last_error="Expo said no"
+        )
+
+        second = self._send(convo, self.ada, text="second")
+
+        self.assertIn(
+            second.id,
+            set(self._queued_for(self.bea).values_list("message_id", flat=True)),
+        )
+
+    def test_a_row_with_retries_left_still_coalesces(self):
+        # The other side of #347: a row that has failed once is still going to be
+        # drained, so a second message must not queue a second buzz behind it.
+        convo = self._direct()
+        self._send(convo, self.ada, text="first")
+        self._queued_for(self.bea).update(attempts=PushOutbox.MAX_ATTEMPTS - 1)
+
+        self._send(convo, self.ada, text="second")
+
+        self.assertEqual(self._queued_for(self.bea).count(), 1)
+
     def test_deleting_the_conversation_removes_the_queued_push(self):
         # Cascade chain: Conversation → Message → PushOutbox, matching the
         # notification path's Post → Notification → PushOutbox guarantee.
@@ -12172,6 +12205,323 @@ class SendPushesCommandTests(APITestCase):
 
         urlopen = self._run()
 
+        urlopen.assert_not_called()
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_the_recipient_cannot_see_does_not_punch_through(self):
+        # Issue #366. `enqueue_message_pushes` carves mentions out of an audience
+        # already filtered by `ParticipantInterval`, precisely so that "a mention
+        # can't make a message readable that isn't". `_mention_marks` asks the
+        # same question on the read side and used not to apply that filter, so
+        # being named during a stretch you had left the thread still beat the
+        # cooldown — on the strength of a message you will never see.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        self._already_buzzed(convo)
+        # The gap: their interval closes, so nothing sent from here on is
+        # readable by them. `status` stays active and `left_at` stays null, so
+        # the interval clause is the only thing that can exclude the mention.
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo, participant__user=self.me
+        ).update(ended_at=timezone.now())
+        unseen = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me are you there"
+        )
+        MessageMention.objects.create(message=unseen, user=self.me)
+
+        urlopen = self._run()
+
+        # Held by the cooldown like any other mid-burst chatter would be. Its
+        # positive control is the test directly below, which is this same setup
+        # with the interval left open.
+        urlopen.assert_not_called()
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_the_recipient_can_see_still_punches_through(self):
+        # The positive control for the test above, and the reason it is worth
+        # having: `urlopen.assert_not_called()` is also what a `_mention_marks`
+        # that had stopped working entirely would produce — a mistyped
+        # `OuterRef`, an `Exists` that matches nothing, or a plain `return {}`.
+        # Identical to it in every respect except that the interval stays open.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        self._already_buzzed(convo)
+        seen = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me are you there"
+        )
+        MessageMention.objects.create(message=seen, user=self.me)
+
+        urlopen = self._run()
+
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_of_a_pending_member_does_not_punch_through(self):
+        # The other half of "could they read it" (#366): a `pending` member —
+        # invited but not yet connected to everyone — has no interval at all, so
+        # nothing in the thread is readable to them yet. The serializer won't
+        # let a client name one, but `MessageMention` rows outlive the
+        # membership state that allowed them: being promoted, mentioned, and
+        # dropped back to pending leaves exactly this shape.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        self._already_buzzed(convo)
+        Participant.objects.filter(conversation=convo, user=self.me).update(
+            status="pending"
+        )
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo, participant__user=self.me
+        ).delete()
+        unseen = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me are you there"
+        )
+        MessageMention.objects.create(message=unseen, user=self.me)
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_dropping_to_pending_does_not_retract_an_earlier_mention(self):
+        # The trap in fixing #366 by copying the *whole* enqueue predicate
+        # across. Over there `status`/`left_at`/`is_active` are read at the
+        # message's own instant; here they would be read whenever the drain
+        # happens to run. Someone mentioned while active, who drops to pending a
+        # moment later, keeps their pre-gap history — `visible_messages_for`
+        # still returns that message — so the mention is still readable and the
+        # exemption still stands. Only the interval decides.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        self._already_buzzed(convo)
+        seen = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me are you there"
+        )
+        MessageMention.objects.create(message=seen, user=self.me)
+        # …and only *now* do they drop out, closing the interval after the
+        # mention rather than before it.
+        Participant.objects.filter(conversation=convo, user=self.me).update(
+            status="pending"
+        )
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo, participant__user=self.me
+        ).update(ended_at=timezone.now())
+
+        urlopen = self._run()
+
+        self.assertIn(
+            seen.id,
+            set(visible_messages_for(convo, self.me).values_list("id", flat=True)),
+        )
+        self.assertEqual(len(self._sent_body(urlopen)), 1)
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_an_unreadable_mention_does_not_rescue_a_read_muted_thread(self):
+        # `_mention_marks` has a second reader: in a *muted* thread a mention is
+        # the only kind of message that could have coalesced onto the row, so
+        # `_should_drop` asks it what the row now stands for. Same rule, same
+        # answer — a mention they can't read is not unread mail, so a recipient
+        # who is caught up on everything visible still gets dropped (#366).
+        convo, message = self._queue_message(kind="group", title="Book Club")
+        Participant.objects.filter(conversation=convo, user=self.me).update(
+            muted_at=timezone.now()
+        )
+        # Every time here is pinned rather than left to `auto_now_add`, because
+        # the whole test is which side of the read marker the mention falls on —
+        # and the batch is put a minute in the past so `_should_defer` (which
+        # holds anything fresher than the grace for an active reader) cannot
+        # stand in for the drop being tested.
+        base = timezone.now() - timedelta(seconds=60)
+        Message.objects.filter(pk=message.pk).update(created_at=base)
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo
+        ).update(started_at=base - timedelta(seconds=1))
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=base + timedelta(seconds=1),
+        )
+        # Their interval closes a second after the message they've read, so the
+        # mention a second after *that* is outside it.
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo, participant__user=self.me
+        ).update(ended_at=base + timedelta(seconds=1))
+        unseen = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me still here?"
+        )
+        Message.objects.filter(pk=unseen.pk).update(
+            created_at=base + timedelta(seconds=2)
+        )
+        MessageMention.objects.create(message=unseen, user=self.me)
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)  # dropped, settled
+
+    def test_a_drain_that_only_reaped_a_dead_token_reports_no_send(self):
+        # Issue #365. A row whose every ticket came back `DeviceNotRegistered`
+        # records no errors, and the settle loop used to read "no errors" as
+        # "sent" — printing a delivery *and* a queue-latency figure for a push
+        # that rang no phone. That number is the one `docs/deploy.md` tells the
+        # operator to trust when answering "is the delay ours?", and
+        # `_last_pushes` already treats exactly these rows as having reached
+        # nobody, so the two readings disagreed.
+        self._queue_message()
+        PushOutbox.objects.update(
+            created_at=timezone.now() - timedelta(seconds=9)
+        )
+
+        out = StringIO()
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "gone",
+                        "details": {"error": "DeviceNotRegistered"},
+                    }
+                ]
+            },
+            stdout=out,
+            verbosity=1,
+        )
+
+        text = out.getvalue()
+        self.assertIn("Sent 0, requeued 0", text)
+        # No latency line: there is no delivery for it to be the latency of.
+        self.assertNotIn("queued up to", text)
+        # But the reap is still worth seeing — it means a reinstall or a
+        # rotated token.
+        self.assertIn("reached nobody", text)
+        # Still settled rather than retried: retrying a dead token can't help.
+        row = PushOutbox.objects.get()
+        self.assertIsNotNone(row.sent_at)
+        self.assertEqual(row.attempts, 0)
+
+    def test_a_reap_after_an_earlier_delivery_is_still_a_send(self):
+        # The narrow half of #365, and the easy one to get wrong: "reached
+        # nobody" has to be asked of the row's whole history, not of this pass.
+        # A row can deliver to the phone on attempt one, fail for the tablet,
+        # and settle on attempt two when the tablet's token turns out to be
+        # dead — at which point this drain delivered nothing but a phone
+        # certainly buzzed. `_last_pushes` reads cumulative `delivered_tokens`
+        # and would count it, so classifying it as a reap would put the two
+        # readings back into disagreement, which is the whole point of the fix.
+        tablet = DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[tablet]", platform="ios"
+        )
+        self._queue()
+
+        # Attempt one: the phone takes it, the tablet errors transiently.
+        self._run(
+            payload={
+                "data": [
+                    {"status": "ok", "id": "t1"},
+                    {
+                        "status": "error",
+                        "message": "rate limited",
+                        "details": {"error": "MessageRateExceeded"},
+                    },
+                ]
+            }
+        )
+        queued = PushOutbox.objects.get()
+        self.assertIsNone(queued.sent_at)
+        self.assertEqual(queued.delivered_tokens, [self.device.expo_token])
+
+        # Attempt two: only the tablet is outstanding, and it's dead.
+        out = StringIO()
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "gone",
+                        "details": {"error": "DeviceNotRegistered"},
+                    }
+                ]
+            },
+            stdout=out,
+            verbosity=1,
+        )
+
+        text = out.getvalue()
+        self.assertIn("Sent 1", text)
+        self.assertNotIn("reached nobody", text)
+        self.assertFalse(
+            DevicePushToken.objects.filter(pk=tablet.pk).exists()
+        )
+
+    def test_a_row_that_runs_out_of_retries_is_settled_not_left_queued(self):
+        # A row `_drain` will never select again must not still read as queued —
+        # that is #347's whole mechanism, and the enqueue is not the only reader
+        # that would have to know the rule. `_last_pushes` bounds its scan on
+        # `sent_at`, so an unstamped dead row hides a delivery it really made
+        # and the next message re-buzzes that phone immediately.
+        self._queue()
+        PushOutbox.objects.update(attempts=PushOutbox.MAX_ATTEMPTS - 1)
+
+        out = StringIO()
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "rate limited",
+                        "details": {"error": "MessageRateExceeded"},
+                    }
+                ]
+            },
+            stdout=out,
+            verbosity=1,
+        )
+
+        row = PushOutbox.objects.get()
+        self.assertEqual(row.attempts, PushOutbox.MAX_ATTEMPTS)
+        self.assertIsNotNone(row.sent_at)
+        # Settled, but emphatically not delivered — and it says so both ways.
+        self.assertEqual(row.delivered_tokens, [])
+        self.assertIn("gave up on 1", out.getvalue())
+        self.assertIn("gave up", str(row))
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_partial_delivery_that_then_gave_up_still_starts_a_cooldown(self):
+        # The regression #347's fix would otherwise introduce. Before it, a dead
+        # row swallowed the next message entirely; after it, the next message
+        # gets a row of its own — so if the dead row's real delivery is invisible
+        # to `_last_pushes`, that new row goes straight out and re-buzzes a phone
+        # that was buzzed seconds ago. The `sent_at` stamp on give-up is what
+        # keeps the cooldown able to see it.
+        convo, _first = self._queue_message()
+        DevicePushToken.objects.create(
+            user=self.me, expo_token="ExponentPushToken[tablet]", platform="ios"
+        )
+        PushOutbox.objects.update(attempts=PushOutbox.MAX_ATTEMPTS - 1)
+        # The phone takes it; the tablet fails for the fifth and last time.
+        self._run(
+            payload={
+                "data": [
+                    {"status": "ok", "id": "t1"},
+                    {
+                        "status": "error",
+                        "message": "rate limited",
+                        "details": {"error": "MessageRateExceeded"},
+                    },
+                ]
+            }
+        )
+        dead = PushOutbox.objects.get()
+        self.assertEqual(dead.attempts, PushOutbox.MAX_ATTEMPTS)
+        self.assertEqual(dead.delivered_tokens, [self.device.expo_token])
+
+        # A new message now queues a row of its own (that is #347's fix)…
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="second"
+        )
+        notifications.enqueue_message_pushes(later)
+        self.assertEqual(
+            PushOutbox.objects.filter(sent_at__isnull=True).count(), 1
+        )
+
+        urlopen = self._run()
+
+        # …but it waits out the cooldown, because the phone really was buzzed.
         urlopen.assert_not_called()
 
     @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
