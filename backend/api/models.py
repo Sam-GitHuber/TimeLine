@@ -866,7 +866,15 @@ def interval_spans(when):
     ``_mention_marks`` both need this exact question, and the drain's copy
     simply didn't ask it — so a mention of someone during a period they had left
     the thread still counted (issue #366). A rule stated in two places is a rule
-    that drifts; stated once, the two callers cannot disagree.
+    that drifts; stated once, the two callers cannot disagree about *this* part.
+
+    It is only the interval half. The enqueue additionally requires the
+    participant to be ``active``, present and not deactivated, and that is
+    deliberately **not** in here: those describe membership at the instant the
+    query runs, which is the message's own instant at enqueue but the drain's
+    instant on the read side, and the two are not the same question. Someone who
+    drops to ``pending`` after being mentioned keeps their pre-gap history —
+    readability is what the interval says, and nothing else.
 
     ``when`` is a datetime for a fixed instant, or an expression (``OuterRef``,
     ``F``) when the moment is a column of the query being filtered.
@@ -2103,8 +2111,15 @@ class PushOutbox(models.Model):
         related_name="queued_pushes",
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    # Null until delivered to *every* device. The command selects on
-    # `sent_at is null`, so this is the queue marker as well as the log.
+    # Null until the row is **settled**. The command selects on
+    # `sent_at is null`, so this is the queue marker as well as the log — which
+    # is why it is stamped on every terminal state and not only a happy one:
+    # delivered to every device, dropped (deleted/already read/no device), every
+    # remaining token reaped as dead, or out of retries. A row the drain will
+    # never pick up again must not still read as queued; see issue #347 for what
+    # it cost when one did. **Settled is not delivered** — `delivered_tokens` is
+    # the record of what actually reached a phone, and it is what `_last_pushes`
+    # and `__str__` read rather than this.
     sent_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)
     # Last failure, kept for diagnosis from the admin/shell. Truncated on write.
@@ -2153,7 +2168,17 @@ class PushOutbox(models.Model):
         ]
 
     def __str__(self):
-        state = "sent" if self.sent_at else f"queued (attempts={self.attempts})"
+        # `sent_at` is stamped on a row that ran out of retries too — it means
+        # "settled", not "delivered" — so `attempts` is read first, or the admin
+        # would render a total failure as "sent". What actually reached a phone
+        # is `delivered_tokens`, which is the same distinction `_last_pushes`
+        # makes.
+        if self.attempts >= self.MAX_ATTEMPTS:
+            state = f"gave up (attempts={self.attempts})"
+        elif self.sent_at:
+            state = "sent"
+        else:
+            state = f"queued (attempts={self.attempts})"
         target = "message" if self.message_id else "notification"
         return f"push #{self.pk} · {target} · {state}"
 

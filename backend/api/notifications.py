@@ -619,13 +619,19 @@ def enqueue_message_pushes(message):
         PushOutbox.objects.filter(
             sent_at__isnull=True,
             # **The same guard the drain selects on** (issue #347). ``_drain``
-            # only ever picks up rows with retries left, so a row that has
-            # exhausted ``MAX_ATTEMPTS`` keeps ``sent_at`` NULL for ever — and
-            # without this line the coalescing above would go on treating that
-            # dead row as an outstanding push and create nothing, silencing that
-            # recipient's phone for that thread until ``_prune`` deletes it a
-            # fortnight later. Two queries, one meaning of "queued": if the
-            # drain will never send it, it is not queued.
+            # only ever picks up rows with retries left, so without this line
+            # the coalescing above went on treating a row that had exhausted
+            # ``MAX_ATTEMPTS`` as an outstanding push and created nothing,
+            # silencing that recipient's phone for that thread until ``_prune``
+            # deleted the row a fortnight later. Two queries, one meaning of
+            # "queued": if the drain will never send it, it is not queued.
+            #
+            # ``_send`` now also stamps ``sent_at`` at the moment a row gives
+            # up, so a freshly-exhausted row is excluded by the line above on
+            # its own. This stays because **rows that died before that change
+            # have no stamp** — the live outbox may hold some — and because a
+            # reader that has to know the rule is a reader that can get it
+            # wrong; agreeing with ``_drain`` column-for-column costs nothing.
             attempts__lt=PushOutbox.MAX_ATTEMPTS,
             message__conversation_id=convo_id,
             recipient_id__in=recipient_ids,

@@ -438,15 +438,30 @@ the per-message tickets:
   `MAX_ATTEMPTS` (5) the row stops being retried, so one poisoned row can't be
   re-sent on every tick forever.
 
-A row is settled three ways, not two (#365): **delivered** (something was
-accepted for at least one device), **requeued** (an error, retry next tick), and
-**reached nobody** — every device it still had outstanding came back
-`DeviceNotRegistered` and was reaped, so there was no error to retry on and no
-delivery either. That third case is counted apart from "sent" and contributes no
-queue-latency figure, because a latency number for a push that rang no phone is
-worse than none — and because `_last_pushes` already treats exactly those rows as
-having rung nobody when it decides whether a cooldown has started. Two readings
-of one fact; they have to agree.
+A row is settled four ways, not two (#365):
+
+- **delivered** — something was accepted for at least one device.
+- **requeued** — an error, with retries left; try again next tick.
+- **reached nobody** — every device it still had outstanding came back
+  `DeviceNotRegistered` and was reaped, so there was no error to retry on and no
+  delivery either.
+- **gave up** — five failed drains; stop.
+
+The last two are counted apart from "sent" and contribute no queue-latency
+figure, because a latency number for a push that rang no phone is worse than
+none — and because `_last_pushes` already treats a rang-nobody row as such when
+it decides whether a cooldown has started. Two readings of one fact; they have to
+agree. **"Reached nobody" is asked of the whole row**, via `delivered_tokens`,
+not of the last tick: a row that buzzed a phone on attempt one and settles on
+attempt two when its remaining tablet token turns out to be dead is a delivery,
+and `_last_pushes` counts it as one.
+
+**`sent_at` means settled, not delivered.** It is stamped on every terminal state
+— delivered, dropped, all-reaped, and out of retries — so that "is this row still
+going to be sent?" has one answer that every reader inherits, rather than a rule
+each has to restate. What actually reached a phone is `delivered_tokens`; that is
+what `_last_pushes` and `PushOutbox.__str__` read, and it is why a row that gave
+up renders as "gave up" rather than "sent".
 
 **"Already queued" means the same thing to both queries** (#347). The enqueue
 coalesces onto an unsent row, and the drain only ever selects rows with retries
@@ -455,7 +470,17 @@ Without that guard on the enqueue side, a row that exhausted its retries kept
 `sent_at` NULL for ever and went on absorbing every later message in the thread,
 silencing that recipient's phone for it until the 14-day prune deleted the row.
 Silently: the messages still arrived, the unread badge stayed right, the only
-trace was a `last_error` nobody reads.
+trace was a `last_error` nobody reads. The give-up stamp above now settles such a
+row at the moment it dies, so the guard is belt-and-braces for rows that died
+before it existed — but it stays, because agreeing with the drain
+column-for-column costs nothing and remembering a rule costs somebody a bug.
+
+One consequence worth knowing: while Expo is down, each message that would once
+have coalesced onto a dead row now mints a fresh row of its own, so an outage
+leaves behind roughly one dead row per burst per recipient instead of exactly
+one. They are small, they hold the `last_error` that says what happened, and
+`_prune` clears them on the ordinary retention clock. That is the deliberate
+trade against the alternative, which was a thread that never buzzed again.
 
 A recipient with **no** registered device is marked sent immediately without
 calling Expo — otherwise a web-only user's rows would retry on every tick.
@@ -608,14 +633,32 @@ it:
   it carves mentions out of an audience already filtered by `ParticipantInterval`
   (see [messaging.md](messaging.md#history-is-interval-clipped)).
   `_mention_marks` asks that same
-  question on the read side, so it applies the same filter — otherwise being
-  named during a stretch you had left the thread, or while you were still
-  `pending`, would punch your next push through the cooldown on the strength of a
-  message you will never see. The interval rule now lives in one place,
-  `models.interval_spans`, precisely so the write side and the read side cannot
-  drift again; **apply it in a single `filter()` call**, or Django joins the
-  interval table twice and lets two *different* intervals satisfy the start and
-  end halves, which is exactly the gap it exists to exclude.
+  question on the read side, so it applies the same interval test — otherwise
+  being named during a stretch you had left the thread, or while you were still
+  `pending` (with no interval to span it), would punch your next push through the
+  cooldown on the strength of a message you will never see. The interval rule now
+  lives in one place, `models.interval_spans`, precisely so the write side and
+  the read side cannot drift on *that* again; **apply it in a single `filter()`
+  call**, or Django joins the interval table twice and lets two *different*
+  intervals satisfy the start and end halves, which is exactly the gap it exists
+  to exclude.
+
+  **The interval test and nothing else**, and that asymmetry is deliberate. The
+  enqueue's other clauses — `status`, `left_at`, `user__is_active` — are read at
+  the moment the message is created, so over there they describe that moment; on
+  the read side they would describe whenever the drain happened to run. Someone
+  who drops to `pending` *after* being mentioned keeps their pre-gap history
+  (`visible_messages_for` still returns that message), so the mention is still
+  readable and the exemption still stands. Membership *now* is a different
+  question from readability *then*.
+
+  **`_later_messages` is the acknowledged exception**, not a second oversight: it
+  answers the unmuted half of `_should_drop`'s question and skips the interval
+  check on purpose, because it can only ever *rescue* a push — phrased from a
+  message the recipient can see — while the reverse failure is silent loss of
+  real messages. Its docstring carries the argument. So `_should_drop` does hold
+  two answers to "can they see this?", and the difference is the direction each
+  one can fail in.
 
 ### Dropping a message push, and what "read" has to mean
 
