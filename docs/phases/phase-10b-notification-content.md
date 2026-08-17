@@ -1,7 +1,12 @@
 # Phase 10b — Notification content, without leaking it
 
 **Status: IN PROGRESS — M1, M2, M3 and M5 done; M4 (Android) is all that
-remains, and it may end in a written decision not to.** Fleshed 2026-07-30 and confirmed with the
+remains, and a written decision not to do it is now the likeliest outcome.**
+A device test on 2026-08-17 showed that Expo delivers Android pushes as
+notification-messages, so `onMessageReceived` never runs in the background and
+every on-device rewrite route depends on a callback that doesn't fire. **M4's
+blocking question is 0b** — can Expo deliver a data-message to Android at all.
+See *What the emulator actually showed*. Fleshed 2026-07-30 and confirmed with the
 user; **revised the same day** after a source-checked review of the plan itself.
 The review found that two of the mechanisms this phase leans on don't behave the
 way the first draft assumed — see *Corrections from review* at the end for what
@@ -629,19 +634,23 @@ plugin that copies a Swift file into a new target and signs it.
 > entry in `mobile/android-builds.log` is v0.24.0 (2026-08-04), which predates
 > M1, M2, M3 and M5.
 >
-> **What the check does *not* establish** is that push works — only that the
-> credential exists and that its Firebase project matches
-> `google-services.json`'s. A key can be revoked in the console with EAS none the
-> wiser until a send fails. That makes "does an Android push arrive at all"
-> question 0 of the spike rather than a precondition to it, and it should be
-> answered before reading anything into questions 1–3: a task that doesn't fire
-> and a push that never arrives look identical from the phone.
+> **The credential check did not establish that push works** — only that the
+> credential existed and matched `google-services.json`'s project. That made
+> "does an Android push arrive at all" question 0 of the spike rather than a
+> precondition to it.
+>
+> **Question 0 was then run, and answered yes (2026-08-17)** — on the emulator,
+> so the fresh build above was never needed. See *What the emulator actually
+> showed*. It also answered a question nobody had asked, which is now the one
+> that blocks the milestone: **question 0b**, whether Expo can deliver a
+> data-message to Android at all.
 >
 > One thing from the original note survives intact and still matters: a local
 > `scheduleNotificationAsync` is **no substitute** for a real push. The
 > background-task consumer fires from
 > `FirebaseMessagingDelegate.onMessageReceived`, which a local notification never
-> reaches.
+> reaches — and which, as it turns out, a *backgrounded remote* push doesn't
+> reach either.
 
 #### What the source already answers, before the spike runs
 
@@ -776,6 +785,13 @@ as a platform constraint.
 
 #### Three routes, and the spike picks between them
 
+> **⚠️ All three are currently unreachable** — each one lives inside
+> `onMessageReceived`, which the 2026-08-17 device test showed is never called
+> in the background. They are kept in full because they become live again the
+> moment question 0b lands, and the analysis below (especially C's real cost) is
+> the part that would otherwise be re-derived from scratch. **Read them as
+> contingent on 0b, not as a menu to choose from today.**
+
 Ordered by how much native surface they add. Route A is the one the milestone
 assumed; C is what everyone else ships.
 
@@ -822,10 +838,15 @@ superclass call — and it needs no `expo-task-manager` and no task at all.
   where two `MESSAGING_EVENT` services is a merge-order question rather than a
   clean override.
 
-**Do not pick before the spike.** Question 1 decides: a task that fires
+~~**Do not pick before the spike.** Question 1 decides: a task that fires
 reliably makes B available and A comfortable; a task that doesn't rules out both
-and leaves C or a written deferral. Picking now would be choosing an
-architecture on the strength of the thing the spike exists to find out.
+and leaves C or a written deferral.~~
+
+**Superseded 2026-08-17. Question 0b decides, and it comes first.** If Expo
+cannot deliver a data-message to Android, none of A, B or C exists and the
+answer is the written deferral. Only if it can does question 1 become
+meaningful, and only then does the choice between the three reopen — at which
+point C's credential-read cost is the number still missing.
 
 ---
 
