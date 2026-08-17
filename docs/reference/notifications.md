@@ -705,8 +705,8 @@ stronger promise and the one this doc makes above.
 ### What a coalesced push says (#346)
 
 Two rules were still reading the row's own message when the row stood for a whole
-burst. The second is the grace, dealt with under "Holding a message push back"
-below; this is the first.
+burst. This is the one that was fixed; the other is the grace, left alone with
+its reasons under "Holding a message push back" below.
 
 `_payload` takes the sender, the photo and — the one that costs something real —
 `is_mentioned` off `row.message`. So Ada saying "chatter" and Cara then saying "@Bea can you make
@@ -739,6 +739,13 @@ how narrow that is:
   message, which is the trade-off `_should_drop` documents above. The preview
   endpoint replaces the body device-side anyway, and it asks the *conversation*
   rather than any message for exactly this reason.
+- **Not one they have already read.** The re-point is also gated on the read
+  marker. `_should_drop` guarantees only that *something* the row stands for is
+  unread, not that the mention is — so without it, someone who read as far as
+  being named and then had more chatter arrive would be buzzed on the mentions
+  channel for a mention they dealt with a minute ago. That channel is the one
+  nobody can turn down without losing real mentions, which is the whole property
+  being protected here.
 - **The same mentions the cooldown counts.** `_readable_mentions` is the one
   queryset both lookups start from — soft-deleted messages out, and the
   `interval_spans` test applied — because a mention one of them counted and the
@@ -767,9 +774,8 @@ pointless buzz.** It was written in anticipation of that and is now load-bearing
 
 So `_should_defer` holds a **message** push back when both are true:
 
-- the newest message the row stands for is younger than
-  `PUSH_MESSAGE_GRACE_SECONDS` (6s — it has to clear the client's 4s poll plus a
-  round trip), **and**
+- the message is younger than `PUSH_MESSAGE_GRACE_SECONDS` (6s — it has to clear
+  the client's 4s poll plus a round trip), **and**
 - the recipient's read marker for *that thread* moved within
   `PUSH_ACTIVE_THREAD_SECONDS` (120s), which is as close to "they are in this
   conversation right now" as the server gets without a presence system.
@@ -796,30 +802,25 @@ someone who fires off a reply and pockets the phone looks active for the next
 Distinguishing the three would need a presence signal, which is exactly what
 leaning on `ConversationRead` avoids.
 
-**Which message's age** (#346). The *newest* one the row stands for, from
-`_newest_covered` — the same quantity `_should_drop` compares the marker against.
-Asking `row.message` instead, which is what it used to do, made this the fourth
-victim of the coalescing: a row held the full cooldown is a minute old at
-release, so the age test read "far too old to defer" while the message it was
-about to announce was half a second old and hadn't reached the recipient's client
-yet. Precisely the #355 buzz this rule exists to prevent, on the busy thread
-where it is most likely to be read. Asking the same message as `_should_drop` is
-also what keeps the two coherent: a row is caught up (drop), too fresh to judge
-(hold), or neither (send) — off two different messages it could be none of them.
+**Known limitation: it asks the row's own message** (#346), which for a coalesced
+row is the *oldest* thing the push announces rather than the newest. A row held
+the full cooldown is a minute old at release, so the age test reads "far too old
+to defer" even when the message it is about to announce landed half a second ago
+and hasn't reached the recipient's client yet — the #355 buzz this rule exists to
+prevent, on the busy thread where someone is most likely to be reading.
+
+It is knowingly left alone, because the obvious fix removes the cap below.
+Comparing against the newest message means a hold ends only when the *thread*
+goes quiet, so a busy thread holds a row drain after drain — and since
+`_should_defer` is evaluated before `_should_space_out`, it would hold back
+exactly the mid-burst @mention the cooldown's exemption exists to let through.
+Fixing it properly needs a bound on the hold that the grace does not have, which
+is a change to a tuned promise rather than a bug fix.
 
 **The cost, and why the window grew from 15s to 120s.** A held row waits for the
-next drain — which used to be up to a minute away and is now two seconds — so one
-hold costs the grace: **six seconds**, however wide the active window is.
-
-**It still can't strand a row**, but the argument is two-sided now rather than
-one. A hold needs a message newer than `now - grace` *and* a marker newer than
-`now - PUSH_ACTIVE_THREAD_SECONDS`; neither moves on its own, so a thread that
-goes quiet for six seconds releases the row, and a recipient who stops touching
-the thread releases it within the active window whatever the thread is doing. The
-one case that holds longer is a thread taking a message every few seconds from
-someone demonstrably in it — where every drain in between re-asks `_should_drop`,
-which is the outcome wanted for a reader. The old hard cap at the grace was
-bought with the bug above.
+next drain — which used to be up to a minute away and is now two seconds. Since
+the age test caps the hold at the grace itself, **the most a defer can now cost
+anyone is six seconds**, however wide the active window is.
 
 That inverts the original trade. 15s was chosen because a wide window meant
 minute-long holds for the send-and-pocket case above; with holding this cheap,

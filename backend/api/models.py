@@ -863,10 +863,14 @@ def interval_spans(when):
 
     **One home for the rule, because it had grown two.** The push enqueue
     (``notifications.enqueue_message_pushes``) and the drain's
-    ``_mention_marks`` both need this exact question, and the drain's copy
+    ``_readable_mentions`` both need this exact question, and the drain's copy
     simply didn't ask it — so a mention of someone during a period they had left
     the thread still counted (issue #366). A rule stated in two places is a rule
     that drifts; stated once, the two callers cannot disagree about *this* part.
+    On the drain's side that home is ``_readable_mentions``, the single queryset
+    both mention lookups start from, for the same reason again: a mention the
+    cooldown counted and the wording didn't would mean a push channelled as a
+    mention and phrased as chatter (issue #346).
 
     It is only the interval half. The enqueue additionally requires the
     participant to be ``active``, present and not deactivated, and that is

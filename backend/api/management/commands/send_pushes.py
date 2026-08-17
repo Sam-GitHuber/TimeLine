@@ -582,7 +582,9 @@ class Command(BaseCommand):
             # is therefore below `_mention_marks` rather than folded into it:
             # the marks are needed on every drain that has a message row,
             # the messages behind them almost never are.
-            mention_messages = self._mention_messages(pending, mention_marks)
+            mention_messages = self._mention_messages(
+                pending, mention_marks, read_markers
+            )
             # Gated because it feeds `_should_space_out` and nothing else, so
             # switching the cooldown off (the documented
             # `PUSH_MESSAGE_COOLDOWN_SECONDS=0` path) should not still pay for a
@@ -601,26 +603,12 @@ class Command(BaseCommand):
                     # drain *does*. The rest keep their place in the queue and
                     # go out on the next tick, two seconds later.
                     break
-                # What this row now stands for: its own message, or the newest
-                # thing that coalesced onto it. Computed once because both the
-                # drop test and the hold test ask about it, from opposite ends —
-                # "have they read all of it" and "is any of it too new to have
-                # been read yet" — and answering those off different messages is
-                # how a drain both declines to drop a row and declines to hold
-                # it. See _newest_covered.
-                covered = (
-                    self._newest_covered(
-                        row, later_messages, mention_marks, muted_pairs
-                    )
-                    if row.message_id
-                    else None
-                )
                 # Two reasons to drop a message push rather than send it, both
                 # settled (not retried) because neither state is ever undone:
                 # the message has since been deleted, or the recipient has
                 # already read everything the row stands for. See _should_drop.
                 if row.message_id and self._should_drop(
-                    row, read_markers, covered
+                    row, read_markers, later_messages, mention_marks, muted_pairs
                 ):
                     settled += 1
                     acted += 1
@@ -663,7 +651,7 @@ class Command(BaseCommand):
                 # `enqueue_message_pushes` coalesces onto any unsent row)
                 # suppress the *next* message's row behind it.
                 if row.message_id and (
-                    self._should_defer(row, read_markers, covered, now)
+                    self._should_defer(row, read_markers, now)
                     or self._should_space_out(
                         row, last_pushes, mention_marks, now
                     )
@@ -1003,7 +991,7 @@ class Command(BaseCommand):
             for entry in grouped
         }
 
-    def _mention_messages(self, pending, mention_marks):
+    def _mention_messages(self, pending, mention_marks, read_markers):
         """``{(conversation_id, user_id): Message}`` — the mention a queued row
         should *speak for*, where that isn't the message it points at (issue
         #346).
@@ -1033,21 +1021,38 @@ class Command(BaseCommand):
         message. Nothing here is written: the answer is assembled for the payload
         and thrown away.
 
-        **Only where it changes something.** A pair is looked up only when the
-        newest readable mention is *strictly newer* than the row's own message,
-        which is what keeps this symmetric. The reverse case — a mention followed
-        by chatter — has the mention as the row's own message, and re-pointing at
-        the newest message would take the mentions channel *away* from a push
-        that correctly had it. So the common burst, and every batch with no
-        mid-burst mention in it at all, pays nothing: no wanted pairs, no query.
+        **Two gates, and a pair needs both.** The mention must be:
+
+        - *strictly newer* than the row's own message, which is what keeps this
+          symmetric. The reverse case — a mention followed by chatter — has the
+          mention as the row's own message, and re-pointing at the newest
+          message would take the mentions channel *away* from a push that
+          correctly had it; and
+        - **newer than the recipient's read marker.** Otherwise a mention they
+          have already read captures a push that is going out for the *chatter*
+          behind it, and escalates it onto the one channel nobody can turn down
+          without losing real mentions. ``_should_drop`` guarantees only that
+          *something* here is unread, not that the mention is — so read the
+          marker or the escalation happens on the strength of a message the
+          recipient dealt with minutes ago. No marker at all means they have
+          never opened the thread, so nothing in it is read and the gate is open.
+
+        So the common burst, and every batch with no mid-burst mention in it at
+        all, pays nothing: no wanted pairs, no query.
 
         Keyed on the exact ``created_at`` ``_mention_marks`` chose rather than
         re-deriving "the newest one", so the two lookups cannot pick different
         messages — the row would then be channelled off one mention and phrased
         off another.
         """
+        # ``Q(pk__in=[])`` is the identity to OR onto — a predicate matching
+        # nothing — for the reason ``_message_pairs`` gives: start from ``Q()``
+        # and "any of these pairs" silently becomes "every mention there is".
+        # Not built by that helper because the pairs here are a *subset* of the
+        # batch and carry a third column; the shape is the same, the rule it
+        # depends on is the same, and it lives there.
         pairs = Q(pk__in=[])
-        wanted = 0
+        wanted = False
         for row in pending:
             if not row.message_id:
                 continue
@@ -1055,7 +1060,10 @@ class Command(BaseCommand):
             when = mention_marks.get(key)
             if when is None or when <= row.message.created_at:
                 continue
-            wanted += 1
+            marker = read_markers.get(key)
+            if marker is not None and when <= marker:
+                continue
+            wanted = True
             pairs |= Q(
                 message__conversation_id=key[0],
                 user_id=key[1],
@@ -1063,7 +1071,6 @@ class Command(BaseCommand):
             )
         if not wanted:
             return {}
-        found = {}
         # ``select_related``/``prefetch_related`` mirror what ``_drain`` joins
         # onto ``row.message``: ``message_push_body`` reads the sender's name and
         # the conversation's kind and title, and ``is_mentioned`` iterates the
@@ -1073,19 +1080,16 @@ class Command(BaseCommand):
         # Ordered so that two mentions sharing a microsecond — the only way a
         # pair can match twice — resolve the same way on every run rather than
         # on whatever heap order Postgres happens to return.
-        for mention in (
-            self._readable_mentions()
+        return {
+            (mention.message.conversation_id, mention.user_id): mention.message
+            for mention in self._readable_mentions()
             .filter(pairs)
             .select_related(
                 "message", "message__sender", "message__conversation"
             )
             .prefetch_related("message__mentions")
             .order_by("message_id")
-        ):
-            found[(mention.message.conversation_id, mention.user_id)] = (
-                mention.message
-            )
-        return found
+        }
 
     def _badge(self, row, cache):
         """The number to put on this recipient's **app icon** (issue #179).
@@ -1115,7 +1119,7 @@ class Command(BaseCommand):
         return cache[row.recipient_id]
 
     def _should_drop(
-        self, row, read_markers, covered
+        self, row, read_markers, later_messages, mention_marks, muted_pairs
     ):
         """Whether this queued *message* push should be dropped instead of sent.
 
@@ -1145,9 +1149,8 @@ class Command(BaseCommand):
         (issue #354) turned that from a race into the normal case, because it
         deliberately holds the row for a minute — a minute in which a glance at
         the thread on a laptop silences the phone for everything that arrives
-        next. So the marker is compared against ``covered``
-        (``_newest_covered``) — the newest message the row now stands for — and
-        only a recipient who is genuinely caught up is dropped.
+        next. So the marker is compared against the newest message the row now
+        stands for, and only a recipient who is genuinely caught up is dropped.
 
         What the row *says* when it does go out is phrased from its first
         message still, except where a mid-burst @mention overrides it
@@ -1155,6 +1158,11 @@ class Command(BaseCommand):
         real unread message is a smaller wrong than no push at all, which is what
         this fixes, and a mention is the one case where the wrong name costs a
         channel too.
+
+        **A muted thread counts only mentions**, because those are the only
+        messages that would have queued or coalesced a row for this recipient
+        (see ``_muted_pairs``); ordinary chatter in a thread they silenced must
+        not resurrect a push they have already read.
 
         The deleted branch is deliberately left as "drop, full stop". It has the
         same shape of hole — a burst whose *first* message is deleted takes the
@@ -1164,44 +1172,11 @@ class Command(BaseCommand):
         """
         if row.message.deleted_at is not None:
             return True
-        marker = read_markers.get(
-            (row.message.conversation_id, row.recipient_id)
-        )
+        key = (row.message.conversation_id, row.recipient_id)
+        marker = read_markers.get(key)
         if marker is None:
             return False
-        return marker >= covered
-
-    def _newest_covered(self, row, later_messages, mention_marks, muted_pairs):
-        """The newest message this queued row now stands for.
-
-        A row keeps pointing at the message it was created for while every later
-        message in the thread coalesces onto it, so ``row.message`` is the
-        *oldest* thing it announces, not the newest. Two rules need the newest —
-        ``_should_drop`` ("have they read all of it?") and ``_should_defer``
-        ("is any of it too new to have been read yet?") — and they are the same
-        question asked from opposite ends. Answering them off different messages
-        is how a drain both declines to drop a row *and* declines to hold it,
-        which is the shape of the bug this closes (issue #346, and #355 with it).
-
-        Computed once per row in ``_drain`` and passed to both, so the two
-        cannot drift.
-
-        **A muted thread counts only mentions**, because those are the only
-        messages ``enqueue_message_pushes`` would have queued or coalesced for
-        this recipient (see ``_muted_pairs``); ordinary chatter in a thread they
-        silenced must not resurrect a push they have already read, nor hold one
-        back on the strength of an arrival they never asked to hear about.
-
-        **The recipient's own messages don't count** in the unmuted branch.
-        Sending stamps the read marker (``MessageCreateView``: "sending implies
-        you've read everything up to now"), but the two writes are not one
-        instant — so counting your own reply would make you look like someone
-        with unread mail.
-
-        Never earlier than the row's own message: a burst only ever grows what a
-        row stands for.
-        """
-        key = (row.message.conversation_id, row.recipient_id)
+        covered = row.message.created_at
         if key in muted_pairs:
             newest = mention_marks.get(key)
         else:
@@ -1213,12 +1188,11 @@ class Command(BaseCommand):
                 ),
                 default=None,
             )
-        covered = row.message.created_at
         if newest is not None and newest > covered:
             covered = newest
-        return covered
+        return marker >= covered
 
-    def _should_defer(self, row, read_markers, covered, now):
+    def _should_defer(self, row, read_markers, now):
         """Whether this *message* push should be left queued a little longer
         (issue #355).
 
@@ -1248,42 +1222,33 @@ class Command(BaseCommand):
         server can get without a presence system. No marker at all — they have
         never opened the thread — is emphatically not active.
 
-        **Which message's age** (issue #346). ``covered``, not
-        ``row.message.created_at`` — the newest message the row stands for, from
-        ``_newest_covered``, the same quantity ``_should_drop`` compares the
-        marker against. A coalesced row's own message is the *oldest* thing it
-        announces, and asking that one produced a specific, repeatable buzz for
-        someone staring at the thread: a row held the full cooldown is a minute
-        old at release, so the age test said "far too old to defer" while the
-        message it was about to announce was half a second old and had not
-        reached the recipient's client yet. That is the exact #355 failure this
-        method exists to prevent, re-opened by the coalescing — and the busy
-        thread where it happens is precisely the one that is being read.
-
-        Asking the same message as ``_should_drop`` is what makes the two
-        coherent: a row is either caught up (drop), too fresh to judge (hold), or
-        neither (send). Off two different messages it could be none of them.
-
         **What it costs — much less than it used to.** A deferred row waits for
         the next drain, which is now two seconds away rather than up to sixty, so
-        one hold costs the grace: six seconds. That is also why
-        ``PUSH_ACTIVE_THREAD_SECONDS`` could be widened from 15s to 120s — a wide
-        window used to mean minute-long holds and now means six-second ones,
-        while a narrow one misses the silent reader whose marker hasn't moved
-        because nothing has arrived to move it.
+        the *most* this can delay a push is the grace itself: six seconds. The
+        age test is what caps it, and the cap is why
+        ``PUSH_ACTIVE_THREAD_SECONDS`` could be widened from 15s to 120s in the
+        same change — a wide window used to mean minute-long holds and now means
+        six-second ones, while a narrow one misses the silent reader whose marker
+        hasn't moved because nothing has arrived to move it.
 
-        **It cannot strand a row**, though the argument is now two-sided rather
-        than one. A hold needs *both* halves to be true at once: something in the
-        thread newer than ``now - grace``, **and** a read marker newer than
-        ``now - PUSH_ACTIVE_THREAD_SECONDS``. Neither the message times nor the
-        marker move on their own, so a thread that goes quiet for six seconds
-        releases the row, and a recipient who stops touching the thread releases
-        it within the active window whatever the thread is doing. The one case
-        that holds for longer is a thread taking a message every few seconds from
-        someone who is demonstrably in it — where every drain in between re-asks
-        ``_should_drop``, which is the outcome actually wanted for a reader. It
-        used to be capped at the grace outright, because the age test asked a
-        timestamp that could not move; that cap was bought with the bug above.
+        **It cannot strand a row.** The age test is against the message's own
+        ``created_at``, which doesn't move, so once a row is older than the grace
+        no later run can defer it again however active the recipient looks.
+
+        **Known limitation: it asks the row's own message**, which for a
+        coalesced row is the *oldest* thing the push announces rather than the
+        newest — so a row held the full cooldown is a minute old at release and
+        this returns False, even when the message it is about to announce landed
+        half a second ago and has not reached the recipient's client yet. That is
+        the #355 buzz this method exists to prevent, re-opened by the coalescing
+        (#346), and it is knowingly left alone. Comparing against the newest
+        message instead removes the cap two paragraphs above: a hold would then
+        end only when the *thread* went quiet, so a busy thread could hold a row
+        past drain after drain — and because ``_should_defer`` is evaluated
+        before ``_should_space_out``, it would hold back exactly the mid-burst
+        @mention the cooldown's exemption exists to let through. Fixing it needs
+        a bound on the hold that the grace does not currently have, which is a
+        change to a tuned, documented promise rather than a bug fix.
 
         **Known limitation: "active" is broader than "reading".** The marker is
         also stamped when the recipient *sends* (``MessageCreateView`` —
@@ -1291,9 +1256,9 @@ class Command(BaseCommand):
         **Mark read** on the conversation list. So someone who fires off a reply
         and pockets the phone looks active for the next
         ``PUSH_ACTIVE_THREAD_SECONDS``, and a reply arriving in that window is
-        held for a grace. This used to be the argument for keeping the window
-        small; with a resident drain each hold is six seconds, which is why the
-        window could stop paying for it. The alternative — telling the three
+        held. This used to be the argument for keeping the window small; with a
+        resident drain it is bounded by the grace at six seconds, which is why
+        the window could stop paying for it. The alternative — telling the three
         apart — needs a presence signal this deliberately avoids.
 
         This deliberately does **not** try to answer "is the thread on screen".
@@ -1302,7 +1267,7 @@ class Command(BaseCommand):
         maintains for its own reasons.
         """
         grace = timedelta(seconds=settings.PUSH_MESSAGE_GRACE_SECONDS)
-        if now - covered >= grace:
+        if now - row.message.created_at >= grace:
             return False
         marker = read_markers.get(
             (row.message.conversation_id, row.recipient_id)

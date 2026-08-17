@@ -11720,6 +11720,20 @@ class SendPushesCommandTests(APITestCase):
 
         self.assertEqual(self._sent_body(urlopen)[0]["channelId"], "messages")
 
+    def _open_thread_since(self, convo, seconds):
+        """Move every member's interval start back, so a `_backdate`d message is
+        still inside it.
+
+        `_queue_message` opens the intervals at `convo.created_at`, which in a
+        test is *now* — so backdating a message puts it before everyone's
+        interval and `_readable_mentions` correctly refuses to see it. Without
+        this a test meaning "the mention is old" quietly becomes "the mention is
+        invisible", and passes for the wrong reason.
+        """
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo
+        ).update(started_at=timezone.now() - timedelta(seconds=seconds))
+
     def _third_member(self, convo, email="drain-cara@example.com", name="Cara"):
         """Another active member of ``convo``, so a mid-burst mention can come
         from someone other than whoever opened the burst."""
@@ -11861,6 +11875,76 @@ class SendPushesCommandTests(APITestCase):
         self.assertEqual(sent["channelId"], "messages")
         self.assertEqual(sent["body"], "Ada in Book Club")
 
+    def test_a_mid_burst_mention_already_read_does_not_escalate_the_push(self):
+        """The push is going out for the *chatter* behind the mention, so it must
+        not arrive dressed as a mention.
+
+        `_should_drop` guarantees only that something the row stands for is
+        unread — not that the mention is. Someone who reads the thread as far as
+        being named, and then has more chatter arrive, would otherwise be buzzed
+        on the **mentions** channel for a mention they dealt with a minute ago.
+        That channel is the one nobody can turn down without losing real
+        mentions, which is exactly the property this PR is protecting; spending
+        it on already-read content is the same wrong in the other direction.
+        """
+        convo, first = self._queue_message(kind="group", title="Book Club")
+        self._backdate(first, 40)
+        cara = self._third_member(convo)
+        mention = Message.objects.create(
+            conversation=convo, sender=cara, text="@Me are you in"
+        )
+        MessageMention.objects.create(message=mention, user=self.me)
+        self._backdate(mention, 30)
+        chatter = Message.objects.create(
+            conversation=convo, sender=self.actor, text="anyway, as I was saying"
+        )
+        self._backdate(chatter, 10)
+        # Everyone's interval has to predate the backdated messages, or they are
+        # simply invisible and this passes without the read gate doing anything.
+        self._open_thread_since(convo, 120)
+        # Read as far as the mention, but not the chatter after it — so the row
+        # still has something unread to announce and is not dropped.
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=20),
+        )
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "messages")
+        self.assertEqual(sent["body"], "Ada in Book Club")
+
+    def test_a_mid_burst_mention_in_a_muted_thread_is_still_a_mention(self):
+        # The case the whole carve-out exists for, and the one where getting it
+        # wrong costs the most: in a muted thread a push exists *only* because
+        # someone was named, so a mention that coalesced onto an earlier
+        # mention's row must not go out phrased and channelled as chatter. It is
+        # also the branch `_muted_pairs` sends `_should_drop` down, so it is
+        # worth pinning that the two agree about which mention is the newest.
+        convo, first = self._queue_message(kind="group", title="Book Club")
+        MessageMention.objects.create(message=first, user=self.me)
+        Participant.objects.filter(conversation=convo, user=self.me).update(
+            muted_at=timezone.now()
+        )
+        cara = self._third_member(convo)
+        later = Message.objects.create(
+            conversation=convo, sender=cara, text="@Me and you specifically"
+        )
+        MessageMention.objects.create(message=later, user=self.me)
+        notifications.enqueue_message_pushes(later)
+        # Coalesced, still pointing at the first mention. (Ada gets a row of her
+        # own — she hasn't muted the thread — but has no device to send it to.)
+        row = PushOutbox.objects.get(sent_at__isnull=True, recipient=self.me)
+        self.assertEqual(row.message_id, first.id)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "mentions")
+        self.assertEqual(sent["body"], "Cara mentioned you in Book Club")
+
     def test_no_mid_burst_mention_means_no_lookup_at_all(self):
         # The cost of the fix on the path every drain takes. `_mention_messages`
         # runs on every batch that has a message row in it, and a mid-burst
@@ -11878,7 +11962,7 @@ class SendPushesCommandTests(APITestCase):
         row = PushOutbox.objects.select_related("message").get(recipient=self.me)
 
         with self.assertNumQueries(0):
-            self.assertEqual(Command()._mention_messages([row], {}), {})
+            self.assertEqual(Command()._mention_messages([row], {}, {}), {})
 
     def test_a_message_push_never_carries_the_message_text(self):
         # The body crosses Expo's servers and Apple's. Naming the sender is the
@@ -12107,98 +12191,6 @@ class SendPushesCommandTests(APITestCase):
         # is exactly what `_should_defer`'s "cannot strand a row" rests on.
         Message.objects.filter(pk=message.pk).update(
             created_at=timezone.now() - timedelta(seconds=30)
-        )
-
-        urlopen = self._run()
-
-        self.assertEqual(len(self._sent_body(urlopen)), 1)
-
-    def test_a_fresh_message_coalesced_onto_an_old_row_is_still_held_back(self):
-        """The same root cause as #346, in the last rule that hadn't been swept
-        for it: ``_should_defer`` asked *the row's own message* how old this
-        push's news was.
-
-        A coalesced row is routinely minutes old by the time it goes out — the
-        cooldown holds it a full minute by design — while the message it is
-        actually about arrived seconds ago. So the age test said "far too old to
-        defer" and the push went to a phone whose owner was reading the thread,
-        for a message their client had not been told about yet. That is the exact
-        #355 failure the grace exists to prevent, and the busy thread where it
-        happens is precisely the one being read.
-
-        The timeline below is that case with the numbers made explicit: a row
-        queued 40s ago (out of the grace), a message 1s ago (inside it), and a
-        marker from 2s ago that covers neither.
-        """
-        convo, first = self._queue_message()
-        self._backdate(first, 40)
-        later = Message.objects.create(
-            conversation=convo, sender=self.actor, text="and one more thing"
-        )
-        self._backdate(later, 1)
-        # No second row — it coalesces onto the one already queued, which goes
-        # on pointing at the message from 40s ago.
-        notifications.enqueue_message_pushes(later)
-        self.assertEqual(PushOutbox.objects.filter(sent_at__isnull=True).count(), 1)
-        # Reading a moment ago, and not yet told about `later`: their client
-        # can't post a marker covering it until its own 4s poll.
-        ConversationRead.objects.create(
-            conversation=convo,
-            user=self.me,
-            last_read_at=timezone.now() - timedelta(seconds=2),
-        )
-
-        urlopen = self._run()
-
-        urlopen.assert_not_called()
-        # Held, not settled — it still goes out on a later run if they turn out
-        # not to have been reading after all.
-        row = PushOutbox.objects.get()
-        self.assertIsNone(row.sent_at)
-        self.assertEqual(row.attempts, 0)
-
-    def test_a_burst_that_has_gone_quiet_is_not_held_back(self):
-        # The other side of the change, and what keeps "it cannot strand a row"
-        # true: the hold is released by the *thread* going quiet, not only by the
-        # recipient going away. Identical to the test above except that the
-        # newest message is older than the grace, so nothing is too fresh to
-        # judge and the push goes out to a recipient who still looks active.
-        # (Their marker sits behind the newest message, or `_should_drop` would
-        # bin the row before the hold test was reached at all.)
-        convo, first = self._queue_message()
-        self._backdate(first, 40)
-        later = Message.objects.create(
-            conversation=convo, sender=self.actor, text="and one more thing"
-        )
-        self._backdate(later, 20)
-        notifications.enqueue_message_pushes(later)
-        ConversationRead.objects.create(
-            conversation=convo,
-            user=self.me,
-            last_read_at=timezone.now() - timedelta(seconds=25),
-        )
-
-        urlopen = self._run()
-
-        self.assertEqual(len(self._sent_body(urlopen)), 1)
-
-    def test_a_fresh_message_you_sent_yourself_does_not_hold_a_push_back(self):
-        # `_newest_covered` ignores the recipient's own messages, and the hold
-        # test inherits that. Otherwise replying in a thread would hold back the
-        # push for everything already waiting in it — your own reply is not news
-        # you are waiting to be told about, and sending stamps your marker anyway.
-        # The marker is set behind the queued message so `_should_drop` doesn't
-        # settle the row first; what is being tested is the hold.
-        convo, first = self._queue_message()
-        self._backdate(first, 40)
-        mine = Message.objects.create(
-            conversation=convo, sender=self.me, text="on my way"
-        )
-        self._backdate(mine, 1)
-        ConversationRead.objects.create(
-            conversation=convo,
-            user=self.me,
-            last_read_at=timezone.now() - timedelta(seconds=45),
         )
 
         urlopen = self._run()
