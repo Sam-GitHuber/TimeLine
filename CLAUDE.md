@@ -34,15 +34,15 @@ Two that are easy to skip and shouldn't be: `messaging.md` is large and its
 
 **In progress: Phase 10 (Android).** Because the app is Expo, Android added no
 new screens — the work is toolchain, FCM credentials, notification channels, the
-back button, and Android-only layout bugs. The app builds and runs; **FCM
-credentials and Play Console distribution are outstanding** (see the phase doc
-for the current state — trust it and git over this paragraph). Then **Phase 10b
-(notification content)** — a fleshed plan in `docs/phases/`, confirmed and then
-revised against a source-checked review: an iOS notification service extension
-(plus the Android equivalent) so a message push can show the message, fetched
-device-side rather than sent through Expo/Apple. It exists to fix the
+back button, and Android-only layout bugs. The app builds and runs; FCM
+credentials are in place, and **Play Console distribution is outstanding** (see
+the phase doc for the current state — trust it and git over this paragraph).
+Then **Phase 10b (notification content)** — an iOS notification service
+extension (plus the Android equivalent) so a message push can show the message,
+fetched device-side rather than sent through Expo/Apple. It exists to fix the
 Reply-with-no-context problem *and* to build most of 9c's milestone 7 early.
-**One open decision** in it needs the user's call before M3.
+**M1, M2, M3 and M5 are done and iOS previews work on a real handset; only M4
+(Android) remains**, and it may end in a written decision not to do it.
 **E2E encryption (9c) is deliberately scheduled after Android**, at the user's
 call: friends are waiting on an Android build. Phases 12–13 (open source/funding
 → short video clips) remain sketches in `docs/phases/`.

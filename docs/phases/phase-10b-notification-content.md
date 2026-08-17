@@ -615,21 +615,33 @@ plugin that copies a Swift file into a new target and signs it.
 
 ### M4 — Android, or a written decision not to
 
-> **⛔ Blocked, and not on us (2026-08-14).** The spike below needs an Android
-> push to arrive, and **Android push doesn't work yet**: Phase 10 lists *"FCM
-> credentials"* as outstanding, meaning the Firebase service-account key has
-> never been uploaded to EAS. Until it is, Expo cannot deliver to FCM at all,
-> and the one question M4 exists to answer is unanswerable. A local
-> `scheduleNotificationAsync` is no substitute — the background task consumer
-> fires from `FirebaseMessagingDelegate.onMessageReceived`, which a local
-> notification never reaches.
+> **~~⛔ Blocked, and not on us (2026-08-14).~~ Not blocked — the block was
+> written on a stale fact, and checked on 2026-08-17.** It said the Firebase
+> service-account key had "never been uploaded to EAS", citing Phase 10's
+> outstanding list. It had been uploaded on **2026-07-30** — eleven days before
+> the note was written, and two weeks before it was committed. Phase 10's status
+> line was stale, this note inherited the staleness, and neither was checked
+> against EAS. Both are corrected now, and Phase 10 carries the read-only query
+> that answers it in one command, because `eas credentials` is interactive-only
+> and so can't be checked in passing.
 >
-> **The prerequisite is Phase 10's, not this phase's**, and it needs the
-> maintainer's Firebase console: create the service-account private key
-> (Firebase → Project settings → Service accounts) and upload it to EAS as the
-> *FCM V1 service account key*. `google-services.json` is already in place; it
-> is the client half, and the two must belong to the same Firebase project or
-> push fails silently.
+> **So M4's spike can run.** What it wants is a fresh Android build: the last
+> entry in `mobile/android-builds.log` is v0.24.0 (2026-08-04), which predates
+> M1, M2, M3 and M5.
+>
+> **What the check does *not* establish** is that push works — only that the
+> credential exists and that its Firebase project matches
+> `google-services.json`'s. A key can be revoked in the console with EAS none the
+> wiser until a send fails. That makes "does an Android push arrive at all"
+> question 0 of the spike rather than a precondition to it, and it should be
+> answered before reading anything into questions 1–3: a task that doesn't fire
+> and a push that never arrives look identical from the phone.
+>
+> One thing from the original note survives intact and still matters: a local
+> `scheduleNotificationAsync` is **no substitute** for a real push. The
+> background-task consumer fires from
+> `FirebaseMessagingDelegate.onMessageReceived`, which a local notification never
+> reaches.
 
 #### What the source already answers, before the spike runs
 
@@ -693,8 +705,13 @@ So Android keeps the same notification-message payload as iOS, and the question
 is narrowed to: **can a background task rewrite an already-delivered
 notification, or post a replacement, in the states we care about?**
 
-- **Spike first**, before writing anything else. Timebox it. It now has three
+- **Spike first**, before writing anything else. Timebox it. It now has four
   questions rather than one, in this order — stop at the first that fails:
+  0. Does an Android push arrive at all? The credentials are in place (above) but
+     have never delivered a message to a device. Answer this on its own, before
+     anything below: a task that doesn't fire and a push that never arrives are
+     indistinguishable from the phone, and mistaking the second for the first is
+     how Android support gets wrongly written off.
   1. Does the task fire at all when the app is swiped away? (The source says the
      callback is reached; the issue history says it sometimes isn't.)
   2. Does a replacement scheduled under the **same identifier** swap in place,
