@@ -857,6 +857,32 @@ class ParticipantInterval(models.Model):
         return f"{self.participant_id}: {self.started_at} → {self.ended_at or '…'}"
 
 
+def interval_spans(when):
+    """A ``Q`` matching a ``Participant`` one of whose intervals covers ``when``
+    — i.e. "could this person read a message sent at ``when``?".
+
+    **One home for the rule, because it had grown two.** The push enqueue
+    (``notifications.enqueue_message_pushes``) and the drain's
+    ``_mention_marks`` both need this exact question, and the drain's copy
+    simply didn't ask it — so a mention of someone during a period they had left
+    the thread still counted (issue #366). A rule stated in two places is a rule
+    that drifts; stated once, the two callers cannot disagree.
+
+    ``when`` is a datetime for a fixed instant, or an expression (``OuterRef``,
+    ``F``) when the moment is a column of the query being filtered.
+
+    **Apply it in a single ``filter()`` call.** Split across two, Django joins
+    the interval table twice and lets *different* interval rows satisfy the
+    start and the end halves — so somebody with a closed interval before the
+    message and another one after it (exactly the gap this excludes) would pass.
+    That is the whole reason this returns one combined ``Q`` rather than two.
+    """
+    return models.Q(intervals__started_at__lte=when) & (
+        models.Q(intervals__ended_at__isnull=True)
+        | models.Q(intervals__ended_at__gt=when)
+    )
+
+
 # A report reason is free text but bounded — a sentence or two of "why", not an
 # essay. Optional (the flag itself is the signal); capped to bound the DB row.
 # Defined here (next to the model) so the serializer's cap and the field's cap

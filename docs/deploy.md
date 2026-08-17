@@ -683,6 +683,14 @@ not that a phone buzzed; that only shows up in a later receipt line, e.g.
 and healthy: it's a device whose app was deleted or whose token was retired,
 being removed so we stop pushing into the void.
 
+`Sent 0, requeued 0, 1 reached nobody (dead token reaped).` is the third
+outcome (#365): the row's only device turned out to be dead, so it was settled
+without anything being delivered. It carries **no** "queued up to" figure on
+purpose — a latency number for a push that rang no phone would be worse than
+none, and this is the one number below that you're asked to trust. Same
+healthy-and-normal reading as a receipt-time reap: it means a reinstall or a
+token rotation.
+
 **"queued up to Ns" is our half of push latency**, from the row being written by
 the web request to it going to Expo. It is the number to look at before tuning
 anything (#354): Expo → APNs/FCM → device adds another 1–5s that we can neither

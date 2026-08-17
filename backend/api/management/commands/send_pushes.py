@@ -57,7 +57,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, transaction
-from django.db.models import Max, Q
+from django.db.models import Exists, Max, OuterRef, Q
 from django.utils import timezone
 
 from ...models import (
@@ -68,6 +68,7 @@ from ...models import (
     Participant,
     PushOutbox,
     PushReceipt,
+    interval_spans,
 )
 from ...notifications import (
     ANONYMOUS_MESSAGE_BODY,
@@ -922,15 +923,40 @@ class Command(BaseCommand):
         Soft-deleted messages are excluded. A mention taken back should not go on
         punching a push through the cooldown, and ``_should_drop`` already treats
         a deleted message as a reason not to send at all.
+
+        **Only mentions the recipient could actually read count** (issue #366).
+        ``enqueue_message_pushes`` is careful that a mention can never make a
+        message readable that isn't — it carves mentions out of an audience
+        already filtered by ``ParticipantInterval`` — and this is the same
+        question asked on the read side, so it has to be filtered the same way or
+        the two copies of the rule say different things. Without it, being named
+        during a stretch someone had left the thread (or while they were still
+        ``pending``) would punch their next push through the cooldown, and would
+        rescue a muted thread's row from ``_should_drop``, on the strength of a
+        message they will never see. The ``Exists`` costs a correlated subquery
+        on a lookup that runs every two seconds; it is bounded by ``since`` and
+        by the batch's pairs like the rest of this query, and the alternative is
+        a rule that holds at enqueue and not at send.
         """
         pairs = self._message_pairs(
             pending, "message__conversation_id", "user_id"
         )
         if pairs is None or since is None:
             return {}
+        # Correlated per *mention*, not per batch: the interval test is against
+        # the moment of that mention's own message, so it can't be hoisted into
+        # the outer query.
+        readable = Participant.objects.filter(
+            conversation_id=OuterRef("message__conversation_id"),
+            user_id=OuterRef("user_id"),
+            left_at__isnull=True,
+            status=Participant.Status.ACTIVE,
+            user__is_active=True,
+        ).filter(interval_spans(OuterRef("message__created_at")))
         grouped = (
             MessageMention.objects.filter(
                 pairs,
+                Exists(readable),
                 message__deleted_at__isnull=True,
                 message__created_at__gte=since,
             )
@@ -1417,15 +1443,17 @@ class Command(BaseCommand):
                     ticket.get("message", "unknown error")
                 )
 
-        sent = requeued = 0
-        # How long the rows in this batch waited between being enqueued and
-        # going to Expo — **our** half of push latency, which is the only half we
-        # can do anything about (issue #354). Reported because the alternative is
-        # guessing: Expo → APNs/FCM → device adds 1-5s nobody here can see, so
-        # "is the delay ours?" is unanswerable without this number, and it is the
-        # number that says whether tuning the drain interval further would
-        # achieve anything at all. The worst wait rather than the mean: a batch's
-        # slowest row is the one a person notices.
+        sent = requeued = reaped = 0
+        # How long the rows this batch actually *delivered* waited between being
+        # enqueued and being accepted by Expo — **our** half of push latency,
+        # which is the only half we can do anything about (issue #354). Reported
+        # because the alternative is guessing: Expo → APNs/FCM → device adds
+        # 1-5s nobody here can see, so "is the delay ours?" is unanswerable
+        # without this number, and it is the number that says whether tuning the
+        # drain interval further would achieve anything at all. The worst wait
+        # rather than the mean: a batch's slowest row is the one a person
+        # notices. **Delivered only** (issue #365): a row that settled having
+        # rung nobody has no latency worth reporting.
         waits = []
         for entry in outcomes.values():
             row = entry["row"]
@@ -1439,10 +1467,24 @@ class Command(BaseCommand):
                 row.attempts += 1
                 row.last_error = entry["errors"][0][:500]
                 requeued += 1
-            else:
+            elif entry["delivered"]:
                 row.sent_at = timezone.now()
                 waits.append((row.sent_at - row.created_at).total_seconds())
                 sent += 1
+            else:
+                # Settled having reached nobody: every device this row still had
+                # outstanding came back `DeviceNotRegistered` and was reaped
+                # above, so there were no errors to requeue on and nothing was
+                # delivered either (issue #365). Counted apart from `sent`
+                # because `sent` is the operator's answer to "is the delay
+                # ours?" and a latency figure for a push that rang no phone is
+                # worse than no figure — and because `_last_pushes` already
+                # treats exactly these rows as "rang nobody" when it decides
+                # whether a cooldown has started. Two readings of one fact, and
+                # they now agree. A reap is worth seeing in its own right: it
+                # means a reinstall or a token rotation.
+                row.sent_at = timezone.now()
+                reaped += 1
             row.save(
                 update_fields=[
                     "delivered_tokens",
@@ -1459,6 +1501,8 @@ class Command(BaseCommand):
             PushReceipt.objects.bulk_create(receipts, ignore_conflicts=True)
 
         summary = f"Sent {sent}, requeued {requeued}"
+        if reaped:
+            summary += f", {reaped} reached nobody (dead token reaped)"
         if waits:
             summary += f" (queued up to {max(waits):.1f}s)"
         self._say(f"{summary}.")

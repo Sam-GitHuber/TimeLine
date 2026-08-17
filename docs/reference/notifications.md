@@ -438,6 +438,25 @@ the per-message tickets:
   `MAX_ATTEMPTS` (5) the row stops being retried, so one poisoned row can't be
   re-sent on every tick forever.
 
+A row is settled three ways, not two (#365): **delivered** (something was
+accepted for at least one device), **requeued** (an error, retry next tick), and
+**reached nobody** — every device it still had outstanding came back
+`DeviceNotRegistered` and was reaped, so there was no error to retry on and no
+delivery either. That third case is counted apart from "sent" and contributes no
+queue-latency figure, because a latency number for a push that rang no phone is
+worse than none — and because `_last_pushes` already treats exactly those rows as
+having rung nobody when it decides whether a cooldown has started. Two readings
+of one fact; they have to agree.
+
+**"Already queued" means the same thing to both queries** (#347). The enqueue
+coalesces onto an unsent row, and the drain only ever selects rows with retries
+left — so both filter on `attempts < MAX_ATTEMPTS` as well as `sent_at IS NULL`.
+Without that guard on the enqueue side, a row that exhausted its retries kept
+`sent_at` NULL for ever and went on absorbing every later message in the thread,
+silencing that recipient's phone for it until the 14-day prune deleted the row.
+Silently: the messages still arrived, the unread badge stayed right, the only
+trace was a `last_error` nobody reads.
+
 A recipient with **no** registered device is marked sent immediately without
 calling Expo — otherwise a web-only user's rows would retry on every tick.
 Delivered rows are kept ~14 days as a delivery log, then pruned.
@@ -583,6 +602,20 @@ it:
   thread since the row's message instead, which is everything the row now stands
   for. Soft-deleted messages are excluded — a mention taken back shouldn't go on
   punching pushes through.
+
+  **And only mentions the recipient could actually read count** (#366). The
+  enqueue is careful that "a mention can't make a message readable that isn't":
+  it carves mentions out of an audience already filtered by `ParticipantInterval`
+  (see [messaging.md](messaging.md#history-is-interval-clipped)).
+  `_mention_marks` asks that same
+  question on the read side, so it applies the same filter — otherwise being
+  named during a stretch you had left the thread, or while you were still
+  `pending`, would punch your next push through the cooldown on the strength of a
+  message you will never see. The interval rule now lives in one place,
+  `models.interval_spans`, precisely so the write side and the read side cannot
+  drift again; **apply it in a single `filter()` call**, or Django joins the
+  interval table twice and lets two *different* intervals satisfy the start and
+  end halves, which is exactly the gap it exists to exclude.
 
 ### Dropping a message push, and what "read" has to mean
 

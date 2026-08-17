@@ -9501,6 +9501,39 @@ class MessagePushEnqueueTests(APITestCase):
 
         self.assertEqual(self._queued_for(self.bea).count(), 1)
 
+    def test_a_row_that_exhausted_its_retries_does_not_suppress_the_next_push(
+        self,
+    ):
+        # Issue #347. `_drain` only ever selects rows with retries left, so a row
+        # at MAX_ATTEMPTS keeps `sent_at` NULL for ever — and coalescing that
+        # asked only about `sent_at` treated it as an outstanding push and
+        # created nothing, silencing that thread's notifications until `_prune`
+        # deleted it a fortnight later. Silently: the messages still arrive, the
+        # unread badge is still right, only the phone stops buzzing.
+        convo = self._direct()
+        self._send(convo, self.ada, text="first")
+        self._queued_for(self.bea).update(
+            attempts=PushOutbox.MAX_ATTEMPTS, last_error="Expo said no"
+        )
+
+        second = self._send(convo, self.ada, text="second")
+
+        self.assertIn(
+            second.id,
+            set(self._queued_for(self.bea).values_list("message_id", flat=True)),
+        )
+
+    def test_a_row_with_retries_left_still_coalesces(self):
+        # The other side of #347: a row that has failed once is still going to be
+        # drained, so a second message must not queue a second buzz behind it.
+        convo = self._direct()
+        self._send(convo, self.ada, text="first")
+        self._queued_for(self.bea).update(attempts=PushOutbox.MAX_ATTEMPTS - 1)
+
+        self._send(convo, self.ada, text="second")
+
+        self.assertEqual(self._queued_for(self.bea).count(), 1)
+
     def test_deleting_the_conversation_removes_the_queued_push(self):
         # Cascade chain: Conversation → Message → PushOutbox, matching the
         # notification path's Post → Notification → PushOutbox guarantee.
@@ -12173,6 +12206,119 @@ class SendPushesCommandTests(APITestCase):
         urlopen = self._run()
 
         urlopen.assert_not_called()
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_a_mention_the_recipient_cannot_see_does_not_punch_through(self):
+        # Issue #366. `enqueue_message_pushes` carves mentions out of an audience
+        # already filtered by `ParticipantInterval`, precisely so that "a mention
+        # can't make a message readable that isn't". `_mention_marks` asks the
+        # same question on the read side and used not to apply that filter, so
+        # being named during a stretch you had left the thread still beat the
+        # cooldown — on the strength of a message you will never see.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        self._already_buzzed(convo)
+        # The gap: their interval closes, so nothing sent from here on is
+        # readable by them. `status` stays active and `left_at` stays null, so
+        # the interval clause is the only thing that can exclude the mention.
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo, participant__user=self.me
+        ).update(ended_at=timezone.now())
+        unseen = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me are you there"
+        )
+        MessageMention.objects.create(message=unseen, user=self.me)
+
+        urlopen = self._run()
+
+        # Held by the cooldown like any other mid-burst chatter would be. The
+        # positive control is
+        # `test_a_mention_that_coalesced_onto_a_queued_row_is_still_exempt`,
+        # which is the same shape with the interval left open.
+        urlopen.assert_not_called()
+
+    @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
+    def test_an_unreadable_mention_does_not_rescue_a_read_muted_thread(self):
+        # `_mention_marks` has a second reader: in a *muted* thread a mention is
+        # the only kind of message that could have coalesced onto the row, so
+        # `_should_drop` asks it what the row now stands for. Same rule, same
+        # answer — a mention they can't read is not unread mail, so a recipient
+        # who is caught up on everything visible still gets dropped (#366).
+        convo, message = self._queue_message(kind="group", title="Book Club")
+        Participant.objects.filter(conversation=convo, user=self.me).update(
+            muted_at=timezone.now()
+        )
+        # Every time here is pinned rather than left to `auto_now_add`, because
+        # the whole test is which side of the read marker the mention falls on —
+        # and the batch is put a minute in the past so `_should_defer` (which
+        # holds anything fresher than the grace for an active reader) cannot
+        # stand in for the drop being tested.
+        base = timezone.now() - timedelta(seconds=60)
+        Message.objects.filter(pk=message.pk).update(created_at=base)
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo
+        ).update(started_at=base - timedelta(seconds=1))
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=base + timedelta(seconds=1),
+        )
+        # Their interval closes a second after the message they've read, so the
+        # mention a second after *that* is outside it.
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo, participant__user=self.me
+        ).update(ended_at=base + timedelta(seconds=1))
+        unseen = Message.objects.create(
+            conversation=convo, sender=self.actor, text="@me still here?"
+        )
+        Message.objects.filter(pk=unseen.pk).update(
+            created_at=base + timedelta(seconds=2)
+        )
+        MessageMention.objects.create(message=unseen, user=self.me)
+
+        urlopen = self._run()
+
+        urlopen.assert_not_called()
+        self.assertIsNotNone(PushOutbox.objects.get().sent_at)  # dropped, settled
+
+    def test_a_drain_that_only_reaped_a_dead_token_reports_no_send(self):
+        # Issue #365. A row whose every ticket came back `DeviceNotRegistered`
+        # records no errors, and the settle loop used to read "no errors" as
+        # "sent" — printing a delivery *and* a queue-latency figure for a push
+        # that rang no phone. That number is the one `docs/deploy.md` tells the
+        # operator to trust when answering "is the delay ours?", and
+        # `_last_pushes` already treats exactly these rows as having reached
+        # nobody, so the two readings disagreed.
+        self._queue_message()
+        PushOutbox.objects.update(
+            created_at=timezone.now() - timedelta(seconds=9)
+        )
+
+        out = StringIO()
+        self._run(
+            payload={
+                "data": [
+                    {
+                        "status": "error",
+                        "message": "gone",
+                        "details": {"error": "DeviceNotRegistered"},
+                    }
+                ]
+            },
+            stdout=out,
+            verbosity=1,
+        )
+
+        text = out.getvalue()
+        self.assertIn("Sent 0, requeued 0", text)
+        # No latency line: there is no delivery for it to be the latency of.
+        self.assertNotIn("queued up to", text)
+        # But the reap is still worth seeing — it means a reinstall or a
+        # rotated token.
+        self.assertIn("reached nobody", text)
+        # Still settled rather than retried: retrying a dead token can't help.
+        row = PushOutbox.objects.get()
+        self.assertIsNotNone(row.sent_at)
+        self.assertEqual(row.attempts, 0)
 
     @override_settings(PUSH_MESSAGE_COOLDOWN_SECONDS=60)
     def test_a_push_that_only_reaped_a_dead_token_starts_no_cooldown(self):

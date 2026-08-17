@@ -36,6 +36,7 @@ from .models import (
     NotificationPreference,
     Participant,
     PushOutbox,
+    interval_spans,
 )
 
 # The content kinds whose actor must be visible to (connected with) the recipient
@@ -586,15 +587,10 @@ def enqueue_message_pushes(message):
             user__is_active=True,
         )
         .exclude(user_id=message.sender_id)
-        .filter(
-            # One filter() → one join → one interval row must satisfy both
-            # halves. See the docstring.
-            Q(intervals__started_at__lte=when)
-            & (
-                Q(intervals__ended_at__isnull=True)
-                | Q(intervals__ended_at__gt=when)
-            )
-        )
+        # One filter() → one join → one interval row must satisfy both halves.
+        # See ``interval_spans``, which is where this rule lives so that the
+        # drain's copy of the same question can't drift from it.
+        .filter(interval_spans(when))
     )
     recipient_ids = set(
         audience.filter(muted_at__isnull=True)
@@ -622,6 +618,15 @@ def enqueue_message_pushes(message):
     already_queued = set(
         PushOutbox.objects.filter(
             sent_at__isnull=True,
+            # **The same guard the drain selects on** (issue #347). ``_drain``
+            # only ever picks up rows with retries left, so a row that has
+            # exhausted ``MAX_ATTEMPTS`` keeps ``sent_at`` NULL for ever — and
+            # without this line the coalescing above would go on treating that
+            # dead row as an outstanding push and create nothing, silencing that
+            # recipient's phone for that thread until ``_prune`` deletes it a
+            # fortnight later. Two queries, one meaning of "queued": if the
+            # drain will never send it, it is not queued.
+            attempts__lt=PushOutbox.MAX_ATTEMPTS,
             message__conversation_id=convo_id,
             recipient_id__in=recipient_ids,
         ).values_list("recipient_id", flat=True)
