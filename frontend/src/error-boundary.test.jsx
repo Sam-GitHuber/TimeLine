@@ -1,10 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import { AppErrorBoundary } from "./components/ErrorBoundary.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
+import { allowConsoleError, consoleErrors } from "../test/console-guard.js";
 
 // Issue #299: before this, a render error anywhere unmounted the whole React
 // tree and left a blank white page — no message, no nav, no way back except the
@@ -104,14 +105,14 @@ function Boom() {
 
 // What the boundary itself logged, as opposed to what React logged. React 19
 // reports every caught error through its own `console.error` *before* the
-// boundary does, so a bare `toHaveBeenCalled()` passes even with
+// boundary does, so a bare "something was logged" check passes even with
 // `componentDidCatch` deleted — a vacuous assertion for the one property it was
 // written to pin. Counting our own message is what makes it real, and it
 // doubles as a catch-counter for the tests below that care how many times a
 // crash was caught.
-function boundaryLogs(spy) {
-  return spy.mock.calls.filter(
-    (call) => call[0] === "Render error caught by ErrorBoundary:"
+function boundaryLogs() {
+  return consoleErrors().filter((text) =>
+    text.startsWith("Render error caught by ErrorBoundary:")
   ).length;
 }
 
@@ -126,21 +127,22 @@ function renderApp() {
   );
 }
 
-let consoleError;
-
 beforeEach(() => {
   pageThrows = false;
   drawerThrows = false;
   bellThrows = false;
   setMessagesOpen(false);
-  // The boundary logs every catch on purpose (it's the only trace that exists
-  // in production). Swallow it here so a passing suite isn't full of red
-  // stacks — the assertions above read the spy instead.
-  consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-});
-
-afterEach(() => {
-  consoleError.mockRestore();
+  // Every test in this file makes something throw on purpose, so both reports a
+  // caught error produces — React's and the boundary's own — are expected here.
+  // Named rather than swallowed with a blanket `vi.spyOn(console, "error")`:
+  // that would exempt the file from the console guard entirely (#357/#360), and
+  // the one file about crashes is the last one that should stop noticing an
+  // act() violation or a bad prop. Anything else logged still fails the test;
+  // `boundaryLogs()` reads these back rather than a spy.
+  allowConsoleError(
+    "Render error caught by ErrorBoundary:",
+    /The above error occurred in/
+  );
 });
 
 describe("a page that throws", () => {
@@ -155,7 +157,7 @@ describe("a page that throws", () => {
     expect(screen.getByRole("link", { name: "Feed" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "People" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Terms" })).toBeInTheDocument();
-    expect(boundaryLogs(consoleError)).toBe(1);
+    expect(boundaryLogs()).toBe(1);
   });
 
   it("announces itself rather than silently swapping the content", () => {
@@ -186,7 +188,7 @@ describe("a page that throws", () => {
     // broken page a second time before settling — so almost every real crash
     // (they're nearly all reached by clicking something) would run its subtree
     // and its effects twice.
-    expect(boundaryLogs(consoleError)).toBe(1);
+    expect(boundaryLogs()).toBe(1);
   });
 
   it("clears itself when you navigate away", async () => {
@@ -302,7 +304,7 @@ describe("a companion drawer that throws", () => {
     setMessagesOpen(true);
     drawerThrows = true;
     renderApp();
-    expect(boundaryLogs(consoleError)).toBe(1);
+    expect(boundaryLogs()).toBe(1);
 
     await userEvent.click(screen.getByRole("link", { name: "People" }));
 
@@ -312,7 +314,7 @@ describe("a companion drawer that throws", () => {
     // re-threw, re-logged, and re-presented the card on each new page as if it
     // were a fresh failure.
     expect(screen.getByText("people content")).toBeInTheDocument();
-    expect(boundaryLogs(consoleError)).toBe(1);
+    expect(boundaryLogs()).toBe(1);
   });
 });
 
@@ -352,6 +354,6 @@ describe("the root boundary", () => {
     expect(
       screen.getByRole("button", { name: /Reload TimeLine/i })
     ).toBeInTheDocument();
-    expect(boundaryLogs(consoleError)).toBe(1);
+    expect(boundaryLogs()).toBe(1);
   });
 });

@@ -238,14 +238,53 @@ build, caught a crash and discarded it completely: nothing on screen, nothing in
 the console, nothing in device logs. The mobile fallbacks now log it themselves,
 tagged `[crash]` like `push.ts`'s warnings.
 
-**Known gap, not yet closed:** a render throw inside a test used to fail that
-test by propagating out of RTL's `render()`. Caught, it renders a fallback and
-logs instead, and the web harness has no fail-on-`console.error` hook — so a
-future regression that makes a page throw could leave the three suites that
-render the whole `App` (`messaging`, `App`, `auth`) green, since every
-`queryBy…toBeNull()` in them passes against a crashed subtree. Adding that hook
-means auditing the warnings the existing suites already emit, which is its own
-piece of work.
+## The cost to the web suite, and how it's paid (#357/#360)
+
+Catching a throw took something away that nobody had written down as coverage: a
+render error used to propagate out of RTL's `render()` and **fail the test**.
+Caught, it renders a fallback and logs, and the test carries on against a subtree
+that rendered *nothing* — so every `queryBy…toBeNull()` around it passes for the
+wrong reason. Measured, not assumed: injecting a throw into
+`ConversationThreadView` left four tests in `messaging.test.jsx` green, each of
+them asserting the absence of something that was absent because the whole thread
+had crashed.
+
+`frontend/test/console-guard.js` closes it. It wraps `console.error`, and fails
+the test in an `afterEach` if anything reached it. The decisions:
+
+- **`console.error`, not React's `onCaughtError`.** The narrower hook fires only
+  for boundary-caught errors, but it has to be passed to every `createRoot` —
+  i.e. every `render()` call site. The console catches the same crashes plus
+  everything else React reports that way (act() violations, invalid props,
+  duplicate keys) from one place, and asks nothing of the tests.
+- **Not `console.warn`.** Everything React says about a broken render is an
+  `error`; `warn` in this stack is third-party deprecation notices, which
+  shouldn't fail a suite.
+- **Collect and assert afterwards, rather than throwing inside `console.error`.**
+  Throwing there raises inside React's rendering, where a boundary may catch it —
+  the guard swallowed by the thing it's reporting on.
+- **The audit the issues expected wasn't needed.** Instrumenting all 34 suites
+  found *zero* `console.error` and zero `console.warn`, so the hook went on with
+  no allow-list of pre-existing noise. That's the part to re-check if this is
+  ever ported to the mobile suite.
+- **Messages are buffered, not passed through to the terminal.** Every
+  `console.error` is now either a failure — whose full text and stacks go into
+  the failure message — or one a test named in advance, which is noise. Printing
+  the second kind is what pushed `error-boundary.test.jsx` into swallowing the
+  console wholesale.
+
+A test whose subject *is* a crash calls `allowConsoleError(...)` with a substring
+or pattern; anything else it logs still fails it. `error-boundary.test.jsx` uses
+that instead of the blanket `vi.spyOn(console, "error")` it used to install —
+that spy exempted the one file about crashes from noticing an act() violation or
+a bad prop, which is the same shape of hole one level down.
+
+**The mobile suite doesn't have this problem**, for a structural reason worth
+knowing: the boundaries there are installed by expo-router's `Try`, and the tests
+render components directly with RNTL rather than through the router, so no
+boundary is in the tree and a throw still fails the test. If mobile tests ever
+start rendering through `expo-router/testing-library`, that changes and this
+guard is the thing to port.
 
 ## Related, but not this
 
