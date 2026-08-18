@@ -626,14 +626,15 @@ it:
   `_mention_marks` asks whether the recipient has been named anywhere in the
   thread since the row's message instead, which is everything the row now stands
   for. Soft-deleted messages are excluded — a mention taken back shouldn't go on
-  punching pushes through.
+  punching pushes through. The same question decides what the push then *says*;
+  see "What a coalesced push says" below.
 
   **And only mentions the recipient could actually read count** (#366). The
   enqueue is careful that "a mention can't make a message readable that isn't":
   it carves mentions out of an audience already filtered by `ParticipantInterval`
   (see [messaging.md](messaging.md#history-is-interval-clipped)).
-  `_mention_marks` asks that same
-  question on the read side, so it applies the same interval test — otherwise
+  `_readable_mentions` — the queryset `_mention_marks` starts from — asks that
+  same question on the read side, so it applies the same interval test; otherwise
   being named during a stretch you had left the thread, or while you were still
   `pending` (with no interval to span it), would punch your next push through the
   cooldown on the strength of a message you will never see. The interval rule now
@@ -694,12 +695,66 @@ Three carve-outs in that lookup:
   read side — is a second copy of the visibility rules, which is a worse thing
   to get wrong. See [connections.md](connections.md) for where visibility lives.
 
-What a rescued row *says* is still phrased and channelled from its first
-message. That half of the coalescing problem is unchanged and tracked
-separately; a push naming the wrong sender of a real unread message is a smaller
-wrong than no push at all. The deleted-message branch is deliberately left as
-"drop, full stop" — it has the same shape of hole, but "a push for deleted
-content cannot fire" is the stronger promise and the one this doc makes above.
+What a rescued row *says* is phrased from its first message, except where a
+mid-burst @mention overrides it — see "What a coalesced push says" below. A push
+naming the wrong sender of a real unread message is a smaller wrong than no push
+at all. The deleted-message branch is deliberately left as "drop, full stop" — it
+has the same shape of hole, but "a push for deleted content cannot fire" is the
+stronger promise and the one this doc makes above.
+
+### What a coalesced push says (#346)
+
+Two rules were still reading the row's own message when the row stood for a whole
+burst. This is the one that was fixed; the other is the grace, left alone with
+its reasons under "Holding a message push back" below.
+
+`_payload` takes the sender, the photo and — the one that costs something real —
+`is_mentioned` off `row.message`. So Ada saying "chatter" and Cara then saying "@Bea can you make
+it" inside one drain window got Bea a push phrased **"New message from Ada"** on
+the **`messages`** channel. That defeats the entire reason the mentions channel
+exists: turn Messages down to quieten a busy group chat and you have silenced
+your @mentions with it. `Kind.MENTION` never creates a `Notification` row, so a
+mention always rides the message path — there was no other route that could have
+caught it.
+
+`_mention_messages` supplies the mention itself for exactly the pairs where the
+newest readable mention is **strictly newer** than the message the row points at,
+and `_payload` phrases and channels from that instead. Four things follow from
+how narrow that is:
+
+- **Nothing is written.** `row.message_id` never moves. Re-pointing the row is
+  the obvious fix and is a trap: it can violate
+  `unique_message_push_per_recipient` when two concurrent sends have each queued
+  a row — and the enqueue runs inside the message-create transaction, so that is
+  a **500 for the sender**; it strands `delivered_tokens`, `attempts` and
+  `last_error` describing a different message; it lets a later soft-delete bin a
+  push that covered earlier undeleted messages; and the UPDATE takes row locks
+  `send_pushes` holds across its Expo HTTP calls, so a slow Expo would start
+  blocking message *sends* — breaking the one promise the call site makes.
+- **Strictly newer, so it stays symmetric.** The reverse case — a mention
+  *followed* by chatter — has the mention as the row's own message, and
+  re-pointing at the newest message would take the mentions channel *away* from a
+  push that correctly had it.
+- **Mentions only.** A burst of ordinary chatter still speaks for its first
+  message, which is the trade-off `_should_drop` documents above. The preview
+  endpoint replaces the body device-side anyway, and it asks the *conversation*
+  rather than any message for exactly this reason.
+- **Not one they have already read.** The re-point is also gated on the read
+  marker. `_should_drop` guarantees only that *something* the row stands for is
+  unread, not that the mention is — so without it, someone who read as far as
+  being named and then had more chatter arrive would be buzzed on the mentions
+  channel for a mention they dealt with a minute ago. That channel is the one
+  nobody can turn down without losing real mentions, which is the whole property
+  being protected here.
+- **The same mentions the cooldown counts.** `_readable_mentions` is the one
+  queryset both lookups start from — soft-deleted messages out, and the
+  `interval_spans` test applied — because a mention one of them counted and the
+  other didn't would mean a push channelled as a mention and phrased as chatter,
+  or the reverse.
+
+It costs one extra query, and only on a drain that actually saw a mid-burst
+mention: no wanted pairs, no lookup. At a two-second cadence that distinction is
+the difference between a rare query and 30 pointless round trips a minute.
 
 ### Holding a message push back (#355)
 
@@ -746,6 +801,21 @@ someone who fires off a reply and pockets the phone looks active for the next
 `PUSH_ACTIVE_THREAD_SECONDS`, and a reply landing in that window is held.
 Distinguishing the three would need a presence signal, which is exactly what
 leaning on `ConversationRead` avoids.
+
+**Known limitation: it asks the row's own message** (#346), which for a coalesced
+row is the *oldest* thing the push announces rather than the newest. A row held
+the full cooldown is a minute old at release, so the age test reads "far too old
+to defer" even when the message it is about to announce landed half a second ago
+and hasn't reached the recipient's client yet — the #355 buzz this rule exists to
+prevent, on the busy thread where someone is most likely to be reading.
+
+It is knowingly left alone, because the obvious fix removes the cap below.
+Comparing against the newest message means a hold ends only when the *thread*
+goes quiet, so a busy thread holds a row drain after drain — and since
+`_should_defer` is evaluated before `_should_space_out`, it would hold back
+exactly the mid-burst @mention the cooldown's exemption exists to let through.
+Fixing it properly needs a bound on the hold that the grace does not have, which
+is a change to a tuned promise rather than a bug fix.
 
 **The cost, and why the window grew from 15s to 120s.** A held row waits for the
 next drain — which used to be up to a minute away and is now two seconds. Since

@@ -1,6 +1,13 @@
 // Extends Vitest's `expect` with DOM matchers like `toBeInTheDocument()`.
 // Loaded automatically before every test (see `setupFiles` in vite.config.js).
 import "@testing-library/jest-dom/vitest";
+import { installConsoleGuard } from "./console-guard.js";
+
+// Fail a test that logs to the console — which is how React reports a render
+// error the boundaries caught, an uncaught one, act() violations, bad props and
+// duplicate keys. Installed first, so the hooks it registers unwind after RTL's
+// `cleanup`. See `console-guard.js` for the reasoning; issues #357/#360.
+installConsoleGuard();
 
 // jsdom doesn't implement object URLs, which our image-preview effects use
 // (ComposeBox, ProfileEditPage). Stub them so those components render in tests.

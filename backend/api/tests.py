@@ -2201,7 +2201,9 @@ class MessagePhotoTests(MessagingBase):
         self._send(photo=make_image_upload())
         row = PushOutbox.objects.get(recipient=self.friend)
 
-        payload = Command()._payload(row)
+        # No mid-burst mention in this batch, so nothing to re-point:
+        # ``_mention_messages`` would return the same empty dict.
+        payload = Command()._payload(row, {})
         self.assertEqual(payload["text"], f"{self.me.display_name} sent a photo")
 
     def test_a_reported_photo_is_visible_to_the_maintainer(self):
@@ -2973,7 +2975,7 @@ class MessageMentionTests(APITestCase):
         from .management.commands.send_pushes import Command as SendPushes
 
         row = self._queued_for(self.bea).get()
-        body = SendPushes()._payload(row)["text"]
+        body = SendPushes()._payload(row, {})["text"]
 
         self.assertEqual(body, "Ada mentioned you in Book club")
         self.assertNotIn("chapter 4", body)
@@ -11717,6 +11719,250 @@ class SendPushesCommandTests(APITestCase):
         urlopen = self._run()
 
         self.assertEqual(self._sent_body(urlopen)[0]["channelId"], "messages")
+
+    def _open_thread_since(self, convo, seconds):
+        """Move every member's interval start back, so a `_backdate`d message is
+        still inside it.
+
+        `_queue_message` opens the intervals at `convo.created_at`, which in a
+        test is *now* — so backdating a message puts it before everyone's
+        interval and `_readable_mentions` correctly refuses to see it. Without
+        this a test meaning "the mention is old" quietly becomes "the mention is
+        invisible", and passes for the wrong reason.
+        """
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo
+        ).update(started_at=timezone.now() - timedelta(seconds=seconds))
+
+    def _third_member(self, convo, email="drain-cara@example.com", name="Cara"):
+        """Another active member of ``convo``, so a mid-burst mention can come
+        from someone other than whoever opened the burst."""
+        user = make_user(email, first_name=name)
+        participant = Participant.objects.create(
+            conversation=convo, user=user, status="active"
+        )
+        ParticipantInterval.objects.create(
+            participant=participant, started_at=convo.created_at
+        )
+        return user
+
+    def test_a_mention_that_coalesced_onto_a_queued_row_is_still_a_mention(self):
+        """Issue #346. The queued row keeps pointing at the burst's *first*
+        message, and ``_payload`` used to read the sender, the photo and — the
+        one that costs a channel — ``is_mentioned`` off it.
+
+        So: Ada says "chatter", a row is queued, and before the drain runs Cara
+        says "@Me can you make it". The push went out phrased "New message from
+        Ada" on the **messages** channel, which is the precise outcome the
+        mentions channel exists to prevent: turn Messages down to quieten a busy
+        group chat and you have silenced your @mentions with it. A mention has no
+        other route — ``Kind.MENTION`` never creates a ``Notification`` — so
+        there was nothing else to catch it.
+
+        Both halves are asserted, and the mention comes from *Cara* on purpose: a
+        fix that only flipped the channel would leave the body naming Ada, who
+        did not name anyone.
+        """
+        convo, first = self._queue_message(kind="group", title="Book Club")
+        cara = self._third_member(convo)
+        later = Message.objects.create(
+            conversation=convo, sender=cara, text="@Me can you make it"
+        )
+        MessageMention.objects.create(message=later, user=self.me)
+        notifications.enqueue_message_pushes(later)
+        # The premise: no second row for me, and the one row still points at the
+        # message it was created for. Nothing in this fix re-points it.
+        row = PushOutbox.objects.get(sent_at__isnull=True, recipient=self.me)
+        self.assertEqual(row.message_id, first.id)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "mentions")
+        self.assertEqual(sent["body"], "Cara mentioned you in Book Club")
+        # Still a message push in every other respect — same deep link, same
+        # reply category, and the row on the database is untouched.
+        self.assertEqual(sent["data"]["url"], f"/messages/{convo.id}")
+        self.assertEqual(sent["categoryId"], "message")
+        row.refresh_from_db()
+        self.assertEqual(row.message_id, first.id)
+
+    def test_chatter_after_a_mention_does_not_take_the_channel_away(self):
+        # The trap in fixing #346 by re-pointing at the *newest* message, which
+        # is the shape the preview endpoint uses and the obvious thing to copy.
+        # It is asymmetric: it fixes chatter→mention and breaks mention→chatter,
+        # taking the mentions channel off a push that correctly had it. Which is
+        # why `_mention_messages` overrides only when the mention is *newer* than
+        # the message the row points at.
+        convo, first = self._queue_message(
+            kind="group", title="Book Club", text="@Me are you in?"
+        )
+        MessageMention.objects.create(message=first, user=self.me)
+        later = Message.objects.create(
+            conversation=convo, sender=self.actor, text="anyway, as I was saying"
+        )
+        notifications.enqueue_message_pushes(later)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "mentions")
+        self.assertEqual(sent["body"], "Ada mentioned you in Book Club")
+
+    def test_a_mid_burst_mention_the_recipient_cannot_see_changes_nothing(self):
+        # The same rule `_mention_marks` applies to the cooldown (#366) has to
+        # hold here too, or the two lookups disagree: a push channelled as a
+        # mention and phrased as chatter, on the strength of a message the
+        # recipient will never see. `status` stays active and `left_at` stays
+        # null, so the closed interval is the only thing excluding the mention.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        cara = self._third_member(convo)
+        ParticipantInterval.objects.filter(
+            participant__conversation=convo, participant__user=self.me
+        ).update(ended_at=timezone.now())
+        unseen = Message.objects.create(
+            conversation=convo, sender=cara, text="@Me are you there"
+        )
+        MessageMention.objects.create(message=unseen, user=self.me)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "messages")
+        self.assertEqual(sent["body"], "Ada in Book Club")
+
+    def test_a_mid_burst_mention_that_was_deleted_changes_nothing(self):
+        # A mention taken back before the drain ran. `_should_drop` already
+        # refuses to send a push for deleted content; this is the other half —
+        # a deleted message must not lend its channel or its wording to a push
+        # that is going out for something else.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        cara = self._third_member(convo)
+        taken_back = Message.objects.create(
+            conversation=convo,
+            sender=cara,
+            text="@Me oops",
+            deleted_at=timezone.now(),
+        )
+        MessageMention.objects.create(message=taken_back, user=self.me)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "messages")
+        self.assertEqual(sent["body"], "Ada in Book Club")
+
+    def test_a_burst_with_no_mention_still_speaks_for_its_first_message(self):
+        # The control. `_mention_messages` must override the payload for mentions
+        # and nothing else: a burst of ordinary chatter is still phrased from the
+        # message the row points at, which is the trade-off `_should_drop`
+        # documents — a push naming the wrong sender of a real unread message is
+        # a smaller wrong than no push at all.
+        #
+        # The later message comes from a *third* member so the assertion can tell
+        # the two apart: re-point at the newest and the body reads "Cara", which
+        # is a behaviour change this fix is not entitled to make.
+        convo, _first = self._queue_message(kind="group", title="Book Club")
+        cara = self._third_member(convo)
+        later = Message.objects.create(
+            conversation=convo, sender=cara, text="and another thing"
+        )
+        notifications.enqueue_message_pushes(later)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "messages")
+        self.assertEqual(sent["body"], "Ada in Book Club")
+
+    def test_a_mid_burst_mention_already_read_does_not_escalate_the_push(self):
+        """The push is going out for the *chatter* behind the mention, so it must
+        not arrive dressed as a mention.
+
+        `_should_drop` guarantees only that something the row stands for is
+        unread — not that the mention is. Someone who reads the thread as far as
+        being named, and then has more chatter arrive, would otherwise be buzzed
+        on the **mentions** channel for a mention they dealt with a minute ago.
+        That channel is the one nobody can turn down without losing real
+        mentions, which is exactly the property this PR is protecting; spending
+        it on already-read content is the same wrong in the other direction.
+        """
+        convo, first = self._queue_message(kind="group", title="Book Club")
+        self._backdate(first, 40)
+        cara = self._third_member(convo)
+        mention = Message.objects.create(
+            conversation=convo, sender=cara, text="@Me are you in"
+        )
+        MessageMention.objects.create(message=mention, user=self.me)
+        self._backdate(mention, 30)
+        chatter = Message.objects.create(
+            conversation=convo, sender=self.actor, text="anyway, as I was saying"
+        )
+        self._backdate(chatter, 10)
+        # Everyone's interval has to predate the backdated messages, or they are
+        # simply invisible and this passes without the read gate doing anything.
+        self._open_thread_since(convo, 120)
+        # Read as far as the mention, but not the chatter after it — so the row
+        # still has something unread to announce and is not dropped.
+        ConversationRead.objects.create(
+            conversation=convo,
+            user=self.me,
+            last_read_at=timezone.now() - timedelta(seconds=20),
+        )
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "messages")
+        self.assertEqual(sent["body"], "Ada in Book Club")
+
+    def test_a_mid_burst_mention_in_a_muted_thread_is_still_a_mention(self):
+        # The case the whole carve-out exists for, and the one where getting it
+        # wrong costs the most: in a muted thread a push exists *only* because
+        # someone was named, so a mention that coalesced onto an earlier
+        # mention's row must not go out phrased and channelled as chatter. It is
+        # also the branch `_muted_pairs` sends `_should_drop` down, so it is
+        # worth pinning that the two agree about which mention is the newest.
+        convo, first = self._queue_message(kind="group", title="Book Club")
+        MessageMention.objects.create(message=first, user=self.me)
+        Participant.objects.filter(conversation=convo, user=self.me).update(
+            muted_at=timezone.now()
+        )
+        cara = self._third_member(convo)
+        later = Message.objects.create(
+            conversation=convo, sender=cara, text="@Me and you specifically"
+        )
+        MessageMention.objects.create(message=later, user=self.me)
+        notifications.enqueue_message_pushes(later)
+        # Coalesced, still pointing at the first mention. (Ada gets a row of her
+        # own — she hasn't muted the thread — but has no device to send it to.)
+        row = PushOutbox.objects.get(sent_at__isnull=True, recipient=self.me)
+        self.assertEqual(row.message_id, first.id)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["channelId"], "mentions")
+        self.assertEqual(sent["body"], "Cara mentioned you in Book Club")
+
+    def test_no_mid_burst_mention_means_no_lookup_at_all(self):
+        # The cost of the fix on the path every drain takes. `_mention_messages`
+        # runs on every batch that has a message row in it, and a mid-burst
+        # mention is rare — so "no wanted pairs" has to mean no query at all. At
+        # a two-second cadence the difference is 30 round trips a minute for an
+        # answer nothing reads.
+        #
+        # What it really pins is the *bound*: start the OR-chain from `Q()`
+        # instead of `Q(pk__in=[])` — the identity mistake `_message_pairs`
+        # documents — and this scans every mention row in the database, joined
+        # three ways, on every drain forever.
+        from api.management.commands.send_pushes import Command
+
+        self._queue_message()
+        row = PushOutbox.objects.select_related("message").get(recipient=self.me)
+
+        with self.assertNumQueries(0):
+            self.assertEqual(Command()._mention_messages([row], {}, {}), {})
 
     def test_a_message_push_never_carries_the_message_text(self):
         # The body crosses Expo's servers and Apple's. Naming the sender is the
