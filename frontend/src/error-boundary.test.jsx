@@ -5,7 +5,7 @@ import { Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import { AppErrorBoundary } from "./components/ErrorBoundary.jsx";
 import { renderWithAuth } from "./test-utils.jsx";
-import { allowConsoleError, consoleErrors } from "../test/console-guard.js";
+import { allowConsole, consoleMessages } from "../test/console-guard.js";
 
 // Issue #299: before this, a render error anywhere unmounted the whole React
 // tree and left a blank white page — no message, no nav, no way back except the
@@ -111,7 +111,7 @@ function Boom() {
 // doubles as a catch-counter for the tests below that care how many times a
 // crash was caught.
 function boundaryLogs() {
-  return consoleErrors().filter((text) =>
+  return consoleMessages().filter((text) =>
     text.startsWith("Render error caught by ErrorBoundary:")
   ).length;
 }
@@ -139,7 +139,7 @@ beforeEach(() => {
   // the one file about crashes is the last one that should stop noticing an
   // act() violation or a bad prop. Anything else logged still fails the test;
   // `boundaryLogs()` reads these back rather than a spy.
-  allowConsoleError(
+  allowConsole(
     "Render error caught by ErrorBoundary:",
     /The above error occurred in/
   );

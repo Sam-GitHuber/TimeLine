@@ -16,5 +16,12 @@ export default defineConfig({
     globals: true,
     environment: "jsdom",
     setupFiles: "./test/setup.js",
+    // Unwind `afterEach` in reverse registration order, so the console guard —
+    // registered first, from the setup file — runs *after* RTL's automatic
+    // `cleanup`. An error thrown while unmounting then belongs to the test that
+    // mounted it. This is Vitest's default, but the guard's correctness rests on
+    // it, so it's declared rather than inherited (the CLI's own help still
+    // advertises the old "parallel" default).
+    sequence: { hooks: "stack" },
   },
 });

@@ -249,17 +249,23 @@ wrong reason. Measured, not assumed: injecting a throw into
 them asserting the absence of something that was absent because the whole thread
 had crashed.
 
-`frontend/test/console-guard.js` closes it. It wraps `console.error`, and fails
-the test in an `afterEach` if anything reached it. The decisions:
+`frontend/test/console-guard.js` closes it. It wraps the console, and fails the
+test in an `afterEach` if anything reached it. The decisions:
 
-- **`console.error`, not React's `onCaughtError`.** The narrower hook fires only
-  for boundary-caught errors, but it has to be passed to every `createRoot` —
-  i.e. every `render()` call site. The console catches the same crashes plus
+- **The console, not React's `onCaughtError`.** The narrower hook fires only for
+  boundary-caught errors, but it has to be passed to every `createRoot` — i.e.
+  every `render()` call site. The console catches the same crashes plus
   everything else React reports that way (act() violations, invalid props,
   duplicate keys) from one place, and asks nothing of the tests.
-- **Not `console.warn`.** Everything React says about a broken render is an
-  `error`; `warn` in this stack is third-party deprecation notices, which
-  shouldn't fail a suite.
+- **`console.warn` as well as `console.error`, which was not the first
+  instinct.** It's tempting to say everything React reports about a broken render
+  is an `error`. It isn't: `defaultOnCaughtError` uses `console.error`, but
+  `defaultOnUncaughtError` — the path taken when nothing above the throw is a
+  boundary, which is every suite that renders a page bare, `auth.test.jsx`
+  included — reports through `console.warn`. Guarding only errors would have left
+  that silent while claiming to have closed the gap. The cost is that a
+  third-party deprecation warning can now fail a suite; that's a line of
+  `allowConsole` once someone has looked at it.
 - **Collect and assert afterwards, rather than throwing inside `console.error`.**
   Throwing there raises inside React's rendering, where a boundary may catch it —
   the guard swallowed by the thing it's reporting on.
@@ -267,14 +273,22 @@ the test in an `afterEach` if anything reached it. The decisions:
   found *zero* `console.error` and zero `console.warn`, so the hook went on with
   no allow-list of pre-existing noise. That's the part to re-check if this is
   ever ported to the mobile suite.
-- **Messages are buffered, not passed through to the terminal.** Every
-  `console.error` is now either a failure — whose full text and stacks go into
-  the failure message — or one a test named in advance, which is noise. Printing
-  the second kind is what pushed `error-boundary.test.jsx` into swallowing the
-  console wholesale.
+- **Messages are buffered, not passed through to the terminal.** Every console
+  call is now either a failure — whose full text and stacks go into the failure
+  message — or one a test named in advance, which is noise. Printing the second
+  kind is what pushed `error-boundary.test.jsx` into swallowing the console
+  wholesale.
+- **`sequence: { hooks: "stack" }` is pinned in `vite.config.js`.** It's Vitest's
+  default, but the guard rests on it: reverse unwinding is what puts its
+  `afterEach` *after* RTL's automatic `cleanup`, so an error thrown while
+  unmounting belongs to the test that mounted it rather than the next one. The
+  installed Vitest's own `--help` still advertises the old `parallel` default,
+  which is reason enough not to inherit it.
 
-A test whose subject *is* a crash calls `allowConsoleError(...)` with a substring
-or pattern; anything else it logs still fails it. `error-boundary.test.jsx` uses
+A test whose subject *is* a failure calls `allowConsole(...)` with a substring or
+pattern — from a `beforeEach` or `afterEach`, never as the body's last statement,
+where a failing assertion above would skip it and bury the real failure under a
+second one. Anything else it logs still fails it. `error-boundary.test.jsx` uses
 that instead of the blanket `vi.spyOn(console, "error")` it used to install —
 that spy exempted the one file about crashes from noticing an act() violation or
 a bad prop, which is the same shape of hole one level down.
