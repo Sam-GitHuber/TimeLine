@@ -1,11 +1,11 @@
-# CI — runs the automated test suites on every push and pull request.
+# CI — runs the automated test suites on every pull request, and on main.
 #
 # Two of the three apps in the repo are tested here:
 #   frontend — Vitest (React Testing Library).
 #   mobile   — Jest + React Native Testing Library (the Expo app).
 #
 # The backend (Django) suite is NOT here — it lives in backend.yml so it can be
-# path-filtered to backend-only changes. It takes ~11 minutes against every
+# path-filtered to backend-only changes. It takes ~20 minutes against every
 # other job's ~1, and it can't see frontend/ or mobile/ code, so running it on a
 # frontend PR only made the PR wait. Read backend.yml's header before changing
 # that arrangement — its skipping is why it isn't a required check.
@@ -29,9 +29,33 @@
 #     -f 'contexts[]=semgrep' -f 'contexts[]=deploy-scripts' \
 #     -f 'contexts[]=backend-image' \
 #     -f 'contexts[]=Analyze (javascript-typescript)' -f 'contexts[]=Analyze (python)'
+#
+# WHY THE TRIGGERS LOOK LIKE THIS
+# -------------------------------
+# This was `on: [push, pull_request]`, which double-ran everything. A branch in
+# this repo (including Dependabot's) fires BOTH events for the same commit — a
+# `push` on the branch and a `pull_request` on the PR — so every job below ran
+# twice on every PR, for identical code, at double the Actions minutes. You could
+# see it in the checks list: two "frontend", two "mobile", two "semgrep", every
+# time.
+#
+# Restricting `push` to main keeps the two runs we actually want — the PR run
+# (which is what branch protection gates on) and a post-merge run on main — and
+# drops the redundant one. codeql.yml already scopes its triggers this way; this
+# just brings CI into line with it.
+#
+# Trade: pushing a branch with no PR open no longer runs CI. Open the PR (draft
+# is enough) and it runs. That's the same deal CodeQL has always had here.
+#
+# NOTE: backend.yml still has an unfiltered `push:`, so it keeps double-running
+# on backend PRs — and at ~20 minutes a go that's the expensive one. Left alone
+# deliberately; its path filter interacts with branch updates (see its header).
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
   frontend:
