@@ -3,7 +3,7 @@
 #
 # WHY THIS IS ITS OWN FILE
 # ------------------------
-# This job takes ~11 minutes; every other CI job finishes in under 90 seconds.
+# This job takes ~20 minutes; every other CI job finishes in under 90 seconds.
 # Running it on a frontend- or mobile-only PR bought us nothing (the Django
 # suite can't see `frontend/` or `mobile/`) and made every PR wait on it, so it
 # only runs when something under `backend/` actually changed.
