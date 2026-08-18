@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "dj-rest-auth>=7.0",
     "django>=6.1,<6.2",
-    "django-allauth>=65.19.0",
+    "django-allauth>=65.19.1",
     "django-cors-headers>=4.9.0",
     # django-storages: the storage abstraction behind media files. Local disk
     # now (through the Phase 7 home-server beta); flipping to an S3 bucket at the
@@ -48,7 +48,7 @@ dependencies = [
 # production images can skip them with `uv sync --no-dev`.
 [dependency-groups]
 dev = [
-    "ruff>=0.16.2",
+    "ruff>=0.16.3",
     "bandit>=1.9",
 ]
 
