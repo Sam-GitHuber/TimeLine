@@ -544,8 +544,10 @@ The gate needs a *present* organiser. Two paths:
   third answer leaves it standing — including one that lands in the same React
   batch as the rejection, which is what #231 reports: the clear used to fire on
   *any* re-sync, and on patchy signal it swallowed the message before it was
-  ever painted. Same condition, same reasoning, as the RSVP's below and a
-  refused reaction's ([reactions.md](reactions.md)).
+  ever painted. Same shape and same reasoning as the RSVP's below, and as
+  `ConnectButton`'s `from`/`to` across its four connection states; a refused
+  reaction ([reactions.md](reactions.md)) asks only the `from` half, because for
+  a boolean the two questions collapse into one.
 - **The RSVP's guests and note are yours to type, and the server's to correct**
   (#229). They're local state seeded from `rsvp.your_response` — which changes
   under a *mounted* event page on every refetch, since each RSVP/vote/finalise
@@ -607,9 +609,9 @@ The gate needs a *present* organiser. Two paths:
     the lifecycle actions and Set/Pin (the same `mutateAsync` handoff it already
     had for `onVote`/`onEdit`, kept in a **separate** state from `voteError` —
     that one is retired by the server confirming the very vote it was about, and
-    a refetch triggered by some *other* write is no answer to "did my Remove poll
-    go through?"), `DimensionEditor`
-    owns Set and Open poll, and only `cancel`/`remove` — whose buttons are on the
+    a refetch triggered by some *other* write is no answer to "did my Remove
+    poll go through?"), `DimensionEditor` owns Set and Open poll, and only
+    `cancel`/`remove` — whose buttons are on the
     page — are rendered by the page. Mobile needed none of this restructuring —
     an `Alert` isn't part of the tree that raised it, which is the same property
     that makes it the phone's answer to #261.
@@ -743,11 +745,11 @@ The **optimistic tick and its two debts** (the "Frontend notes" bullet above) ho
 here too, as of #227: `PollTally` awaits the vote and rolls its tick back with a
 message if it's rejected — which is why `EventScreen` hands voting down as
 `mutateAsync` — and re-derives your ticks whenever `poll.your_votes` changes by
-*contents*, retiring the message only on the server arriving at the selection you
-cast. The rollback earns its keep more here than on the web: a phone's network is
-the one that actually drops a request mid-tap, and #231's swallowed message was
-found on this copy first. The **RSVP guests/note
-bullet** above holds here too and landed on both clients together (#229) — with
+*contents*, retiring the message only on the server arriving at the selection
+you cast. The rollback earns its keep more here than on the web: a phone's
+network is the one that actually drops a request mid-tap, and #231's swallowed
+message was found on this copy first. The **RSVP guests/note bullet** above
+holds here too and landed on both clients together (#229) — with
 one extra way in on a phone: `_layout.tsx` wires `AppState` to `focusManager`,
 so merely returning to the foreground refetches the event and moves
 `your_response` under the open screen.

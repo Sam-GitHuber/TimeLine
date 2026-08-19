@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { onlineManager, useQuery } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
 import DimensionEditor from "./components/events/DimensionEditor.jsx";
 import EventPage from "./pages/EventPage.jsx";
+import PollTally from "./components/events/PollTally.jsx";
 import CalendarPage from "./pages/CalendarPage.jsx";
 import EventCard from "./components/events/EventCard.jsx";
 import MonthGrid from "./components/events/MonthGrid.jsx";
@@ -141,6 +142,17 @@ function makeEvent(overrides = {}) {
     ],
     ...overrides,
   };
+}
+
+// Move your votes in one of the event's polls to `ids`. The per-option
+// `you_voted` flags move with them: the component reads only `your_votes`, but a
+// fixture whose two halves disagree would mislead the next person about which of
+// them drives the sync. (The app's suite has `movedVotes` for the same reason.)
+function setVotes(event, pollIndex, ids) {
+  const poll = event.polls[pollIndex];
+  poll.your_votes = ids;
+  poll.options = poll.options.map((o) => ({ ...o, you_voted: ids.includes(o.id) }));
+  return event;
 }
 
 function renderEventPage() {
@@ -411,8 +423,8 @@ describe("EventPage", () => {
     // What the next fetch carries: you moved your date vote on your phone, and
     // the Cake vote you're about to cast here has landed.
     const after = makeEvent(member);
-    after.polls[0].your_votes = [102];
-    after.polls[1].your_votes = [201];
+    setVotes(after, 0, [102]);
+    setVotes(after, 1, [201]);
     api.getEvent.mockResolvedValueOnce(before).mockResolvedValue(after);
     renderEventPage();
     await screen.findByText("Picnic");
@@ -446,7 +458,7 @@ describe("EventPage", () => {
   it("doesn't roll back over an answer the server gave mid-vote", async () => {
     const member = { can_manage: false, can_moderate: false };
     const after = makeEvent(member);
-    after.polls[1].your_votes = [202]; // Drinks, cast elsewhere
+    setVotes(after, 1, [202]); // Drinks, cast elsewhere
     api.getEvent.mockResolvedValueOnce(makeEvent(member)).mockResolvedValue(after);
     // The Cake vote fails, but only after a refetch (triggered by the RSVP) has
     // brought the Drinks vote in.
@@ -491,7 +503,7 @@ describe("EventPage", () => {
   it("stops saying so once the server confirms the vote that failed", async () => {
     const member = { can_manage: false, can_moderate: false };
     const after = makeEvent(member);
-    after.polls[1].your_votes = [201]; // the Cake vote landed after all
+    setVotes(after, 1, [201]); // the Cake vote landed after all
     api.getEvent.mockResolvedValueOnce(makeEvent(member)).mockResolvedValue(after);
     api.votePoll.mockRejectedValueOnce(offlineError());
     renderEventPage();
@@ -517,7 +529,7 @@ describe("EventPage", () => {
   it("keeps the failure showing when the server moves to a different vote", async () => {
     const member = { can_manage: false, can_moderate: false };
     const after = makeEvent(member);
-    after.polls[1].your_votes = [202]; // Drinks, cast on the web meanwhile
+    setVotes(after, 1, [202]); // Drinks, cast on the web meanwhile
     api.getEvent.mockResolvedValueOnce(makeEvent(member)).mockResolvedValue(after);
     api.votePoll.mockRejectedValueOnce(apiError("This poll is closed."));
     renderEventPage();
@@ -541,46 +553,54 @@ describe("EventPage", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("This poll is closed.");
   });
 
-  // The exact shape issue #231 reports: the cache update and the rejection land
-  // in **one** React batch, so the component renders once holding both the new
-  // failure and the new `poll` prop. A clear that fired on the sync alone ran
-  // before the message was ever painted, and nothing appeared at all — on
-  // patchy signal, which is the case the message exists for.
-  it("keeps the failure showing when the refetch and the rejection land together", async () => {
-    const member = { can_manage: false, can_moderate: false };
-    const after = makeEvent(member);
-    after.polls[1].your_votes = [202]; // Drinks, cast on the web meanwhile
-    let landRefetch;
-    api.getEvent
-      .mockResolvedValueOnce(makeEvent(member))
-      .mockImplementationOnce(
-        () => new Promise((resolve) => (landRefetch = () => resolve(after)))
-      )
-      .mockResolvedValue(after);
+  // The exact shape issue #231 reports: the new `poll` and the rejection land in
+  // **one** React batch, so the component renders once holding both, and a clear
+  // that fired on the sync alone ran before the message was ever painted —
+  // nothing appeared at all, on patchy signal, which is the case it exists for.
+  //
+  // `PollTally` directly, not through `EventPage`: React Query hands a cache
+  // change to its observers on a **batched timer**, so a refetch resolved beside
+  // the rejection shares a batch with it only sometimes — a test built that way
+  // passed two runs in three. A `rerender` inside the same `act` is the same
+  // condition without the scheduler in it.
+  it("keeps the failure showing when the new poll and the rejection share a batch", async () => {
+    const poll = makeEvent().polls[1]; // custom, pick-one, no vote of yours
+    // Drinks, cast on the phone meanwhile — neither what we cast nor what the
+    // server held when we cast it.
+    const moved = {
+      ...poll,
+      your_votes: [202],
+      options: poll.options.map((o) => ({ ...o, you_voted: o.id === 202 })),
+    };
     let rejectVote;
-    api.votePoll.mockImplementationOnce(
+    const onVote = vi.fn(
       () => new Promise((_, reject) => (rejectVote = reject))
     );
-    renderEventPage();
-    await screen.findByText("Picnic");
+    const { rerender } = render(
+      <PollTally poll={poll} onVote={onVote} busy={false} />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
-    // The RSVP invalidates the event; its refetch is held open below.
-    await userEvent.click(screen.getByRole("button", { name: /^Going/ }));
-    await waitFor(() => expect(api.getEvent).toHaveBeenCalledTimes(2));
+    expect(onVote).toHaveBeenCalledWith([201]);
 
-    // Both at once, in a single flush.
+    // Both at once. Inside `act`, React holds the rerender and the rejection's
+    // `setState` until the scope ends, so they flush as a single render.
     await act(async () => {
-      landRefetch();
+      rerender(<PollTally poll={moved} onVote={onVote} busy={false} />);
       rejectVote(offlineError());
     });
 
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Your vote didn't go through — try again."
     );
+    // And the sync did happen — the ticks are the server's, not ours.
     expect(screen.getByRole("button", { name: /Drinks/ })).toHaveAttribute(
       "aria-pressed",
       "true"
+    );
+    expect(screen.getByRole("button", { name: /Cake/ })).toHaveAttribute(
+      "aria-pressed",
+      "false"
     );
   });
 
@@ -616,6 +636,37 @@ describe("EventPage", () => {
     await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "This poll is closed."
+    );
+  });
+
+  // `voteKey` sorts, so the fingerprint is order-independent — and a **pick-any**
+  // poll is the only place that matters. `Array.from(next)` is insertion order,
+  // while DRF promises no order on a reverse relation, so the server can hand the
+  // same two votes back the other way round. Drop the sort and the confirm-clear
+  // silently stops working for every multi-select poll, with no single-choice
+  // test any the wiser.
+  it("clears a confirmed pick-any vote whatever order the server lists it in", async () => {
+    const member = { can_manage: false, can_moderate: false };
+    const after = makeEvent(member);
+    setVotes(after, 0, [102, 101]); // both dates, listed the other way round
+    api.getEvent.mockResolvedValueOnce(makeEvent(member)).mockResolvedValue(after);
+    api.votePoll.mockRejectedValueOnce(offlineError());
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    // The date poll is pick-any and you already hold Sat, so ticking Sun casts
+    // both — insertion order, [101, 102].
+    await userEvent.click(
+      screen.getByRole("button", { name: new RegExp(formatEventDate("2026-07-20")) })
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Your vote didn't go through — try again."
+    );
+
+    // It had landed after all, and the server states both — in its own order.
+    await userEvent.click(screen.getByRole("button", { name: /^Going/ }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument()
     );
   });
 

@@ -42,8 +42,9 @@ export default function PollTally({
   const serverKey = voteKey(serverVotes);
   const [selected, setSelected] = useState(() => new Set(serverVotes));
   const [syncedKey, setSyncedKey] = useState(serverKey);
-  // A rejected vote: the selection it tried to cast, what the server held at the
-  // time, and the message to show.
+  // A rejected vote: the selection it tried to save, what the server held at the
+  // time, and the message to show — the same three fields, under the same names,
+  // as `RsvpBar` next door.
   const [voteError, setVoteError] = useState(null);
   if (syncedKey !== serverKey) {
     setSyncedKey(serverKey);
@@ -60,12 +61,21 @@ export default function PollTally({
   // when the sync arrives, so this holds even when the refetch and the rejection
   // land in the same render batch — the trap issue #231 describes, where a
   // blanket "clear on sync" swallowed the message before it was ever painted.
-  // `from` is what keeps a re-cast of the server's own answer honest: attempting
-  // exactly what the server already holds means `cast` equals `serverKey`
-  // already, and without `from` the message would go the instant it was set.
   //
-  // Same condition, for the same reason, as `RsvpBar` and `reactionFailures.js`.
-  if (voteError && serverKey !== voteError.from && serverKey === voteError.cast) {
+  // `from` is what keeps a re-cast of the server's own answer honest: in the
+  // window between a vote landing and its refetch catching up, your tick is a
+  // step ahead of `your_votes`, so tapping it again sends the server its own
+  // answer back — and without `from` that failure would go the instant it was
+  // set. Its cost is that when `saved` *equals* `from` the condition can never
+  // be satisfied, so a vote that did land with its response lost keeps its
+  // message until the next tap clears it. Deliberate: the server's answer
+  // carries no evidence either way there, and a stale "try again" beside a live
+  // button is recoverable where a swallowed failure isn't.
+  //
+  // Same shape and same reasoning as `RsvpBar`; `ConnectButton` is the other
+  // two-sided copy (`from`/`to`, across its four states). `reactionFailures.js`
+  // asks only the `from` half, because for a boolean the two questions collapse.
+  if (voteError && serverKey !== voteError.from && serverKey === voteError.saved) {
     setVoteError(null);
   }
   // The organiser's lifecycle actions and the per-option Set/Pin. Each is handed
@@ -121,10 +131,11 @@ export default function PollTally({
     else next.add(optionId);
     // A single-choice re-click on the same option clears it.
     if (!poll.allow_multiple && selected.has(optionId)) next.clear();
+    const attempted = Array.from(next);
     setSelected(next);
     setVoteError(null);
     try {
-      await onVote(Array.from(next));
+      await onVote(attempted);
     } catch (err) {
       // The vote didn't happen — put the tick back where it was and say so.
       // Leaving it showing is what makes a dropped answer invisible: the tally
@@ -135,7 +146,7 @@ export default function PollTally({
       // its answer must not be undone by a snapshot taken before the click.
       setSelected((current) => (current === next ? before : current));
       setVoteError({
-        cast: voteKey(Array.from(next)),
+        saved: voteKey(attempted),
         from: serverKey,
         message: serverMessage(err, "Your vote didn't go through — try again."),
       });

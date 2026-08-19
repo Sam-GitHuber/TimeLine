@@ -19,6 +19,7 @@ import CalendarScreen from '@/app/(tabs)/calendar';
 import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
 import { EventTimelineEntry } from '@/components/events/EventTimelineEntry';
+import { PollTally } from '@/components/events/PollTally';
 import { MonthGrid } from '@/components/events/MonthGrid';
 import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { saveTokens } from '@/tokens';
@@ -747,43 +748,51 @@ describe('optimistic vote ticks', () => {
   });
 
   /**
-   * The exact shape #231 reports: the cache update and the rejection land in
-   * **one** React batch, so the card renders once holding both the new failure
-   * and the new `poll` prop. A clear that fired on the sync alone ran before the
-   * message was ever painted, and nothing appeared at all.
+   * The exact shape #231 reports: the new `poll` and the rejection land in **one**
+   * React batch, so the card renders once holding both, and a clear that fired on
+   * the sync alone ran before the message was ever painted — nothing appeared at
+   * all, on patchy signal, which is the case it exists for.
    *
-   * `setQueryData` rather than a held refetch: it is the same cache write the
-   * refetch performs, and driving it directly is what makes "the same batch"
-   * a fact of the test rather than a hope about scheduling.
+   * `PollTally` directly, not through `EventScreen`: React Query hands a cache
+   * change to its observers on a **batched timer**, so a refetch resolved beside
+   * the rejection shares a batch with it only sometimes — a test built that way
+   * failed one run in three. A `rerender` inside the same `act` is the same
+   * condition with the scheduler taken out of it.
    */
-  it('keeps the failure showing when the cache update and the rejection share a batch', async () => {
-    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+  it('keeps the failure showing when the new poll and the rejection share a batch', async () => {
+    // Snacks, cast on the web meanwhile: neither what we cast nor what the
+    // server held when we cast it.
+    const moved = movedVotes(CUSTOM_POLL, [40]);
     let rejectVote: (err: Error) => void = () => {};
-    const vote = jest.spyOn(api, 'votePoll').mockImplementation(
+    const onVote = jest.fn(
       () =>
         new Promise((_resolve, reject) => {
           rejectVote = reject;
         })
     );
-
-    const { client } = await renderWith(<EventScreen />);
+    // `await render`: RNTL hands back a promise, and this test needs `rerender`.
+    const { rerender } = await render(
+      <PollTally poll={CUSTOM_POLL} onVote={onVote} busy={false} />
+    );
 
     // `act`, not `await fireEvent.press`: the press hands back `toggle`'s
     // promise, and this vote deliberately never settles until we reject it.
-    const drinks = await screen.findByRole('button', { name: /Drinks/ });
     await act(async () => {
-      fireEvent.press(drinks);
+      fireEvent.press(screen.getByRole('button', { name: /Drinks/ }));
     });
-    await waitFor(() => expect(vote).toHaveBeenCalledWith(4, [41]));
+    await waitFor(() => expect(onVote).toHaveBeenCalledWith([41]));
 
+    // Both at once. Inside `act`, React holds the rerender and the rejection's
+    // `setState` until the scope ends, so they flush as a single render.
     await act(async () => {
-      client.setQueryData(['event', 9], makeEvent({ polls: [movedVotes(CUSTOM_POLL, [40])] }));
+      rerender(<PollTally poll={moved} onVote={onVote} busy={false} />);
       rejectVote(new TypeError('Network request failed'));
     });
 
     expect(screen.getByText(/didn’t go through/)).toBeTruthy();
+    // And the sync did happen — the ticks are the server's, not ours.
     expect(screen.getByRole('button', { name: /Snacks/ })).toBeSelected();
-    vote.mockRestore();
+    expect(screen.getByRole('button', { name: /Drinks/ })).not.toBeSelected();
   });
 
   /**
