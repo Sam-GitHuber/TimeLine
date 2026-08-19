@@ -711,6 +711,116 @@ describe('optimistic vote ticks', () => {
   });
 
   /**
+   * The clear is deliberately narrower than "the server said something": only the
+   * server *arriving at the selection you cast* retires the message. A refetch
+   * carrying some third answer is not confirmation, and swallowing the failure
+   * there is the bug #231 reports — the message the whole guard exists to deliver,
+   * lost in exactly the conditions (bad signal, concurrent refetch) that produced
+   * the failure in the first place.
+   */
+  it('keeps the failure showing when the server moves to a different vote', async () => {
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest
+      .spyOn(api, 'votePoll')
+      .mockRejectedValue(new ApiError('This poll is closed.', 409, null));
+    const rsvp = jest.spyOn(api, 'rsvpEvent').mockImplementation(async () => {
+      // Neither what we cast nor what the server held when we cast it: a Snacks
+      // vote made on the web while this screen sat open.
+      serveEvent(makeEvent({ polls: [movedVotes(CUSTOM_POLL, [40])] }));
+      return served;
+    });
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByRole('button', { name: /Drinks/ }));
+    expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Snacks/ })).toBeSelected()
+    );
+
+    // Your vote still didn't land, so it still says so — even though the ticks
+    // have moved on to the newer truth.
+    expect(screen.getByText('This poll is closed.')).toBeTruthy();
+    vote.mockRestore();
+    rsvp.mockRestore();
+  });
+
+  /**
+   * The exact shape #231 reports: the cache update and the rejection land in
+   * **one** React batch, so the card renders once holding both the new failure
+   * and the new `poll` prop. A clear that fired on the sync alone ran before the
+   * message was ever painted, and nothing appeared at all.
+   *
+   * `setQueryData` rather than a held refetch: it is the same cache write the
+   * refetch performs, and driving it directly is what makes "the same batch"
+   * a fact of the test rather than a hope about scheduling.
+   */
+  it('keeps the failure showing when the cache update and the rejection share a batch', async () => {
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    let rejectVote: (err: Error) => void = () => {};
+    const vote = jest.spyOn(api, 'votePoll').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectVote = reject;
+        })
+    );
+
+    const { client } = await renderWith(<EventScreen />);
+
+    // `act`, not `await fireEvent.press`: the press hands back `toggle`'s
+    // promise, and this vote deliberately never settles until we reject it.
+    const drinks = await screen.findByRole('button', { name: /Drinks/ });
+    await act(async () => {
+      fireEvent.press(drinks);
+    });
+    await waitFor(() => expect(vote).toHaveBeenCalledWith(4, [41]));
+
+    await act(async () => {
+      client.setQueryData(['event', 9], makeEvent({ polls: [movedVotes(CUSTOM_POLL, [40])] }));
+      rejectVote(new TypeError('Network request failed'));
+    });
+
+    expect(screen.getByText(/didn’t go through/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Snacks/ })).toBeSelected();
+    vote.mockRestore();
+  });
+
+  /**
+   * Casting exactly what the server already shows is reachable in the window
+   * between a vote landing and its refetch catching up: your tick is a step ahead
+   * of `your_votes`, so tapping it again sends the server its own answer back. So
+   * "the server is confirming the attempt" can't be judged on the selection
+   * alone — without also remembering what the server said *before* the attempt,
+   * this failure would be cleared the instant it was set.
+   */
+  it('still says so when the rejected vote changed nothing', async () => {
+    // The server hasn't caught up: every refetch still reports no vote of yours,
+    // so `your_votes` never moves off empty.
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest
+      .spyOn(api, 'votePoll')
+      .mockResolvedValueOnce(CUSTOM_POLL)
+      .mockRejectedValueOnce(new ApiError('This poll is closed.', 409, null));
+
+    await renderWith(<EventScreen />);
+
+    // Tick Drinks. It lands, so the tally is a step ahead of the server.
+    await fireEvent.press(await screen.findByRole('button', { name: /Drinks/ }));
+    await waitFor(() => expect(vote).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(screen.getByRole('button', { name: /Drinks/ })).toBeSelected();
+
+    // Untick it — an empty selection, which is exactly what the server still
+    // reports. That one is refused.
+    await fireEvent.press(screen.getByRole('button', { name: /Drinks/ }));
+    await waitFor(() => expect(vote).toHaveBeenCalledWith(4, []));
+
+    expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+    vote.mockRestore();
+  });
+
+  /**
    * The re-sync compares `your_votes` by *contents*, not identity. A refetch that
    * returns the same votes in a different order is not a change, and treating it
    * as one would wipe the tick you're mid-way through casting — the failure mode

@@ -42,13 +42,30 @@ export default function PollTally({
   const serverKey = voteKey(serverVotes);
   const [selected, setSelected] = useState(() => new Set(serverVotes));
   const [syncedKey, setSyncedKey] = useState(serverKey);
+  // A rejected vote: the selection it tried to cast, what the server held at the
+  // time, and the message to show.
   const [voteError, setVoteError] = useState(null);
   if (syncedKey !== serverKey) {
     setSyncedKey(serverKey);
     setSelected(new Set(serverVotes));
-    // The server has just told us where your votes stand, so a message about an
-    // earlier attempt is out of date — clearing it stops "your vote didn't go
-    // through" sitting under a tick the server has since confirmed.
+  }
+  // Clear the failure only once the server has *moved* to the very selection we
+  // thought failed — the request landed and only its response was lost (issue
+  // #226), so "your vote didn't go through" would now be sitting under a tick
+  // the server has confirmed. Any other change to `your_votes` leaves the
+  // message standing: it's about your attempt, not about whatever else has
+  // happened since.
+  //
+  // Both halves are compared against keys recorded at the attempt, never against
+  // when the sync arrives, so this holds even when the refetch and the rejection
+  // land in the same render batch — the trap issue #231 describes, where a
+  // blanket "clear on sync" swallowed the message before it was ever painted.
+  // `from` is what keeps a re-cast of the server's own answer honest: attempting
+  // exactly what the server already holds means `cast` equals `serverKey`
+  // already, and without `from` the message would go the instant it was set.
+  //
+  // Same condition, for the same reason, as `RsvpBar` and `reactionFailures.js`.
+  if (voteError && serverKey !== voteError.from && serverKey === voteError.cast) {
     setVoteError(null);
   }
   // The organiser's lifecycle actions and the per-option Set/Pin. Each is handed
@@ -57,9 +74,10 @@ export default function PollTally({
   // that 404'd (another admin removed the poll) left it painted open with no
   // message, and votes went on arriving into a poll the organiser had frozen.
   //
-  // Kept apart from `voteError` on purpose: that one is retired by a resync
-  // (#226), and a refetch triggered by some *other* write on this page is no
-  // answer at all to "did my Remove poll go through?".
+  // Kept apart from `voteError` on purpose: that one is retired by the server
+  // confirming the very vote it was about (#226), and a refetch triggered by
+  // some *other* write on this page is no answer at all to "did my Remove poll
+  // go through?".
   //
   // Returns whether the write landed, which is how `FreeValueFinalise` knows to
   // keep what you typed rather than clearing a value that never got set.
@@ -116,9 +134,11 @@ export default function PollTally({
       // `next` while this request was in flight, the server has since spoken and
       // its answer must not be undone by a snapshot taken before the click.
       setSelected((current) => (current === next ? before : current));
-      setVoteError(
-        serverMessage(err, "Your vote didn't go through — try again.")
-      );
+      setVoteError({
+        cast: voteKey(Array.from(next)),
+        from: serverKey,
+        message: serverMessage(err, "Your vote didn't go through — try again."),
+      });
     }
   }
 
@@ -215,7 +235,7 @@ export default function PollTally({
 
       {voteError && (
         <p role="alert" className="mt-2 text-sm text-red-600">
-          {voteError}
+          {voteError.message}
         </p>
       )}
 

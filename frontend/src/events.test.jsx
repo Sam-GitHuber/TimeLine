@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { onlineManager, useQuery } from "@tanstack/react-query";
 import { Routes, Route } from "react-router-dom";
@@ -481,6 +481,141 @@ describe("EventPage", () => {
     expect(screen.getByRole("button", { name: /Cake/ })).toHaveAttribute(
       "aria-pressed",
       "false"
+    );
+  });
+
+  // The request had landed after all — only its response was lost. Once the
+  // server states that very selection, "your vote didn't go through" would be
+  // sitting under a tick the server has confirmed (issue #226). The mobile copy
+  // has pinned this since #228; the web never did.
+  it("stops saying so once the server confirms the vote that failed", async () => {
+    const member = { can_manage: false, can_moderate: false };
+    const after = makeEvent(member);
+    after.polls[1].your_votes = [201]; // the Cake vote landed after all
+    api.getEvent.mockResolvedValueOnce(makeEvent(member)).mockResolvedValue(after);
+    api.votePoll.mockRejectedValueOnce(offlineError());
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Your vote didn't go through — try again."
+    );
+
+    // Anything that refetches the event carries the server's answer with it.
+    await userEvent.click(screen.getByRole("button", { name: /^Going/ }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+    );
+  });
+
+  // Issue #231: the clear used to fire on *any* re-sync, so a refetch that spoke
+  // about something else swallowed the failure — including when it landed in the
+  // same React batch as the rejection, where the message was never painted at
+  // all. Judging it on keys recorded at the attempt rather than on the sync
+  // arriving is what makes the answer independent of which order they land in.
+  it("keeps the failure showing when the server moves to a different vote", async () => {
+    const member = { can_manage: false, can_moderate: false };
+    const after = makeEvent(member);
+    after.polls[1].your_votes = [202]; // Drinks, cast on the web meanwhile
+    api.getEvent.mockResolvedValueOnce(makeEvent(member)).mockResolvedValue(after);
+    api.votePoll.mockRejectedValueOnce(apiError("This poll is closed."));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This poll is closed."
+    );
+
+    // A refetch brings a selection that is neither what we cast nor what the
+    // server held when we cast it. Your vote still didn't land, so it still says
+    // so — even though the ticks have moved on to the newer truth.
+    await userEvent.click(screen.getByRole("button", { name: /^Going/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Drinks/ })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      )
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("This poll is closed.");
+  });
+
+  // The exact shape issue #231 reports: the cache update and the rejection land
+  // in **one** React batch, so the component renders once holding both the new
+  // failure and the new `poll` prop. A clear that fired on the sync alone ran
+  // before the message was ever painted, and nothing appeared at all — on
+  // patchy signal, which is the case the message exists for.
+  it("keeps the failure showing when the refetch and the rejection land together", async () => {
+    const member = { can_manage: false, can_moderate: false };
+    const after = makeEvent(member);
+    after.polls[1].your_votes = [202]; // Drinks, cast on the web meanwhile
+    let landRefetch;
+    api.getEvent
+      .mockResolvedValueOnce(makeEvent(member))
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (landRefetch = () => resolve(after)))
+      )
+      .mockResolvedValue(after);
+    let rejectVote;
+    api.votePoll.mockImplementationOnce(
+      () => new Promise((_, reject) => (rejectVote = reject))
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    // The RSVP invalidates the event; its refetch is held open below.
+    await userEvent.click(screen.getByRole("button", { name: /^Going/ }));
+    await waitFor(() => expect(api.getEvent).toHaveBeenCalledTimes(2));
+
+    // Both at once, in a single flush.
+    await act(async () => {
+      landRefetch();
+      rejectVote(offlineError());
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Your vote didn't go through — try again."
+    );
+    expect(screen.getByRole("button", { name: /Drinks/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+  });
+
+  // Casting exactly what the server already shows is reachable in the window
+  // between a vote landing and its refetch catching up: your tick is ahead of
+  // `your_votes`, so tapping it again sends the server its own answer back. So
+  // "the server is confirming the attempt" can't be judged on the selection
+  // alone — without also remembering what the server said *before* the attempt,
+  // this failure would be cleared the instant it was set.
+  it("still says so when the rejected vote changed nothing", async () => {
+    const member = { can_manage: false, can_moderate: false };
+    // The server hasn't caught up: every refetch still reports no vote of yours
+    // in the custom poll, so `your_votes` never moves off empty.
+    api.getEvent.mockResolvedValue(makeEvent(member));
+    api.votePoll
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(apiError("This poll is closed."));
+    renderEventPage();
+    await screen.findByText("Picnic");
+
+    // Tick Cake. It lands, so the tally is a step ahead of the server.
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Cake/ })).not.toBeDisabled()
+    );
+    expect(screen.getByRole("button", { name: /Cake/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    // Untick it — an empty selection, which is exactly what the server still
+    // reports. That one is refused.
+    await userEvent.click(screen.getByRole("button", { name: /Cake/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This poll is closed."
     );
   });
 

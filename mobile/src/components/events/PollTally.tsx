@@ -93,13 +93,33 @@ export function PollTally({
   const serverKey = voteKey(serverVotes);
   const [selected, setSelected] = useState<Set<number>>(() => new Set(serverVotes));
   const [syncedKey, setSyncedKey] = useState(serverKey);
-  const [voteError, setVoteError] = useState<string | null>(null);
+  // A rejected vote: the selection it tried to cast, what the server held at the
+  // time, and the message to show.
+  const [voteError, setVoteError] = useState<
+    { cast: string; from: string; message: string } | null
+  >(null);
   if (syncedKey !== serverKey) {
     setSyncedKey(serverKey);
     setSelected(new Set(serverVotes));
-    // The server has just told us where your votes stand, so a message about an
-    // earlier attempt is out of date — clearing it stops "your vote didn't go
-    // through" sitting under a tick the server has since confirmed.
+  }
+  // Clear the failure only once the server has *moved* to the very selection we
+  // thought failed — the request landed and only its response was lost (#226),
+  // so "your vote didn't go through" would now be sitting under a tick the
+  // server has confirmed. Any other change to `your_votes` leaves the message
+  // standing: it's about your attempt, not about whatever else has happened
+  // since.
+  //
+  // Both halves are compared against keys recorded at the attempt, never against
+  // when the sync arrives, so this holds even when the refetch and the rejection
+  // land in the same React batch — the trap #231 describes, where a blanket
+  // "clear on sync" swallowed the message before it was ever painted. `from` is
+  // what keeps a re-cast of the server's own answer honest: attempting exactly
+  // what the server already holds means `cast` equals `serverKey` already, and
+  // without `from` the message would go the instant it was set.
+  //
+  // Same condition, for the same reason, as `RsvpBar` and the web's
+  // `reactionFailures.js`.
+  if (voteError && serverKey !== voteError.from && serverKey === voteError.cast) {
     setVoteError(null);
   }
   const [editing, setEditing] = useState(false);
@@ -147,7 +167,11 @@ export function PollTally({
       // connection *is* an `ApiError` too — that's how it stopped being React
       // Native's `Network request failed` — so the class no longer separates the
       // server's words from our own stand-ins. The `fromServer` flag does.
-      setVoteError(serverMessage(err, 'Your vote didn’t go through — try again.'));
+      setVoteError({
+        cast: voteKey(Array.from(next)),
+        from: serverKey,
+        message: serverMessage(err, 'Your vote didn’t go through — try again.'),
+      });
     }
   }
 
@@ -259,7 +283,7 @@ export function PollTally({
 
       {voteError ? (
         <Text style={styles.error} accessibilityRole="alert">
-          {voteError}
+          {voteError.message}
         </Text>
       ) : null}
 
