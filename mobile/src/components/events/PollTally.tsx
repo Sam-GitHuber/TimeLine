@@ -93,13 +93,41 @@ export function PollTally({
   const serverKey = voteKey(serverVotes);
   const [selected, setSelected] = useState<Set<number>>(() => new Set(serverVotes));
   const [syncedKey, setSyncedKey] = useState(serverKey);
-  const [voteError, setVoteError] = useState<string | null>(null);
+  // A rejected vote: the selection it tried to save, what the server held at the
+  // time, and the message to show — the same three fields, under the same names,
+  // as `RsvpBar` next door.
+  const [voteError, setVoteError] = useState<
+    { saved: string; from: string; message: string } | null
+  >(null);
   if (syncedKey !== serverKey) {
     setSyncedKey(serverKey);
     setSelected(new Set(serverVotes));
-    // The server has just told us where your votes stand, so a message about an
-    // earlier attempt is out of date — clearing it stops "your vote didn't go
-    // through" sitting under a tick the server has since confirmed.
+  }
+  // Clear the failure only once the server has *moved* to the very selection we
+  // thought failed — the request landed and only its response was lost (#226),
+  // so "your vote didn't go through" would now be sitting under a tick the
+  // server has confirmed. Any other change to `your_votes` leaves the message
+  // standing: it's about your attempt, not about whatever else has happened
+  // since.
+  //
+  // Both halves are compared against keys recorded at the attempt, never against
+  // when the sync arrives, so this holds even when the refetch and the rejection
+  // land in the same React batch — the trap #231 describes, where a blanket
+  // "clear on sync" swallowed the message before it was ever painted.
+  //
+  // `from` is what keeps a re-cast of the server's own answer honest: in the
+  // window between a vote landing and its refetch catching up, your tick is a
+  // step ahead of `your_votes`, so tapping it again sends the server its own
+  // answer back — and without `from` that failure would go the instant it was
+  // set. Its cost is that when `saved` *equals* `from` the condition can never
+  // be satisfied, so a vote that did land with its response lost keeps its
+  // message until the next tap clears it. Deliberate: the server's answer
+  // carries no evidence either way there, and a stale "try again" beside a live
+  // button is recoverable where a swallowed failure isn't.
+  //
+  // Same shape and same reasoning as `RsvpBar`; the web's `ConnectButton` is the
+  // other two-sided copy (`from`/`to`, across its four states).
+  if (voteError && serverKey !== voteError.from && serverKey === voteError.saved) {
     setVoteError(null);
   }
   const [editing, setEditing] = useState(false);
@@ -125,10 +153,11 @@ export function PollTally({
     const next = new Set(poll.allow_multiple ? selected : []);
     if (selected.has(optionId)) next.delete(optionId);
     else next.add(optionId);
+    const attempted = Array.from(next);
     setSelected(next);
     setVoteError(null);
     try {
-      await onVote(Array.from(next));
+      await onVote(attempted);
     } catch (err) {
       // The vote didn't happen — put the tick back where it was and say so.
       // Leaving it showing is what makes a dropped answer invisible: the tally
@@ -147,7 +176,11 @@ export function PollTally({
       // connection *is* an `ApiError` too — that's how it stopped being React
       // Native's `Network request failed` — so the class no longer separates the
       // server's words from our own stand-ins. The `fromServer` flag does.
-      setVoteError(serverMessage(err, 'Your vote didn’t go through — try again.'));
+      setVoteError({
+        saved: voteKey(attempted),
+        from: serverKey,
+        message: serverMessage(err, 'Your vote didn’t go through — try again.'),
+      });
     }
   }
 
@@ -259,7 +292,7 @@ export function PollTally({
 
       {voteError ? (
         <Text style={styles.error} accessibilityRole="alert">
-          {voteError}
+          {voteError.message}
         </Text>
       ) : null}
 

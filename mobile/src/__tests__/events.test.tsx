@@ -19,6 +19,7 @@ import CalendarScreen from '@/app/(tabs)/calendar';
 import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
 import { EventTimelineEntry } from '@/components/events/EventTimelineEntry';
+import { PollTally } from '@/components/events/PollTally';
 import { MonthGrid } from '@/components/events/MonthGrid';
 import { formatEventDate, formatEventTime } from '@/eventFormat';
 import { saveTokens } from '@/tokens';
@@ -708,6 +709,124 @@ describe('optimistic vote ticks', () => {
     expect(screen.queryByText('This poll is closed.')).toBeNull();
     vote.mockRestore();
     rsvp.mockRestore();
+  });
+
+  /**
+   * The clear is deliberately narrower than "the server said something": only the
+   * server *arriving at the selection you cast* retires the message. A refetch
+   * carrying some third answer is not confirmation, and swallowing the failure
+   * there is the bug #231 reports — the message the whole guard exists to deliver,
+   * lost in exactly the conditions (bad signal, concurrent refetch) that produced
+   * the failure in the first place.
+   */
+  it('keeps the failure showing when the server moves to a different vote', async () => {
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest
+      .spyOn(api, 'votePoll')
+      .mockRejectedValue(new ApiError('This poll is closed.', 409, null));
+    const rsvp = jest.spyOn(api, 'rsvpEvent').mockImplementation(async () => {
+      // Neither what we cast nor what the server held when we cast it: a Snacks
+      // vote made on the web while this screen sat open.
+      serveEvent(makeEvent({ polls: [movedVotes(CUSTOM_POLL, [40])] }));
+      return served;
+    });
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByRole('button', { name: /Drinks/ }));
+    expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+
+    await fireEvent.press(screen.getByRole('button', { name: /Going/ }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Snacks/ })).toBeSelected()
+    );
+
+    // Your vote still didn't land, so it still says so — even though the ticks
+    // have moved on to the newer truth.
+    expect(screen.getByText('This poll is closed.')).toBeTruthy();
+    vote.mockRestore();
+    rsvp.mockRestore();
+  });
+
+  /**
+   * The exact shape #231 reports: the new `poll` and the rejection land in **one**
+   * React batch, so the card renders once holding both, and a clear that fired on
+   * the sync alone ran before the message was ever painted — nothing appeared at
+   * all, on patchy signal, which is the case it exists for.
+   *
+   * `PollTally` directly, not through `EventScreen`: React Query hands a cache
+   * change to its observers on a **batched timer**, so a refetch resolved beside
+   * the rejection shares a batch with it only sometimes — a test built that way
+   * failed one run in three. A `rerender` inside the same `act` is the same
+   * condition with the scheduler taken out of it.
+   */
+  it('keeps the failure showing when the new poll and the rejection share a batch', async () => {
+    // Snacks, cast on the web meanwhile: neither what we cast nor what the
+    // server held when we cast it.
+    const moved = movedVotes(CUSTOM_POLL, [40]);
+    let rejectVote: (err: Error) => void = () => {};
+    const onVote = jest.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectVote = reject;
+        })
+    );
+    // `await render`: RNTL hands back a promise, and this test needs `rerender`.
+    const { rerender } = await render(
+      <PollTally poll={CUSTOM_POLL} onVote={onVote} busy={false} />
+    );
+
+    // `act`, not `await fireEvent.press`: the press hands back `toggle`'s
+    // promise, and this vote deliberately never settles until we reject it.
+    await act(async () => {
+      fireEvent.press(screen.getByRole('button', { name: /Drinks/ }));
+    });
+    await waitFor(() => expect(onVote).toHaveBeenCalledWith([41]));
+
+    // Both at once. Inside `act`, React holds the rerender and the rejection's
+    // `setState` until the scope ends, so they flush as a single render.
+    await act(async () => {
+      rerender(<PollTally poll={moved} onVote={onVote} busy={false} />);
+      rejectVote(new TypeError('Network request failed'));
+    });
+
+    expect(screen.getByText(/didn’t go through/)).toBeTruthy();
+    // And the sync did happen — the ticks are the server's, not ours.
+    expect(screen.getByRole('button', { name: /Snacks/ })).toBeSelected();
+    expect(screen.getByRole('button', { name: /Drinks/ })).not.toBeSelected();
+  });
+
+  /**
+   * Casting exactly what the server already shows is reachable in the window
+   * between a vote landing and its refetch catching up: your tick is a step ahead
+   * of `your_votes`, so tapping it again sends the server its own answer back. So
+   * "the server is confirming the attempt" can't be judged on the selection
+   * alone — without also remembering what the server said *before* the attempt,
+   * this failure would be cleared the instant it was set.
+   */
+  it('still says so when the rejected vote changed nothing', async () => {
+    // The server hasn't caught up: every refetch still reports no vote of yours,
+    // so `your_votes` never moves off empty.
+    serveEvent(makeEvent({ polls: [CUSTOM_POLL] }));
+    const vote = jest
+      .spyOn(api, 'votePoll')
+      .mockResolvedValueOnce(CUSTOM_POLL)
+      .mockRejectedValueOnce(new ApiError('This poll is closed.', 409, null));
+
+    await renderWith(<EventScreen />);
+
+    // Tick Drinks. It lands, so the tally is a step ahead of the server.
+    await fireEvent.press(await screen.findByRole('button', { name: /Drinks/ }));
+    await waitFor(() => expect(vote).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(screen.getByRole('button', { name: /Drinks/ })).toBeSelected();
+
+    // Untick it — an empty selection, which is exactly what the server still
+    // reports. That one is refused.
+    await fireEvent.press(screen.getByRole('button', { name: /Drinks/ }));
+    await waitFor(() => expect(vote).toHaveBeenCalledWith(4, []));
+
+    expect(await screen.findByText('This poll is closed.')).toBeTruthy();
+    vote.mockRestore();
   });
 
   /**
