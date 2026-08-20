@@ -5,7 +5,11 @@ import DimensionChips from "./DimensionChips.jsx";
 import Lightbox from "../Lightbox.jsx";
 import PhotoGrid from "../PhotoGrid.jsx";
 import ReactionBar from "../ReactionBar.jsx";
-import { parseEventDate, formatEventTimeParts } from "../../utils.js";
+import {
+  parseEventDate,
+  formatEventWhen,
+  formatEventTimeParts,
+} from "../../utils.js";
 
 // An event as an entry on the timeline spine — the same shape as a post (a marker
 // on the line, mono type on the rail, the organiser + content in the body), so an
@@ -84,15 +88,8 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           {cancelled && <span className="ev-tag ev-tag--off">Cancelled</span>}
         </div>
 
-        {/* Organiser and venue — **not the when**. This line used to write
-            `formatEventWhen` too, which on a past recap stated the date three
-            times (day divider, here, Date chip) and the time three times (rail,
-            here, Time chip), and on a future entry stated the date three times
-            over (rail, here, Date chip). It was a boxed card's meta line, and it
-            never got revisited when the entry moved onto the spine — where the
-            rail is the voice of time and a post two rows below carries its clock
-            time there and nowhere else (#293; #292 is the same fix on the
-            phone). The when now lives on the rail and in the chips. */}
+        {/* Organiser and venue — **not the when** (#293; see the header above
+            and events.md, "A timeline entry says its when nowhere in its body"). */}
         <p className="text-sm text-ink-faint">
           {event.organiser.display_name}
           {event.location_name ? ` · ${event.location_name}` : ""}
@@ -183,27 +180,36 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
 // The rail voice-of-time: a past event shows its clock time like a post (the day
 // divider carries the date); a future event shows its date (there are no day
 // dividers above now) in accent.
+//
+// Every branch is a `<time>` carrying the **whole** when in `title` +
+// `aria-label`, exactly as `PostCard` does and for the same two reasons, both of
+// which bind harder here since #293 made the rail the entry's only statement of
+// time in the body: the visible text splits over two lines ("1:00" / "pm", "20"
+// / "Aug"), which assistive tech reads as two fragments, and the visible form
+// is lossy — an accent rail shows day and month with no year, so two upcoming
+// events twelve months apart draw the same two lines. `formatEventWhen` adds the
+// year whenever the event isn't in the current one, and the `Date` chip below
+// the title carries it in full either way. The all-day branch is a `<time>` too
+// so it picks up `.tl-rail > time` in `index.css` (display/leading/padding) —
+// as a `<span>` it sat a couple of pixels off the clock times above and below it
+// in the same column.
 function Rail({ event, past }) {
+  const when = formatEventWhen(event);
+  const label = when && (event.start_time ? when : `${when} · all day`);
+
   if (past) {
     const parts = formatEventTimeParts(event.start_time);
-    if (parts) {
-      return (
-        <time
-          className="font-mono text-xs tabular-nums text-ink-faint"
-          dateTime={event.starts_at}
-        >
-          {parts.time}
-          <br />
-          {parts.meridiem}
-        </time>
-      );
-    }
     return (
-      <span className="font-mono text-xs text-ink-faint">
-        all
+      <time
+        className="font-mono text-xs tabular-nums text-ink-faint"
+        dateTime={event.starts_at}
+        title={label || undefined}
+        aria-label={label || undefined}
+      >
+        {parts ? parts.time : "all"}
         <br />
-        day
-      </span>
+        {parts ? parts.meridiem : "day"}
+      </time>
     );
   }
 
@@ -212,6 +218,8 @@ function Rail({ event, past }) {
     <time
       className="font-mono text-xs tabular-nums text-accent-deep"
       dateTime={event.event_date}
+      title={label || undefined}
+      aria-label={label || undefined}
     >
       {d ? d.getDate() : ""}
       <br />
