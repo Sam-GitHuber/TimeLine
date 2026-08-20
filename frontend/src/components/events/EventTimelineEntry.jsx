@@ -5,11 +5,7 @@ import DimensionChips from "./DimensionChips.jsx";
 import Lightbox from "../Lightbox.jsx";
 import PhotoGrid from "../PhotoGrid.jsx";
 import ReactionBar from "../ReactionBar.jsx";
-import {
-  parseEventDate,
-  formatEventWhen,
-  formatEventTimeParts,
-} from "../../utils.js";
+import { parseEventDate, formatEventTimeParts } from "../../utils.js";
 
 // An event as an entry on the timeline spine — the same shape as a post (a marker
 // on the line, mono type on the rail, the organiser + content in the body), so an
@@ -18,12 +14,21 @@ import {
 //
 // - "future" (above the now-node): the date sits on the rail in accent, and the
 //   body carries the live details — description, the dimension chips, RSVP counts.
+//   (There are no day dividers above the now-node, so the rail is the only place
+//   outside the chips that dates it.)
 // - "past"   (below the now-node, among the posts): a quiet **recap**. The rail
-//   shows the clock time like a post (the day divider already gives the date), and
-//   the body drops the planning chips for a one-line mono recap + the turnout —
-//   the event has become a memory, not a thing to act on.
+//   shows the clock time like a post (the day divider already gives the date), the
+//   body drops the description and the live RSVP for the turnout alone — the
+//   event has become a memory, not a thing to act on.
 //
-// A cancelled event is dimmed and tagged in either direction.
+// Neither variant writes the when in its body: the rail and the chips say it, and
+// the Date · Time · Where chips stay on a recap too because they're the record of
+// what the event settled on, and the one thing a recap is most defined by is its
+// date.
+//
+// A cancelled event is dimmed and tagged in either direction. A past one carries
+// **no tag** — its position below the now-node, under a dated day divider, among
+// posts equally in the past that wear no label, already says it happened.
 export default function EventTimelineEntry({ event, variant = "future" }) {
   const past = variant === "past";
   const cancelled = event.status === "cancelled";
@@ -68,7 +73,6 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
 
       <div className="tl-body">
         <div className="flex flex-wrap items-baseline gap-x-1.5">
-          {past && !cancelled && <span className="ev-tag ev-tag--muted">Happened</span>}
           <Link
             to={eventPath}
             className={`font-semibold transition hover:text-accent-deep ${
@@ -80,10 +84,17 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           {cancelled && <span className="ev-tag ev-tag--off">Cancelled</span>}
         </div>
 
+        {/* Organiser and venue — **not the when**. This line used to write
+            `formatEventWhen` too, which on a past recap stated the date three
+            times (day divider, here, Date chip) and the time three times (rail,
+            here, Time chip), and on a future entry stated the date three times
+            over (rail, here, Date chip). It was a boxed card's meta line, and it
+            never got revisited when the entry moved onto the spine — where the
+            rail is the voice of time and a post two rows below carries its clock
+            time there and nowhere else (#293; #292 is the same fix on the
+            phone). The when now lives on the rail and in the chips. */}
         <p className="text-sm text-ink-faint">
           {event.organiser.display_name}
-          {" · "}
-          <span className="font-mono">{formatEventWhen(event)}</span>
           {event.location_name ? ` · ${event.location_name}` : ""}
         </p>
 

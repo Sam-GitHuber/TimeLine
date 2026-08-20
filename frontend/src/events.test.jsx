@@ -18,7 +18,7 @@ import {
   unauthoredError,
   failRefetch,
 } from "./test-utils.jsx";
-import { formatEventDate } from "./utils.js";
+import { formatEventDate, formatEventWhen } from "./utils.js";
 import { api } from "./api.js";
 
 // Phase 8b: group events. The visibility/permission rules are enforced (and
@@ -1266,7 +1266,6 @@ describe("event timeline entries", () => {
         <Route path="/" element={<Timeline pastEvents={[past]} />} />
       </Routes>
     );
-    expect(screen.getByText("Happened")).toBeInTheDocument();
     expect(screen.getByText("6 went")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Reunion/ })).toHaveAttribute(
       "href",
@@ -1277,6 +1276,58 @@ describe("event timeline entries", () => {
     // It keeps the Date · Time · Where pills, like its future self.
     expect(screen.getByText("Date")).toBeInTheDocument();
     expect(screen.getByText("Where")).toBeInTheDocument();
+    // #293: and it no longer wears a "Happened" tag — its position below the
+    // now-node, under a dated divider among posts equally in the past, says it.
+    expect(screen.queryByText("Happened")).toBeNull();
+  });
+
+  it("doesn't repeat a past recap's when under its title (#293)", () => {
+    // The rail carries the clock time, the day divider above carries the date,
+    // and the Date · Time chips carry what the event settled on. The meta line
+    // used to write both again — a boxed card's line, left behind when the entry
+    // moved onto the spine — so the date read three times and the time three
+    // times. It now carries the organiser and the venue only.
+    const past = makeEvent({
+      id: 9,
+      title: "Reunion",
+      status: "scheduled",
+      is_past: true,
+      event_date: "2026-06-01",
+      start_time: "13:00:00",
+      starts_at: "2026-06-01T13:00:00Z",
+      location_name: "The Oakhouse",
+      dimensions: {
+        date: { state: "set" },
+        time: { state: "set" },
+        location: { state: "set" },
+      },
+      polls: [],
+      rsvp: { counts: { going: 6, maybe: 0, declined: 0, guests: 0 } },
+    });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={[past]} />} />
+      </Routes>
+    );
+    // Derived, never spelled out: these go through `toLocaleDateString`, so a
+    // hardcoded "Mon 1 Jun" passes here and fails on CI, which renders
+    // "Mon, Jun 1". That exact mistake failed CI on #292.
+    expect(screen.queryByText(formatEventWhen(past))).toBeNull();
+    expect(screen.getByText("You · The Oakhouse")).toBeInTheDocument();
+    // What does say when: the rail's clock time, and the chips. (The rail pads
+    // its minutes and the chip doesn't — the rail shares a column with the
+    // posts' clock times and has to come out their width; see events.md.)
+    expect(
+      within(document.querySelector(".tl-rail")).getByText("1:00pm")
+    ).toBeInTheDocument();
+    expect(
+      within(document.querySelector(".ev-chips")).getByText(
+        formatEventDate("2026-06-01")
+      )
+    ).toBeInTheDocument();
+    expect(
+      within(document.querySelector(".ev-chips")).getByText("1pm")
+    ).toBeInTheDocument();
   });
 
   it("files all-day past events under their own date, not the viewer's", () => {
@@ -1342,6 +1393,21 @@ describe("event timeline entries", () => {
     );
     expect(screen.getByRole("link", { name: /Camping/ })).toBeInTheDocument();
     expect(screen.getByText(/2 going/)).toBeInTheDocument();
+    // #293: a future entry doesn't write its when under the title either — the
+    // accent rail beside it dates it and the chips hold the record, so writing
+    // it here made three statements of the date. Read off the meta line itself,
+    // since the Date chip legitimately states the same date.
+    expect(document.querySelector(".tl-body p").textContent).toBe("You");
+    // The rail dates it in the accent day/month form, and the Date chip holds
+    // the full record — the two places a future entry is allowed to say it.
+    const rail = document.querySelector(".tl-rail time");
+    expect(rail).toHaveAttribute("dateTime", "2026-08-20");
+    expect(rail.textContent).toBe("20Aug");
+    expect(
+      within(document.querySelector(".ev-chips")).getByText(
+        formatEventWhen(fut)
+      )
+    ).toBeInTheDocument();
   });
 
   it("carries the reaction row and comment count, as a post on this spine does", () => {
