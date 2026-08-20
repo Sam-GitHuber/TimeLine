@@ -454,9 +454,10 @@ The gate needs a *present* organiser. Two paths:
   status. (The earlier build split display from a separate always-visible toolkit;
   that was replaced because a freshly-created event wasn't obvious to use.)
 - **Upcoming events hang off the timeline spine, above the now-node**, as
-  post-shaped entries (`EventTimelineEntry` — the poster-style avatar marker on the
-  line, a mono **accent** date on the rail, title/organiser/when/chips in the
-  body). A future event reads apart from a past post by its *position* (above now)
+  post-shaped entries (`EventTimelineEntry` — the poster-style avatar marker on
+  the line, a mono **accent** date on the rail, title/organiser/chips in the
+  body; the *when* is the rail's and the chips', never the body's — see below).
+  A future event reads apart from a past post by its *position* (above now)
   and the accent date, not a permanent ring — the marker's accent ring is
   hover-only, exactly like a post.
   `Timeline` renders them above its `header` (the composer), so it's **one
@@ -507,11 +508,66 @@ The gate needs a *present* organiser. Two paths:
 - Past events are merged into the group `Timeline` **on the spine** among the
   posts — the *same* `EventTimelineEntry` as a future event, in its `variant="past"`
   recap form: the rail shows the clock time like a post (the day divider carries the
-  date), and the body drops the planning chips for a one-line mono recap + turnout
+  date), and the body drops the description and the live RSVP for the turnout alone
   ("6 went"). So an event looks the same threading the line whether it's ahead of
   now or behind it — not a boxed card wedged into the spine. (`EventCard`, the boxed
   form, is still used *off* the line — the staging strip, month day-lists, the
   personal calendar agenda.)
+- **A timeline entry says its "when" nowhere in its body** (#293, the web's half
+  of #292 below) — on **both** variants. The meta line under the title carries
+  the organiser and the venue only. It used to write `formatEventWhen` as well,
+  which on a past recap stated the date three times (day divider, meta line,
+  `Date` chip) and the time three times (rail, meta line, `Time` chip), and on a
+  future entry stated the date three times over (accent rail, meta line, `Date`
+  chip) — on entries sitting two rows from a post whose clock time is on the rail
+  and nowhere else. That line was written when the entry was a boxed card with
+  neither a rail nor a divider over it, and it simply never got revisited when
+  the entry moved onto the spine, where **the rail is the voice of time**. The
+  future variant was outside #293 as filed and was folded in on the same edit,
+  because it's the same mistake in the same file and leaving it would have left
+  the web stating a future date three times where the phone states it twice.
+  The **`Happened` tag went with it**: position says it — below the now-node,
+  under a dated divider, among posts equally in the past that wear no such
+  label. `Cancelled` stays, because that one *isn't* legible from position: a
+  called-off event is a tombstone, not a memory. The branch is written for
+  either variant but only a **past** entry can reach it — `GroupPage` filters
+  cancelled events out of `upcoming` before `Timeline` sees them (they resurface
+  as a recap once their date passes), so a cancelled event is only ever drawn on
+  the line below the now-node.
+
+  Three things deliberately **stay** where they are:
+
+  - the **chips**, including `Date`. A recap missing the one decision it's most
+    defined by reads as though it never got a date, and the divider is a property
+    of the *timeline* rather than of the event — so the date appears **twice**,
+    which was never the complaint;
+  - the **venue on the meta line**, alongside the organiser, even though the
+    `Where` chip repeats it. #293 asked for it kept, and the web has a reason the
+    phone doesn't: the phone dropped its whole meta line (its when sits inline in
+    an alignment band instead), so on mobile the chips really are the only place
+    the venue is written, while on the web dropping it would leave a line holding
+    a name and nothing else. Repetition was the complaint about the *when*, which
+    was stated three times in three type styles; a venue named once beside the
+    organiser and once in the chip that records it is the same twice-over the
+    date gets;
+  - `EventCard`'s `Event · happened` — the boxed *off*-the-line form has no
+    spine and no divider to place it, so the label is doing real work there, as
+    it is on `EventPage`.
+
+  **The rail took on the accessibility the body used to provide.** It splits over
+  two lines ("1:00" / "pm", "20" / "Aug"), which assistive tech reads as two
+  fragments, and its visible form is lossy — the accent day/month carries no
+  year, so two upcoming events twelve months apart draw the same two lines. While
+  the body spelled the when out that didn't bite; now it would. So every branch
+  of `Rail` is a `<time>` carrying the whole `formatEventWhen` in `title` +
+  `aria-label`, which is exactly what `PostCard` already does for its own split
+  clock time and for the same reason. Making the all-day branch a `<time>` rather
+  than a `<span>` also gets it `.tl-rail > time` in `index.css`, so "all / day"
+  finally lines up with the clock times above and below it in the same column.
+
+  Pinned in `frontend/src/events.test.jsx` ("event timeline entries"), with the
+  same derive-don't-spell-out rule as the mobile tests below — the suite passes
+  under `LC_ALL=fr_FR.UTF-8` and at both ends of the date line.
 - **An event is placed on the line by its own wall-clock start, never by the
   `starts_at` instant** (`eventLocalStart` — `frontend/src/utils.js` and
   `mobile/src/eventFormat.ts`; used by the web `Timeline`, mobile `toGroupRows`,
@@ -726,7 +782,14 @@ with the clock time only (the day divider above it carries the date, which is
 also why the body no longer repeats the full `formatEventWhen`); a **future**
 entry leads with the whole date in accent, because there are no day dividers
 above the now boundary to carry it. The Date · Time · Where chips stay on both,
-as on the web, and are now the only place the venue is written. A past recap
+as on the web, and are now the only place the venue is written. **The web
+answered the same repetition in #293**, on both of its variants and without
+touching its rail — so neither client now writes the when in an entry's body,
+which is the rule the two share. What still differs is *where* it's drawn (the
+phone's band, the web's rail — this paragraph's subject) and the **venue**,
+which the web keeps on its meta line beside the organiser because it kept that
+line; the reasoning is under "A timeline entry says its when nowhere in its
+body" above. A past recap
 therefore states its date twice — the divider above it, and the Date chip — and
 that's the settled answer, not an oversight: the chips are the record of what
 the event decided, and a recap missing the one decision it's most defined by

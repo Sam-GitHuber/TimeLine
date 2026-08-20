@@ -18,12 +18,21 @@ import {
 //
 // - "future" (above the now-node): the date sits on the rail in accent, and the
 //   body carries the live details — description, the dimension chips, RSVP counts.
+//   (There are no day dividers above the now-node, so the rail is the only place
+//   outside the chips that dates it.)
 // - "past"   (below the now-node, among the posts): a quiet **recap**. The rail
-//   shows the clock time like a post (the day divider already gives the date), and
-//   the body drops the planning chips for a one-line mono recap + the turnout —
-//   the event has become a memory, not a thing to act on.
+//   shows the clock time like a post (the day divider already gives the date), the
+//   body drops the description and the live RSVP for the turnout alone — the
+//   event has become a memory, not a thing to act on.
 //
-// A cancelled event is dimmed and tagged in either direction.
+// Neither variant writes the when in its body: the rail and the chips say it, and
+// the Date · Time · Where chips stay on a recap too because they're the record of
+// what the event settled on, and the one thing a recap is most defined by is its
+// date.
+//
+// A cancelled event is dimmed and tagged in either direction. A past one carries
+// **no tag** — its position below the now-node, under a dated day divider, among
+// posts equally in the past that wear no label, already says it happened.
 export default function EventTimelineEntry({ event, variant = "future" }) {
   const past = variant === "past";
   const cancelled = event.status === "cancelled";
@@ -68,7 +77,6 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
 
       <div className="tl-body">
         <div className="flex flex-wrap items-baseline gap-x-1.5">
-          {past && !cancelled && <span className="ev-tag ev-tag--muted">Happened</span>}
           <Link
             to={eventPath}
             className={`font-semibold transition hover:text-accent-deep ${
@@ -80,10 +88,10 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
           {cancelled && <span className="ev-tag ev-tag--off">Cancelled</span>}
         </div>
 
+        {/* Organiser and venue — **not the when** (#293; see the header above
+            and events.md, "A timeline entry says its when nowhere in its body"). */}
         <p className="text-sm text-ink-faint">
           {event.organiser.display_name}
-          {" · "}
-          <span className="font-mono">{formatEventWhen(event)}</span>
           {event.location_name ? ` · ${event.location_name}` : ""}
         </p>
 
@@ -172,27 +180,36 @@ export default function EventTimelineEntry({ event, variant = "future" }) {
 // The rail voice-of-time: a past event shows its clock time like a post (the day
 // divider carries the date); a future event shows its date (there are no day
 // dividers above now) in accent.
+//
+// Every branch is a `<time>` carrying the **whole** when in `title` +
+// `aria-label`, exactly as `PostCard` does and for the same two reasons, both of
+// which bind harder here since #293 made the rail the entry's only statement of
+// time in the body: the visible text splits over two lines ("1:00" / "pm", "20"
+// / "Aug"), which assistive tech reads as two fragments, and the visible form
+// is lossy — an accent rail shows day and month with no year, so two upcoming
+// events twelve months apart draw the same two lines. `formatEventWhen` adds the
+// year whenever the event isn't in the current one, and the `Date` chip below
+// the title carries it in full either way. The all-day branch is a `<time>` too
+// so it picks up `.tl-rail > time` in `index.css` (display/leading/padding) —
+// as a `<span>` it sat a couple of pixels off the clock times above and below it
+// in the same column.
 function Rail({ event, past }) {
+  const when = formatEventWhen(event);
+  const label = when && (event.start_time ? when : `${when} · all day`);
+
   if (past) {
     const parts = formatEventTimeParts(event.start_time);
-    if (parts) {
-      return (
-        <time
-          className="font-mono text-xs tabular-nums text-ink-faint"
-          dateTime={event.starts_at}
-        >
-          {parts.time}
-          <br />
-          {parts.meridiem}
-        </time>
-      );
-    }
     return (
-      <span className="font-mono text-xs text-ink-faint">
-        all
+      <time
+        className="font-mono text-xs tabular-nums text-ink-faint"
+        dateTime={event.starts_at}
+        title={label || undefined}
+        aria-label={label || undefined}
+      >
+        {parts ? parts.time : "all"}
         <br />
-        day
-      </span>
+        {parts ? parts.meridiem : "day"}
+      </time>
     );
   }
 
@@ -201,6 +218,8 @@ function Rail({ event, past }) {
     <time
       className="font-mono text-xs tabular-nums text-accent-deep"
       dateTime={event.event_date}
+      title={label || undefined}
+      aria-label={label || undefined}
     >
       {d ? d.getDate() : ""}
       <br />

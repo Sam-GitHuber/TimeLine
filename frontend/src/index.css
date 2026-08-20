@@ -773,12 +773,6 @@
     background: #f3e7e4;
     color: #9a4a3a;
   }
-  /* A quiet "Happened" marker on a past-event recap — grey, not accent. */
-  .ev-tag--muted {
-    background: var(--color-line);
-    color: var(--color-ink-faint);
-  }
-
   /* The poll tally — a bar that fills as votes arrive, count on the right. */
   .ev-tally-row {
     position: relative;

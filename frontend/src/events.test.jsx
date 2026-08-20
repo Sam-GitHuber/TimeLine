@@ -18,7 +18,7 @@ import {
   unauthoredError,
   failRefetch,
 } from "./test-utils.jsx";
-import { formatEventDate } from "./utils.js";
+import { formatEventDate, formatEventWhen, parseEventDate } from "./utils.js";
 import { api } from "./api.js";
 
 // Phase 8b: group events. The visibility/permission rules are enforced (and
@@ -1243,8 +1243,9 @@ describe("EventCard", () => {
 });
 
 describe("event timeline entries", () => {
-  it("renders a past event as a quiet recap on the spine (not a boxed card)", () => {
-    const past = makeEvent({
+  // One past recap, shared by the tests below so the fixture has a single home.
+  const makePastReunion = (overrides = {}) =>
+    makeEvent({
       id: 9,
       title: "Reunion",
       status: "scheduled",
@@ -1260,13 +1261,16 @@ describe("event timeline entries", () => {
       },
       polls: [],
       rsvp: { counts: { going: 6, maybe: 0, declined: 0, guests: 0 } },
+      ...overrides,
     });
+
+  it("renders a past event as a quiet recap on the spine (not a boxed card)", () => {
+    const past = makePastReunion();
     renderWithAuth(
       <Routes>
         <Route path="/" element={<Timeline pastEvents={[past]} />} />
       </Routes>
     );
-    expect(screen.getByText("Happened")).toBeInTheDocument();
     expect(screen.getByText("6 went")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Reunion/ })).toHaveAttribute(
       "href",
@@ -1277,6 +1281,89 @@ describe("event timeline entries", () => {
     // It keeps the Date · Time · Where pills, like its future self.
     expect(screen.getByText("Date")).toBeInTheDocument();
     expect(screen.getByText("Where")).toBeInTheDocument();
+    // #293: and it no longer wears a "Happened" tag — its position below the
+    // now-node, under a dated divider among posts equally in the past, says it.
+    expect(screen.queryByText("Happened")).toBeNull();
+  });
+
+  it("doesn't repeat a past recap's when under its title (#293)", () => {
+    // The rail carries the clock time, the day divider above carries the date,
+    // and the Date · Time chips carry what the event settled on. The meta line
+    // used to write both again — a boxed card's line, left behind when the entry
+    // moved onto the spine — so the date read three times and the time three
+    // times. It now carries the organiser and the venue only.
+    const past = makePastReunion();
+    // Rendered the way `GroupPage` really renders it — a composer at the now
+    // node and a post below — because both of those carry a `.tl-rail` and a
+    // `.tl-body` of their own, and a bare first-match selector would read them.
+    renderWithAuth(
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <Timeline
+              pastEvents={[past]}
+              posts={[
+                {
+                  id: 1,
+                  author: you,
+                  body: "A post on the same spine",
+                  created_at: "2026-06-01T09:00:00Z",
+                  comment_count: 0,
+                },
+              ]}
+              header={<div className="tl-entry tl-now-anchor" />}
+            />
+          }
+        />
+      </Routes>
+    );
+    const entry = document.querySelector(".tl-entry--event-past");
+    // Derived, never spelled out: these go through `toLocaleDateString`, so a
+    // hardcoded "Mon 1 Jun" passes here and fails on CI, which renders
+    // "Mon, Jun 1". That exact mistake failed CI on #292.
+    expect(within(entry).queryByText(formatEventWhen(past))).toBeNull();
+    expect(within(entry).getByText("You · The Oakhouse")).toBeInTheDocument();
+    // What does say when: the rail's clock time, and the chips. (The rail pads
+    // its minutes and the chip doesn't — the rail shares a column with the
+    // posts' clock times and has to come out their width; see events.md.)
+    const rail = entry.querySelector(".tl-rail time");
+    expect(within(entry.querySelector(".tl-rail")).getByText("1:00pm"))
+      .toBeInTheDocument();
+    expect(
+      within(entry.querySelector(".ev-chips")).getByText(
+        formatEventDate("2026-06-01")
+      )
+    ).toBeInTheDocument();
+    expect(
+      within(entry.querySelector(".ev-chips")).getByText("1pm")
+    ).toBeInTheDocument();
+    // The rail splits over two lines, so — as `PostCard` does for its clock
+    // time — it hands the whole when to assistive tech and to the tooltip. That
+    // matters more now the body doesn't write it.
+    expect(rail).toHaveAttribute("aria-label", formatEventWhen(past));
+    expect(rail).toHaveAttribute("title", formatEventWhen(past));
+  });
+
+  it("labels an all-day past recap's rail, and keeps it a <time> (#293)", () => {
+    // The visible rail reads "all" / "day" with no date at all, so the label is
+    // the only unambiguous statement of when for a screen reader. `<time>` also
+    // picks up `.tl-rail > time`, which is what lines it up with the clock times
+    // above and below it in the same column.
+    const past = makePastReunion({ start_time: null });
+    renderWithAuth(
+      <Routes>
+        <Route path="/" element={<Timeline pastEvents={[past]} />} />
+      </Routes>
+    );
+    const rail = document
+      .querySelector(".tl-entry--event-past")
+      .querySelector(".tl-rail time");
+    expect(rail.textContent).toBe("allday");
+    expect(rail).toHaveAttribute(
+      "aria-label",
+      `${formatEventDate("2026-06-01")} · all day`
+    );
   });
 
   it("files all-day past events under their own date, not the viewer's", () => {
@@ -1342,6 +1429,37 @@ describe("event timeline entries", () => {
     );
     expect(screen.getByRole("link", { name: /Camping/ })).toBeInTheDocument();
     expect(screen.getByText(/2 going/)).toBeInTheDocument();
+    // #293: a future entry doesn't write its when under the title either — the
+    // accent rail beside it dates it and the chips hold the record, so writing
+    // it here made three statements of the date. Read off the meta line itself,
+    // since the Date chip legitimately states the same date.
+    const entry = document.querySelector(".tl-entry--event");
+    expect(entry.querySelector(".tl-body p").textContent).toBe("You");
+    // The rail dates it in the accent day/month form, and the Date chip holds
+    // the full record — the two places a future entry is allowed to say it.
+    // Derived, never spelled out: the month goes through `toLocaleDateString`,
+    // so a hardcoded "Aug" passes here and fails a French runner on "août".
+    const rail = entry.querySelector(".tl-rail time");
+    expect(rail).toHaveAttribute("dateTime", "2026-08-20");
+    expect(rail.textContent).toBe(
+      `20${parseEventDate("2026-08-20").toLocaleDateString(undefined, {
+        month: "short",
+      })}`
+    );
+    // The rail shows no year, so its label carries the whole date — the fix for
+    // two upcoming events twelve months apart drawing the same two lines. This
+    // fixture sets no `start_time`, so it says so rather than implying midnight.
+    expect(rail).toHaveAttribute(
+      "aria-label",
+      `${formatEventWhen(fut)} · all day`
+    );
+    expect(
+      within(entry.querySelector(".ev-chips")).getByText(
+        // The chip renders `formatEventDate`, not `formatEventWhen` — they only
+        // coincide while this fixture has no `start_time`.
+        formatEventDate("2026-08-20")
+      )
+    ).toBeInTheDocument();
   });
 
   it("carries the reaction row and comment count, as a post on this spine does", () => {
