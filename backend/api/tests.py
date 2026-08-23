@@ -11450,17 +11450,24 @@ class SendPushesCommandTests(APITestCase):
 
         sent = self._sent_body(urlopen)[0]
         self.assertEqual(sent["priority"], "high")
+        # A fixture guard, not a second copy of the channel rule (which
+        # `test_a_mention_push_uses_the_mentions_channel` owns): every message
+        # push is high priority, so without this the case would pass just as
+        # happily on a fixture that had stopped being a mention at all.
         self.assertEqual(sent["channelId"], "mentions")
 
     def test_a_notification_push_states_its_priority_instead_of_omitting_it(self):
         """Not high — but said out loud, which is the point of the issue.
 
-        A reaction or an invite is not worth waking a sleeping radio for, and
-        FCM throttles apps that overuse high priority, which would cost us the
-        delivery of the pushes that *are* urgent. But an omitted `priority` is
-        not "we chose the default", it is an unpinned platform default chosen by
-        nobody — so the key is present and carries Expo's own documented name
-        for it.
+        A reaction or an invite is not worth waking a dozing Android radio for,
+        and FCM throttles apps that overuse high priority, which would cost us
+        the delivery of the pushes that *are* urgent.
+
+        On the wire `default` is Expo's documented per-platform mapping (normal
+        on Android, high on iOS) and so is identical in effect to sending
+        nothing — which is exactly why the assertion is on `_payload`'s literal
+        below as well as here. This half only pins that the field reaches the
+        wire at all.
         """
         self._queue(kind=Notification.Kind.REACTION, post=self.post)
 
@@ -11470,26 +11477,58 @@ class SendPushesCommandTests(APITestCase):
         self.assertIn("priority", sent)
         self.assertEqual(sent["priority"], "default")
 
-    def test_a_payload_that_forgets_its_priority_still_sends_one(self):
-        """A future third `_payload` branch cannot reintroduce the bug silently.
+    def test_each_payload_branch_names_its_own_priority(self):
+        """The recorded decision, pinned where it is actually made.
 
-        `_message` reads the key with a conservative fallback rather than
-        `data[...]` on purpose — a `KeyError` here would raise inside `_drain`'s
-        transaction and stop *all* push delivery every tick, which is the far
-        worse failure. So the guarantee is that something is always on the wire,
-        and this pins which something.
+        `_message` falls back to `default` for a payload that has no priority at
+        all, so a wire assertion alone cannot tell "the notification branch
+        chose default" from "the notification branch forgot and the fallback
+        covered for it" — the bytes are identical. Deleting the literal from
+        `_payload` has to fail something, or the decision is unenforced and the
+        next person tidies away a line that looks like a no-op.
         """
         from api.management.commands.send_pushes import Command
 
         command = Command()
+        # Both helpers enqueue their own outbox row; read them back rather than
+        # building one, or the unique-per-notification constraint fires.
+        self._queue()
+        self._queue_message()
+        notification_row = PushOutbox.objects.get(notification__isnull=False)
+        message_row = PushOutbox.objects.get(message__isnull=False)
 
-        message = command._message(
-            self.device,
-            {"id": None, "kind": "message", "text": "hi", "url": "/messages/1"},
-            badge=0,
-        )
+        self.assertEqual(command._payload(notification_row, {})["priority"], "default")
+        self.assertEqual(command._payload(message_row, {})["priority"], "high")
 
-        self.assertEqual(message["priority"], "default")
+    def test_a_payload_with_no_usable_priority_still_sends_a_valid_one(self):
+        """A future third `_payload` branch cannot reintroduce the bug silently.
+
+        `_message` reads the key with `or` rather than `data[...]` or a plain
+        `.get` default, and both halves of that matter. A `KeyError` would raise
+        inside `_drain`'s transaction and stop *all* push delivery every tick;
+        and a `None` reaching the wire as `"priority": null` is worse than it
+        looks — Expo 400s an invalid priority, which fails **every row in the
+        batch** rather than the one message, unlike an unknown `channelId` that
+        is merely dropped per-push.
+        """
+        from api.management.commands.send_pushes import Command
+
+        command = Command()
+        base = {"id": None, "kind": "message", "text": "hi", "url": "/messages/1"}
+
+        missing = command._message(self.device, base, badge=0)
+        explicit_none = command._message(self.device, {**base, "priority": None}, badge=0)
+
+        self.assertEqual(missing["priority"], "default")
+        self.assertEqual(explicit_none["priority"], "default")
+
+    def test_the_only_priorities_sent_are_ones_expo_accepts(self):
+        # Expo rejects an unknown `priority` with a 400 that takes the whole
+        # batch down, so the legal set is named (`PUSH_PRIORITIES`) the way the
+        # channel ids are — and both `_payload` branches have to stay inside it.
+        for branch in ("default", "high"):
+            with self.subTest(priority=branch):
+                self.assertIn(branch, notifications.PUSH_PRIORITIES)
 
     # --- Preview previews (Phase 10b) -----------------------------------------
 

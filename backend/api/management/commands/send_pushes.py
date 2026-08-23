@@ -73,6 +73,8 @@ from ...models import (
 from ...notifications import (
     ANONYMOUS_MESSAGE_BODY,
     MENTION_CHANNEL,
+    PUSH_PRIORITY_DEFAULT,
+    PUSH_PRIORITY_HIGH,
     channel_for_kind,
     is_mentioned,
     message_push_body,
@@ -82,29 +84,6 @@ from ...views import badge_count_for
 
 # Expo's reply carries one ticket per message, in the order sent.
 _DEVICE_NOT_REGISTERED = "DeviceNotRegistered"
-
-# Expo's ``priority`` field (issue #363), which governs **when** a push is
-# delivered — a different layer from the Android channel importance beside it,
-# which governs how it looks *once it has arrived*.
-#
-# Easy to conflate, and the conflation is expensive: the app already files
-# message pushes on a HIGH-importance channel, but importance is applied by the
-# device after FCM has handed the message over, and a HIGH-importance channel
-# does nothing to rescue a normal-priority message that FCM is still holding.
-# FCM's own documentation is explicit that normal-priority messages are
-# **delayed while the device is in Doze**, batched until it next wakes, and that
-# high priority is what may wake a sleeping device to open a network connection.
-# A phone in a pocket is precisely the case push exists for and precisely the
-# case Doze is designed to batch.
-#
-# Omitting the field is not neutral: Expo treats an absent ``priority`` as
-# ``default``, and ``default`` maps to whatever each platform's own default
-# happens to be — a wire-level behaviour chosen by nobody and pinned by nothing.
-# So both values below are set explicitly, including the one that resolves to
-# the platform default, because "we deliberately did not ask for high here" and
-# "nobody thought about this field" should not look identical in the code.
-_PUSH_PRIORITY_HIGH = "high"
-_PUSH_PRIORITY_DEFAULT = "default"
 
 # How long ``--loop`` waits after an iteration raised before trying again.
 #
@@ -1375,14 +1354,12 @@ class Command(BaseCommand):
                 "text": data["text"],
                 "url": data["url"],
                 "channel": channel_for_kind(data["kind"]),
-                # **Not high** (issue #363), and deliberately so rather than by
-                # omission. A reaction, a connection request or a poll opening
-                # is not worth waking a dozing phone's radio for: FCM asks that
-                # high priority be kept for messages needing immediate
-                # attention, and throttles apps that overuse it — which would
-                # cost us the delivery of the pushes that *are* urgent. This is
-                # the same split the notification channels already make.
-                "priority": _PUSH_PRIORITY_DEFAULT,
+                # **Not high** (issue #363): a reaction or an invite is not
+                # worth waking a dozing radio for. Deliberately written down
+                # rather than omitted, though on the wire the two are the same
+                # thing — see ``notifications.PUSH_PRIORITY_DEFAULT`` for why
+                # that is the point rather than a contradiction.
+                "priority": PUSH_PRIORITY_DEFAULT,
             }
 
         # **Not simply ``row.message``** (issue #346). A queued row keeps
@@ -1450,12 +1427,13 @@ class Command(BaseCommand):
             # explicitly not what this feature is for.
             "previewable": True,
             # **High** (issue #363): the one push kind whose whole value is that
-            # it arrives now. Mentions ride this branch too — ``Kind.MENTION``
-            # never creates a ``Notification`` — so they inherit it, which is
-            # what the mentions channel would otherwise promise and fail to
-            # deliver. See ``_PUSH_PRIORITY_HIGH`` for why this is not the same
-            # thing as the channel's importance.
-            "priority": _PUSH_PRIORITY_HIGH,
+            # it arrives now, and the only branch whose Android delivery this
+            # actually changes. Mentions ride here too — ``Kind.MENTION`` never
+            # creates a ``Notification`` — so they inherit it, which is what the
+            # mentions channel would otherwise promise and fail to deliver. Not
+            # the same thing as the channel's importance; see
+            # ``notifications.PUSH_PRIORITY_HIGH``.
+            "priority": PUSH_PRIORITY_HIGH,
         }
 
     def _message(self, device, data, badge):
@@ -1490,18 +1468,22 @@ class Command(BaseCommand):
                 "kind": data["kind"],
                 "url": data["url"],
             },
-            # When Expo/FCM/APNs may deliver this, as opposed to how it looks on
-            # arrival — see ``_PUSH_PRIORITY_HIGH``. Unconditional, like
-            # ``badge`` and unlike ``categoryId``/``channelId``: a push with no
-            # priority is not a push that opted out, it is one riding an
-            # unpinned platform default, which is the thing issue #363 is about.
+            # When Expo/FCM/APNs may deliver this, as against how it looks once
+            # it has — see ``notifications.PUSH_PRIORITY_HIGH``. Unconditional,
+            # like ``badge`` and unlike ``categoryId``/``channelId``, which a
+            # kind opts into: a push with no priority is not one that opted out.
             #
-            # ``.get`` with a conservative fallback rather than ``data[...]``:
-            # both ``_payload`` branches set the key, and a future third that
-            # forgot to should send a lower-priority push, not raise a
-            # ``KeyError`` inside ``_drain``'s transaction and stop all push
-            # delivery every tick — the failure mode ``previewable`` documents.
-            "priority": data.get("priority", _PUSH_PRIORITY_DEFAULT),
+            # ``or`` rather than ``data[...]`` or a plain ``.get`` default. A
+            # future third ``_payload`` branch that omitted the key — or set it
+            # to ``None`` — must not put ``"priority": null`` on the wire:
+            # Expo 400s an invalid priority, and ``_post`` raises on the reply,
+            # which fails **every row in the batch** rather than the one message
+            # (unlike an unknown ``channelId``, which is dropped per-push). Nor
+            # may it raise a ``KeyError`` here, inside ``_drain``'s transaction,
+            # which would stop all push delivery every tick — the failure mode
+            # ``previewable`` documents. Falling back to what every notification
+            # push already sends is the outcome that can hurt nobody.
+            "priority": data.get("priority") or PUSH_PRIORITY_DEFAULT,
         }
         # **A device with previews off gets an anonymous body, and no Reply.**
         #

@@ -428,6 +428,15 @@ uploaded manually, internal testing track, tester list, opt-in links out. Plus a
 - [ ] **Push works on Android** via FCM: respects Phase 8 per-type preferences,
       deep-links in (warm *and* cold start), uses notification channels mapped to
       the preference groups, and shows a proper monochrome status-bar icon.
+- [ ] **Push priority verified on a real handset** (issue #363, code landed
+      separately). A message push must arrive promptly with the phone **idle and
+      the screen off for several minutes** — the Doze case the field exists for,
+      and the only test that proves it; a reaction push, which stays at
+      `default`, must still arrive at all. Do this on a device rather than the
+      emulator, which does not reproduce Doze faithfully. Worth measuring the
+      *current* behaviour too: if pushes already arrive promptly, Expo's
+      effective default was high and the change is insurance rather than a fix —
+      either result belongs in `reference/notifications.md`.
 - [ ] Back button behaves correctly in every modal, in multi-select, and at the
       root; no dead-end or app-exiting surprises.
 - [ ] Date/time pickers work on Android (event planning + date/time polls).

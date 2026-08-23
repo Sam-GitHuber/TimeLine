@@ -167,6 +167,47 @@ def channel_for_kind(kind):
     return _KIND_CHANNELS.get(kind, DEFAULT_CHANNEL)
 
 
+# --- Delivery priority (issue #363) -----------------------------------------
+#
+# **A different layer from the channel importance above, and the two are easy to
+# conflate.** Importance governs how a notification is *displayed* once it has
+# arrived — heads-up banner, sound, silent tray entry — and is applied by the
+# device after FCM has already handed the message over. Priority governs whether
+# FCM delivers it promptly *at all*: normal-priority messages are held while the
+# device is in Doze and batched until it next wakes, and a HIGH-importance
+# channel does nothing to rescue one that FCM is still holding.
+#
+# The two values, and what Expo actually puts on the wire for each:
+#
+# - ``high`` — FCM high priority, APNs priority 10. May wake a sleeping device
+#   to open a network connection.
+# - ``default`` — Expo's documented per-platform mapping: **normal on Android,
+#   high on iOS**. Identical in effect to omitting the field.
+#
+# That asymmetry is the reason ``default`` is right for notification kinds and
+# ``normal`` would be wrong. On Android it is already what we want (a reaction
+# is not worth waking a radio for, and FCM throttles apps that overuse high
+# priority, which would cost us the pushes that *are* urgent). On iOS it is
+# APNs priority 10 — which is today's behaviour for every push the app has ever
+# sent, and demoting the whole activity centre to priority 5 is a change nobody
+# asked for and no one has measured.
+#
+# So the field is written down rather than omitted for the reader's sake, not
+# the wire's: on the wire ``default`` *is* omission, and saying so is the point.
+# "We deliberately did not ask for high here" and "nobody thought about this
+# field" should not look identical in the code.
+#
+# The full argument, including why message pushes get ``high``, is in
+# docs/reference/notifications.md under "Delivery priority".
+PUSH_PRIORITY_HIGH = "high"
+PUSH_PRIORITY_DEFAULT = "default"
+
+# Every value we may put on the field, for the same reason ``ANDROID_CHANNELS``
+# exists: Expo rejects an unknown ``priority`` with a 400 that fails the whole
+# batch, not the one message, so the legal set is worth naming.
+PUSH_PRIORITIES = frozenset({PUSH_PRIORITY_HIGH, PUSH_PRIORITY_DEFAULT})
+
+
 # Kinds that refresh an existing *unread* row rather than stacking a duplicate:
 # a react/un-react/re-react, repeated edits to one event, or several batches of
 # photos added to one album, bump a single line to the top instead of filling

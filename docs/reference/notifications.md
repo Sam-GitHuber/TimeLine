@@ -915,43 +915,71 @@ being blunt about the two layers:
   displayed once it has already arrived** — heads-up banner, sound, silent tray
   entry. It is applied by the device, after FCM has handed the message over.
 - **Priority** (Expo's `priority` field, set by the server in `_message`) governs
-  **whether FCM delivers it now at all.** FCM delays normal-priority messages
-  while a device is in **Doze**, batching them until it next wakes; high priority
-  is what may wake a sleeping device to open a network connection.
+  **whether FCM delivers it promptly at all.** FCM holds normal-priority
+  messages while a device is in **Doze**, batching them until it next wakes; high
+  priority is what may wake a sleeping device to open a network connection.
 
 A HIGH-importance channel does not rescue a normal-priority message that FCM is
-still holding. Until #363 the field was **not set at all**, which is not neutral:
-Expo treats an absent `priority` as `default`, and `default` maps to whatever
-each platform's own default happens to be — so the one field deciding whether a
-phone in a pocket buzzes now or in ten minutes was an unpinned platform
-behaviour chosen by nobody.
+still holding. Until #363 the field was **not set at all**, so the one thing
+deciding whether a phone in a pocket buzzes now or in ten minutes was left to
+each platform's own default.
 
-Both values are now set explicitly, including the one that resolves to the
-platform default, so that *"we deliberately did not ask for high here"* and
-*"nobody thought about this field"* cannot look identical in the code:
+**What the two values actually put on the wire.** This is the part that decides
+everything below, and it is asymmetric:
+
+| Value | Android (FCM) | iOS (APNs) |
+|---|---|---|
+| `high` | high priority — may wake a sleeping device | priority 10 |
+| `default` | **normal** | **high** (priority 10) |
+| *(omitted)* | identical to `default` | identical to `default` |
 
 | Push | `priority` | Why |
 |---|---|---|
-| message (and mention — it rides the message branch) | `high` | The one push kind whose entire value is that it arrives *now*. A phone in a pocket is exactly what push is for and exactly what Doze batches. |
-| every `Notification` kind (replies, reactions, events, social) | `default` | Not worth waking a sleeping radio for. FCM asks that high priority be kept for messages needing immediate attention and **throttles apps that overuse it** — which would cost us the delivery of the pushes that *are* urgent. |
+| message (and mention — it rides the message branch) | `high` | The one push kind whose entire value is that it arrives *now*. A phone in a pocket is exactly what push is for and exactly what Doze batches. **This is the only branch whose delivery actually changes**, and only on Android: iOS was already sending these at priority 10 under the old omitted field. |
+| every `Notification` kind (replies, reactions, events, social) | `default` | Not worth waking a dozing Android radio for. FCM asks that high priority be kept for messages needing immediate attention and **throttles apps that overuse it** — which would cost us the delivery of the pushes that *are* urgent. |
 
 That split is the same one the channel importances already make (`messages` and
 `mentions` are the two HIGH channels), so the two layers agree rather than
 pulling against each other.
 
-`_message` sets the field unconditionally — like `badge`, unlike
-`categoryId`/`channelId`, which a kind opts into — reading it from the payload
-with a conservative fallback rather than a subscript. A future third `_payload`
-branch that forgot the key should send a lower-priority push, not raise a
-`KeyError` inside `_drain`'s transaction and stop **all** push delivery every
-tick.
+**Why `default` and not `normal` for notification kinds.** `normal` is the value
+that would genuinely pin the wire behaviour, and it was rejected on purpose. On
+Android the two are the same thing. On **iOS** they are not: `default` is APNs
+priority 10, `normal` is priority 5, and priority 5 asks APNs to deliver at a
+time that conserves power. Choosing `normal` would therefore demote every
+activity-centre push on the platform the app actually ships to today — a
+user-visible change nobody asked for and nobody has measured — in exchange for
+pinning a value that on Android is already what we want.
 
-**Not yet observed on a real Android handset.** The reasoning above is from
-Expo's and FCM's documented behaviour; what an idle Android phone actually does
-with our payload shape is a device observation, and Phase 10 is where it gets
-made. The change cannot make delivery *later* than it was — `default` is
-precisely what an omitted field already meant — so it is safe insurance either
-way.
+So be clear about what writing `default` down buys, because it is not a wire
+change: **on the wire, `default` is omission.** It is written for the reader, so
+that *"we deliberately did not ask for high here"* and *"nobody thought about
+this field"* stop looking identical in the code. The wire fix is the message
+branch; the rest is the decision being recorded where the next person will find
+it. Both literals are pinned by a test asserting `_payload`'s own return value,
+not just the bytes — a wire assertion cannot tell the recorded decision from the
+fallback covering for its absence.
+
+`_message` sets the field unconditionally — like `badge`, unlike
+`categoryId`/`channelId`, which a kind opts into — reading it as
+`data.get("priority") or PUSH_PRIORITY_DEFAULT`. Both halves of that are
+load-bearing. A subscript would raise a `KeyError` inside `_drain`'s transaction
+and stop **all** push delivery every tick. A plain `.get` default would still let
+a `None` through as `"priority": null`, and an invalid priority is not like an
+unknown `channelId` (silently dropped, one push): Expo **400s the request**, so
+one bad payload fails every row in that batch.
+
+The constants live in `api/notifications.py` (`PUSH_PRIORITY_HIGH`,
+`PUSH_PRIORITY_DEFAULT`, and `PUSH_PRIORITIES` naming the legal set) beside the
+channel vocabulary, for the reason that module's docstring gives: every rule
+about what may reach someone's phone should be readable in one file.
+
+**Not yet observed on a real Android handset.** Everything above is reasoned from
+Expo's and FCM's documented behaviour; what an idle Android phone does with our
+payload shape is a device observation, and it is carried in Phase 10's definition
+of done rather than assumed here. The change cannot make delivery *later* than it
+was — no push moves to a lower priority on either platform — so it is safe
+insurance whichever way that observation falls.
 
 ### What leaves the box, and who sees it
 
@@ -981,6 +1009,14 @@ recipient's total unread count — so the services in the path also see *how muc
 is waiting for a device, and can watch that number rise and fall. Same category
 as the deep-link route above: a count, naming nobody and quoting nothing, and
 the only way to put a number on the icon of a phone that isn't running the app.
+
+**And the delivery priority** (#363), which is the weakest of the three but
+belongs on an exhaustive list. `high` on a message push and `default` on
+everything else means the services in the path can tell a private message apart
+from an activity-centre notification without reading either. That is already
+implied by the `channelId` and the `/messages/<id>` route beside it, so it
+discloses nothing those two didn't — but this section exists to be complete
+rather than to be reassuring, and a field added is a field listed.
 
 Deliberately **not** included: any post, comment **or message** text, any photo,
 any email address. A push names people but never quotes them — so a lock screen
