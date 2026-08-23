@@ -906,6 +906,53 @@ A kind with no mapping falls back to `social` rather than being dropped — but 
 test enumerates `Notification.Kind`, so adding a kind without a channel fails the
 suite rather than quietly half-working.
 
+### Delivery priority — a different thing from importance (issue #363)
+
+Easy to conflate with the table above, and expensive to conflate, so it is worth
+being blunt about the two layers:
+
+- **Importance** (the channel, set by the app) governs **how a notification is
+  displayed once it has already arrived** — heads-up banner, sound, silent tray
+  entry. It is applied by the device, after FCM has handed the message over.
+- **Priority** (Expo's `priority` field, set by the server in `_message`) governs
+  **whether FCM delivers it now at all.** FCM delays normal-priority messages
+  while a device is in **Doze**, batching them until it next wakes; high priority
+  is what may wake a sleeping device to open a network connection.
+
+A HIGH-importance channel does not rescue a normal-priority message that FCM is
+still holding. Until #363 the field was **not set at all**, which is not neutral:
+Expo treats an absent `priority` as `default`, and `default` maps to whatever
+each platform's own default happens to be — so the one field deciding whether a
+phone in a pocket buzzes now or in ten minutes was an unpinned platform
+behaviour chosen by nobody.
+
+Both values are now set explicitly, including the one that resolves to the
+platform default, so that *"we deliberately did not ask for high here"* and
+*"nobody thought about this field"* cannot look identical in the code:
+
+| Push | `priority` | Why |
+|---|---|---|
+| message (and mention — it rides the message branch) | `high` | The one push kind whose entire value is that it arrives *now*. A phone in a pocket is exactly what push is for and exactly what Doze batches. |
+| every `Notification` kind (replies, reactions, events, social) | `default` | Not worth waking a sleeping radio for. FCM asks that high priority be kept for messages needing immediate attention and **throttles apps that overuse it** — which would cost us the delivery of the pushes that *are* urgent. |
+
+That split is the same one the channel importances already make (`messages` and
+`mentions` are the two HIGH channels), so the two layers agree rather than
+pulling against each other.
+
+`_message` sets the field unconditionally — like `badge`, unlike
+`categoryId`/`channelId`, which a kind opts into — reading it from the payload
+with a conservative fallback rather than a subscript. A future third `_payload`
+branch that forgot the key should send a lower-priority push, not raise a
+`KeyError` inside `_drain`'s transaction and stop **all** push delivery every
+tick.
+
+**Not yet observed on a real Android handset.** The reasoning above is from
+Expo's and FCM's documented behaviour; what an idle Android phone actually does
+with our payload shape is a device observation, and Phase 10 is where it gets
+made. The change cannot make delivery *later* than it was — `default` is
+precisely what an omitted field already meant — so it is safe insurance either
+way.
+
 ### What leaves the box, and who sees it
 
 Worth being explicit, since privacy-first is a project non-negotiable and push

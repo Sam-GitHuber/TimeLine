@@ -11421,6 +11421,76 @@ class SendPushesCommandTests(APITestCase):
 
         self.assertNotIn("categoryId", self._sent_body(urlopen)[0])
 
+    # --- Delivery priority (issue #363) ---------------------------------------
+
+    def test_a_message_push_asks_for_high_priority(self):
+        """The field that decides whether a dozing Android phone buzzes now.
+
+        Distinct from the channel importance the app sets, which only governs
+        how a notification is *displayed* once FCM has already handed it over. A
+        HIGH-importance channel does not rescue a normal-priority message that
+        FCM is still holding until the device next wakes, so this is pinned on
+        the wire rather than inferred from the channel.
+        """
+        self._queue_message()
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["priority"], "high")
+
+    def test_a_mention_push_inherits_the_high_priority(self):
+        # A mention has no `Notification` row, so it rides the message branch —
+        # which is how it gets this without a rule of its own. Pinned because a
+        # mentions channel that promises to reach you in a muted chat, riding a
+        # push FCM may sit on, keeps only half that promise.
+        _convo, message = self._queue_message(text="@Me look at this")
+        MessageMention.objects.create(message=message, user=self.me)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["priority"], "high")
+        self.assertEqual(sent["channelId"], "mentions")
+
+    def test_a_notification_push_states_its_priority_instead_of_omitting_it(self):
+        """Not high — but said out loud, which is the point of the issue.
+
+        A reaction or an invite is not worth waking a sleeping radio for, and
+        FCM throttles apps that overuse high priority, which would cost us the
+        delivery of the pushes that *are* urgent. But an omitted `priority` is
+        not "we chose the default", it is an unpinned platform default chosen by
+        nobody — so the key is present and carries Expo's own documented name
+        for it.
+        """
+        self._queue(kind=Notification.Kind.REACTION, post=self.post)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertIn("priority", sent)
+        self.assertEqual(sent["priority"], "default")
+
+    def test_a_payload_that_forgets_its_priority_still_sends_one(self):
+        """A future third `_payload` branch cannot reintroduce the bug silently.
+
+        `_message` reads the key with a conservative fallback rather than
+        `data[...]` on purpose — a `KeyError` here would raise inside `_drain`'s
+        transaction and stop *all* push delivery every tick, which is the far
+        worse failure. So the guarantee is that something is always on the wire,
+        and this pins which something.
+        """
+        from api.management.commands.send_pushes import Command
+
+        command = Command()
+
+        message = command._message(
+            self.device,
+            {"id": None, "kind": "message", "text": "hi", "url": "/messages/1"},
+            badge=0,
+        )
+
+        self.assertEqual(message["priority"], "default")
+
     # --- Preview previews (Phase 10b) -----------------------------------------
 
     def test_the_wire_body_never_carries_the_message_text(self):
