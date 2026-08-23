@@ -906,6 +906,96 @@ A kind with no mapping falls back to `social` rather than being dropped — but 
 test enumerates `Notification.Kind`, so adding a kind without a channel fails the
 suite rather than quietly half-working.
 
+### Delivery priority — a different thing from importance (issue #363)
+
+Easy to conflate with the table above, and expensive to conflate, so it is worth
+being blunt about the two layers:
+
+- **Importance** (the channel, set by the app) governs **how a notification is
+  displayed once it has already arrived** — heads-up banner, sound, silent tray
+  entry. It is applied by the device, after FCM has handed the message over.
+- **Priority** (Expo's `priority` field, set by the server in `_message`) governs
+  **whether FCM delivers it promptly at all.** FCM holds normal-priority
+  messages while a device is in **Doze**, batching them until it next wakes; high
+  priority is what may wake a sleeping device to open a network connection.
+
+A HIGH-importance channel does not rescue a normal-priority message that FCM is
+still holding. Until #363 the field was **not set at all**, so the one thing
+deciding whether a phone in a pocket buzzes now or in ten minutes was left to
+each platform's own default.
+
+**What the two values actually put on the wire.** This is the part that decides
+everything below, and it is asymmetric:
+
+| Value | Android (FCM) | iOS (APNs) |
+|---|---|---|
+| `high` | high priority — may wake a sleeping device | priority 10 |
+| `default` | **normal** | **high** (priority 10) |
+| *(omitted)* | identical to `default` | identical to `default` |
+
+| Push | `priority` | Why |
+|---|---|---|
+| message (and mention — it rides the message branch) | `high` | The one push kind whose entire value is that it arrives *now*. A phone in a pocket is exactly what push is for and exactly what Doze batches. **This is the only branch whose delivery actually changes**, and only on Android: iOS was already sending these at priority 10 under the old omitted field. |
+| every `Notification` kind (replies, reactions, events, social) | `default` | Not worth waking a dozing Android radio for. FCM asks that high priority be kept for messages needing immediate attention and **throttles apps that overuse it** — which would cost us the delivery of the pushes that *are* urgent. |
+
+That split is the same one the channel importances already make (`messages` and
+`mentions` are the two HIGH channels), so the two layers agree rather than
+pulling against each other.
+
+**Why `default` and not `normal` for notification kinds.** `normal` is the value
+that would genuinely pin the wire behaviour, and it was rejected on purpose. On
+Android the two are the same thing. On **iOS** they are not: `default` is APNs
+priority 10, `normal` is priority 5, and priority 5 asks APNs to deliver at a
+time that conserves power. Choosing `normal` would therefore demote every
+activity-centre push on the platform the app actually ships to today — a
+user-visible change nobody asked for and nobody has measured — in exchange for
+pinning a value that on Android is already what we want.
+
+So be clear about what writing `default` down buys, because it is not a wire
+change: **on the wire, `default` is omission.** It is written for the reader, so
+that *"we deliberately did not ask for high here"* and *"nobody thought about
+this field"* stop looking identical in the code. The wire fix is the message
+branch; the rest is the decision being recorded where the next person will find
+it. Both literals are pinned by a test asserting `_payload`'s own return value,
+not just the bytes — a wire assertion cannot tell the recorded decision from the
+fallback covering for its absence.
+
+`_message` sets the field unconditionally — like `badge`, unlike
+`categoryId`/`channelId`, which a kind opts into — and **derives it from the
+kind** via `notifications.priority_for_kind`, deliberately shaped like
+`channel_for_kind` beside it. Both answer "what goes on the wire for this kind",
+so both live in that module, for the reason its docstring gives: every rule about
+what may reach someone's phone should be readable in one file.
+
+Deriving it rather than having each `_payload` branch set a key is what makes the
+guarantee total. There is no key a branch can forget, no fallback to get wrong,
+and — since `priority_for_kind` is closed over `PUSH_PRIORITIES` — no way to put
+a value on the wire that Expo would reject. That last part matters more than it
+looks: an invalid `priority` is **not** like an unknown `channelId`, which is
+dropped silently for the one push. Expo **400s the request**, `_post` raises on
+the reply, and every row in that batch is failed and requeued — so one bad value
+blocks unrelated pushes, and the next tick rebuilds the same poisoned batch.
+
+A kind added later gets `default`, the same conservative way an unmapped kind
+gets `DEFAULT_CHANNEL` — and a test enumerating `Notification.Kind` makes that a
+decision someone took rather than one nobody noticed.
+
+**Not yet observed on a real Android handset.** Everything above is reasoned from
+Expo's and FCM's documented behaviour; what an idle Android phone does with our
+payload shape is a device observation, and it is carried in Phase 10's definition
+of done rather than assumed here.
+
+No push moves to a *lower* priority on either platform, so nothing is directly
+slowed. The one way this could cost latency is second-order and worth stating
+rather than glossing: FCM throttles senders that overuse high priority, and the
+message branch is not rate-limited in a way that bounds it — `_should_space_out`
+applies a 60s per-thread cooldown but **exempts @mentions by design**, so a busy
+group chat that mentions someone repeatedly is the case with no ceiling. That is
+the trade the message/notification split exists to keep small (a reaction storm,
+the high-volume case, stays at `default`), but "cannot make anything later" would
+be too strong a claim. If throttling is ever suspected, the mention exemption is
+the first thing to look at.
+
 ### What leaves the box, and who sees it
 
 Worth being explicit, since privacy-first is a project non-negotiable and push
@@ -929,11 +1019,27 @@ A mention says *"Ada mentioned you"* (Phase 9b M8) — which is the same rule, a
 earns its place because a chat you silenced suddenly buzzing owes you an
 explanation.
 
+**So is the Android notification channel.** Every push carries a `channelId`
+(see "Android notification channels" above), so Expo and Google can see which
+*category* a push belongs to — `messages`, `mentions`, `reactions`, `social`,
+`events` — without reading any of it. It is the most revealing of the metadata
+fields on this list, and it earns its place the same way the deep-link route
+does: an Android push naming no channel is dropped silently rather than
+delivered, so there is no version of this feature without it.
+
 **The icon badge is metadata too** (#179). Every push carries a `badge` — the
 recipient's total unread count — so the services in the path also see *how much*
 is waiting for a device, and can watch that number rise and fall. Same category
 as the deep-link route above: a count, naming nobody and quoting nothing, and
 the only way to put a number on the icon of a phone that isn't running the app.
+
+**And the delivery priority** (#363), the weakest of the set but on an
+exhaustive list all the same. `high` on a message push and `default` on
+everything else lets the services in the path tell a private message from an
+activity-centre notification without reading either — which the `channelId`
+above and the `/messages/<id>` route already gave them, so it adds nothing new.
+It is listed because this section exists to be complete rather than to be
+reassuring, and it has been wrong once before by leaving something implied.
 
 Deliberately **not** included: any post, comment **or message** text, any photo,
 any email address. A push names people but never quotes them — so a lock screen

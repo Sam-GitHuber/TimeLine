@@ -167,6 +167,60 @@ def channel_for_kind(kind):
     return _KIND_CHANNELS.get(kind, DEFAULT_CHANNEL)
 
 
+# --- Delivery priority (issue #363) -----------------------------------------
+#
+# **Not the channel importance above, and the two are easy to conflate.**
+# Importance governs how a notification is *displayed* once it has arrived, and
+# is applied by the device after FCM has already handed the message over.
+# Priority governs whether FCM delivers it promptly at all — it holds
+# normal-priority messages while the device is in Doze — so a HIGH-importance
+# channel does nothing for one FCM is still holding.
+#
+# ``default`` is Expo's per-platform mapping (**normal on Android, high on
+# iOS**) and is identical in effect to omitting the field. That asymmetry is why
+# ``normal`` was rejected for notification kinds: on Android it changes nothing,
+# and on iOS it would demote the whole activity centre to APNs priority 5.
+#
+# The full argument — including why ``normal`` was weighed at all, and what this
+# does and does not change on the wire — is in docs/reference/notifications.md
+# under "Delivery priority". Kept there rather than restated here, so a
+# correction lands in one place.
+PUSH_PRIORITY_HIGH = "high"
+PUSH_PRIORITY_DEFAULT = "default"
+
+# Every value we may put on the field, for the same reason ``ANDROID_CHANNELS``
+# exists: Expo rejects an unknown ``priority`` with a 400 that fails the whole
+# batch, not the one message, so the legal set is worth naming — and is checked
+# on the way out in ``send_pushes._message``.
+PUSH_PRIORITIES = frozenset({PUSH_PRIORITY_HIGH, PUSH_PRIORITY_DEFAULT})
+
+
+def priority_for_kind(kind):
+    """How urgently FCM should deliver a push of this ``kind``.
+
+    Deliberately shaped like ``channel_for_kind`` directly above, and for the
+    same reason: both answer "what goes on the wire for this kind", so both
+    belong in this module and neither should be a literal sitting in the sender.
+    Deriving it here rather than having ``_payload`` set a key means a branch
+    *cannot* forget it — there is no key to omit, no fallback to get wrong, and
+    no way to put a value Expo would reject on the wire.
+
+    **Only the message kind is high**, mentions included: they have no
+    ``Notification`` row and ride the message push, so they inherit it, which is
+    what the mentions channel would otherwise promise and fail to deliver.
+    Everything else is ``default`` — a reaction or an invite is not worth waking
+    a dozing radio for, and FCM throttles apps that overuse high priority, which
+    would cost us the pushes that *are* urgent.
+
+    A kind added later gets ``default``, the same conservative way an unmapped
+    kind gets ``DEFAULT_CHANNEL`` — and a test enumerating ``Notification.Kind``
+    makes that a decision someone took rather than one nobody noticed.
+    """
+    if kind == "message":
+        return PUSH_PRIORITY_HIGH
+    return PUSH_PRIORITY_DEFAULT
+
+
 # Kinds that refresh an existing *unread* row rather than stacking a duplicate:
 # a react/un-react/re-react, repeated edits to one event, or several batches of
 # photos added to one album, bump a single line to the top instead of filling

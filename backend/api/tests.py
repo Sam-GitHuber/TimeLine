@@ -11421,6 +11421,102 @@ class SendPushesCommandTests(APITestCase):
 
         self.assertNotIn("categoryId", self._sent_body(urlopen)[0])
 
+    # --- Delivery priority (issue #363) ---------------------------------------
+
+    def test_a_message_push_asks_for_high_priority(self):
+        """The field that decides whether a dozing Android phone buzzes now.
+
+        Distinct from the channel importance the app sets, which only governs
+        how a notification is *displayed* once FCM has already handed it over. A
+        HIGH-importance channel does not rescue a normal-priority message that
+        FCM is still holding until the device next wakes, so this is pinned on
+        the wire rather than inferred from the channel.
+        """
+        self._queue_message()
+
+        urlopen = self._run()
+
+        self.assertEqual(self._sent_body(urlopen)[0]["priority"], "high")
+
+    def test_a_mention_push_inherits_the_high_priority(self):
+        # A mention has no `Notification` row, so it rides the message branch —
+        # which is how it gets this without a rule of its own. Pinned because a
+        # mentions channel that promises to reach you in a muted chat, riding a
+        # push FCM may sit on, keeps only half that promise.
+        _convo, message = self._queue_message(text="@Me look at this")
+        MessageMention.objects.create(message=message, user=self.me)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertEqual(sent["priority"], "high")
+        # A fixture guard, not a second copy of the channel rule (which
+        # `test_a_mention_push_uses_the_mentions_channel` owns): every message
+        # push is high priority, so without this the case would pass just as
+        # happily on a fixture that had stopped being a mention at all.
+        self.assertEqual(sent["channelId"], "mentions")
+
+    def test_a_notification_push_states_its_priority_instead_of_omitting_it(self):
+        """Not high — but said out loud, which is the point of the issue.
+
+        A reaction or an invite is not worth waking a dozing Android radio for,
+        and FCM throttles apps that overuse high priority, which would cost us
+        the delivery of the pushes that *are* urgent.
+
+        On the wire `default` is Expo's documented per-platform mapping (normal
+        on Android, high on iOS) and so is identical in effect to sending
+        nothing — which is why the rule itself is pinned on `priority_for_kind`
+        below, over every kind. This half only pins that the field reaches the
+        wire at all.
+        """
+        self._queue(kind=Notification.Kind.REACTION, post=self.post)
+
+        urlopen = self._run()
+
+        sent = self._sent_body(urlopen)[0]
+        self.assertIn("priority", sent)
+        self.assertEqual(sent["priority"], "default")
+
+    def test_only_the_message_kind_is_high_priority(self):
+        """The rule itself, enumerated over every kind rather than sampled.
+
+        The same shape as `test_every_notification_kind_maps_to_a_known_android_channel`
+        and for the same reason: a kind added later that *should* wake a phone
+        has to be an answered question, not a silent inheritance. Sampling one
+        reaction push proves nothing about the eleven kinds beside it.
+        """
+        self.assertEqual(notifications.priority_for_kind("message"), "high")
+        for kind in Notification.Kind.values:
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    notifications.priority_for_kind(kind),
+                    "default",
+                    f"{kind} became high priority without the decision being made",
+                )
+
+    def test_no_kind_can_put_a_priority_on_the_wire_that_expo_rejects(self):
+        """Why `priority` is derived from the kind rather than read from a payload.
+
+        Expo answers an unknown `priority` with a 400 that fails the **whole
+        batch**, not the one message — unlike an unknown `channelId`, which is
+        dropped silently per-push — and the next tick rebuilds and re-fails the
+        same poisoned batch. `priority_for_kind` is total and closed over
+        `PUSH_PRIORITIES`, so there is no payload key to mistype and no branch
+        that can forget one.
+
+        Deliberately asserts the *function's* output for every kind, not a pair
+        of literals against the frozenset that was built from them — that would
+        pass for every conceivable input and protect nothing, the trap already
+        written up on the channel test above.
+        """
+        kinds = [*Notification.Kind.values, "message", "something_added_later"]
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                self.assertIn(
+                    notifications.priority_for_kind(kind),
+                    notifications.PUSH_PRIORITIES,
+                )
+
     # --- Preview previews (Phase 10b) -----------------------------------------
 
     def test_the_wire_body_never_carries_the_message_text(self):

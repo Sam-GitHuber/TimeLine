@@ -76,6 +76,7 @@ from ...notifications import (
     channel_for_kind,
     is_mentioned,
     message_push_body,
+    priority_for_kind,
 )
 from ...serializers import NotificationSerializer
 from ...views import badge_count_for
@@ -1452,6 +1453,22 @@ class Command(BaseCommand):
                 "kind": data["kind"],
                 "url": data["url"],
             },
+            # When FCM/APNs may deliver this, as against how it looks once it
+            # has — see ``notifications.priority_for_kind``. Unconditional, like
+            # ``badge`` and unlike ``categoryId``/``channelId``, which a kind
+            # opts into: a push with no priority is not one that opted out.
+            #
+            # **Derived from the kind, not read from the payload.** An earlier
+            # cut had each ``_payload`` branch set the key and had this line
+            # fall back if one forgot. Deriving it means there is no key to
+            # forget, no fallback to get wrong, and — since ``priority_for_kind``
+            # can only return a member of ``PUSH_PRIORITIES`` — no way to put a
+            # value on the wire that Expo would reject. That last one matters
+            # more than it looks: an invalid ``priority`` is not like an unknown
+            # ``channelId`` (dropped silently, one push). Expo 400s the request,
+            # ``_post`` raises on the reply, and ``_send`` fails **every row in
+            # that batch**, which the next tick then rebuilds and re-fails.
+            "priority": priority_for_kind(data["kind"]),
         }
         # **A device with previews off gets an anonymous body, and no Reply.**
         #
