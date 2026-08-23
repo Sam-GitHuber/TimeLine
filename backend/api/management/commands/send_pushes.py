@@ -73,11 +73,10 @@ from ...models import (
 from ...notifications import (
     ANONYMOUS_MESSAGE_BODY,
     MENTION_CHANNEL,
-    PUSH_PRIORITY_DEFAULT,
-    PUSH_PRIORITY_HIGH,
     channel_for_kind,
     is_mentioned,
     message_push_body,
+    priority_for_kind,
 )
 from ...serializers import NotificationSerializer
 from ...views import badge_count_for
@@ -1354,12 +1353,6 @@ class Command(BaseCommand):
                 "text": data["text"],
                 "url": data["url"],
                 "channel": channel_for_kind(data["kind"]),
-                # **Not high** (issue #363): a reaction or an invite is not
-                # worth waking a dozing radio for. Deliberately written down
-                # rather than omitted, though on the wire the two are the same
-                # thing — see ``notifications.PUSH_PRIORITY_DEFAULT`` for why
-                # that is the point rather than a contradiction.
-                "priority": PUSH_PRIORITY_DEFAULT,
             }
 
         # **Not simply ``row.message``** (issue #346). A queued row keeps
@@ -1426,14 +1419,6 @@ class Command(BaseCommand):
             # reacted to your post", which has no preview to fetch and is
             # explicitly not what this feature is for.
             "previewable": True,
-            # **High** (issue #363): the one push kind whose whole value is that
-            # it arrives now, and the only branch whose Android delivery this
-            # actually changes. Mentions ride here too — ``Kind.MENTION`` never
-            # creates a ``Notification`` — so they inherit it, which is what the
-            # mentions channel would otherwise promise and fail to deliver. Not
-            # the same thing as the channel's importance; see
-            # ``notifications.PUSH_PRIORITY_HIGH``.
-            "priority": PUSH_PRIORITY_HIGH,
         }
 
     def _message(self, device, data, badge):
@@ -1468,22 +1453,22 @@ class Command(BaseCommand):
                 "kind": data["kind"],
                 "url": data["url"],
             },
-            # When Expo/FCM/APNs may deliver this, as against how it looks once
-            # it has — see ``notifications.PUSH_PRIORITY_HIGH``. Unconditional,
-            # like ``badge`` and unlike ``categoryId``/``channelId``, which a
-            # kind opts into: a push with no priority is not one that opted out.
+            # When FCM/APNs may deliver this, as against how it looks once it
+            # has — see ``notifications.priority_for_kind``. Unconditional, like
+            # ``badge`` and unlike ``categoryId``/``channelId``, which a kind
+            # opts into: a push with no priority is not one that opted out.
             #
-            # ``or`` rather than ``data[...]`` or a plain ``.get`` default. A
-            # future third ``_payload`` branch that omitted the key — or set it
-            # to ``None`` — must not put ``"priority": null`` on the wire:
-            # Expo 400s an invalid priority, and ``_post`` raises on the reply,
-            # which fails **every row in the batch** rather than the one message
-            # (unlike an unknown ``channelId``, which is dropped per-push). Nor
-            # may it raise a ``KeyError`` here, inside ``_drain``'s transaction,
-            # which would stop all push delivery every tick — the failure mode
-            # ``previewable`` documents. Falling back to what every notification
-            # push already sends is the outcome that can hurt nobody.
-            "priority": data.get("priority") or PUSH_PRIORITY_DEFAULT,
+            # **Derived from the kind, not read from the payload.** An earlier
+            # cut had each ``_payload`` branch set the key and had this line
+            # fall back if one forgot. Deriving it means there is no key to
+            # forget, no fallback to get wrong, and — since ``priority_for_kind``
+            # can only return a member of ``PUSH_PRIORITIES`` — no way to put a
+            # value on the wire that Expo would reject. That last one matters
+            # more than it looks: an invalid ``priority`` is not like an unknown
+            # ``channelId`` (dropped silently, one push). Expo 400s the request,
+            # ``_post`` raises on the reply, and ``_send`` fails **every row in
+            # that batch**, which the next tick then rebuilds and re-fails.
+            "priority": priority_for_kind(data["kind"]),
         }
         # **A device with previews off gets an anonymous body, and no Reply.**
         #

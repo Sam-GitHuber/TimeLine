@@ -169,43 +169,56 @@ def channel_for_kind(kind):
 
 # --- Delivery priority (issue #363) -----------------------------------------
 #
-# **A different layer from the channel importance above, and the two are easy to
-# conflate.** Importance governs how a notification is *displayed* once it has
-# arrived — heads-up banner, sound, silent tray entry — and is applied by the
-# device after FCM has already handed the message over. Priority governs whether
-# FCM delivers it promptly *at all*: normal-priority messages are held while the
-# device is in Doze and batched until it next wakes, and a HIGH-importance
-# channel does nothing to rescue one that FCM is still holding.
+# **Not the channel importance above, and the two are easy to conflate.**
+# Importance governs how a notification is *displayed* once it has arrived, and
+# is applied by the device after FCM has already handed the message over.
+# Priority governs whether FCM delivers it promptly at all — it holds
+# normal-priority messages while the device is in Doze — so a HIGH-importance
+# channel does nothing for one FCM is still holding.
 #
-# The two values, and what Expo actually puts on the wire for each:
+# ``default`` is Expo's per-platform mapping (**normal on Android, high on
+# iOS**) and is identical in effect to omitting the field. That asymmetry is why
+# ``normal`` was rejected for notification kinds: on Android it changes nothing,
+# and on iOS it would demote the whole activity centre to APNs priority 5.
 #
-# - ``high`` — FCM high priority, APNs priority 10. May wake a sleeping device
-#   to open a network connection.
-# - ``default`` — Expo's documented per-platform mapping: **normal on Android,
-#   high on iOS**. Identical in effect to omitting the field.
-#
-# That asymmetry is the reason ``default`` is right for notification kinds and
-# ``normal`` would be wrong. On Android it is already what we want (a reaction
-# is not worth waking a radio for, and FCM throttles apps that overuse high
-# priority, which would cost us the pushes that *are* urgent). On iOS it is
-# APNs priority 10 — which is today's behaviour for every push the app has ever
-# sent, and demoting the whole activity centre to priority 5 is a change nobody
-# asked for and no one has measured.
-#
-# So the field is written down rather than omitted for the reader's sake, not
-# the wire's: on the wire ``default`` *is* omission, and saying so is the point.
-# "We deliberately did not ask for high here" and "nobody thought about this
-# field" should not look identical in the code.
-#
-# The full argument, including why message pushes get ``high``, is in
-# docs/reference/notifications.md under "Delivery priority".
+# The full argument — including why ``normal`` was weighed at all, and what this
+# does and does not change on the wire — is in docs/reference/notifications.md
+# under "Delivery priority". Kept there rather than restated here, so a
+# correction lands in one place.
 PUSH_PRIORITY_HIGH = "high"
 PUSH_PRIORITY_DEFAULT = "default"
 
 # Every value we may put on the field, for the same reason ``ANDROID_CHANNELS``
 # exists: Expo rejects an unknown ``priority`` with a 400 that fails the whole
-# batch, not the one message, so the legal set is worth naming.
+# batch, not the one message, so the legal set is worth naming — and is checked
+# on the way out in ``send_pushes._message``.
 PUSH_PRIORITIES = frozenset({PUSH_PRIORITY_HIGH, PUSH_PRIORITY_DEFAULT})
+
+
+def priority_for_kind(kind):
+    """How urgently FCM should deliver a push of this ``kind``.
+
+    Deliberately shaped like ``channel_for_kind`` directly above, and for the
+    same reason: both answer "what goes on the wire for this kind", so both
+    belong in this module and neither should be a literal sitting in the sender.
+    Deriving it here rather than having ``_payload`` set a key means a branch
+    *cannot* forget it — there is no key to omit, no fallback to get wrong, and
+    no way to put a value Expo would reject on the wire.
+
+    **Only the message kind is high**, mentions included: they have no
+    ``Notification`` row and ride the message push, so they inherit it, which is
+    what the mentions channel would otherwise promise and fail to deliver.
+    Everything else is ``default`` — a reaction or an invite is not worth waking
+    a dozing radio for, and FCM throttles apps that overuse high priority, which
+    would cost us the pushes that *are* urgent.
+
+    A kind added later gets ``default``, the same conservative way an unmapped
+    kind gets ``DEFAULT_CHANNEL`` — and a test enumerating ``Notification.Kind``
+    makes that a decision someone took rather than one nobody noticed.
+    """
+    if kind == "message":
+        return PUSH_PRIORITY_HIGH
+    return PUSH_PRIORITY_DEFAULT
 
 
 # Kinds that refresh an existing *unread* row rather than stacking a duplicate:

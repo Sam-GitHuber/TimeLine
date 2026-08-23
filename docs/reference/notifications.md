@@ -961,25 +961,40 @@ not just the bytes — a wire assertion cannot tell the recorded decision from t
 fallback covering for its absence.
 
 `_message` sets the field unconditionally — like `badge`, unlike
-`categoryId`/`channelId`, which a kind opts into — reading it as
-`data.get("priority") or PUSH_PRIORITY_DEFAULT`. Both halves of that are
-load-bearing. A subscript would raise a `KeyError` inside `_drain`'s transaction
-and stop **all** push delivery every tick. A plain `.get` default would still let
-a `None` through as `"priority": null`, and an invalid priority is not like an
-unknown `channelId` (silently dropped, one push): Expo **400s the request**, so
-one bad payload fails every row in that batch.
+`categoryId`/`channelId`, which a kind opts into — and **derives it from the
+kind** via `notifications.priority_for_kind`, deliberately shaped like
+`channel_for_kind` beside it. Both answer "what goes on the wire for this kind",
+so both live in that module, for the reason its docstring gives: every rule about
+what may reach someone's phone should be readable in one file.
 
-The constants live in `api/notifications.py` (`PUSH_PRIORITY_HIGH`,
-`PUSH_PRIORITY_DEFAULT`, and `PUSH_PRIORITIES` naming the legal set) beside the
-channel vocabulary, for the reason that module's docstring gives: every rule
-about what may reach someone's phone should be readable in one file.
+Deriving it rather than having each `_payload` branch set a key is what makes the
+guarantee total. There is no key a branch can forget, no fallback to get wrong,
+and — since `priority_for_kind` is closed over `PUSH_PRIORITIES` — no way to put
+a value on the wire that Expo would reject. That last part matters more than it
+looks: an invalid `priority` is **not** like an unknown `channelId`, which is
+dropped silently for the one push. Expo **400s the request**, `_post` raises on
+the reply, and every row in that batch is failed and requeued — so one bad value
+blocks unrelated pushes, and the next tick rebuilds the same poisoned batch.
+
+A kind added later gets `default`, the same conservative way an unmapped kind
+gets `DEFAULT_CHANNEL` — and a test enumerating `Notification.Kind` makes that a
+decision someone took rather than one nobody noticed.
 
 **Not yet observed on a real Android handset.** Everything above is reasoned from
 Expo's and FCM's documented behaviour; what an idle Android phone does with our
 payload shape is a device observation, and it is carried in Phase 10's definition
-of done rather than assumed here. The change cannot make delivery *later* than it
-was — no push moves to a lower priority on either platform — so it is safe
-insurance whichever way that observation falls.
+of done rather than assumed here.
+
+No push moves to a *lower* priority on either platform, so nothing is directly
+slowed. The one way this could cost latency is second-order and worth stating
+rather than glossing: FCM throttles senders that overuse high priority, and the
+message branch is not rate-limited in a way that bounds it — `_should_space_out`
+applies a 60s per-thread cooldown but **exempts @mentions by design**, so a busy
+group chat that mentions someone repeatedly is the case with no ceiling. That is
+the trade the message/notification split exists to keep small (a reaction storm,
+the high-volume case, stays at `default`), but "cannot make anything later" would
+be too strong a claim. If throttling is ever suspected, the mention exemption is
+the first thing to look at.
 
 ### What leaves the box, and who sees it
 
@@ -1004,19 +1019,27 @@ A mention says *"Ada mentioned you"* (Phase 9b M8) — which is the same rule, a
 earns its place because a chat you silenced suddenly buzzing owes you an
 explanation.
 
+**So is the Android notification channel.** Every push carries a `channelId`
+(see "Android notification channels" above), so Expo and Google can see which
+*category* a push belongs to — `messages`, `mentions`, `reactions`, `social`,
+`events` — without reading any of it. It is the most revealing of the metadata
+fields on this list, and it earns its place the same way the deep-link route
+does: an Android push naming no channel is dropped silently rather than
+delivered, so there is no version of this feature without it.
+
 **The icon badge is metadata too** (#179). Every push carries a `badge` — the
 recipient's total unread count — so the services in the path also see *how much*
 is waiting for a device, and can watch that number rise and fall. Same category
 as the deep-link route above: a count, naming nobody and quoting nothing, and
 the only way to put a number on the icon of a phone that isn't running the app.
 
-**And the delivery priority** (#363), which is the weakest of the three but
-belongs on an exhaustive list. `high` on a message push and `default` on
-everything else means the services in the path can tell a private message apart
-from an activity-centre notification without reading either. That is already
-implied by the `channelId` and the `/messages/<id>` route beside it, so it
-discloses nothing those two didn't — but this section exists to be complete
-rather than to be reassuring, and a field added is a field listed.
+**And the delivery priority** (#363), the weakest of the set but on an
+exhaustive list all the same. `high` on a message push and `default` on
+everything else lets the services in the path tell a private message from an
+activity-centre notification without reading either — which the `channelId`
+above and the `/messages/<id>` route already gave them, so it adds nothing new.
+It is listed because this section exists to be complete rather than to be
+reassuring, and it has been wrong once before by leaving something implied.
 
 Deliberately **not** included: any post, comment **or message** text, any photo,
 any email address. A push names people but never quotes them — so a lock screen
