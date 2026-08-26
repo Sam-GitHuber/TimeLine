@@ -26,6 +26,13 @@ product principle, enforced server-side so it can't drift:
   meaning stays "the people I'm connected with". An opt-in `?include_groups=1`
   toggle merges group posts in strictly chronologically — a pure time-merge, no
   ranking. See [groups](groups.md).
+- **"Following" someone changes nothing here** (issue #382). The Follow toggle on
+  a connection's profile is a *notification* subscription — it decides whether
+  their next post also reaches your activity centre and your phone. It does not
+  reorder the feed, filter it, or float followed people to the top, and no feed
+  query reads that table. If it ever did, this section's first sentence would be
+  a lie. See
+  [notifications.md](notifications.md#following-someone-to-hear-when-they-post).
 
 ### Pagination
 

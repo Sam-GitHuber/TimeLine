@@ -596,6 +596,7 @@ describe('configureNotificationChannels (Phase 10)', () => {
     'reactions',
     'events',
     'social',
+    'posts',
   ];
 
   it('creates exactly the channels the backend sends', () => {

@@ -360,6 +360,19 @@ const CHANNELS: {
     name: 'Requests and invites',
     importance: Notifications.AndroidImportance.DEFAULT,
   },
+  {
+    // Someone you follow published a post (#382). **Its own channel rather than
+    // `social`**, which this list labels "Requests and invites" — turning post
+    // pushes down there would have silenced connection requests too, having
+    // told the user that was what the switch did.
+    //
+    // DEFAULT, not LOW: unlike a reaction this is something the recipient asked
+    // for in advance, per person, by name. Someone who wants it quieter has the
+    // channel to turn down — which is the point of it having one.
+    id: 'posts',
+    name: 'Posts from people you follow',
+    importance: Notifications.AndroidImportance.DEFAULT,
+  },
 ];
 
 /** The channel ids, for the test that pins them against the backend's. */

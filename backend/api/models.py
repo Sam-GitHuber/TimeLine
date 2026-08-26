@@ -107,8 +107,11 @@ class Connection(models.Model):
     private-by-default: the connection starts **pending** and grants no access
     on its own. Once the requestee **approves** it (``status`` becomes
     ``accepted``) the connection is **symmetric** — each account sees the
-    other's posts. There is no one-way "follow": approving is the whole
-    relationship. Rejecting or disconnecting deletes the row.
+    other's posts. There is no one-way "follow" **in the graph**: approving is
+    the whole relationship. (The app does have a Follow button — see
+    ``PostNotificationSubscription`` directly below, which is a notification
+    subscription between two people already connected here, and grants no
+    access.) Rejecting or disconnecting deletes the row.
 
     While pending, direction still matters (who asked whom, for the requests
     inbox). Once accepted, the row is treated as an undirected edge and every
@@ -165,6 +168,78 @@ class Connection(models.Model):
     def __str__(self):
         arrow = "↔" if self.status == self.Status.ACCEPTED else "→"
         return f"{self.requester} {arrow} {self.requestee} ({self.status})"
+
+
+class PostNotificationSubscription(models.Model):
+    """One person asking to be **told** when another posts — a "follow" (#382).
+
+    **Read this against ``Connection`` directly above, because the word invites
+    exactly the wrong reading.** This is *not* a second social graph, and it is
+    not the one-directional follow that model's docstring rules out. It grants
+    no access to anything: ``follower`` can already see every post ``followee``
+    writes, because the two are connected — that is the *precondition* for a row
+    existing here, not something the row confers. All it changes is whether a
+    post the follower would have scrolled past on their own timeline also
+    buzzes their phone and lands in their activity centre.
+
+    Two invariants follow from that, and both are load-bearing:
+
+    - **It never widens visibility.** ``connected_user_ids`` / ``visible_posts``
+      remain the single gate; nothing reads this table to decide what may be
+      *seen*. The notification fan-out applies the ordinary gates on top of this
+      list, so a subscription can only ever produce a notification about a post
+      the follower was already entitled to read.
+    - **It never touches the feed.** No ranking, no filtering, no "followed
+      people first" — the timeline stays strictly reverse-chronological for
+      everyone (``docs/SHARED.md``). A follow is a *notification* preference
+      that happens to be per-person.
+
+    Unlike ``Connection`` this row genuinely **is** directional, and that is the
+    point: A can want telling about B's posts without B wanting telling about
+    A's, and neither needs the other's permission for something that only
+    changes their own phone.
+
+    **Off by default, always.** There is no follow-on-connect and no backfill —
+    the absence of a row *is* the off state, so the feature ships silent and
+    stays silent until someone presses the button. The rows are deleted when the
+    connection ends (disconnect or block), because leaving them dormant would
+    mean reconnecting months later silently resumed pushes nobody re-consented
+    to.
+
+    Guardrails live in the database, the same standard ``Connection`` holds
+    itself to: one row per (follower, followee) ordered pair, and you can't
+    follow yourself.
+    """
+
+    follower = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="post_subscriptions",
+    )
+    followee = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="post_subscribers",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            # Ordered pair, not unordered: A→B and B→A are two different facts
+            # here, which is the one place this table's rules differ from
+            # ``Connection``'s.
+            models.UniqueConstraint(
+                fields=["follower", "followee"],
+                name="unique_post_subscription",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(follower=models.F("followee")),
+                name="no_self_post_subscription",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.follower} → {self.followee} (posts)"
 
 
 class Comment(models.Model):
@@ -1377,6 +1452,15 @@ class Notification(models.Model):
         # notification kind behind it; the two placements are the same rule
         # applied honestly, not an inconsistency.
         MENTION = "mention", "You were mentioned in a chat"
+        # Issue #382. Someone you **follow** — a connection whose posts you
+        # asked to be told about — published a post. The odd one out among the
+        # content kinds in that the recipient asked for it *in advance* rather
+        # than it being a response to something of theirs, which is why the
+        # activity centre's usual "things that happen *to* you" framing still
+        # holds: you requested this one, per person, by name. Targets the
+        # ``post`` FK and deep-links to the permalink, exactly like
+        # ``POST_REPLY``, so it needs no new target and no new routing.
+        NEW_POST = "new_post", "New post from someone you follow"
 
     # Kinds a user is allowed to mute in preferences. The request/invite kinds
     # are deliberately *always-on*: muting "someone wants to connect" or "you've
@@ -1401,6 +1485,16 @@ class Notification(models.Model):
             # punching through a quiet they deliberately asked for has to be
             # something they can decline. See the kind's note above.
             Kind.MENTION,
+            # Mutable, and default-*on* like every other kind here — which is
+            # not in tension with following being opt-in (#382). This switch
+            # can't notify anyone who hasn't first followed somebody by name,
+            # so it's a mute for a category you already opted into person by
+            # person, not a second consent gate. Shipping it off would be the
+            # first exception to the absence-means-enabled rule
+            # ``NotificationPreference`` rests on, and would make the profile
+            # toggle a dead control: follow someone, get nothing, no indication
+            # why, until you find a settings screen you had no reason to visit.
+            Kind.NEW_POST,
         }
     )
 

@@ -149,6 +149,7 @@ cross-cutting rules, so no call site can forget one.
 | `event_created` / `poll_opened` / `event_scheduled` / `event_updated` / `event_cancelled` | the [group-event](events.md) views | members connected to the organiser (going/maybe RSVPs for updated/cancelled) | yes |
 | `event_comment` | `EventCommentsView` (top-level comment) | the event's **organiser** | yes |
 | `event_photos` | `EventPhotosView` (POST) | going/maybe RSVPs **∩ the uploader's connections** | yes |
+| `new_post` | `PostCreateView` (POST) | the author's **followers**, ∩ their connections, ∩ the group's active members for a group post | yes |
 
 The five **event** kinds (Phase 8b) added a fifth concrete target FK
 (`Notification.event`) and widened the "at most one target" `CheckConstraint`
@@ -206,8 +207,8 @@ they don't want.
 
 Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, all seven
 [event](events.md) kinds — the organiser's five broadcasts plus `event_comment`
-and `event_photos` — and `mention`) are ever written here and exposed in the
-API. The
+and `event_photos` — `mention`, and `new_post`) are ever written here and
+exposed in the API. The
 connection/invite kinds are **always-on**: muting "someone wants to connect" would
 hide something you must act
 on — and with the badges unified, the bell is the only signal. A `PATCH` that tries
@@ -247,6 +248,194 @@ Both are on the object the setting actually describes rather than in a preferenc
 table that would have to invent a fake kind to hold them. The rule is simply: if
 switching it off doesn't stop a `Notification` or a push, it isn't a notification
 preference.
+
+## Following someone to hear when they post
+
+Issue #382, and the one kind here you **ask for in advance**. On a connection's
+profile a **Follow / Following** toggle asks to be notified when that person
+publishes a post; their next post then produces a `new_post` notification in the
+activity centre and a push, exactly like every other kind.
+
+**It is not a second social graph, and the word invites precisely that misreading.**
+[connections.md](connections.md) is still right that the graph has no
+one-directional follow. What a row here says is "tell me about this person's
+posts", between two accounts that are *already* symmetrically connected. Two
+consequences are load-bearing enough to be tested rather than promised:
+
+- **It never widens visibility.** `connected_user_ids` / `visible_posts` remain
+  the single gate. Nothing reads `PostNotificationSubscription` to decide what
+  may be *seen* — you could already see every post this notifies you about,
+  which is exactly why being connected is the precondition for creating the row.
+- **It never touches the feed.** No ranking, no filtering, no "followed people
+  first". The timeline stays strictly reverse-chronological for everyone
+  (`docs/SHARED.md`). A follow is a notification preference that happens to be
+  per-person; if it ever reordered a feed, the whole point of the project would
+  be gone. See [feed-and-posts.md](feed-and-posts.md#the-feed--reverse-chronological-always).
+
+### Off by default, per person
+
+Nothing here notifies anyone until they turn it on for a **specific** person.
+There is no follow-everyone default, no follow-on-connect, and no backfill
+seeding subscriptions for existing connections — the migration creates no rows,
+and a test asserts that connecting, approving a request and signing up all leave
+the table empty. **The absence of a row is the off state**, so the feature
+shipped silent and stays silent until someone presses the button; the toggle read
+*Follow*, not *Following*, on every profile on day one.
+
+Accepting a connection request is consent to be **seen**, not consent to be
+**pushed at**. Those are different asks and the second one is made separately.
+
+### The person being followed is not told, deliberately
+
+There is no "Alice started following you" notification, and there shouldn't be.
+Three reasons, in order of weight:
+
+- **Nothing changed for them.** They already granted the follower access to
+  everything they post when they accepted the connection; following adds nothing
+  to what can be seen. Telling them would be notifying someone about a third
+  party's *notification settings*.
+- **It is the nearest thing this app could have to a follower count.** "X started
+  following you" invites "should I follow them back?", and follow-backs, follower
+  counts and reciprocity prompts are precisely the engagement mechanics
+  `docs/SHARED.md` rules out. It's a small door, but it opens onto that.
+- **It would make people follow less.** Announced, someone might not quietly
+  follow a friend for fear of seeming intense — which defeats a feature whose
+  entire job is "I don't want to miss this person's posts".
+
+The transparency argument (in a privacy-first app, shouldn't you know who is
+watching you closely?) is the serious counter, and it doesn't survive the first
+point: there is no exposure to be transparent about, because the follower can
+already read all of it.
+
+This also matches the closest thing already in the codebase —
+`Participant.muted_at`, silencing a conversation, doesn't tell the other party
+either. **A notification preference is private to whoever holds it**, and this is
+one.
+
+### The model
+
+```
+PostNotificationSubscription:
+  follower   FK → User (CASCADE)   # who wants telling
+  followee   FK → User (CASCADE)   # about whose posts
+  created_at
+```
+
+- `UniqueConstraint(follower, followee)` and a no-self-follow `CheckConstraint` —
+  guardrails in the database, the standard `Connection` holds itself to.
+- **Directional**, unlike `Connection`, and that's the point: A can want telling
+  about B's posts without B wanting telling about A's, and neither needs the
+  other's permission for something that only changes their own phone. So the
+  unique constraint is on the *ordered* pair, where `Connection`'s is on the
+  unordered one.
+- `is_following` is annotated per-viewer on **`UserDetailView` only**, beside
+  `is_blocked` and for the same reason: the toggle exists on profiles, so the
+  people lists would be paying for an `EXISTS` per row to render a control they
+  don't have. It serializes as `false` wherever it isn't annotated.
+
+### Endpoints
+
+- `POST /api/users/<id>/follow/` — 400 if you're not connected, or it's you;
+  403 across a block. Idempotent.
+- `DELETE /api/users/<id>/follow/` — unfollow. Idempotent, and deliberately
+  **not** gated on the other account still being active: withdrawing your own
+  subscription is cleanup, and refusing it because they deactivated would leave
+  a row nobody could remove.
+
+Shaped like `BlockView` rather than `ConnectView` — there's no pending state and
+no second party to wait for, so there's nothing a 201 would mean that `200` plus
+`is_following` doesn't already say.
+
+### The four gates, and where each lives
+
+A `new_post` notification passes through four filters, and it matters which of
+them sit in `PostCreateView` and which in the choke-point:
+
+1. **Still connected at send time** — `new_post` is in `_CONNECTION_GATED_KINDS`,
+   so the choke-point drops a recipient who isn't currently connected to the
+   author. This is checked on the *fact*, not on the bookkeeping: it's what makes
+   a subscription that outlived its connection notify nobody, even if some future
+   code path forgets to delete the row.
+2. **Group membership** — the one gate the choke-point can't apply, because a
+   *connected* follower who simply isn't in the group would sail through it and
+   be told about a post whose permalink 404s. `_new_post_audience` narrows on
+   `GroupMembership` in one query (the set form of `is_group_member`, exactly as
+   `_connected_ids` is the set form of `_are_connected`). Between the two, the
+   audience is precisely `can_view_post` — pinned by a test that asserts every
+   recipient could actually open the post, rather than trusting this paragraph.
+3. **Blocks** — a block deletes the `Connection` row, so gate 1 covers it; the
+   subscription is deleted too (below), and `FollowView` refuses across a block
+   with its own message rather than the misleading "you're not connected".
+4. **The recipient's preference** — `new_post` is in `MUTABLE_KINDS`, so a mute
+   produces no row at all, like every other mutable kind.
+
+### Lifecycle, and why the row is deleted rather than left dormant
+
+Disconnecting or blocking **deletes the subscriptions in both directions**
+(`drop_post_subscriptions`, called from `ConnectView.delete` and
+`BlockView.post`). Leaving them would mean that reconnecting months later
+silently resumed pushes neither person had re-consented to — the sort of quiet
+resurrection a privacy-first app shouldn't have. Following is cheap to
+re-establish and its absence is the safe state. Account deletion cascades.
+
+Publishing is the event: **editing a post notifies nobody**. Nobody followed you
+to hear that you fixed a typo, and a kind that fired on `PATCH` would make an
+edit a way to buzz a phone repeatedly.
+
+### The global switch is default-*on*, and that isn't a contradiction
+
+`new_post` is in `MUTABLE_KINDS`, so Settings carries one "New posts from people
+you follow" switch — **on** out of the box, under the absence-means-enabled rule
+every other kind follows. That sits fine beside "off by default": the switch
+can't notify anyone who hasn't first followed somebody by name, so it's a mute
+for a category you already opted into person by person, not a second consent
+gate. Shipping it off would be the first exception to the rule the preference
+model rests on, and would make the profile toggle a dead control — follow
+someone, get nothing, no indication why, until you find a settings screen you had
+no reason to visit.
+
+### What the line says, and what it deliberately doesn't
+
+"**Ada posted**" — no excerpt. This is the first kind where there would be
+something to quote, and `NotificationSerializer.get_text` is also the push body
+(`send_pushes._payload` reads it straight from there), so the string transits
+Expo's servers and Apple's/Google's on its way to a lock screen. The standing
+rule that a push names people but never quotes them is what lets message pushes
+exist at all, and a post is exactly the friends-and-family content it protects.
+
+It deep-links to the post permalink `/p/<id>`, the same destination a reply to
+your own post goes to, and its Android channel is **`posts`**, not `social` —
+the app labels `social` "Requests and invites", so filing post pushes there would
+mean turning them down silenced connection requests too.
+
+### Known: reading it in the feed doesn't clear the badge
+
+`see_post_notifications` is hooked to the post **permalink** and its comment
+tree, so a `new_post` row is marked seen when you open the post — not when you
+scroll past it in the feed. This is the first kind whose content is routinely
+read on a surface that clears nothing (every other kind points at something you
+must navigate to), so four overnight posts can stay counted after you've read
+all four in the feed. It clears on the next open of the activity centre, like
+any notification you never clicked through.
+
+**Deliberately not "fixed" by hooking the feed.** The seen rule is built on a
+*deliberate* open — the doc's own note that the comment hooks are "safe from
+scroll-by" is the reason it's safe at all. A feed page is the opposite: it
+returns twenty posts to a viewport showing two, so marking their notifications
+seen would clear the badge for posts nobody looked at, which is a worse failure
+than the one it fixes (the badge would then under-count rather than
+over-count, and under-counting loses things). If this becomes a real irritation
+the honest fix is client-side viewport tracking, not a server-side hook on the
+fetch.
+
+### Known: a burst is a burst
+
+Someone posting four times in a row buzzes a follower four times. There is no
+cooldown outside messaging (`PUSH_MESSAGE_COOLDOWN_SECONDS` is per-thread and
+message-only), and `new_post` is deliberately **not** in `_DEDUP_KINDS` — that
+set collapses repeats aimed at *one* target, and each post is its own target, so
+adding it would do nothing. Accepted at this scale rather than overlooked: worth
+watching real usage before building machinery for it.
 
 ## API
 
@@ -867,8 +1056,8 @@ Every push therefore carries a **`channelId`** (`_message` in `send_pushes`),
 derived from its `kind` by `notifications.channel_for_kind`. iOS ignores the
 field.
 
-Six channels, mirroring the **per-type preference groups** so the OS control and
-the in-app one tell the same story:
+Seven channels, mirroring the **per-type preference groups** so the OS control
+and the in-app one tell the same story:
 
 | Channel | Kinds | Importance |
 |---|---|---|
@@ -878,6 +1067,15 @@ the in-app one tell the same story:
 | `reactions` | `reaction` | **low** — nice to know, never urgent, and a popular post shouldn't buzz a pocket twenty times |
 | `events` | the organiser's five broadcast kinds **+ `event_photos`** | default |
 | `social` | `connection_request`, `connection_accepted`, `group_invite` | default |
+| `posts` | `new_post` | default |
+
+`posts` is its own channel rather than riding `social` (issue #382) because the
+app labels `social` **"Requests and invites"** in Android's own settings screen
+— so turning post pushes down there would have silenced connection requests too,
+having told the user that was what the switch did. Default rather than low, the
+call `reactions` went the other way on: this is something the recipient asked
+for in advance, per person, by name, and anyone who wants it quieter now has a
+switch to do it with.
 
 Deliberately **not one channel per kind**: six separate event channels would be
 a wall of switches nobody reads. The two kinds whose actor *isn't* the organiser

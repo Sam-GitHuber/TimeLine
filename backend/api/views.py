@@ -1,3 +1,4 @@
+import logging
 import re
 from collections import defaultdict
 from datetime import timedelta
@@ -79,6 +80,7 @@ from .models import (
     Post,
     PostCommentRead,
     PostImage,
+    PostNotificationSubscription,
     Reaction,
     Report,
 )
@@ -118,6 +120,8 @@ from .serializers import (
     serialize_poll,
     summarise_reactions,
 )
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -1514,6 +1518,83 @@ class FeedView(CommentCountMixin, ReactionContextMixin, generics.ListAPIView):
         return feed_posts(self.request.user, include_groups=include_groups)
 
 
+def _new_post_audience(post):
+    """The people who asked to be told when ``post``'s author posts, narrowed to
+    those who may actually **see** this particular post (issue #382).
+
+    Two filters, and it matters which one lives where.
+
+    Here: the subscriptions themselves, plus **group membership** when the post
+    went into a group. That second one is the half the notification choke-point
+    cannot do for us — it gates on the connection, which a co-member you aren't
+    connected with fails, but a *connected* follower who simply isn't in the
+    group would sail through it and be told about a post they'd get a 404 for.
+    One query for both, joined rather than intersected in Python — the same
+    shape as ``_event_rsvp_audience`` below, which answers the same sort of
+    question about an event's audience.
+
+    Not here: the connection gate and the mute. ``create_notifications`` applies
+    both, set-wise, to whatever it's handed (``_CONNECTION_GATED_KINDS`` /
+    ``MUTABLE_KINDS``), so re-deriving them would be a second copy of the rule
+    to keep in step. Between the two, the audience is precisely
+    ``can_view_post`` — a follower who couldn't open the post is never told
+    about it — and a test pins that equivalence rather than trusting the prose.
+    """
+    qs = User.objects.filter(
+        post_subscriptions__followee_id=post.author_id, is_active=True
+    )
+    if post.group_id:
+        qs = qs.filter(
+            group_memberships__group_id=post.group_id,
+            group_memberships__status=ACTIVE,
+        )
+    # ``distinct`` because the joins can multiply rows, and ``only`` because the
+    # sole thing the caller reads is ``.id`` — no need to drag every column of
+    # every follower across the wire to build a set of primary keys.
+    return qs.distinct().only("id")
+
+
+def notify_new_post(post, connected_ids=None):
+    """Tell this author's followers they posted (issue #382).
+
+    **Bulk, not a loop**, for the reason ``EventPhotosView`` spells out: the
+    per-recipient path costs about seven statements each and this runs in the
+    same request that may have just decoded and re-encoded ten photos on one
+    worker. ``create_notifications`` applies the identical rules set-wise.
+
+    ``connected_ids`` is the **author's** accepted-connection set, threaded in
+    by a caller that already has it so the choke-point doesn't scan
+    ``Connection`` a second time in one request — the same hand-off
+    ``EventPhotosView`` makes. Pass the author's set or nothing; anyone else's
+    would silently widen the gate.
+
+    **Never raises.** The post is committed by the time this runs, so letting a
+    failed fan-out out of here would 500 a request whose post exists and is
+    already in the author's feed — and the natural response to that is to press
+    Post again, which is how one post becomes two. A notification nobody gets is
+    a much smaller wrong than a duplicate post, and a logged error is what lets
+    the maintainer notice a genuinely broken fan-out. Same trade, and the same
+    idiom, as ``accounts.views._deliver_code``.
+
+    Called only from ``PostCreateView`` — publishing is the event. Editing a
+    post deliberately notifies nobody: nobody followed you to be told you fixed
+    a typo, and a kind that fired on ``PATCH`` would make an edit a way to buzz
+    a phone repeatedly.
+    """
+    try:
+        notifications.create_notifications(
+            _new_post_audience(post),
+            post.author,
+            Notification.Kind.NEW_POST,
+            post=post,
+            connected_ids=connected_ids,
+        )
+    except Exception:  # pragma: no cover - defensive; DB/transient failure
+        logger.exception(
+            "Could not notify followers about post %s", post.pk
+        )
+
+
 class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
     """Create a post as the logged-in user, optionally with photos.
 
@@ -1598,6 +1679,25 @@ class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
                     f"thumb{item['ext']}", item["thumbnail"], save=False
                 )
                 image.save()
+
+        # Tell anyone who follows this author (#382) — after the commit, like
+        # every other fan-out in this file, so nobody is notified about a post
+        # that didn't survive. The audience is narrowed to people who can see
+        # the post; the connection gate and the per-kind mute are applied inside
+        # the choke-point. See ``notify_new_post``, which cannot raise.
+        #
+        # ``visible_reactor_ids`` is this request's memoised set, already
+        # computed by ``ReactionContextMixin`` for the serializer at the top of
+        # this method — so threading it here costs nothing and saves the
+        # choke-point a second scan of ``Connection`` in the same request. It's
+        # the author's connections **plus the author**, so the author is
+        # subtracted back out: ``create_notifications`` asks for exactly the
+        # actor's set, and handing it something else — even something harmless
+        # — is how the "anyone else's would silently widen the gate" warning in
+        # its docstring eventually comes true.
+        notify_new_post(
+            post, connected_ids=self.visible_reactor_ids() - {request.user.id}
+        )
 
         # Re-serialize so the response carries the created images (with URLs).
         out = self.get_serializer(post)
@@ -1788,7 +1888,75 @@ class UserDetailView(generics.RetrieveAPIView):
                     blocker=user, blocked=OuterRef("pk")
                 )
             ),
+            # Whether *you* have asked to be notified when this person posts
+            # (#382), so the profile can render Follow vs Following without a
+            # second round trip. Annotated here and not on ``UserListView``:
+            # the toggle exists on profiles only, so the people lists would be
+            # paying for an EXISTS per row to render a control they don't have.
+            is_following=Exists(
+                PostNotificationSubscription.objects.filter(
+                    follower=user, followee=OuterRef("pk")
+                )
+            ),
         )
+
+
+def drop_post_subscriptions(user, other):
+    """Delete the follow rows **in both directions** between two people (#382).
+
+    Leaving them dormant would mean that reconnecting months later silently
+    resumed pushes neither person had re-consented to, which is precisely the
+    kind of quiet resurrection a privacy-first app shouldn't have. Following is
+    cheap to re-establish and its absence is the safe state, so it goes with the
+    connection.
+
+    Both directions because a connection ending is symmetric even though a
+    follow isn't: whoever pressed disconnect, neither of them is entitled to be
+    notified about the other any more.
+    """
+    PostNotificationSubscription.objects.filter(
+        Q(follower=user, followee=other) | Q(follower=other, followee=user)
+    ).delete()
+
+
+def end_connection(user, other, when):
+    """Everything that has to happen when an **accepted or pending connection
+    ends** between two people — the one copy of a four-step sequence.
+
+    Two callers reach it, and they are the two ways a connection dies:
+    ``ConnectView.delete`` (disconnect, or withdraw a request) and
+    ``BlockView.post`` (blocking severs the connection too). Both must run this
+    **inside their own transaction**, because the block also writes a ``Block``
+    row that has to land or not land with it.
+
+    The order is load-bearing and is why this is one function rather than four
+    lines repeated:
+
+    1. ``sever_shared_chats`` **before** the delete — it needs the ``Connection``
+       row still there, and it closes the initiator's interval (see its
+       docstring).
+    2. Delete the ``Connection`` itself, in either direction: the row is the
+       unordered pair, so both ``Q``s are needed whoever asked whom.
+    3. Drop the follow subscriptions riding on it (#382).
+    4. ``promote_participants`` **after** the delete, deferred for the reason
+       ``sever_shared_chats`` explains.
+
+    Returns nothing; the callers had no use for the conversations afterwards.
+
+    **Rejecting a connection request does not come through here**, and that is
+    correct rather than an omission: ``ConnectionRequestActionView`` only ever
+    deletes a still-``pending`` row, which shares no chats to sever and can
+    carry no subscription (``FollowView`` requires an *accepted* connection). It
+    deletes the row directly so its request notification cascades away with it.
+    """
+    convos = sever_shared_chats(user, other, when)
+    Connection.objects.filter(
+        Q(requester=user, requestee=other)
+        | Q(requester=other, requestee=user)
+    ).delete()
+    drop_post_subscriptions(user, other)
+    for convo in convos:
+        promote_participants(convo, when)
 
 
 class ConnectView(APIView):
@@ -1899,18 +2067,125 @@ class ConnectView(APIView):
         target = self._target(pk)
         now = timezone.now()
         with transaction.atomic():
-            # Sever must run — and close the initiator's interval — before the
-            # Connection row is gone; see sever_shared_chats' docstring for why
-            # promotion is deferred until after the delete below.
-            convos = sever_shared_chats(request.user, target, now)
-            Connection.objects.filter(
-                Q(requester=request.user, requestee=target)
-                | Q(requester=target, requestee=request.user)
-            ).delete()
-            for convo in convos:
-                promote_participants(convo, now)
+            # Severing shared chats, deleting the row, dropping any follow that
+            # rode on it, and re-promoting — in that order, for reasons that
+            # live in ``end_connection``.
+            end_connection(request.user, target, now)
         return Response(
             {"detail": "Removed.", "connection_status": "none"},
+            status=status.HTTP_200_OK,
+        )
+
+
+class FollowView(APIView):
+    """Ask to be notified when someone posts (POST), or stop (DELETE), at
+    ``/users/<pk>/follow/`` — issue #382.
+
+    **This is not a second relationship, and the URL's word is the user's word,
+    not the model's.** A follow grants nothing: you can already see every post
+    this person writes, because you're connected — that's the precondition for
+    following them, not something following gives you. All it changes is
+    whether their next post also reaches your activity centre and your phone.
+    See ``PostNotificationSubscription`` for why that distinction is worth
+    keeping in the code as well as the docs.
+
+    POST is refused unless you're **currently connected** (400). That gate is
+    re-applied at send time inside the notification choke-point, so the check
+    here is about giving an honest answer to a button press rather than about
+    security — a subscription that outlived its connection would notify nobody
+    either way.
+
+    Both verbs are **idempotent** — following twice is following, unfollowing
+    something you don't follow is fine — because this is a toggle and a
+    double-tap or a retried request must not be an error. Shaped like
+    ``BlockView`` rather than ``ConnectView``: there's no pending state and no
+    second party to wait for, so there is nothing for a 201 to mean that 200 and
+    ``is_following`` don't already say.
+    """
+
+    def post(self, request, pk):
+        target = get_object_or_404(User, pk=pk, is_active=True)
+        if target == request.user:
+            return Response(
+                {"detail": "You can't follow yourself."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Belt-and-braces: a block deletes the ``Connection`` row outright
+        # (``BlockView.post``), so a blocked pair already fails the connection
+        # check below. Kept explicit because it's the check that would still be
+        # right if that ever stopped being true, and because "You can't follow
+        # this person" is the honest answer to a block, where "you're not
+        # connected" would invite them to go and connect — the same wording
+        # ``ConnectView`` gives for the same situation.
+        if is_blocked_between(request.user, target):
+            return Response(
+                {"detail": "You can't follow this person."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        # **The check and the insert are one transaction, holding a lock on the
+        # `Connection` row**, and that is not belt-and-braces — it is the only
+        # thing standing between this feature and the "quiet resurrection" its
+        # model docstring promises can't happen.
+        #
+        # Without the lock: A presses Follow and the connection check passes; B
+        # presses Disconnect, whose ``end_connection`` deletes the row and drops
+        # the subscriptions — finding none, because A's insert hasn't happened
+        # yet — and commits; A's insert then lands. The result is a subscription
+        # with no connection behind it. The send-time gate keeps it silent, so
+        # nothing looks wrong, until the two reconnect months later and the gate
+        # starts passing: A is now pushed about everything B writes, having
+        # never asked for it after the disconnect. The row is invisible in the
+        # UI as well, because ``is_following`` renders only for a connection.
+        #
+        # ``select_for_update`` closes it from both sides. If we get the lock
+        # first, B's delete blocks until we commit, and ``drop_post_subscriptions``
+        # — which runs *after* the delete inside ``end_connection`` — then sees
+        # our row and removes it. If B gets there first, the row is gone by the
+        # time we look and this is a plain 400. Re-checking after the insert
+        # would not do: under READ COMMITTED our re-read still sees B's
+        # not-yet-committed delete as a live row.
+        with transaction.atomic():
+            # ``.first()`` rather than ``.exists()``: the row itself has to be
+            # selected for the ``FOR UPDATE`` to lock anything.
+            connected = (
+                Connection.objects.select_for_update()
+                .filter(
+                    Q(requester=request.user, requestee=target)
+                    | Q(requester=target, requestee=request.user),
+                    status=ACCEPTED,
+                )
+                .first()
+            )
+            if connected is None:
+                return Response(
+                    {
+                        "detail": (
+                            "You can only follow people you're connected with."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # ``get_or_create`` rather than ``create``: it takes its own
+            # savepoint and re-reads on the unique-constraint violation, so two
+            # taps racing each other resolve to one row instead of a 500.
+            PostNotificationSubscription.objects.get_or_create(
+                follower=request.user, followee=target
+            )
+        return Response(
+            {"detail": "Following.", "is_following": True},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        # No ``is_active`` filter, unlike POST and like ``BlockView.delete``:
+        # withdrawing your own subscription is cleanup, and it must not be
+        # blocked by the other account having been deactivated in the meantime.
+        target = get_object_or_404(User, pk=pk)
+        PostNotificationSubscription.objects.filter(
+            follower=request.user, followee=target
+        ).delete()
+        return Response(
+            {"detail": "Unfollowed.", "is_following": False},
             status=status.HTTP_200_OK,
         )
 
@@ -3860,17 +4135,12 @@ class BlockView(APIView):
             Block.objects.get_or_create(
                 blocker=request.user, blocked=target
             )
-            # Sever before the Connection delete — see sever_shared_chats'
-            # docstring for why promotion is deferred until after it.
-            convos = sever_shared_chats(request.user, target, now)
             # Blocking severs any connection — you shouldn't stay "connected"
-            # to someone you've blocked.
-            Connection.objects.filter(
-                Q(requester=request.user, requestee=target)
-                | Q(requester=target, requestee=request.user)
-            ).delete()
-            for convo in convos:
-                promote_participants(convo, now)
+            # to someone you've blocked — so it ends it exactly the way
+            # disconnecting does, including dropping the follow rows that rode
+            # on it (#382): unblocking must not silently switch those pushes
+            # back on, which is what leaving them would do.
+            end_connection(request.user, target, now)
         return Response(
             {"detail": "Blocked.", "is_blocked": True},
             status=status.HTTP_200_OK,

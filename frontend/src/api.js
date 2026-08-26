@@ -471,6 +471,18 @@ export const api = {
   // Cancels a pending request or ends an accepted connection (same endpoint).
   disconnect: (id) => request(`/api/users/${id}/connect/`, { method: "DELETE" }),
 
+  // Ask to be notified when this person posts, or stop (issue #382).
+  //
+  // **Not a relationship, despite the word.** You can already see everything
+  // they post — that's what being connected means, and it's the precondition
+  // the server checks. Following only decides whether their next post also
+  // reaches your activity centre and your phone; it changes nothing about
+  // visibility, and nothing about feed order. Both verbs are idempotent.
+  followUser: (id) => request(`/api/users/${id}/follow/`, { method: "POST" }),
+
+  unfollowUser: (id) =>
+    request(`/api/users/${id}/follow/`, { method: "DELETE" }),
+
   // Incoming connection requests (people asking to connect) + approve/reject.
   getConnectionRequests: () => request("/api/connection-requests/"),
 

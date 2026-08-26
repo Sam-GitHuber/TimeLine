@@ -77,6 +77,14 @@ _CONNECTION_GATED_KINDS = frozenset(
         # the kind in this set makes the recipient filter the same one line of
         # code every other content kind uses.
         Notification.Kind.EVENT_PHOTOS,
+        # Someone you follow posted (#382). The gate does **real** work here,
+        # and it is what stops a follow outliving the connection it rests on: a
+        # subscription is only creatable between connections, but the connection
+        # can end afterwards, and deleting the row on disconnect/block is
+        # *view*-level bookkeeping that a future code path could forget. This
+        # check runs at send time, on the fact rather than on the bookkeeping,
+        # so a stale subscription notifies nobody.
+        Notification.Kind.NEW_POST,
     }
 )
 
@@ -135,6 +143,13 @@ _KIND_CHANNELS = {
     # its own preference: being named is the one thing that should still reach
     # you in a chat you've otherwise quietened.
     Notification.Kind.MENTION: "mentions",
+    # **Its own channel, not "social"** (#382). ``social`` is the things-waiting-
+    # on-an-answer channel, and the app labels it "Requests and invites" in
+    # Android's own settings screen — so a user turning post pushes down there
+    # would be silencing connection requests to do it, having been told that is
+    # what the switch was for. A friend posting is neither a request nor an
+    # invite, so it gets a channel that says what it is.
+    Notification.Kind.NEW_POST: "posts",
 }
 
 # The kind a *message* push carries. It has no ``Notification`` row, so it isn't

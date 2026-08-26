@@ -50,6 +50,7 @@ from api.views import (
     activate,
     active_participant_ids,
     badge_count_for,
+    can_view_post,
     deactivate,
     must_connect_with,
     promote_participants,
@@ -81,6 +82,7 @@ from .models import (
     Post,
     PostCommentRead,
     PostImage,
+    PostNotificationSubscription,
     PushOutbox,
     PushReceipt,
     Reaction,
@@ -6959,6 +6961,518 @@ class NotificationPreferenceTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+# --- Following a connection to be notified when they post (issue #382) --------
+
+
+def follow_url(user):
+    return f"/api/users/{user.pk}/follow/"
+
+
+def user_detail_url(user):
+    return f"/api/users/{user.pk}/"
+
+
+class FollowEndpointTests(APITestCase):
+    """``POST``/``DELETE /users/<id>/follow/`` — who may follow whom, and the
+    idempotence a toggle needs."""
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.friend = make_user("friend@example.com")
+        make_connection(self.me, self.friend)
+        self.stranger = make_user("stranger@example.com")
+        self.client.force_authenticate(self.me)
+
+    def test_follow_a_connection_creates_the_subscription(self):
+        resp = self.client.post(follow_url(self.friend))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["is_following"])
+        self.assertTrue(
+            PostNotificationSubscription.objects.filter(
+                follower=self.me, followee=self.friend
+            ).exists()
+        )
+
+    def test_cannot_follow_someone_you_are_not_connected_with(self):
+        # The whole feature rests on this: following is a notification
+        # preference *about a connection*, not a way to watch a stranger.
+        resp = self.client.post(follow_url(self.stranger))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_a_pending_request_is_not_a_connection(self):
+        pending = make_user("pending@example.com")
+        make_connection(self.me, pending, status=PENDING)
+        resp = self.client.post(follow_url(pending))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_cannot_follow_yourself(self):
+        resp = self.client.post(follow_url(self.me))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_cannot_follow_across_a_block(self):
+        # Belt-and-braces. Blocking severs the connection, so this pair would
+        # fail the connection check anyway — but the block check is the one that
+        # stays right if that ever changes, and it gives the honest answer
+        # rather than inviting them to go and connect. Rows made directly so the
+        # test exercises *this* branch rather than BlockView's cleanup.
+        blocked = make_user("blocked@example.com")
+        make_connection(self.me, blocked)
+        Block.objects.create(blocker=blocked, blocked=self.me)
+        resp = self.client.post(follow_url(blocked))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_the_connection_check_holds_a_lock(self):
+        """The check and the insert are one locked transaction (#382).
+
+        Not a nicety. Without the lock, a follow racing the other person's
+        disconnect leaves a subscription with no connection behind it: the
+        send-time gate keeps it silent, so nothing looks wrong, until the two
+        reconnect months later and it starts pushing about every post — the
+        quiet resurrection the whole delete-on-disconnect rule exists to
+        prevent. A real race can't be driven from a single-threaded test, so
+        what's pinned is the mechanism: the connection is selected FOR UPDATE.
+        """
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.post(follow_url(self.friend))
+        self.assertTrue(
+            any(
+                "FOR UPDATE" in query["sql"].upper()
+                for query in ctx.captured_queries
+            ),
+            "the connection check must lock the row it read",
+        )
+
+    def test_following_twice_is_following(self):
+        # A double-tap, or a retried request whose response was lost, must not
+        # be an error — and must not trip the unique constraint into a 500.
+        self.client.post(follow_url(self.friend))
+        resp = self.client.post(follow_url(self.friend))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(PostNotificationSubscription.objects.count(), 1)
+
+    def test_unfollow_removes_it_and_is_idempotent(self):
+        self.client.post(follow_url(self.friend))
+        resp = self.client.delete(follow_url(self.friend))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data["is_following"])
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+        # Again, with nothing to remove.
+        resp = self.client.delete(follow_url(self.friend))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_unfollow_works_after_the_other_account_is_deactivated(self):
+        # Withdrawing your own subscription is cleanup. Refusing it because the
+        # other account was disabled would leave a row nobody can remove.
+        self.client.post(follow_url(self.friend))
+        self.friend.is_active = False
+        self.friend.save(update_fields=["is_active"])
+        resp = self.client.delete(follow_url(self.friend))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_cannot_follow_an_inactive_account(self):
+        self.friend.is_active = False
+        self.friend.save(update_fields=["is_active"])
+        resp = self.client.post(follow_url(self.friend))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unknown_user_is_404(self):
+        self.assertEqual(
+            self.client.post("/api/users/999999/follow/").status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_requires_authentication(self):
+        self.client.force_authenticate(None)
+        self.assertEqual(
+            self.client.post(follow_url(self.friend)).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_one_direction_only(self):
+        # The row is directional, unlike a Connection: me following friend says
+        # nothing about friend following me.
+        self.client.post(follow_url(self.friend))
+        self.client.force_authenticate(self.friend)
+        resp = self.client.get(user_detail_url(self.me))
+        self.assertFalse(resp.data["is_following"])
+
+    def test_the_profile_payload_carries_is_following(self):
+        resp = self.client.get(user_detail_url(self.friend))
+        self.assertFalse(resp.data["is_following"])
+        self.client.post(follow_url(self.friend))
+        resp = self.client.get(user_detail_url(self.friend))
+        self.assertTrue(resp.data["is_following"])
+
+    def test_the_people_list_reports_false_rather_than_erroring(self):
+        # ``is_following`` is annotated on the profile queryset only — the
+        # toggle lives on profiles. The list must still serialize (defaulting to
+        # False) rather than raising on the missing annotation.
+        self.client.post(follow_url(self.friend))
+        resp = self.client.get(USERS_URL)
+        rows = {row["id"]: row for row in resp.data["results"]}
+        self.assertFalse(rows[self.friend.id]["is_following"])
+
+
+class FollowOptInTests(APITestCase):
+    """**Off by default, per person** — the promise #382 is built on.
+
+    Nothing notifies anyone until someone presses Follow for a *specific*
+    person: no follow-everyone default, no follow-on-connect, no backfill.
+    These assert the absence, because an absence is what a well-meaning
+    "helpful" default would quietly break.
+    """
+
+    def setUp(self):
+        self.me = make_user("me@example.com")
+        self.other = make_user("other@example.com")
+
+    def test_a_fresh_database_has_no_subscriptions(self):
+        # i.e. no migration seeds any. Migrations have run by the time a test
+        # method executes, so an empty table here is that guarantee.
+        self.assertEqual(PostNotificationSubscription.objects.count(), 0)
+
+    def test_signing_up_follows_nobody(self):
+        newcomer = make_user("newcomer@example.com")
+        self.assertFalse(
+            PostNotificationSubscription.objects.filter(
+                Q(follower=newcomer) | Q(followee=newcomer)
+            ).exists()
+        )
+
+    def test_connecting_does_not_follow(self):
+        # Accepting a connection request is consent to be *seen*, not consent to
+        # be pushed at.
+        self.client.force_authenticate(self.me)
+        self.client.post(connect_url(self.other))
+        self.client.force_authenticate(self.other)
+        self.client.post(connect_url(self.me))
+        self.assertEqual(
+            Connection.objects.filter(status=ACCEPTED).count(), 1
+        )
+        self.assertEqual(PostNotificationSubscription.objects.count(), 0)
+
+    def test_approving_a_request_does_not_follow(self):
+        self.client.force_authenticate(self.me)
+        self.client.post(connect_url(self.other))
+        connection = Connection.objects.get()
+        self.client.force_authenticate(self.other)
+        self.client.post(approve_url(connection.pk))
+        self.assertEqual(PostNotificationSubscription.objects.count(), 0)
+
+    def test_a_new_connection_reads_as_follow_not_following(self):
+        # The toggle's initial state, for every profile, for everyone, day one.
+        make_connection(self.me, self.other)
+        self.client.force_authenticate(self.me)
+        resp = self.client.get(user_detail_url(self.other))
+        self.assertEqual(resp.data["connection_status"], "connected")
+        self.assertFalse(resp.data["is_following"])
+
+    def test_posting_notifies_nobody_when_nobody_follows(self):
+        make_connection(self.me, self.other)
+        self.client.force_authenticate(self.me)
+        self.client.post(POSTS_URL, {"text": "hello"}, format="json")
+        self.assertFalse(
+            Notification.objects.filter(kind=KIND.NEW_POST).exists()
+        )
+
+
+class FollowNotificationTests(APITestCase):
+    """Publishing a post notifies the author's followers — and only the ones
+    who may see it."""
+
+    def setUp(self):
+        self.author = make_user("author@example.com")
+        self.fan = make_user("fan@example.com")
+        make_connection(self.author, self.fan)
+        PostNotificationSubscription.objects.create(
+            follower=self.fan, followee=self.author
+        )
+        self.client.force_authenticate(self.author)
+
+    def _post(self, text="hello", **extra):
+        resp = self.client.post(
+            POSTS_URL, {"text": text, **extra}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        return Post.objects.get(pk=resp.data["id"])
+
+    def test_a_followed_authors_post_notifies_the_follower(self):
+        post = self._post()
+        n = Notification.objects.get(recipient=self.fan)
+        self.assertEqual(n.kind, KIND.NEW_POST)
+        self.assertEqual(n.actor, self.author)
+        self.assertEqual(n.post_id, post.id)
+        self.assertIsNone(n.seen_at)
+
+    def test_it_queues_a_push(self):
+        self._post()
+        n = Notification.objects.get(recipient=self.fan)
+        self.assertTrue(
+            PushOutbox.objects.filter(
+                notification=n, recipient=self.fan
+            ).exists()
+        )
+
+    def test_a_connection_who_does_not_follow_is_not_notified(self):
+        quiet = make_user("quiet@example.com")
+        make_connection(self.author, quiet)
+        self._post()
+        self.assertFalse(
+            Notification.objects.filter(recipient=quiet).exists()
+        )
+
+    def test_editing_a_post_notifies_nobody_again(self):
+        # You were followed to hear about new posts, not about typo fixes — and
+        # a kind that fired on PATCH would make an edit a way to buzz a phone
+        # over and over.
+        post = self._post()
+        self.client.patch(
+            f"/api/posts/{post.pk}/", {"text": "hello (fixed)"}, format="json"
+        )
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient=self.fan, kind=KIND.NEW_POST
+            ).count(),
+            1,
+        )
+
+    def test_a_failed_fan_out_does_not_fail_the_post(self):
+        """The post is committed before the fan-out runs, so a fan-out that
+        raises would 500 a request whose post exists and is already in the
+        author's feed — and the natural response to that is to press Post
+        again, which is how one post becomes two. A notification nobody gets is
+        the far smaller wrong.
+        """
+        with mock.patch.object(
+            notifications,
+            "create_notifications",
+            side_effect=DatabaseError("boom"),
+        ):
+            resp = self.client.post(
+                POSTS_URL, {"text": "survives"}, format="json"
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Post.objects.filter(text="survives").exists())
+        self.assertFalse(Notification.objects.exists())
+
+    def test_muting_the_kind_creates_no_row_at_all(self):
+        NotificationPreference.objects.create(
+            user=self.fan, kind=KIND.NEW_POST, enabled=False
+        )
+        self._post()
+        self.assertFalse(Notification.objects.exists())
+
+    def test_the_kind_is_mutable_and_defaults_on(self):
+        self.assertIn(KIND.NEW_POST, Notification.MUTABLE_KINDS)
+        self.client.force_authenticate(self.fan)
+        resp = self.client.get(NOTIF_PREFS_URL)
+        self.assertTrue(resp.data[KIND.NEW_POST])
+
+    def test_a_subscription_that_outlived_its_connection_notifies_nobody(self):
+        # The send-time gate, tested on the fact rather than the bookkeeping:
+        # the Connection is removed directly, leaving the subscription behind as
+        # a code path that forgot to clean up would.
+        Connection.objects.all().delete()
+        self._post()
+        self.assertFalse(Notification.objects.exists())
+
+    def test_disconnecting_deletes_the_subscription_both_ways(self):
+        PostNotificationSubscription.objects.create(
+            follower=self.author, followee=self.fan
+        )
+        self.client.delete(connect_url(self.fan))
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_blocking_deletes_the_subscription_both_ways(self):
+        PostNotificationSubscription.objects.create(
+            follower=self.author, followee=self.fan
+        )
+        self.client.post(block_url(self.fan))
+        self.assertFalse(PostNotificationSubscription.objects.exists())
+
+    def test_reconnecting_after_a_disconnect_does_not_resume_pushes(self):
+        # The reason the rows are deleted rather than left dormant: a follow
+        # nobody re-consented to must not come back to life months later.
+        self.client.delete(connect_url(self.fan))
+        make_connection(self.author, self.fan)
+        self._post()
+        self.assertFalse(
+            Notification.objects.filter(kind=KIND.NEW_POST).exists()
+        )
+
+    def test_the_payload_names_the_person_and_never_quotes_the_post(self):
+        # This string is also the push body, so it transits Expo's and Apple's
+        # servers on the way to a lock screen: it names people, never quotes
+        # them.
+        post = self._post(text="a secret thing I told my friends")
+        n = Notification.objects.get(recipient=self.fan)
+        data = NotificationSerializer(n).data
+        self.assertEqual(data["text"], f"{self.author.display_name} posted")
+        self.assertNotIn("secret", data["text"])
+        self.assertEqual(data["url"], f"/p/{post.id}")
+        self.assertEqual(data["target"], {"type": "post", "id": post.id})
+
+    def test_it_never_falls_through_to_the_generic_line(self):
+        # ``get_text`` ends in "<name> did something"; a kind added without its
+        # own branch renders that, in the centre *and* in the push body.
+        self._post()
+        n = Notification.objects.get(recipient=self.fan)
+        self.assertNotIn(
+            "did something", NotificationSerializer(n).data["text"]
+        )
+
+    def test_opening_the_post_clears_the_badge(self):
+        # Free, and worth pinning because it's a claim rather than an accident:
+        # ``see_post_notifications`` matches on the target FK, not on kinds, so
+        # reading the post *is* reading the notification about it. Without this
+        # the bell would go on counting a post the reader had already opened
+        # from the push.
+        post = self._post()
+        self.client.force_authenticate(self.fan)
+        self.client.get(f"/api/posts/{post.pk}/")
+        n = Notification.objects.get(recipient=self.fan)
+        self.assertIsNotNone(n.seen_at)
+        # Seen, not addressed — it keeps its weight in the centre.
+        self.assertIsNone(n.addressed_at)
+
+    def test_deleting_the_post_takes_the_notification_with_it(self):
+        # ``Notification.post`` cascades, so there is no dangling deep-link to
+        # filter at read time — the promise the whole model rests on.
+        post = self._post()
+        self.client.delete(f"/api/posts/{post.pk}/")
+        self.assertFalse(Notification.objects.exists())
+
+    def test_the_push_wiring(self):
+        # Its own Android channel rather than ``social`` (labelled "Requests and
+        # invites" in the app), and ordinary delivery priority — a friend's post
+        # is not worth waking a dozing radio for.
+        self.assertEqual(notifications.channel_for_kind(KIND.NEW_POST), "posts")
+        self.assertEqual(
+            notifications.priority_for_kind(KIND.NEW_POST),
+            notifications.PUSH_PRIORITY_DEFAULT,
+        )
+
+    def test_the_fan_out_is_bounded(self):
+        # The rules are applied set-wise (``create_notifications``), so ten
+        # followers cost about what one does — this runs in the same request
+        # that may have just decoded ten photos on one worker.
+        for i in range(10):
+            follower = make_user(f"follower{i}@example.com")
+            make_connection(self.author, follower)
+            PostNotificationSubscription.objects.create(
+                follower=follower, followee=self.author
+            )
+        with CaptureQueriesContext(connection) as ctx:
+            self._post()
+        self.assertEqual(
+            Notification.objects.filter(kind=KIND.NEW_POST).count(), 11
+        )
+        self.assertLess(len(ctx.captured_queries), 30)
+
+
+class FollowGroupPostTests(APITestCase):
+    """A group post reaches only followers who could open it."""
+
+    def setUp(self):
+        self.author = make_user("author@example.com")
+        self.group = make_group(self.author)
+        self.client.force_authenticate(self.author)
+
+    def _follower(self, email, *, connected=True, member=True):
+        user = make_user(email)
+        if connected:
+            make_connection(self.author, user)
+        if member:
+            add_member(self.group, user)
+        PostNotificationSubscription.objects.create(
+            follower=user, followee=self.author
+        )
+        return user
+
+    def _post_to_group(self):
+        resp = self.client.post(
+            POSTS_URL, {"text": "in the group", "group": self.group.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        return Post.objects.get(pk=resp.data["id"])
+
+    def test_a_member_who_follows_is_notified(self):
+        member = self._follower("member@example.com")
+        self._post_to_group()
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=member, kind=KIND.NEW_POST
+            ).exists()
+        )
+
+    def test_a_follower_outside_the_group_is_not(self):
+        # The gate the notification choke-point can't apply for us: this person
+        # *is* connected, so the connection gate passes them — but the post is
+        # in a group they aren't in, and the permalink would 404.
+        outsider = self._follower("outsider@example.com", member=False)
+        self._post_to_group()
+        self.assertFalse(
+            Notification.objects.filter(recipient=outsider).exists()
+        )
+
+    def test_an_invited_but_not_active_member_is_not(self):
+        invitee = make_user("invitee@example.com")
+        make_connection(self.author, invitee)
+        add_member(self.group, invitee, status=INVITED_STATUS)
+        PostNotificationSubscription.objects.create(
+            follower=invitee, followee=self.author
+        )
+        self._post_to_group()
+        self.assertFalse(
+            Notification.objects.filter(recipient=invitee).exists()
+        )
+
+    def test_a_co_member_who_is_not_connected_is_not(self):
+        stranger = self._follower("stranger@example.com", connected=False)
+        self._post_to_group()
+        self.assertFalse(
+            Notification.objects.filter(recipient=stranger).exists()
+        )
+
+    def test_every_recipient_could_open_the_post(self):
+        """The equivalence the audience helper claims, asserted rather than
+        argued: nobody is ever told about a post they'd get a 404 for.
+
+        Written against ``can_view_post`` — the same predicate the permalink
+        endpoint uses — so if the visibility rule moves and the fan-out doesn't,
+        this fails rather than shipping a notification that dead-ends.
+        """
+        self._follower("member@example.com")
+        self._follower("outsider@example.com", member=False)
+        self._follower("stranger@example.com", connected=False)
+        post = self._post_to_group()
+        recipients = Notification.objects.filter(
+            kind=KIND.NEW_POST, post=post
+        ).values_list("recipient", flat=True)
+        self.assertTrue(recipients)
+        for user in User.objects.filter(id__in=recipients):
+            with self.subTest(user=user.email):
+                self.assertTrue(can_view_post(user, post))
+
+    def test_a_personal_post_still_reaches_a_follower_outside_any_group(self):
+        # The group filter must not leak into the personal timeline: no group,
+        # no membership requirement.
+        outsider = self._follower("outsider@example.com", member=False)
+        self.client.post(POSTS_URL, {"text": "personal"}, format="json")
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=outsider, kind=KIND.NEW_POST
+            ).exists()
+        )
+
+
 # --- Post permalink endpoint + deep-link URLs ---------------------------------
 
 
@@ -11769,7 +12283,10 @@ class SendPushesCommandTests(APITestCase):
         # two processes drifted apart.
         self.assertEqual(
             sorted(notifications.ANDROID_CHANNELS),
-            ["events", "mentions", "messages", "reactions", "replies", "social"],
+            [
+                "events", "mentions", "messages", "posts", "reactions",
+                "replies", "social",
+            ],
         )
 
     def test_a_notification_push_carries_its_channel(self):

@@ -27,6 +27,11 @@ const LABELS = {
   // blanket mentions on/off. A mention in an unmuted chat notifies either way;
   // this decides only whether one punches through a chat you silenced.
   mention: "Let @mentions notify me in muted chats",
+  // Issue #382. A category switch, not the follow itself: it can only quieten
+  // people you have already chosen to follow one by one, which is why it's
+  // default-on like the rest and why the label says "people you follow" rather
+  // than implying it turns following on.
+  new_post: "New posts from people you follow",
 };
 
 export default function NotificationPreferencesSection() {

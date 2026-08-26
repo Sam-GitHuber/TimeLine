@@ -16,6 +16,7 @@ from .models import (
     Participant,
     Post,
     PostImage,
+    PostNotificationSubscription,
     Report,
 )
 from .serializers import MESSAGE_THUMBNAIL_MAX_BYTES
@@ -77,6 +78,23 @@ class ConnectionAdmin(admin.ModelAdmin):
     list_select_related = ("requester", "requestee")
     list_filter = ("status",)
     search_fields = ("requester__email", "requestee__email")
+    ordering = ("-created_at",)
+
+
+@admin.register(PostNotificationSubscription)
+class PostNotificationSubscriptionAdmin(admin.ModelAdmin):
+    """Who has asked to be told when whom posts (issue #382).
+
+    Registered beside ``Connection`` because it is read in the same breath as
+    one — "why is this person getting pushes about that person" is answerable
+    only if both tables are visible. It grants no access, so unlike
+    ``Connection`` there is nothing here whose absence would hide content:
+    deleting a row from this page silences a notification, nothing more.
+    """
+
+    list_display = ("id", "follower", "followee", "created_at")
+    list_select_related = ("follower", "followee")
+    search_fields = ("follower__email", "followee__email")
     ordering = ("-created_at",)
 
 
