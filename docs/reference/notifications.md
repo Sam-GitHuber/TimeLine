@@ -366,21 +366,55 @@ is covered for free — ending a connection deletes the subscription server-side
 and `invalidateConnectionChange` already names `['user', id]`, so a disconnect
 repaints the toggle back to *Follow* without either file knowing about the other.
 
-Where they legitimately differ is the refused write (#236). The web renders its
-refusal **inline under the button**, and has to track whose profile it belongs
-to, because `/u/:id` is one route that doesn't remount between people — fail to
-follow Priya, click back to Dana, and the message would be sitting under Dana's
-button. The app **alerts**, like every other write it has, and needs no such
-guard: each profile is a freshly-pushed screen and an `Alert` is modal. Both
-resolve their wording *at the attempt* and phrase it per direction — "you're
-still being notified about their posts" versus "you won't be" — because which of
-the two things failed, and what is therefore still true, is the whole of what the
-reader needs. The server's own sentence wins wherever it wrote one.
+**A refusal is the exception, and it inverts that rule.** Every answer
+`FollowView` can give a real person is the server saying the relationship the
+screen is drawn from has already moved: 400 because you're no longer connected,
+403 because a block now stands between you, 404 because the account is gone.
+Repainting only the message would leave a header still reading *Connected*, a
+Message button and a whole posts wall standing behind an alert saying the
+opposite — so *that* failure does take the wide connection set, precisely
+because the boundary really did move. A 5xx or a dropped connection says nothing
+about the relationship and repaints nothing. (The app does this; the web half
+predates the finding — see the note at the end of this section.)
+
+**The success path holds its pending state across the repaint.** React Query
+clears `isPending` once it has awaited whatever `onSuccess` returns, so an
+invalidation that is fired and forgotten there lets the button leave *Saving…*
+while the profile refetch is still on the wire and `is_following` is still the
+stale `false` it was pressed with — the label then reads *Follow* again for the
+length of a whole GET. That is the "my tap didn't register" appearance the whole
+of #236 exists to stop, arrived at from the success side, and it invites a
+second press. Returning the promise makes the sequence Follow → Saving… →
+Following with nothing in between.
+
+Where the two clients legitimately differ is *where* a refusal is reported
+(#236). The web renders it **inline under the button**, and has to track whose
+profile it belongs to, because `/u/:id` is one route that doesn't remount
+between people — fail to follow Priya, click back to Dana, and the message would
+be sitting under Dana's button. The app **alerts**, and has the mirror-image
+exposure: unmounting does nothing to the promise the handler is sitting on, so a
+press followed by Back would throw a modal *"Couldn't follow Priya"* over the
+feed. It guards with a `mounted` ref — if the screen has gone there is nowhere
+left to report to — the same way `app/activity.tsx` guards its own late-landing
+write. Both clients resolve their wording *at the attempt* and phrase it per
+direction — "you're still being notified about their posts" versus "you won't
+be" — because which of the two things failed, and what is therefore still true,
+is the whole of what the reader needs. The server's own sentence wins wherever
+it wrote one.
 
 The app's pending label is **"Saving…"**, the label it uses for every other
 write, and not "Following…": a pending label one ellipsis away from *Following*,
 the resting label for the state the tap is trying to reach, is no pending label
 at all.
+
+**Two of these landed on the app only.** The returned invalidation promise and
+the refusal-repaints-the-relationship rule came out of #383's review, after the
+web half had already shipped in #384 — `frontend/src/components/FollowButton.jsx`
+still fires its invalidation without returning it, and still repaints nothing on
+a refusal. Neither is a silent failure (the web has no pending label to flicker,
+and its inline message stays put), and web and mobile are separate surfaces with
+separate review and testing, so they weren't folded into the app's PR. Worth
+tidying when that file is next open.
 
 **Neither client needed anything per-kind for the row or the deep link**, which
 is worth stating because it looks like an omission. `NotificationSerializer`

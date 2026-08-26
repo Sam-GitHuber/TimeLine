@@ -157,8 +157,60 @@ describe('following and unfollowing', () => {
 
     // Let it land before the test ends: a mutation still settling as RNTL tears
     // the tree down leaves an act() straddling the next test's render.
+    //
+    // It settles back to "Follow" here only because this harness holds
+    // `isFollowing` fixed — there is no `['user', 42]` query behind it to
+    // repaint. **That is not the product behaviour**, and asserting it as if it
+    // were would pin the very bug the returned invalidation promise exists to
+    // stop. The real sequence, where a profile query does sit behind the prop,
+    // is pinned in `profile.test.tsx`.
     await server.refuse();
     await waitFor(() => expect(screen.getByText('Follow')).toBeTruthy());
+  });
+
+  /**
+   * A press abandoned mid-flight must not follow you off the screen.
+   *
+   * Unmounting does nothing to the promise `run` is sitting on, so without the
+   * `mounted` guard this alert lands modally over whatever you navigated to —
+   * the feed, or the next person's profile, naming someone you're no longer
+   * looking at. The web twin has the same exposure and answers it differently,
+   * because `/u/:id` doesn't remount between people and its message is inline.
+   *
+   * The button is dropped by **re-rendering the tree without it** rather than
+   * by `unmount()`, which is both closer to what a pop does — the app is still
+   * there, this screen isn't — and the only version that leaves the act scope
+   * intact for the tests after it.
+   */
+  it('says nothing if you’ve left the screen before the refusal lands', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0 },
+        mutations: { gcTime: 0 },
+      },
+    });
+    const tree = (present: boolean) => (
+      <QueryClientProvider client={queryClient}>
+        {present ? (
+          <FollowButton userId={42} displayName="Priya Shah" isFollowing={false} />
+        ) : null}
+      </QueryClientProvider>
+    );
+    const server = holdRequest(mockFetch, { detail: 'Nope.' }, 400);
+    const { rerender } = await render(tree(true));
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('Follow'));
+    });
+    await server.inFlight('Saving…');
+    // Back pressed: the profile pops and takes the control with it.
+    await act(async () => {
+      rerender(tree(false));
+    });
+    await server.refuse();
+    await settle(2);
+
+    expect(alertSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -180,10 +232,54 @@ describe('when the write is refused (#236)', () => {
     await waitFor(() => expect(alertSpy).toHaveBeenCalled());
     expect(alertTitle()).toBe('Couldn’t follow');
     expect(alertBody()).toBe("You can only follow people you're connected with.");
-    // A refused write repaints nothing — there's nothing new to read.
-    expect(invalidate).not.toHaveBeenCalled();
-    // And the button is back to where it was, not stuck on "Saving…".
+    // And the connection it just told us about is refreshed — see the
+    // `it.each` below for what that covers and why it's this failure only.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['user', 42] });
+    // The button is back to where it was, not stuck on "Saving…".
     expect(screen.getByText('Follow')).toBeTruthy();
+  });
+
+  /**
+   * **The one refusal that is news about the relationship, not just about the
+   * write.** Every answer `FollowView` can give a real person says the profile
+   * underneath has gone stale: 400 (no longer connected), 403 (a block now
+   * stands between you, which severed the connection too), 404 (the account is
+   * gone). Repainting only the alert would leave a header still reading
+   * *Connected*, a Message button and their whole posts wall standing behind a
+   * message saying the opposite.
+   *
+   * So this failure — and only this one — earns the wide connection set, for
+   * exactly the reason the *success* path above earns only `['user', id]`: here
+   * the visibility boundary really did move.
+   */
+  it.each([400, 403, 404])(
+    'repaints the whole relationship when the server refuses with a %i',
+    async (status) => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ detail: 'No.' }, status));
+      const { invalidate } = await renderButton(false);
+
+      await fireEvent.press(screen.getByText('Follow'));
+
+      await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+      // The connection set, not just this profile — `['feed']` and the calendar
+      // keys are the ones that would otherwise keep showing content the server
+      // has stopped being willing to serve.
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['user', 42] });
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['feed'] });
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['personalCalendar'] });
+    }
+  );
+
+  it('repaints nothing when the failure said nothing about the relationship', async () => {
+    // A 5xx or a dropped connection is not entitled to claim the connection is
+    // gone — it knows nothing about it — so it apologises and touches no cache.
+    mockFetch.mockRejectedValueOnce(new TypeError('Network request failed'));
+    const { invalidate } = await renderButton(false);
+
+    await fireEvent.press(screen.getByText('Follow'));
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it('falls back to what is still true, per direction, when it didn’t', async () => {

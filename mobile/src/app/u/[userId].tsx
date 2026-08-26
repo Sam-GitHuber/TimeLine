@@ -450,7 +450,21 @@ const styles = StyleSheet.create({
   ghostLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.ink },
   logout: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   logoutLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.danger },
-  actions: { marginTop: spacing.sm, flexDirection: 'row', gap: spacing.sm },
+  // **Wraps**, and it has to. Once Follow joined Connected and Message (#383)
+  // the three pills are ~325pt of content — 48pt of padding plus a 13pt label
+  // each, plus two 8pt gaps — in a `headerBody` that has the screen width less
+  // 32pt of header padding, the 80pt `lg` Avatar and a 16pt gap: 265pt on an
+  // iPhone 15, 302pt on a Pro Max. React Native defaults `flexShrink` to 0, so
+  // without this the third button is pushed past the edge on every phone we
+  // ship to — clipped, and untappable on Android, where the parent clips.
+  // `ProfileEditForm` and `GroupForm` wrap their button rows for the same
+  // reason.
+  actions: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
   // Block is a quieter, secondary action, so it sits on its own line below the
   // primary connect/message row (as on the web), left-aligned.
   blockRow: { marginTop: spacing.xs, flexDirection: 'row', alignSelf: 'flex-start' },
