@@ -281,6 +281,32 @@ describe('ActivityScreen', () => {
     await waitFor(() => expect(mockRouter.navigate).toHaveBeenCalledWith('/events/9'));
   });
 
+  /**
+   * A followed person's post (#382/#383) needs no code on this screen, and this
+   * is the assertion that it stays that way.
+   *
+   * Every row's wording is authored by `NotificationSerializer.get_text` — the
+   * same string the push body carries, which is why it names a person and
+   * quotes nobody — and every row's route comes from `url`. So a new kind
+   * renders and deep-links itself. The failure this guards against is somebody
+   * later "handling" a kind here: a `switch` on `kind` with no `new_post` arm
+   * would blank the row, and the two clients would start disagreeing about what
+   * the same notification says.
+   */
+  it('renders a new-post row from the server’s own words and opens the post', async () => {
+    serveList([
+      notification({ id: 11, kind: 'new_post', url: '/p/42', text: 'Ada posted' }),
+    ]);
+    await renderWithClient(<ActivityScreen />);
+
+    await fireEvent.press(await screen.findByText('Ada posted'));
+
+    await waitFor(() =>
+      expect(made(/\/api\/notifications\/11\/addressed\/$/, 'POST')).toBe(true)
+    );
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/post/42');
+  });
+
   it('does not re-address an already-addressed row, but still navigates', async () => {
     serveList([
       notification({ id: 9, addressed: true, seen: true, url: '/u/5', text: 'Ada accepted' }),

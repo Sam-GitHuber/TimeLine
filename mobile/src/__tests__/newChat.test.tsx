@@ -61,6 +61,8 @@ function person(id: number, name: string): PersonSummary {
     avatar_thumb: null,
     connection_status: 'connected',
     is_blocked: false,
+    // List rows never carry a real value for this — see `PersonSummary`.
+    is_following: false,
   };
 }
 

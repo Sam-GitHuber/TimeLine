@@ -885,6 +885,35 @@ export const api = {
     request<void>(`/api/users/${userId}/block/`, { method: 'DELETE' }),
 
   /**
+   * Follow (POST) or unfollow (DELETE) a person — ask to be told when they post
+   * (#382). The subscription is a notification preference, not a second social
+   * graph: it grants no access to anything, because you can already see every
+   * post they write. That is exactly why POST 400s unless the two of you are
+   * still connected — the server re-checks the connection under a row lock at
+   * the moment of the write, so a tap that races a disconnect is refused with a
+   * sentence written for a person rather than quietly stored.
+   *
+   * DELETE has no such precondition and never fails on state: withdrawing your
+   * own subscription is cleanup, and it stays possible after a disconnect or
+   * after the other account is deactivated. It is idempotent — unfollowing
+   * someone you don't follow deletes nothing and still returns 200.
+   *
+   * Both return `{ detail, is_following }`. The caller refetches `['user', id]`
+   * rather than reading that flag, so one source (the profile payload) drives
+   * the toggle; the body is there for the web's benefit and for debugging.
+   */
+  followUser: (userId: number | string) =>
+    request<{ detail: string; is_following: boolean }>(
+      `/api/users/${userId}/follow/`,
+      { method: 'POST' }
+    ),
+  unfollowUser: (userId: number | string) =>
+    request<{ detail: string; is_following: boolean }>(
+      `/api/users/${userId}/follow/`,
+      { method: 'DELETE' }
+    ),
+
+  /**
    * Flag a post, comment or message for the maintainer to review (the
    * content-takedown path). Pass exactly one of `postId` / `commentId` /
    * `messageId`, plus an optional reason. Idempotent server-side: a repeat flag

@@ -346,6 +346,51 @@ Shaped like `BlockView` rather than `ConnectView` — there's no pending state a
 no second party to wait for, so there's nothing a 201 would mean that `200` plus
 `is_following` doesn't already say.
 
+### The two clients
+
+The same toggle on both, and deliberately the twin rather than a second
+interpretation — `frontend/src/components/FollowButton.jsx` and
+`mobile/src/components/FollowButton.tsx` (#382 shipped the web half, #383 the
+app half). Both render **inside** the `connection_status === 'connected'` branch
+of the profile, beside Message, so following is never offered as a fifth
+connection state and never on your own profile; both read *Follow* until pressed;
+both refetch **`['user', id]` and nothing else** on success.
+
+That last one is the choice worth writing down. There is a shared
+`invalidateConnectionChange` helper on each client — seventeen query keys — and
+it is the right hammer for a *connection*, which moves the visibility boundary a
+dozen screens gate on. A follow moves nothing: you could already read every one
+of those posts, `is_following` is annotated on the profile payload and nowhere
+else, so the profile query is the whole of what went stale. The reverse direction
+is covered for free — ending a connection deletes the subscription server-side,
+and `invalidateConnectionChange` already names `['user', id]`, so a disconnect
+repaints the toggle back to *Follow* without either file knowing about the other.
+
+Where they legitimately differ is the refused write (#236). The web renders its
+refusal **inline under the button**, and has to track whose profile it belongs
+to, because `/u/:id` is one route that doesn't remount between people — fail to
+follow Priya, click back to Dana, and the message would be sitting under Dana's
+button. The app **alerts**, like every other write it has, and needs no such
+guard: each profile is a freshly-pushed screen and an `Alert` is modal. Both
+resolve their wording *at the attempt* and phrase it per direction — "you're
+still being notified about their posts" versus "you won't be" — because which of
+the two things failed, and what is therefore still true, is the whole of what the
+reader needs. The server's own sentence wins wherever it wrote one.
+
+The app's pending label is **"Saving…"**, the label it uses for every other
+write, and not "Following…": a pending label one ellipsis away from *Following*,
+the resting label for the state the tap is trying to reach, is no pending label
+at all.
+
+**Neither client needed anything per-kind for the row or the deep link**, which
+is worth stating because it looks like an omission. `NotificationSerializer`
+authors both the text and the `url`, so a `new_post` row renders and routes
+itself; the app maps `/p/<id>` to `/post/<id>` through the same
+`routeForNotification` every push tap uses, and that screen has been safe since
+#318 against the post having been deleted between send and tap — the seen-mirror
+is bolted to the request, so a 404 rejects before it can dismiss the notification
+that brought you there. Tests pin all three rather than leaving them assumed.
+
 ### The four gates, and where each lives
 
 A `new_post` notification passes through four filters, and it matters which of

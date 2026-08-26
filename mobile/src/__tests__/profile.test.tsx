@@ -138,6 +138,9 @@ function profile(overrides: Partial<ProfileUser> & { id: number }): ProfileUser 
     avatar_thumb: null,
     connection_status: 'connected',
     is_blocked: false,
+    // Following is off by default and per person, so every profile starts here
+    // unless a test says otherwise (#382/#383).
+    is_following: false,
     ...overrides,
   };
 }
@@ -248,6 +251,73 @@ describe('viewing a profile', () => {
     // And their posts were never requested — you're not allowed to see them, so
     // the query stays disabled rather than firing a call the backend empties.
     expect(mockFetch.mock.calls.some(([url]) => url.includes('/posts/'))).toBe(false);
+  });
+});
+
+/**
+ * Where the Follow toggle may and may not appear (#382, app half #383).
+ *
+ * The control's own behaviour is `followButton.test.tsx`; what's pinned here is
+ * the gate, because getting it wrong is how a "follow" stops being a
+ * notification subscription and starts looking like a second social graph.
+ * Following is only offered for someone whose posts you can already read, which
+ * is the same precondition the server enforces under a row lock — so the toggle
+ * must never be on a stranger's profile, a pending request, or your own.
+ */
+describe('the Follow toggle’s gate', () => {
+  it('offers it on a connection’s profile, reading "Follow" by default', async () => {
+    mockParams.userId = '2';
+    serve({ user: profile({ id: 2, display_name: 'Bob Brown' }) });
+
+    await renderScreen();
+
+    // Beside Message, inside the connected case — not a fifth connection state.
+    expect(await screen.findByRole('button', { name: 'Follow Bob Brown' })).toBeTruthy();
+    expect(screen.getByLabelText('Message')).toBeTruthy();
+  });
+
+  it('reads "Following" when the profile says you already do', async () => {
+    mockParams.userId = '2';
+    serve({
+      user: profile({ id: 2, display_name: 'Bob Brown', is_following: true }),
+    });
+
+    await renderScreen();
+
+    expect(
+      await screen.findByRole('button', { name: 'Following Bob Brown' })
+    ).toBeTruthy();
+  });
+
+  it.each(['none', 'requested', 'incoming'] as const)(
+    'withholds it from a "%s" relationship',
+    async (connection_status) => {
+      mockParams.userId = '2';
+      serve({
+        user: profile({ id: 2, display_name: 'Bob Brown', connection_status }),
+      });
+
+      await renderScreen();
+
+      // Wait for the header itself, so this can't pass by asserting against a
+      // screen that hasn't finished loading.
+      expect(await screen.findByText('Bob Brown')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Follow Bob Brown' })).toBeNull();
+    }
+  );
+
+  it('never offers it on your own profile', async () => {
+    serve({ user: profile({ id: 1 }), posts: [] });
+
+    await renderScreen();
+
+    expect(await screen.findByRole('button', { name: 'Edit profile' })).toBeTruthy();
+    expect(
+      screen.queryByRole('button', { name: 'Follow Alice Anderson' })
+    ).toBeNull();
+    // Not even a stray one under any name — following yourself is refused by a
+    // database constraint, so a control for it could only ever fail.
+    expect(screen.queryByText('Follow')).toBeNull();
   });
 });
 

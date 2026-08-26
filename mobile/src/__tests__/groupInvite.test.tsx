@@ -48,6 +48,9 @@ function person(id: number, display_name: string): PersonSummary {
     avatar_thumb: null,
     connection_status: 'connected',
     is_blocked: false,
+    // `UserListView` doesn't annotate this, so a list row always reads false —
+    // the toggle it drives exists on the profile detail only (#382).
+    is_following: false,
   };
 }
 

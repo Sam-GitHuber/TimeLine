@@ -36,6 +36,7 @@ import { Avatar } from '@/components/Avatar';
 import { SettingsIcon } from '@/components/icons';
 import { BlockButton } from '@/components/BlockButton';
 import { ConnectButton } from '@/components/ConnectButton';
+import { FollowButton } from '@/components/FollowButton';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { MessageButton } from '@/components/MessageButton';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
@@ -225,6 +226,15 @@ export default function ProfileScreen() {
               // mutation invalidates ['user', id] + ['userPosts', id], so
               // accepting/connecting here flips both the posts wall and whether
               // Message shows without leaving the screen.
+              //
+              // Follow (#382/#383) sits *inside* the connected case with Message,
+              // never as a fifth connection state: you can only be told when
+              // someone posts if you could already read the post, which is the
+              // same precondition the server enforces. It is off by default, so
+              // this reads "Follow" until somebody taps it — connecting never
+              // turns it on. The same `['user', id]` invalidation covers both
+              // directions: disconnecting deletes the subscription server-side
+              // and repaints this back to "Follow" on the way past.
               <>
                 <View style={styles.actions}>
                   <ConnectButton
@@ -234,7 +244,14 @@ export default function ProfileScreen() {
                     size="md"
                   />
                   {user.connection_status === 'connected' && (
-                    <MessageButton userId={id} />
+                    <>
+                      <MessageButton userId={id} />
+                      <FollowButton
+                        userId={id}
+                        displayName={user.display_name}
+                        isFollowing={user.is_following}
+                      />
+                    </>
                   )}
                 </View>
                 <View style={styles.blockRow}>

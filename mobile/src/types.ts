@@ -37,8 +37,8 @@ export type User = {
  * The public view of *someone else's* profile, distinct from the `User` above:
  * no email, no first/last name split, no `pk` (it's `id` here, matching every
  * other embedded user in the API). It carries the viewer-relative fields the
- * profile header needs — `connection_status` and `is_blocked` — which the
- * self-only `User` type has no reason to.
+ * profile header needs — `connection_status`, `is_blocked` and `is_following` —
+ * which the self-only `User` type has no reason to.
  *
  * `connection_status` is *your* relationship to this person:
  *   - `"none"`      — no link (Connect)
@@ -56,15 +56,31 @@ export type ProfileUser = {
   avatar_thumb: string | null;
   connection_status: 'none' | 'requested' | 'incoming' | 'connected';
   is_blocked: boolean;
+  /**
+   * Whether *you* have asked to be told when this person posts (#382) — the
+   * state of the Follow / Following toggle. It is a notification subscription
+   * and nothing more: you can already see every one of their posts, since only
+   * a connection can be followed. Off by default, per person; nothing but a
+   * deliberate tap ever turns it on.
+   *
+   * **Only meaningful on the profile detail.** `UserDetailView` annotates it;
+   * `UserListView` deliberately doesn't (an EXISTS per row for a control the
+   * people lists don't render), and the serializer's method field then defaults
+   * it to `false`. So a `PersonSummary` row always reads `false` regardless of
+   * the truth — same shape as `is_blocked`, which is detail-only for the same
+   * reason. Don't drive UI off it outside `getUser`.
+   */
+  is_following: boolean;
 };
 
 /**
  * A row in the People hub's lists — `api.serializers.UserListSerializer`, the
  * same serializer behind `getUser`. It's structurally a `ProfileUser`: the
  * `/api/users/` list endpoint annotates `connection_status` per row and defaults
- * `is_blocked` to `false` (block state is only surfaced on the profile detail),
- * so one type serves both. Aliased rather than duplicated so a serializer change
- * lands in one place.
+ * `is_blocked` and `is_following` to `false` (both are only surfaced on the
+ * profile detail, where the controls that read them live), so one type serves
+ * both. Aliased rather than duplicated so a serializer change lands in one
+ * place.
  */
 export type PersonSummary = ProfileUser;
 
