@@ -44,6 +44,10 @@ const LABELS: Record<string, string> = {
   // Phase 9b M8. Phrased as exactly what it does: not a blanket mentions
   // on/off, only whether a mention beats a chat you muted. See messaging.md.
   mention: 'Let @mentions notify me in muted chats',
+  // Issue #382. The backend half of following ships before the app's profile
+  // toggle does (#383), so this label lands with it — otherwise the moment the
+  // server deploys, this screen shows a raw `new_post` key.
+  new_post: 'New posts from people you follow',
 };
 
 const PREFS_KEY = ['notificationPreferences'] as const;

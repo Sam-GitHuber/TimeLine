@@ -1,9 +1,19 @@
 # Connections & comments
 
 The social graph and the visibility boundary that everything else keys off. A
-**connection** is a symmetric, mutually-approved relationship (there is no
-one-directional "follow"), and it's the single predicate that decides whose posts,
-comments, and reactions you see. This doc is the current-state reference.
+**connection** is a symmetric, mutually-approved relationship, and it's the
+single predicate that decides whose posts, comments, and reactions you see. This
+doc is the current-state reference.
+
+**There is no one-directional "follow" in the graph**, and that hasn't changed —
+but the app does now have a button saying *Follow* (issue #382), so the sentence
+needs saying precisely rather than briefly. That button creates a **notification
+subscription** to someone you are *already* symmetrically connected to: it asks
+to be told when they post. It grants no access — you could already see those
+posts, which is why being connected is the precondition for creating one — and
+it never touches the feed, which stays strictly reverse-chronological for
+everyone. Nothing in this document's visibility rules reads that table. See
+[notifications.md](notifications.md#following-someone-to-hear-when-they-post).
 
 Code: `Connection` / `Comment` models + `connected_user_ids` / `visible_posts` /
 comment-tree pruning in `backend/api/views.py`. Frontend: the Connect button,

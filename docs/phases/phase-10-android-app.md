@@ -204,10 +204,11 @@ real, located thing.
 - **Two different service-account keys, easily confused:** one for **FCM v1**
   (sending push) and, if we automate submission, another for the **Play Developer
   API** (`eas submit`). Different consoles, different purposes.
-- **Notification channels.** ✅ **Done.** Six channels mirroring the per-type
+- **Notification channels.** ✅ **Done.** Seven channels mirroring the per-type
   preference groups (`messages`, `mentions`, `replies`, `reactions`, `events`,
-  `social`), created at launch by `configureNotificationChannels`, with each push
-  carrying a matching `channelId`. Written up in
+  `social`, `posts` — the last added with following, issue #382), created at
+  launch by `configureNotificationChannels`, with each push carrying a matching
+  `channelId`. Written up in
   [`reference/notifications.md`](../reference/notifications.md#android-notification-channels-phase-10).
 
   **This needed a backend change, which this plan and `notifications.md` both

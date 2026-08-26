@@ -86,6 +86,15 @@ urlpatterns = [
         views.ConnectView.as_view(),
         name="user-connect",
     ),
+    # Ask to be notified when this person posts, or stop (issue #382). Shaped
+    # like connect/ and block/ above because it sits beside them on a profile —
+    # but it is a *notification* subscription, not a relationship: it grants no
+    # access and requires an existing connection. See ``FollowView``.
+    path(
+        "users/<int:pk>/follow/",
+        views.FollowView.as_view(),
+        name="user-follow",
+    ),
     path(
         "users/<int:pk>/block/",
         views.BlockView.as_view(),

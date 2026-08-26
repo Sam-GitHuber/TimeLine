@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Avatar from "../components/Avatar.jsx";
 import ConnectButton from "../components/ConnectButton.jsx";
+import FollowButton from "../components/FollowButton.jsx";
 import MessageButton from "../components/MessageButton.jsx";
 import BlockButton from "../components/BlockButton.jsx";
 import ProfileEditForm from "../components/ProfileEditForm.jsx";
@@ -141,10 +142,21 @@ export default function ProfilePage() {
                 />
               ) : (
                 <div className="flex shrink-0 items-center gap-2">
-                  {/* Message only makes sense once connected — and the backend
-                      enforces the same rule. */}
+                  {/* Message and Follow only make sense once connected — and
+                      the backend enforces the same rule for both. Follow is
+                      deliberately *inside* the connected case rather than a
+                      fifth connection state: it isn't a relationship, it's a
+                      per-person notification preference about someone you're
+                      already connected to (issue #382). */}
                   {user.connection_status === "connected" && (
-                    <MessageButton userId={user.id} />
+                    <>
+                      <MessageButton userId={user.id} />
+                      <FollowButton
+                        userId={user.id}
+                        displayName={user.display_name}
+                        isFollowing={user.is_following}
+                      />
+                    </>
                   )}
                   <ConnectButton
                     userId={user.id}

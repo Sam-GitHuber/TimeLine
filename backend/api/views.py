@@ -79,6 +79,7 @@ from .models import (
     Post,
     PostCommentRead,
     PostImage,
+    PostNotificationSubscription,
     Reaction,
     Report,
 )
@@ -1514,6 +1515,64 @@ class FeedView(CommentCountMixin, ReactionContextMixin, generics.ListAPIView):
         return feed_posts(self.request.user, include_groups=include_groups)
 
 
+def _new_post_audience(post):
+    """The people who asked to be told when ``post``'s author posts, narrowed to
+    those who may actually **see** this particular post (issue #382).
+
+    Two filters, and it matters which one lives where.
+
+    Here: the subscriptions themselves, plus **group membership** when the post
+    went into a group. That second one is the half the notification choke-point
+    cannot do for us — it gates on the connection, which a co-member you aren't
+    connected with fails, but a *connected* follower who simply isn't in the
+    group would sail through it and be told about a post they'd get a 404 for.
+    The set form of ``is_group_member``, one query, exactly as ``_connected_ids``
+    is the set form of ``_are_connected``.
+
+    Not here: the connection gate and the mute. ``create_notifications`` applies
+    both, set-wise, to whatever it's handed (``_CONNECTION_GATED_KINDS`` /
+    ``MUTABLE_KINDS``), so re-deriving them would be a second copy of the rule
+    to keep in step. Between the two, the audience is precisely
+    ``can_view_post`` — a follower who couldn't open the post is never told
+    about it — and a test pins that equivalence rather than trusting the prose.
+    """
+    ids = set(
+        PostNotificationSubscription.objects.filter(
+            followee_id=post.author_id, follower__is_active=True
+        ).values_list("follower_id", flat=True)
+    )
+    if ids and post.group_id:
+        ids &= set(
+            GroupMembership.objects.filter(
+                group_id=post.group_id, status=ACTIVE, user_id__in=ids
+            ).values_list("user_id", flat=True)
+        )
+    if not ids:
+        return User.objects.none()
+    return User.objects.filter(id__in=ids)
+
+
+def notify_new_post(post):
+    """Tell this author's followers they posted (issue #382).
+
+    **Bulk, not a loop**, for the reason ``EventPhotosView`` spells out: the
+    per-recipient path costs about seven statements each and this runs in the
+    same request that may have just decoded and re-encoded ten photos on one
+    worker. ``create_notifications`` applies the identical rules set-wise.
+
+    Called only from ``PostCreateView`` — publishing is the event. Editing a
+    post deliberately notifies nobody: nobody followed you to be told you fixed
+    a typo, and a kind that fired on ``PATCH`` would make an edit a way to buzz
+    a phone repeatedly.
+    """
+    notifications.create_notifications(
+        _new_post_audience(post),
+        post.author,
+        Notification.Kind.NEW_POST,
+        post=post,
+    )
+
+
 class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
     """Create a post as the logged-in user, optionally with photos.
 
@@ -1598,6 +1657,13 @@ class PostCreateView(ReactionContextMixin, generics.CreateAPIView):
                     f"thumb{item['ext']}", item["thumbnail"], save=False
                 )
                 image.save()
+
+        # Tell anyone who follows this author (#382) — after the commit, like
+        # every other fan-out in this file, so nobody is notified about a post
+        # that didn't survive. The audience is narrowed to people who can see
+        # the post; the connection gate and the per-kind mute are applied inside
+        # the choke-point. See ``notify_new_post``.
+        notify_new_post(post)
 
         # Re-serialize so the response carries the created images (with URLs).
         out = self.get_serializer(post)
@@ -1788,7 +1854,36 @@ class UserDetailView(generics.RetrieveAPIView):
                     blocker=user, blocked=OuterRef("pk")
                 )
             ),
+            # Whether *you* have asked to be notified when this person posts
+            # (#382), so the profile can render Follow vs Following without a
+            # second round trip. Annotated here and not on ``UserListView``:
+            # the toggle exists on profiles only, so the people lists would be
+            # paying for an EXISTS per row to render a control they don't have.
+            is_following=Exists(
+                PostNotificationSubscription.objects.filter(
+                    follower=user, followee=OuterRef("pk")
+                )
+            ),
         )
+
+
+def drop_post_subscriptions(user, other):
+    """Delete the follow rows **in both directions** between two people (#382).
+
+    Called wherever a connection ends — disconnecting and blocking. Leaving them
+    dormant would mean that reconnecting months later silently resumed pushes
+    neither person had re-consented to, which is precisely the kind of quiet
+    resurrection a privacy-first app shouldn't have. Following is cheap to
+    re-establish and its absence is the safe state, so it goes with the
+    connection.
+
+    Both directions because a connection ending is symmetric even though a
+    follow isn't: whoever pressed disconnect, neither of them is entitled to be
+    notified about the other any more.
+    """
+    PostNotificationSubscription.objects.filter(
+        Q(follower=user, followee=other) | Q(follower=other, followee=user)
+    ).delete()
 
 
 class ConnectView(APIView):
@@ -1907,10 +2002,91 @@ class ConnectView(APIView):
                 Q(requester=request.user, requestee=target)
                 | Q(requester=target, requestee=request.user)
             ).delete()
+            # A follow rests on the connection, so it goes with it (#382).
+            drop_post_subscriptions(request.user, target)
             for convo in convos:
                 promote_participants(convo, now)
         return Response(
             {"detail": "Removed.", "connection_status": "none"},
+            status=status.HTTP_200_OK,
+        )
+
+
+class FollowView(APIView):
+    """Ask to be notified when someone posts (POST), or stop (DELETE), at
+    ``/users/<pk>/follow/`` — issue #382.
+
+    **This is not a second relationship, and the URL's word is the user's word,
+    not the model's.** A follow grants nothing: you can already see every post
+    this person writes, because you're connected — that's the precondition for
+    following them, not something following gives you. All it changes is
+    whether their next post also reaches your activity centre and your phone.
+    See ``PostNotificationSubscription`` for why that distinction is worth
+    keeping in the code as well as the docs.
+
+    POST is refused unless you're **currently connected** (400). That gate is
+    re-applied at send time inside the notification choke-point, so the check
+    here is about giving an honest answer to a button press rather than about
+    security — a subscription that outlived its connection would notify nobody
+    either way.
+
+    Both verbs are **idempotent** — following twice is following, unfollowing
+    something you don't follow is fine — because this is a toggle and a
+    double-tap or a retried request must not be an error. Shaped like
+    ``BlockView`` rather than ``ConnectView``: there's no pending state and no
+    second party to wait for, so there is nothing for a 201 to mean that 200 and
+    ``is_following`` don't already say.
+    """
+
+    def post(self, request, pk):
+        target = get_object_or_404(User, pk=pk, is_active=True)
+        if target == request.user:
+            return Response(
+                {"detail": "You can't follow yourself."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Belt-and-braces: a block deletes the ``Connection`` row outright
+        # (``BlockView.post``), so a blocked pair already fails the connection
+        # check below. Kept explicit because it's the check that would still be
+        # right if that ever stopped being true, and because "You can't follow
+        # this person" is the honest answer to a block, where "you're not
+        # connected" would invite them to go and connect — the same wording
+        # ``ConnectView`` gives for the same situation.
+        if is_blocked_between(request.user, target):
+            return Response(
+                {"detail": "You can't follow this person."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if target.id not in connected_user_ids(request.user):
+            return Response(
+                {
+                    "detail": (
+                        "You can only follow people you're connected with."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # ``get_or_create`` rather than ``create``: it takes its own savepoint
+        # and re-reads on the unique-constraint violation, so two taps racing
+        # each other resolve to one row instead of a 500.
+        PostNotificationSubscription.objects.get_or_create(
+            follower=request.user, followee=target
+        )
+        return Response(
+            {"detail": "Following.", "is_following": True},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        # No ``is_active`` filter, unlike POST and like ``BlockView.delete``:
+        # withdrawing your own subscription is cleanup, and it must not be
+        # blocked by the other account having been deactivated in the meantime.
+        target = get_object_or_404(User, pk=pk)
+        PostNotificationSubscription.objects.filter(
+            follower=request.user, followee=target
+        ).delete()
+        return Response(
+            {"detail": "Unfollowed.", "is_following": False},
             status=status.HTTP_200_OK,
         )
 
@@ -3869,6 +4045,10 @@ class BlockView(APIView):
                 Q(requester=request.user, requestee=target)
                 | Q(requester=target, requestee=request.user)
             ).delete()
+            # The connection is gone, so any follow riding on it goes too
+            # (#382) — and unblocking must not silently switch the pushes back
+            # on, which is exactly what leaving the row would do.
+            drop_post_subscriptions(request.user, target)
             for convo in convos:
                 promote_participants(convo, now)
         return Response(

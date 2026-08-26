@@ -238,6 +238,12 @@ class UserListSerializer(serializers.ModelSerializer):
     ``"requested"`` (you asked — awaiting them), ``"incoming"`` (they asked —
     awaiting you), or ``"connected"`` (mutual). It's annotated onto the queryset
     in the view (one query, no N+1).
+
+    ``is_following`` (issue #382) is the same shape one step along: whether you
+    have asked to be *notified* when this person posts. It is emphatically not a
+    fifth ``connection_status`` — the two are independent, and following is only
+    possible while ``connection_status`` is ``"connected"``, so a client renders
+    the Follow toggle *inside* the connected case rather than beside it.
     """
 
     display_name = serializers.CharField(read_only=True)
@@ -248,6 +254,13 @@ class UserListSerializer(serializers.ModelSerializer):
     # profile-detail queryset; defaults to False elsewhere (e.g. the people
     # list, which doesn't surface block state).
     is_blocked = serializers.SerializerMethodField()
+    # Whether the requesting user has asked to be notified when this person
+    # posts (issue #382). Annotated on the profile-detail queryset only, exactly
+    # like ``is_blocked`` and for the same reason: the Follow toggle lives on a
+    # profile and nowhere else, so the people lists would be paying for an
+    # ``EXISTS`` per row to render a control they don't have. Defaults to False
+    # everywhere it isn't annotated.
+    is_following = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -258,10 +271,14 @@ class UserListSerializer(serializers.ModelSerializer):
             "avatar_thumb",
             "bio",
             "is_blocked",
+            "is_following",
         )
 
     def get_is_blocked(self, obj):
         return bool(getattr(obj, "is_blocked", False))
+
+    def get_is_following(self, obj):
+        return bool(getattr(obj, "is_following", False))
 
     def get_avatar_thumb(self, obj):
         return absolute_media_url(obj.avatar_thumb, self.context.get("request"))
@@ -1197,6 +1214,17 @@ class NotificationSerializer(serializers.ModelSerializer):
         if obj.kind == K.GROUP_INVITE:
             group_name = obj.group.name if obj.group_id else "a group"
             return f"{name} invited you to {group_name}"
+        # Someone you follow posted (#382). **No excerpt of the post**, and the
+        # omission is deliberate: this string is also the push body
+        # (``send_pushes._payload`` reads it straight from here), so it transits
+        # Expo's servers and Apple's/Google's on its way to a lock screen. The
+        # standing rule there is that a push names people but never quotes them
+        # — it is what lets message pushes exist at all — and a post is exactly
+        # the friends-and-family content that rule exists to protect. This is
+        # the first kind where there would be something to quote, so it is the
+        # first place the rule could have been broken by accident.
+        if obj.kind == K.NEW_POST:
+            return f"{name} posted"
         # Event kinds (Phase 8b) — the actor is the organiser; name the event so
         # the line is meaningful in a push payload with no surrounding context.
         title = obj.event.title if obj.event_id else "an event"
@@ -1256,6 +1284,11 @@ class NotificationSerializer(serializers.ModelSerializer):
         # Post permalink (/p/<id>), with ?comment=<id> when the notification is
         # about a specific comment so the thread opens right at it.
         if obj.kind == K.POST_REPLY and obj.post_id:
+            return f"/p/{obj.post_id}"
+        # Someone you follow posted (#382) — the permalink for the post itself.
+        # Same route as a reply to your own post, because it is the same
+        # destination: the post, on its own page, with its thread under it.
+        if obj.kind == K.NEW_POST and obj.post_id:
             return f"/p/{obj.post_id}"
         if obj.kind == K.COMMENT_REPLY and obj.comment_id:
             return self._comment_url(obj.comment)
