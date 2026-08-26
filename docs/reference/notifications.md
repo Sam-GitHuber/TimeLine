@@ -285,6 +285,33 @@ shipped silent and stays silent until someone presses the button; the toggle rea
 Accepting a connection request is consent to be **seen**, not consent to be
 **pushed at**. Those are different asks and the second one is made separately.
 
+### The person being followed is not told, deliberately
+
+There is no "Alice started following you" notification, and there shouldn't be.
+Three reasons, in order of weight:
+
+- **Nothing changed for them.** They already granted the follower access to
+  everything they post when they accepted the connection; following adds nothing
+  to what can be seen. Telling them would be notifying someone about a third
+  party's *notification settings*.
+- **It is the nearest thing this app could have to a follower count.** "X started
+  following you" invites "should I follow them back?", and follow-backs, follower
+  counts and reciprocity prompts are precisely the engagement mechanics
+  `docs/SHARED.md` rules out. It's a small door, but it opens onto that.
+- **It would make people follow less.** Announced, someone might not quietly
+  follow a friend for fear of seeming intense — which defeats a feature whose
+  entire job is "I don't want to miss this person's posts".
+
+The transparency argument (in a privacy-first app, shouldn't you know who is
+watching you closely?) is the serious counter, and it doesn't survive the first
+point: there is no exposure to be transparent about, because the follower can
+already read all of it.
+
+This also matches the closest thing already in the codebase —
+`Participant.muted_at`, silencing a conversation, doesn't tell the other party
+either. **A notification preference is private to whoever holds it**, and this is
+one.
+
 ### The model
 
 ```
