@@ -36,6 +36,7 @@ import { Avatar } from '@/components/Avatar';
 import { SettingsIcon } from '@/components/icons';
 import { BlockButton } from '@/components/BlockButton';
 import { ConnectButton } from '@/components/ConnectButton';
+import { FollowButton } from '@/components/FollowButton';
 import { KeyboardAvoider } from '@/components/KeyboardAvoider';
 import { MessageButton } from '@/components/MessageButton';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
@@ -225,6 +226,15 @@ export default function ProfileScreen() {
               // mutation invalidates ['user', id] + ['userPosts', id], so
               // accepting/connecting here flips both the posts wall and whether
               // Message shows without leaving the screen.
+              //
+              // Follow (#382/#383) sits *inside* the connected case with Message,
+              // never as a fifth connection state: you can only be told when
+              // someone posts if you could already read the post, which is the
+              // same precondition the server enforces. It is off by default, so
+              // this reads "Follow" until somebody taps it — connecting never
+              // turns it on. The same `['user', id]` invalidation covers both
+              // directions: disconnecting deletes the subscription server-side
+              // and repaints this back to "Follow" on the way past.
               <>
                 <View style={styles.actions}>
                   <ConnectButton
@@ -234,7 +244,14 @@ export default function ProfileScreen() {
                     size="md"
                   />
                   {user.connection_status === 'connected' && (
-                    <MessageButton userId={id} />
+                    <>
+                      <MessageButton userId={id} />
+                      <FollowButton
+                        userId={id}
+                        displayName={user.display_name}
+                        isFollowing={user.is_following}
+                      />
+                    </>
                   )}
                 </View>
                 <View style={styles.blockRow}>
@@ -433,7 +450,21 @@ const styles = StyleSheet.create({
   ghostLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.ink },
   logout: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   logoutLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.danger },
-  actions: { marginTop: spacing.sm, flexDirection: 'row', gap: spacing.sm },
+  // **Wraps**, and it has to. Once Follow joined Connected and Message (#383)
+  // the three pills are ~325pt of content — 48pt of padding plus a 13pt label
+  // each, plus two 8pt gaps — in a `headerBody` that has the screen width less
+  // 32pt of header padding, the 80pt `lg` Avatar and a 16pt gap: 265pt on an
+  // iPhone 15, 302pt on a Pro Max. React Native defaults `flexShrink` to 0, so
+  // without this the third button is pushed past the edge on every phone we
+  // ship to — clipped, and untappable on Android, where the parent clips.
+  // `ProfileEditForm` and `GroupForm` wrap their button rows for the same
+  // reason.
+  actions: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
   // Block is a quieter, secondary action, so it sits on its own line below the
   // primary connect/message row (as on the web), left-aligned.
   blockRow: { marginTop: spacing.xs, flexDirection: 'row', alignSelf: 'flex-start' },

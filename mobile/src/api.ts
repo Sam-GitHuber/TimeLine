@@ -808,8 +808,10 @@ export const api = {
   /**
    * A single person's public profile by numeric id — the header for `/u/[id]`.
    *
-   * Returns `connection_status` and `is_blocked` relative to you, so the screen
-   * can decide whether their posts are visible. Like the feed, a profile you
+   * Returns `connection_status`, `is_blocked` and `is_following` relative to
+   * you, so the screen can decide whether their posts are visible and which of
+   * the header's controls to draw. It is the only endpoint that annotates
+   * `is_following` — the people lists don't (see `PersonSummary`). Like the feed, a profile you
    * genuinely can't see still returns its header (the wall is on the *posts*,
    * which come back empty) — the id itself isn't a secret, a real person is.
    */
@@ -883,6 +885,32 @@ export const api = {
     request<void>(`/api/users/${userId}/block/`, { method: 'POST' }),
   unblockUser: (userId: number | string) =>
     request<void>(`/api/users/${userId}/block/`, { method: 'DELETE' }),
+
+  /**
+   * Follow (POST) or unfollow (DELETE) a person — ask to be told when they post
+   * (#382). The subscription is a notification preference, not a second social
+   * graph: it grants no access to anything, because you can already see every
+   * post they write. That is exactly why POST 400s unless the two of you are
+   * still connected — the server re-checks the connection under a row lock at
+   * the moment of the write, so a tap that races a disconnect is refused with a
+   * sentence written for a person rather than quietly stored.
+   *
+   * DELETE has no such precondition and never fails on state: withdrawing your
+   * own subscription is cleanup, and it stays possible after a disconnect or
+   * after the other account is deactivated. It is idempotent — unfollowing
+   * someone you don't follow deletes nothing and still returns 200.
+   *
+   * Both answer `{ detail, is_following }` on the wire, and both are typed
+   * `void` here — the convention `blockUser` and `connect` above already follow
+   * for servers that likewise return a body. The caller refetches `['user', id]`
+   * rather than reading the flag, so one source (the profile payload) drives the
+   * toggle; typing a shape nothing reads would advertise a contract instead of
+   * describing one.
+   */
+  followUser: (userId: number | string) =>
+    request<void>(`/api/users/${userId}/follow/`, { method: 'POST' }),
+  unfollowUser: (userId: number | string) =>
+    request<void>(`/api/users/${userId}/follow/`, { method: 'DELETE' }),
 
   /**
    * Flag a post, comment or message for the maintainer to review (the

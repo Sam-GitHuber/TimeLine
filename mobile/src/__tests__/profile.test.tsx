@@ -138,6 +138,9 @@ function profile(overrides: Partial<ProfileUser> & { id: number }): ProfileUser 
     avatar_thumb: null,
     connection_status: 'connected',
     is_blocked: false,
+    // Following is off by default and per person, so every profile starts here
+    // unless a test says otherwise (#382/#383).
+    is_following: false,
     ...overrides,
   };
 }
@@ -248,6 +251,146 @@ describe('viewing a profile', () => {
     // And their posts were never requested — you're not allowed to see them, so
     // the query stays disabled rather than firing a call the backend empties.
     expect(mockFetch.mock.calls.some(([url]) => url.includes('/posts/'))).toBe(false);
+  });
+});
+
+/**
+ * Where the Follow toggle may and may not appear (#382, app half #383).
+ *
+ * The control's own behaviour is `followButton.test.tsx`; what's pinned here is
+ * the gate, because getting it wrong is how a "follow" stops being a
+ * notification subscription and starts looking like a second social graph.
+ * Following is only offered for someone whose posts you can already read, which
+ * is the same precondition the server enforces under a row lock — so the toggle
+ * must never be on a stranger's profile, a pending request, or your own.
+ */
+describe('the Follow toggle’s gate', () => {
+  it('offers it on a connection’s profile, reading "Follow" by default', async () => {
+    mockParams.userId = '2';
+    serve({ user: profile({ id: 2, display_name: 'Bob Brown' }) });
+
+    await renderScreen();
+
+    // Beside Message, inside the connected case — not a fifth connection state.
+    expect(await screen.findByRole('button', { name: 'Follow Bob Brown' })).toBeTruthy();
+    expect(screen.getByLabelText('Message')).toBeTruthy();
+  });
+
+  it('reads "Following" when the profile says you already do', async () => {
+    mockParams.userId = '2';
+    serve({
+      user: profile({ id: 2, display_name: 'Bob Brown', is_following: true }),
+    });
+
+    await renderScreen();
+
+    expect(
+      await screen.findByRole('button', { name: 'Following Bob Brown' })
+    ).toBeTruthy();
+  });
+
+  it.each(['none', 'requested', 'incoming'] as const)(
+    'withholds it from a "%s" relationship',
+    async (connection_status) => {
+      mockParams.userId = '2';
+      serve({
+        user: profile({ id: 2, display_name: 'Bob Brown', connection_status }),
+      });
+
+      await renderScreen();
+
+      // Wait for the header itself, so this can't pass by asserting against a
+      // screen that hasn't finished loading.
+      expect(await screen.findByText('Bob Brown')).toBeTruthy();
+      // **Both labels**, not just "Follow". `is_following` is annotated by
+      // `UserDetailView` independently of `connection_status`, and a
+      // subscription can outlive its connection for as long as it takes the
+      // delete to land — so a broken gate could just as easily render
+      // "Following Bob Brown" here, and an assertion naming only the other
+      // label would stay green through it.
+      expect(screen.queryByRole('button', { name: 'Follow Bob Brown' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Following Bob Brown' })).toBeNull();
+      expect(screen.queryByText(/^Follow(ing)?$/)).toBeNull();
+    }
+  );
+
+  /**
+   * **The label must not flash back to "Follow" after a successful follow.**
+   *
+   * `mutateAsync` resolves the moment React Query is done awaiting whatever
+   * `onSuccess` returns — so a fire-and-forget `invalidateQueries` there clears
+   * `isPending` while the profile refetch is still on the wire and
+   * `isFollowing` is still the stale `false` the button was pressed with. The
+   * control then reads exactly as it did before the press, for the length of a
+   * whole GET, which on patchy signal is seconds: the "my tap didn't register"
+   * appearance the whole #236 rule exists to stop, and an invitation to press
+   * again. Returning the promise holds "Saving…" across the repaint.
+   *
+   * This can only be caught here, with a real `['user', id]` query behind the
+   * prop — `followButton.test.tsx` mounts the control with `isFollowing` fixed,
+   * so there the label has nothing to move it.
+   */
+  it('holds "Saving…" across the repaint rather than flashing back to Follow', async () => {
+    mockParams.userId = '2';
+    let followed = false;
+    let releaseRefetch: () => void = () => {};
+    const refetched = new Promise<void>((resolve) => {
+      releaseRefetch = resolve;
+    });
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/auth/user/')) return jsonResponse(me);
+      if (url.includes('/posts/')) {
+        return jsonResponse({ count: 0, next: null, previous: null, results: [] });
+      }
+      if (url.includes('/follow/')) {
+        followed = true;
+        return jsonResponse({ detail: 'Following.', is_following: true });
+      }
+      if (url.includes('/api/users/')) {
+        const user = profile({
+          id: 2,
+          display_name: 'Bob Brown',
+          is_following: followed,
+        });
+        // The post-follow refetch is held open; the first load isn't.
+        if (followed) await refetched;
+        return jsonResponse(user);
+      }
+      return jsonResponse(null, 404);
+    });
+
+    await renderScreen();
+
+    await act(async () => {
+      fireEvent.press(screen.getByRole('button', { name: 'Follow Bob Brown' }));
+    });
+    await settle(2);
+
+    // The POST has answered. The profile refetch has not.
+    expect(screen.getByText('Saving…')).toBeTruthy();
+    expect(screen.queryByText('Follow')).toBeNull();
+
+    await act(async () => {
+      releaseRefetch();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(await screen.findByText('Following')).toBeTruthy();
+    expect(screen.queryByText('Saving…')).toBeNull();
+  });
+
+  it('never offers it on your own profile', async () => {
+    serve({ user: profile({ id: 1 }), posts: [] });
+
+    await renderScreen();
+
+    expect(await screen.findByRole('button', { name: 'Edit profile' })).toBeTruthy();
+    expect(
+      screen.queryByRole('button', { name: 'Follow Alice Anderson' })
+    ).toBeNull();
+    // Not even a stray one under any name — following yourself is refused by a
+    // database constraint, so a control for it could only ever fail.
+    expect(screen.queryByText('Follow')).toBeNull();
   });
 });
 

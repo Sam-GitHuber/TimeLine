@@ -251,11 +251,24 @@ describe('ActivityScreen', () => {
     );
   });
 
-  it('addresses a row and deep-links to its mapped route on tap', async () => {
-    serveList([notification({ id: 7, url: '/p/42', text: 'Reply on your post' })]);
+  /**
+   * **Parameterised over `kind` on purpose.** This screen knows nothing about
+   * kinds: `NotificationSerializer` authors both the wording and the `url`, so
+   * a row renders and deep-links itself and a new kind needs no code here. The
+   * second case is `new_post` (#382/#383) — following someone was the first
+   * kind added after this screen was written, and it needed exactly nothing.
+   * What the pair guards against is somebody later "handling" kinds with a
+   * `switch`: an arm-less kind would blank its row, and the two clients would
+   * start disagreeing about what the same notification says.
+   */
+  it.each([
+    ['post_reply', 'Reply on your post'],
+    ['new_post', 'Ada posted'],
+  ])('addresses a %s row and deep-links to its mapped route on tap', async (kind, text) => {
+    serveList([notification({ id: 7, kind, url: '/p/42', text })]);
     await renderWithClient(<ActivityScreen />);
 
-    await fireEvent.press(await screen.findByText('Reply on your post'));
+    await fireEvent.press(await screen.findByText(text));
 
     await waitFor(() =>
       expect(made(/\/api\/notifications\/7\/addressed\/$/, 'POST')).toBe(true)
