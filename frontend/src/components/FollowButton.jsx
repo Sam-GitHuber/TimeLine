@@ -27,6 +27,21 @@ import { serverMessage } from "../errors.js";
 export default function FollowButton({ userId, displayName, isFollowing }) {
   const queryClient = useQueryClient();
   const [failure, setFailure] = useState(null);
+  // **The message must not follow you to someone else's profile.** `/u/:id` is
+  // a single route, so moving between profiles changes this component's props
+  // without remounting it — `ProfilePage` resets its own `editing` state for
+  // exactly that reason, and this has the same exposure: fail to follow Priya,
+  // click back to Dana (served from cache, so no loading branch intervenes),
+  // and "Couldn't follow Priya" would be sitting under Dana's button. The
+  // subject is tracked here rather than fixed with a `key` at the call site so
+  // the guarantee travels with the component to any future caller. React's
+  // "adjust state during render on prop change" pattern, as used above it.
+  const [subject, setSubject] = useState(userId);
+  const changedSubject = subject !== userId;
+  if (changedSubject) {
+    setSubject(userId);
+    setFailure(null);
+  }
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -56,7 +71,11 @@ export default function FollowButton({ userId, displayName, isFollowing }) {
   // the same render batch as the rejection can't swallow the message before
   // it's painted (the trap #231 describes). Render-phase, like `BlockButton`'s
   // equivalent — no effect, no extra paint.
-  if (failure && isFollowing !== failure.from) setFailure(null);
+  // (Skipped on the render that just changed subject: it has already cleared
+  // the message, and `isFollowing` there belongs to a different person.)
+  if (!changedSubject && failure && isFollowing !== failure.from) {
+    setFailure(null);
+  }
 
   // Resolved at the attempt and held as a string: a success flips `isFollowing`
   // underneath us, and the message must keep describing the action that

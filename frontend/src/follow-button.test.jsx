@@ -162,6 +162,27 @@ describe("FollowButton", () => {
     );
   });
 
+  it("does not carry the message to another person's profile", async () => {
+    // `/u/:id` is one route, so moving between profiles changes the props
+    // without remounting — "Couldn’t follow Priya" must not end up under
+    // Dana's button.
+    api.followUser.mockRejectedValue(unauthoredError(500));
+    const { setProps } = renderButton(
+      <FollowButton userId={2} displayName="Priya" isFollowing={false} />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Follow" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Priya/);
+
+    // Same follow state, different person — the state the retirement check
+    // alone would have missed.
+    setProps(
+      <FollowButton userId={3} displayName="Dana" isFollowing={false} />
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+    );
+  });
+
   it("keeps the message while the answer stays what it was", async () => {
     // A refetch that agrees with the pre-attempt state is not confirmation of
     // anything; clearing on any resync is the swallow #231 describes.

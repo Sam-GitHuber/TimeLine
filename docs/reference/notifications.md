@@ -207,8 +207,8 @@ they don't want.
 
 Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, all seven
 [event](events.md) kinds — the organiser's five broadcasts plus `event_comment`
-and `event_photos` — and `mention`) are ever written here and exposed in the
-API. The
+and `event_photos` — `mention`, and `new_post`) are ever written here and
+exposed in the API. The
 connection/invite kinds are **always-on**: muting "someone wants to connect" would
 hide something you must act
 on — and with the badges unified, the bell is the only signal. A `PATCH` that tries
@@ -380,6 +380,26 @@ It deep-links to the post permalink `/p/<id>`, the same destination a reply to
 your own post goes to, and its Android channel is **`posts`**, not `social` —
 the app labels `social` "Requests and invites", so filing post pushes there would
 mean turning them down silenced connection requests too.
+
+### Known: reading it in the feed doesn't clear the badge
+
+`see_post_notifications` is hooked to the post **permalink** and its comment
+tree, so a `new_post` row is marked seen when you open the post — not when you
+scroll past it in the feed. This is the first kind whose content is routinely
+read on a surface that clears nothing (every other kind points at something you
+must navigate to), so four overnight posts can stay counted after you've read
+all four in the feed. It clears on the next open of the activity centre, like
+any notification you never clicked through.
+
+**Deliberately not "fixed" by hooking the feed.** The seen rule is built on a
+*deliberate* open — the doc's own note that the comment hooks are "safe from
+scroll-by" is the reason it's safe at all. A feed page is the opposite: it
+returns twenty posts to a viewport showing two, so marking their notifications
+seen would clear the badge for posts nobody looked at, which is a worse failure
+than the one it fixes (the badge would then under-count rather than
+over-count, and under-counting loses things). If this becomes a real irritation
+the honest fix is client-side viewport tracking, not a server-side hook on the
+fetch.
 
 ### Known: a burst is a burst
 

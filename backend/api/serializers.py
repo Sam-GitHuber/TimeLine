@@ -1283,12 +1283,11 @@ class NotificationSerializer(serializers.ModelSerializer):
         K = Notification.Kind
         # Post permalink (/p/<id>), with ?comment=<id> when the notification is
         # about a specific comment so the thread opens right at it.
-        if obj.kind == K.POST_REPLY and obj.post_id:
-            return f"/p/{obj.post_id}"
-        # Someone you follow posted (#382) — the permalink for the post itself.
-        # Same route as a reply to your own post, because it is the same
-        # destination: the post, on its own page, with its thread under it.
-        if obj.kind == K.NEW_POST and obj.post_id:
+        # ``NEW_POST`` (#382) shares this branch rather than getting a copy of
+        # it: a followed friend's post and a reply to your own both open the
+        # same place — the post, on its own page, with its thread under it — so
+        # two branches would only be two things to change when the route moves.
+        if obj.kind in (K.POST_REPLY, K.NEW_POST) and obj.post_id:
             return f"/p/{obj.post_id}"
         if obj.kind == K.COMMENT_REPLY and obj.comment_id:
             return self._comment_url(obj.comment)

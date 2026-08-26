@@ -7025,6 +7025,27 @@ class FollowEndpointTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(PostNotificationSubscription.objects.exists())
 
+    def test_the_connection_check_holds_a_lock(self):
+        """The check and the insert are one locked transaction (#382).
+
+        Not a nicety. Without the lock, a follow racing the other person's
+        disconnect leaves a subscription with no connection behind it: the
+        send-time gate keeps it silent, so nothing looks wrong, until the two
+        reconnect months later and it starts pushing about every post — the
+        quiet resurrection the whole delete-on-disconnect rule exists to
+        prevent. A real race can't be driven from a single-threaded test, so
+        what's pinned is the mechanism: the connection is selected FOR UPDATE.
+        """
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.post(follow_url(self.friend))
+        self.assertTrue(
+            any(
+                "FOR UPDATE" in query["sql"].upper()
+                for query in ctx.captured_queries
+            ),
+            "the connection check must lock the row it read",
+        )
+
     def test_following_twice_is_following(self):
         # A double-tap, or a retried request whose response was lost, must not
         # be an error — and must not trip the unique constraint into a 500.
@@ -7220,6 +7241,25 @@ class FollowNotificationTests(APITestCase):
             ).count(),
             1,
         )
+
+    def test_a_failed_fan_out_does_not_fail_the_post(self):
+        """The post is committed before the fan-out runs, so a fan-out that
+        raises would 500 a request whose post exists and is already in the
+        author's feed — and the natural response to that is to press Post
+        again, which is how one post becomes two. A notification nobody gets is
+        the far smaller wrong.
+        """
+        with mock.patch.object(
+            notifications,
+            "create_notifications",
+            side_effect=DatabaseError("boom"),
+        ):
+            resp = self.client.post(
+                POSTS_URL, {"text": "survives"}, format="json"
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Post.objects.filter(text="survives").exists())
+        self.assertFalse(Notification.objects.exists())
 
     def test_muting_the_kind_creates_no_row_at_all(self):
         NotificationPreference.objects.create(
