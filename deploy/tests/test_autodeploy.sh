@@ -43,10 +43,6 @@ new_world() {
   cp "$STUB" "$STATE/bin/docker"
   chmod +x "$STATE/bin/docker"
   : >"$STATE/calls.log"
-  # The Caddyfile "on disk". A running web container sees this same content
-  # unless a case says otherwise (web_sees_caddyfile).
-  printf 'your-timeline.net {\n}\n' >"$STATE/Caddyfile"
-  export TIMELINE_CADDYFILE="$STATE/Caddyfile"
 }
 
 # An image that is already on the box.
@@ -56,17 +52,10 @@ have_image() { printf '%s' "$2" >"$STATE/images/$(sanitize "$1")"; }
 running_container() {
   printf '%s' "$2" >"$STATE/running/$1"
   printf '%s' "$3" >"$STATE/containers/$2"
-  if [[ "$1" == "web" ]]; then
-    cp "$STATE/Caddyfile" "$STATE/web_caddyfile"
-  fi
 }
 
-# What the running web container sees at /etc/caddy/Caddyfile, when that's
-# not the file on disk (i.e. a `git pull` replaced it after web was created).
-web_sees_caddyfile() { printf '%s' "$1" >"$STATE/web_caddyfile"; }
-
-# The web container is running but `compose exec` into it fails.
-web_caddyfile_unreadable() { rm -f "$STATE/web_caddyfile"; }
+# The Caddyfile on main is one Caddy refuses, so `caddy reload` fails.
+caddy_rejects_config() { : >"$STATE/reload_fails"; }
 
 # What `docker compose pull` will put on the box for this image.
 pull_delivers() { printf '%s' "$2" >"$STATE/pull_delivers/$(sanitize "$1")"; }
@@ -115,28 +104,14 @@ assert_not_deployed() {
     fail "redeployed when the containers were already on the release image"
 }
 
-# The only redeploy was `web` alone: the Caddyfile is web's config, so a change
-# to it must not recreate backend or pushes (the drain can take minutes to stop).
-assert_only_web_recreated() {
-  local ups
-  ups="$(grep ' up -d ' "$STATE/calls.log")"
-  if [[ -z "$ups" ]]; then
-    fail "expected web to be recreated, but nothing was"
-    return
-  fi
-  [[ "$(printf '%s\n' "$ups" | wc -l | tr -d ' ')" == "1" ]] ||
-    fail "expected exactly one docker compose up, got: $ups"
-  [[ "$ups" == *" up -d --no-build --force-recreate web" ]] ||
-    fail "expected only web to be force-recreated, got: $ups"
+assert_reloaded() {
+  grep -q ' exec -T web caddy reload ' "$STATE/calls.log" ||
+    fail "expected a caddy reload, so a pulled Caddyfile change is applied"
 }
 
-assert_single_full_redeploy() {
-  local ups
-  ups="$(grep ' up -d ' "$STATE/calls.log")"
-  [[ "$(printf '%s\n' "$ups" | wc -l | tr -d ' ')" == "1" ]] ||
-    fail "expected exactly one docker compose up, got: $ups"
-  [[ "$ups" == *" backend pushes web" ]] ||
-    fail "expected the full release redeploy, got: $ups"
+assert_not_reloaded() {
+  ! grep -q ' exec -T web caddy reload ' "$STATE/calls.log" ||
+    fail "reloaded caddy after a redeploy, which already starts it on the current file"
 }
 
 assert_output_contains() {
@@ -285,64 +260,65 @@ test_pinned_tag() {
   finish_case
 }
 
-# --- Caddyfile drift (issue #202) -------------------------------------------
+# --- Caddyfile reload (issue #202) ------------------------------------------
 #
-# The Caddyfile is a single-file bind mount, so after `git pull` replaces it the
-# running Caddy keeps the old content. No image changed, so the release check
-# above sees nothing to do — this is what catches it.
+# Config arrives by `git pull`, but nothing recreates `web` unless its image
+# changed — so a Caddyfile change used to sit unapplied until an unrelated
+# release. Every tick with nothing to redeploy now asks Caddy to reload.
 
-# THE REGRESSION TEST FOR #202. Every container is on its release image, but a
-# pull has brought a new Caddyfile that the running web container doesn't see.
-# Before the fix this was "nothing to do" until an unrelated release.
-test_caddyfile_changed() {
-  new_world "caddyfile_changed"
+# THE REGRESSION TEST FOR #202. Nothing to redeploy, so the only thing that can
+# apply a pulled Caddyfile is a reload — and it must happen without recreating
+# anything (a recreate is downtime).
+test_caddy_reloaded_when_nothing_to_redeploy() {
+  new_world "caddy_reloaded_when_nothing_to_redeploy"
   have_image "$BACKEND_IMAGE" sha256:aaa
   have_image "$WEB_IMAGE" sha256:bbb
   running_container backend c_backend sha256:aaa
   running_container pushes c_pushes sha256:aaa
   running_container web c_web sha256:bbb
-  web_sees_caddyfile "the pre-pull Caddyfile"
 
   run_converge
   assert_exit_ok
-  assert_only_web_recreated
-  assert_output_contains "running Caddyfile differs"
+  assert_reloaded
+  assert_not_deployed
   finish_case
 }
 
-# Can't read the Caddyfile back through the container: recreate web so `up`
-# fixes it or fails loudly, rather than reporting "nothing to do".
-test_caddyfile_unreadable() {
-  new_world "caddyfile_unreadable"
+# A broken Caddyfile on main: Caddy refuses it and keeps serving the last good
+# config. The run must fail loudly — but must NOT recreate web, which would
+# swap a working Caddy for one that can't start.
+test_caddy_reload_fails() {
+  new_world "caddy_reload_fails"
   have_image "$BACKEND_IMAGE" sha256:aaa
   have_image "$WEB_IMAGE" sha256:bbb
   running_container backend c_backend sha256:aaa
   running_container pushes c_pushes sha256:aaa
   running_container web c_web sha256:bbb
-  web_caddyfile_unreadable
+  caddy_rejects_config
 
   run_converge
-  assert_exit_ok
-  assert_only_web_recreated
-  assert_output_contains "couldn't read the Caddyfile"
+  assert_exit_fails
+  assert_not_deployed
+  assert_output_contains "caddy reload failed"
+  assert_output_contains "unrecognized directive"
   finish_case
 }
 
-# A release and a Caddyfile change in the same pull: the full redeploy already
-# recreates web (which then mounts the new file), so there's one `up`, not two.
-test_caddyfile_changed_with_release() {
-  new_world "caddyfile_changed_with_release"
+# A release: the redeploy recreates web, which reads the current Caddyfile as
+# it starts. No reload on top.
+test_no_reload_after_redeploy() {
+  new_world "no_reload_after_redeploy"
   have_image "$BACKEND_IMAGE" sha256:aaa
   have_image "$WEB_IMAGE" sha256:bbb
   running_container backend c_backend sha256:aaa
   running_container pushes c_pushes sha256:aaa
   running_container web c_web sha256:bbb
-  web_sees_caddyfile "the pre-pull Caddyfile"
   pull_delivers "$WEB_IMAGE" sha256:newweb
 
   run_converge
   assert_exit_ok
-  assert_single_full_redeploy
+  assert_deployed
+  assert_not_reloaded
   finish_case
 }
 
@@ -440,9 +416,9 @@ test_pushes_drift
 test_missing_container
 test_missing_image
 test_pinned_tag
-test_caddyfile_changed
-test_caddyfile_unreadable
-test_caddyfile_changed_with_release
+test_caddy_reloaded_when_nothing_to_redeploy
+test_caddy_reload_fails
+test_no_reload_after_redeploy
 test_guard_default_is_strict
 test_guard_single_disk_ok
 test_guard_single_disk_missing_dir

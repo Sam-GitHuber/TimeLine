@@ -6,8 +6,9 @@
 #   2. pulls the latest release images from GHCR,
 #   3. and ONLY IF a container isn't already running that image, recreates the
 #      stack;
-#   4. otherwise, if the running Caddy is still serving an older Caddyfile than
-#      the one on disk, recreates just `web` (issue #202 — see caddyfile_drift).
+#   4. otherwise asks the running Caddy to reload its Caddyfile, so a pulled
+#      config change takes effect without a release (issue #202 — see
+#      reload_caddy).
 # The backend entrypoint (entrypoint.prod.sh) runs migrations + collectstatic on
 # start, so a redeploy needs nothing else by hand.
 #
@@ -88,11 +89,6 @@ IMAGES=(
   "ghcr.io/sam-githuber/timeline-web:${TIMELINE_TAG}"
 )
 
-# The Caddyfile as the box has it on disk — i.e. as main has it, after the
-# `git pull` in main(). Relative to the repo root, which main() cd's into.
-# Overridable so deploy/tests can point it at a temp file.
-CADDYFILE="${TIMELINE_CADDYFILE:-deploy/Caddyfile}"
-
 # Spelled out rather than `date -Is`: -I is GNU-only, and the test harness runs
 # on macOS too, where BSD date rejects it and every log line grows an error.
 log() { echo "$(date '+%Y-%m-%dT%H:%M:%S%z') autodeploy: $*"; }
@@ -170,36 +166,37 @@ drift_reasons() {
   done
 }
 
-caddyfile_drift() {
-  # Print a reason if the running `web` container is NOT serving the Caddyfile
-  # that's on disk; no output means it is.
+reload_caddy() {
+  # Ask the running Caddy to re-read /etc/caddy/Caddyfile.
   #
-  # WHY THIS EXISTS (issue #202). The prod compose file bind-mounts the Caddyfile
-  # as a single file. A single-file bind mount pins the file's *inode*, and
-  # `git pull` doesn't edit files in place — it writes a new file and renames it
-  # over the old one, i.e. a new inode. So after a pull the container goes on
-  # seeing (and Caddy goes on serving) the old content, and nothing above would
-  # ever notice: the images haven't changed, so no service is recreated. A
-  # Caddyfile fix — the admin allowlist, a body cap, security headers — could sit
-  # on disk unapplied for weeks, until an unrelated release happened to recreate
-  # `web`.
+  # WHY THIS EXISTS (issue #202). Config arrives by `git pull`, but nothing
+  # above recreates `web` unless its *image* changed, so a merged Caddyfile fix
+  # (the admin allowlist, a body cap, security headers) used to sit on disk
+  # unapplied until an unrelated release. The Caddyfile is mounted as a
+  # directory (deploy/caddy -> /etc/caddy) so the container sees the pulled
+  # file, and this makes Caddy load it.
   #
-  # Same shape as drift_reasons: ask what the running container actually has,
-  # rather than "did the file change in this pull?" (an event a failed or skipped
-  # run would miss forever). Reading it back through the container is exactly
-  # the stale-inode view Caddy loaded, so a mismatch means Caddy is out of date.
+  # Safe to run on every tick, which is what makes it convergent rather than a
+  # "did the file change?" event that a failed run could miss for good:
+  #   - an unchanged config is a no-op: Caddy compares it with what's loaded and
+  #     skips the reload ("config is unchanged").
+  #   - a broken config is refused: `caddy reload` fails to adapt/load it and
+  #     the running config stays in place. The site keeps serving the last good
+  #     Caddyfile; this run fails loudly and each later tick retries until main
+  #     is fixed. (Recreating `web` instead would have taken the site down on a
+  #     typo, and couldn't have been retried without bouncing it every tick.)
+  #   - no downtime: a reload swaps config in-process; connections aren't
+  #     dropped.
   #
-  # Only called when no service needed recreating: a full redeploy recreates
-  # `web`, and a new container mounts the current file anyway.
-  local seen
-  if ! seen="$(docker compose "${COMPOSE_FILES[@]}" exec -T web cat /etc/caddy/Caddyfile 2>/dev/null)"; then
-    # Can't tell — recreate so `up` either fixes it or fails loudly, rather than
-    # reporting "nothing to do" about a container we couldn't inspect.
-    echo "web: couldn't read the Caddyfile inside the running container"
-    return 0
-  fi
-  if [[ "$seen" != "$(cat "$CADDYFILE")" ]]; then
-    echo "web: running Caddyfile differs from $CADDYFILE on disk"
+  # Its output is kept only on failure: on success it's the same few INFO lines
+  # every five minutes, which would bury the log lines that matter.
+  local out
+  if ! out="$(docker compose "${COMPOSE_FILES[@]}" exec -T web \
+    caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1)"; then
+    printf '%s\n' "$out"
+    log "ERROR: caddy reload failed; web is still serving its previous config."
+    log "       Fix deploy/caddy/Caddyfile on main (the error is above)."
+    return 1
   fi
 }
 
@@ -211,17 +208,10 @@ converge() {
   reasons="$(drift_reasons)"
 
   if [[ -z "$reasons" ]]; then
-    reason="$(caddyfile_drift)"
-    if [[ -n "$reason" ]]; then
-      # Recreate rather than `caddy reload`: a reload would re-read the same
-      # stale inode. Only `web` — the Caddyfile is its config alone, and
-      # recreating `pushes` in particular can mean waiting out a long drain.
-      # Costs a few seconds of the site being unreachable, once per change.
-      log "config redeploy needed — $reason"
-      docker compose "${COMPOSE_FILES[@]}" up -d --no-build --force-recreate web
-      log "deploy complete: web recreated with the current Caddyfile."
-      return 0
-    fi
+    # No redeploy, so `web` is the container that loaded the Caddyfile at some
+    # earlier start. (A redeploy below recreates it, and a fresh Caddy reads the
+    # current file anyway.)
+    reload_caddy || return 1
     log "containers already running release ${TIMELINE_TAG}; nothing to do."
     return 0
   fi
@@ -237,7 +227,9 @@ converge() {
   # here when something is already wrong — and it's what makes convergence
   # guaranteed rather than best-effort. It applies only to the services named on
   # the command line: compose does not cascade it to dependencies, so Postgres is
-  # never recreated by a deploy.
+  # not recreated by a deploy *unless its own compose config changed* — compose
+  # still recreates a dependency whose config has diverged (e.g. an edited db
+  # healthcheck), once, as part of this `up`.
   docker compose "${COMPOSE_FILES[@]}" up -d --no-build --force-recreate "${SERVICES[@]}"
   docker compose "${COMPOSE_FILES[@]}" ps
   docker image prune -f >/dev/null

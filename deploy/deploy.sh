@@ -63,6 +63,26 @@ main() {
   echo "==> Building images and starting the stack..."
   docker compose -f "$COMPOSE_FILE" up -d --build
 
+  # `up` only recreates `web` if its image or compose config changed, so a
+  # pulled Caddyfile change alone would never be loaded (issue #202). A reload
+  # applies it; an unchanged config is a no-op, and a broken one is refused with
+  # the old config left running. Retried because a `web` that `up` has just
+  # recreated may not have its admin endpoint listening yet.
+  echo "==> Reloading Caddy's config..."
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if docker compose -f "$COMPOSE_FILE" exec -T web \
+      caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+      break
+    fi
+    if [[ "$attempt" == 5 ]]; then
+      echo "WARNING: caddy reload failed; web is still serving its previous config." >&2
+      echo "         Fix deploy/caddy/Caddyfile (the error is above), then re-run." >&2
+      break
+    fi
+    sleep 2
+  done
+
   echo "==> Current status:"
   docker compose -f "$COMPOSE_FILE" ps
 
