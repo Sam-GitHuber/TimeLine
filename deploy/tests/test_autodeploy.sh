@@ -43,6 +43,10 @@ new_world() {
   cp "$STUB" "$STATE/bin/docker"
   chmod +x "$STATE/bin/docker"
   : >"$STATE/calls.log"
+  # The Caddyfile "on disk". A running web container sees this same content
+  # unless a case says otherwise (web_sees_caddyfile).
+  printf 'your-timeline.net {\n}\n' >"$STATE/Caddyfile"
+  export TIMELINE_CADDYFILE="$STATE/Caddyfile"
 }
 
 # An image that is already on the box.
@@ -52,7 +56,17 @@ have_image() { printf '%s' "$2" >"$STATE/images/$(sanitize "$1")"; }
 running_container() {
   printf '%s' "$2" >"$STATE/running/$1"
   printf '%s' "$3" >"$STATE/containers/$2"
+  if [[ "$1" == "web" ]]; then
+    cp "$STATE/Caddyfile" "$STATE/web_caddyfile"
+  fi
 }
+
+# What the running web container sees at /etc/caddy/Caddyfile, when that's
+# not the file on disk (i.e. a `git pull` replaced it after web was created).
+web_sees_caddyfile() { printf '%s' "$1" >"$STATE/web_caddyfile"; }
+
+# The web container is running but `compose exec` into it fails.
+web_caddyfile_unreadable() { rm -f "$STATE/web_caddyfile"; }
 
 # What `docker compose pull` will put on the box for this image.
 pull_delivers() { printf '%s' "$2" >"$STATE/pull_delivers/$(sanitize "$1")"; }
@@ -99,6 +113,30 @@ assert_deployed() {
 assert_not_deployed() {
   ! grep -q ' up -d ' "$STATE/calls.log" ||
     fail "redeployed when the containers were already on the release image"
+}
+
+# The only redeploy was `web` alone: the Caddyfile is web's config, so a change
+# to it must not recreate backend or pushes (the drain can take minutes to stop).
+assert_only_web_recreated() {
+  local ups
+  ups="$(grep ' up -d ' "$STATE/calls.log")"
+  if [[ -z "$ups" ]]; then
+    fail "expected web to be recreated, but nothing was"
+    return
+  fi
+  [[ "$(printf '%s\n' "$ups" | wc -l | tr -d ' ')" == "1" ]] ||
+    fail "expected exactly one docker compose up, got: $ups"
+  [[ "$ups" == *" up -d --no-build --force-recreate web" ]] ||
+    fail "expected only web to be force-recreated, got: $ups"
+}
+
+assert_single_full_redeploy() {
+  local ups
+  ups="$(grep ' up -d ' "$STATE/calls.log")"
+  [[ "$(printf '%s\n' "$ups" | wc -l | tr -d ' ')" == "1" ]] ||
+    fail "expected exactly one docker compose up, got: $ups"
+  [[ "$ups" == *" backend pushes web" ]] ||
+    fail "expected the full release redeploy, got: $ups"
 }
 
 assert_output_contains() {
@@ -247,6 +285,67 @@ test_pinned_tag() {
   finish_case
 }
 
+# --- Caddyfile drift (issue #202) -------------------------------------------
+#
+# The Caddyfile is a single-file bind mount, so after `git pull` replaces it the
+# running Caddy keeps the old content. No image changed, so the release check
+# above sees nothing to do — this is what catches it.
+
+# THE REGRESSION TEST FOR #202. Every container is on its release image, but a
+# pull has brought a new Caddyfile that the running web container doesn't see.
+# Before the fix this was "nothing to do" until an unrelated release.
+test_caddyfile_changed() {
+  new_world "caddyfile_changed"
+  have_image "$BACKEND_IMAGE" sha256:aaa
+  have_image "$WEB_IMAGE" sha256:bbb
+  running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
+  running_container web c_web sha256:bbb
+  web_sees_caddyfile "the pre-pull Caddyfile"
+
+  run_converge
+  assert_exit_ok
+  assert_only_web_recreated
+  assert_output_contains "running Caddyfile differs"
+  finish_case
+}
+
+# Can't read the Caddyfile back through the container: recreate web so `up`
+# fixes it or fails loudly, rather than reporting "nothing to do".
+test_caddyfile_unreadable() {
+  new_world "caddyfile_unreadable"
+  have_image "$BACKEND_IMAGE" sha256:aaa
+  have_image "$WEB_IMAGE" sha256:bbb
+  running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
+  running_container web c_web sha256:bbb
+  web_caddyfile_unreadable
+
+  run_converge
+  assert_exit_ok
+  assert_only_web_recreated
+  assert_output_contains "couldn't read the Caddyfile"
+  finish_case
+}
+
+# A release and a Caddyfile change in the same pull: the full redeploy already
+# recreates web (which then mounts the new file), so there's one `up`, not two.
+test_caddyfile_changed_with_release() {
+  new_world "caddyfile_changed_with_release"
+  have_image "$BACKEND_IMAGE" sha256:aaa
+  have_image "$WEB_IMAGE" sha256:bbb
+  running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
+  running_container web c_web sha256:bbb
+  web_sees_caddyfile "the pre-pull Caddyfile"
+  pull_delivers "$WEB_IMAGE" sha256:newweb
+
+  run_converge
+  assert_exit_ok
+  assert_single_full_redeploy
+  finish_case
+}
+
 # --- data-location guard -----------------------------------------------------
 #
 # check_data_location decides whether it's safe to deploy at all. Two host
@@ -341,6 +440,9 @@ test_pushes_drift
 test_missing_container
 test_missing_image
 test_pinned_tag
+test_caddyfile_changed
+test_caddyfile_unreadable
+test_caddyfile_changed_with_release
 test_guard_default_is_strict
 test_guard_single_disk_ok
 test_guard_single_disk_missing_dir

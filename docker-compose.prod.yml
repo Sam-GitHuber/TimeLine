@@ -25,7 +25,14 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-timeline} -d ${POSTGRES_DB:-timeline}"]
+      # `$$` hands the `$` through to the container's shell, so these expand
+      # *inside* the container from the env_file above — the same values Postgres
+      # itself was started with. A single `$` would be interpolated by Compose from
+      # the host shell / `.env` instead, which never sees `.env.prod`: rename the
+      # DB user there and the probe keeps asking for the old one, never passes,
+      # and the backend (waiting on service_healthy) never starts (issue #202).
+      # The fallbacks mirror the postgres image's own defaults.
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-postgres}\" -d \"$${POSTGRES_DB:-$${POSTGRES_USER:-postgres}}\""]
       interval: 5s
       timeout: 3s
       retries: 10

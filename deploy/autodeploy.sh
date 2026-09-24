@@ -5,7 +5,9 @@
 #   1. syncs config from main (compose files, GHCR override, Caddyfile),
 #   2. pulls the latest release images from GHCR,
 #   3. and ONLY IF a container isn't already running that image, recreates the
-#      stack.
+#      stack;
+#   4. otherwise, if the running Caddy is still serving an older Caddyfile than
+#      the one on disk, recreates just `web` (issue #202 — see caddyfile_drift).
 # The backend entrypoint (entrypoint.prod.sh) runs migrations + collectstatic on
 # start, so a redeploy needs nothing else by hand.
 #
@@ -86,6 +88,11 @@ IMAGES=(
   "ghcr.io/sam-githuber/timeline-web:${TIMELINE_TAG}"
 )
 
+# The Caddyfile as the box has it on disk — i.e. as main has it, after the
+# `git pull` in main(). Relative to the repo root, which main() cd's into.
+# Overridable so deploy/tests can point it at a temp file.
+CADDYFILE="${TIMELINE_CADDYFILE:-deploy/Caddyfile}"
+
 # Spelled out rather than `date -Is`: -I is GNU-only, and the test harness runs
 # on macOS too, where BSD date rejects it and every log line grows an error.
 log() { echo "$(date '+%Y-%m-%dT%H:%M:%S%z') autodeploy: $*"; }
@@ -163,6 +170,39 @@ drift_reasons() {
   done
 }
 
+caddyfile_drift() {
+  # Print a reason if the running `web` container is NOT serving the Caddyfile
+  # that's on disk; no output means it is.
+  #
+  # WHY THIS EXISTS (issue #202). The prod compose file bind-mounts the Caddyfile
+  # as a single file. A single-file bind mount pins the file's *inode*, and
+  # `git pull` doesn't edit files in place — it writes a new file and renames it
+  # over the old one, i.e. a new inode. So after a pull the container goes on
+  # seeing (and Caddy goes on serving) the old content, and nothing above would
+  # ever notice: the images haven't changed, so no service is recreated. A
+  # Caddyfile fix — the admin allowlist, a body cap, security headers — could sit
+  # on disk unapplied for weeks, until an unrelated release happened to recreate
+  # `web`.
+  #
+  # Same shape as drift_reasons: ask what the running container actually has,
+  # rather than "did the file change in this pull?" (an event a failed or skipped
+  # run would miss forever). Reading it back through the container is exactly
+  # the stale-inode view Caddy loaded, so a mismatch means Caddy is out of date.
+  #
+  # Only called when no service needed recreating: a full redeploy recreates
+  # `web`, and a new container mounts the current file anyway.
+  local seen
+  if ! seen="$(docker compose "${COMPOSE_FILES[@]}" exec -T web cat /etc/caddy/Caddyfile 2>/dev/null)"; then
+    # Can't tell — recreate so `up` either fixes it or fails loudly, rather than
+    # reporting "nothing to do" about a container we couldn't inspect.
+    echo "web: couldn't read the Caddyfile inside the running container"
+    return 0
+  fi
+  if [[ "$seen" != "$(cat "$CADDYFILE")" ]]; then
+    echo "web: running Caddyfile differs from $CADDYFILE on disk"
+  fi
+}
+
 converge() {
   # Pull the release images, then make the running containers match them.
   docker compose "${COMPOSE_FILES[@]}" pull --quiet "${SERVICES[@]}"
@@ -171,6 +211,17 @@ converge() {
   reasons="$(drift_reasons)"
 
   if [[ -z "$reasons" ]]; then
+    reason="$(caddyfile_drift)"
+    if [[ -n "$reason" ]]; then
+      # Recreate rather than `caddy reload`: a reload would re-read the same
+      # stale inode. Only `web` — the Caddyfile is its config alone, and
+      # recreating `pushes` in particular can mean waiting out a long drain.
+      # Costs a few seconds of the site being unreachable, once per change.
+      log "config redeploy needed — $reason"
+      docker compose "${COMPOSE_FILES[@]}" up -d --no-build --force-recreate web
+      log "deploy complete: web recreated with the current Caddyfile."
+      return 0
+    fi
     log "containers already running release ${TIMELINE_TAG}; nothing to do."
     return 0
   fi

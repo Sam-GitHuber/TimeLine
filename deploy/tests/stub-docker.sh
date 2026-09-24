@@ -10,6 +10,8 @@
 #   running/<service>       the container ID `compose ps -q <service>` returns
 #   containers/<container>  the image ID that container was created from
 #   pull_delivers/<ref>     an image ID a `compose pull` will install for <ref>
+#   web_caddyfile           the Caddyfile the running `web` container sees
+#                           (`compose exec -T web cat ...`); missing -> exec fails
 #   calls.log               every invocation, for the test's assertions
 # A missing file means "not on this box", modelled the way the real command
 # reports it: `inspect` fails (exit 1), while `compose ps -q` for a service with
@@ -43,6 +45,11 @@ case "$args" in
     echo
     ;;
   "image prune"*) ;;
+  *" exec -T web cat "*)
+    file="$state/web_caddyfile"
+    [[ -f "$file" ]] || exit 1
+    cat "$file"
+    ;;
   *" ps -q "*)
     file="$state/running/$last"
     # No container for that service: real compose prints nothing and exits 0.

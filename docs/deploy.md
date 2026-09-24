@@ -160,6 +160,28 @@ so deploys are *pull-based* (the box reaches out to GHCR; nothing reaches in).
    running container against the pulled image covers the new-image case as a
    side effect *and* self-heals drift from any cause.
 
+   **Caddyfile changes apply on their own — by recreating `web`** (issue #202).
+   The Caddyfile is bind-mounted into `web` as a single file, and a single-file
+   bind mount pins the file's *inode*. `git pull` doesn't edit a file in place:
+   it deletes it and writes a new one. So the running container went on seeing
+   (and Caddy went on serving) the **old** Caddyfile, and because no image had
+   changed nothing got recreated. A merged Caddyfile fix (the admin allowlist,
+   the upload body cap, security headers) could sit on the box unapplied until
+   some unrelated release. Now, when every container is already on its release
+   image, autodeploy reads the Caddyfile back *through* the running `web`
+   container. If that differs from `deploy/Caddyfile` on disk, it recreates
+   **`web` only** (log line: `config redeploy needed`). That means a few seconds
+   of the site being unreachable, once per Caddyfile change. It recreates rather
+   than running `caddy reload` because a reload would re-read the same stale
+   inode. It recreates only `web` because the Caddyfile is its config alone, and
+   `pushes` can take minutes to stop.
+
+   One case it *can't* see: a Caddyfile edited **by hand on the box** with an
+   editor that saves in place. That changes what the container sees without
+   Caddy re-reading it, so the check reads "in step" while Caddy serves the old
+   config. For a hand edit, apply it yourself:
+   `docker compose -f docker-compose.prod.yml -f docker-compose.ghcr.yml up -d --no-build --force-recreate web`.
+
 **Cutting a release (the deploy trigger):**
 
 ```bash
@@ -933,7 +955,9 @@ so a future change doesn't quietly undo the reasoning.
   action with a version/changelog, and fork PRs can't publish releases so untrusted
   code never builds our images. Chosen a systemd timer over Watchtower for
   consistency with the box's other timers (backups, token flush, health) and transparency. Config
-  (Caddyfile, compose files) travels via `git pull`; only the heavy image build is
+  (Caddyfile, compose files) travels via `git pull` (and a changed Caddyfile gets
+  `web` recreated, since a single-file bind mount keeps showing a running
+  container the pre-pull file, #202); only the heavy image build is
   offloaded to CI, and the box stays on `main` so the manual `deploy.sh`
   build-from-source path still works as a fallback. **Security:** the whole
   pipeline's trust reduces to control of the GitHub account (2FA is the crown-jewel
