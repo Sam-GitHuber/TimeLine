@@ -1034,9 +1034,219 @@ it('says so when a single-message delete is refused', async () => {
       'You can only delete your own messages.'
     )
   );
-  // Still there, which is right — and was the whole of the feedback before.
+  // Back again (#393): it was a tombstone while the request was out.
   expect(screen.getByText('oops typo')).toBeTruthy();
+  expect(screen.queryByText('Message deleted')).toBeNull();
   alertSpy.mockRestore();
+});
+
+/* ---- Deletes and reactions drawn before the server answers (#393) -------- */
+
+it('shows the tombstone before the server has answered a delete', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'oops typo' })],
+  });
+  const alertSpy = confirmDeletes();
+
+  await renderScreen();
+  await openMenu('Your message: oops typo');
+  const server = holdWrite(null, 204);
+  await fireEvent.press(screen.getByLabelText('Delete'));
+
+  expect(await screen.findByText('Message deleted')).toBeTruthy();
+  expect(screen.queryByText('oops typo')).toBeNull();
+
+  // And it stays one when the answer lands. The server has deleted it by
+  // then, so that is what the refetch behind the answer will be told.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: '', is_deleted: true })],
+  });
+  await server.answer();
+  expect(screen.getByText('Message deleted')).toBeTruthy();
+  alertSpy.mockRestore();
+});
+
+it('keeps the tombstone through a poll that still has the message', async () => {
+  // The reason the pending write isn't in the query cache: a refetch replaces
+  // the pages, and one that left before the DELETE did brings the message back.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'oops typo' })],
+  });
+  const alertSpy = confirmDeletes();
+  const client = warmClient();
+
+  await renderScreen(client);
+  await openMenu('Your message: oops typo');
+  holdWrite(null, 204);
+  await fireEvent.press(screen.getByLabelText('Delete'));
+  await screen.findByText('Message deleted');
+
+  await act(async () => {
+    await client.refetchQueries({ queryKey: ['messages', 5] });
+  });
+
+  expect(screen.getByText('Message deleted')).toBeTruthy();
+  expect(screen.queryByText('oops typo')).toBeNull();
+  alertSpy.mockRestore();
+});
+
+it('brings back only the messages a bulk delete failed on', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'one' }),
+      message({ id: 8, sender: MINE, text: 'two' }),
+    ],
+  });
+  const alertSpy = confirmDeletes();
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await screen.findByText('1 selected');
+  await fireEvent.press(screen.getByLabelText('Your message: two'));
+  await screen.findByText('2 selected');
+
+  // The first DELETE lands and the second is refused. Reads are held from here
+  // on, so what's on screen afterwards is what the *client* decided — a refetch
+  // would otherwise paper over a wrong answer with the fixture's.
+  const serveTheRest = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'DELETE') {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return url.includes('/messages/7/')
+          ? jsonResponse(null, 204)
+          : jsonResponse({ detail: 'No.' }, 403);
+      }
+      if (url.includes('/messages/')) return new Promise(() => {});
+      return serveTheRest(url, init);
+    }
+  );
+  await fireEvent.press(screen.getByLabelText('Delete selected messages'));
+
+  // Both at once, before either request has come back.
+  expect(await screen.findAllByText('Message deleted')).toHaveLength(2);
+
+  await waitFor(() =>
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Couldn’t delete everything',
+      'Some messages are still there. Try again.'
+    )
+  );
+  expect(screen.getAllByText('Message deleted')).toHaveLength(1);
+  expect(screen.getByText('two')).toBeTruthy();
+  expect(screen.queryByText('one')).toBeNull();
+  alertSpy.mockRestore();
+});
+
+it('shows the reaction before the server has answered', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  const server = holdWrite({ reactions: [{ emoji: '👍', count: 1, reacted: true }] }, 200);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+
+  expect(await screen.findByLabelText(/^👍, 1/)).toBeTruthy();
+
+  await server.answer();
+  expect(screen.getByLabelText(/^👍, 1/)).toBeTruthy();
+});
+
+it('takes the server’s count over its own guess', async () => {
+  // Someone else reacted in the same moment: the toggle's answer is the whole
+  // aggregate, and it wins.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  const server = holdWrite({ reactions: [{ emoji: '👍', count: 2, reacted: true }] }, 200);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+  await screen.findByLabelText(/^👍, 1/);
+
+  await server.answer();
+  expect(await screen.findByLabelText(/^👍, 2/)).toBeTruthy();
+});
+
+it('keeps the reaction through a poll that hasn’t heard of it', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+  const client = warmClient();
+
+  await renderScreen(client);
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  holdWrite({ reactions: [{ emoji: '👍', count: 1, reacted: true }] }, 200);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+  await screen.findByLabelText(/^👍, 1/);
+
+  await act(async () => {
+    await client.refetchQueries({ queryKey: ['messages', 5] });
+  });
+
+  expect(screen.getByLabelText(/^👍, 1/)).toBeTruthy();
+});
+
+it('takes the reaction away again, and says why, when it is refused', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+  const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  const server = holdWrite({ detail: 'That’s too many different emoji.' }, 400);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+  await screen.findByLabelText(/^👍, 1/);
+
+  await server.answer();
+
+  await waitFor(() => expect(screen.queryByLabelText(/^👍/)).toBeNull());
+  expect(alertSpy).toHaveBeenCalledWith(
+    'Couldn’t react',
+    'That’s too many different emoji.'
+  );
+  alertSpy.mockRestore();
+});
+
+it('takes your reaction off at once from the who-reacted sheet', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 8,
+        sender: ADA,
+        text: 'dinner at 7?',
+        reactions: [
+          { emoji: '👍', count: 2, reacted: true },
+          { emoji: '🎉', count: 1, reacted: false },
+        ],
+      }),
+    ],
+    reactors: [{ emoji: '👍', count: 2, users: [MINE, ADA] }],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText(/^👍, 2/));
+  holdWrite({ reactions: [] }, 200);
+  await fireEvent.press(await screen.findByLabelText('Remove your 👍 reaction'));
+
+  // One fewer, not gone: Ada's is still there. Unanswered, so this is the
+  // client's own arithmetic.
+  expect(await screen.findByLabelText(/^👍, 1/)).toBeTruthy();
+  expect(screen.getByLabelText(/^🎉, 1/)).toBeTruthy();
 });
 
 /* ---- The long-press action menu + edit (Phase 9b M1) --------------------- */
@@ -1157,25 +1367,68 @@ it('cancelling an edit restores the draft you were typing', async () => {
 });
 
 /**
- * Leaving edit mode may not throw away a rejection that hasn't arrived (#257).
+ * Hold the next **write to a message** — a reaction toggle, a DELETE or a PATCH
+ * — while every read goes on being served.
  *
- * `stopEditing()` ends with `editMutation.reset()`, written to clear a
- * **settled** failure — an error from a finished edit shouldn't hang over a
- * composer that isn't editing anything. But `reset()` doesn't distinguish that
- * from an edit still in flight: it detaches the observer from the running
- * mutation, so the PATCH's answer arrives with nothing left to paint the error
- * line, which is its only renderer.
- *
- * So both hand routes out of edit mode hold while the write is out, which is
- * what makes that `reset()` safe rather than conditional. A blanket
- * `if (!isPending)` guard on the call itself couldn't work: React Query runs
- * `onSuccess` before the mutation leaves its pending state, so it would refuse
- * the one call that has to work — the last test here is what pins that.
+ * `holdRequest` holds everything, which is right for "can you leave while it's
+ * out" and wrong here: the thing these tests are about is what the *poll* does
+ * to a write that hasn't been answered, so the poll has to be able to land.
  */
-describe('holding edit mode until the server answers', () => {
+function holdWrite(body: unknown, status: number) {
+  const serveTheRest = mockFetch.getMockImplementation()!;
+  let release: () => void = () => {};
+  const answered = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      const write =
+        (url.includes('/react/') || /\/messages\/\d+\/$/.test(url)) &&
+        (init?.method ?? 'GET') !== 'GET';
+      if (!write) return serveTheRest(url, init);
+      await answered;
+      return jsonResponse(body, status);
+    }
+  );
+  return {
+    answer: async () => {
+      await act(async () => {
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    },
+  };
+}
+
+/** Fire the confirm dialog's destructive button; leave every other alert be. */
+function confirmDeletes() {
+  return jest.spyOn(Alert, 'alert').mockImplementation(((
+    _title: string,
+    _message: string | undefined,
+    buttons?: { style?: string; onPress?: () => void }[]
+  ) => {
+    buttons?.find((button) => button.style === 'destructive')?.onPress?.();
+  }) as unknown as typeof Alert.alert);
+}
+
+/**
+ * An edit is drawn before the server answers, and a refusal undoes it (#393).
+ *
+ * Saving used to hold the composer in edit mode on "Saving…" until the PATCH
+ * came back, then wait again for a refetch of every loaded page before the
+ * bubble changed — next to an instant send, that read as the tap not
+ * registering. Now the bubble shows the correction and the composer is back to
+ * your draft at once.
+ *
+ * What that must not cost is the thing #257 and #261 were about: a refusal has
+ * to be *spoken*, and the words someone wrote have to survive it. So the last
+ * three steps of every test here are the same — the old text is back, the
+ * refusal is on screen, and the composer is editing what was typed.
+ */
+describe('an edit the server hasn’t answered yet', () => {
   const REFUSAL = 'Editing is only allowed for 15 minutes.';
 
-  async function startSaving() {
+  async function startSaving(body: unknown = { detail: REFUSAL }, status = 403) {
     serve({
       conversation: detail({}),
       messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
@@ -1186,35 +1439,127 @@ describe('holding edit mode until the server answers', () => {
     await fireEvent.press(screen.getByLabelText('Edit'));
     await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
 
-    const server = holdRequest(mockFetch, { detail: REFUSAL }, 403);
-    await act(async () => {
-      fireEvent.press(screen.getByLabelText('Save'));
-    });
-    await server.inFlight('Saving…');
+    const server = holdWrite(body, status);
+    await fireEvent.press(screen.getByLabelText('Save'));
+    // The corrected *bubble* is how we know the write is out — the composer no
+    // longer says so, which is the point.
+    await screen.findByLabelText('Your message: the quick fox');
     return server;
   }
 
-  it('refuses the ✕, then shows the refusal', async () => {
-    const server = await startSaving();
+  it('shows the correction and leaves edit mode without waiting', async () => {
+    const server = await startSaving(
+      message({ id: 7, sender: MINE, text: 'the quick fox', is_edited: true }),
+      200
+    );
 
-    await fireEvent.press(screen.getByLabelText('Cancel editing'));
-    expect(screen.getByText('Editing message')).toBeTruthy();
+    expect(screen.queryByText('teh quick fox')).toBeNull();
+    expect(screen.queryByText('Editing message')).toBeNull();
+    expect(screen.getByLabelText('Message').props.value).toBe('');
 
-    await server.refuse();
-    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    // The server has it now, so that is what the refetch behind the answer
+    // will be told.
+    serve({
+      conversation: detail({}),
+      messages: [
+        message({ id: 7, sender: MINE, text: 'the quick fox', is_edited: true }),
+      ],
+    });
+    await server.answer();
+    expect(screen.getByLabelText('Your message: the quick fox')).toBeTruthy();
   });
 
-  it('refuses the header’s Back, which would unmount the whole screen', async () => {
+  it('puts the old text back and reopens the edit when it is refused', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+
+    await server.answer();
+
+    // #261: the alert can't be covered by a modal; the line persists beside
+    // the text you're back to editing. Both, still.
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    expect(alertSpy).toHaveBeenCalledWith('Couldn’t save the edit', REFUSAL);
+    expect(screen.getByLabelText('Your message: teh quick fox')).toBeTruthy();
+    expect(screen.getByText('Editing message')).toBeTruthy();
+    expect(screen.getByLabelText('Message').props.value).toBe('the quick fox');
+    alertSpy.mockRestore();
+  });
+
+  it('keeps what you typed in the meantime, behind the reopened edit', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'next thought');
+
+    await server.answer();
+    await screen.findByText('Editing message');
+    await fireEvent.press(screen.getByLabelText('Cancel editing'));
+
+    expect(screen.getByLabelText('Message').props.value).toBe('next thought');
+    alertSpy.mockRestore();
+  });
+
+  it('still sends a re-save of the same text after the first was refused', async () => {
+    // Reopened while the first save is out, the composer holds the correction
+    // the bubble is already showing. "Unchanged, so nothing to save" has to be
+    // judged against what the *server* has, or this second Save sends nothing.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+    await openMenu('Your message: the quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    // Waiting on the first, and only because it is the same message.
+    expect(screen.getByText('Saving…')).toBeTruthy();
+
+    await server.answer();
+    await screen.findByLabelText('Your message: teh quick fox');
+    const before = mockFetch.mock.calls.filter(([, init]) => init?.method === 'PATCH');
+    await fireEvent.press(screen.getByLabelText('Save'));
+
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.filter(([, init]) => init?.method === 'PATCH')
+      ).toHaveLength(before.length + 1)
+    );
+    alertSpy.mockRestore();
+  });
+
+  it('doesn’t make an edit of a different message wait', async () => {
+    serve({
+      conversation: detail({}),
+      messages: [
+        message({ id: 7, sender: MINE, text: 'teh quick fox' }),
+        message({ id: 9, sender: MINE, text: 'lazy dgo' }),
+      ],
+    });
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
+    holdWrite({ detail: REFUSAL }, 403);
+    await fireEvent.press(screen.getByLabelText('Save'));
+    await screen.findByLabelText('Your message: the quick fox');
+
+    await openMenu('Your message: lazy dgo');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+
+    expect(screen.queryByText('Saving…')).toBeNull();
+    await fireEvent.press(screen.getByLabelText('Cancel editing'));
+    expect(screen.queryByText('Editing message')).toBeNull();
+  });
+
+  it('refuses the header’s Back, which would take the reopened edit with it', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     const server = await startSaving();
 
     await fireEvent.press(screen.getByLabelText('Back'));
     expect(mockBack).not.toHaveBeenCalled();
 
-    await server.refuse();
+    await server.answer();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    alertSpy.mockRestore();
   });
 
   androidIt('refuses hardware back, then shows the refusal', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     captureBackHandler();
     const server = await startSaving();
 
@@ -1222,55 +1567,10 @@ describe('holding edit mode until the server answers', () => {
       // Claimed, not passed on: an unclaimed press leaves the conversation.
       expect(pressBack()).toBe(true);
     });
-    expect(screen.getByText('Editing message')).toBeTruthy();
 
-    await server.refuse();
+    await server.answer();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
-  });
-
-  /**
-   * Issue #261 — the *other* spelling of an unreported write, and why the alert
-   * exists alongside the line rather than instead of it.
-   *
-   * The line lives inside the composer's `KeyboardAvoider`, and three
-   * screen-level `Modal`s are siblings of it — the strand, the photo lightbox
-   * and the reactors sheet. Each is opaque, and each stays reachable while the
-   * PATCH is out (`busy` greys the Save button and nothing else), so a 403
-   * landing while one is open paints underneath it. The strand also sets
-   * `accessibilityViewIsModal`, so the announcement is dropped outright and
-   * never replayed.
-   *
-   * An `Alert` isn't part of this screen's tree, so being covered can't happen
-   * to it. Both are asserted here: the line is still the better answer when
-   * nothing is covering it, because it persists beside the text you're editing.
-   */
-  it('reports a refused edit through an Alert as well as the line', async () => {
-    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
-    const server = await startSaving();
-
-    await server.refuse();
-
-    expect(await screen.findByText(REFUSAL)).toBeTruthy();
-    expect(alertSpy).toHaveBeenCalledWith('Couldn’t save the edit', REFUSAL);
     alertSpy.mockRestore();
-  });
-
-  it('still leaves edit mode when the save succeeds', async () => {
-    // `onSuccess` calls `stopEditing` while the mutation is *still* pending, so
-    // a hold written as a guard inside `stopEditing` would strand the composer
-    // in edit mode on every successful save.
-    serve({
-      conversation: detail({}),
-      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
-    });
-
-    await renderScreen();
-    await openMenu('Your message: teh quick fox');
-    await fireEvent.press(screen.getByLabelText('Edit'));
-    await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
-    await fireEvent.press(screen.getByLabelText('Save'));
-
-    await waitFor(() => expect(screen.queryByText('Editing message')).toBeNull());
   });
 });
 

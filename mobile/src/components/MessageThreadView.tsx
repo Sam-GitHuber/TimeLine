@@ -76,6 +76,8 @@ import { useFetchAllPages } from '@/lists';
 import type { Mentionable } from '@/mentions';
 import { useMentions } from '@/mentions';
 import type { SendState } from '@/readReceipts';
+import type { PendingWrites } from '@/pendingWrites';
+import { present } from '@/pendingWrites';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
 
@@ -93,6 +95,7 @@ export function MessageThreadView({
   canSend,
   mentionable = [],
   mentionNames,
+  pending,
   outgoing,
   statusFor,
   onSend,
@@ -124,6 +127,13 @@ export function MessageThreadView({
   mentionable?: Mentionable[];
   /** Names for the mention ids on these messages; see `MessageBubble`. */
   mentionNames?: Map<number, string>;
+  /**
+   * Reactions, edits and deletes the server hasn't answered yet (#393). The
+   * caller owns them, as it owns the outbox: they're made in the transcript,
+   * and drawn here so a strand opened a moment later doesn't show the message
+   * as it was.
+   */
+  pending?: PendingWrites;
   /**
    * Replies to this strand still in the caller's outbox (Phase 9b M4), already
    * dressed as messages. Rendered after the loaded ones, so a reply appears the
@@ -195,7 +205,10 @@ export function MessageThreadView({
   });
   useFetchAllPages(threadQuery);
 
-  const loaded = threadQuery.data?.pages.flatMap((page) => page.results) ?? [];
+  const loaded = present(
+    threadQuery.data?.pages.flatMap((page) => page.results) ?? [],
+    pending ?? {}
+  );
   // Unsent replies go last: one that hasn't been accepted is by definition
   // newer than every reply that has.
   const messages = [...loaded, ...(outgoing ?? [])];
