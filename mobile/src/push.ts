@@ -1064,3 +1064,28 @@ export function configureOnScreenDismissal(): void {
     void dismissNotifications([notification.request.identifier]);
   });
 }
+
+/**
+ * Be told when a message push arrives for one conversation (#394).
+ *
+ * For the open thread, which treats it as the cue to fetch now rather than on
+ * its next poll: the push is the server saying a message exists, and nothing
+ * else reaches the phone sooner. Separate from the dismissal above because that
+ * one is about what's *on screen* and lives for the app's lifetime; this is
+ * about what's *mounted*, and goes when the thread does.
+ *
+ * Returns the unsubscribe.
+ */
+export function onMessagePush(
+  conversationId: number,
+  listener: () => void
+): () => void {
+  const subscription = Notifications.addNotificationReceivedListener(
+    (notification) => {
+      if (conversationIdFromUrl(pushData(notification).url) === conversationId) {
+        listener();
+      }
+    }
+  );
+  return () => subscription.remove();
+}

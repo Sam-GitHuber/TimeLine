@@ -36,7 +36,11 @@ import * as ImagePicker from 'expo-image-picker';
 import { Alert, FlatList, Linking, Platform, StyleSheet } from 'react-native';
 import { State } from 'react-native-gesture-handler';
 
-import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
+import {
+  CONVERSATION_DETAIL_POLL_MS,
+  MESSAGE_HISTORY_POLL_MS,
+  MESSAGE_POLL_MS,
+} from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
 import { clearDrafts } from '@/drafts';
@@ -44,6 +48,7 @@ import { clearOutbox } from '@/outbox';
 import { configureNotificationHandler, setOnScreenConversation } from '@/push';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
+import { newestMessagesKey } from '@/useNewestMessagesPoll';
 
 import {
   androidIt,
@@ -3336,6 +3341,324 @@ it('pages older messages in when you reach the top', async () => {
     expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
   );
   expect(await screen.findByText('Message 5')).toBeTruthy();
+});
+
+describe('a thread paged back into its history (#394)', () => {
+  /**
+   * The defect: `['messages', id]` is an infinite query, and a refetch of one
+   * re-requests every loaded page in turn. On the four-second poll that was a
+   * request per page per tick, and a new message — which can only be on the
+   * first — wasn't drawn until the last had landed.
+   */
+  const SIZE = 4;
+  const BASE = 'https://your-timeline.net/api/conversations/5/messages/?order=desc';
+
+  /** One page of `all` (oldest-first) as the endpoint serves it, newest-first. */
+  function pageOf(all: Message[], page: number) {
+    const newestFirst = [...all].reverse();
+    return {
+      count: all.length,
+      next: all.length > page * SIZE ? `${BASE}&page=${page + 1}` : null,
+      previous: null,
+      results: newestFirst.slice((page - 1) * SIZE, page * SIZE),
+    };
+  }
+
+  /**
+   * Serve `all` in pages of four, **read at request time** so a test can have a
+   * message arrive by pushing onto it. `hold` keeps back the answer to any
+   * request it matches until `release()` — which is how one whole-list refetch
+   * is left in flight while a newest-page poll comes and goes.
+   */
+  function servePaged(all: Message[]) {
+    serve({ conversation: detail({}), messages: all });
+    const base = mockFetch.getMockImplementation()!;
+    let held: Promise<void> | null = null;
+    let release = () => {};
+    let holding: (url: string) => boolean = () => false;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      const transcript =
+        url.includes('order=desc') &&
+        !url.includes('ids=') &&
+        (init?.method ?? 'GET') === 'GET';
+      if (!transcript) return base(url, init);
+      const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1);
+      // Snapshot first, wait second: a held answer is one the server composed
+      // before whatever the test does next.
+      const body = pageOf(all, page);
+      if (held && holding(url)) await held;
+      return jsonResponse(body);
+    });
+    return {
+      hold(matching: (url: string) => boolean) {
+        holding = matching;
+        held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+      /** Stop holding new requests back; the ones already held stay held. */
+      holdNoMore() {
+        holding = () => false;
+      },
+      release: () => release(),
+    };
+  }
+
+  /**
+   * A client that already holds two pages, which is what "paged back" is. The
+   * scroll that gets there is pinned above; seeding skips repeating its
+   * double-render here.
+   */
+  function pagedBackClient(all: Message[]) {
+    const client = warmClient();
+    client.setQueryData(['messages', 5], {
+      pages: [pageOf(all, 1), pageOf(all, 2)],
+      pageParams: ['', pageOf(all, 1).next],
+    });
+    return client;
+  }
+
+  /** Let `ms` of fake time pass, and everything it sets off settle. */
+  async function pass(ms: number) {
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  /** Deliver a push to whatever is listening for one. */
+  function deliverPush(url: string) {
+    for (const [listener] of mockNotifications.addNotificationReceivedListener.mock
+      .calls) {
+      listener({
+        request: { identifier: 'n', content: { data: { url } } },
+      } as never);
+    }
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockNotifications.addNotificationReceivedListener.mockClear();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('asks for the newest page alone on the fast poll, and draws what it brings', async () => {
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 10, sender: ADA, text: 'Message 10' }));
+    await pass(MESSAGE_POLL_MS);
+
+    const since = transcriptCalls().slice(before);
+    expect(since).toHaveLength(1);
+    expect(since[0]).not.toContain('page=');
+    expect(screen.getByText('Message 10')).toBeTruthy();
+    // The arrival pushed Message 6 off the server's first page and onto its
+    // second. Swapping the page rather than merging it would drop it from the
+    // middle of the transcript until the next sweep.
+    expect(screen.getByText('Message 6')).toBeTruthy();
+  });
+
+  it('still sweeps the whole list, on the slower cadence', async () => {
+    // What the every-page refetch was also doing: an edit, a delete or a
+    // reaction on an *older* message has no other way to arrive.
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 2');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all[1] = { ...all[1], text: 'Message 2, corrected' };
+    await pass(MESSAGE_HISTORY_POLL_MS - MESSAGE_POLL_MS);
+    expect(screen.queryByText('Message 2, corrected')).toBeNull();
+    expect(transcriptCalls().slice(before).some((url) => url.includes('page='))).toBe(
+      false
+    );
+
+    await pass(MESSAGE_POLL_MS * 2);
+    expect(screen.getByText('Message 2, corrected')).toBeTruthy();
+  });
+
+  it('keeps a message the newest poll brought in while a sweep was out', async () => {
+    // A sweep asks for page one first and lands when its last page does, so a
+    // newest-page poll that left later can be back sooner — and the sweep then
+    // lands on top without the message that poll had already drawn.
+    const all = longThread(9);
+    const server = servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+
+    server.hold((url) => url.includes('page=2'));
+    await pass(MESSAGE_HISTORY_POLL_MS + MESSAGE_POLL_MS);
+    expect(transcriptCalls().at(-1)).toContain('page=2');
+
+    all.push(message({ id: 10, sender: ADA, text: 'Message 10' }));
+    await pass(MESSAGE_POLL_MS);
+    expect(screen.getByText('Message 10')).toBeTruthy();
+
+    server.release();
+    await pass(100);
+    expect(screen.getByText('Message 10')).toBeTruthy();
+  });
+
+  it('does not let a poll that left before a delete put the message back', async () => {
+    // Every write ends by invalidating `['messages', id]` to cancel a poll that
+    // left before it (#393). The newest-page poll is such a poll, and is keyed
+    // under that prefix so the same invalidation reaches it.
+    //
+    // Real timers: the long-press that opens the menu doesn't sit well under
+    // fake ones, and nothing here waits on the cadence — the poll is sent by
+    // hand.
+    jest.useRealTimers();
+    const all = longThread(8);
+    all.push(message({ id: 9, sender: MINE, text: 'oops typo' }));
+    const server = servePaged(all);
+    const alertSpy = confirmDeletes();
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await openMenu('Your message: oops typo');
+    await settle();
+
+    // One newest-page poll leaves and is kept out; everything after it answers
+    // straight away.
+    server.hold((url) => !url.includes('page='));
+    void client.refetchQueries({ queryKey: newestMessagesKey(5), exact: true });
+    await settle(2);
+    server.holdNoMore();
+
+    all[8] = { ...all[8], text: '', is_deleted: true };
+    await fireEvent.press(screen.getByLabelText('Delete'));
+    await settle();
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+
+    // The poll from before the delete finally comes back, still carrying the
+    // message as it was.
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+    expect(screen.queryByText('oops typo')).toBeNull();
+    alertSpy.mockRestore();
+  });
+
+  it('does not lay an earlier newest page back over a refetch that started after it', async () => {
+    // The other half of the test above the last. Merging the newest page again
+    // when a refetch finishes is right only if that page is the *newer* of the
+    // two; a refetch set off by a write, or by coming back to the app, started
+    // after it and knows better.
+    jest.useRealTimers();
+    const all = longThread(8);
+    all.push(message({ id: 9, sender: MINE, text: 'oops typo' }));
+    const server = servePaged(all);
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await screen.findByText('oops typo');
+    // The newest-page poll has landed, with the message as it was.
+    await settle();
+
+    // Held on its second page, so the refetch is out for long enough to be
+    // seen: one that starts and lands inside a single render never asks the
+    // question.
+    all[8] = { ...all[8], text: '', is_deleted: true };
+    server.hold((url) => url.includes('page=2'));
+    void client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    await settle();
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+    expect(screen.queryByText('oops typo')).toBeNull();
+  });
+
+  it('fetches the newest page at once when a push arrives for this conversation', async () => {
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 10, sender: ADA, text: 'Message 10' }));
+    deliverPush('/messages/5');
+    await pass(100);
+
+    const since = transcriptCalls().slice(before);
+    expect(since).toHaveLength(1);
+    expect(since[0]).not.toContain('page=');
+    expect(screen.getByText('Message 10')).toBeTruthy();
+  });
+
+  it('fetches at once on a push with one page loaded too', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 4, sender: ADA, text: 'Message 4' }));
+    deliverPush('/messages/5');
+    await pass(100);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(1);
+    expect(screen.getByText('Message 4')).toBeTruthy();
+  });
+
+  it('ignores a push for some other conversation', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    deliverPush('/messages/6');
+    deliverPush('/p/5');
+    await pass(100);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(0);
+  });
+
+  it('stops listening for pushes when the thread is left', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    const view = await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const subscription =
+      mockNotifications.addNotificationReceivedListener.mock.results.at(-1)!.value;
+
+    await view.unmount();
+
+    expect(subscription.remove).toHaveBeenCalled();
+  });
+
+  it('with one page loaded, polls exactly as before — one request a tick', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 4, sender: ADA, text: 'Message 4' }));
+    await pass(MESSAGE_POLL_MS);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(1);
+    expect(screen.getByText('Message 4')).toBeTruthy();
+  });
 });
 
 it('separates the days and shows a clock time, not "5m ago"', async () => {

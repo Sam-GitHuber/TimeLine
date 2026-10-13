@@ -115,10 +115,11 @@ import type { Outgoing, OutgoingPhoto } from '@/outbox';
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
 import { asTombstone, present, usePendingWrites } from '@/pendingWrites';
 import { usePhotoPicker } from '@/photoSource';
-import { setOnScreenConversation } from '@/push';
+import { onMessagePush, setOnScreenConversation } from '@/push';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
 import { useMarkThreadRead } from '@/useMarkThreadRead';
+import { useNewestMessagesPoll } from '@/useNewestMessagesPoll';
 import {
   colors,
   emojiPickerTheme,
@@ -542,6 +543,16 @@ export default function ThreadScreen() {
    * `getMessages` now asks for `?order=desc`, which makes page one the screenful
    * you opened to and lets `onEndReached` (the *top* of an inverted list) page
    * backwards into history.
+   *
+   * **The poll slows down once a second page is loaded** (#394). A refetch of
+   * an infinite query re-requests every loaded page in turn, so on the fast
+   * cadence a reader five pages back made five requests a tick and waited for
+   * the last before a new message was drawn. With one page it is one request
+   * and stays as it was; past that, `useNewestMessagesPoll` below keeps the
+   * fast cadence for the only page that can hold anything new, and refetches
+   * this one every `MESSAGE_HISTORY_POLL_MS` to pick up changes to older
+   * messages. The interval here is *off* then rather than slow — see that hook
+   * for why a slow one would never fire.
    */
   const messagesQuery = useInfiniteQuery({
     queryKey: ['messages', id],
@@ -549,9 +560,43 @@ export default function ThreadScreen() {
       pageParam ? api.getPage<Message>(pageParam) : api.getMessages(id),
     initialPageParam: '' as string,
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
-    refetchInterval: MESSAGE_POLL_MS,
+    refetchInterval: (query) =>
+      (query.state.data?.pages.length ?? 0) > 1 ? false : MESSAGE_POLL_MS,
     enabled: !!detail && !isPending,
   });
+  const pagedBack = (messagesQuery.data?.pages.length ?? 0) > 1;
+  const refetchMessages = messagesQuery.refetch;
+  // Not cancelling: a refetch already out — a write's, or the one returning to
+  // the app starts — is the sweep, and restarting it replays every page.
+  const sweepMessages = useCallback(() => {
+    void refetchMessages({ cancelRefetch: false });
+  }, [refetchMessages]);
+  const refetchNewest = useNewestMessagesPoll(id, {
+    enabled: pagedBack,
+    refetching: messagesQuery.isRefetching,
+    sweep: sweepMessages,
+  });
+  const transcriptLoaded = !!messagesQuery.data;
+  /**
+   * **A push for this conversation is news the poll hasn't had yet** (#394).
+   * The phone has just been told a message exists; waiting out the rest of the
+   * tick to go and get it is up to four seconds of showing a banner for a
+   * message the thread underneath doesn't have. Whichever request is the cheap
+   * one right now goes at once, restarting any poll already in flight — that
+   * one may have left before the message was written.
+   *
+   * While mounted, not while focused: a thread sitting behind its own info
+   * screen should be up to date when you come back to it. And only once there
+   * is a transcript — `refetch` ignores `enabled`, and before then the first
+   * load is either on its way or was refused.
+   */
+  useEffect(() => {
+    if (!transcriptLoaded) return;
+    return onMessagePush(id, () => {
+      if (pagedBack) refetchNewest();
+      else void refetchMessages();
+    });
+  }, [id, transcriptLoaded, pagedBack, refetchNewest, refetchMessages]);
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = messagesQuery;
   /** Older messages, on reaching the top. The end of an inverted list is the top. */
   const loadOlder = useCallback(() => {
