@@ -16,10 +16,10 @@
  * `animate` is read once. False — or Reduce Motion — draws the end state and
  * never moves.
  */
-import { type ReactNode, useEffect, useState } from 'react';
-import { Animated, type StyleProp, type ViewStyle } from 'react-native';
+import { type ReactNode, useState } from 'react';
+import { Animated, type StyleProp, View, type ViewStyle } from 'react-native';
 
-import { settle, useReducedMotion } from '@/motion';
+import { settle, useEntrance } from '@/motion';
 
 export function SettleIn({
   animate,
@@ -35,28 +35,25 @@ export function SettleIn({
   style?: StyleProp<ViewStyle>;
   children: ReactNode;
 }) {
-  const reduced = useReducedMotion();
-  const [runs] = useState(animate && !reduced);
-  const [progress] = useState(() => new Animated.Value(runs ? 0 : 1));
-  useEffect(() => {
-    if (runs) settle(progress);
-  }, [runs, progress]);
-
-  return (
-    <Animated.View
-      style={[
-        style,
-        {
+  const progress = useEntrance(animate, settle);
+  // Built once, beside the value: this re-renders with its bubble on every
+  // poll, and an interpolation is a node, not a number.
+  const [moving] = useState(() =>
+    progress
+      ? {
           opacity: progress.interpolate({ inputRange: [0, 1], outputRange: opacity }),
           transform: [
             {
               scale: progress.interpolate({ inputRange: [0, 1], outputRange: scale }),
             },
           ],
-        },
-      ]}
-    >
-      {children}
-    </Animated.View>
+        }
+      : null
   );
+
+  // The end state, plainly. Nearly every bubble's text and tick is this.
+  if (!moving) {
+    return <View style={[style, opacity[1] !== 1 && { opacity: opacity[1] }]}>{children}</View>;
+  }
+  return <Animated.View style={[style, moving]}>{children}</Animated.View>;
 }

@@ -141,7 +141,7 @@ import type { BubbleAnchor } from './MessageActionMenu';
 import { SwipeToReply } from './SwipeToReply';
 import { measureInWindow } from '@/measure';
 import type { Mark } from '@/messageText';
-import { bump, pop, rise, RISE_FROM, useReducedMotion } from '@/motion';
+import { bump, pop, rise, RISE_FROM, useEntrance, useReducedMotion } from '@/motion';
 import { isEmojiOnly, parseMessageText } from '@/messageText';
 import type { SendState } from '@/readReceipts';
 import { colors, fonts, fontSize, radius, spacing } from '@/theme';
@@ -707,11 +707,7 @@ function ReactionPill({
   onPress?: () => void;
 }) {
   const reduced = useReducedMotion();
-  const [pops] = useState(arriving && !reduced);
-  const [appear] = useState(() => new Animated.Value(pops ? 0 : 1));
-  useEffect(() => {
-    if (pops) pop(appear);
-  }, [pops, appear]);
+  const appear = useEntrance(arriving, pop);
 
   // A count changing is the other thing a pill does — someone else adding the
   // same emoji, or yours coming off one that others share.
@@ -723,27 +719,35 @@ function ReactionPill({
     if (!reduced) bump(nudge);
   }, [reaction.count, reduced, nudge]);
 
-  return (
-    <Animated.View
-      style={{
-        // Clamped: `pop` overshoots past 1 for the scale, and an opacity above
-        // 1 is at best ignored.
-        opacity: appear.interpolate({
+  // Built once: a pill re-renders with its bubble on every poll, and an
+  // interpolation is a node, not a number.
+  const [moving] = useState(() => ({
+    // Clamped: `pop` overshoots past 1 for the scale, and an opacity above 1
+    // is at best ignored.
+    opacity: appear
+      ? appear.interpolate({
           inputRange: [0, 1],
           outputRange: [0, 1],
           extrapolate: 'clamp',
-        }),
-        transform: [
-          {
-            scale: appear.interpolate({
-              inputRange: [0, 1],
-              outputRange: [0.6, 1],
-            }),
-          },
-          { scale: nudge },
-        ],
-      }}
-    >
+        })
+      : 1,
+    transform: [
+      ...(appear
+        ? [
+            {
+              scale: appear.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0.6, 1],
+              }),
+            },
+          ]
+        : []),
+      { scale: nudge },
+    ],
+  }));
+
+  return (
+    <Animated.View style={moving}>
       <Pressable
         onPress={onPress}
         hitSlop={4}
@@ -858,12 +862,22 @@ export function MessageBubble({
 
   // The row's entrance (#395). Created at 0 rather than set to it, so the first
   // frame is already the start of the rise and not the finished row.
-  const reduced = useReducedMotion();
-  const [rises] = useState(entering && !reduced);
-  const [arrive] = useState(() => new Animated.Value(rises ? 0 : 1));
-  useEffect(() => {
-    if (rises) rise(arrive);
-  }, [rises, arrive]);
+  const arrive = useEntrance(entering, rise);
+  const [rising] = useState(() =>
+    arrive
+      ? {
+          opacity: arrive,
+          transform: [
+            {
+              translateY: arrive.interpolate({
+                inputRange: [0, 1],
+                outputRange: [mine ? RISE_FROM.mine : RISE_FROM.theirs, 0],
+              }),
+            },
+          ],
+        }
+      : null
+  );
 
   /**
    * A delete settles into its tombstone (#395) rather than the bubble blinking
@@ -921,17 +935,7 @@ export function MessageBubble({
         // message is picked" rather than as a new kind of bubble, and it has to
         // be visible on a tombstone and behind reaction pills too.
         selected && styles.rowSelected,
-        {
-          opacity: arrive,
-          transform: [
-            {
-              translateY: arrive.interpolate({
-                inputRange: [0, 1],
-                outputRange: [mine ? RISE_FROM.mine : RISE_FROM.theirs, 0],
-              }),
-            },
-          ],
-        },
+        rising,
       ]}
     >
       {/* The whole message moves as one under a swipe — bubble, sender line,

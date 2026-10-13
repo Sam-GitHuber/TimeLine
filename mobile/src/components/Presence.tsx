@@ -55,11 +55,13 @@ export function Presence({
   // driver can't attach to a view still mounting in the same commit.
   useEffect(() => {
     if (reduced) return;
+    // Hidden and never shown: there is no view, and nothing to animate out.
+    if (!visible && !mounted) return;
     // Starting a new animation on the value stops the one in flight, which
     // reports itself unfinished — so an exit interrupted by `visible` coming
     // back never reaches its unmount.
     ease(progress, visible ? 1 : 0, visible ? undefined : () => setMounted(false));
-  }, [visible, reduced, progress]);
+  }, [visible, mounted, reduced, progress]);
 
   if (!mounted) return null;
   return (

@@ -2627,12 +2627,20 @@ All of it is `opacity` and `transform` on the native driver, 140–200ms, in
 (`mobile/src/arrivals.ts`). An inverted, virtualised list mounts rows on the
 first load, on every page of history and when one scrolls back into the render
 window. Animate on mount and all of those shimmer. A row animates only if it is
-newer than a **baseline captured once** when the transcript first drew: the
-newest server id of that first load, and the outbox as it stood on opening (a
+newer than a **baseline of what the view has already drawn**
+(`useArrivalBaseline`): the newest server id, and the latest outbox entry (a
 failed send from an earlier visit is already there and shouldn't rise from the
-composer again). The strand takes its baseline later, once its page-by-page walk
-has finished and the fetch a reopened strand starts has landed — its second page
-is twenty messages all newer than its first.
+composer again). Two things about when it is taken, both found in review:
+
+- **Not until the first load is whole and current.** A thread reopened inside
+  the cache's lifetime draws its old copy and refetches; measured against that
+  copy, everything said since the last visit would rise at once. The strand
+  also waits for its page-by-page walk — its second page is twenty messages all
+  newer than its first.
+- **It moves up behind each arrival, a frame later.** A row can mount twice:
+  scroll far enough back and the newest rows leave the list's render window,
+  then jump-to-latest brings them back *in view*. Against a baseline frozen at
+  open they would all rise again and every send would replay its tick.
 
 **⚠️ Your own send is two rows, and only the first animates** — the web's
 [`justSent`](#reactions-send-state-and-ticks-on-the-web-phase-9b-m9c) rule, for

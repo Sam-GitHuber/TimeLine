@@ -91,7 +91,7 @@ import {
   serverMessage,
   WENT_WRONG,
 } from '@/api';
-import { isArrival, isSettledSend, newestServerId } from '@/arrivals';
+import { isArrival, isSettledSend, useArrivalBaseline } from '@/arrivals';
 import { useAuth } from '@/auth';
 import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
@@ -114,13 +114,7 @@ import { ReportModal } from '@/components/ReportModal';
 import { getDraft, setDraft } from '@/drafts';
 import { useMentions } from '@/mentions';
 import type { Outgoing, OutgoingPhoto } from '@/outbox';
-import {
-  asMessage,
-  newOutgoing,
-  outboxFor,
-  updateOutbox,
-  useOutbox,
-} from '@/outbox';
+import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
 import { asTombstone, present, usePendingWrites } from '@/pendingWrites';
 import { usePhotoPicker } from '@/photoSource';
 import { onMessagePush, setOnScreenConversation } from '@/push';
@@ -747,18 +741,22 @@ export default function ThreadScreen() {
 
   /**
    * What counts as *new* in this transcript, so only that animates in (#395).
-   * `arrivals.ts` has the rule and the reasons; these are its three inputs.
+   * `arrivals.ts` has the rule and the reasons.
    *
-   * Both halves of the baseline are captured **once**, the same way the unread
-   * divider below is: the outbox as it stood when the screen opened, and the
-   * newest message of the first load — on the first render that has one. Left
-   * live, "newer than the newest" would be true of nothing.
+   * Ready once the transcript has pages **and no fetch in flight**: a thread
+   * reopened inside the cache's lifetime starts from its old copy, and taking
+   * the baseline from that would raise everything said since the last visit
+   * the moment the refetch landed.
    */
-  const [outboxOnOpen] = useState(() =>
-    outboxFor(id).reduce((lowest, entry) => Math.min(lowest, entry.tempId), 0)
+  const unsent = useMemo(
+    () => outstanding.map((entry) => asMessage(entry, meAsAuthor)),
+    [outstanding, meAsAuthor]
   );
-  const [newestOnOpen, setNewestOnOpen] = useState<number | null>(null);
-  if (newestOnOpen === null && pages) setNewestOnOpen(newestServerId(loaded));
+  const drawn = useArrivalBaseline({
+    loaded,
+    outgoing: unsent,
+    ready: !!pages && !messagesQuery.isFetching,
+  });
   /**
    * Server ids of the messages this screen sent. Each one replaces an outbox
    * bubble that already rose from the composer, so it mustn't rise again —
@@ -839,14 +837,14 @@ export default function ThreadScreen() {
         messages: [
           // Reversed on the way in: the outbox holds entries oldest-first, and
           // everything downstream of here is newest-first.
-          ...outstanding.map((entry) => asMessage(entry, meAsAuthor)).reverse(),
+          ...[...unsent].reverse(),
           ...shown,
         ],
         meId: me?.pk,
         unread,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see `today` above
-    [shown, outstanding, meAsAuthor, me?.pk, unread, today]
+    [shown, unsent, me?.pk, unread, today]
   );
 
   /**
@@ -2159,16 +2157,8 @@ export default function ThreadScreen() {
                     showSender={isGroup && !mine && item.startsRun}
                     endsRun={item.endsRun}
                     status={statusFor(message)}
-                    entering={isArrival(
-                      message,
-                      { newestOnOpen, outboxOnOpen },
-                      justSent
-                    )}
-                    settled={isSettledSend(
-                      message,
-                      { newestOnOpen, outboxOnOpen },
-                      justSent
-                    )}
+                    entering={isArrival(message, drawn, justSent)}
+                    settled={isSettledSend(message, drawn, justSent)}
                     mentionNames={mentionNames}
                     // Select mode is the one time a tap on a bubble does
                     // something (M8) — and it doesn't break the "one gesture

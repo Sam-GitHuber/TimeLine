@@ -5543,6 +5543,27 @@ describe('what moves in the transcript, and what doesn’t (#395)', () => {
     expect(rise).toHaveBeenCalledTimes(1);
   });
 
+  it('doesn’t raise what arrived while you were away, on coming back to a cached thread', async () => {
+    // A thread reopened inside the cache's lifetime draws its old copy first
+    // and refetches. Measured against that copy, everything said since the
+    // last visit would rise at once the moment the refetch landed.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const client = warmClient();
+    const first = await renderScreen(client);
+    await screen.findByText('Message 1');
+    first.unmount();
+
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1 }), message({ id: 2 }), message({ id: 3 })],
+    });
+    await renderScreen(client);
+    await screen.findByText('Message 3');
+    await settle();
+
+    expect(rise).not.toHaveBeenCalled();
+  });
+
   it('raises the first message of a conversation that opened empty', async () => {
     // "Loaded, and empty" is not "not loaded yet" — the baseline has to tell
     // them apart, or the very first message would be the one that pops in.

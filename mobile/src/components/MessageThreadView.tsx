@@ -68,7 +68,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MentionSuggestions } from './MentionSuggestions';
 import { MessageBubble } from './MessageBubble';
 import { api, MESSAGE_POLL_MS } from '@/api';
-import { isArrival, isSettledSend, newestServerId } from '@/arrivals';
+import { isArrival, isSettledSend, useArrivalBaseline } from '@/arrivals';
 import {
   KeyboardAvoider,
   useKeyboardVisible,
@@ -84,6 +84,7 @@ import type { Message } from '@/types';
 
 /** One shared empty set, so a strand handed no `justSent` doesn't build one per row. */
 const NO_SENDS: ReadonlySet<number> = new Set();
+const NO_OUTGOING: Message[] = [];
 
 export function threadQueryKey(conversationId: number, rootId: number) {
   return ['thread', conversationId, rootId] as const;
@@ -226,29 +227,21 @@ export function MessageThreadView({
 
   /**
    * What counts as new in here, so only that animates in (#395) — the
-   * transcript's rule (`arrivals.ts`) with one difference in *when* the
-   * baseline is taken. A strand loads whole, a page at a time, oldest-first, so
-   * "the newest message of the first load" isn't known until the walk has
-   * finished: taken any earlier, page two would arrive as twenty new messages.
-   * It also waits out the fetch a reopened strand starts over its cached copy,
-   * or everything said since the last visit would rise the moment it opened.
+   * transcript's rule (`arrivals.ts`), ready later: a strand loads whole, a
+   * page at a time, oldest-first, so "what the first load held" isn't known
+   * until the walk has finished. Taken any earlier, page two would arrive as
+   * twenty new messages.
    *
-   * If a page fails the walk stops and this is never taken, so nothing from the
+   * If a page fails the walk stops and this is never ready, so nothing from the
    * server animates in a strand that hasn't fully loaded. That errs the right
    * way: a reply that merely appears is how it always was.
    */
-  const [outboxOnOpen] = useState(() =>
-    (outgoing ?? []).reduce((lowest, entry) => Math.min(lowest, entry.id), 0)
-  );
-  const [newestOnOpen, setNewestOnOpen] = useState<number | null>(null);
-  if (
-    newestOnOpen === null &&
-    threadQuery.data &&
-    !threadQuery.hasNextPage &&
-    !threadQuery.isFetching
-  ) {
-    setNewestOnOpen(newestServerId(loaded));
-  }
+  const drawn = useArrivalBaseline({
+    loaded,
+    outgoing: outgoing ?? NO_OUTGOING,
+    ready:
+      !!threadQuery.data && !threadQuery.hasNextPage && !threadQuery.isFetching,
+  });
   // Quotes resolve against *loaded* messages only — nothing can be quoting a
   // reply the server hasn't given an id to yet.
   const byId = new Map(loaded.map((m) => [m.id, m]));
@@ -405,16 +398,8 @@ export function MessageThreadView({
                   <MessageBubble
                     message={item}
                     mine={item.sender.id === meId}
-                    entering={isArrival(
-                      item,
-                      { newestOnOpen, outboxOnOpen },
-                      justSent ?? NO_SENDS
-                    )}
-                    settled={isSettledSend(
-                      item,
-                      { newestOnOpen, outboxOnOpen },
-                      justSent ?? NO_SENDS
-                    )}
+                    entering={isArrival(item, drawn, justSent ?? NO_SENDS)}
+                    settled={isSettledSend(item, drawn, justSent ?? NO_SENDS)}
                     // Every bubble in here is attributed in a group, including
                     // runs: the strand is short and read out of its
                     // chronological context, so "who said this" is worth the

@@ -34,7 +34,7 @@
  * Node can see a frame, but a test can see that `rise` ran once for a new
  * message and not at all for a page of history.
  */
-import { useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { AccessibilityInfo, Animated, Easing } from 'react-native';
 
 export const DURATION = {
@@ -150,4 +150,29 @@ function subscribe(notify: () => void) {
 
 export function useReducedMotion(): boolean {
   return useSyncExternalStore(subscribe, () => reduced);
+}
+
+/**
+ * A value for something that animates **as it mounts, and only then** — or
+ * `null` when it shouldn't (not new, or Reduce Motion), so the caller can draw
+ * a plain view with no animated style at all. Almost every row in a transcript
+ * is the `null` case, and it re-renders on every poll.
+ *
+ * `animate` is read once. The value is *created* at 0 rather than set to it, so
+ * the first frame is already the start of the animation and not the finished
+ * thing; `run` takes it to 1 after the commit, when the native driver has a
+ * view to attach to.
+ */
+export function useEntrance(
+  animate: boolean,
+  run: (progress: Animated.Value) => void
+): Animated.Value | null {
+  const reducedMotion = useReducedMotion();
+  const [progress] = useState(() =>
+    animate && !reducedMotion ? new Animated.Value(0) : null
+  );
+  useEffect(() => {
+    if (progress) run(progress);
+  }, [progress, run]);
+  return progress;
 }
