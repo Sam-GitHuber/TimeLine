@@ -434,8 +434,10 @@ Consequences, each deliberate:
   two messages are in flight and one of them fell over.
 - **The composer clears on dispatch and never blocks.** Sending two quick
   messages in a row is ordinary, and waiting for the first is exactly the lag
-  this removes. An *edit* still blocks, because it targets one specific message
-  and two saves racing on it would be genuinely ambiguous.
+  this removes. An *edit* on the web still blocks, because it targets one
+  specific message and two saves racing on it would be genuinely ambiguous; on
+  the phone only a *second* edit waits — see
+  [below](#reactions-edits-and-deletes-are-drawn-first-on-the-phone-393).
 - **Replies go through the same outbox**, so a reply that fails inside a strand
   is recoverable both there and in the transcript — rather than existing only
   inside a view you've since closed.
@@ -2201,10 +2203,14 @@ already off on this screen — see
 three read one hoisted `reportingWrite`, exactly as the web's three view
 switches do. Two differences worth knowing:
 
-- **`stopEditing`'s `reset()` needed no change either**, for the same reason —
-  the back handler and the ✕ hold, so the call on the way out can stay
-  unconditional. A blanket `if (!isPending)` guard would refuse the call
-  `onSuccess` makes, which is the one that has to work.
+- **The edit no longer holds the ✕, because by then there isn't one** (#393).
+  Saving leaves edit mode on the tap, so the only exits left while the PATCH is
+  out are Back and hardware back, and those still hold: a refusal reopens the
+  edit, and there has to be a screen to reopen it on. `reportingWrite` reads
+  the pending layer rather than `editMutation.isPending`, since the observer
+  follows only the latest mutation and `reset()` detaches it from one in
+  flight. That detaching costs a refusal only its inline line — the `Alert`
+  and the reopened edit come from `onError`, which runs regardless.
 - **`PendingChatPanel`'s Decline / Leave *is* held on the phone**, where the
   web's three Leave controls are deliberately open. The reading above turns on
   what the pending write is *about*: a rename or an edit stops mattering once
@@ -2501,12 +2507,91 @@ Changing your own reaction has two unambiguous homes instead: the menu's emoji r
 "Tap to remove". The full picker opens at
 *screen* level rather than inside the menu, because `rn-emoji-keyboard` is itself
 a `Modal` and two visible modals stack badly on iOS; the menu closes on its way
-there. There's no optimistic pre-tap update: the toggle endpoint returns the whole
-fresh aggregate, and simulating it locally would mean a second copy of rules the
-server owns (the per-target emoji cap, emoji validation, count-then-emoji
-ordering) that could show a pill and then take it away. See
+there. The pill changes on the tap and is reconciled with the aggregate the
+toggle endpoint returns — see
+[drawn first](#reactions-edits-and-deletes-are-drawn-first-on-the-phone-393),
+which reversed the original "no optimistic update" decision. See
 [reactions.md](reactions.md#mobile) for the emoji set and why it differs from the
 feed's.
+
+### Reactions, edits and deletes are drawn first on the phone (#393)
+
+Sending was instant from M4; every other write in the thread still waited for
+the server. A reaction took one round trip to show, and a delete or an edit took
+the write **plus a refetch of every loaded page** — worse the further back you'd
+scrolled. Next to an instant send, that wait read as the tap not registering,
+and it was most of why the thread felt slower than it is. All three are now
+drawn on the tap and reconciled when the server answers. (The web still waits;
+its turn comes once this has proved itself.)
+
+**They live in a pending layer (`mobile/src/pendingWrites.ts`), not in the
+TanStack cache** — the outbox's decision again, for the outbox's reason. A poll
+*replaces* the cached pages, so one that left before the write did would land
+after it and undo it: the pill appears, vanishes, and returns four seconds
+later. The layer sits outside the cache and `present()` re-applies it to
+whatever the cache holds at each render, so the poll can replace the pages as
+often as it likes. Two things fall out of that:
+
+- **There is no rollback.** A refused write drops its entry and the message
+  draws as the server has it. No snapshot is taken, so none can go stale.
+- **A pending reaction is a statement, not a toggle** — "mine is on for 👍" —
+  so applying it to a list that already includes the write (a poll that got
+  there first) changes nothing, rather than taking the pill back off.
+
+When the answer arrives it is written into the cache **before** the pending
+entry is dropped — the toggle's aggregate, the PATCH's own response, or a
+tombstone — so the bubble never blinks back for the length of a refetch. It goes
+into the transcript and into every cached strand of the conversation
+(`writeMessage`), because a reply lives in both and the strand keeps its cache
+between visits. The strand is handed the pending layer as a prop for the same
+reason it is handed the outbox.
+
+Delete and edit still invalidate afterwards, though nothing waits on it: the
+invalidation cancels a poll that left before the write, which would otherwise
+put the old message back.
+
+**This reverses "no optimistic reaction toggle"** (M2's fifth decision, which
+the web still follows). That decision's objection was that simulating the toggle
+means a second copy of rules the server owns — the per-target emoji cap, emoji
+validation, the count-then-emoji order — which could show a pill and then take
+it away. Two of those can only *refuse*, and a refusal now takes the pill away
+with an `Alert` carrying the server's own words; that is rare, and honest when
+it happens. Only the ordering is mirrored, so a new pill doesn't land in one
+place and hop to another. The decision also said to live with reactions and see
+whether the latency was noticeable. It was.
+
+**A refused write always says so**, because each of them now visibly *undoes*
+something and an unexplained undo looks like a glitch:
+
+| Write | Drawn on the tap | If refused |
+| --- | --- | --- |
+| React | the pill, or yours taken off | pill reverts · `Alert` |
+| Delete | the tombstone | the bubble comes back · `Alert` |
+| Bulk delete | every tombstone | only the ones that failed come back · `Alert` |
+| Edit | the new text, and the composer leaves edit mode | old text back · `Alert` · **the edit reopens on what you wrote** |
+
+The edit's last step is the one that matters. A correction is someone's words;
+"it didn't save" with those words gone would leave them retyping from memory.
+Whatever was in the composer by then is stashed exactly as starting an edit
+stashes it, so cancelling gives it back. The one exception: if a *different*
+edit is already open, it is left alone — hijacking the message someone is in the
+middle of correcting would lose the text they're typing to save text they'd
+finished with.
+
+**Only a second edit waits.** The composer is free the moment you save — send,
+or open another edit and type it — but that edit's Save reads "Saving…" until
+the first has landed, because two saves racing on one message would be genuinely
+ambiguous. And **Back is still held while an edit is out** (see
+[the hold](#the-drawer-holds-open-while-a-panel-inside-it-has-a-write-out-257258)):
+leaving would take away the composer a refusal reopens.
+
+Known edge, accepted: a reaction's answer doesn't cancel a poll already in
+flight, so one that left before the toggle can still land after it and show the
+pill's old state until the next poll. That was true before this change too;
+fixing it by invalidating would refetch every loaded page per reaction.
+
+Pinned in `pendingWrites.test.ts` (the arithmetic) and `thread.test.tsx` (each
+write drawn before the answer, kept through a poll, and undone on a refusal).
 
 ### Send state on the phone (Phase 9b M4)
 

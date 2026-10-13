@@ -204,9 +204,11 @@ grammar, matching the app's. The quick row is **the chat's six** — 👍 ❤️
 the message's `⋯` menu rather than on a button of its own; the `＋`
 expands that same panel into the full picker in place. Pills hang off the
 bubble's lower edge and 🔒 **a pill never toggles — it opens "who reacted"**,
-which is where your own row offers *"tap to remove"*. Neither is optimistic —
-the feed's chips aren't either (above); what differs here is that a pill isn't
-a control at all, for the reason under *Message reactions*.
+which is where your own row offers *"tap to remove"*. Neither is optimistic on
+the web — the feed's chips aren't either (above); what differs here is that a
+pill isn't a control at all, for the reason under *Message reactions*. **The
+app's message pills are optimistic** as of #393, with the reasoning in
+[messaging.md](messaging.md#reactions-edits-and-deletes-are-drawn-first-on-the-phone-393).
 
 🔒 **A refused message reaction is reported on the bubble, never on the
 composer** (issue #251). The mutation lives in `ConversationThreadView`, but two
