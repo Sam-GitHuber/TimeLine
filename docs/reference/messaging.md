@@ -1261,7 +1261,9 @@ for unread (a fixed number of queries per page).
 
 Near-real-time is **polling** via TanStack Query `refetchInterval` — cadence in one
 place: `MESSAGE_POLL_MS` (open thread) and `CONVERSATION_LIST_POLL_MS` (list + nav
-badge) in `frontend/src/api.js`. Real-time chat via Django Channels would need an
+badge) in `frontend/src/api.js`. (The app's open thread polls only its newest page
+once history is loaded, and fetches at once on a push — see
+[Mobile](#mobile-phase-9-e2).) Real-time chat via Django Channels would need an
 ASGI server + Redis channel layer — real infra deferred per `docs/SHARED.md`. At
 family scale polling is indistinguishable to users and far simpler/cheaper. **The
 swap is non-breaking by design:** the REST endpoints and data model stay identical;
@@ -2771,8 +2773,79 @@ into view afterwards.
 The known cost, and it's the feed's too: the endpoint pages by page *number*, so
 a message arriving mid-scroll shifts the window and a page can re-send what the
 previous one showed. `toThreadRows` de-duplicates by id — two rows sharing a key
-makes React warn and lets `FlatList` recycle the wrong one — and the four-second
-poll refetches every loaded page, so any gap at a boundary heals itself.
+makes React warn and lets `FlatList` recycle the wrong one — and a refetch of
+the whole list replaces every loaded page, so any gap at a boundary heals itself.
+
+**Paged back, only the newest page is polled fast** (#394). That whole-list
+refetch used to *be* the four-second poll, and a refetch of an infinite query
+re-requests every loaded page one after another — so five pages back was five
+requests a tick, and an incoming message waited for the last of them although it
+can only ever be on the first. Latency grew with how far you'd scrolled. Now:
+
+| Loaded | Every `MESSAGE_POLL_MS` (4s) | Every `MESSAGE_HISTORY_POLL_MS` (30s) |
+| --- | --- | --- |
+| One page | the whole list — one request, as before | — |
+| More | the newest page only, merged in (`useNewestMessagesPoll`) | the whole list |
+
+The slow sweep is not optional: it is the only way an edit, a delete or a
+reaction on an *older* message arrives, and the thing that heals the boundary
+gaps above. (Ticks are unaffected — they ride the conversation detail.) Four
+things about it are non-obvious, and each was a bug on the way:
+
+- **The newest page is merged, not swapped in.** Each arrival pushes the oldest
+  message on the server's first page onto its second, so replacing page one
+  would drop that message from the middle of a transcript that still shows its
+  neighbours. `mergeNewestPage` keeps what the fresh page no longer carries.
+- **It writes through to `['messages', id]`** rather than being overlaid at
+  render like the outbox and the pending layer. `writeMessage` puts a server's
+  answer *into* a cached message, and one that lived only in an overlay couldn't
+  be reacted to without its pill blinking off.
+- **Its key sits under that prefix** (`['messages', id, 'newest']`). Every write
+  invalidates the prefix to cancel a poll that left before it (#393); this is
+  such a poll, and being under the prefix means no write site has to know it
+  exists.
+- **The sweep is counted off the newest poll's own answers, not a
+  `refetchInterval`.** query-core restarts an observer's interval timer on every
+  update to its query, and a `setQueryData` is an update — so a 30s interval on a
+  query written to every 4s is reset before it can fire, for ever. That would
+  have shipped as "old messages never update while scrolled back".
+
+One race is guarded. A sweep asks for page one first and lands when its last
+page does, and `fetchNextPage` appends to the pages as they were when it left —
+so a newest-page poll that left later can be back sooner, and the other fetch
+then lands on top without the message that poll already drew. The newest page
+is therefore merged again when either kind of fetch finishes, **only if it is
+the newer of the two**. Two things say it isn't: it was fetched before that
+fetch began, or it has been *invalidated* since. The second catches what the
+clock can't — a write's invalidation restarts a sweep already in flight without
+the transcript ever looking idle — and works because the newest poll sits under
+the prefix and is marked by the same call. Re-applying a page that fails either
+test would undo the write.
+
+Three smaller rules. The merge **skips the cache write when the fresh page
+changes nothing** — a `setQueryData` is a manual success, and one a tick would
+clear a failed sweep's error. The poll runs under the transcript's own
+`enabled`, so going back to pending with history loaded stops it. And
+`useMarkThreadRead`'s foreground refetch names the transcript **exactly**: the
+newest poll lives beneath that key, and its failing says nothing about whether
+the client holds the messages.
+
+**A push for the mounted conversation fetches at once** (#394) — `onMessagePush`
+in `push.ts`. The phone has been told a message exists; waiting out the tick to
+go and get it was up to four seconds of banner over a thread that didn't have
+the message. It fires whichever request is the cheap one. (Not over a page of
+older history on its way in, with one page loaded: that is the same query, and
+restarting it would cancel the page.) This helps less often
+than it sounds, and that is by design on the server: a push to someone who looks
+active in the thread is [held back](#push-notifications) for six seconds so the
+poll can get there first. It earns its keep when you've been sitting in a quiet
+thread for more than two minutes and the push is sent straight away.
+
+Known and left: more than a page of arrivals between two polls leaves a gap
+below the newest page until the next sweep. At four seconds that needs twenty
+messages in one tick; returning from the background refetches the whole list
+anyway. The web's thread and both clients' strands still refetch every page on
+the fast poll.
 
 **The transcript is a second query, and it fails separately** (#321) — the app's
 copy of the web's #319. The header, the participants and the mute state come from

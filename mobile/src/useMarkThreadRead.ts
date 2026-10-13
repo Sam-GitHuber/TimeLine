@@ -109,7 +109,11 @@ export function useMarkThreadRead(
    * marker can only ever claim messages the client actually holds.
    */
   useEffect(() => {
-    const queryKey = ['messages', conversationId];
+    // **Exactly the transcript**, not everything under it. The paged-back
+    // thread's newest-page poll lives beneath this key (#394), and a failure of
+    // *that* one says nothing about whether the client holds the messages —
+    // the whole-list refetch is the one that proves it.
+    const transcript = { queryKey: ['messages', conversationId], exact: true };
     // **`background` → `active`, not merely `active`.** iOS emits
     // `inactive` → `active` for Control Centre, the notification shade, a
     // permission dialog, an incoming-call banner and the app switcher. Treating
@@ -124,7 +128,7 @@ export function useMarkThreadRead(
         if (!returning) return;
         queryClient
           .refetchQueries(
-            { queryKey },
+            transcript,
             {
               // `throwOnError` turns a *failed* fetch into a rejection, which
               // the `.catch` below swallows without claiming a read.
@@ -147,7 +151,7 @@ export function useMarkThreadRead(
             // this client today (`_layout.tsx`), which makes the check dead
             // weight here and load-bearing the moment that lands — and its twin
             // needs it now, because the browser wires it by default.
-            const current = queryClient.getQueryCache().findAll({ queryKey });
+            const current = queryClient.getQueryCache().findAll(transcript);
             const unfinished = current.some(
               (query) =>
                 query.state.fetchStatus === 'paused' ||
